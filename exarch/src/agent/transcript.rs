@@ -1,23 +1,13 @@
-//! Per-session operational trace.
+//! Per-session operational trace: a `transcript.jsonl` in the session's log
+//! dir, one JSON object per bus event.
 //!
-//! Every [`Agent`](crate::agent::Agent) — the root and each forked
-//! child, in both the TUI and headless — owns a [`Transcript`]: a
-//! `transcript.jsonl` in the session's log dir, one JSON object per bus event.
-//! It is the *operational* view — what the agent did: every tool call and its
-//! result, step, usage delta, structural I/O effect, stop reason, error, and
-//! sub-agent boundary — the sibling of the model-view `events.json` the
-//! [`AgentLog`](crate::agent::event::AgentLog) keeps.
-//!
-//! Pure rendering events — a composed [`Card`](crate::bus::card::Card), the card a
-//! [`Kind::Io`] draws, a [`Kind::Phase`] progress label — are deliberately
-//! *not* recorded here; they are a presentation the TUI captures in its
-//! `user.log`, not an effect. The exhaustive match in [`event_record`] means a
-//! new [`Kind`] variant cannot silently fall out of the trace.
-//!
-//! The writer is fed at the emit seam ([`Emitter::emit`](crate::bus::Emitter)),
-//! independent of who drains the live bus for display. A headless child muted
-//! from the screen still records its full trace, because recording is a
-//! property of the session, not of the frontend.
+//! What the agent *did* — every tool call and result, step, usage delta,
+//! structural I/O effect, stop reason, error, sub-agent boundary — sibling to
+//! the model-view `events.json` that `AgentLog` keeps. A rendering is not an
+//! effect, so composed cards and progress labels stay out; they are the TUI's
+//! `user.log`. The writer is fed at the emit seam (`Emitter::emit`), not by
+//! whoever drains the live bus, so a child muted off the display still records
+//! its full trace.
 
 use crate::bus::{AgentId, Kind};
 use std::fs::File;
@@ -28,19 +18,15 @@ use std::time::Instant;
 
 /// A cheap, cloneable handle to one session's `transcript.jsonl` writer.
 ///
-/// Clones share the same file — the token-stream emitter clone, a derived
-/// child emitter that re-uses the parent's id — so a session writes through a
-/// single handle whoever holds it. A *forked* session is given its own
-/// [`Transcript`]. [`Transcript::none`] is the no-op handle tests and
-/// dir-less emitters carry; it records nothing.
+/// Clones share the one file, so a session writes through a single handle
+/// whoever holds it; a forked session gets its own `Transcript`.
 #[derive(Clone)]
 pub struct Transcript(Option<Arc<Inner>>);
 
 struct Inner {
-    /// Buffered, flushed per record so the file is always tail-able — the
-    /// same discipline `events.json` keeps.
+    /// Flushed per record, so the file is always tail-able.
     file: Mutex<BufWriter<File>>,
-    /// Monotonic origin for the `t_ms` offset stamped on each record.
+    /// Origin of the `t_ms` offset stamped on each record.
     started: Instant,
 }
 
@@ -48,7 +34,7 @@ impl Transcript {
     /// Open `path` for this session's trace, truncating any prior file.
     ///
     /// # Errors
-    /// Returns `Err` if creating (truncating) the transcript file fails.
+    /// Returns `Err` if the file cannot be created.
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:silent:transcript-file] creates the session's transcript.jsonl; output infra, not turn-time data I/O"
@@ -66,10 +52,9 @@ impl Transcript {
         Self(None)
     }
 
-    /// Record one bus event as a JSONL line, projected to its operational
-    /// shape by [`event_record`]. Rendering-only events project to `None` and
-    /// are skipped before the lock is ever taken, so the token stream — the
-    /// one high-frequency `Kind` — costs nothing here.
+    /// Record one bus event as a JSONL line. Rendering-only events project to
+    /// `None` before the lock is taken, so the token stream — the one
+    /// high-frequency `Kind` — costs nothing here.
     pub fn record(&self, id: AgentId, kind: &Kind) {
         let Some(inner) = &self.0 else { return };
         let t_ms = inner.started.elapsed().as_millis();
@@ -86,13 +71,9 @@ impl Transcript {
     }
 }
 
-/// Project one bus event into its `transcript.jsonl` record, or `None` for the
-/// variants the operational trace deliberately omits: the rendering-only
-/// [`Kind::Card`] / [`Kind::Phase`], the assistant [`Kind::Token`],
-/// [`Kind::Thinking`], and [`Kind::Reasoning`] streams (prose and deliberation
-/// belong to the model view), and the interactive-only chrome
-/// ([`Kind::Boundary`], [`Kind::UserPromptEcho`], the pin register). The
-/// exhaustive match means a new [`Kind`] won't silently fall out of the trace.
+/// Project one bus event into its `transcript.jsonl` record, or `None` for a
+/// variant the operational trace omits. The exhaustive match means a new
+/// [`Kind`] cannot silently fall out of the trace.
 pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde_json::Value> {
     use serde_json::json;
     let (name, mut obj) = match kind {
@@ -121,10 +102,8 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
             "tool_call",
             json!({ "tool": tool, "cmd": cmd, "summary": summary }),
         ),
-        // A desk verb records its three act fields as they are: an act names
-        // a subject and carries a payload, which no `tool_call` shape has a
-        // slot for.  Its result still records as a `tool_result`, so the
-        // forensic pair stays intact.
+        // An act's subject and payload have no slot in `tool_call`; its result
+        // does record as `tool_result`, so the forensic pair stays intact.
         Kind::HarnessCall {
             verb,
             subject,
@@ -167,10 +146,8 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
             )
         }
         // Io, Done, Notice, and Resources each carry a raw fact beside the
-        // `card` the TUI renders from it (bus.rs documents each pairing); the
-        // trace keeps the fact — structural read/write/exec/grep shape, worker
-        // settlement, ready-boundary housekeeping, `/resources` rows — never
-        // the rendering, which lives only in the TUI's `user.log`.
+        // `card` the TUI renders from it; the trace keeps the fact, never the
+        // rendering, which lives only in the TUI's `user.log`.
         Kind::Io { event, .. } => ("io", json!({ "event": event })),
         Kind::Done { outcome, .. } => {
             use crate::bus::card::DoneOutcome;
@@ -202,12 +179,11 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
                 ),
             }
         }
-        // The frontend's own rows are appended at render time and stay
-        // presentation, so they are deliberately absent from these raw rows.
+        // The rows the TUI owns are appended at render time, so only the
+        // agent's own accumulators appear here.
         Kind::Resources { rows, .. } => ("resources", json!({ "rows": rows })),
-        // Rendering- and presentation-only: a composed card, a progress phase,
-        // the assistant token stream, the interactive-only live lines, and the
-        // pin register (state that *is*, not a thing that happened).
+        // Rendering, prose, and interactive chrome — plus the pin register,
+        // which is state that *is*, not a thing that happened.
         Kind::Card(_)
         | Kind::Phase(_)
         | Kind::Token(_)

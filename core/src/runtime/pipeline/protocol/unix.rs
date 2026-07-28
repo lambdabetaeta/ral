@@ -1,23 +1,15 @@
-//! Unix backend for the pipeline gate / report protocol.
+//! Unix backend for the pipeline gate / report protocol.  Channels are
+//! socketpairs, inherited by raw fd number passed in an env var, which
+//! `helper::UnixTransport` reads back and re-secures with `FD_CLOEXEC`
+//! against the stage's own children.
 //!
-//! Channels are Unix-domain socketpairs.  Inheritance into a child
-//! `Command` is by raw fd: the fd number is passed in an env var and a
-//! `pre_exec` hook on the child clears `FD_CLOEXEC` so the fd survives
-//! `execve`; the helper / trampoline consumes the env var, wraps the fd
-//! inside `from_raw_fd`, and re-applies CLOEXEC.  All of this is wrapped
-//! behind the [`pair`] / [`pass`] backend functions so the rest of the
-//! protocol module never reaches into `AsRawFd` directly.
-//!
-//! Clearing `FD_CLOEXEC` in the *child's* `pre_exec` rather than on the
-//! parent's fd is deliberate: the parent's copy keeps `FD_CLOEXEC` set
-//! throughout, so a `Command::spawn` racing on another thread inherits
-//! the channel fd at `fork` (fork copies the whole fd table) but closes
-//! it at its own `execve`.  Only the helper this `pass` targets — whose
-//! `pre_exec` clears the bit — keeps the fd past exec.  Clearing the bit
-//! on the parent's fd instead would open a window from that `fcntl` until
-//! the parent dropped its copy in which any unrelated concurrent spawn
-//! would leak the channel into a foreign child, hanging the reader on a
-//! never-arriving EOF.
+//! The clear of `FD_CLOEXEC` happens in the *child's* `pre_exec` rather
+//! than by `fcntl` on the parent's fd, so the parent's copy stays
+//! close-on-exec: a `Command::spawn` racing on another thread inherits
+//! the fd at `fork` (which copies the whole fd table) but drops it at its
+//! own `execve`.  Clearing the bit on the parent's copy would instead
+//! leave any such foreign child holding the channel open, hanging the
+//! reader on an EOF that never arrives.
 
 use std::os::fd::AsRawFd;
 
@@ -25,28 +17,17 @@ use super::super::helper::{JOB_FD_ENV, REPORT_FD_ENV, VALUE_IN_FD_ENV, VALUE_OUT
 use super::common::{EnvNames, pipe_error};
 use crate::types::{Break, Settled};
 
-/// Unix-side channel type: a Unix-domain socketpair end.  Reads and
-/// writes are blocking; `serde_json` length-prefixed frames flow over
-/// it.  Both halves are owned `UnixStream`s so dropping closes the fd
-/// deterministically.
+/// One end of a socketpair, owned, carrying blocking length-prefixed frames.
 pub(crate) type Channel = std::os::unix::net::UnixStream;
 
-/// Allocate one socketpair.  Module-public because the Unix layer of
-/// the pipeline (for value-edge transport between adjacent ral
-/// helpers) wants the same socketpair primitive without going through
-/// a `FrameGate`.
+/// Allocate one socketpair.  Re-exported as `create_value_pair` for the
+/// value edges and the anchor, which want a bare pair with no `FrameGate`.
 pub(crate) fn pair() -> Result<(Channel, Channel), Break> {
     Channel::pair().map_err(pipe_error)
 }
 
-/// Stash the child-end fd number in `env` on `cmd` and register a
-/// child-side `pre_exec` that clears `FD_CLOEXEC` on that fd so it
-/// survives `execve`.  Composes the two operations the launcher used to
-/// do inline at every gate-wire site.
-///
-/// Registering the CLOEXEC clear as a `pre_exec` hook — rather than an
-/// `fcntl` on the parent's fd — confines the inherit window to this one
-/// child (see the module comment).
+/// Stash the child-end fd number in `env` on `cmd` and register the
+/// child-side `pre_exec` that clears `FD_CLOEXEC` on it.
 #[allow(
     clippy::unnecessary_wraps,
     reason = "one of the platform `pass` backends behind `platform::pass`; the fallback variant genuinely returns `Err`, so the `Settled<()>` signature is fixed across the backend family."
@@ -58,7 +39,6 @@ pub(crate) fn pass(cmd: &mut crate::process::Launch, env: &str, ch: &Channel) ->
     Ok(())
 }
 
-/// Env-var names this backend uses to pass channel fds to the helper.
 pub(crate) const ENV: EnvNames = EnvNames {
     job: JOB_FD_ENV,
     report: REPORT_FD_ENV,

@@ -1,19 +1,11 @@
-//! Full-screen TUI frontend.
+//! Full-screen TUI frontend: [`run`] holds the terminal — raw mode, alternate
+//! screen, bracketed paste, mouse capture — and the REPL loop the user types
+//! into, while the agent core sees only a [`crate::bus::Emitter`] channel.
 //!
-//! One [`crate::bus::Sink`] implementation, plus the REPL loop the user
-//! types into.  The TUI owns raw-mode, bracketed-paste, the alternate
-//! screen, and mouse capture through [`terminal::TerminalGuard`]; the agent
-//! core in [`crate::bus`] and [`crate::agent`] sees only a
-//! [`crate::bus::Emitter`] channel.
-//!
-//! The app owns its scrollback rather than delegating it to the host
-//! terminal: each session is a buffer of collapsible [`block`]s and the
-//! whole frame is redrawn every tick.  A tool call shows its summary and
-//! opens to the full ral script on a click; the wheel scrolls, click-drag
-//! selects and copies, and Shift-drag falls through to the terminal's own
-//! selection.  Assistant text accumulates into the active [`viewport::Viewport`]'s
-//! paragraph buffer and commits one fence-safe paragraph at a time — no
-//! live preview row.
+//! It is deliberately not a [`crate::bus::Sink`]: it drains the same bus on its
+//! render cadence instead, and owns its scrollback rather than the host
+//! terminal's, redrawing the whole screen each tick.
+
 mod app;
 mod banner;
 mod block;
@@ -46,13 +38,8 @@ pub(super) use app::App;
 pub use banner::SessionInfo;
 pub use tui_loop::run;
 
-// ---------------------------------------------------------------------------
-// Layout constants
-// ---------------------------------------------------------------------------
-
-/// How long a subagent tab stays in the rotation after the session
-/// dies — long enough for the user to tab over and inspect the final
-/// frame of its scrollback, short enough not to clutter the tab bar.
+/// How long a dead subagent's tab survives in the bar, so its last frame is
+/// still readable before `tabs` ages it out.
 pub(super) const LINGER: Duration = Duration::from_secs(90);
-/// Display label for the root session in the tab bar.
+/// Tab-bar label for the root session.
 pub(super) const ROOT_NAME: &str = "main";

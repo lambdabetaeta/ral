@@ -1,29 +1,16 @@
-//! The inbound queue: [`Inbox`] is the owned consumer end and [`Mailbox`]
-//! the cloneable sender end of a session's typed, multi-producer queue. A
-//! push either coalesces into a still-queued entry or is checked against a
-//! per-source quota ([`Shared::try_push`]); the two drains are a
-//! tool-boundary pull mid-exchange ([`Inbox::drain_steering`]) and the
-//! exchange-boundary pull the attend loop parks on ([`Inbox::next_or_idle`]).
+//! A session's typed, multi-producer inbound queue: [`Inbox`] is the owned
+//! consumer end, [`Mailbox`] the cloneable sender end.  Pushes coalesce or are
+//! quota-checked; the attend loop drains mid-exchange at a tool boundary
+//! ([`Inbox::drain_steering`]) and parks at the exchange boundary
+//! ([`Inbox::next_or_idle`]).
 //!
-//! # Lock order: inbox before registries
-//!
-//! The attend loop evaluates its park verdict *while holding its inbox queue
-//! mutex* — [`Inbox::next_or_idle`] recomputes it under the lock on every
-//! wake — and the verdict reads the fleet's [`crate::fleet::registry::AgentRegistry`] and the
-//! session's [`crate::fleet::schedule::ScheduleRegistry`].  The process-wide lock order is therefore
-//! **inbox → registry**, and the converse is forbidden: never post to or
-//! wake a [`Mailbox`] while holding a registry lock.  Clone the mailbox out,
-//! drop the guard, then push — [`crate::fleet::registry::AgentRegistry::message`] and
-//! [`crate::fleet::schedule::ScheduleRegistry::fire`] are the pattern.
-//!
-//! The two locks also shape how a producer must *sequence* its effects.
-//! Each [`Inbox::next_or_idle`] iteration computes the verdict first and pops the
-//! queue second, so a producer whose settling both changes a verdict input
-//! and delivers a message — a child retiring its registry entry and posting
-//! its result — must deliver first (deliver-then-retire,
-//! [`crate::shell_eval::tools::agent::spawn_async`]): whichever side of the retirement the
-//! verdict reads, the consumer either still parks for the child or finds
-//! the result already queued, and can never quiesce between the two facts.
+//! Two orderings bind every producer.  The park verdict is computed *under the
+//! queue mutex* and reads `fleet::registry` and `fleet::schedule`, so the lock
+//! order is **inbox → registry**: clone a [`Mailbox`] out and drop the registry
+//! guard before pushing.  And the verdict is computed *before* the pop, so a
+//! producer that both changes a verdict input and delivers must deliver first —
+//! a settling child posts its result, then retires its registry entry — or the
+//! consumer could quiesce between the two facts.
 
 use super::post::{Boundary, is_slash, source_name};
 use super::{Item, Post};
@@ -34,78 +21,44 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-/// How [`Inbox::next_or_idle`] should treat an empty inbox — the computed
-/// [`Agent::park_mode`](crate::agent::Agent::park_mode) verdict.
-///
-/// Re-evaluated on every wake: a human exchange engages a parked agent, a
-/// live child settles, or a schedule can arm or disarm.
+/// How [`Inbox::next_or_idle`] should treat an empty inbox — the verdict
+/// `Agent::park_mode` recomputes on every wake.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ParkMode {
-    /// A human is having a live conversation with this agent — the
-    /// interactive trunk, or a `/branch` tab, neither of which ever returns
-    /// to a parent.  Park *and ignore cancellation* entirely: an Esc cancels
-    /// the current *exchange*, not the agent, which keeps waiting for the next
-    /// human line.
+    /// A live human conversation: park *and ignore cancellation* entirely, for
+    /// an Esc cancels the exchange, not the agent.
     Held,
-    /// This agent does not converse — it returns to a parent, or runs
-    /// headless — but a human has exchanged a message with it: the registry
-    /// carries the exchange, not the TUI's focus cursor.  Parks on an empty
-    /// queue exactly like [`Self::Held`], bounded by the registry's idle
-    /// lease rather than any cancellation immunity — a *terminate*-cause
-    /// cancellation (`agent-cancel`, the lease's own expiry) still ends it
-    /// at once: an exchange is not immunity, or a `HeldByChildren` parent
-    /// waiting on this very agent would never receive the cancelled result
-    /// it is owed.
+    /// A non-conversing agent a human has exchanged with, per the registry
+    /// rather than the TUI's focus cursor.  Parks like [`Self::Held`] but with
+    /// no immunity, or a `HeldByChildren` parent would wait forever on the
+    /// cancelled result it is owed; the registry's idle lease bounds it.
     Engaged,
-    /// No human, but this agent has live children still running (async
-    /// `agent`s it launched).  Each will deliver its result up this agent's
-    /// own inbox when it settles, so park — a headless root waiting on its
-    /// fleet has a legal "keep still" move rather than being killed at
-    /// quiescence.  Like [`Self::UntilCancelled`], a cancellation
-    /// (`agent-cancel`, the ceiling) terminates at once, and the wait ends on
-    /// its own the moment the last child settles (the next re-evaluation sees
-    /// no children and falls through to [`Self::Quiesce`]).
+    /// Live children will each deliver a result up this inbox, so park rather
+    /// than kill a headless root waiting on its fleet; the last one settling
+    /// drops the next verdict to [`Self::Quiesce`].
     HeldByChildren,
-    /// No human, but a self-schedule is armed and may fire a wakeup.  Park,
-    /// but a cancellation (`agent-cancel`, the ceiling) terminates at once —
-    /// stop now rather than wait for the schedule.
+    /// An armed self-schedule may fire a wakeup — park, but a terminate-cause
+    /// cancel still stops now rather than wait for it.
     UntilCancelled,
     /// Nothing will ever feed this agent again: terminate at quiescence.
     Quiesce,
 }
 
-/// Per-agent, per-source cap on a *non-idempotent* inbox message
-/// (`AgentResult`, `AgentMessage`, `Command`, `Surface`).
-///
-/// Generous, so an ordinary burst never rejects, but a runaway producer
-/// cannot grow one source without bound. The idempotent sources (`user`,
-/// `schedule`, `nudge`) never count toward this cap at all — they coalesce
-/// instead — so this and [`INBOX_TOTAL_CAP`] bound only the
-/// four quota-checked sources, not the inbox as a whole. `nudge` is itself
-/// bounded to one outstanding entry (see [`Shared::try_push`]); `schedule`
-/// is bounded only by how many schedules are concurrently armed — a count
-/// this module does not hold and [`crate::fleet::schedule::ScheduleRegistry`] does
-/// not cap either; `user` is bounded only by how many non-slash runs a human
-/// queues between slash lines. Both are human/config scale in practice, not
-/// machine-floodable the way the quota-checked sources are.
+/// Per-agent, per-source cap on a *non-idempotent* message (`AgentResult`,
+/// `AgentMessage`, `Command`, `Surface`) — generous, so only a runaway producer
+/// meets it.  The idempotent sources coalesce and are never counted: `nudge`
+/// holds one entry, while `schedule` and `user` are bounded only by armed
+/// schedules and by a human's typing, neither machine-floodable.
 pub(crate) const INBOX_SOURCE_CAP: usize = 64;
-/// Total cap across the four quota-checked sources.
-///
-/// Alongside [`INBOX_SOURCE_CAP`]: several sources sitting near their own cap
-/// at once must not add up past one shared ceiling. Like [`INBOX_SOURCE_CAP`],
-/// this does not bound the idempotent sources — see its doc for what does.
+/// Total across the four quota-checked sources, so several near their own cap
+/// cannot add up past one ceiling.  Bounds no idempotent source either.
 pub(crate) const INBOX_TOTAL_CAP: usize = 256;
 
-/// Why a non-idempotent [`crate::bus::Post`] push was rejected.
-///
-/// See [`INBOX_SOURCE_CAP`] for which sources this can (and cannot) happen
-/// to. Every producer surfaces this to its own caller as a user-facing
-/// error; a push is never silently dropped.
+/// Why a quota-checked [`Post`] push was rejected.  Every producer surfaces
+/// this to its own caller; a push is never silently dropped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InboxReject {
-    /// This source alone is already at [`INBOX_SOURCE_CAP`].
     SourceFull { source: &'static str, cap: usize },
-    /// The whole inbox is already at [`INBOX_TOTAL_CAP`].
     TotalFull { cap: usize },
 }
 
@@ -124,30 +77,23 @@ impl std::fmt::Display for InboxReject {
     }
 }
 
-/// The queue an [`Inbox`] consumer and its [`Mailbox`] senders share: a
-/// [`VecDeque`] of [`crate::bus::Post`] under a `Mutex`, plus a [`Condvar`] a parked
-/// `next_or_idle` waits on so a push wakes it without polling.
+/// The queue an [`Inbox`] and its [`Mailbox`]es share: posts under a mutex,
+/// plus a [`Condvar`] a parked `next_or_idle` waits on so a push wakes it
+/// without polling.
 struct Shared {
     queue: Mutex<VecDeque<Post>>,
     signal: Condvar,
     /// True while the consumer is parked in [`ParkMode::Held`] or
-    /// [`ParkMode::Engaged`] on an empty queue: the human-facing yield point.
-    /// A producer clears it before waking the consumer, so frontends can
-    /// distinguish "prompt is editable" from "the root is still working"
-    /// without minting a presentation event.
+    /// [`ParkMode::Engaged`] on an empty queue.  A producer clears it before
+    /// waking the consumer, so a frontend can tell "prompt is editable" from
+    /// "the root is still working" without minting a presentation event.
     waiting_for_input: AtomicBool,
-    /// This inbox's clear-epoch, bumped by [`Inbox::clear`] under the same
-    /// queue mutex as the drain it runs alongside. A [`ScheduledWakeup`]
-    /// composed on the reaper thread ([`crate::fleet::schedule::ScheduleRegistry::fire`], `schedule.rs`)
-    /// cannot check staleness itself — its compose and its push are two
-    /// separate steps that a `/clear` can fall between — so it stamps
-    /// [`Mailbox::epoch`]'s value at compose time instead, and the pop-time
-    /// admission check ([`pop_item`]) reads this counter fresh, under the same
-    /// lock `clear` uses, to tell the two orderings apart: a push that lands
-    /// before `clear`'s bump is swept with the rest of the queue, one that
-    /// lands after is stamped stale and refused at the pop.
-    ///
-    /// [`ScheduledWakeup`]: crate::bus::Post::ScheduledWakeup
+    /// Bumped by [`Inbox::clear`] under the queue mutex.  A `ScheduledWakeup`
+    /// is composed on the reaper thread and pushed as a second step, with a
+    /// `/clear` free to fall between, so it stamps [`Mailbox::epoch`] at
+    /// compose time and [`pop_item`] compares that against this counter under
+    /// the lock `clear` holds: a push landing before the bump is swept with the
+    /// queue, one landing after is refused as stale.
     epoch: AtomicU64,
 }
 
@@ -161,40 +107,22 @@ impl Shared {
         })
     }
 
-    /// Lock the queue, recovering from a poisoned mutex rather than
-    /// panicking.  No operation ever run under this lock can leave the
-    /// `VecDeque` itself torn — each is a total push/pop/clear — so a
-    /// panicked holder leaves the queue in a perfectly usable state; the
-    /// alternative (propagating the poison to every subsequent producer)
-    /// would turn one unrelated panic into a permanently dead inbox for the
-    /// whole fleet.  The same policy as
-    /// [`crate::fleet::schedule::ScheduleRegistry::lock`]
-    /// (`schedule.rs`).
+    /// Recovers from a poisoned mutex rather than panicking, as
+    /// `ScheduleRegistry::lock` does: every operation here is a whole push, pop
+    /// or clear, so a panicked holder leaves the deque usable, where
+    /// propagating the poison would kill the fleet's inbox for good.
     fn lock(&self) -> MutexGuard<'_, VecDeque<Post>> {
         self.queue.lock_ignore_poison()
     }
 
-    /// Apply the inbox's push rule for one message, waking a parked consumer
-    /// on success. The three idempotent sources always succeed, coalescing
-    /// into an existing entry rather than growing the queue:
-    ///
-    /// - `ScheduledWakeup` replaces a still-queued wakeup for the *same
-    ///   schedule id* (newest wins) rather than adding a second.
-    /// - `UserSteering` joins onto a still-queued, non-slash tail entry with
-    ///   a blank line, preserving arrival order; a slash line is never
-    ///   merged either direction, so its exchange-boundary classification
-    ///   ([`crate::bus::Post::boundary`]) always survives intact.
-    /// - `Nudge` replaces a still-queued nudge outright (newest wins,
-    ///   mirroring `ScheduledWakeup`) rather than adding a second: it is
-    ///   always self-pushed by the agent's own attend loop reacting to one
-    ///   deliberation's outcome, so at most one is ever meaningfully outstanding —
-    ///   a second one queuing means a fresher continuation superseded the
-    ///   first, not that both are owed to the model.
-    ///
-    /// Every other source (`AgentResult`, `AgentMessage`, `Command`,
-    /// `Surface`) is quota-checked: rejected, never silently dropped, once
-    /// its own [`INBOX_SOURCE_CAP`] or the shared [`INBOX_TOTAL_CAP`] is
-    /// reached.
+    /// The push rule, waking a parked consumer on success.  The idempotent
+    /// sources always succeed by coalescing: a `ScheduledWakeup` replaces a
+    /// still-queued one for the same schedule id, a `Nudge` replaces a
+    /// still-queued nudge (a second means a fresher continuation superseded the
+    /// first, not that both are owed), and `UserSteering` joins a non-slash tail
+    /// entry with a blank line — never across a slash line, whose
+    /// exchange-boundary classification ([`Post::boundary`]) must survive the
+    /// merge.  Every other source is quota-checked: rejected, never dropped.
     fn try_push(&self, msg: Post) -> Result<(), InboxReject> {
         let mut q = self.lock();
         match msg {
@@ -250,76 +178,57 @@ impl Shared {
     }
 }
 
-/// How long a parked [`Inbox::next_or_idle`] sleeps between condvar wakes
-/// before re-checking its cancellation token.  A push notifies the condvar
-/// immediately; this bound only governs how fast a cancel (which does not
-/// notify) is observed by a parked agent.
+/// How long a parked [`Inbox::next_or_idle`] sleeps between condvar wakes.  A
+/// push notifies immediately; this bound governs only how fast a cancel, which
+/// does not notify, is observed.
 const PARK_POLL: Duration = Duration::from_millis(100);
 
-/// The cloneable **sender** side of a session's inbox.
-///
-/// Producers hold a
-/// `Mailbox`, never the [`Inbox`]: a schedule re-arms through its own
-/// session's `Mailbox`, a finishing child posts its one result through its
-/// parent's `Mailbox` ([`Agent::mailbox`](crate::agent::Agent::mailbox)), a
-/// `spawn` worker flushes its surface batch through the owning session's
-/// `Mailbox`.  The registry holds each peer's `Mailbox` so the frontend can
-/// steer a focused tab and the `message` tool can deliver a marked note
-/// between live agents without exposing raw senders to model code.
+/// The cloneable **sender** side of a session's inbox — producers hold this,
+/// never the [`Inbox`].  The fleet registry holds each peer's, so the frontend
+/// can steer a focused tab and the `message` tool can reach a live agent
+/// without exposing raw senders to model code.
 #[derive(Clone)]
 pub struct Mailbox {
     shared: Arc<Shared>,
 }
 
 impl Mailbox {
-    /// Post any message (cron wakeup, agent result, self-nudge, …), applying
-    /// the inbox's coalesce/quota rule ([`Shared::try_push`]) and waking a
-    /// parked consumer on success.
-    ///
-    /// Takes the inbox queue mutex — callers must not hold a registry lock
-    /// (the module's [lock order](self)): clone the mailbox out and push
-    /// after the guard drops.
+    /// Post any message, applying the coalesce/quota rule
+    /// ([`Shared::try_push`]) and waking a parked consumer.  Takes the queue
+    /// mutex, so no caller may hold a registry lock: clone the mailbox out and
+    /// push after the guard drops.
     ///
     /// # Errors
-    /// Returns `Err(InboxReject)` when a non-idempotent source is already at
-    /// its queue quota — see [`InboxReject`] for the rejection contract.
+    /// `Err(InboxReject)` when a quota-checked source is at its cap.
     pub(crate) fn push(&self, msg: Post) -> Result<(), InboxReject> {
         self.shared.try_push(msg)
     }
 
-    /// Post a user-typed steering prompt — the TUI `Enter`-while-busy path.
+    /// Post a user-typed steering prompt — the TUI's `Enter`-while-busy path.
     ///
     /// # Panics
-    /// Panics if the push is rejected — ruled out because `UserSteering` is
-    /// idempotent (it merges rather than growing the queue) and never
-    /// rejects.
+    /// Never in practice: `UserSteering` coalesces, so it never rejects.
     pub(crate) fn push_user(&self, prompt: String) {
         self.push(Post::UserSteering(prompt))
             .expect("UserSteering is idempotent and never rejects");
     }
 
-    /// Whether this queue's consumer is parked at a human-input boundary. The
-    /// TUI reads the focused tab's bit through its registry mailbox to drive
-    /// the prompt chrome and tab-title spinner.
+    /// Whether this queue's consumer is parked at a human-input boundary — the
+    /// TUI reads the focused tab's to drive the prompt chrome and the spinner.
     pub(crate) fn waiting_for_input(&self) -> bool {
         self.shared.waiting_for_input.load(Ordering::Acquire)
     }
 
-    /// This inbox's current clear-epoch — the full compose-vs-`/clear` race
-    /// a producer stamps this against is [`Shared::epoch`]'s own doc.
+    /// This inbox's clear-epoch — the race is [`Shared::epoch`]'s doc.
     pub(crate) fn epoch(&self) -> u64 {
         self.shared.epoch.load(Ordering::Acquire)
     }
 }
 
-/// A session's inbox: the owned **consumer** of the typed, multi-producer
-/// queue the agent's attend loop pulls its next item from.  Senders are minted
-/// with [`Self::mailbox`].
-///
-/// The attend loop drains tool-boundary messages mid-exchange ([`Self::drain_steering`],
-/// from `deliberate`) and exchange-boundary items at the boundary
-/// ([`Self::next_or_idle`]); a drained message disappears from the pending
-/// strip and cannot be delivered twice.
+/// A session's inbox: the owned **consumer** the attend loop pulls from, with
+/// senders minted by [`Self::mailbox`].  Tool-boundary messages drain
+/// mid-exchange ([`Self::drain_steering`], from `agent::deliberate`), the rest
+/// at the exchange boundary ([`Self::next_or_idle`]).
 #[derive(Clone)]
 pub(crate) struct Inbox {
     shared: Arc<Shared>,
@@ -338,30 +247,20 @@ impl Inbox {
         }
     }
 
-    /// Mint a [`Mailbox`] sender onto this inbox's queue.
     pub(crate) fn mailbox(&self) -> Mailbox {
         Mailbox {
             shared: self.shared.clone(),
         }
     }
 
-    /// Post directly through the consumer handle — the self-push path (a
-    /// nudge, a self-armed wakeup landing in the agent's own box).  Equivalent
-    /// to `self.mailbox().push(msg)`; see [`Mailbox::push`] for the
-    /// coalesce/quota rule and the rejection contract.
-    ///
-    /// # Errors
-    /// Returns `Err(InboxReject)` when a non-idempotent source is already at
-    /// its queue quota.
+    /// The self-push path — a nudge or a self-armed wakeup landing in the
+    /// agent's own box.  Same rule and rejection contract as [`Mailbox::push`].
     pub(crate) fn push(&self, msg: Post) -> Result<(), InboxReject> {
         self.shared.try_push(msg)
     }
 
-    /// Post a user-typed steering prompt through the consumer handle.
-    ///
     /// # Panics
-    /// Panics if the push is rejected — ruled out by the same idempotence;
-    /// see [`Mailbox::push_user`].
+    /// Never in practice: `UserSteering` coalesces, so it never rejects.
     pub(crate) fn push_user(&self, prompt: String) {
         self.push(Post::UserSteering(prompt))
             .expect("UserSteering is idempotent and never rejects");
@@ -372,19 +271,14 @@ impl Inbox {
         self.shared.lock().is_empty()
     }
 
-    /// Whether the consumer is parked at a human-input boundary — true once it
-    /// yields on an empty queue, cleared the moment a producer enqueues work.
-    /// The chrome reads the focused tab's bit through its [`Mailbox`], not this
-    /// consumer handle.
+    /// True once the consumer yields on an empty queue, cleared the moment a
+    /// producer enqueues work.  The chrome reads a [`Mailbox`]'s, not this.
     pub(crate) fn waiting_for_input(&self) -> bool {
         self.shared.waiting_for_input.load(Ordering::Acquire)
     }
 
-    /// Queue depth per message source — the inbox's probe figures for the
-    /// `/resources` fold, one `(source, count)` pair per [`crate::bus::Post`]
-    /// variant, zeros included so the row set is stable.  Counts only,
-    /// taken in one pass under the queue lock: nothing is drained,
-    /// reordered, or woken — enumeration is not observation.
+    /// Queue depth per source for the `/resources` fold, zeros included so the
+    /// row set is stable.  One pass under the lock; nothing is drained or woken.
     pub(crate) fn source_depths(&self) -> Vec<(&'static str, u64)> {
         let mut rows = vec![
             ("user", 0u64),
@@ -403,9 +297,8 @@ impl Inbox {
         rows
     }
 
-    /// Pending user-authored steering prompts, oldest first, for the TUI's
-    /// queue strip.  Non-human deliveries and slash-command control items stay
-    /// invisible here: they are work for the attend loop, not queued user text.
+    /// Pending user-authored prompts, oldest first, for the TUI's queue strip.
+    /// Other deliveries stay invisible: they are work, not queued user text.
     pub(crate) fn queued_user_messages(&self) -> Vec<String> {
         self.shared
             .lock()
@@ -417,14 +310,9 @@ impl Inbox {
             .collect()
     }
 
-    /// Pull every pending user prompt back out for editing at once — all the
-    /// `UserSteering` messages in the queue, wherever they sit, leaving any
-    /// non-user deliveries (a wakeup, an agent result, a `spawn`'s surface) in
-    /// place for the exchange boundary.  A user prompt queued behind a wakeup is
-    /// still the user's draft and should come back with the rest; the wakeup is
-    /// not the user's draft and stays queued.
-    ///
-    /// Returns oldest-first, or `None` if no user prompts are queued.
+    /// Pull every queued user prompt back out for editing, oldest first,
+    /// wherever it sits: a prompt queued behind a wakeup is still the user's
+    /// draft, and the wakeup, left in place, is not.
     pub(crate) fn pop_back_user_all(&self) -> Option<Vec<String>> {
         let mut q = self.shared.lock();
         let mut prompts: Vec<String> = Vec::new();
@@ -440,25 +328,19 @@ impl Inbox {
         (!prompts.is_empty()).then_some(prompts)
     }
 
-    /// Mid-exchange drain at a tool-call boundary: take the leading run of
-    /// tool-boundary messages — every source but a slash command — and deliver
-    /// them, in order, each tagged with its source so the attend loop renders it in
-    /// its honest medium (a `↘` subagent block for an agent result, a marked
-    /// wakeup, the cards of a settled `spawn`).  A consecutive run of user
-    /// steering coalesces into one [`crate::bus::Item::Human`].
+    /// Mid-exchange drain at a tool-call boundary: the leading run of
+    /// tool-boundary messages, in order, each tagged with its source so the
+    /// attend loop renders it in its honest medium.  A consecutive run of user
+    /// steering coalesces into one [`Item::Human`].
     ///
-    /// The scan stops at the first exchange-boundary entry
-    /// ([`Boundary::Exchange`]) — a [`Post::Command`], which must run against a
-    /// `ReadyForUser` session, or a slash-prefixed steering line holding its
-    /// place — so it and everything queued behind it stay for
-    /// [`Self::next_or_idle`].  This is also what holds the human's
-    /// own ordering — a `/model` then a prompt swaps before the prompt runs —
-    /// since steering queued behind the command is left with it.
+    /// The scan stops at the first [`Boundary::Exchange`] entry — a
+    /// [`Post::Command`], or a slash-prefixed steering line holding its place —
+    /// leaving it and whatever is queued behind it for [`Self::next_or_idle`],
+    /// which is what preserves the human's ordering: a `/model` typed before a
+    /// prompt swaps the model before the prompt runs.
     ///
     /// # Panics
-    /// Panics only on an internal invariant violation (a bug): every
-    /// `pop_front` here follows a `front` check made in the same loop
-    /// iteration, under the same lock.
+    /// Never: every `pop_front` follows a `front` check in the same iteration.
     pub(crate) fn drain_steering(&self) -> Vec<Item> {
         let mut q = self.shared.lock();
         let epoch = self.shared.epoch.load(Ordering::Acquire);
@@ -477,35 +359,25 @@ impl Inbox {
         items
     }
 
-    /// Exchange-boundary drain: the next deliverable, tagged with its source, or
-    /// `None` if the queue is empty.  Never blocks — see [`Self::next_or_idle`]
-    /// for the parking variant the attend loop uses.
+    /// The next exchange-boundary deliverable.  Never blocks —
+    /// [`Self::next_or_idle`] is the parking variant the attend loop uses.
     pub(crate) fn next_item(&self) -> Option<Item> {
         let mut q = self.shared.lock();
         let epoch = self.shared.epoch.load(Ordering::Acquire);
         pop_item(&mut q, epoch)
     }
 
-    /// The attend loop's exchange-boundary pull.  Returns the next deliverable; on
-    /// an empty queue the `park` verdict — recomputed on every wake — decides
-    /// whether to park or terminate; the immunity ladder is [`ParkMode`]'s
-    /// own doc.
+    /// The attend loop's exchange-boundary pull: the next deliverable, or, on
+    /// an empty queue, whatever the `park` verdict says — the immunity ladder is
+    /// [`ParkMode`]'s doc.  A push wakes the park at once through the condvar;
+    /// a cancellation does not notify, so a non-`Held` park re-checks it every
+    /// [`PARK_POLL`].
     ///
-    /// `park` is re-evaluated each iteration, so a lease expiry's
-    /// terminate-cause cancel, or the last live child settling, is seen on
-    /// the very next wake.  A push wakes the park at once through the
-    /// condvar; a cancellation does not notify, so a non-`Held` park
-    /// re-checks `cancel` every [`PARK_POLL`].
-    ///
-    /// Two orderings carry the loop's correctness.  The verdict runs *under
-    /// the queue mutex*, so a push can never interleave between the verdict
-    /// and the wait (the condvar releases the lock atomically) — a lost
-    /// wakeup is impossible.  And the verdict is
-    /// computed *before* the pop, so a producer that both changes a verdict
-    /// input and delivers a message need only deliver first
-    /// (deliver-then-retire, the module's [lock order](self)): a `Quiesce`
-    /// verdict can then never win a race against a delivery it was supposed
-    /// to wait for.
+    /// Two orderings carry the correctness.  The verdict runs *under the queue
+    /// mutex*, which the condvar releases atomically, so no push interleaves
+    /// between verdict and wait and no wakeup is lost.  And it runs *before* the
+    /// pop, so a producer need only deliver before it changes a verdict input:
+    /// a `Quiesce` can never win against the delivery it should wait for.
     pub(crate) fn next_or_idle(
         &self,
         park: impl Fn() -> ParkMode,
@@ -514,14 +386,9 @@ impl Inbox {
         let mut q = self.shared.lock();
         loop {
             let mode = park();
-            // Every park but a genuinely conversing `Held` terminates the
-            // instant a *terminate*-cause cancel trips — `agent-cancel`, the
-            // ceiling, or `/clear` means stop now, dropping any queued
-            // messages; `Engaged` gets no immunity from the exchange alone.
-            // An *interrupt*-cause cancel is not a terminate: it drops the
-            // in-flight exchange but the agent re-parks.  Only a live human
-            // conversation (`Held`) ignores cancellation entirely: an Esc
-            // interrupts an exchange, not the agent.
+            // A *terminate*-cause cancel ends every park but `Held`; an
+            // *interrupt* drops the in-flight exchange and the agent re-parks.
+            // Only a live human conversation ignores cancellation entirely.
             if mode != ParkMode::Held && cancel.terminated() {
                 return None;
             }
@@ -551,15 +418,11 @@ impl Inbox {
         }
     }
 
-    /// Drop every pending message — `/clear` rebuilds the agent, so neither
-    /// queued user prompts nor stale non-human deliveries carry across.
-    /// Runs each dropped message's drain side effect
-    /// ([`crate::bus::Post::on_drain`]) first, so a queued-but-unconsumed
-    /// `ScheduledWakeup`'s `pending` flag clears here too — `clear` does not
-    /// depend on its callers also clearing the schedule registry to avoid
-    /// stranding a schedule that can never fire again. Bumps the clear-epoch
-    /// under the same queue lock as the drain — [`Shared::epoch`]'s doc has
-    /// the full race against a racing schedule fire.
+    /// Drop every pending message — `/clear` rebuilds the agent, so nothing
+    /// queued carries across — running each one's [`Post::on_drain`] first, so
+    /// a queued-but-unconsumed `ScheduledWakeup` still clears its `pending` flag
+    /// rather than stranding a schedule that could never fire again.  Bumps the
+    /// clear-epoch under the same lock as the drain ([`Shared::epoch`]).
     pub(crate) fn clear(&self) {
         let mut q = self.shared.lock();
         for msg in q.drain(..) {
@@ -571,18 +434,14 @@ impl Inbox {
 }
 
 /// Pop the next exchange-boundary item from a locked queue, tagged with its
-/// source.  A leading run of *non-slash* user steering coalesces into one
-/// [`crate::bus::Item::Human`], matching the push-time never-merge rule
-/// ([`Shared::try_push`]): a slash line neither absorbs the run ahead of it
-/// nor merges with the steering behind it, so it is always delivered alone,
-/// as ordinary prompt text — the same rule [`Inbox::drain_steering`] already
-/// applies at the tool boundary.  Every other source is delivered on its own
-/// so the attend loop can render each in its honest medium.
+/// source.  A leading run of *non-slash* steering coalesces into one
+/// [`Item::Human`], matching the push-time never-merge rule
+/// ([`Shared::try_push`]) — a slash line is always delivered alone, as ordinary
+/// prompt text — and every other source is delivered on its own.
 ///
-/// `epoch` is this inbox's *current* clear-epoch, read by the caller under
-/// the same lock this function runs under — see [`Shared::epoch`] for the
-/// full staleness race.  A stale `ScheduledWakeup` is dropped rather than
-/// converted, so the loop below just tries the next queued message.
+/// `epoch` is the caller's read of the clear-epoch, taken under the lock this
+/// runs under ([`Shared::epoch`]); a stale `ScheduledWakeup` is dropped rather
+/// than converted, so the loop just tries the next queued message.
 pub(super) fn pop_item(q: &mut VecDeque<Post>, epoch: u64) -> Option<Item> {
     loop {
         if let Post::UserSteering(front) = q.front()? {
@@ -601,12 +460,9 @@ pub(super) fn pop_item(q: &mut VecDeque<Post>, epoch: u64) -> Option<Item> {
     }
 }
 
-/// Pop the leading run of consecutive, non-slash [`crate::bus::Post::UserSteering`]
-/// entries off `q` and join them with a blank line into one [`crate::bus::Item::Human`] —
-/// the coalesce half of the never-merge rule ([`Shared::try_push`]), shared by
-/// [`Inbox::drain_steering`] and [`pop_item`]. Both callers enter with a
-/// guaranteed non-slash steering at the front, so the loop always pops at
-/// least one entry.
+/// Pop the leading run of consecutive, non-slash [`Post::UserSteering`] entries
+/// and join them with a blank line — the coalesce half of the never-merge rule.
+/// Both callers enter with a non-slash steering at the front, so one always pops.
 fn coalesce_steering(q: &mut VecDeque<Post>) -> Item {
     let mut text = String::new();
     while let Some(Post::UserSteering(s)) = q.front() {
@@ -624,12 +480,9 @@ fn coalesce_steering(q: &mut VecDeque<Post>) -> Item {
     Item::Human(text)
 }
 
-/// Convert one non-user-steering message into the [`crate::bus::Item`] it delivers,
-/// running its drain side effect ([`crate::bus::Post::on_drain`]) — or `None` for a
-/// [`ScheduledWakeup`](crate::bus::Post::ScheduledWakeup) whose stamped epoch has
-/// fallen behind `epoch`, refused rather than converted.  Shared by the
-/// tool-boundary drain ([`Inbox::drain_steering`]) and the exchange-boundary drain
-/// ([`pop_item`]).
+/// Convert one non-steering message into the [`Item`] it delivers, running its
+/// [`Post::on_drain`] — or `None` for a `ScheduledWakeup` whose stamped epoch
+/// has fallen behind `epoch`, refused rather than converted.
 fn to_item(msg: Post, epoch: u64) -> Option<Item> {
     msg.on_drain();
     if let Post::ScheduledWakeup { epoch: fired, .. } = &msg
@@ -672,16 +525,12 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
-    /// A scheduled-wakeup message with a fresh pending flag, stamped with
-    /// epoch 0 (a fresh [`Inbox`]'s own starting epoch), for the inbox drain
-    /// tests. `id` matters only to the dedupe tests below; the drain-order
-    /// tests all use the same arbitrary id.
+    /// Epoch 0 is a fresh [`Inbox`]'s own; `id` matters only to the dedupe tests.
     fn wakeup(id: u64, label: &str, trigger: &str, prompt: &str) -> Post {
         wakeup_at(id, label, trigger, prompt, 0)
     }
 
-    /// [`wakeup`], stamped with an explicit epoch — for the admission tests
-    /// below, which need a wakeup composed under a *stale* epoch.
+    /// [`wakeup`] with an explicit epoch, for the stale-admission tests.
     fn wakeup_at(id: u64, label: &str, trigger: &str, prompt: &str, epoch: u64) -> Post {
         Post::ScheduledWakeup {
             id,
@@ -788,18 +637,10 @@ mod tests {
         );
     }
 
-    /// The complement of the test above: a non-`Held` park ignores an
-    /// *interrupt*-cause cancel — an interrupt drops the in-flight exchange, it does
-    /// not end the agent — where a *terminate* cause ends it.
-    ///
-    /// "Still parked" is proved without a timing race by making the release a
-    /// real item: after `cancel(Interrupt)`, the only exit `next_or_idle` has
-    /// left is a pushed item.  It cannot return `None` — `terminated()` never
-    /// trips for an interrupt, and the park is not `Quiesce` — so it stays
-    /// parked until the push wakes it, then pops the item and returns `Some`.  A
-    /// terminate cancel would instead have returned `None`, dropping the item;
-    /// observing the item come back through the join is therefore exactly the
-    /// evidence the interrupt was ignored.  No sleep gates the assertion.
+    /// The complement of the test above: an *interrupt* drops the in-flight
+    /// exchange rather than ending the agent.  Proved without a timing race —
+    /// after the interrupt the only exit left is a pushed item, so getting it
+    /// back through the join is the evidence a terminate would have destroyed.
     #[test]
     fn non_human_park_survives_an_interrupt() {
         let inbox = Inbox::new();
@@ -826,12 +667,8 @@ mod tests {
             "the worker reached the park predicate"
         );
 
-        // An interrupt is not a terminate: the park re-checks `cancel` each
-        // PARK_POLL and stays, because `terminated()` stays false.
         token.cancel(ral_core::process::CancelCause::Interrupt);
 
-        // The only remaining exit is a real item.  Getting it back proves the
-        // interrupt did not end the park (which would have dropped it, `None`).
         inbox.mailbox().push_user("resume".into());
         assert!(
             matches!(
@@ -842,13 +679,8 @@ mod tests {
         );
     }
 
-    /// [`ParkMode::Engaged`] — a non-conversing agent a human has exchanged a
-    /// message with — grants no cancellation immunity: `agent-cancel`/the
-    /// lease expiring while the exchange is recent must still kill it, or
-    /// its `HeldByChildren` parent would sit waiting on a cancelled-result
-    /// delivery that never comes.  Contrast
-    /// [`held_park_survives_a_terminate_cause`], where a *genuine*
-    /// conversation stays immune.
+    /// [`ParkMode::Engaged`] grants no immunity: were it to, its
+    /// `HeldByChildren` parent would wait forever on a cancelled result.
     #[test]
     fn engaged_park_dies_on_a_terminate_cause_despite_the_exchange() {
         let inbox = Inbox::new();
@@ -878,12 +710,8 @@ mod tests {
         );
     }
 
-    /// The complement: a genuinely conversing [`ParkMode::Held`] stays immune
-    /// even to a terminate cause — the split introduced for `Engaged` must not
-    /// weaken `Held`'s existing immunity for a live human conversation.  Proved
-    /// the same way [`non_human_park_survives_an_interrupt`] proves an
-    /// interrupt is ignored: the only remaining exit is a pushed item, so
-    /// getting it back shows the terminate cancel did not end the park.
+    /// The complement: a conversing [`ParkMode::Held`] stays immune even to a
+    /// terminate cause, proved as [`non_human_park_survives_an_interrupt`] is.
     #[test]
     fn held_park_survives_a_terminate_cause() {
         let inbox = Inbox::new();
@@ -922,11 +750,8 @@ mod tests {
         );
     }
 
-    /// Tool-boundary drain stops at the first slash-prefixed steering line.
-    /// It waits for the exchange boundary like a real [`crate::bus::Post::Command`], but
-    /// is delivered as ordinary prompt text, never interpreted — and, per the
-    /// never-merge rule, it neither absorbs the non-slash run ahead of it nor
-    /// merges with the plain steering queued behind it.
+    /// A slash-prefixed line waits for the exchange boundary like a real
+    /// [`Post::Command`], yet is delivered as ordinary prompt text.
     #[test]
     fn inbox_tool_drain_stops_before_slash_command() {
         let inbox = Inbox::new();
@@ -950,9 +775,7 @@ mod tests {
         assert!(inbox.is_empty());
     }
 
-    /// A scheduled wakeup drains at the tool boundary, marked, alongside the
-    /// steering ahead of it — so it reaches the model as soon as the tool
-    /// batch settles rather than waiting out the whole exchange.
+    /// A wakeup reaches the model as soon as the tool batch settles.
     #[test]
     fn inbox_wakeup_drains_at_tool_boundary_marked() {
         let inbox = Inbox::new();
@@ -973,14 +796,11 @@ mod tests {
         assert!(inbox.is_empty());
     }
 
-    /// Asynchronous deliveries — a settled detached agent's `AgentResult`, a
-    /// `spawn`'s `Surface`, a `ScheduledWakeup` — drain at the tool boundary
-    /// too, in queue order, so a result that settles during a long tool-call
-    /// loop reaches the model at the next boundary, not at exchange's end.
+    /// Async deliveries drain in queue order too, so a result settling during a
+    /// long tool-call loop need not wait for the exchange to end.
     #[test]
     fn inbox_tool_drain_takes_async_deliveries() {
         let inbox = Inbox::new();
-        // A wakeup that fired, then a barging human, in arrival order.
         inbox.push(wakeup(1, "nightly", "@", "go")).unwrap();
         inbox.push_user("redirect now".into());
         inbox.push_user("and also this".into());
@@ -1018,10 +838,8 @@ mod tests {
         assert!(inbox.is_empty());
     }
 
-    /// A slash command holds the line: it is the lone exchange-boundary item,
-    /// so the drain stops at it and everything queued behind — here steering
-    /// the human typed after a mid-exchange `/model` — stays for the exchange boundary,
-    /// running after the swap.  Async deliveries ahead of it still drain.
+    /// A slash command holds the line, so steering typed after a mid-exchange
+    /// `/model` runs only after the swap.  Deliveries ahead of it still drain.
     #[test]
     fn inbox_tool_drain_stops_at_command_barrier() {
         let inbox = Inbox::new();
@@ -1030,8 +848,6 @@ mod tests {
         inbox.push(Post::Command("/model".into())).unwrap();
         inbox.push_user("after model".into());
 
-        // "before" and the wakeup drain; the /model command stops the run, so
-        // "after model" stays behind it for the exchange boundary.
         assert!(matches!(
             inbox.drain_steering().as_slice(),
             [Item::Human(b), Item::Wakeup(_)] if b == "before"
@@ -1042,9 +858,8 @@ mod tests {
         assert!(inbox.is_empty());
     }
 
-    /// The TUI queue strip is a user-text projection, not a generic inbox
-    /// debugger: wakeups and control items stay out, while user steering keeps
-    /// its queue order even when interleaved with them.
+    /// The queue strip is a user-text projection, not an inbox debugger:
+    /// wakeups and control items stay out, and steering keeps its order.
     #[test]
     fn inbox_queued_user_messages_shows_only_user_steering() {
         let inbox = Inbox::new();
@@ -1063,8 +878,7 @@ mod tests {
         assert!(matches!(inbox.next_item(), Some(Item::Human(s)) if s == "second"));
     }
 
-    /// A queue with no user prompts yields `None`: a sole wakeup is not the
-    /// user's draft and stays for the exchange boundary.
+    /// A sole wakeup is not the user's draft, so nothing comes back.
     #[test]
     fn inbox_pop_back_user_all_no_user_prompts() {
         let inbox = Inbox::new();
@@ -1073,13 +887,9 @@ mod tests {
         assert!(matches!(inbox.next_item(), Some(Item::Wakeup(_))));
     }
 
-    /// `pop_back_user_all` extracts every user prompt entry from the queue —
-    /// even ones sandwiched between non-user deliveries — and leaves the
-    /// non-user messages in their original order for the exchange boundary.
-    /// "second" and "third" arrive back-to-back with nothing between them,
-    /// so the push-time merge rule already folded them into one entry; the
-    /// wakeup and the command each still separate a run and force a fresh
-    /// entry.
+    /// Even prompts sandwiched between non-user deliveries, which keep their
+    /// order.  "second" and "third" arrive back-to-back, so the push-time merge
+    /// already folded them into one entry.
     #[test]
     fn inbox_pop_back_user_all_extracts_all_leaving_non_user_in_order() {
         let inbox = Inbox::new();
@@ -1098,14 +908,12 @@ mod tests {
             ]),
             "all user prompts come back oldest-first, past interspersed deliveries",
         );
-        // The non-user messages survive in their original order.
         assert!(matches!(inbox.next_item(), Some(Item::Wakeup(_))));
         assert!(matches!(inbox.next_item(), Some(Item::Command(s)) if s == "/model"));
         assert!(inbox.is_empty());
     }
 
-    /// A deferred `spawn` worker's delivered surface batch, terminated by
-    /// the `` `done `` event core appends.
+    /// A `spawn` worker's batch, terminated by the `` `done `` event core appends.
     fn surface() -> Post {
         use ral_core::Value;
         let done = Value::Variant {
@@ -1128,9 +936,7 @@ mod tests {
         }
     }
 
-    /// A `Surface` drains at the tool boundary as a [`crate::bus::Item::Surface`] in the
-    /// root viewport, and `clear` drops a queued batch for free (the deque is
-    /// emptied), so a `/clear` between delivery and drain delivers nothing.
+    /// A `/clear` landing between delivery and drain empties the deque.
     #[test]
     fn inbox_surface_drains_at_tool_boundary_and_cleared() {
         let inbox = Inbox::new();
@@ -1143,7 +949,6 @@ mod tests {
             "a /clear drops the queued batch"
         );
 
-        // A fresh, un-cleared batch surfaces mid-exchange.
         inbox.push(surface()).unwrap();
         assert!(matches!(
             inbox.drain_steering().as_slice(),
@@ -1151,8 +956,7 @@ mod tests {
         ));
     }
 
-    /// A wakeup's pending flag clears when it drains, re-opening its
-    /// schedule for the next occurrence (the overlap-skip mechanism).
+    /// Draining a wakeup re-opens its schedule for the next occurrence.
     #[test]
     fn inbox_wakeup_clears_its_pending_flag_on_drain() {
         let pending = Arc::new(AtomicBool::new(true));
@@ -1175,12 +979,10 @@ mod tests {
         );
     }
 
-    /// `clear` runs the same drain side effect a real drain would, so a
-    /// queued-but-unconsumed wakeup's `pending` flag is cleared rather than
-    /// stranded `true` forever.  Production never observes this today only
-    /// because both call sites also clear the schedule registry outright
-    /// (`agent.rs`'s `/clear`); `clear` must not depend on that coupling to
-    /// be correct on its own.
+    /// `clear` runs the same drain side effect a real drain would, so an
+    /// unconsumed wakeup's `pending` flag is not stranded `true` forever.
+    /// `Agent::clear` disarms the schedule registry alongside, but the TUI's
+    /// `App::clear` reaches only the inbox, so this must hold on its own.
     #[test]
     fn inbox_clear_runs_the_drain_side_effect_on_a_stranded_wakeup() {
         let pending = Arc::new(AtomicBool::new(true));
@@ -1203,10 +1005,9 @@ mod tests {
         assert!(inbox.is_empty());
     }
 
-    /// The schedule race ([`crate::fleet::schedule::ScheduleRegistry::fire`], `schedule.rs`): a wakeup
-    /// composed while a stale epoch was still current, then pushed after an
-    /// intervening `/clear` already bumped it, is refused at the pop rather
-    /// than surfacing into the rebuilt context.
+    /// The reaper's compose-then-push race (`ScheduleRegistry::fire`): a wakeup
+    /// composed under an epoch an intervening `/clear` has since bumped never
+    /// surfaces into the rebuilt context.
     #[test]
     fn stale_epoch_wakeup_is_refused_at_pop() {
         let inbox = Inbox::new();
@@ -1219,8 +1020,7 @@ mod tests {
         );
     }
 
-    /// The positive half: a wakeup stamped with the live epoch is delivered
-    /// exactly like any other.
+    /// The positive half: the live epoch is delivered like any other message.
     #[test]
     fn current_epoch_wakeup_is_delivered() {
         let inbox = Inbox::new();
@@ -1231,8 +1031,6 @@ mod tests {
 
     // ── inbox quotas without silent loss ───────────────────────────────────
 
-    /// The source name a `source_depths` row carries, for these tests'
-    /// convenience.
     fn depth_of(inbox: &Inbox, source: &str) -> u64 {
         inbox
             .source_depths()
@@ -1241,9 +1039,8 @@ mod tests {
             .map_or(0, |(_, n)| n)
     }
 
-    /// A newer wakeup for the same schedule id replaces a still-queued older
-    /// one in place — one entry, not two — while a different schedule's
-    /// wakeup is untouched and keeps its own arrival order.
+    /// One entry, not two, and a different schedule's is untouched and keeps
+    /// its arrival order.
     #[test]
     fn inbox_scheduled_wakeup_dedupes_by_schedule_id_newest_wins() {
         let inbox = Inbox::new();
@@ -1272,9 +1069,7 @@ mod tests {
         }
     }
 
-    /// Consecutive `UserSteering` pushes merge into one queue entry —
-    /// newline-joined, order kept — rather than growing the queue one per
-    /// keystroke of a fast typist.
+    /// Otherwise a fast typist grows the queue one entry per line.
     #[test]
     fn inbox_user_steering_merges_pre_boundary_preserving_order() {
         let inbox = Inbox::new();
@@ -1296,9 +1091,8 @@ mod tests {
         }
     }
 
-    /// A slash line is never merged into an adjacent plain-text entry, in
-    /// either direction — merging it away would silently change its
-    /// exchange-boundary classification ([`crate::bus::Post::boundary`]).
+    /// In either direction: merging would silently change the slash line's
+    /// boundary ([`Post::boundary`]).
     #[test]
     fn inbox_user_steering_never_merges_across_a_slash_command() {
         let inbox = Inbox::new();
@@ -1317,11 +1111,8 @@ mod tests {
         );
     }
 
-    /// A newer `Nudge` replaces a still-queued one outright (newest wins,
-    /// mirroring `ScheduledWakeup`'s own dedupe-by-id) rather than adding a
-    /// second: it is always self-pushed by the agent reacting to one
-    /// deliberation's outcome, so at most one is ever meaningfully outstanding — a second
-    /// arriving means a fresher continuation superseded the first.
+    /// The agent self-pushes a nudge per deliberation, so a second one means a
+    /// fresher continuation superseded the first, not that both are owed.
     #[test]
     fn inbox_nudge_replaces_a_still_queued_one_newest_wins() {
         let inbox = Inbox::new();
@@ -1339,9 +1130,7 @@ mod tests {
         );
     }
 
-    /// A non-idempotent source (`Command`, here) rejects once it reaches its
-    /// own per-source cap — the producer observes the rejection directly as
-    /// an `Err`, never a silent drop.
+    /// The producer sees the rejection as an `Err`, never a silent drop.
     #[test]
     fn inbox_non_idempotent_source_rejects_at_quota() {
         let inbox = Inbox::new();
@@ -1362,8 +1151,6 @@ mod tests {
         );
     }
 
-    /// Draining one queued message frees exactly one slot of quota for its
-    /// source.
     #[test]
     fn inbox_drain_frees_quota_for_a_rejected_source() {
         let inbox = Inbox::new();
@@ -1377,13 +1164,9 @@ mod tests {
             .expect("draining freed one slot of quota");
     }
 
-    /// The idempotent sources (`user`, `schedule`, `nudge`) never reject,
-    /// however far past `INBOX_SOURCE_CAP` they are pushed.  `nudge` also
-    /// stays bounded to its one outstanding entry (the dedupe above);
-    /// `schedule` and `user` are not bounded by this cap at all — a distinct
-    /// schedule id or a slash-interleaved run of steering each mint their own
-    /// entry — which is accepted, human/config-scale risk this module does
-    /// not itself enforce (see [`INBOX_SOURCE_CAP`]'s doc).
+    /// `nudge` stays at its one outstanding entry; `schedule` and `user` are not
+    /// bounded by [`INBOX_SOURCE_CAP`] at all, since a distinct schedule id or a
+    /// slash-interleaved run of steering each mint their own entry.
     #[test]
     fn inbox_idempotent_sources_never_reject_past_the_source_cap() {
         let inbox = Inbox::new();

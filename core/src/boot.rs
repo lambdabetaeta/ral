@@ -1,30 +1,13 @@
-//! Embedding and booting a `Shell` in a host process.
+//! Booting a `Shell` in a host process — the interactive `ral` REPL,
+//! `exarch`, a test binary.  Probing the host *machine* (OS, cwd, git
+//! state) is [`crate::host`]; evaluating on the booted shell is
+//! [`crate::run`].
 //!
-//! A host (the interactive `ral` REPL, `exarch`, a test binary) needs the
-//! same four things before it evaluates any run: the prelude as a baked
-//! [`Comp`], the prelude's top-level [`Scheme`] list, its [`HostSurface`],
-//! and a `Shell` constructed-seeded-and-loaded from all three.  This
-//! module names the missing type, [`BakedPrelude`], the surface type,
-//! [`HostSurface`], and the one function that performs the embedding,
-//! [`boot_shell`], which installs the surface before any rc file or user
-//! code is checked — so the typechecker's builtin table and the runtime's
-//! agree by construction.  Everything else host-specific — terminal
-//! handling, output capture, watchdogs, capability frames, rc files — is
-//! interposed by the host before or after the call.  Evaluating anything
-//! on the booted shell goes through the run door, [`crate::run`].
-//!
-//! This is about *booting* a `Shell` in a host process; probing the
-//! underlying host *machine* (OS, architecture, cwd, git state,
-//! wall-clock) lives in [`crate::host`].
-//!
-//! The prelude is baked ahead of time: the host's build script calls
-//! [`bake_prelude_to_out_dir`], which parses, elaborates, and
-//! [`bake_prelude`](crate::bake_prelude)s `prelude.ral` into two postcard
-//! blobs in `OUT_DIR`; the host then embeds them with the
-//! [`baked_prelude!`](crate::baked_prelude) macro.  Core cannot bake its
-//! own prelude at build time — a crate's build script cannot depend on
-//! the crate it is building — so a test binary, which has no build-time
-//! blob, takes [`BakedPrelude::bake_runtime`] instead.
+//! The prelude arrives baked: a host's build script calls
+//! [`bake_prelude_to_out_dir`], and the host embeds the blobs it wrote with
+//! [`baked_prelude!`](crate::baked_prelude).  Core cannot bake its own — a
+//! build script cannot depend on the crate it is building — so a test
+//! binary takes [`BakedPrelude::bake_runtime`] instead.
 
 use crate::io::TerminalState;
 use crate::ir::Comp;
@@ -32,13 +15,9 @@ use crate::typecheck::Scheme;
 use crate::types::{BuiltinEntry, BuiltinTable, Shell};
 use std::sync::{Arc, OnceLock};
 
-/// A build-time-baked prelude: the two postcard blobs and their
-/// once-decoded forms.
-///
-/// `ir` is the annotated prelude [`Comp`] whose
-/// `Bind` nodes carry the checker's schemes; `scheme_bytes` is the
-/// top-level scheme list harvested in the same pass.  Both decode lazily
-/// on first access and memoise.
+/// A prelude baked ahead of time: the annotated [`Comp`] and the top-level
+/// [`Scheme`] list, harvested in one checked pass, as postcard blobs that
+/// decode and memoise on first access.
 pub struct BakedPrelude {
     ir: &'static [u8],
     scheme_bytes: &'static [u8],
@@ -47,9 +26,9 @@ pub struct BakedPrelude {
 }
 
 impl BakedPrelude {
-    /// Wrap the two blobs a host embedded via
-    /// [`baked_prelude!`](crate::baked_prelude).  `const` so it can
-    /// initialise a `static`.
+    /// Wrap the blobs a host embedded via
+    /// [`baked_prelude!`](crate::baked_prelude).  `const` so a host can
+    /// hold its prelude in a `static`.
     pub const fn from_blobs(ir: &'static [u8], schemes: &'static [u8]) -> Self {
         Self {
             ir,
@@ -59,33 +38,33 @@ impl BakedPrelude {
         }
     }
 
-    /// The annotated prelude comp, decoded on first use.
+    /// The annotated prelude comp.
     ///
     /// # Panics
-    /// Panics if the embedded prelude IR blob fails to deserialize.
+    /// Panics if the embedded IR blob fails to deserialize.
     pub fn comp(&self) -> &Arc<Comp> {
         self.comp.get_or_init(|| {
             Arc::new(postcard::from_bytes(self.ir).expect("prelude IR deserialization failed"))
         })
     }
 
-    /// The prelude's top-level schemes, decoded on first use.
+    /// The prelude's top-level schemes.
     ///
     /// # Panics
-    /// Panics if the embedded prelude scheme blob fails to deserialize.
+    /// Panics if the embedded scheme blob fails to deserialize.
     pub fn schemes(&self) -> &[(String, Scheme)] {
         self.schemes.get_or_init(|| {
             postcard::from_bytes(self.scheme_bytes).expect("prelude schemes deserialization failed")
         })
     }
 
-    /// Bake the prelude at runtime from core's embedded source, for test
-    /// binaries that have no build-time blob.  Parse, elaborate, and
-    /// [`bake_prelude`](crate::bake_prelude) `prelude.ral`, then carry the
-    /// results in `OnceLock`s already filled (the blobs are unused).
+    /// Bake the prelude from core's embedded source, for a test binary with
+    /// no build-time blob: both `OnceLock`s come back filled, so the empty
+    /// blobs are never read.
     ///
     /// # Panics
-    /// Panics if the embedded `prelude.ral` fails to parse or elaborate.
+    /// Panics if the embedded `prelude.ral` fails to parse, elaborate, or
+    /// type-check.
     pub fn bake_runtime() -> Self {
         let src = include_str!("prelude.ral");
         let ast = crate::parse(src).expect("prelude parse");
@@ -102,9 +81,8 @@ impl BakedPrelude {
 /// Expand in a host crate whose build script called
 /// [`bake_prelude_to_out_dir`](crate::boot::bake_prelude_to_out_dir).
 ///
-/// The `include_bytes!` must expand in the host crate, against its own
-/// `OUT_DIR`; pinning the filename contract here keeps it in the same
-/// crate as the writer.
+/// A macro, because `include_bytes!` has to expand against the *host's*
+/// `OUT_DIR`; keeping it here keeps the filenames beside the writer.
 #[macro_export]
 macro_rules! baked_prelude {
     () => {
@@ -117,28 +95,24 @@ macro_rules! baked_prelude {
 
 /// A host's builtin surface beyond [`CORE_BUILTINS`](crate::builtins::CORE_BUILTINS).
 ///
-/// The one definition [`boot_shell`] installs and shell-free typechecking
-/// ([`Self::builtin_table`]) reads, so the checker surface and the runtime
-/// surface cannot drift.  An empty surface (`Default`) is a bare core shell.
+/// One value serves both [`boot_shell`] and shell-free typechecking
+/// ([`Self::builtin_table`]), so the checker's surface and the runtime's
+/// cannot drift.  `Default` is a bare core shell.
 #[derive(Default)]
 pub struct HostSurface {
-    /// Process-static builtin sets.
     pub statics: Vec<&'static [BuiltinEntry]>,
-    /// Runtime-owned builtin sets capturing host state.
+    /// Sets a host built at run time, closing over its own state.
     pub captured: Vec<Arc<[BuiltinEntry]>>,
 }
 
 impl HostSurface {
-    /// The builtin table this surface presents:
-    /// [`CORE_BUILTINS`](crate::builtins::CORE_BUILTINS)
-    /// (via [`core_builtin_table`](crate::builtins::core_builtin_table))
-    /// plus every set here — exactly what a shell booted with this
+    /// Core plus every set here — exactly what a shell booted with this
     /// surface dispatches.  Seeds
     /// [`SessionSchemes::from_schemes`](crate::typecheck::SessionSchemes)
-    /// for a checker with no live shell (`--check`).
+    /// where there is no live shell to read a table off (`--check`).
     ///
     /// # Panics
-    /// Panics if a name here collides with an installed builtin.
+    /// Panics if a name here collides with a core builtin.
     pub fn builtin_table(&self) -> BuiltinTable {
         let mut table = crate::builtins::core_builtin_table();
         self.install_into(&mut table);
@@ -158,12 +132,11 @@ impl HostSurface {
 /// Construct a fresh `Shell`, install the host's builtin surface, seed the
 /// env, and load the prelude.
 ///
-/// The shell leaves here fully dressed: `surface` lands next to
-/// `CORE_BUILTINS`, before any rc file or user code is checked, so the
-/// typechecker (which reads this shell's builtin table) and the runtime
-/// agree on the surface by construction.  Everything else host-specific —
-/// terminal handling, output capture, watchdogs, capability frames, rc
-/// files — remains interposed around this call.
+/// `surface` lands before any rc file or user code is checked, so the
+/// typechecker — which reads this shell's builtin table — and the runtime
+/// agree by construction.  Terminal handling, output capture, watchdogs,
+/// capability frames and rc files stay the host's, interposed around this
+/// call.
 ///
 /// # Panics
 /// Panics if a name in `surface` collides with a core builtin or repeats
@@ -176,22 +149,20 @@ pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude, surface: &Hos
     shell
 }
 
-/// The build-script half of the bake: parse, elaborate, and
-/// [`bake_prelude`](crate::bake_prelude) the embedded prelude source,
-///
-/// write both postcard blobs to `OUT_DIR`, and emit rerun-if-changed
-/// lines for every shape-defining file (absolute paths via
-/// `CARGO_MANIFEST_DIR`, so the lines are host-independent).
+/// The build-script half of the bake: write the two postcard blobs into the
+/// calling host's `OUT_DIR`, and name every file that shapes them in a
+/// rerun-if-changed line — absolutely, since the script runs in the host.
 ///
 /// postcard carries no schema, so a field added to
 /// [`CompKind`](crate::ir::CompKind), [`Val`](crate::ir::Val),
 /// [`Pattern`](crate::syntax::ast::Pattern), or the scheme's type
-/// vocabulary silently invalidates a previously-emitted bake; the rerun
-/// lines force a re-bake when any of those files change.
+/// vocabulary would silently invalidate an old bake.  Those rerun lines are
+/// the only thing that forces a fresh one.
 ///
 /// # Panics
-/// Panics if `OUT_DIR` is unset, if serialising the prelude blobs fails, or
-/// if writing them into `OUT_DIR` fails.
+/// Panics if the prelude fails to type-check, if `OUT_DIR` is unset, or if
+/// serialising or writing the blobs fails.  A parse or elaboration failure
+/// exits instead, reporting the error to the build log.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:prelude-bake] build-script prelude bake: writes the postcard IR/scheme blobs to OUT_DIR during host setup; build-time artifact emission, not turn-time model data I/O, raises no surface card."

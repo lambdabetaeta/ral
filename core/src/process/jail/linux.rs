@@ -1,17 +1,13 @@
-//! The thin Linux syscall edge for [`super::JailPlan`]: every place this
-//! jail actually touches the kernel — cgroup files, the uid/gid drop,
-//! `NO_NEW_PRIVS` — lives here and nowhere else.  Structurally absent from
-//! the module tree on macOS/Windows, the same split `sandbox/linux.rs` and
-//! `process/signal/unix.rs` already use for a platform-only edge.
+//! The Linux syscall edge of the jail — cgroup files, the uid/gid drop,
+//! `NO_NEW_PRIVS`.  [`super::JailPlan`] decides; this file only carries it out.
 
 use super::{JailCgroup, JailPlan};
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::Path;
 
-/// Create `path` if it is not already there.  `EEXIST` is the ordinary
-/// case — the jail root outlives any one exec, and a sibling exec may
-/// have raced this one — not a failure.
+/// `EEXIST` is the ordinary case: the jail root outlives any one exec, and a
+/// sibling exec may have raced this one.
 fn mkdir_if_missing(path: &Path) -> io::Result<()> {
     match std::fs::create_dir(path) {
         Ok(()) => Ok(()),
@@ -20,8 +16,6 @@ fn mkdir_if_missing(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Write one cgroup control file — the single door every limit and the
-/// kill switch write through.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:jail-cgroup-write] Cgroup control-file writes are guest-boot/exec-time jail setup, not model turn-time I/O: the limits are policy the host sets, never data the model reads or writes."
@@ -36,19 +30,15 @@ fn write_cpu_max(cgroup: &Path, quota_pct: u32) -> io::Result<()> {
     write_control(cgroup, "cpu.max", &format!("{quota_us} {PERIOD_US}"))
 }
 
-/// Create the per-exec cgroup (and the jail root, lazily, the first
-/// time), write its limits, and open `cgroup.procs` for writing, handing
-/// the fd back rather than closing it: keeping it open across the fork is
-/// what lets the pre-exec closure place the child in its cgroup without a
-/// second open after the uid drop below.
+/// Create the per-exec cgroup (and the jail root, lazily), write its limits,
+/// and hand back `cgroup.procs` still open: the pre-exec closure may not
+/// allocate, so it cannot build that path and open it itself.
 ///
 /// # Errors
 /// Returns the kernel's error for any mkdir/write/open along the way.
 pub(crate) fn prepare(plan: &JailPlan) -> io::Result<(JailCgroup, OwnedFd)> {
-    // A controller's files appear in a child cgroup only once the
-    // parent's `cgroup.subtree_control` enables it, so the lazy root
-    // setup enables the three the limits need — at the mount root and at
-    // the jail root.  Both writes are idempotent.
+    // A controller's files appear in a child cgroup only once the parent's
+    // `cgroup.subtree_control` enables it.  Both writes are idempotent.
     const CONTROLLERS: &str = "+memory +pids +cpu";
     if let Some(root) = plan.cgroup.parent() {
         mkdir_if_missing(root)?;
@@ -80,9 +70,8 @@ pub(crate) fn prepare(plan: &JailPlan) -> io::Result<(JailCgroup, OwnedFd)> {
     ))
 }
 
-/// Write a raw pid into `fd` with no allocation — the only I/O the
-/// pre-exec closure below performs, kept as its own function so the
-/// async-signal-safety of the whole thing is visible in one small loop.
+/// Format and write a pid without allocating: this runs in the pre-exec
+/// closure, where allocation is forbidden.
 fn write_pid(fd: RawFd, pid: libc::pid_t) -> io::Result<()> {
     let mut buf = [0u8; 12];
     let mut n = pid;
@@ -119,20 +108,13 @@ fn write_pid(fd: RawFd, pid: libc::pid_t) -> io::Result<()> {
     Ok(())
 }
 
-/// Register the pre-exec closure that places the about-to-exec child in
-/// its cgroup and drops it to its unprivileged uid/gid before
-/// `NO_NEW_PRIVS` closes the door on regaining any of it.  Four steps,
-/// each checked: write the child's own pid into the pre-opened
-/// `cgroup.procs` fd; `setgroups(0, NULL)`; `setresgid` then `setresuid`
-/// — gid before uid, the only safe order, since a process cannot change
-/// its gid once its uid is no longer privileged; `prctl(PR_SET_NO_NEW_PRIVS,
-/// 1, 0, 0, 0)`.
+/// Place the child in its cgroup and drop it to the plan's uid/gid before
+/// `NO_NEW_PRIVS` shuts the door on regaining any of it.  `setresgid` comes
+/// first: a process cannot change its gid once its uid is unprivileged.
 ///
 /// # Safety
-/// Runs between `fork` and `exec`: every step (`write`, `setgroups`,
-/// `setresgid`, `setresuid`, `prctl`) is async-signal-safe, allocates
-/// nothing, and takes no lock — the same discipline every other
-/// `pre_exec` closure in this tree keeps.
+/// The closure runs between `fork` and `exec`, so every step is
+/// async-signal-safe, allocates nothing, and takes no lock.
 pub(crate) fn install_pre_exec(
     cmd: &mut std::process::Command,
     plan: &JailPlan,
@@ -163,18 +145,14 @@ pub(crate) fn install_pre_exec(
     }
 }
 
-/// Best-effort `cgroup.kill`: mirrors [`super::super::Pgid::signal_group`]'s
-/// own stance — a write that fails leaves nothing further to try, and the
-/// kernel already did whatever it was going to do.
+/// Best-effort, the same stance as `Pgid::signal_group`: a write that fails
+/// leaves nothing further to try, and the kernel already did what it would.
 pub(crate) fn kill(cgroup: &JailCgroup) {
     let _ = write_control(&cgroup.path, "cgroup.kill", "1");
 }
 
-/// Remove the transient per-exec cgroup once its process is confirmed
-/// dead.  `cgroup.kill` is asynchronous — it delivers SIGKILL without
-/// waiting — so an `rmdir` racing a not-yet-reaped member fails `EBUSY`;
-/// poll briefly, then abandon.  An abandoned directory is inert and costs
-/// nothing until the next boot.
+/// `cgroup.kill` returns before its members die, so `rmdir` can lose the race
+/// with `EBUSY`: poll briefly, then abandon.  A leftover directory is inert.
 pub(crate) fn remove(cgroup: &JailCgroup) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
     loop {

@@ -1,14 +1,10 @@
 //! What command did the user name?
 //!
-//! [`CommandIdentity`] freezes the answer in three fields: the
-//! `CommandName` the user wrote, the `shown` string we display, and the
-//! `resolved` absolute path (or the bare name when PATH lookup
-//! misses).  Built once at dispatch classification and threaded down
-//! to launch, so classify and exec agree on which executable they
-//! are talking about — no second PATH walk, no TOCTOU window.
-//!
-//! Identity is total: a missing bare name keeps `resolved == shown`
-//! and the 127/126 decision is deferred to [`super::vet`].
+//! [`CommandIdentity`] freezes the answer at dispatch — the surface
+//! spelling we show and the PATH-walked form we exec — and is threaded
+//! down to launch, so classification and spawn cannot disagree and PATH
+//! is walked once.  Resolution is total: a bare name that misses on PATH
+//! keeps `resolved == shown`, leaving the 127/126 verdict to `super::vet`.
 
 use crate::ir::CommandName;
 use crate::path::tilde::expand_tilde_path;
@@ -22,8 +18,7 @@ pub(crate) struct CommandIdentity {
 }
 
 impl CommandIdentity {
-    /// Render and PATH-resolve `name` against `ctx`.  Never fails: a
-    /// bare name that misses on PATH keeps `resolved == shown`.
+    /// Render and PATH-resolve `name` against `ctx`.
     pub(crate) fn resolve(name: CommandName, ctx: &Context) -> Self {
         let shown = render(&name, ctx);
         let resolved = walk_path(&name, ctx);
@@ -34,35 +29,23 @@ impl CommandIdentity {
         }
     }
 
-    /// Candidate names by which this head matches an `exec`
-    /// capability key, in admission-order.
+    /// The narrow identity set: candidate names by which an `exec` grant may
+    /// *admit* this head.  [`deny_names_from`](Self::deny_names_from) is the
+    /// broad counterpart, for vetoes.
     ///
-    /// `Bare` heads drop the surface name from the candidate list
-    /// whenever the active scope's `PATH` redirects resolution away
-    /// from the host `PATH`: an outer grant keyed by the bare name
-    /// must not silently admit a spoofed binary that only exists on
-    /// a temporary search path.  `Path` heads pick up the cwd-joined
-    /// absolute form so a directory-keyed grant covering the working
-    /// tree can admit them — `exec_dirs` matchers require absolute
-    /// paths.
+    /// A `Bare` head drops its surface name whenever a scoped `PATH` redirects
+    /// resolution away from the host `PATH`, so an outer grant keyed on the
+    /// bare name cannot admit a binary planted on a temporary search path.  A
+    /// `Path` head gains the cwd-joined absolute form, because `allow_dirs` and
+    /// `deny_dirs` only match absolute candidates.
     pub(crate) fn policy_names(&self, ctx: &Context) -> Vec<String> {
         let mut names = Vec::new();
         let mut include_rendered = true;
         if matches!(self.name, CommandName::Bare(_)) {
-            // Anti-spoof: when a scoped `PATH` redirects a bare name to a
-            // different binary than the host `PATH` would find, drop the bare
-            // surface name so an outer grant keyed on it cannot silently
-            // admit the redirected binary.  This can only bite when the
-            // effective `PATH` diverges from the host `PATH`; when they are
-            // identical the baseline resolution equals `self.resolved` by
-            // construction (same walk, same inputs), so we skip the walk.
-            //
-            // The skip is the point: a PATH walk is cheap on Unix but costly
-            // on Windows (a filesystem probe per PATHEXT suffix in every PATH
-            // dir, each hit by Defender), and `policy_names` runs several
-            // times per command.  Avoiding the redundant baseline walk on the
-            // common (unscoped) path removes the bulk of bare-command
-            // dispatch cost there.
+            // With equal PATHs the baseline walk is `self.resolved` by
+            // construction, so the guard skips it.  That skip is the point:
+            // `policy_names` runs several times per command, and on Windows a
+            // walk is a filesystem probe per PATHEXT suffix in every PATH dir.
             let host_path = std::env::var("PATH").ok();
             let effective_path = ctx.env_overrides().get_or_host("PATH");
             if host_path != effective_path {
@@ -92,27 +75,18 @@ impl CommandIdentity {
         names
     }
 
-    /// Candidate names by which this head triggers a `Deny` veto — the
-    /// broad identity set: [`policy_names`](Self::policy_names) widened
-    /// with the basename of the resolved and the as-invoked forms.
+    /// The broad identity set: `names`, a fresh
+    /// [`policy_names`](Self::policy_names), widened with the basenames of the
+    /// resolved and as-invoked forms.  Only a `Deny` consults it.
     ///
-    /// Admission stays keyed on the narrow `policy_names`, but a veto
-    /// must see through both of a command's identities.  A `Path` head
-    /// `/bin/bash` carries no bare name in `policy_names` (anti-spoof:
-    /// see there), so a bare `bash: deny` would otherwise be missed and
-    /// a covering `/bin/` allow dir would admit it.  Surfacing the
-    /// basename here closes that hole on the veto side WITHOUT widening
-    /// admission — a planted `/tmp/evil/rg` still cannot inherit a bare
-    /// `rg: allow`, because the basename is in this set, never in
-    /// `policy_names`.  Basenames are added only when they differ from a
-    /// name already present (a bare invocation already carries its bare
-    /// name).
-    ///
-    /// Callers that need only the broad set start from a freshly computed
-    /// [`policy_names`](Self::policy_names); the two live call sites
-    /// ([`admits_head`](crate::capability) and
-    /// [`vet`](crate::runtime::command)) need both and reuse one narrow set
-    /// so the (potentially PATH-walking) walk is paid for exactly once.
+    /// A veto must see through both of a command's identities, admission
+    /// through only one.  So a bare `bash: deny` still stops a `Path` head
+    /// `/bin/bash` that a covering `/bin/` allow dir would otherwise admit,
+    /// while a planted `/tmp/evil/rg` still cannot inherit a bare `rg: allow`
+    /// — the basename lands here and never in `policy_names`.  It takes the
+    /// narrow set rather than rebuilding it because both callers,
+    /// `capability::admits_head` and `super::vet`, need both, and the PATH
+    /// walk should be paid once.
     pub(crate) fn deny_names_from(&self, mut names: Vec<String>) -> Vec<String> {
         for base in [
             crate::path::basename(&self.resolved),
@@ -126,14 +100,11 @@ impl CommandIdentity {
     }
 }
 
-/// Surface rendering of `name`: bare and path heads are returned
-/// verbatim; tilde heads expand against the effective `HOME`.
-///
-/// A `~user` head that cannot resolve (no `getpwnam(3)` analogue off
-/// Unix) falls back to its literal spelling — [`CommandIdentity::resolve`]
-/// never fails, so an unresolvable named user is left to fail naturally
-/// downstream as an ordinary missing-command/missing-path error, the
-/// same as any other head that doesn't exist.
+/// Surface rendering of `name`: bare and path heads verbatim, tilde heads
+/// expanded against the effective `HOME`.  A `~user` head off Unix, where
+/// there is no `getpwnam(3)`, falls back to its literal spelling — keeping
+/// resolution total, and leaving it to fail downstream as an ordinary
+/// missing command.
 fn render(name: &CommandName, ctx: &Context) -> String {
     match name {
         CommandName::Bare(name) => name.clone(),
@@ -148,13 +119,11 @@ fn render(name: &CommandName, ctx: &Context) -> String {
 
 /// PATH walk for bare names against ral's effective `PATH`.
 ///
-/// A `within [shell: [PATH: …]]` override changes the search list for
-/// every command inside the block; resolving here and handing the
-/// absolute path to `Command::new` keeps ral's view authoritative
-/// over `posix_spawnp(3)`'s parent-PATH search.  A name already
-/// containing `/` is a path and returned unchanged; a bare name that
-/// misses on PATH falls through as input so the OS produces its
-/// normal "not found" error at spawn time.
+/// A `within [env: [PATH: …]]` override rewrites the search list for the
+/// block, so resolving here and handing `Command::new` an absolute path
+/// keeps ral's view authoritative over `posix_spawnp(3)`'s own parent-PATH
+/// search.  A miss falls through as input, leaving the OS to produce its
+/// "not found" at spawn time.
 fn walk_path(name: &CommandName, ctx: &Context) -> String {
     let rendered = render(name, ctx);
     if let CommandName::Bare(_) = name {
@@ -166,10 +135,9 @@ fn walk_path(name: &CommandName, ctx: &Context) -> String {
     rendered
 }
 
-/// Lexically resolve a relative path against ral's effective cwd,
-/// collapsing `.` and `..`.  Returns `None` when `s` is already
-/// absolute — the caller treats that as "no need to add another
-/// candidate."
+/// Lexically resolve a relative path against ral's effective cwd, folding
+/// `.` and `..`.  `None` when `s` is already absolute — the caller needs no
+/// second candidate then.
 fn absolutize(s: &str, ctx: &Context) -> Option<String> {
     if crate::path::is_absolute(s) {
         return None;
@@ -233,11 +201,7 @@ mod tests {
         );
     }
 
-    /// `./configure` is denied by `exec_dirs` (which require absolute
-    /// paths) unless `policy_names` also surfaces the cwd-joined form.
-    /// Unix-only: on Windows the path resolver produces a `C:\…`
-    /// duplicate that the no-dup invariant rejects, and the grant
-    /// subsystem this serves is Unix-only anyway.
+    /// Unix-only: the expected candidate is spelled with POSIX separators.
     #[cfg(unix)]
     #[test]
     fn policy_names_surface_cwd_absolute_for_relative_path_head() {
@@ -257,8 +221,6 @@ mod tests {
         );
     }
 
-    /// Already-absolute path heads emit exactly one candidate — no
-    /// duplicate from `absolutize`.
     #[cfg(unix)]
     #[test]
     fn policy_names_do_not_duplicate_absolute_path_head() {
@@ -271,12 +233,9 @@ mod tests {
         assert_eq!(names, vec!["/usr/local/bin/configure".to_string()]);
     }
 
-    /// Closes the bare/absolute identity duality: a `reasonable`-shaped
-    /// policy denies `bash` by bare name and allows `/bin/`.  Invoked by
-    /// absolute path, `bash` carries no bare name in the narrow
-    /// `policy_names`, so the narrow-only gate (pre-fix) admits it via
-    /// the `/bin/` allow dir — the security hole.  The broad `deny_names`
-    /// surfaces the basename `bash`, so the fixed gate vetoes it.
+    /// A policy that denies `bash` by bare name yet allows all of `/bin/`.
+    /// Feeding the narrow set as both identities admits `/bin/bash` through
+    /// the allow dir; the broad `deny_names` vetoes it.
     #[cfg(unix)]
     #[test]
     fn deny_names_close_path_bash_bypass_of_bare_deny() {
@@ -303,7 +262,7 @@ mod tests {
         let deny = id.deny_names_from(id.policy_names(&ctx));
         let deny_refs: Vec<&str> = deny.iter().map(String::as_str).collect();
 
-        // Pre-fix shape: narrow set fed as both — the hole is open.
+        // Narrow set fed as both identities: the hole is open.
         assert!(
             admits_for_test(&ctx.grants, &allow_refs, &allow_refs),
             "narrow-only gate admits /bin/bash (the pre-fix bypass)",
@@ -316,19 +275,15 @@ mod tests {
             deny.iter().any(|n| n == "bash"),
             "deny_names must surface the bare basename for a Path head",
         );
-        // Post-fix: broad deny set closes the hole.
+        // The broad deny set closes it.
         assert!(
             !admits_for_test(&ctx.grants, &deny_refs, &allow_refs),
             "broad deny_names veto closes the /bin/bash bypass",
         );
     }
 
-    /// Anti-spoof preserved: a planted binary invoked by absolute path
-    /// must not inherit a bare-name `allow`.  The only `rg` grant is the
-    /// bare literal `rg: allow` (no covering allow dir); a `Path` head
-    /// `/tmp/evil/rg` carries the basename `rg` ONLY in the broad
-    /// `deny_names`, never in the narrow `policy_names`, so it is not
-    /// admitted.
+    /// The mirror of the bypass test: widening the veto set must not widen
+    /// admission, so a bare `rg: allow` cannot reach a planted `/tmp/evil/rg`.
     #[cfg(unix)]
     #[test]
     fn deny_names_basename_does_not_admit_planted_path_head() {
@@ -368,10 +323,6 @@ mod tests {
         );
     }
 
-    /// When a scoped `PATH` redirects resolution away from the host
-    /// PATH, the bare surface name drops out of the candidate list so
-    /// an outer grant keyed on the bare name cannot silently admit
-    /// the spoofed binary.
     #[cfg(unix)]
     #[test]
     fn policy_names_drop_bare_when_scoped_path_diverges() {

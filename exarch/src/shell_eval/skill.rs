@@ -1,43 +1,27 @@
-//! Agent Skills: progressive-disclosure skill loading per the
-//! [Agent Skills spec](https://agentskills.io/llms.txt).
+//! Agent Skills: a directory holding a `SKILL.md`, YAML frontmatter (`name`,
+//! `description`) over a Markdown body, discovered from `.exarch/skills/` in the
+//! cwd and from `$XDG_CONFIG_HOME/exarch/skills/`.
 //!
-//! Skills are directories containing a `SKILL.md` file with YAML
-//! frontmatter (`name`, `description`) and Markdown body. They are
-//! discovered from two roots:
-//!
-//! - `.exarch/skills/` in the working directory (project skills)
-//! - `$XDG_CONFIG_HOME/exarch/skills/` (user skills)
-//!
-//! ## Progressive disclosure
-//!
-//! 1. The prompt carries a static Skills section — `name: description`
-//!    per skill, discovered and grant-filtered once at startup. The body
-//!    is withheld until asked for.
-//! 2. `skill-list` re-scans at call time, filtered by the live grant —
-//!    picks up skills added mid-session.
-//! 3. `skill <name>` loads the full `SKILL.md` body, also at call
-//!    time — picks up skills added or edited mid-session.
+//! Progressive disclosure: the prompt's Skills section carries only
+//! `name: description`, baked once at startup by `prompt::assemble`, while the
+//! `skill-list` and `skill` builtins rescan at call time — so a skill added or
+//! edited mid-session is still found, and a body reaches the model only when
+//! asked for.
 
 use gray_matter::Matter;
 use gray_matter::engine::YAML;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// A discovered skill's prompt metadata: the `name` and `description` the
-/// Skills section lists.  It holds no path — on-demand body loading is
-/// driven by the `(name, dir)` pairs [`discover_all`] returns.
+/// A skill's frontmatter — the `name: description` pair the prompt lists.
 #[derive(Clone, Debug)]
 pub struct Skill {
     pub name: String,
     pub description: String,
 }
 
-// ---------------------------------------------------------------------------
-// public API
-// ---------------------------------------------------------------------------
-
-/// The two skill roots, in precedence order: the project-local
-/// `.exarch/skills/` (cwd), then the user's `$XDG_CONFIG_HOME/exarch/skills/`.
+/// The two skill roots in precedence order: the cwd's `.exarch/skills/`, then
+/// the user's `$XDG_CONFIG_HOME/exarch/skills/`.
 pub(crate) fn skill_roots(cwd: &Path, config_dir: &Path) -> [PathBuf; 2] {
     [
         cwd.join(".exarch").join("skills"),
@@ -45,12 +29,9 @@ pub(crate) fn skill_roots(cwd: &Path, config_dir: &Path) -> [PathBuf; 2] {
     ]
 }
 
-/// Discover all skill directories from both roots — directory names only,
-/// no file reads.
-///
-/// The caller parses frontmatter after a grant check.
-/// Returns `(name, dir)` pairs where `name` is the directory basename.
-/// Duplicate names: local (cwd) overrides global (config).
+/// Every skill directory under both roots as `(name, dir)`, the name being the
+/// basename; on a collision the cwd root shadows the config one.  Reads no file
+/// contents, so callers gate their own frontmatter and body reads.
 pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
     let mut seen = HashSet::new();
     let mut skills = Vec::new();
@@ -64,11 +45,9 @@ pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
     skills
 }
 
-/// Discover skills from both roots, filter by `caps` readability, and
-/// parse frontmatter — for the prompt's Skills section.
-///
-/// Called once at startup (pre-run); file reads here are `silent`, gated
-/// by the static capability set rather than a live shell.
+/// Frontmatter for every readable skill, for the prompt's Skills section.  Runs
+/// once at boot, before a `Shell` exists, so it filters against the static
+/// `caps` where `skill-list` and `skill` use `Shell::check_fs_read`.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:skill-metadata] reads SKILL.md frontmatter at prompt assembly to build the Skills section; pre-run, gated by caps"
@@ -93,8 +72,8 @@ pub fn discover_metadata(
     skills
 }
 
-/// Check whether `dir` is within any read prefix and not within any
-/// deny path of `caps`.  `None` fs policy = unrestricted = readable.
+/// Whether `caps` admits reading `dir`; no fs policy is the lattice top, so
+/// unrestricted and readable.
 fn dir_readable(dir: &Path, caps: &ral_core::types::Capabilities) -> bool {
     let Some(fs) = &caps.fs else {
         return true;
@@ -111,11 +90,10 @@ fn dir_readable(dir: &Path, caps: &ral_core::types::Capabilities) -> bool {
         .any(|p| ral_core::path::path_within(dir, p.as_path()))
 }
 
-/// Build a [`Skill`] from a `SKILL.md`'s raw text: parse the YAML frontmatter
-/// and accept it only when the declared `name` matches the directory it lives in
-/// (`dir_name`) and is a valid skill name.  I/O-free — callers do their own
-/// `read_to_string` under the appropriate io-door, so the silent (startup) and
-/// surface (turn-time) reads stay distinct doors while sharing this parse.
+/// Parse a `SKILL.md`'s frontmatter, accepting it only when the declared `name`
+/// is valid and matches its directory.  I/O-free by design: callers do their own
+/// read, keeping the silent startup door and the surface turn-time door distinct
+/// while sharing this parse.
 fn skill_from_frontmatter(raw: &str, dir_name: &str) -> Option<Skill> {
     let matter = Matter::<YAML>::new();
     let parsed: gray_matter::ParsedEntity<gray_matter::Pod> = matter.parse(raw).ok()?;
@@ -125,9 +103,8 @@ fn skill_from_frontmatter(raw: &str, dir_name: &str) -> Option<Skill> {
     (name == dir_name && valid_skill_name(&name)).then_some(Skill { name, description })
 }
 
-/// Read `dir`'s `SKILL.md` and parse its frontmatter into a [`Skill`].
-/// `dir_name` is the expected skill name (the parent directory).  Called
-/// at run time by `skill-list`, gated by `check_fs_read` at the call site.
+/// `dir`'s frontmatter, for the `skill-list` builtin; the call site has already
+/// cleared `check_fs_read`.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:surface:skill-list] reads a SKILL.md's frontmatter for the `skill-list` builtin; the surface card justifies the read"
@@ -137,9 +114,8 @@ pub(crate) fn parse_skill(dir: &Path, dir_name: &str) -> Option<Skill> {
     skill_from_frontmatter(&raw, dir_name)
 }
 
-/// Read the Markdown body of `SKILL.md` — everything after the
-/// frontmatter.  Called by the `skill` builtin at run time, gated by
-/// `check_fs_read` at the call site.
+/// The Markdown after the frontmatter, for the `skill` builtin; the call site
+/// has already cleared `check_fs_read`.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:surface:skill-body] reads the SKILL.md body for `skill`; the surface card justifies the read"
@@ -154,13 +130,6 @@ pub(crate) fn read_skill_body(dir: &Path) -> Result<String, String> {
     Ok(parsed.content)
 }
 
-// ---------------------------------------------------------------------------
-// internal
-// ---------------------------------------------------------------------------
-
-/// `std::fs::read_dir` touches the filesystem but reads no file
-/// contents — the caller gates any body/frontmatter reads through the
-/// grant.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:skill-list-dir] lists skill directory names; no file contents read — frontmatter/body reads are gated by check_fs_read"
@@ -183,15 +152,9 @@ fn scan_dir(root: &Path) -> Vec<(String, PathBuf)> {
     skills
 }
 
-/// Validate a skill name per the Agent Skills spec:
-/// - 1–64 characters
-/// - lowercase alphanumeric and hyphens only
-/// - must not start or end with a hyphen
-/// - no consecutive hyphens
-///
-/// The character set excludes `/` and `.`, so a validated name joined onto
-/// a skills root cannot escape it — `skill <name>` leans on this as a
-/// path-traversal guard before resolving the directory.
+/// An Agent Skills name: 1–64 characters, lowercase alphanumerics and lone
+/// interior hyphens.  The charset excludes `/` and `.`, so `skill <name>` joins
+/// a validated name onto a root and calls that its path-traversal guard.
 pub(crate) fn valid_skill_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 64 {
         return false;
@@ -281,8 +244,6 @@ mod tests {
         assert_eq!(body, "# Hello\nworld");
     }
 
-    /// On a name collision the project-local `.exarch/skills/` wins over
-    /// the user's `$XDG_CONFIG_HOME` copy.
     #[test]
     fn local_overrides_global() {
         let cwd = tempfile::tempdir().unwrap();

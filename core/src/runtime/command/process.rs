@@ -1,49 +1,31 @@
-//! Turn a [`SpawnPlan`] into a `std::process::Command`, spawn it via
-//! the canonical pgid + sandbox funnel, and translate spawn errors into
-//! [`Break`]s.  No stdio routing here — that lives in [`super::stdio`]
-//! and [`super::redirect`] and is layered on top before spawn.
+//! Turn a [`SpawnPlan`] into a launchable child, spawn it through the
+//! canonical pgid + sandbox funnel, and render spawn failures as [`Break`]s.
+//! Stdio routing lives in `stdio` and `redirect`, layered on before spawn.
 
 use crate::types::{Break, Error, Settled, Shell};
 
 use super::vet::{ExecImage, SpawnPlan};
 
-/// Build a `Command` from a [`SpawnPlan`] and apply the shell's
-/// scoped env vars + cwd.  Stdio routing and `pre_exec` hooks are the
-/// caller's responsibility: those vary between single-command and
-/// pipeline contexts.
+/// Build a launch for `plan` and apply the shell's scoped env and cwd.  Stdio
+/// and `pre_exec` hooks are the caller's: they differ between the standalone
+/// and pipeline contexts.
 ///
-/// A [`ExecImage::Host`] is `Command::new`'d directly.  A
-/// [`ExecImage::BundledTool`] is rendered as a child placement of ral
-/// itself (`ral --ral-bundled-tool <tool> …`) via the cross-platform
-/// self-exec helper, so building it is fallible (the self-path lookup
-/// can fail); the resulting child inherits cwd/env/PWD through
-/// `apply_env` exactly like a host external.
-///
-/// `ownership` says whether the caller keeps the child it is about to
-/// spawn.  Only the Linux sandbox reads it, and only to decide whether the
-/// bwrap envelope is tied to this process's death — see
-/// [`Ownership`](crate::sandbox::Ownership).
-///
-/// Invoked by [`super::run`], by [`super::detach`], and by the pipeline
-/// stage builder (`launch_external_stage_direct`); it is never spawned
-/// here.
+/// `ownership` reaches only the Linux bwrap backend, which ties the envelope
+/// to this process's death unless the child is being surrendered.
 pub(crate) fn build_command(
     plan: &SpawnPlan,
     ownership: crate::sandbox::Ownership,
     shell: &Shell,
 ) -> Settled<crate::process::Launch> {
-    // A guest jail IS the guest's sandbox: bwrap needs unprivileged user
-    // namespaces, which the guest's boot-time sysctl turns off, so a
-    // jailed shell never wraps a spawn in bwrap on top — `check_exec_args`
-    // still gates the call, only the OS-confinement layer changes.
+    // A guest jail is already the guest's sandbox: bwrap needs unprivileged
+    // user namespaces and the guest boots with `user.max_user_namespaces = 0`.
+    // The capability gate in `vet` runs either way.
     let jail = shell.guest_jail();
     let mut cmd = if jail.is_none()
         && let Some(projection) = shell.sandbox_projection()
     {
-        // Per-command OS confinement: when a projection is active, confine
-        // the child per-command under the effective projection.  The grant
-        // body itself evaluates locally; this launcher is the sole OS-sandbox
-        // locus.
+        // A `grant` body evaluates in this process unconfined; spawned children
+        // are the only thing an OS sandbox reaches, and this is where it does.
         crate::sandbox::projection_enforceable(&projection).map_err(|reason| {
             Break::Error(Error::new(
                 format!("sandbox confinement unavailable: {reason}"),
@@ -86,18 +68,10 @@ pub(crate) fn build_command(
     Ok(cmd)
 }
 
-/// Spawn a standalone external child the canonical way: install the
-/// canonical `pre_exec` (apply pgid, reset child signals) via
-/// `signal::spawn_with_pgid`, mirror `setpgid` in the parent, then
-/// apply sandbox child limits if any capability grant is active.
-///
-/// The standalone-exec funnel only ([`super::run`]).  Pipeline stages
-/// take a parallel post-spawn path — `PipelineGroup::spawn` followed by
-/// `apply_child_limits_in_pipeline` — because they must join the group's
-/// pgid rather than lead their own.
-///
-/// Returns the child plus its leader pgid: `Some` when `pgid` is
-/// `NewLeader`, `NewSession`, or `Join`, `None` for `Inherit`.
+/// Spawn a standalone external child, then apply any active grant's post-spawn
+/// child limits.  Pipeline stages take the parallel path through
+/// `spawn_into_group` in `runtime/pipeline/launch.rs`: they join the group's
+/// pgid rather than lead their own, and their limits ride the group's job.
 pub(crate) fn spawn(
     cmd: &mut crate::process::Launch,
     pgid: crate::process::PgidPolicy,
@@ -114,11 +88,9 @@ pub(crate) fn spawn(
     Ok((child, leader, jail))
 }
 
-/// Map a spawn `io::Error` for command `name` into a [`Break`].
-///
-/// Uses `compat::not_found_hint` for `NotFound` so the error message mentions
-/// PATH issues and platform conventions.  Exit status 127 matches the POSIX
-/// convention for "command not found".
+/// Render a spawn `io::Error` for command `name` as a [`Break`].  `NotFound`
+/// reuses the one wording `vet`'s pre-spawn existence probe emits, so the two
+/// paths never disagree about a missing command.
 pub(crate) fn spawn_error(name: &str, e: &std::io::Error) -> Break {
     use crate::process::{CommandFailure, SpawnFailure};
 
@@ -137,24 +109,15 @@ pub(crate) fn spawn_error(name: &str, e: &std::io::Error) -> Break {
     })
 }
 
-/// Wrap an I/O error from pipe creation/cloning into a [`Break`].
+/// Wrap an I/O error from pipe creation or cloning as a [`Break`].
 pub(super) fn pipe_err(e: &std::io::Error) -> Break {
     Break::Error(Error::new(format!("pipe: {e}"), 1))
 }
 
-/// Propagate `context.env_overrides`, the shell's effective cwd, and
-/// `PWD`/`OLDPWD` shell state into the child; strip dynamic-loader
-/// overrides under an active grant.  Used by [`super::run`] and by
-/// the pipeline stage builder.
-///
-/// `Command::current_dir` is always set, not only when `context.dir`
-/// is present.  The shell's logical cwd may differ from the process
-/// cwd whenever the user has run `cd` (which no longer mutates the
-/// process cwd to avoid racing parallel threads), so the child's
-/// cwd must come from `Shell::cwd()` rather than from a fork-inherit
-/// of `getcwd(3)`.  `PWD` / `OLDPWD` ride along the same way: they
-/// live in shell state and are threaded into each spawn, not
-/// installed via `std::env::set_var`.
+/// Thread the shell's env overrides, logical cwd and `PWD`/`OLDPWD` into the
+/// child; strip dynamic-loader overrides under an active grant.  `current_dir`
+/// is set unconditionally because `cd` moves shell state and leaves the process
+/// cwd alone, so an inherited `getcwd(3)` would be the wrong directory.
 pub fn apply_env(cmd: &mut crate::process::Launch, shell: &Shell) {
     for (k, v) in shell.mobile.context.env_overrides() {
         cmd.env(k, v);
@@ -165,13 +128,13 @@ pub fn apply_env(cmd: &mut crate::process::Launch, shell: &Shell) {
     if let Some(oldpwd) = &shell.mobile.context.cwd.previous {
         cmd.env("OLDPWD", oldpwd);
     } else {
-        // The child must never inherit a `OLDPWD` from this process's
-        // env: that value belongs to whichever shell launched us, not
-        // to the ral session, and would mislead `cd -` inside the
-        // child.  Strip it explicitly.
+        // An inherited `OLDPWD` names whichever shell launched ral, not this
+        // session, and would mislead a `cd -` inside the child.
         cmd.env_remove("OLDPWD");
     }
     if shell.has_active_capabilities() {
+        // A loader hook makes an admitted binary run someone else's code, so
+        // the grant's judgment about which program may run would mean nothing.
         for var in &["LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH"] {
             cmd.env_remove(var);
         }

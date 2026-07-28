@@ -1,21 +1,13 @@
-//! "Sign in with ChatGPT": ChatGPT-plan accounts as OAuth-backed providers.
+//! "Sign in with ChatGPT": `ChatGPT`-plan accounts authorised through
+//! `OpenAI`'s OAuth issuer rather than an API key.
 //!
-//! A `ChatGPT` plan subscription is authorised through `OpenAI`'s OAuth issuer
-//! rather than an API key. Two interactive flows obtain the initial token:
-//! a browser redirect to a loopback listener ([`browser`]), and a device
-//! code typed into a verification page ([`device`]). Both end in an
-//! authorization-code exchange against the token endpoint, yielding an
-//! `id_token`, an `access_token`, and a `refresh_token`. The `access_token` is a
-//! JWT whose `exp` claim sets the expiry; the `id_token` carries the `ChatGPT`
-//! account id and the login email.
-//!
-//! Several accounts can be signed in at once. The store ([`load_all`] /
-//! [`save_one`] / [`remove`]) holds a list of [`OAuthToken`]s keyed by
-//! account id, persisted under the XDG state directory and reloaded on later
-//! runs; each becomes a selectable [`crate::provider::ProviderId::ChatGpt`]
-//! in the credential store. The provider refreshes a token through
-//! [`refresh`] when it is near expiry, upserting it back into the store so a
-//! refresh never disturbs the other accounts.
+//! Both flows — a browser redirect to a loopback listener ([`browser`]), a
+//! device code typed into a verification page ([`device`]) — end in the same
+//! authorization-code exchange, yielding a JWT `access_token` whose `exp` is
+//! the expiry and an `id_token` carrying the account id and login email.
+//! Several accounts coexist in one store keyed by account id, each a
+//! selectable [`crate::provider::ProviderId::ChatGpt`]; [`refresh`] upserts,
+//! so renewing one never disturbs the others.
 
 mod browser;
 mod device;
@@ -36,28 +28,15 @@ pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub(crate) const ORIGINATOR: &str = "codex_cli_rs";
 pub(crate) const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
-/// The default Codex CLI version exarch presents to the Codex backend — as the
-/// `client_version` on the model-list query and the `codex_cli_rs/<v>`
-/// user-agent on every request. It must be a *real, current* Codex CLI
-/// version, **not** exarch's own `CARGO_PKG_VERSION`: the backend gates model
-/// availability on `client_version` (each model carries a
-/// `minimal_client_version`), so an unrecognised low version like `0.1.0` is
-/// served an *empty* model list and rejects newer models outright. Pinned to
-/// the latest Codex CLI release; bump it as the backend raises the floor for
-/// new models (e.g. the `gpt-5.6` family requires `>= 0.144.0`).
-///
-/// A pinned constant rots the day `OpenAI` raises the floor again, so
-/// [`codex_client_version`] lets an operator override it without a rebuild.
+/// The Codex CLI version exarch presents as `client_version` and in the
+/// `codex_cli_rs/<v>` user-agent. It must be a real, current Codex release,
+/// **not** exarch's own `CARGO_PKG_VERSION`: each model carries a
+/// `minimal_client_version`, so a low version is served an *empty* model list.
 const DEFAULT_CODEX_CLIENT_VERSION: &str = "0.144.3";
 
-/// The Codex CLI version to present to the backend: the
-/// `EXARCH_CODEX_CLIENT_VERSION` override when set to a non-blank value, else
-/// the pinned [`DEFAULT_CODEX_CLIENT_VERSION`]. This is the unstick valve for
-/// when the backend raises its `minimal_client_version` floor before the
-/// pinned default is bumped — the model list goes empty, and the operator can
-/// set a known-good version in the environment rather than wait for a release.
-/// Read on demand (like every `EXARCH_*` knob); the value is stable after the
-/// single startup env scrub, which never touches this var.
+/// [`DEFAULT_CODEX_CLIENT_VERSION`], or a non-blank
+/// `EXARCH_CODEX_CLIENT_VERSION` override — the valve for when the backend
+/// raises its floor before the pinned default is bumped.
 pub(crate) fn codex_client_version() -> String {
     std::env::var("EXARCH_CODEX_CLIENT_VERSION")
         .ok()
@@ -69,21 +48,16 @@ pub(crate) fn codex_client_version() -> String {
 const ISSUER: &str = "https://auth.openai.com";
 const SCOPE: &str = "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
-/// A persisted `ChatGPT` OAuth token.
-///
-/// The access token is a short-lived JWT;
-/// the refresh token mints fresh access tokens once it expires. Several of
-/// these can be stored at once — one per signed-in `ChatGPT` account — keyed
-/// by [`Self::account_id`].
+/// A persisted `ChatGPT` login: a short-lived JWT access token and the refresh
+/// token that mints its successors. One per signed-in account, keyed by
+/// [`Self::account_id`].
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OAuthToken {
     pub access_token: String,
     pub refresh_token: String,
     pub account_id: String,
-    /// The account's login email, from the `id_token`'s `email` claim. The
-    /// human-readable handle the picker and `/model` switch select by;
-    /// `None` when the `id_token` carried none, in which case the opaque
-    /// [`Self::account_id`] stands in (see [`Self::label`]).
+    /// From the `id_token`'s `email` claim; `None` when it carried none, and
+    /// then [`Self::account_id`] stands in as the label.
     pub email: Option<String>,
     /// Unix seconds at which `access_token` expires (its JWT `exp`).
     pub expires_at: u64,
@@ -95,10 +69,9 @@ impl OAuthToken {
         self.expires_at <= crate::bootstrap::now_secs() + 60
     }
 
-    /// The account's stable, human-readable handle: its login email, or the
-    /// opaque account id when no email was issued. This is the label exarch's
-    /// selection layer keys the account by — the picker row, the persisted
-    /// selection, and the `logout`/`accounts` commands all read it.
+    /// The account's handle: its login email, or the opaque account id when
+    /// none was issued. `ChatGptAccount` carries it as the `ProviderId` label,
+    /// so the picker, the persisted selection, and `logout` all match on it.
     pub fn label(&self) -> String {
         self.email
             .clone()
@@ -125,30 +98,27 @@ pub enum LoginMethod {
 
 /// One staged report from a running login flow.
 ///
-/// Both the CLI adapter (as a stderr line, via [`Self::stderr_line`]) and the
-/// TUI's `/login` overlay (as a fixed-position phase track) render these three
-/// phases; nothing outside them is a progress tick — no percentage, no elapsed
-/// clock.
+/// The CLI adapter ([`Self::stderr_line`]) and the TUI's `/login` overlay both
+/// render exactly these three phases; there is no percentage or elapsed clock.
 pub enum LoginPhase {
-    /// Browser flow: the authorize URL is open (or shown for manual open when
-    /// the platform launcher failed), awaiting the loopback callback.
-    AwaitingBrowser { url: String, opened: bool },
-    /// Device flow: the one-time code is issued, awaiting entry at `url`.
+    /// `opened` is false when the platform launcher failed and the user must
+    /// open `url` by hand.
+    AwaitingBrowser {
+        url: String,
+        opened: bool,
+    },
     AwaitingDevice {
         user_code: String,
         url: String,
         expires_in: String,
     },
-    /// The authorization code landed; exchanging it for tokens.
     ExchangingCode,
 }
 
 impl LoginPhase {
-    /// The CLI adapter's stderr line for this phase; `None` for
-    /// `ExchangingCode`, which has nothing to print. The browser
-    /// launch-failure fallback never names the specific launcher error
-    /// (`open`/`xdg-open`/…): `browser::open_browser` discards it before it
-    /// reaches this seam.
+    /// The CLI adapter's stderr line, `None` for `ExchangingCode`. The
+    /// launch-failure text cannot name the underlying `open`/`xdg-open`
+    /// error: `browser::open_browser` discards it before this seam.
     pub fn stderr_line(&self) -> Option<String> {
         match self {
             Self::AwaitingBrowser { opened: true, .. } => {
@@ -169,20 +139,15 @@ impl LoginPhase {
     }
 }
 
-/// Drive one interactive login to a persisted token.
+/// Drive one interactive login to a persisted token, reporting whether an
+/// existing account was replaced.
 ///
-/// Blocking: builds its own current-thread runtime. `on_phase` observes the
-/// staged progress; `cancel`, polled by the wait loops, aborts an abandoned
-/// flow promptly (freeing the loopback port). Borrowed, not owned: this call
-/// never outlives the caller's own use of the flag (e.g. to trip it on Esc), so
-/// ownership never needs to move here.
-///
-/// Returns the persisted token and whether an existing account was replaced.
+/// Blocking: builds its own current-thread runtime. The flows' wait loops poll
+/// `cancel`, so tripping it (on Esc, say) frees the loopback port promptly.
 ///
 /// # Errors
-/// Returns `Err` if the tokio runtime or HTTP client cannot be built, if the
-/// browser/device flow fails or is cancelled, or if finalising or persisting
-/// the token fails.
+/// Returns `Err` if the runtime or HTTP client cannot be built, if the flow
+/// fails or is cancelled, or if finalising or persisting the token fails.
 pub fn login_flow(
     method: LoginMethod,
     on_phase: impl Fn(LoginPhase),
@@ -199,9 +164,8 @@ pub fn login_flow(
             LoginMethod::Browser => browser::run(&client, on_phase, cancel).await,
         }
     })?;
-    // A cancel that lands after the wait loops returned `Ok` (the exchange
-    // itself does not poll the flag) must still not persist — defense in
-    // depth beside the wait loops' own cancel checks.
+    // The exchange itself does not poll the flag, so a cancel landing after
+    // the wait loops returned `Ok` would otherwise still persist a token.
     if cancel.load(Ordering::Relaxed) {
         return Err("sign-in cancelled".to_string());
     }
@@ -210,16 +174,13 @@ pub fn login_flow(
     Ok((token, replaced))
 }
 
-/// Run interactive login (browser flow, or device code when `device`), then
-/// persist the token.
-///
-/// A thin adapter over [`login_flow`]: it renders staged phases to stderr
-/// exactly as the flow used to print them inline, and never cancels (a CLI run
-/// has no overlay to Esc out of; Ctrl-C kills the process).
+/// The `exarch login` command: [`login_flow`] with its phases rendered to
+/// stderr, and no cancellation — a CLI run has no overlay to Esc out of, and
+/// Ctrl-C kills the process.
 ///
 /// # Errors
-/// Returns `Err` if the tokio runtime or HTTP client cannot be built, if the
-/// browser/device flow fails, or if finalising or persisting the token fails.
+/// Returns `Err` if the runtime or HTTP client cannot be built, if the flow
+/// fails, or if finalising or persisting the token fails.
 pub fn login(device: bool) -> Result<(), String> {
     let method = if device {
         LoginMethod::Device
@@ -244,13 +205,11 @@ pub fn login(device: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Remove one signed-in account (matched by its label or account id), or
-/// every account when `all`.
+/// Remove one signed-in account (by label or account id), or every account
+/// when `all`.
 ///
-/// With neither an account nor `--all`: removes the
-/// sole account when exactly one is signed in, and otherwise errors asking
-/// which — so a stray `logout` cannot silently drop the wrong account when
-/// several are present. Progress is printed to stderr.
+/// Named neither, it drops the sole account and otherwise errors asking which,
+/// so a stray `logout` cannot silently take the wrong one.
 ///
 /// # Errors
 /// Returns `Err` if rewriting the token store fails, if several accounts are
@@ -289,8 +248,8 @@ pub fn logout(account: Option<String>, all: bool) -> Result<(), String> {
     }
 }
 
-/// Every signed-in account's label, comma-joined — for the disambiguating
-/// messages `logout`/`accounts` print.
+/// Every signed-in account's label, comma-joined for the messages that ask
+/// which one was meant.
 fn labels(accounts: &[OAuthToken]) -> String {
     accounts
         .iter()
@@ -299,18 +258,15 @@ fn labels(accounts: &[OAuthToken]) -> String {
         .join(", ")
 }
 
-/// Every persisted `ChatGPT` login, in stored order. An absent or unparseable
-/// store yields an empty list.
+/// Every persisted login, in stored order. An absent or corrupt store reads
+/// as no accounts rather than an error.
 pub fn load_all() -> Vec<OAuthToken> {
     load_all_at(&token_path())
 }
 
-/// Persist `token`, replacing any existing login for the same account id
-/// and appending it otherwise.
-///
-/// Returns whether an existing account was replaced. `pub` like
-/// [`load_all`]: the credential-store scenarios in
-/// `tests/credential_env.rs` seed logins through this same door.
+/// Upsert `token` by account id, reporting whether an existing login was
+/// replaced. `pub` so the `credential_env` integration test seeds logins
+/// through the same door the flows use.
 ///
 /// # Errors
 /// Returns `Err` when the token store cannot be written.
@@ -318,20 +274,19 @@ pub fn save_one(token: &OAuthToken) -> Result<bool, String> {
     save_one_at(&token_path(), token)
 }
 
-/// Remove the login matched by `account` (its label or account id). Returns
-/// the removed account's label, or `None` when nothing matched.
+/// Remove the login matched by `account` (label or account id), returning its
+/// label, or `None` when nothing matched.
 pub(crate) fn remove(account: &str) -> Result<Option<String>, String> {
     remove_at(&token_path(), account)
 }
 
-// The storage core is a pure function of a path, so it is exercised in tests
-// against a temp file without mutating the process environment.
+// The `*_at` core takes the path as an argument so tests drive it against a
+// temp file without mutating the process environment.
 
-/// Serializes `save_one_at` and `remove_at`'s load-modify-write against the
-/// store: two concurrent refreshes (one per stale account) that interleaved
-/// an unlocked read and write would each write back a stale copy of the
-/// *other* account, silently reverting it. `load_all_at` alone stays
-/// lock-free — a bare read is never part of a race.
+/// Serializes `save_one_at` and `remove_at`'s load-modify-write: two
+/// concurrent refreshes, one per stale account, would otherwise each write
+/// back a stale copy of the *other*, silently reverting it. `load_all_at`
+/// stays lock-free — a bare read is never part of that race.
 static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[allow(
@@ -370,8 +325,7 @@ fn remove_at(path: &std::path::Path, account: &str) -> Result<Option<String>, St
         return Ok(None);
     };
     let removed = all.remove(pos);
-    // Delete the store outright when the last account goes, so a fully
-    // logged-out machine carries no empty file.
+    // A fully logged-out machine carries no store at all, not an empty one.
     if all.is_empty() {
         clear_at(path)?;
     } else {
@@ -380,8 +334,6 @@ fn remove_at(path: &std::path::Path, account: &str) -> Result<Option<String>, St
     Ok(Some(removed.label()))
 }
 
-/// Write the whole account set to `path`, creating its dir as needed. On Unix
-/// the file is created with mode 0600.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:token-dir] creates the OAuth token store dir; credential store infra, not turn-time data I/O"
@@ -397,7 +349,7 @@ fn write_all_at(path: &std::path::Path, all: &[OAuthToken]) -> Result<(), String
         .map_err(|e| format!("could not write {}: {e}", path.display()))
 }
 
-/// Delete the whole store at `path`. Succeeds when no store is present.
+/// Delete the store; an absent one is not an error.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:token-remove] deletes the stored OAuth tokens; credential store infra, not turn-time data I/O"
@@ -410,7 +362,6 @@ fn clear_at(path: &std::path::Path) -> Result<(), String> {
     }
 }
 
-/// Exchange the refresh token for a fresh [`OAuthToken`].
 pub(crate) async fn refresh(current: &OAuthToken) -> Result<OAuthToken, String> {
     #[derive(Deserialize)]
     // The `_token` suffix is the token-endpoint wire format; renaming would break serde.
@@ -443,8 +394,8 @@ pub(crate) async fn refresh(current: &OAuthToken) -> Result<OAuthToken, String> 
         .unwrap_or_else(|| current.refresh_token.clone());
     let id_token = resp.id_token;
     let expires_at = expiry_secs(&access_token, id_token.as_deref());
-    // The refresh response may omit the id_token; keep the account's existing
-    // identity (id and email) when it does, so a refresh never loses the label.
+    // The refresh response may omit the id_token; keeping the existing
+    // identity then is what stops a refresh from losing the account's label.
     let account_id = id_token
         .as_deref()
         .and_then(account_id_from_jwt)
@@ -465,10 +416,10 @@ pub(crate) async fn refresh(current: &OAuthToken) -> Result<OAuthToken, String> 
 
 /// Renew the token in a shared credential cell when it is near expiry.
 ///
-/// Both inference and catalog requests enter through this door, so neither can
-/// accidentally authenticate with a stale token merely because it happened
-/// first in a session. Persistence is best-effort: a fresh in-memory token is
-/// immediately useful even when the state directory cannot be written.
+/// Both inference (`transport`) and the model catalog (`models`) enter here,
+/// so neither can authenticate with a stale token merely by going first.
+/// Persistence is best-effort: a fresh in-memory token still serves the
+/// session when the state directory cannot be written.
 pub(crate) async fn refresh_cell_if_stale(
     cell: &std::sync::Arc<std::sync::Mutex<OAuthToken>>,
 ) -> Result<(), String> {
@@ -485,8 +436,8 @@ pub(crate) async fn refresh_cell_if_stale(
     Ok(())
 }
 
-/// The headers a Codex-backend model request carries for this token,
-/// returned as lowercase `(name, value)` pairs.
+/// The headers a Codex-backend request carries for this token, as lowercase
+/// `(name, value)` pairs.
 pub(crate) fn request_headers(token: &OAuthToken, accept: &str) -> Vec<(String, String)> {
     vec![
         (
@@ -508,7 +459,6 @@ fn token_endpoint() -> String {
     format!("{ISSUER}/oauth/token")
 }
 
-/// The HTTP client shared by the login flows and refresh.
 fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .use_preconfigured_tls(crate::provider::tls::config())
@@ -517,11 +467,9 @@ fn http_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("could not build HTTP client: {e}"))
 }
 
-/// Turn a token-endpoint response into a decoded `T`: a non-2xx status
-/// becomes an `Err` carrying the status and the body text, a success decodes
-/// the JSON body. `action` names the request for both messages
-/// (`"{action} failed (…)"` / `"could not parse {action} response"`). Shared
-/// by every login flow and by [`refresh`].
+/// Decode a token-endpoint response, turning a non-2xx status into an `Err`
+/// carrying the body text. `action` names the request in both messages; every
+/// login flow and [`refresh`] report through here.
 pub(super) async fn json_or_error<T: DeserializeOwned>(
     resp: reqwest::Response,
     action: &str,
@@ -536,7 +484,6 @@ pub(super) async fn json_or_error<T: DeserializeOwned>(
         .map_err(|e| format!("could not parse {action} response: {e}"))
 }
 
-/// Exchange an authorization code for tokens at the token endpoint.
 pub(super) async fn exchange_code(
     client: &reqwest::Client,
     redirect_uri: &str,
@@ -559,22 +506,19 @@ pub(super) async fn exchange_code(
     json_or_error(resp, "token exchange").await
 }
 
-/// A PKCE verifier/challenge pair. The verifier is 64 random bytes encoded
-/// as URL-safe base64; the challenge is the URL-safe base64 of its SHA-256.
+/// A PKCE verifier and its S256 challenge.
 pub(super) fn pkce() -> (String, String) {
     let verifier = random_b64url(64);
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     (verifier, challenge)
 }
 
-/// `n_bytes` of OS randomness encoded as URL-safe base64 without padding.
 pub(super) fn random_b64url(n_bytes: usize) -> String {
     let mut bytes = vec![0u8; n_bytes];
     getrandom::fill(&mut bytes).expect("OS randomness");
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Decode and deserialize a JWT payload (the second dot-separated segment).
 fn jwt_payload<T: DeserializeOwned>(jwt: &str) -> Result<T, String> {
     let payload = jwt
         .split('.')
@@ -595,8 +539,7 @@ struct AuthClaims {
 struct IdClaims {
     #[serde(rename = "https://api.openai.com/auth")]
     auth: Option<AuthClaims>,
-    /// The standard OIDC `email` claim — the account's login email, used as
-    /// its human-readable label. Requested via the `email` scope.
+    /// The standard OIDC claim; present only because [`SCOPE`] asks for it.
     email: Option<String>,
 }
 
@@ -605,33 +548,28 @@ struct ExpClaims {
     exp: Option<i64>,
 }
 
-/// The `ChatGPT` account id carried by an `id_token`'s auth claim.
 fn account_id_from_jwt(jwt: &str) -> Option<String> {
     jwt_payload::<IdClaims>(jwt).ok()?.auth?.chatgpt_account_id
 }
 
-/// The login email carried by an `id_token`'s standard `email` claim.
 fn email_from_jwt(jwt: &str) -> Option<String> {
     jwt_payload::<IdClaims>(jwt).ok()?.email
 }
 
-/// The `exp` claim of a JWT, as unix seconds.
 fn jwt_exp(jwt: &str) -> Option<u64> {
     let exp = jwt_payload::<ExpClaims>(jwt).ok()?.exp?;
     u64::try_from(exp).ok()
 }
 
-/// When the access token expires, as unix seconds: its own JWT `exp`, then the
-/// `id_token`'s, then one hour out when neither carries one.
+/// The access token's own `exp`, else the `id_token`'s, else an hour out.
 fn expiry_secs(access_token: &str, id_token: Option<&str>) -> u64 {
     jwt_exp(access_token)
         .or_else(|| id_token.and_then(jwt_exp))
         .unwrap_or_else(|| crate::bootstrap::now_secs() + 3600)
 }
 
-/// Turn a token-endpoint response into a persisted [`OAuthToken`]. The
-/// account id comes from the `id_token`; the expiry is the access token's
-/// `exp`, falling back to the `id_token`'s `exp`, then to one hour out.
+/// Turn a token-endpoint response into an [`OAuthToken`]. A login without an
+/// account id is rejected outright: nothing downstream can key on it.
 fn finalize(raw: RawTokens) -> Result<OAuthToken, String> {
     let account_id = account_id_from_jwt(&raw.id_token)
         .ok_or_else(|| "login did not return a ChatGPT account id".to_string())?;
@@ -669,14 +607,9 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     file.write_all(bytes)
 }
 
-/// Create `path` with an owner-only DACL already in force, then write
-/// `bytes` to it — the Windows analogue of the Unix arm's mode `0600` at
-/// `open`.  The DACL (one explicit ACE granting the current process's
-/// owner full control, no inherited ACEs, built via `SetEntriesInAclW`) is
-/// carried in the `SECURITY_ATTRIBUTES` passed to `CreateFileW` itself, so
-/// the file never exists with the parent directory's inherited ACL even
-/// for an instant — unlike stamping a DACL on afterwards, there is no
-/// window and no permanently-over-permissioned file if a later step fails.
+/// The Windows analogue of the Unix arm's `0600` at `open`: the owner-only
+/// DACL rides in on `CreateFileW`'s `SECURITY_ATTRIBUTES`, so the file never
+/// exists under the parent directory's inherited ACL, not even for an instant.
 #[cfg(windows)]
 #[allow(
     clippy::disallowed_methods,
@@ -711,23 +644,18 @@ mod windows_dacl {
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-    /// The only security-descriptor revision Win32 defines
-    /// (`SECURITY_DESCRIPTOR_REVISION` in `winnt.h`, stable since NT) — not
-    /// worth a whole extra `windows-sys` feature for one ABI constant.
+    /// The only revision Win32 defines (`winnt.h`), restated rather than
+    /// pulling in another `windows-sys` feature for one ABI constant.
     const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 
-    /// `SECURITY_ATTRIBUTES`'s own byte count, as the `u32` its `nLength`
-    /// field is — a fixed three-field Win32 layout, so the narrowing from
-    /// `usize` cannot lose anything.
     #[allow(
         clippy::cast_possible_truncation,
         reason = "a fixed Win32 layout of 24 bytes; size_of is a compile-time constant nowhere near u32::MAX"
     )]
     const SECURITY_ATTRIBUTES_LENGTH: u32 = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
 
-    /// RAII wrapper closing a process token handle exactly once, so every
-    /// early return below (a query failure, an ACL-build failure) doesn't
-    /// need its own `CloseHandle` call.
+    /// Closes a process token handle exactly once, so the early returns below
+    /// need no `CloseHandle` of their own.
     struct OwnedToken(HANDLE);
 
     impl Drop for OwnedToken {
@@ -742,18 +670,13 @@ mod windows_dacl {
         }
     }
 
-    /// Fetch the current process's owner SID as an owned buffer (a
-    /// `TOKEN_USER` followed inline by its SID bytes, per
-    /// `GetTokenInformation`'s contract): query once to size the buffer,
-    /// once more to fill it.
+    /// The current process's owner SID, in the layout `GetTokenInformation`
+    /// hands back: a `TOKEN_USER` followed inline by its SID bytes.
     ///
-    /// The buffer is `u64`, not `u8`, though the API counts bytes: the
-    /// caller reads a `TOKEN_USER` back out of it, and that struct leads
-    /// with a pointer, so it wants eight-byte alignment.  A `Vec<u8>` is
-    /// byte-aligned *as a type* — every allocator worth the name hands back
-    /// something stricter, but relying on that makes the read sound by luck
-    /// rather than by construction.  Counting in `u64` puts the guarantee
-    /// in the type.
+    /// The buffer counts `u64`s though the API counts bytes, because the
+    /// caller reads a pointer-leading `TOKEN_USER` back out of it. `Vec<u8>`
+    /// is byte-aligned *as a type*; counting in `u64` makes that read sound
+    /// by construction rather than by allocator luck.
     fn current_process_owner() -> std::io::Result<Vec<u64>> {
         use windows_sys::Win32::Security::GetTokenInformation;
 
@@ -767,9 +690,8 @@ mod windows_dacl {
         let token = OwnedToken(raw_token);
 
         let mut needed: u32 = 0;
-        // SAFETY: a null buffer with zero length is the documented way to
-        // size a `GetTokenInformation` query; `needed` is filled with the
-        // required size regardless of the (expected) failure.
+        // SAFETY: a null buffer of zero length is the documented sizing
+        // query; `needed` is filled despite the expected failure.
         unsafe {
             GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &raw mut needed);
         }
@@ -777,8 +699,8 @@ mod windows_dacl {
             return Err(std::io::Error::last_os_error());
         }
         let mut buf = vec![0u64; (needed as usize).div_ceil(size_of::<u64>())];
-        // SAFETY: `buf` holds at least `needed` bytes — the count the sizing
-        // call above reported, rounded up to whole `u64`s.
+        // SAFETY: `buf` holds at least the `needed` bytes the sizing call
+        // reported, rounded up to whole `u64`s.
         let ok = unsafe {
             GetTokenInformation(
                 token.0,
@@ -794,19 +716,13 @@ mod windows_dacl {
         Ok(buf)
     }
 
-    /// Build a single-ACE ACL granting the current process's owner full
-    /// control — the same access an owner-only file would have — and no
-    /// other entries, so nothing the parent directory would otherwise hand
-    /// down survives.  The caller wraps it in a security descriptor and
-    /// frees it after `CreateFileW` returns (the kernel copies the
-    /// descriptor's contents into the new file object at creation time, so
-    /// nothing here needs to outlive that call).
+    /// A single-ACE ACL granting the process owner full control and nobody
+    /// else anything. The caller owns the allocation and frees it once
+    /// `CreateFileW` has copied the descriptor into the new file object.
     fn owner_only_acl() -> std::io::Result<*mut ACL> {
         let owner_buf = current_process_owner()?;
-        // SAFETY: `owner_buf` holds a fully-populated `TOKEN_USER` from the
-        // successful `GetTokenInformation` call above, in a `u64` buffer and
-        // so aligned for it; `owner_buf` outlives every use of the `PSID` it
-        // hands out below.
+        // SAFETY: `owner_buf` holds a populated `TOKEN_USER` in a `u64`
+        // buffer, so aligned for it, and outlives every use of the `PSID`.
         let owner_sid = unsafe { (*owner_buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
 
         let trustee = TRUSTEE_W {
@@ -814,11 +730,9 @@ mod windows_dacl {
             MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
             TrusteeForm: TRUSTEE_IS_SID,
             TrusteeType: TRUSTEE_IS_UNKNOWN,
-            // The trustee-by-SID form reinterprets this field as the PSID
-            // pointer per the Win32 contract; both are raw `*mut _` under
-            // windows-sys, so the cast is a bit-preserving reinterpret (see
-            // `core::sandbox::windows::dacl::trustee_for` for the same
-            // pattern).
+            // The trustee-by-SID form reinterprets this field as the PSID;
+            // both are raw `*mut _` here, so the cast preserves bits.
+            // `trustee_for` in ral-core's `sandbox::windows::dacl` does the same.
             ptstrName: owner_sid.cast::<u16>(),
         };
         let ea = EXPLICIT_ACCESS_W {
@@ -829,9 +743,8 @@ mod windows_dacl {
         };
 
         let mut acl: *mut ACL = std::ptr::null_mut();
-        // SAFETY: `ea` outlives the call; passing a null prior ACL builds a
-        // fresh ACL containing only this one entry — no merge with
-        // whatever the parent directory would otherwise hand down.
+        // SAFETY: `ea` outlives the call; a null prior ACL builds a fresh one
+        // holding only this entry, merging in nothing inherited.
         let rc = unsafe { SetEntriesInAclW(1, &raw const ea, std::ptr::null(), &raw mut acl) };
         if rc != ERROR_SUCCESS {
             return Err(std::io::Error::from_raw_os_error(rc.cast_signed()));
@@ -839,35 +752,28 @@ mod windows_dacl {
         Ok(acl)
     }
 
-    /// Create `path` (truncating any existing file, matching the Unix
-    /// arm's `create + truncate`) with an owner-only DACL already in
-    /// force: one explicit ACE granting the current process's owner full
-    /// control, no inherited ACEs, `SE_DACL_PROTECTED` so the object never
-    /// picks up inheritable ACEs from the parent either.  Returns the open
-    /// file for the caller to write through — there is no separate "stamp
-    /// the DACL" step, so no window exists where the file carries whatever
-    /// the parent directory would otherwise hand down.
+    /// Create `path`, truncating as the Unix arm does, with the owner-only
+    /// DACL and `SE_DACL_PROTECTED` already in force. Returns the open file
+    /// for the caller to write through: there is no separate stamping step,
+    /// hence no window in which the file carries an inherited ACL.
     pub(super) fn create_owner_only(path: &Path) -> std::io::Result<std::fs::File> {
         let acl = owner_only_acl()?;
 
         let mut sd: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
         let sd_ptr: PSECURITY_DESCRIPTOR = std::ptr::addr_of_mut!(sd).cast();
         let result = (|| -> std::io::Result<std::fs::File> {
-            // SAFETY: `sd` is a local, stack-allocated `SECURITY_DESCRIPTOR`
-            // that `InitializeSecurityDescriptor` fills in place.
+            // SAFETY: `sd` is a stack-allocated `SECURITY_DESCRIPTOR` that
+            // `InitializeSecurityDescriptor` fills in place.
             if unsafe { InitializeSecurityDescriptor(sd_ptr, SECURITY_DESCRIPTOR_REVISION) } == 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            // SAFETY: `sd` was just initialised; `acl` is a live ACL from
-            // `SetEntriesInAclW` that outlives this call (freed below,
-            // after `CreateFileW` has copied the descriptor's contents).
+            // SAFETY: `sd` was just initialised; `acl` outlives this call,
+            // freed only after `CreateFileW` has copied the descriptor.
             if unsafe { SetSecurityDescriptorDacl(sd_ptr, TRUE, acl, FALSE) } == 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            // Mark the DACL protected so `CreateFileW` does not merge in
-            // any inheritable ACEs from the parent directory — the same
-            // guarantee `PROTECTED_DACL_SECURITY_INFORMATION` gave the
-            // old stamp-after-write path, applied at creation instead.
+            // Protecting the DACL is what stops `CreateFileW` merging in the
+            // parent directory's inheritable ACEs.
             // SAFETY: `sd` carries the DACL just attached above.
             if unsafe { SetSecurityDescriptorControl(sd_ptr, SE_DACL_PROTECTED, SE_DACL_PROTECTED) }
                 == 0
@@ -885,10 +791,9 @@ mod windows_dacl {
                 .encode_wide()
                 .chain(std::iter::once(0))
                 .collect();
-            // SAFETY: `path_w` is NUL-terminated and kept alive for the
-            // call; `sa` carries the owner-only, protected descriptor just
-            // built, so the file is created with that DACL atomically —
-            // no window where a default or inherited DACL applies.
+            // SAFETY: `path_w` is NUL-terminated and alive for the call; `sa`
+            // carries the descriptor just built, so the file is created with
+            // that DACL atomically.
             let handle = unsafe {
                 CreateFileW(
                     path_w.as_ptr(),
@@ -903,8 +808,8 @@ mod windows_dacl {
             if handle == INVALID_HANDLE_VALUE {
                 return Err(std::io::Error::last_os_error());
             }
-            // SAFETY: `handle` is a just-created, valid file handle opened
-            // for `GENERIC_WRITE` with no other owner.
+            // SAFETY: `handle` is a just-created file handle opened for
+            // `GENERIC_WRITE` with no other owner.
             Ok(
                 unsafe {
                     std::fs::File::from_raw_handle(handle as std::os::windows::io::RawHandle)
@@ -912,11 +817,9 @@ mod windows_dacl {
             )
         })();
 
-        // SAFETY: `acl` was allocated by `SetEntriesInAclW` (which uses
-        // `LocalAlloc` internally); free it exactly once, regardless of
-        // which step above failed or succeeded — `CreateFileW` (if
-        // reached) has already copied the descriptor's contents into the
-        // new file object by the time this runs.
+        // SAFETY: `acl` came from `SetEntriesInAclW`, which allocates through
+        // `LocalAlloc`; freeing it exactly once on every path is safe because
+        // `CreateFileW`, if reached, has already copied the descriptor.
         unsafe {
             if !acl.is_null() {
                 LocalFree(acl.cast());
@@ -958,8 +861,6 @@ mod tests {
         assert_eq!(jwt_exp(&jwt), Some(1_893_456_000));
     }
 
-    /// An account labels by its email, falling back to the opaque account id
-    /// when the `id_token` carried none.
     #[test]
     fn label_prefers_email_then_account_id() {
         let with_email = OAuthToken {
@@ -977,11 +878,8 @@ mod tests {
         assert_eq!(no_email.label(), "acc_123");
     }
 
-    /// `save_one` upserts by account id: a second account appends, and
-    /// re-saving an existing account replaces its tokens in place rather than
-    /// duplicating it. `remove` drops one account by label and deletes the
-    /// store only once the last account is gone. Exercised against a temp file
-    /// so no process-environment mutation is involved.
+    /// The upsert-by-account-id contract multiple logins depend on: re-saving
+    /// replaces in place, and the file goes only when the last account does.
     #[test]
     #[allow(
         clippy::disallowed_methods,
@@ -1013,7 +911,6 @@ mod tests {
         );
         assert_eq!(load_all_at(&path).len(), 2, "two accounts coexist");
 
-        // Re-saving acc_a replaces its token rather than duplicating it.
         assert!(
             save_one_at(&path, &tok("acc_a", "a@x", "at2")).unwrap(),
             "existing replaced"
@@ -1023,10 +920,8 @@ mod tests {
         let a = all.iter().find(|t| t.account_id == "acc_a").unwrap();
         assert_eq!(a.access_token, "at2", "token updated in place");
 
-        // Remove by label leaves the other account and keeps the file.
         assert_eq!(remove_at(&path, "a@x").unwrap().as_deref(), Some("a@x"));
         assert_eq!(load_all_at(&path), vec![tok("acc_b", "b@x", "at1")]);
-        // Removing the last account deletes the store entirely.
         assert_eq!(remove_at(&path, "acc_b").unwrap().as_deref(), Some("b@x"));
         assert!(!path.exists(), "empty store is removed, not left as []");
         assert!(
@@ -1036,9 +931,8 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Pins the CLI adapter's stderr text for each phase verbatim: this is
-    /// user-facing sign-in copy, so any change to it must be deliberate, not
-    /// incidental drift from touching `LoginPhase` or its callers.
+    /// Pins the user-facing sign-in copy verbatim, so it cannot drift as an
+    /// incidental consequence of touching `LoginPhase` or its callers.
     #[test]
     fn stderr_line_reproduces_legacy_messages() {
         assert_eq!(

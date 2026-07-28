@@ -1,25 +1,12 @@
-//! Typing rules for the five structural scope nodes (`within`, `grant`,
-//! `try`, `guard`, `audit`) — the sole typing rules for these IR nodes.
+//! Typing rules for the `within`, `grant`, `try`, `guard` and `audit` scope
+//! nodes, plus the field schemas for the `within`/`grant` option maps.  The
+//! sixth scope node, `ScopeOp::Redirect`, is typed inline in `infer.rs`.
 //!
-//! Also here: the `within`/`grant` option-map field schemas
-//! (`within_field_ty`, `grant_field_ty`) consulted when a map is a literal,
-//! and the shared opts-walk and body-passthrough inference helpers.
-//!
-//! Conventions:
-//!
-//!   - `try`, `guard`, `audit` leave their body's pipeline modes free: a
-//!     control wrapper runs a thunk that may itself read or write bytes
-//!     (`try { echo x } …`), so the body is `F[μ₀,μ₁] α`, not `F[none,none]`.
-//!     `try` also exposes byte output when either outcome can write bytes, so
-//!     a recovery arm such as `{ |_| echo missing }` observes like any other
-//!     final byte-output computation.  Pinning the body to `none` would clash
-//!     with any byte-output body now that mode unification is equality-strict
-//!     (`docs/SPEC.md` §4.2.1).
-//!   - `within`, `grant` allocate fresh mode vars and let body's modes
-//!     flow up unchanged — the scope is transparent to pipeline I/O.
-//!   - Options/capability maps validate their entry shapes against
-//!     `within_field_ty` / `grant_field_ty` when the map is a literal;
-//!     unknown-key rejection stays at runtime in `WithinScope::parse`.
+//! Scope bodies stay mode-polymorphic (`F[μ₀,μ₁] α`) rather than pinned to
+//! `F[none,none]`: mode unification is equality-strict, so a pinned `none`
+//! would clash with any body that writes bytes (`try { echo x }`).  Unknown
+//! option keys are rejected at runtime — by `WithinScope::parse` and
+//! `decode_capability_map` — not by the schemas here.
 
 use super::builtins::{FieldSchema, audit_record, try_error_record};
 use super::error::Reason;
@@ -30,32 +17,10 @@ use super::unify::Unifier;
 use crate::ir::{Val, ValMapEntry};
 
 impl Inferencer<'_> {
-    /// Walk a `within` opts value once, collecting handler-result schemes
-    /// from recognisable `handlers:` entries while inferring every value for
-    /// side-effects — each handler thunk inferred exactly once, so a type
-    /// error inside a handler body is reported once rather than twice.
-    ///
-    /// Rules per the design doc:
-    ///
-    /// - `Entry(String("handlers"), Map(entries))` — for each inner entry
-    ///   whose key is a literal `String(name)` and value is a literal
-    ///   `Thunk(comp)`, infer the handler under the runtime calling
-    ///   convention, generalise the resulting computation result, and collect
-    ///   `(name, scheme)`.  A name that cannot be bound (a builtin or a name
-    ///   shadowed by a binding) still has its body inferred once for
-    ///   side-effects.  Non-literal inner keys or values are inferred for
-    ///   side-effects only.
-    ///
-    /// - `Entry(String("handler"), Thunk(comp))` — catch-all handler: infer
-    ///   for side-effects (so type errors inside it surface); no binding,
-    ///   since catch-alls match all names and the type system cannot say
-    ///   anything specific about them.
-    ///
-    /// - All other entries (`env`, `dir`, spreads, dynamic keys): validated
-    ///   against [`within_field_ty`] and inferred once.
-    ///
-    /// Non-literal `opts` (variable, function call, etc.): inferred for
-    /// side-effects, yielding no bindings.
+    /// Collect handler schemes from literal `handlers: [name: { … }]` entries;
+    /// everything else is inferred for its errors and binds nothing — a
+    /// catch-all `handler:` matches every name, so no one name can be bound.
+    /// Each thunk is inferred exactly once, so an error inside is reported once.
     fn infer_within_opts(&mut self, opts: &Val) -> Vec<(String, Scheme)> {
         let Val::Map(outer_entries) = opts else {
             let _ = self.infer_val(opts);
@@ -66,7 +31,6 @@ impl Inferencer<'_> {
 
         for outer_entry in outer_entries {
             match outer_entry {
-                // `handlers: [name: { comp }, ...]`
                 ValMapEntry::Entry(Val::String(key), Val::Map(inner_entries))
                     if key == "handlers" =>
                 {
@@ -74,18 +38,13 @@ impl Inferencer<'_> {
                         match inner_entry {
                             ValMapEntry::Entry(Val::String(name), Val::Thunk(comp)) => {
                                 if self.reject_handler_for_binding(name, "install handler for") {
-                                    // Name cannot be bound; still infer the
-                                    // body once so type errors inside surface.
+                                    // Not bindable, but errors inside still surface.
                                     let _ = self.with_scope(|this| this.infer_comp(comp));
                                 } else {
                                     bindings
                                         .push((name.clone(), self.handler_comp_scheme(name, comp)));
                                 }
                             }
-                            // Non-literal key or non-thunk value: infer for
-                            // side-effects only.  No binding — we can't say
-                            // anything specific about a handler we can't see
-                            // statically (open question 3 in the design doc).
                             ValMapEntry::Entry(key_val, val_val) => {
                                 let _ = self.infer_val(key_val);
                                 let _ = self.infer_val(val_val);
@@ -97,14 +56,10 @@ impl Inferencer<'_> {
                     }
                 }
 
-                // `handler: { comp }` — catch-all: infer for side-effects only.
-                // Catch-alls match all names, so no specific name can be bound.
                 ValMapEntry::Entry(Val::String(key), Val::Thunk(comp)) if key == "handler" => {
                     let _ = self.with_scope(|this| this.infer_comp(comp));
                 }
 
-                // `env:`, `dir:`, spreads, dynamic keys — validate the field
-                // shape and infer the value once.
                 entry => {
                     self.check_map_entry_fields(
                         std::slice::from_ref(entry),
@@ -141,10 +96,8 @@ impl Inferencer<'_> {
         let body_final_out = self.final_output_of_thunk_value(body, &body_cty);
         let body_value = self.observed_value_ty(body_raw, body_final_out);
 
-        // The handler runs on failure and must produce the same observed value
-        // type as the body — `try` yields one or the other.  Its own pipeline
-        // modes are independent of the body's, so the handler's result is
-        // mode-polymorphic too.
+        // `try` yields the body's value or the handler's, so the two observed
+        // types unify; the handler's own pipeline modes stay independent.
         let handler_value_raw = self.ctx.unifier.fresh_ty();
         let handler_result =
             CompTy::Return(self.ctx.unifier.fresh_spec(), Box::new(handler_value_raw));
@@ -209,12 +162,8 @@ impl Inferencer<'_> {
         body_cty
     }
 
-    /// Constrain `val` to be `Thunk(F[μ₀,μ₁] α)` for a fresh `α` and fresh
-    /// pipeline modes, and return `α`.  The control wrappers (try / guard
-    /// body and cleanup / audit body) all take a thunk whose body may have
-    /// any pipeline modes — a byte-output body flushes to the visible
-    /// stream while the wrapper still returns a value.  This centralises
-    /// the unify so the call sites read as 'name the body's result type'.
+    /// Constrain `val` to `Thunk(F[μ₀,μ₁] α)` for a fresh `α` and fresh
+    /// pipeline modes, and return `α`.
     fn infer_thunk_body(&mut self, val: &Val) -> Ty {
         match self.infer_scope_body_passthrough(val) {
             CompTy::Return(_, alpha) => *alpha,
@@ -223,8 +172,8 @@ impl Inferencer<'_> {
     }
 }
 
-/// Schema for the `within [env:, dir:]` options map.  `handlers`/`handler`
-/// are thunk-typed and dispatch at runtime.
+/// Schema for the `within [env:, dir:]` options map; `handlers:`/`handler:`
+/// hold thunks and dispatch at runtime.
 fn within_field_ty(key: &str, u: &mut Unifier) -> Option<Ty> {
     match key {
         "env" => Some(Ty::Map(Box::new(u.fresh_ty()))),
@@ -233,19 +182,11 @@ fn within_field_ty(key: &str, u: &mut Unifier) -> Option<Ty> {
     }
 }
 
-/// Schema for the `grant [exec:, fs:, net:, detach:, editor:, env:,
-/// audit:]` map.
-///
-/// `net`/`detach`/`audit` are booleans and `editor`/`shell` are
-/// `String → Bool` maps, so each carries a homogeneous type the checker
-/// can pin.  `exec`/`fs`
-/// cannot: their per-key policy value is a `String` (`'allow'`/`'deny'`), a
-/// subcommand list, or — for `fs` — a `read`/`write`/`deny` map, and these
-/// shapes mix freely within one policy map (TUTORIAL §16, SPEC §11.1).  No
-/// single homogeneous element type captures that union, so they are left to
-/// the runtime decoder (`None`) — like `within`'s `handlers:`.  Each value is
-/// still inferred by `check_map_entry_fields`, so a type error inside a policy
-/// expression still surfaces; only the outer shape is unconstrained.
+/// Schema for the `grant [exec:, fs:, net:, detach:, audit:, editor:, shell:]`
+/// map.  `exec` and `fs` are left to `decode_capability_map`: an `exec` policy
+/// value is either an `'allow'`/`'deny'` string or a subcommand list, and the
+/// two mix freely within one map, so no homogeneous element type fits.  Their
+/// values are still inferred, so an error inside a policy expression surfaces.
 fn grant_field_ty(key: &str, _u: &mut Unifier) -> Option<Ty> {
     let bool_map = || Ty::Map(Box::new(Ty::Bool));
     match key {

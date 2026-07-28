@@ -1,20 +1,8 @@
-//! Byte-channel codecs.
-//!
-//! Each `from-X` / `to-X` is its own builtin so that `from-json < file` can
-//! dispatch directly through the `Exec` arm — no Thunk indirection, the
-//! typechecker sees the actual return type, and a misspelled name fails at
-//! command lookup rather than as a runtime "unknown codec" string.
-//!
-//! Decoders and encoders are duals with definite arities.  A `from-X`
-//! decoder takes no argument: its bytes always come from the channel
-//! (stdin, a `< file` redirect, or a pipeline).  A `to-X` encoder takes
-//! exactly one value and writes its encoded form to stdout, returning
-//! Bytes — except `to-line`, which returns Unit.  Decoding is strict
-//! UTF-8, except `from-lines`, which decodes lossily so a line stream
-//! survives invalid bytes.  To decode a value already in hand, put it on
-//! the channel with the matching encoder — `to-string $s | from-json`.
-//! The three-arm stdin policy (installed source / tty refusal / fd-0
-//! fall-through) lives in [`super::util::stdin_reader`].
+//! Byte-channel codecs, one builtin per `from-X` / `to-X` rather than a
+//! name-dispatched `codec <name>`: the typechecker then sees each one's real
+//! return type, and a misspelling fails at command lookup.  Decoders are
+//! nullary; where their bytes come from is [`super::util::stdin_reader`]'s
+//! policy.
 
 use crate::ir::{CompKind, Val};
 use crate::source::Spanned;
@@ -34,11 +22,9 @@ fn read_stdin_bytes(name: &str, shell: &mut Shell) -> Settled<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Channel bytes for a `from-X` decoder.  Decoders are 0-arity: the bytes
-/// come from the channel (stdin / a `< file` redirect / a pipeline), never
-/// from an argument.  Passing one is a mistake — the encoder→decoder pipe is
-/// how a value already in hand reaches the channel.  The typechecker rejects
-/// it first; this guard covers untyped call paths.
+/// Channel bytes for a `from-X` decoder.  The typechecker rejects a written
+/// argument outright, so this guard is for spread calls, whose arity it
+/// cannot see ([`crate::ir::args::positional`] gives up on them).
 fn input_bytes(args: &[Value], name: &str, shell: &mut Shell) -> Settled<Vec<u8>> {
     if !args.is_empty() {
         return Err(sig_hint(
@@ -95,15 +81,10 @@ fn stream_cons(head: String, tail: Value) -> Value {
     }
 }
 
-/// Decode the channel into a `` `more``/`` `done`` Stream of lines.
-///
-/// The Stream *shape* matches the prelude's demand-driven protocol so it
-/// composes with `stream-map` / `stream-take` / etc., but the shape is
-/// the only part that's lazy: the whole channel is read to EOF up front
-/// and every node is built before this call returns, so forcing a tail
-/// is a lookup into an already-built value, not a read.  An unbounded or
-/// very large source is read in full regardless of how few elements a
-/// downstream `stream-take` asks for.
+/// Decode the channel into a `` `more``/`` `done`` Stream of lines, decoding
+/// lossily so a line stream survives invalid bytes.  Only the shape is lazy:
+/// the channel is read to EOF and every node built before this returns, so a
+/// downstream `stream-take 3` still drains an unbounded source.
 pub(super) fn builtin_from_lines(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let bytes = input_bytes(args, "from-lines", shell)?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
@@ -125,12 +106,11 @@ fn json_to_value(j: &serde_json::Value) -> Settled<Value> {
             if let Some(i) = n.as_i64() {
                 Value::Int(i)
             } else if n.is_f64() {
-                // A genuine JSON float; `as_f64` cannot fail here.
+                // `is_f64` just held.
                 Value::Float(n.as_f64().unwrap())
             } else {
-                // An integer literal that overflowed `i64` (a `u64` above
-                // `i64::MAX`).  Reading it as `f64` would silently round
-                // away its low bits, so refuse rather than corrupt it.
+                // A `u64` above `i64::MAX`: `f64` would round away its low
+                // bits, so refuse rather than corrupt it.
                 return Err(sig(format!(
                     "from-json: integer {n} is outside the supported range"
                 )));
@@ -160,13 +140,9 @@ pub(super) fn builtin_from_json(args: &[Value], shell: &mut Shell) -> Settled<Va
     json_to_value(&json)
 }
 
-/// Decode CSV from the channel into a list of records, one per data row,
-/// keyed by the header row.  Every field is a `String` — CSV is untyped, so
-/// the caller coerces with `int`/`float`.  Quoted fields, embedded commas,
-/// and embedded newlines are handled by the `csv` reader; a short row leaves
-/// the missing trailing columns empty.  The first line is always the header.
-/// A record can't faithfully represent two columns of the same name, so a
-/// duplicate header is an error rather than a silent last-write-wins.
+/// Decode CSV into a list of records keyed by the header row; fields stay
+/// `String`, since CSV is untyped.  A duplicate header is refused rather than
+/// resolved last-write-wins — a record cannot hold two columns of one name.
 pub(super) fn builtin_from_csv(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let bytes = input_bytes(args, "from-csv", shell)?;
     let mut rdr = csv::ReaderBuilder::new()
@@ -203,11 +179,9 @@ pub(super) fn builtin_from_csv(args: &[Value], shell: &mut Shell) -> Settled<Val
     Ok(Value::list(rows))
 }
 
-/// Encode a list of records as CSV.  Columns are the keys of the first
-/// record, in sorted order (maps are key-ordered, so there is no original
-/// column order to recover); each field is the value's `String` form, and a
-/// record missing a column contributes an empty field.  An empty list emits
-/// nothing.  The `csv` writer quotes and escapes as needed.
+/// Encode a list of records as CSV.  Columns are the first record's keys in
+/// sorted order — `Map` is key-ordered, so no original column order survives
+/// into one to be recovered.
 pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "to-csv")?;
     let rows = as_list(&args[0], "to-csv")?;
@@ -230,8 +204,8 @@ pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value
     write_encoded("to-csv", bytes, shell)
 }
 
-/// The write-success convention every `to-X` encoder shares: write `bytes`
-/// to stdout and mark the codec's exit status a success.
+/// Write `bytes` to stdout and claim success: an encoder sets its own exit
+/// status rather than leaving whatever the previous command left.
 fn write_stdout_ok(name: &str, bytes: &[u8], shell: &mut Shell) -> Settled<()> {
     shell
         .write_stdout(bytes)
@@ -240,8 +214,6 @@ fn write_stdout_ok(name: &str, bytes: &[u8], shell: &mut Shell) -> Settled<()> {
     Ok(())
 }
 
-/// Common tail for every `to-X` builtin: write encoded bytes to stdout and
-/// return them as `Value::Bytes`.
 fn write_encoded(name: &str, bytes: Vec<u8>, shell: &mut Shell) -> Settled<Value> {
     write_stdout_ok(name, &bytes, shell)?;
     Ok(Value::Bytes(bytes))
@@ -277,16 +249,14 @@ pub(super) fn builtin_to_lines(args: &[Value], shell: &mut Shell) -> Settled<Val
     write_encoded("to-lines", joined.into_bytes(), shell)
 }
 
-/// Encode `v` as JSON for `to-json`.
-///
-/// Refuses any value with no faithful JSON form rather than erasing it (a
-/// non-finite Float, or a computation value); Bytes render as the integer
-/// array `from-bytes` round-trips.
+/// Encode `v` as JSON, refusing whatever has no faithful JSON form rather
+/// than erasing it; Bytes become the integer array `to-bytes` accepts back.
+/// [`super::util::value_to_json_lossy_bytes`] is the total counterpart, where
+/// legibility outranks fidelity.
 ///
 /// # Errors
-/// Returns `Err` if `v`, or any value nested within it, is a non-finite
-/// `Float` (NaN / ±Infinity) or a computation value (`Lambda` / `Block` /
-/// `Handle`).
+/// If `v` or anything nested within it is a non-finite `Float` or a
+/// computation value (`Lambda` / `Block` / `Handle`).
 pub fn value_to_json(v: &Value) -> Settled<serde_json::Value> {
     Ok(match v {
         Value::Unit => serde_json::Value::Null,

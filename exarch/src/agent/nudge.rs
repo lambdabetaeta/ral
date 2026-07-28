@@ -1,103 +1,61 @@
-//! Single home for the inter-attempt nudge facility.
+//! Inter-attempt nudges: after each deliberation, either accept the outcome —
+//! surfacing any attached provider error — or hand back a synthetic prompt for
+//! the attend loop to post to itself as a `Post::Nudge`.
 //!
-//! Owns the rule set, the budget counter, and the post-attempt decision:
-//! walk the rules and either accept the exchange (surfacing any attached provider
-//! error on the way out) or hand back a synthetic next prompt for the attend
-//! loop to post to itself as a [`Post::Nudge`](crate::bus::Post).
-//! Records each nudge to both the `events.json` breadcrumb and the operational
-//! trace ([`Kind::Nudge`]); the display decides whether to surface it.
-//!
-//! The registry is **per-session** ([`Agent::nudges`]): the attend loop runs
-//! one [`Agent::deliberate`] per inbox item, not one whole exchange, so the
-//! per-exchange state must outlive a single [`Agent::deliberate`].  It resets on a genuine
-//! exchange-boundary item via [`Registry::reset`], never on a self-nudge.
-//!
-//! [`Agent::deliberate`]: crate::agent::Agent::deliberate
-//! [`Agent::nudges`]: crate::agent::Agent
+//! The registry is per-session because the attend loop runs one
+//! `Agent::deliberate` per inbox item, not one per exchange, so this state must
+//! outlive a single deliberation.  `Registry::reset` clears it at a genuine
+//! exchange boundary, never on a self-nudge.
 
 use crate::agent::deliberate;
 use crate::agent::event::AgentLog;
 use crate::bus::{Emitter, Kind};
 use crate::provider::ProviderError;
 
-/// Outer-attempt budget per user exchange.  Independent of the provider's
-/// transport retry budget: this is only for model-visible recovery.
+/// Outer-attempt budget per user exchange, distinct from the provider's own
+/// transport retries: this one is for model-visible recovery.
 const BUDGET: u32 = 3;
-/// How many genuine exchanges elapse between "nothing is pinned" reminders.  A
-/// gentle cadence, since there is no outstanding obligation to be restless
-/// about.  The pinned-state reminder itself is budget-free and fires on
-/// every clean completion instead — see [`Registry::react`].
+/// Exchanges between "nothing is pinned" reminders.  The reminder for state that
+/// *is* pinned is budget-free and fires on every clean completion instead.
 const REMIND_EVERY: u32 = 12;
-/// A shared bracket for every synthetic nudge message, so the model can
-/// distinguish a system reminder from genuine user input.  The opening
-/// bracket carries the "do not mention" instruction; the closing bracket
-/// delimits where the system text ends.
+/// Brackets every synthetic nudge, so the model can tell a system reminder from
+/// genuine user input.
 const EXARCH_REMINDER_OPEN: &str = "[EXARCH_REMINDER // Do not mention to user.] ";
 const EXARCH_REMINDER_CLOSE: &str = " [/EXARCH_REMINDER]";
-/// A degenerate-outcome classifier: `None` if the attempt doesn't match, else
-/// the nudge `(cause, message)` — `cause` is the breadcrumb recorded to the
-/// log and trace, `message` is the synthetic reminder text sent to the model.
+/// A degenerate-outcome classifier: `None` if the attempt doesn't match, else the
+/// `cause` recorded to log and trace and the `message` sent to the model.
 type Rule = fn(&Result<deliberate::Outcome, ProviderError>) -> Option<(String, &'static str)>;
 
-/// The rule set the binary ships with.
 const RULES: &[Rule] = &[on_empty, on_early_stop, on_truncated];
 
-/// Wrap a synthetic reminder body in the shared bracket, so the model can
-/// distinguish a system reminder from genuine user input.
 fn wrap_reminder(body: &str) -> String {
     format!("{EXARCH_REMINDER_OPEN}{body}{EXARCH_REMINDER_CLOSE}")
 }
 
-/// Per-attempt expectations that depend on the agent rather than the
-/// attempt outcome: whether this agent returns through `reply`
-/// ([`must_reply`](Self::must_reply)) and its current pinned state
-/// ([`pinned`](Self::pinned)).  Threaded in by [`Agent::attend`].
-///
-/// [`Agent::attend`]: crate::agent::Agent::attend
+/// The agent-side facts a nudge decision needs, as against the attempt outcome.
+/// Assembled by `take_up` in `agent/attend.rs`.
 pub(crate) struct NudgeCtx {
-    /// Whether this session returns through `reply` — true for a returning
-    /// agent (a peer or a headless root), false for the interactive root.  A
-    /// returning agent that finishes a tool-call-free step without having
-    /// replied is re-nudged to call `reply` within the [`BUDGET`], then fails.
-    /// Independent of, and additive with, the pinned-state nudge below: a
-    /// returning agent owes both a reply and a clean pin register.
+    /// True for an agent that returns through `reply` — a peer or a headless
+    /// root, never the interactive root, and suppressed while children are live.
     pub must_reply: bool,
-    /// The model's current pinned state as a one-line description, or `None`
-    /// when nothing is pinned — the one register covering every pin kind
-    /// (tasks, goals, and other pinned state alike; see
-    /// [`Agent::pinned_digest`](crate::agent::Agent)).  Drives the pinned-state
-    /// reminder for any actionable agent, regardless of role.
+    /// One-line digest of the whole pin register, `None` when nothing is pinned.
     pub pinned: Option<String>,
-    /// True while this agent has live descendants that may still deliver the
-    /// next actionable fact.  In that state the pin register stays live, but
-    /// pin/no-pin reminders wait until the descendants settle.
+    /// True while live descendants may still deliver the next actionable fact:
+    /// the pin register stays live, but its reminders wait for them to settle.
     pub waiting_on_children: bool,
-    /// True for the headless root (`parent.is_none() && !interactive`), false
-    /// for everyone else — an interactive root never reaches `reply`, and a
-    /// sub-agent peer's `reply` is read by a parent that can push back on it.
-    /// The headless root's `reply` instead reaches an external caller with
-    /// nobody left to scrutinize it, so [`Registry::react`] turns its first
-    /// `reply` back once for self-verification before honouring the next one.
+    /// True for the headless root (`parent.is_none() && !interactive`), whose
+    /// `reply` reaches an external caller with no parent left to push back on it.
     pub is_headless_root: bool,
 }
 
-/// Per-session nudge state.  Lives on the [`Agent`](crate::agent::Agent)
-/// and is reset at each genuine exchange boundary by [`Self::reset`];
-/// [`Self::react`] is the only post-attempt entry point.
+/// Per-session nudge state; [`Self::react`] is the only post-attempt entry point.
 pub(crate) struct Registry {
     used: u32,
-    /// Genuine exchanges since the last "nothing is pinned" reminder, bumped once
-    /// per exchange-boundary item by [`Self::reset`].  Unlike a latch it
-    /// accumulates *across* exchanges; the reminder fires once it reaches
-    /// [`REMIND_EVERY`], then it returns to zero.  Unused while anything is
-    /// pinned — that case is budget-free, see [`Self::react`].
+    /// Unlike the budget, accumulates *across* exchanges: bumped by
+    /// [`Self::reset`], zeroed once it reaches [`REMIND_EVERY`] and fires.
     exchanges_since_no_pins_reminder: u32,
-    /// One-shot latch for the headless root's self-verification nudge: once
-    /// its first `reply` has been turned back, every later `reply` — from
-    /// this same run, regardless of exchange boundaries — is honoured.  Unlike
-    /// [`Self::used`] this is never cleared by [`Self::reset`]: the
-    /// obligation is "verify once before the run's result stands", not a
-    /// per-exchange accounting.
+    /// One-shot for the whole run, not per exchange — [`Self::reset`] never
+    /// clears it, since the obligation is "verify once before the result stands".
     reply_verified: bool,
 }
 
@@ -110,24 +68,16 @@ impl Registry {
         }
     }
 
-    /// Reset the per-exchange state — the retry budget and the one-shot latch —
-    /// and count this exchange toward the periodic "nothing is pinned" reminder.
-    /// Called by [`Agent::attend`] on a genuine exchange-boundary item, never on
-    /// a self-nudge (which is the same exchange continuing), so the exchange counter
-    /// advances once per real exchange.
-    ///
-    /// [`Agent::attend`]: crate::agent::Agent::attend
+    /// Clear the retry budget and count one exchange toward the no-pins reminder.
+    /// The attend loop calls this only on a genuine exchange-boundary item, never
+    /// on a self-nudge, which is the same exchange continuing.
     pub fn reset(&mut self) {
         self.used = 0;
         self.exchanges_since_no_pins_reminder += 1;
     }
 
-    /// The one decider.  Walks [`RULES`] against `attempt`, optionally
-    /// records the nudge to `log`, emits any user-facing error breadcrumbs
-    /// through `emit`, and returns the synthetic next prompt to re-attend
-    /// with — `Some(message)` for the attend loop to self-post as a
-    /// [`Post::Nudge`](crate::bus::Post) — or `None` to accept the
-    /// exchange and stop.
+    /// The one decider: walk [`RULES`] against `attempt` and return the synthetic
+    /// prompt the attend loop self-posts as a `Post::Nudge`, or `None` to stop.
     pub fn react(
         &mut self,
         attempt: &Result<deliberate::Outcome, ProviderError>,
@@ -135,12 +85,9 @@ impl Registry {
         emit: &Emitter,
         log: &mut AgentLog,
     ) -> Option<String> {
-        // A headless root's first `reply` is intercepted here, before it ever
-        // reaches the rules below: its result is the run's entire externally
-        // visible output, with no parent left to read it and push back. Turn
-        // it back once, budget-free, for self-verification; [`Self::reply_verified`]
-        // latches so the very next `reply` — whatever it carries — is honoured
-        // and [`Agent::attend`](crate::agent::Agent::attend) lets it terminate.
+        // A headless root's first `reply` is turned back before the rules see it,
+        // budget-free, for self-verification; the latch then honours the very next
+        // one whatever it carries, so the attend loop can terminate.
         if matches!(attempt, Ok(deliberate::Outcome::Replied(_))) {
             if ctx.is_headless_root && !self.reply_verified {
                 self.reply_verified = true;
@@ -150,19 +97,16 @@ impl Registry {
             return None;
         }
         let Some((cause, message)) = RULES.iter().find_map(|&r| r(attempt)) else {
-            // (No RULE matched.)  Only a clean completion reaches the two
-            // nudges below; every other outcome here (a provider error the
-            // rules didn't classify, a `Replied`/`Cancelled`/`Capped`
-            // termination) is reported and accepted as-is.
+            // Only a clean completion reaches the nudges below; anything else that
+            // no rule claimed — an unclassified provider error, a `Cancelled` or
+            // `Capped` end — is reported and accepted as-is.
             if !matches!(attempt, Ok(deliberate::Outcome::Complete(_))) {
                 surface_provider_error(attempt, emit, log);
                 return None;
             }
             // Two independent obligations, neither suppressing the other: a
-            // returning agent owes a `reply` regardless of its pins, and any
-            // agent — trunk or sub-agent alike — owes a clean pin register
-            // regardless of whether it also returns.  Compose whichever
-            // apply into one reminder.
+            // returning agent owes a `reply` whatever its pins, and any agent owes
+            // a clean pin register whether or not it returns.  Compose both.
             let mut parts = Vec::new();
             if ctx.must_reply {
                 if self.used < BUDGET {
@@ -175,9 +119,8 @@ impl Registry {
                     );
                     parts.push(REPLY_MESSAGE.to_string());
                 } else {
-                    // A hard give-up: an agent that cannot even call `reply`
-                    // after the full budget is failed outright, regardless
-                    // of any pinned state.
+                    // An agent that cannot call `reply` even after the full budget
+                    // fails outright, whatever it still has pinned.
                     let msg = "agent finished without calling `reply` after the nudge budget; \
                                returning a failure"
                         .to_string();
@@ -186,13 +129,8 @@ impl Registry {
                     return None;
                 }
             }
-            // The one pinned-state nudge: whatever is pinned (a task, a
-            // goal, or any other pinned state — [`NudgeCtx::pinned`]
-            // covers every kind uniformly) keeps the agent restless,
-            // budget-free, on every clean completion.  Only the empty
-            // register gets a gentler, throttled suggestion instead.  If a
-            // child is still running, the agent has already taken the next
-            // action; wait for that result before asking again.
+            // Anything pinned keeps the agent restless on every clean completion,
+            // budget-free; an empty register gets a throttled suggestion instead.
             if !ctx.waiting_on_children {
                 if let Some(pinned) = ctx.pinned.as_deref() {
                     record_nudge(emit, log, self.used, "pinned-state reminder".into());
@@ -225,8 +163,8 @@ impl Registry {
     }
 }
 
-/// Record a nudge to both views: the `events.json` forensic breadcrumb and the
-/// operational trace ([`Kind::Nudge`], which the display surfaces as it sees fit).
+/// Record to both views: the `events.json` forensic breadcrumb and the
+/// operational trace ([`Kind::Nudge`]), which the display surfaces as it sees fit.
 fn record_nudge(emit: &Emitter, log: &mut AgentLog, used: u32, cause: String) {
     let _ = log.record_nudge(used, BUDGET, cause.clone());
     emit.emit(Kind::Nudge {
@@ -247,20 +185,15 @@ fn surface_provider_error(
     }
 }
 
-/// The headless root's one-shot reply-verification nudge
-/// ([`NudgeCtx::is_headless_root`]) — see [`Registry::react`].
+/// The headless root's one-shot reply-verification nudge.
 const VERIFY_REPLY_MESSAGE: &str = "Recall the original prompt, and ensure that you \
     have correctly responded to it, completing any tasks. Then call `reply` again, with \
     `ral { reply <value> }`.";
 
 // ── Rules ────────────────────────────────────────────────────────────
 
-/// The no-reply reminder (gated by [`NudgeCtx::must_reply`], so it fires for a
-/// returning agent — a peer or a headless root).  The agent finished with prose
-/// but never called `reply`, its sole return path, so as things stand it
-/// returns nothing; this asks it to return through `reply` before the run ends.
-/// It is *budgeted*: re-issued each un-replied finish until the [`BUDGET`] is
-/// spent, then the run fails.
+/// The no-reply reminder: the agent finished with prose but never called `reply`,
+/// its sole return path.  Re-issued until [`BUDGET`] is spent, then the run fails.
 const REPLY_MESSAGE: &str = "You ended your turn without calling `reply`, so your parent will \
     receive nothing. Return your result now with `ral { reply <value> }` — a string for a \
     markdown report, or a record/list for structured findings; if the value carries `$`, `!`, \
@@ -311,9 +244,8 @@ mod tests {
     use ral_core::serial::FOValue;
     use std::time::Duration;
 
-    /// An emitter onto a dropped receiver — `react` records to the log and
-    /// emits only error breadcrumbs, and the tests assert on the returned
-    /// `Option` and the budget counter, so the events go nowhere.
+    /// An emitter onto a dropped receiver: these tests assert on `react`'s return
+    /// and the budget counter, so the events may go nowhere.
     fn emit() -> Emitter {
         let (tx, _rx) = channel();
         Emitter::new(tx, 0)
@@ -325,9 +257,8 @@ mod tests {
         AgentLog::root(&root, 0, "test", "test", 0).expect("session log")
     }
 
-    /// A surfaced rate-limit already exhausted the provider loop's backoff
-    /// budget.  It is not a model turn, so the nudge layer reports it
-    /// directly instead of appending a synthetic user message.
+    /// A surfaced rate limit already exhausted the provider loop's backoff budget,
+    /// and is not a model turn, so it is reported rather than nudged.
     #[test]
     fn rate_limit_surfaces_without_nudge() {
         let mut reg = Registry::new();
@@ -355,9 +286,8 @@ mod tests {
         assert_eq!(reg.used, 0);
     }
 
-    /// A transient failure exhausted the provider loop before the model
-    /// produced output.  Re-attending through a nudge would duplicate the same
-    /// invisible request as a fake user turn, so it stops immediately.
+    /// The transient exhausted the provider loop before the model produced output;
+    /// nudging would resend that same invisible request as a fake user turn.
     #[test]
     fn transient_surfaces_without_nudge() {
         let mut reg = Registry::new();
@@ -382,8 +312,7 @@ mod tests {
         assert_eq!(reg.used, 0);
     }
 
-    /// Repeated provider failures still do not spend nudge budget.  The
-    /// provider loop owns retry attempts; the nudge budget is only for
+    /// The provider loop owns retry attempts; the budget here is only for
     /// model-visible recovery.
     #[test]
     fn provider_failures_do_not_consume_budget() {
@@ -411,7 +340,6 @@ mod tests {
         assert_eq!(reg.used, 0);
     }
 
-    /// A model-behaviour outcome still nudges and spends one unit of budget.
     #[test]
     fn empty_turn_nudges_and_consumes_budget() {
         let mut reg = Registry::new();
@@ -433,7 +361,6 @@ mod tests {
         assert_eq!(reg.used, 1);
     }
 
-    /// Past the budget, even a nudgeable outcome stops the exchange.
     #[test]
     fn exhausted_budget_stops() {
         let mut reg = Registry::new();
@@ -470,7 +397,6 @@ mod tests {
         );
     }
 
-    /// A clean `Complete` ends the exchange.
     #[test]
     fn completion_stops() {
         let mut reg = Registry::new();
@@ -491,11 +417,9 @@ mod tests {
         );
     }
 
-    /// A returning agent (`must_reply`) that finishes a tool-call-free
-    /// `Complete` without replying is re-nudged to call `reply` while budget
-    /// remains — drawing on the shared per-exchange budget — then, once it is
-    /// spent, the un-replied finish is accepted (`None`) so the attend loop ends
-    /// and `agent_outcome` maps the `Complete` to `Failed`.
+    /// Once the budget is spent the un-replied finish is accepted (`None`) so the
+    /// loop ends; `agent_outcome` in `agent/attend.rs` maps that `Complete` to
+    /// `Failed`.
     #[test]
     fn no_reply_finish_re_nudges_up_to_budget_then_fails() {
         let mut reg = Registry::new();
@@ -506,7 +430,6 @@ mod tests {
             pinned: None,
             waiting_on_children: false,
         };
-        // Each un-replied finish re-nudges and spends one unit of budget.
         for _ in 0..BUDGET {
             match reg.react(
                 &Ok(deliberate::Outcome::Complete("prose, no reply".into())),
@@ -526,7 +449,6 @@ mod tests {
             reg.used, BUDGET,
             "the no-reply nudge now draws on the budget"
         );
-        // Past the budget the un-replied finish is accepted so the run ends.
         assert!(
             reg.react(
                 &Ok(deliberate::Outcome::Complete("still no reply".into())),
@@ -539,8 +461,7 @@ mod tests {
         );
     }
 
-    /// The interactive root (`must_reply` false) never gets the reply reminder
-    /// — a clean `Complete` ends its exchange at once.
+    /// The interactive root converses and never returns, so it owes no `reply`.
     #[test]
     fn root_completion_is_never_reply_nudged() {
         let mut reg = Registry::new();
@@ -561,9 +482,7 @@ mod tests {
         );
     }
 
-    /// A headless root's first `reply` is turned back for self-verification
-    /// rather than accepted outright — its result reaches an external caller
-    /// with nobody left to scrutinize it.
+    /// Its result reaches an external caller with nobody left to scrutinize it.
     #[test]
     fn headless_root_first_reply_is_turned_back_for_verification() {
         let mut reg = Registry::new();
@@ -588,9 +507,8 @@ mod tests {
         assert_eq!(reg.used, 0, "the verify nudge is budget-free");
     }
 
-    /// Once turned back, the headless root's *next* `reply` — regardless of
-    /// what it carries — is honoured: the latch is one-shot for the run, not
-    /// re-armed by the pinned/must-reply state.
+    /// The latch is one-shot for the run, not re-armed by the pinned or
+    /// must-reply state, so the second `reply` stands whatever it carries.
     #[test]
     fn headless_root_second_reply_is_honoured() {
         let mut reg = Registry::new();
@@ -627,10 +545,8 @@ mod tests {
         );
     }
 
-    /// A sub-agent peer's `reply` is never intercepted, even though it is
-    /// also a returning agent (`must_reply`): its parent reads the result and
-    /// can push back, so only the headless root needs the self-verification
-    /// nudge.
+    /// A peer returns too, but its parent reads the result and can push back, so
+    /// only the headless root needs the self-verification nudge.
     #[test]
     fn peer_reply_is_never_verify_nudged() {
         let mut reg = Registry::new();
@@ -654,12 +570,8 @@ mod tests {
         );
     }
 
-    /// Any pinned state — a task, a goal, or any other digest alike — keeps
-    /// the agent restless via the one pinned-state nudge, budget-free, until
-    /// whatever cleared it does so (out of this module's scope — [`nudge`]
-    /// only reports pinned state, it never clears it).
-    ///
-    /// [`nudge`]: crate::agent::nudge
+    /// Anything pinned keeps the agent restless, budget-free.  This module only
+    /// reports the pin register; nothing here ever clears it.
     #[test]
     fn pinned_state_keeps_completion_restless() {
         let mut reg = Registry::new();
@@ -684,9 +596,8 @@ mod tests {
         assert_eq!(reg.used, 0, "pinned-state nudges are budget-free");
     }
 
-    /// A parent that has already launched the next action is allowed to wait:
-    /// the pinned state remains live, but the pinned-state nudge resumes only
-    /// after the child settles.
+    /// A live child *is* the next action, so the pin stays live but its reminder
+    /// waits for the child to settle.
     #[test]
     fn pinned_state_waits_while_children_live() {
         let mut reg = Registry::new();
@@ -711,11 +622,8 @@ mod tests {
         assert_eq!(reg.used, 0, "waiting must not spend nudge budget");
     }
 
-    /// A returning agent owes both obligations at once: it hasn't called
-    /// `reply`, and it still holds pinned state.  Neither nudge suppresses
-    /// the other — both compose into one reminder, and each still draws on
-    /// its own accounting (the reply nudge spends budget; the pinned-state
-    /// nudge does not).
+    /// Both obligations compose into one reminder, each on its own accounting:
+    /// the reply half spends budget, the pinned-state half does not.
     #[test]
     fn returning_agent_gets_both_reply_and_pinned_nudges() {
         let mut reg = Registry::new();
@@ -745,8 +653,6 @@ mod tests {
         assert_eq!(reg.used, 1, "only the reply half spends budget");
     }
 
-    /// [`Registry::reset`] clears the per-exchange budget, so a fresh
-    /// exchange-boundary item starts with a full budget.
     #[test]
     fn reset_clears_budget() {
         let mut reg = Registry::new();
@@ -757,17 +663,14 @@ mod tests {
             pinned: None,
             waiting_on_children: false,
         };
-        // Spend a unit of budget.
         let _ = reg.react(&Ok(deliberate::Outcome::Empty), &ctx(), &emit(), &mut log);
         assert!(reg.used >= 1);
         reg.reset();
         assert_eq!(reg.used, 0, "reset clears the budget");
     }
 
-    /// With nothing pinned, the periodic reminder nudges toward `set-goal` /
-    /// `add-task` every `REMIND_EVERY` exchanges instead of the pinned-state
-    /// message — firing exactly once per `REMIND_EVERY`-exchange window, not on
-    /// every exchange in between.
+    /// Exactly once per [`REMIND_EVERY`]-exchange window, not on every exchange
+    /// in between.
     #[test]
     fn no_pins_reminder_fires_every_remind_every_exchanges() {
         let mut reg = Registry::new();

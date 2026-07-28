@@ -1,22 +1,11 @@
-//! The type-error taxonomy: the structural causes the unifier and
-//! inferencer raise, their constraint provenance, and the located error
-//! they are packaged into.
-//!
-//! `TypeError` and `TypeErrorKind` represent the diagnostics produced by
-//! unification and inference failures; `Reason` records *why* a constraint
-//! was demanded, and `CompDiff` records which components of a computation
-//! type disagreed.  Every user-facing sentence derived from these lives in
-//! `explain.rs`.
+//! The type errors the checker raises: a structural cause, the provenance of
+//! the failed constraint, and a span.  Their user-facing prose is in `explain.rs`.
 
 use super::ty::{CompTy, PipeMode, Ty};
 use crate::source::Span;
 use crate::syntax::ast::BinaryOpKind;
 
-/// A single component diff within a `CompTyMismatch` error.
-///
-/// When two computation types fail to unify, individual diffs record which
-/// components (stdin mode, stdout mode, return type) disagreed and what their
-/// resolved types were at the point of failure.
+/// Which component of a computation type disagreed, within a `CompTyMismatch`.
 #[derive(Debug, Clone)]
 pub enum CompDiff {
     Stdin {
@@ -33,100 +22,77 @@ pub enum CompDiff {
     },
 }
 
-/// The provenance of a constraint — *why* the inferencer demanded that
-/// two types, computation types, or pipeline modes agree.
-///
-/// Carried on a constraint-failure [`TypeError`] (`reason: Some(..)`) and
-/// absent on a direct diagnosis, which is already its own complete story
-/// (`reason: None`).  `Reason` is data only — every sentence derived from
-/// it lives in `explain.rs`, which is what makes each hint unit-testable
-/// and reviewable in one place.
+/// Why the inferencer demanded that two types agree.  Present exactly on
+/// constraint failures; a direct diagnosis stands alone with `reason: None`.
+/// Data only — the sentence each turns into is composed in `explain.rs`.
 #[derive(Debug, Clone)]
 pub enum Reason {
-    /// A `[a, b, ...]` pattern's scrutinee against the list shape it destructures.
     ListPattern,
-    /// A `[key: name, ...]` pattern's scrutinee against the record shape it destructures.
     RecordPattern,
-    /// An applied argument's type against the function's parameter type.
     Argument,
-    /// A call argument's type against an alias/handler arm's argv element type.
+    /// A call argument against the element type of the arm's argv list.
     AliasArgv,
-    /// An alias/handler arm's declared parameter against the argv list shape.
+    /// An arm's declared parameter against the argv list shape.
     AliasParam,
-    /// A builtin argument against the block/lambda shape it expects.
     BuiltinBlockArg,
-    /// A builtin argument's actual type against its declared per-position type template.
     BuiltinTypedArg,
-    /// A pipeline stage's produced value against the next stage's function parameter.
-    PipedValue { step_stream: bool },
-    /// Two adjacent pipeline stages' byte-channel modes at the edge between them.
+    /// A stage's produced value against the next stage's parameter; the flag
+    /// marks a lazy Step stream, which must be consumed explicitly.
+    PipedValue {
+        step_stream: bool,
+    },
+    /// The byte-channel modes of two adjacent stages, at the edge between them.
     PipelineEdge,
-    /// An unresolved computation forced into `Return` shape to read its value type and modes.
+    /// An unresolved computation forced to `Return` shape to read its value and modes.
     ReturnShape,
-    /// An alias/handler arm's pipeline modes against the head it reinterprets.
+    /// An arm's pipeline modes against those of the head it reinterprets.
     HandlerModePin,
-    /// An `if` condition's type against `Bool`.
     IfCond,
-    /// The two branches of an `if` against each other's value type.
     IfBranches,
-    /// The two outcomes of a `try` against each other's observed value.
     TryArms,
-    /// A `try` handler's type against the one-argument function shape it must have.
+    /// A `try` handler against the one-argument function shape it must have.
     TryHandler,
     /// A scope form's body against the thunk shape every control wrapper expects.
     ScopeBody,
-    /// A `case` arm handler's payload type against the scrutinee's payload at that tag.
+    /// An arm handler's payload against the scrutinee's payload at that tag.
     CaseArmPayload,
-    /// A `case` scrutinee's type against the variant shape `case` requires.
     CaseScrutinee,
-    /// A `case` handler table's type against the record-of-thunks shape `case` requires.
+    /// A handler table against the record-of-thunks shape `case` requires.
     CaseTable,
-    /// A list literal's element type against the list's shared element type.
     ListElem,
-    /// A list spread's operand against the list shape it must itself have.
     ListSpread,
-    /// A dynamic map key against `String`.
     MapKey,
-    /// A dynamic map entry's value against the map's shared element type.
     MapElem,
-    /// A map spread's operand against the map shape it must itself have.
     MapSpread,
-    /// An options/capability map entry's value against its schema-declared field type.
-    OptionField { form: &'static str, key: String },
-    /// The `!` operator's operand against the block/thunk shape it forces.
+    /// An options-map entry against its schema-declared field type, under `form`.
+    OptionField {
+        form: &'static str,
+        key: String,
+    },
+    /// The `!` operator's operand against the block shape it forces.
     ForceOperand,
-    /// `not`'s operand against `Bool`.
     NotOperand,
-    /// The two operands of a binary operator against each other.
     BinaryOperands(BinaryOpKind),
-    /// A list index key against `Int`.
     ListIndexKey,
-    /// A map index key against `String`.
     MapIndexKey,
-    /// An indexing target against the record shape carrying the field being read.
     RecordFieldRead,
-    /// An indexing target pinned to `List` or `Map` by its runtime-computed key's type.
+    /// An indexing target pinned to `List` or `Map` by its computed key's type.
     DynamicIndexTarget,
-    /// A command head still unknown enough to be a thunk, pinned to `Thunk` so application can unfold it.
+    /// A head still a bare variable, pinned to `Thunk` so application can unfold it.
     AutoderefHead,
-    /// The `_type` probe's threaded result against the argument's own type.
+    /// `_type`'s result threaded back to its argument, keeping the probe transparent.
     TypeProbe,
-    /// A `letrec` binding's inferred type against its own self-referential placeholder.
     LetRecSelf,
-    /// The `from-lines` Step shape's recursive tail placeholder against its own closing value.
+    /// `from-lines`' recursive Step tail against the stream it closes into.
     LinesStepSelf,
 }
 
-/// The structural cause of a type error — raised by the unifier or inferencer,
-/// enriched by `InferCtx` with source spans and rendered at the diagnostic layer.
+/// The structural cause of a type error, raised by the unifier or inferencer.
+/// `InferCtx` attaches the span; `diagnostic.rs` renders it.
 #[derive(Debug, Clone)]
 pub enum TypeErrorKind {
     RecursiveRow,
-    /// Structural nesting exceeds the unifier's defensive recursion
-    /// ceiling.  The co-inductive guard terminates every *cyclic*
-    /// obligation; this is the belt-and-braces stop for a variable-free
-    /// type nested past any plausible source program, turning a would-be
-    /// stack overflow into a graceful type error.
+    /// Nesting past the unifier's depth ceiling — a stack-overflow guard.
     TypeTooDeep,
     TyMismatch {
         expected: Ty,
@@ -147,27 +113,18 @@ pub enum TypeErrorKind {
     RowMissingField {
         label: String,
     },
-    /// Command head is a non-function value (e.g. a literal `String` in
-    /// command position with arguments).  Reported under the same code as
-    /// `CompTyMismatch` (T0011) — it is the same condition, framed in
-    /// surface terms instead of as a `Cmd a vs a → b` mismatch.  The flag
-    /// records that the head/args IR shape suggests a single
-    /// double-quoted string split by an unescaped inner quote.
+    /// A non-function value in head position; shares T0011 with `CompTyMismatch`.
+    /// The flag marks a head/args shape suggesting a string split by a stray quote.
     CommandNotFunction {
         ty: Ty,
         split_string_suspect: bool,
     },
-    /// `case` arms do not match the scrutinee row: either a label is
-    /// missing (no handler for some variant constructor) or extraneous
-    /// (a handler labelled with a constructor the scrutinee can never
-    /// produce).  Both directions are surfaced in one diagnostic.
+    /// `case` arms do not match the scrutinee row — missing and extra, together.
     CaseNotExhaustive {
         missing: Vec<String>,
         extra: Vec<String>,
     },
-    /// `case` handler at `label` does not have the right shape — its
-    /// payload type fails to unify with the scrutinee's payload type at
-    /// that constructor, or it is not a function at all.
+    /// A `case` handler at `label` is not a function, or its payload does not fit.
     CaseLabelTypeMismatch {
         label: String,
         expected: Ty,
@@ -177,68 +134,53 @@ pub enum TypeErrorKind {
     CaseOnNonVariant {
         ty: Ty,
     },
-    /// A control operator (`within`, `try`, `guard`, `grant`, `audit`) named
-    /// in value position instead of command position.
+    /// `within`, `try`, `guard`, `grant`, or `audit` named in value position.
     ControlOperatorAsValue {
         name: String,
     },
-    /// An alias/`within`-handler name used as a first-class value; handlers
-    /// are only invocable in command position.
     HandlerNotFirstClass {
         name: String,
     },
-    /// A builtin command's name used as a first-class value; builtins are
-    /// only invocable in command position.
     BuiltinNotFirstClass {
         name: String,
     },
-    /// An `alias`/handler install attempted to name a builtin, which owns
-    /// its name outright.
+    /// An install named a builtin, which owns its name outright.
     CannotRedefineBuiltin {
         name: String,
         verb: &'static str,
     },
-    /// An `alias`/handler install named a lexical binding already in
-    /// scope; bare lookup resolves to the binding first.
+    /// An install named a binding already in scope; bare lookup finds it first.
     HandlerShadowedByBinding {
         name: String,
     },
-    /// A builtin call's argument count does not match its signature —
-    /// exactly `expected`, or at most `expected` when `at_most`.
+    /// Wrong argument count: exactly `expected`, or at most it when `at_most`.
     BuiltinArity {
         expected: usize,
         got: usize,
         at_most: bool,
     },
-    /// A `from-*` decoder was passed an argument; it reads the byte
-    /// channel, so there is no argument slot to fill.
+    /// A `from-*` decoder reads the byte channel — no argument slot to fill.
     DecoderTakesNoArgument {
         name: String,
     },
-    /// `fail [status: 0]` — a nonzero status is required so `fail` cannot
-    /// masquerade as a clean exit.
+    /// A nonzero status is required, so `fail` cannot masquerade as a clean exit.
     FailStatusZero,
-    /// The elaborated IR for an `alias name { body }` statement does not
-    /// have the expected shape.
+    /// The elaborated IR for an `alias name { body }` statement has the wrong shape.
     MalformedAlias {
         detail: &'static str,
     },
-    /// The elaborated IR for an `unalias name` statement does not have
-    /// the expected shape.
+    /// The elaborated IR for an `unalias name` statement has the wrong shape.
     MalformedUnalias {
         detail: &'static str,
     },
-    /// Indexing directly into a block value (`Thunk`) instead of its
-    /// forced result.
+    /// Indexing into a block value instead of its forced result.
     IndexIntoThunk,
-    /// A record-field read (`$v[field]`) on a value that is concretely
-    /// not a record.
+    /// A field read (`$v[field]`) on a value that is concretely not a record.
     FieldOnNonRecord {
         label: String,
         ty: Ty,
     },
-    /// A runtime-computed index (`$v[$k]`) on a value that accepts no
-    /// key at all.
+    /// A computed index (`$v[$k]`) on a value that accepts no key at all.
     DynamicIndexOnScalar {
         ty: Ty,
     },
@@ -275,8 +217,7 @@ impl TypeErrorKind {
     }
 }
 
-/// A located type error: source span, structural cause, and optional
-/// constraint provenance.
+/// A located type error: span, structural cause, and constraint provenance.
 #[derive(Debug, Clone)]
 pub struct TypeError {
     pub pos: Option<Span>,
@@ -285,8 +226,7 @@ pub struct TypeError {
 }
 
 impl TypeError {
-    /// Render the optional guidance sentence from the error's kind and
-    /// provenance; all prose lives in `explain.rs`.
+    /// The optional guidance sentence for this error, composed in `explain.rs`.
     pub fn hint(&self) -> Option<String> {
         super::explain::hint(&self.kind, self.reason.as_ref())
     }

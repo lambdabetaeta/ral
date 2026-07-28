@@ -1,21 +1,9 @@
-//! Lifted helpers for the structural scope IR nodes.
+//! Evaluator arms for the scope IR nodes — `within`, `grant`, `try`,
+//! `guard`, `audit` — and the vocabulary they share.
 //!
-//! The evaluator arms for `Within`/`Grant`/`Try`/`Guard`/`Audit` need
-//! three pieces of vocabulary:
-//!
-//!   * [`Outcome`] / [`classify`] — `try`'s body-result classification
-//!     into a normalised record the handler-call and audit-tag paths
-//!     can read uniformly.
-//!   * [`WithinScope`] — the parsed `within [...]` options map plus the
-//!     [`WithinScope::enter`] composer that runs a body inside the
-//!     resulting nest of `Shell::with_*` scopes.
-//!   * [`eval_within`] / [`eval_grant`] / [`eval_try`] / [`eval_guard`] /
-//!     [`eval_audit`] — the per-arm bodies extracted out of
-//!     [`crate::evaluator::eval_comp`]'s giant `match`.  Lifting them
-//!     keeps the match arms themselves one-liners so the unoptimised
-//!     debug frame of `eval_comp` stays small enough for deep
-//!     recursion under the default 2 MiB test-thread stack (see
-//!     `deeply_nested_calls`).
+//! The arms live here rather than inline in `eval_comp` so that match's
+//! unoptimised debug frame stays small enough for deep recursion under the
+//! default 2 MiB test-thread stack (`deeply_nested_calls`).
 
 use crate::ir::Val;
 use crate::source::Span;
@@ -29,9 +17,7 @@ use crate::evaluator::{apply, audit};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Classified outcome handed to `try`'s handler-call and audit-tag
-/// paths.  Derived from the body's result; never carries the canonical
-/// `Result` — all fields below are projection.
+/// `try`'s body result, flattened for the handler-call and audit-tag paths.
 pub(crate) struct Outcome {
     pub ok: bool,
     pub status: i32,
@@ -42,11 +28,9 @@ pub(crate) struct Outcome {
     pub col: usize,
 }
 
-/// The error record handed to `try`'s handler thunk — `{cmd, status,
-/// message, line, col}`.  Bytes are absent by design (§10.1): use `audit`
-/// for forensic capture.  Shared by `try`'s handler call and `poll`'s
-/// `` `err `` outcome so a caught error and a polled failure read the same
-/// shape; the field set and types match `typecheck::builtins::try_error_record`.
+/// The `{cmd, status, message, line, col}` record `try` hands its handler and
+/// `poll` its `` `err `` payload.  Bytes are absent by design; `audit` is the
+/// forensic path.  Mirrors `typecheck::builtins::try_error_record`.
 pub(crate) fn error_record(
     cmd: &str,
     status: i32,
@@ -67,8 +51,8 @@ pub(crate) fn error_record(
     ])
 }
 
-/// The failed body's position comes from the error's own span; an
-/// unspanned error falls back to the run's call site.
+/// A failed body's position comes from the error's own span; an unspanned
+/// error falls back to the run's call site.
 pub(crate) fn classify(body: &BodyResult, children: &[ExecNode], shell: &Shell) -> Outcome {
     match body {
         BodyResult::Value(v) => Outcome {
@@ -98,8 +82,7 @@ pub(crate) fn classify(body: &BodyResult, children: &[ExecNode], shell: &Shell) 
     }
 }
 
-/// The parsed `within [...]` options, ready to enter a scope.  Each key
-/// becomes a `Shell::with_*` call, composed left-to-right in `enter`.
+/// Parsed `within [...]` options; each key becomes a `Shell::with_*` scope.
 pub(crate) struct WithinScope {
     env_overrides: Option<HashMap<String, String>>,
     cwd: Option<PathBuf>,
@@ -195,7 +178,8 @@ impl WithinScope {
         })
     }
 
-    /// Compose the parsed keys as nested `with_*` scopes around `body`.
+    /// Nest the parsed keys as `with_*` scopes around `body`: env outermost,
+    /// then cwd, handlers innermost.
     pub(crate) fn enter<R>(self, shell: &mut Shell, body: impl FnOnce(&mut Shell) -> R) -> R {
         let Self {
             env_overrides,
@@ -266,12 +250,9 @@ pub(crate) fn eval_try(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    // `try` is pure control flow: bytes still flow through fd 1/2, so
-    // the capture policy is `None`.  `record_scope` still collects
-    // children (forced) so we can name the failing command in the
-    // error record.  Exit/Stopped propagate cleanly as `Err(Escape)`
-    // through `?`, which lifts via `From<Escape> for Control`; the
-    // parked-pipeline case never reaches `classify`.
+    // Pure control flow: bytes keep flowing through fd 1/2, hence
+    // `CapturePolicy::Off`.  Children are still forced so the error record can
+    // name the failing command; `Exit`/`Stopped` leave via `?` before `classify`.
     let body_val = eval_val(body, shell)?;
     let handler_val = eval_val(handler, shell)?;
     let record = audit::record_scope(shell, "try", CapturePolicy::Off, span, |s| {
@@ -288,9 +269,8 @@ pub(crate) fn eval_try(
         outcome.col,
     );
 
-    // The `[`ok A | `err ErrorRec]` variant attached to the audit node's
-    // `value` so `--audit` output retains the success/failure tag for
-    // each `try`; `try` itself returns body-or-handler value directly.
+    // The audit node's `value` carries the success/failure tag so `--audit`
+    // keeps it; `try` itself returns the body or handler value directly.
     let variant = if outcome.ok {
         Value::Variant {
             label: "ok".into(),
@@ -326,14 +306,9 @@ pub(crate) fn eval_guard(
     let cleanup_val = eval_val(cleanup, shell)?;
     audit::with_scope(shell, "guard", span, |shell| {
         let body_result = apply(body_val, vec![], mooring, shell);
-        // Cleanup is the guard's finalizer, run after the body whatever
-        // the body did. A cleanup *error* is catchable and best-effort:
-        // it is logged and the body's result stands, so an ordinary
-        // failure in the finalizer cannot mask the body's outcome. A
-        // cleanup *escape* (`exit`, `Stopped`) is non-local control that
-        // must not be swallowed — dropping `Stopped` orphans a stopped
-        // process group (pgid lost, never resumable or reapable) — so it
-        // takes priority over the body result and propagates.
+        // A cleanup error is logged and the body's result stands; a cleanup
+        // escape takes priority and propagates — dropping `Stopped` orphans
+        // a stopped process group, pgid lost, never resumable or reapable.
         match apply(cleanup_val, vec![], mooring, shell) {
             Ok(_) => body_result,
             Err(Break::Error(err)) => {
@@ -352,8 +327,6 @@ pub(crate) fn eval_audit(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    // Exit / Stopped propagate as `Err(Escape)` from `record_scope`;
-    // `?` lifts via `From<Escape> for Control` without classification.
     let body_val = eval_val(body, shell)?;
     let record = audit::record_scope(shell, "audit", CapturePolicy::Bytes, span, |s| {
         apply(body_val, vec![], mooring, s)

@@ -1,10 +1,5 @@
-//! Primitive operators and value indexing.
-//!
-//! [`eval_not`] and [`eval_binary`] evaluate the primitive operator nodes
-//! (arithmetic, comparison, boolean negation) produced by the elaborator's
-//! expression desugaring.
-//! [`index_value`] implements `CompKind::Index` — subscripting into lists by
-//! integer position and into maps by string key.
+//! Arithmetic, comparison, negation, and subscripting: the leaves `comp.rs`
+//! dispatches `CompKind::Binary`, `CompKind::Not`, and `CompKind::Index` to.
 
 use super::val::eval_val;
 use crate::ir::Val;
@@ -13,11 +8,7 @@ use crate::types::{Break, Error, Settled, Shell, Value};
 
 // ── Indexing ─────────────────────────────────────────────────────────────
 
-/// Index into a composite value.
-///
-/// Lists are indexed by non-negative `Int`; maps by `String` key.
-/// Out-of-bounds or missing-key errors carry a hint listing valid indices
-/// or available keys.
+/// Index a `List` by non-negative `Int`, or a `Map` by `String` key.
 pub(crate) fn index_value(val: &Value, key: &Value, shell: &Shell) -> Result<Value, Error> {
     match val {
         Value::List(items) => {
@@ -80,7 +71,7 @@ pub(crate) fn index_value(val: &Value, key: &Value, shell: &Shell) -> Result<Val
 
 // ── Primitive ops ────────────────────────────────────────────────────────
 
-/// Evaluate a `CompKind::Not(v)` — logical negation on a `Bool` value.
+/// Negation of a `Bool`, and only a `Bool`: nothing else is truthy here.
 pub(crate) fn eval_not(val: &Val, shell: &mut Shell) -> Result<Value, Error> {
     match eval_val(val, shell)? {
         Value::Bool(b) => Ok(Value::Bool(!b)),
@@ -92,16 +83,13 @@ pub(crate) fn eval_not(val: &Val, shell: &mut Shell) -> Result<Value, Error> {
     }
 }
 
-/// Evaluate a `CompKind::Binary(op, lhs, rhs)` — arithmetic, comparison,
-/// or structural equality on two values.  Arity is encoded in the IR
-/// variant, so no runtime arity guard is needed.
+/// Arithmetic, comparison, or equality; both operands evaluate, left first.
 pub(crate) fn eval_binary(op: BinaryOp, lhs: &Val, rhs: &Val, shell: &mut Shell) -> Settled<Value> {
     let l = eval_val(lhs, shell).map_err(Break::from)?;
     let r = eval_val(rhs, shell).map_err(Break::from)?;
     binop(&l, op, &r, shell)
 }
 
-/// Ensure `val` is `Int` or `Float`; error otherwise.
 fn require_numeric(val: &Value, shell: &Shell) -> Result<(), Error> {
     match val {
         Value::Int(_) | Value::Float(_) => Ok(()),
@@ -117,21 +105,11 @@ fn require_numeric(val: &Value, shell: &Shell) -> Result<(), Error> {
     }
 }
 
-/// Evaluate a binary operation, dispatching on the operator category.
-///
-/// - `Eq`/`Ne`: structural equality on any value pair.
-/// - `Lt`/`Gt`/`Le`/`Ge`: ordering via [`value_ordering`](crate::builtins::util::value_ordering)
-///   — Int·Int as `i64`, mixed Int/Float as f64, String·String lexicographic.
-/// - `Add`/`Sub`/`Mul`/`Div`/`Mod`: arithmetic on numerics.  Integer
-///   ops check overflow; division/modulo guard against zero; `%` is
-///   integer-only.
+/// `==`/`!=` share `values_equal` with the `equal` builtin, so comparing a pair
+/// of closures errors on both surfaces instead of answering a non-reflexive
+/// `false`.
 fn binop(l: &Value, op: BinaryOp, r: &Value, shell: &Shell) -> Settled<Value> {
     match op.kind() {
-        // Route through `values_equal` — the same definition `equal`
-        // uses — so `==`/`!=` and `equal` cannot disagree: a
-        // computation pair (closures, blocks, handles) raises the same
-        // "cannot compare" error on both surfaces instead of `==`
-        // silently answering `false` for a non-reflexive `f == f`.
         BinaryOpKind::Eq(EqOp::Eq) => Ok(Value::Bool(crate::builtins::util::values_equal(l, r)?)),
         BinaryOpKind::Eq(EqOp::Ne) => Ok(Value::Bool(!crate::builtins::util::values_equal(l, r)?)),
         BinaryOpKind::Compare(c) => compare(l, c, r),
@@ -139,9 +117,8 @@ fn binop(l: &Value, op: BinaryOp, r: &Value, shell: &Shell) -> Settled<Value> {
     }
 }
 
-/// Ordering on the four [`CompareOp`] variants via
-/// [`value_ordering`](crate::builtins::util::value_ordering), which owns
-/// the comparison taxonomy.
+/// Ordering is `builtins::util::value_ordering`, shared with `lt`, `gt`, and
+/// `sort-list`, which owns the comparison taxonomy.
 fn compare(l: &Value, op: CompareOp, r: &Value) -> Settled<Value> {
     let want: fn(std::cmp::Ordering) -> bool = match op {
         CompareOp::Lt => std::cmp::Ordering::is_lt,
@@ -153,9 +130,8 @@ fn compare(l: &Value, op: CompareOp, r: &Value) -> Settled<Value> {
     Ok(Value::Bool(want(order)))
 }
 
-/// Arithmetic on the five [`ArithOp`] variants.  `Mod` rejects float
-/// operands; `Div` / `Mod` reject a zero divisor; integer ops are
-/// overflow-checked.
+/// Int·Int stays in `i64` and is overflow-checked; one Float operand promotes
+/// both, and there `%` is refused rather than given IEEE remainder semantics.
 fn arithmetic(l: &Value, op: ArithOp, r: &Value, shell: &Shell) -> Result<Value, Error> {
     let div_zero = || shell.err("division by zero", 1);
     let mod_zero = || shell.err("modulo by zero", 1);
@@ -173,6 +149,7 @@ fn arithmetic(l: &Value, op: ArithOp, r: &Value, shell: &Shell) -> Result<Value,
             ArithOp::Mod => a.checked_rem(*b).map(Value::Int).ok_or_else(overflow)?,
         })
     } else {
+        // Both operands cleared `require_numeric`, so `as_float` cannot fail.
         let a = l.as_float().unwrap();
         let b = r.as_float().unwrap();
         Ok(match op {

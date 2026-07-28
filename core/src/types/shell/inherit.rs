@@ -1,134 +1,63 @@
-//! State transfer between parent and child interpreter states.
+//! Moving state from a parent shell into a child computation.
 //!
-//! A same-thread β-step — forcing a block or applying a lambda — runs the
-//! body *in* the caller's [`Shell`] ([`Shell::with_thunk_body`]): only the
-//! [`Mobile`] is swapped for one rescoped to the closure's captured
-//! environment, while `io`,
-//! [`SessionState`](super::SessionState), and
-//! [`LocalState`](super::LocalState) are shared by identity — and the
-//! caller's [`Mooring`] simply stays borrowed.  The body
-//! therefore observes the caller's audit trail, byte sinks, builtin table,
-//! cancel root, and terminal lease without any of them being copied or
-//! re-attached — there is no second store to drift from the first.
-//! [`ThunkBody`] fixes the only two places a block and a lambda differ: the
-//! entry `last_status` and the fold-back set.
+//! A same-thread β-step is no fork: [`Shell::with_thunk_body`] runs the body
+//! on the caller's [`Shell`], swapping only the [`Mobile`] for one rescoped to
+//! the closure's captured environment, while `io`,
+//! [`SessionState`](super::SessionState) and [`LocalState`](super::LocalState)
+//! stay shared by identity — no second store to drift from the first.
 //!
-//! The owned-[`Shell`] modes below are *genuine* runtime forks — a
-//! different store — and so copy state explicitly:
-//!
-//! - **Spawned thread** (`spawn`, `par`, detached worker):
-//!   [`Shell::spawn_thread`] snapshots the parent's [`Context`](super::Context)
-//!   and ships it to a fresh OS thread that owns its own IO; nothing flows
-//!   back. The worker registry (`local.workers`) is the one piece of
-//!   [`LocalState`](super::LocalState) that *does* flow in here — shared by
-//!   `Arc`, not cloned-and-forgotten — so a `spawn` nested inside a worker's
-//!   body registers into the same directory its parent did.
-//! - **Cross-process pipeline stage**: [`Shell::child_of`] builds a child
-//!   over a throwaway parent in the helper process (see
-//!   [`crate::child_eval`]) and folds its result back with
-//!   [`Shell::return_to`].
-//! - **REPL aside** (prompt, hook): [`Shell::child_from`] clones the
-//!   parent's [`Context`](super::Context) without touching its local
-//!   machinery; the child is an independent sibling with no flow-back.
-//!   [`Shell::join_session`] adds the one edge an aside keeps — the parent's
-//!   durable cancel root, shared — so the aside is inside the session for
-//!   cancellation while beginning no command of its own.
-//! - **Host session fork** (sub-agent): [`Shell::fork_session`] is the
-//!   session-scoped specialisation of `child_from` — it snapshots the whole
-//!   scope, context, and builtin table into a child session that performs its
-//!   own runs, with fresh control counters and no flow-back.
-//!
-//! Each fork starts from a freshly-defaulted [`SessionState`](super::SessionState),
-//! so it mints no [`TerminalLease`](crate::process::TerminalLease): terminal
-//! authority lives on the [`Mooring`], not the shell, so a fork simply
-//! cannot foreground — the gate (`access ∧ session lease`) fails on the
-//! missing lease no matter what a later run's mooring claims.
-//!
-//! [`Shell::inherit_from`] and [`Shell::return_to`] are the per-substate
-//! manifests the cross-process stage leans on: `mobile.context` clones
-//! whole; `mobile.control`, `io` (via
-//! [`Io::inherit_from`](crate::io::Io::inherit_from) /
-//! [`return_to`](crate::io::Io::return_to)), `local.audit` (which also
-//! carries the dispatch call-site register — in on inherit, never back on
-//! return), and `local.repl` each carry their
-//! own inherit / return rule; `session.builtins`, `session.library_docs`,
-//! `session.root`, `session.anchor`, and `session.guest_jail` are shared
-//! so dispatch, the `help`/`explain` index, the cancel root and anchor, and (on
-//! a guest) the jail's uid counter reach the child.  The
-//! asymmetry between the two manifests is the flow matrix — the call site
-//! and the `within`-attenuable bits do not flow back, but `context.cwd`
-//! does.
+//! The owned-[`Shell`] routines below — spawned thread, cross-process pipeline
+//! stage, REPL aside, sub-agent session — are genuine forks over a different
+//! store, so each spells out what it carries across.  Every one starts from a
+//! defaulted [`SessionState`](super::SessionState), which mints no
+//! [`TerminalLease`](crate::process::TerminalLease): the foreground gate wants
+//! the run's access *and* the session's lease, so a fork fails the second half
+//! whatever [`Mooring`] it later runs under.
 
 use super::{Mobile, Mooring, Shell, SurfaceSink};
 use crate::types::{ControlState, Env};
 use std::sync::Arc;
 
 /// Which same-thread thunk body [`Shell::with_thunk_body`] is eliminating.
-///
-/// The kind fixes the two places a forced block and an applied lambda
-/// differ — the entry `last_status` and the fold-back set — spelled out in
-/// the per-variant docs below.
+/// A forced block and an applied lambda differ in exactly two places: the
+/// entry `last_status` and the fold-back set.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ThunkBody {
-    /// `!{ … }` — force a block (or apply one as a function).  Enters with
-    /// the caller's `last_status` (cloned with the mobile) and folds only
-    /// `last_status` back: a block's `let` / `cd` and any `chpwd` it queues
-    /// die with the body mobile.
+    /// `!{ … }` — enters with the caller's `$?` and folds only `last_status`
+    /// back, so a block's `let` / `cd` and any `chpwd` it queues die with the
+    /// body mobile.
     Block,
-    /// `λx. …` applied to an argument.  Enters with a *fresh* `last_status`
-    /// — a lambda body does not inherit the caller's `$?` — and folds
-    /// `{last_status, cwd}` back, so a `cd` inside a function, alias, or
-    /// handler persists like every other shell.  The bound parameter is
-    /// installed by the caller's closure, since pattern binding lives in the
-    /// evaluator, a layer above `Shell`.
+    /// `λx. …` applied to an argument: a fresh `$?` on entry, `{last_status,
+    /// cwd}` folded back, so a `cd` inside a function, alias, or handler
+    /// persists like every other shell.  The caller's closure binds the
+    /// parameter — pattern binding lives in the evaluator, above `Shell`.
     Lambda,
 }
 
 impl Shell {
-    /// Snapshot the persistable half of this shell's state.
-    ///
-    /// Returns a clone of [`Self::mobile`] — the bundle that survives
-    /// across an evaluation boundary independently of local machinery
-    /// (IO, audit, REPL scratch).  The primitive a caller uses to
-    /// stash the parent's mobile, install a different one for a
-    /// sub-evaluation, and later restore the original.  The returned
-    /// value is logically detached: mutating it does not affect
-    /// `self`.
+    /// Clone the persistable half of this shell: the bundle that crosses an
+    /// evaluation boundary, leaving `io`, audit and REPL scratch behind.
     pub fn mobile(&self) -> Mobile {
         self.mobile.clone()
     }
 
-    /// Replace `self.mobile` wholesale with `mobile`.
+    /// Replace `self.mobile` wholesale; snapshot with [`Self::mobile`] to keep
+    /// what it displaces.
     ///
-    /// The setter half of the [`Self::mobile`] / [`Self::install_mobile`]
-    /// pair: completes the swap-in-then-swap-out protocol that lets a
-    /// caller move a mobile bundle through a sub-evaluation without
-    /// threading it through every call site.  The previous mobile is
-    /// dropped; callers wanting to preserve it should snapshot via
-    /// [`Self::mobile`] first.  After the call, every read of
-    /// `self.mobile.*` observes the freshly installed bundle.
-    ///
-    /// Restricted to `pub(crate)` so callers outside `core` cannot
-    /// silently overwrite the builtin table or handler stack.  Wire-borne
-    /// mobiles must go through [`crate::subprocess::install_shell_mobile`],
-    /// which preserves the receiver's builtins and splices the wire's
-    /// handler frames on top.
+    /// `pub(crate)` so nothing outside core can overwrite the handler stack
+    /// behind the evaluator's back.  A wire-borne mobile goes through
+    /// [`crate::subprocess::install_shell_mobile`], which splices the wire's
+    /// handler frames atop the receiver's own.
     pub(crate) fn install_mobile(&mut self, mobile: Mobile) {
         self.mobile = mobile;
     }
 
-    /// Swap `mobile` in, run `f`, swap back out.
+    /// Swap `mobile` in, run `f`, swap back out; the post-run bundle comes
+    /// back beside `f`'s result, to keep or to discard.
     ///
-    /// The combinator form of the [`Self::mobile`] / [`Self::install_mobile`]
-    /// pair.  Returns the post-run mobile (which `f` may have mutated
-    /// through `&mut Shell`) alongside `f`'s result, so the caller
-    /// can inspect or discard the body's mobile mutations explicitly.
-    /// At no point during `f` is `self.mobile` the caller's original;
-    /// on return, `self.mobile` is byte-for-byte that original (moved
-    /// back via [`std::mem::replace`]).  An unwind through `f` would
-    /// leave `self.mobile` as the passed-in bundle — acceptable
-    /// because ral evaluation does not rely on Rust unwinding for
-    /// control flow.
+    /// An unwind through `f` would leave the passed-in bundle installed —
+    /// harmless only because ral carries control flow in its own signals, not
+    /// in Rust panics.
     pub fn run_with_mobile<R>(
         &mut self,
         mobile: Mobile,
@@ -141,24 +70,14 @@ impl Shell {
     }
 
     /// Evaluate a same-thread thunk body — a forced block or an applied
-    /// lambda — in place on this shell.
+    /// lambda — in place on this shell.  The single routine block and lambda
+    /// elimination meet at: `f` installs the body's [`Mobile`] and hands it
+    /// back, and the [`ThunkBody`]-specific set is folded onto the caller's.
     ///
-    /// Builds the body's [`Mobile`] from a clone of `self.mobile`, rescoped
-    /// to `captured` plus a fresh frame so the body's own `let` bindings
-    /// live above the captured closure scope, and hands it to `f` together
-    /// with `&mut self`.  `f` installs the mobile for the body's duration
-    /// (via [`Self::run_with_mobile`], for both a lambda and a block) and
-    /// returns the post-body mobile alongside its result; this routine then
-    /// folds the [`ThunkBody`]-specific set back onto the caller's mobile.
-    /// The store — `io`, `session`, `local` — is shared by identity (see
-    /// the module doc); this is the single in-place routine block and lambda
-    /// elimination meet at.
-    ///
-    /// `local.repl.pending_chpwd` is bracketed for a [`ThunkBody::Block`] —
-    /// a block has no business persisting a REPL notification the parent
-    /// would replay — but left to ride the shared `local.repl` for a
-    /// [`ThunkBody::Lambda`], where a body `cd` is a real process-state
-    /// change: the REPL-notification analogue of the `cwd` fold-back.
+    /// `local.repl.pending_chpwd` is bracketed for a [`ThunkBody::Block`] — a
+    /// block has no business persisting a REPL notification the parent would
+    /// replay — and left to ride the shared `local.repl` for a
+    /// [`ThunkBody::Lambda`], the notification analogue of its `cwd` fold-back.
     pub(crate) fn with_thunk_body<R>(
         &mut self,
         kind: ThunkBody,
@@ -169,8 +88,6 @@ impl Shell {
         mobile.scope = captured.clone();
         mobile.scope.push_scope();
         if matches!(kind, ThunkBody::Lambda) {
-            // A lambda body enters with a fresh `$?`; a block keeps the
-            // caller's, cloned above.
             mobile.control.last_status = ControlState::default().last_status;
         }
         let saved_pending_chpwd = match kind {
@@ -189,52 +106,41 @@ impl Shell {
         result
     }
 
-    /// Build a fresh [`Shell`] whose lexical environment is a clone
-    /// of `captured`.  Other components are defaulted.  Building
-    /// block for [`Self::child_of`], [`Self::child_from`], and
-    /// [`Self::spawn_thread`]; external callers want one of those,
-    /// since a defaulted shell has no inherited grants, env vars, or
-    /// call-site location.
+    /// A defaulted [`Shell`] scoped to `captured`: no inherited grants, env
+    /// vars, or call site.  The base every fork below builds on.
     fn from_captured(captured: &Env) -> Self {
         let mut shell = Self::new(crate::io::TerminalState::default());
         shell.mobile.scope = captured.clone();
         shell
     }
 
-    /// Cross-process pipeline-stage child: inherit context state from
-    /// `parent` *and* move the read-once bits (pipe stdin, audit trail,
-    /// REPL editor context) out of parent for the duration of the child's
-    /// life.  Pair with [`Shell::return_to`] to fold the mutations back,
-    /// lest the lent state die with the child.
+    /// Cross-process pipeline-stage child: inherit `parent`'s context *and*
+    /// move its read-once bits — pipe stdin, audit trail, REPL editor context
+    /// — into the child.  Pair with [`Shell::return_to`], lest the lent state
+    /// die with the child.
     ///
-    /// Unlike a same-thread β-step (which runs in place via
-    /// [`Shell::with_thunk_body`]), this builds a *new* `Shell` because the
-    /// pipeline stage runs in a separate helper process: its `parent` is a
-    /// throwaway reconstructed there ([`crate::child_eval`]), so the loan is
-    /// repaid into that throwaway, not a live caller.  The per-call overhead
-    /// benchmark also drives it directly to measure the bracket.
+    /// `parent` is the throwaway `child_eval` rebuilds in the helper process,
+    /// so the loan is repaid into that throwaway and not a live caller.
     pub fn child_of(captured: &Env, parent: &mut Self) -> Self {
         let mut child = Self::from_captured(captured);
         child.inherit_from(parent);
         child
     }
 
-    /// REPL aside (prompt, hook shell): clone context state from
-    /// `parent` without touching its IO / audit / REPL editor
-    /// context.  The child is an independent sibling; no flow-back is
-    /// needed.  The call site (`local.audit.call_site`), the builtin table
-    /// (`session.builtins`), and the library doc index
-    /// (`session.library_docs`) are copied alongside the context clone so the
-    /// aside resolves names, renders positions, and describes itself exactly
-    /// as the parent would.  The detach policy rides along with the builtin
-    /// table it belongs to: a child that resolves `detach` must also hold the
-    /// budget it spends, and it spends the parent's rather than a fresh one.
+    /// Clone `parent`'s context into an independent sibling, touching none of
+    /// its IO, audit, or REPL editor context — no flow-back needed.  The
+    /// shared body of [`Self::fork_session`] and [`Self::join_session`].
+    ///
+    /// The builtin table, library docs, call site and source registry ride
+    /// along so the child resolves, renders, and describes as the parent does;
+    /// the detach budget too, so a child that resolves `detach` spends the
+    /// parent's births rather than a fresh allowance.
     pub fn child_from(captured: &Env, parent: &Self) -> Self {
         let mut child = Self::from_captured(captured);
         child.mobile.context = parent.mobile.context.clone();
         child.local.audit.call_site = parent.local.audit.call_site;
-        // The registry rides along with the call site: an `Arc` bump, and
-        // without it the aside's spans name sources it does not hold.
+        // Rides with the call site: without the registry, the child's spans
+        // name sources it does not hold.
         child.session.sources = parent.session.sources.clone();
         child.session.builtins = parent.session.builtins.clone();
         child
@@ -252,43 +158,30 @@ impl Shell {
     /// Fork this shell into an independent child *session* — the primitive a
     /// host uses to spawn a sub-agent that executes its own runs.
     ///
-    /// The session-scoped specialisation of [`Self::child_from`]: the child
-    /// snapshots this shell's whole lexical `scope` (prelude, libraries, and
-    /// every accumulated binding), its dynamic `context` (cwd, env, grants,
-    /// handlers), and the installed builtin table, and starts fresh in
-    /// everything else — fresh control counters (a new session is not a
-    /// continuation of the caller's call stack) and a freshly-defaulted
-    /// [`SessionState`](super::SessionState), which mints no terminal lease
-    /// — it is not the foreground session, so no mooring built over it can
-    /// ever borrow one — and a freshly-minted durable root, deaf to the
-    /// ambient causes even when forked from a session that faces them (it is
-    /// not the signal-facing session either — its host cancels it through
-    /// [`Shell::cancel_handle`]). There is no flow-back: the child's `cd`,
-    /// env, and new bindings die with it.
+    /// The session-scoped [`Self::child_from`]: scope, context, and builtin
+    /// table are snapshotted, everything else fresh — control counters, since
+    /// a new session continues no call stack, and a durable root deaf to the
+    /// ambient causes even when forked from a facing session, its host
+    /// cancelling it through [`Shell::cancel_handle`] instead.  Nothing flows
+    /// back: the child's `cd`, env, and new bindings die with it.
     ///
-    /// Routing a host fork through here keeps the "what flows into a child"
-    /// decision in the flow matrix rather than at the call site, so a host
-    /// cannot silently sever an inheritable datum — the builtin table among
-    /// them — by hand-copying only the fields it happened to remember.
+    /// Routing host forks through one door keeps "what a child inherits" in
+    /// one place, where a hand-copying call site would quietly sever a datum
+    /// it forgot.
     pub fn fork_session(&self) -> Self {
         Self::child_from(&self.mobile.scope, self)
     }
 
     /// Join this session as an *aside*: a second [`Shell`] the host runs
-    /// beside it rather than as one — the REPL's hook shell, which evaluates
+    /// beside it rather than as one — the REPL's hook shell, evaluating
     /// arbitrary plugin code while the session sits at its prompt.
     ///
-    /// The aside twin of [`Self::fork_session`], and its opposite in the one
-    /// place that matters: it *shares* this session's
-    /// [`DurableRoot`](crate::process::DurableRoot) instead of minting a fresh
-    /// one, so it is inside the session for cancellation exactly as
-    /// [`Self::inherit_from`] and [`Self::spawn_thread`] are — it hears the
-    /// shutdown request, a root abort, and a [`Self::cancel_handle`] cancel
-    /// through ancestry, and its runs' frames read the interrupt watermark as
-    /// this session's own do, each against its own birth. A hook interrupted
-    /// while it runs unwinds; one aimed at a command the session was already
-    /// running is older than every frame the aside will mint, so the aside
-    /// can neither absorb it nor keep it from the run it was aimed at.
+    /// The twin of [`Self::fork_session`], opposite in the one place that
+    /// matters: it *shares* this session's durable root instead of minting a
+    /// fresh one, so it is inside the session for cancellation.  An interrupt
+    /// aimed at a command the session was already running is older than every
+    /// frame the aside will mint, so the aside can neither absorb it nor keep
+    /// it from the run it was aimed at.
     pub fn join_session(&self) -> Self {
         let mut aside = Self::child_from(&self.mobile.scope, self);
         aside.session.root = self.session.root.clone();
@@ -296,39 +189,27 @@ impl Shell {
         aside
     }
 
-    /// Spawn `f` on a fresh OS thread with a cloned child shell and a
-    /// [`Mooring`] rebuilt from `parent` for a worker.  The caller supplies
-    /// `scopes` — the thunk's captured closure scope — and `surface`, the
-    /// buffering sink the worker surfaces into instead of the spawning run's
-    /// live one; this shell's [`Context`](super::Context) subtree is cloned
-    /// and installed on the new thread.  Per-fork IO setup lives inside `f`.
-    /// The one and only thread-spawn primitive.
+    /// Spawn `f` on a fresh OS thread with a cloned child shell — the one and
+    /// only thread-spawn primitive.  `scopes` is the thunk's captured closure
+    /// scope and `surface` the buffering sink the worker surfaces into instead
+    /// of the spawning run's live one; per-fork IO setup lives inside `f`.
     ///
-    /// The worker's control counters start fresh — `call_depth` and `$?` at
-    /// zero, since it is no continuation of the spawning call stack — but the
-    /// `recursion_limit` ceiling is the parent's: a limit set by rc or CLI
-    /// belongs to the session, not to one stack.
+    /// The worker's counters start fresh, since it continues no call stack,
+    /// but the `recursion_limit` ceiling is the parent's: a limit set by rc or
+    /// CLI belongs to the session, not to one stack.
     ///
-    /// The mooring is minted here rather than inside the thread so the
-    /// worker's scope can be returned to the caller, and it is a *rebuild*
-    /// ([`Mooring::for_worker`]), never a share: the worker runs under a
-    /// [`worker`](crate::process::DurableRoot::worker) scope of the **durable
-    /// root**, not the spawning run's foreground scope, so a foreground
-    /// cancel — a run timeout or a Ctrl-C — does not reach it, while the
-    /// ambient shutdown cause folded through the root does.  Only a
-    /// [`RootAbort`](crate::process::CancelCause::RootAbort) on the root,
-    /// or a cancel on the worker's own returned scope (via `cancel` /
-    /// `race`), stops it.  That returned child scope is stored on the
-    /// handle so `cancel` / `race` can stop just this worker.
+    /// Its [`Mooring`] is a *rebuild* ([`Mooring::for_worker`]), never a
+    /// share, minted here rather than in the thread so the worker's cancel
+    /// scope can be returned: the worker hangs off a
+    /// [`worker`](crate::process::DurableRoot::worker) scope of the durable
+    /// root, so a foreground cancel — a run timeout, a Ctrl-C — misses it,
+    /// while the ambient shutdown cause folded through the root, a
+    /// [`RootAbort`](crate::process::CancelCause::RootAbort), or a cancel on
+    /// the returned scope stops it.
     ///
-    /// `local.workers` — the worker registry — is shared into the new
-    /// thread's `Shell` by `Arc` clone, alongside `session.root`,
-    /// `session.builtins`, `session.library_docs`, and `session.guest_jail`:
-    /// a `spawn` inside `f`'s body registers into the same registry this
-    /// shell's own workers
-    /// do, rather than a private one of its own.  `local.detach` — the
-    /// detach budget — is shared the same way, so a `detach` inside `f`'s
-    /// body spends the owning session's births rather than a copy.
+    /// The worker registry and the detach budget are `Arc`-shared, not copied,
+    /// so a `spawn` or `detach` nested in `f`'s body registers and spends
+    /// where this shell's own do.
     pub fn spawn_thread<F, R>(
         &self,
         parent: &Mooring,
@@ -361,17 +242,18 @@ impl Shell {
             child.session.guest_jail = guest_jail;
             child.local.workers = workers;
             child.local.detach = detach;
-            // Shared, not owned: this worker's shell dropping must not
-            // cancel the parent's whole registry.
+            // Shared, not owned: this worker's shell dropping must not cancel
+            // the parent's whole registry.
             child.local.workers_owned = false;
             f(&mooring, &mut child)
         });
         (handle, worker_cancel)
     }
 
-    /// Propagate runtime state from `parent` into this child shell
-    /// for a same-thread thunk body.  Per-substate inherit rules; the
-    /// asymmetry with [`Self::return_to`] is the flow matrix.
+    /// Propagate `parent`'s state into this cross-process pipeline-stage child;
+    /// [`Self::child_of`] is its only caller.  Each substate carries its own
+    /// inherit rule, whose asymmetry with [`Self::return_to`] is the flow
+    /// matrix.
     pub fn inherit_from(&mut self, parent: &mut Self) {
         self.mobile.context = parent.mobile.context.clone();
         self.mobile.control.inherit_from(&parent.mobile.control);
@@ -385,14 +267,10 @@ impl Shell {
         self.session.guest_jail = parent.session.guest_jail.clone();
     }
 
-    /// Flow mutations made by a child computation back to `parent`.
-    /// Per-substate return rules.  The call site (`local.audit.call_site`)
-    /// and the `within`-attenuable bits do not flow back; the asymmetry is
-    /// the point.
-    ///
-    /// `cwd` (both halves of the pair) flows back: a `cd` inside a
-    /// thunk persists like every other shell.  Threads do not run
-    /// `return_to`, so their own `cd`s stay private.
+    /// Flow a child stage's mutations back to `parent`.  The call site and the
+    /// `within`-attenuable bits stay behind; both halves of `cwd` do not, so a
+    /// `cd` in a stage persists like every other shell.  A spawned thread
+    /// never runs this, so its own `cd`s stay private.
     pub fn return_to(&mut self, parent: &mut Self) {
         self.mobile.control.return_to(&mut parent.mobile.control);
         self.local.audit.return_to(&mut parent.local.audit);
@@ -403,9 +281,9 @@ impl Shell {
     }
 }
 
-// Unix-only: both tests assert a minted `TerminalLease` is `Some`, but
-// `mint_at_startup` returns `None` unconditionally on platforms with no
-// `tcsetpgrp` (Windows), so the assertions cannot hold there.
+// Unix-only: the lease tests assert a minted `TerminalLease` is `Some`, and
+// `mint_at_startup` returns `None` unconditionally where there is no
+// `tcsetpgrp`.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -413,12 +291,9 @@ mod tests {
     use crate::types::shell::{DEFAULT_RECURSION_LIMIT, TerminalAccess};
 
     /// A same-thread lambda body runs in place on the caller's shell, so it
-    /// observes the session-owned terminal lease *by identity* — not by a
-    /// manifest remembering to copy a witness into a fresh `SessionState`.
-    /// A foreground external inside a function / alias / handler body can
-    /// therefore take the controlling terminal whenever the run is
-    /// `Leased`, and the lease is plainly still held after the body since it
-    /// never moved.
+    /// observes the session-owned terminal lease *by identity*: a foreground
+    /// external inside a function, alias, or handler body can take the
+    /// controlling terminal whenever the run is `Leased`.
     #[test]
     fn lambda_body_shares_the_session_terminal_lease() {
         let mut shell = Shell::default();
@@ -448,14 +323,10 @@ mod tests {
         );
     }
 
-    /// A forked session is not the foreground session, so it holds no terminal
-    /// authority — even when forked from a parent that does, and even under a
-    /// mooring that claims `Leased` access for the child's own run.
-    /// `fork_session` builds the child over a freshly-defaulted
-    /// `SessionState`, which mints no lease witness, so a sub-agent can never
-    /// foreground an external command and seize the controlling terminal the
-    /// host's TUI owns: the gate (`access ∧ session lease`) fails on the
-    /// missing lease, with no shell-side "no authority" flag needed.
+    /// A forked session builds over a defaulted `SessionState` and so mints no
+    /// lease witness: a sub-agent can never foreground an external command and
+    /// seize the controlling terminal the host's TUI owns, even forked from a
+    /// parent that holds the lease and run under a mooring claiming `Leased`.
     #[test]
     fn fork_session_holds_no_terminal_authority() {
         let mut parent = Shell::default();
@@ -476,10 +347,9 @@ mod tests {
         );
     }
 
-    /// A worker's counters start fresh but its recursion ceiling is the
-    /// parent's: an rc `recursion_limit:` key or a `--recursion-limit` flag
-    /// configures the session, so a `spawn` / `par` / `watch` body must not
-    /// silently fall back to the compile-time default.
+    /// An rc `recursion_limit:` key or a `--recursion-limit` flag configures
+    /// the session, so a `spawn` / `par` / `watch` body must not silently fall
+    /// back to the compile-time default — though its counters do start fresh.
     #[test]
     fn spawned_worker_inherits_the_recursion_limit() {
         let mut parent = Shell::default();

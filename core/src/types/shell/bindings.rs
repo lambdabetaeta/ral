@@ -1,53 +1,27 @@
 //! The binding-lease ledger: a per-[`Shell`](super::Shell) policy that lets
 //! an agent host expire an idle top-level scratch name, leaving core's
-//! lexical semantics untouched everywhere else
-//! (`decisions/260629_agent-binding-reaping`).
+//! lexical semantics untouched everywhere else.
 //!
-//! **Single-writer verification.** This ledger is a plain owned struct with
-//! no lock — unlike the [`WorkerRegistry`](super::workers::WorkerRegistry)
-//! beside it on [`LocalState`](super::LocalState), which needs
-//! `Arc<Mutex<…>>` because the reaper daemon thread and spawned worker
-//! threads write it concurrently with the agent's own thread. The binding
-//! ledger has exactly one writer, verified by walking every path that
-//! reaches a `Shell` in exarch:
-//!
-//! - Every touch is `Agent::transport.shell_mut()`. Every `Agent` — the
-//!   trunk and every forked sub-agent — is driven by exactly one dedicated
-//!   OS thread running `Agent::attend`: the TUI's `worker` thread
-//!   (`exarch/src/tui/tui_loop.rs`, `std::thread::Builder::spawn_scoped`),
-//!   headless's single `pump` worker thread (`exarch/src/headless.rs`), and
-//!   each `agent`-tool spawn's own dedicated thread
-//!   (`exarch/src/shell_eval/tools/agent.rs`) for a fork. No two threads
-//!   ever hold the same `Agent`, and an `Agent` (with it, its `Shell`)
-//!   never migrates threads mid-life.
-//! - `/clear` and `/resources` do not bypass this: both route as
-//!   `Post::Command` through `Agent::attend`'s loop, handled by
-//!   `Control::command` — called from *inside* `attend`, on the agent's own
-//!   thread, never from the TUI's separate render/input thread (which reads
-//!   only the bus and the fleet's shared, separately-locked registry).
-//! - The reaper daemon thread that fires the worker lease
-//!   (`decisions/260705_leases-and-budgets`) never touches
-//!   `LocalState::bindings`: it only ever takes the worker registry's own
-//!   lock.
-//!
-//! A lock here would document a race that cannot happen. If a future change
-//! ever lets a second thread reach `&mut Shell` for a live agent, this
-//! module's unlocked design is the first thing that must change — and this
-//! doc comment is where to look.
+//! Deliberately unlocked, unlike the
+//! [`WorkerRegistry`](super::workers::WorkerRegistry) beside it on
+//! [`LocalState`](super::LocalState): every touch arrives through
+//! `&mut Shell` on the one thread driving that `Agent`'s attend loop — slash
+//! commands included, since they reach it as posts handled inside that loop
+//! rather than on exarch's render thread — and the daemon thread firing a
+//! worker's idle lease takes only the worker registry's own lock. Let a
+//! second thread ever reach `&mut Shell` for a live agent and this unlocked
+//! design is the first thing that must change.
 
 use std::collections::{HashMap, HashSet};
 
-/// Host-stated per-agent policy: a leased name expires once it has gone
-/// `idle_calls` epochs without use.
+/// Host-stated per-agent policy: a leased name expires after `idle_calls`
+/// epochs without use, an epoch being the shell's committed-run clock
+/// ([`Shell::run`](super::Shell::run)'s source-arm tick), never wall time.
 ///
-/// The epoch is the shell's committed-run
-/// clock ([`Shell::run`](super::Shell::run)'s source-arm tick),
-/// never wall time. `large_binding_bytes` is a separate, orthogonal axis —
-/// residency, not lifetime — read only by the install chokepoint's
-/// large-binding check: an install whose
-/// [`Value::shallow_size`](crate::types::Value::shallow_size) estimate
-/// meets this threshold queues a [`LargeBindingNotice`], regardless of how
-/// idle or fresh the name is.
+/// `large_binding_bytes` is an orthogonal axis — residency, not lifetime:
+/// an install whose
+/// [`Value::shallow_size`](crate::types::Value::shallow_size) estimate meets
+/// it queues a [`LargeBindingNotice`], however fresh the name.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct BindingLease {
     pub idle_calls: u64,
@@ -60,18 +34,14 @@ pub struct BindingPruneNotice {
     pub name: String,
     /// Epochs elapsed since last use at prune time (`>= lease.idle_calls`).
     pub idle_calls: u64,
-    /// The pruned value's [`Value::type_name`](crate::types::Value::type_name),
-    /// for the card.
+    /// The pruned value's [`Value::type_name`](crate::types::Value::type_name).
     pub kind: &'static str,
 }
 
 /// The transcript facts of one session-scope install whose shallow-size
-/// estimate met [`BindingLease::large_binding_bytes`] at the moment it was
-/// written
-///
-/// — a residency nudge, not a lease event: the binding itself is
-/// completely untouched, and a rebind that still exceeds the threshold
-/// queues another notice (`decisions/260629_agent-binding-reaping`).
+/// estimate met [`BindingLease::large_binding_bytes`] as it was written — a
+/// residency nudge that leaves the binding wholly untouched, re-queued by
+/// every rebind still over the threshold.
 #[derive(Clone, Debug)]
 pub struct LargeBindingNotice {
     pub name: String,
@@ -84,34 +54,26 @@ struct Armed {
     lease: BindingLease,
     /// The committed-run clock. Ticks once per source-door run.
     epoch: u64,
-    /// Every name visible anywhere in the scope chain at arm time —
-    /// prelude, agent library, rc bindings, host seed vars. A baseline name
-    /// is never a candidate, forever (until the shell is rebuilt and
-    /// re-armed). This also covers shadows: a model `let` that shadows a
-    /// prelude name is itself baseline-named and therefore never pruned, so
-    /// pruning can never un-shadow an older meaning.
+    /// Every name visible anywhere in the scope chain at arm time — prelude,
+    /// agent library, rc bindings, host seed vars — never a candidate. This
+    /// covers shadows too: a model `let` over a prelude name is itself
+    /// baseline-named, so pruning can never un-shadow an older meaning.
     baseline: HashSet<String>,
-    /// Leased candidates: name -> last-used epoch. An entry exists exactly
-    /// for the non-baseline names installed at session scope since arming
-    /// (enforced by the install chokepoint and self-healed by the prune
-    /// verb's adoption sweep).
+    /// Leased candidates: name -> last-used epoch, one entry per non-baseline
+    /// name installed at session scope since arming.
     last_used: HashMap<String, u64>,
-    /// Large-binding notices queued since the last drain — a plain `Vec`,
-    /// not a registry: unlike the worker registry's `ReapNotice` ledger,
-    /// there is no cross-thread producer here either, so the queue is just
-    /// scratch, drained wholesale by the host's boundary reap.
     large_bindings: Vec<LargeBindingNotice>,
 }
 
 /// Per-`Shell` binding-lease ledger. `Default` is the inert state: a host
-/// that never arms it (REPL, batch, worker shells, pipeline children) pays
-/// one branch per run door and nothing else, and observes no expiry ever.
+/// that never arms it (REPL, batch, worker shells, pipeline children) pays a
+/// branch per run door and observes no expiry ever.
 #[derive(Default)]
 pub(crate) struct BindingLedger(Option<Armed>);
 
 impl BindingLedger {
     /// Arm this ledger and seal `baseline` as permanently exempt. Idempotent
-    /// by replacement: a re-arm discards any prior state and reseals.
+    /// by replacement: a re-arm discards all prior state and reseals.
     pub(crate) fn arm(&mut self, lease: BindingLease, baseline: impl IntoIterator<Item = String>) {
         self.0 = Some(Armed {
             lease,
@@ -122,22 +84,19 @@ impl BindingLedger {
         });
     }
 
-    /// Whether a host has armed this ledger. A host that never calls
-    /// [`Self::arm`] sees `false` forever.
     pub(crate) fn armed(&self) -> bool {
         self.0.is_some()
     }
 
-    /// Advance the committed-run clock by one. A no-op when unarmed.
+    /// Advance the committed-run clock by one.
     pub(crate) fn tick(&mut self) {
         if let Some(armed) = &mut self.0 {
             armed.epoch += 1;
         }
     }
 
-    /// Install/rebind stamp. Baseline names are ignored; a candidate gets
-    /// `last_used = epoch` — creation counts as use, and a rebind is a use,
-    /// since writing a name is interest in it. A no-op when unarmed.
+    /// Stamp an install or rebind: baseline names are ignored, a candidate
+    /// gets the current epoch — writing a name is itself interest in it.
     pub(crate) fn note_install(&mut self, name: &str) {
         let Some(armed) = &mut self.0 else { return };
         if armed.baseline.contains(name) {
@@ -147,9 +106,8 @@ impl BindingLedger {
     }
 
     /// Bump every already-tracked name in `names` to the current epoch.
-    /// Names without an entry (baseline, builtins, undefined names) are
-    /// ignored — renewal never *creates* a lease, so the harvest needs no
-    /// filtering. A no-op when unarmed.
+    /// Renewal never *creates* a lease, so a caller may hand over every name
+    /// a run referenced unfiltered.
     pub(crate) fn renew<'a>(&mut self, names: impl IntoIterator<Item = &'a str>) {
         let Some(armed) = &mut self.0 else { return };
         let epoch = armed.epoch;
@@ -160,8 +118,8 @@ impl BindingLedger {
         }
     }
 
-    /// [`Self::renew`]'s single-name sibling, for a dispatch-time touch
-    /// (a runtime-resolved command head) rather than a batch harvest.
+    /// [`Self::renew`]'s single-name sibling, for `classify_command`'s touch
+    /// of a runtime-resolved command head rather than a batch harvest.
     pub(crate) fn renew_one(&mut self, name: &str) {
         let Some(armed) = &mut self.0 else { return };
         if let Some(last) = armed.last_used.get_mut(name) {
@@ -169,9 +127,8 @@ impl BindingLedger {
         }
     }
 
-    /// Names idle past the armed lease's bound, paired with the epochs
-    /// elapsed since each was last used, in deterministic (sorted) name
-    /// order — the prune verb's candidate list. Empty when unarmed.
+    /// Names idle past the lease's bound with the epochs each has been idle,
+    /// in sorted name order so a prune pass is deterministic.
     pub(crate) fn expired(&self) -> Vec<(String, u64)> {
         let Some(armed) = &self.0 else {
             return Vec::new();
@@ -188,23 +145,18 @@ impl BindingLedger {
         out
     }
 
-    /// Drop `name`'s ledger entry without recording anything — the
-    /// orphan-drop path (an install a panic rollback undid, leaving the
-    /// entry behind on `LocalState`, untouched by the rollback) and the
-    /// prune verb's own post-prune cleanup. A no-op when unarmed or when
-    /// `name` carries no entry.
+    /// Drop `name`'s entry with no notice: the orphan path (an install a
+    /// panic rollback undid, leaving the entry behind on `LocalState`, which
+    /// the rollback does not restore) and the prune verb's own cleanup.
     pub(crate) fn drop_entry(&mut self, name: &str) {
         if let Some(armed) = &mut self.0 {
             armed.last_used.remove(name);
         }
     }
 
-    /// Self-healing adoption: if `name` is neither baseline nor already
-    /// tracked, start a fresh lease for it at the current epoch. Converts a
-    /// name a future missed install path left untracked from "immortal
-    /// zombie" into "leased from first sighting" — the conservative
-    /// direction. A no-op when unarmed, when `name` is baseline, or when it
-    /// already carries an entry (never resets an existing lease).
+    /// Self-healing: a name neither baseline nor tracked starts a fresh lease
+    /// now, turning whatever a missed install path left behind from immortal
+    /// into leased-from-first-sighting. Never resets an existing lease.
     pub(crate) fn adopt(&mut self, name: &str) {
         let Some(armed) = &mut self.0 else { return };
         if armed.baseline.contains(name) || armed.last_used.contains_key(name) {
@@ -213,15 +165,14 @@ impl BindingLedger {
         armed.last_used.insert(name.to_string(), armed.epoch);
     }
 
-    /// The armed lease, if any — read by the install chokepoint's
-    /// large-binding check for `large_binding_bytes`. `None` when unarmed.
+    /// The armed lease — read by `Shell::install_scope_binding` for its
+    /// large-binding check.
     pub(crate) fn lease(&self) -> Option<BindingLease> {
         self.0.as_ref().map(|armed| armed.lease)
     }
 
-    /// Queue a large-binding notice. Unconditional (no de-duplication): a
-    /// rebind that still meets the threshold queues another notice, since
-    /// each offending install is its own fact. A no-op when unarmed.
+    /// Queue a notice. No de-duplication: each offending install is its own
+    /// fact, so a rebind still over the threshold queues another.
     pub(crate) fn queue_large_binding_notice(&mut self, name: String, bytes: u64) {
         if let Some(armed) = &mut self.0 {
             armed
@@ -230,7 +181,6 @@ impl BindingLedger {
         }
     }
 
-    /// Drain every queued large-binding notice, leaving the queue empty.
     pub(crate) fn take_large_binding_notices(&mut self) -> Vec<LargeBindingNotice> {
         match &mut self.0 {
             Some(armed) => std::mem::take(&mut armed.large_bindings),
@@ -238,10 +188,8 @@ impl BindingLedger {
         }
     }
 
-    /// Number of names currently leased (tracked, non-baseline) — the
-    /// `/resources` probe figure. Read-only: counting renews nothing, the
-    /// same rule enumeration obeys everywhere else in this ledger. `0` when
-    /// unarmed.
+    /// Names currently leased. Counting renews nothing, the rule every
+    /// enumeration in this ledger obeys.
     pub(crate) fn leased_count(&self) -> usize {
         self.0.as_ref().map_or(0, |armed| armed.last_used.len())
     }
@@ -273,16 +221,12 @@ mod tests {
     fn baseline_names_are_never_candidates() {
         let mut ledger = BindingLedger::default();
         ledger.arm(lease(2), ["prelude_fn".to_string()]);
-        // A rebind of a baseline name must never start a lease.
+        // A rebind of a baseline name must never start a lease; ten ticks
+        // would have long expired it, had it ever been tracked.
         ledger.note_install("prelude_fn");
         for _ in 0..10 {
             ledger.tick();
         }
-        // If `prelude_fn` had somehow been tracked, it would now be
-        // long-expired; the fact that pruning never reaches it is asserted
-        // via the prune verb in parcel 4, but at this layer we can at least
-        // check the entry never got created by re-arming with an empty
-        // baseline and confirming a distinctly-named install *does* track.
         ledger.note_install("scratch");
         assert!(
             ledger.0.as_ref().unwrap().last_used.contains_key("scratch"),
@@ -308,7 +252,6 @@ mod tests {
         for _ in 0..3 {
             ledger.tick();
         }
-        // A rebind at epoch 3 restamps to the current epoch.
         ledger.note_install("x");
         assert_eq!(ledger.0.as_ref().unwrap().last_used["x"], 3);
     }
@@ -358,15 +301,13 @@ mod tests {
 }
 
 /// Run-level tests for the install chokepoint and the use-observation
-/// harvest (`decisions/260629_agent-binding-reaping` parcels 2 and 3): every
-/// persistent top-level install routes through
-/// [`Shell::install_scope_binding`] and gets leased, while every
-/// deeper-scope write is recorded nowhere; a committed run's referenced
-/// names renew already-leased entries at the three harvest seams
-/// (`run`'s own compiled program, `check_source`'s
+/// harvest: every persistent top-level install routes through
+/// `Shell::install_scope_binding` and gets leased while deeper-scope writes
+/// are recorded nowhere, and a committed run's referenced names renew at all
+/// three harvest seams — `run`'s own compiled program, `check_source`'s
 /// runtime-compiled loads, `classify_command`'s `Resolution::Env` dispatch
-/// touch). Driven through the public `run` door, no exarch
-/// involved — the same harness shape as `core/tests/top_level_vs_block.rs`.
+/// touch. Driven through the public `run` door, no exarch involved: the same
+/// harness shape as `core/tests/top_level_vs_block.rs`.
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
@@ -382,22 +323,20 @@ mod chokepoint_tests {
 
     use super::BindingLease;
 
-    /// The prelude baked once per test binary (no build-time blob inside
-    /// core's own unit tests).
+    /// The prelude baked once per test binary — core's own unit tests get no
+    /// build-time blob.
     fn prelude() -> &'static BakedPrelude {
         static P: OnceLock<BakedPrelude> = OnceLock::new();
         P.get_or_init(BakedPrelude::bake_runtime)
     }
 
-    /// A shell booted with the real prelude and armed with `idle_calls` and
-    /// an effectively-infinite large-binding threshold (never fires), the
-    /// same seed-then-arm sequence exarch's `Agent::assemble` follows.
+    /// A booted, armed shell whose large-binding threshold never fires.
     fn armed_shell(idle_calls: u64) -> Shell {
         armed_shell_with(idle_calls, u64::MAX)
     }
 
-    /// [`armed_shell`], with an explicit `large_binding_bytes` threshold for
-    /// the large-binding tests below.
+    /// [`armed_shell`] with an explicit threshold — the same seed-then-arm
+    /// order exarch's `Agent::assemble` follows.
     fn armed_shell_with(idle_calls: u64, large_binding_bytes: u64) -> Shell {
         let mut shell = crate::boot::boot_shell(
             crate::io::TerminalState::default(),
@@ -411,8 +350,8 @@ mod chokepoint_tests {
         shell
     }
 
-    /// Perform one top-level run through the public door. Every source below
-    /// is expected to compile; a `Static` report is a test bug.
+    /// One top-level run through the public door. Every source below must
+    /// compile; a `Static` report is a test bug.
     fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
         match shell.run(RunRequest {
             run: Run {
@@ -437,8 +376,8 @@ mod chokepoint_tests {
         }
     }
 
-    /// Perform one top-level run capturing its streams, returning the run's
-    /// stderr — where the ready boundary writes the large-binding warning.
+    /// One captured run's stderr — where the ready boundary writes the
+    /// large-binding warning.
     fn top_level_stderr(shell: &mut Shell, source: &str) -> String {
         match shell.run(RunRequest {
             run: Run {
@@ -466,7 +405,6 @@ mod chokepoint_tests {
         }
     }
 
-    /// Whether `name` carries a ledger entry — a leased candidate.
     fn is_leased(shell: &Shell, name: &str) -> bool {
         shell
             .local
@@ -476,7 +414,6 @@ mod chokepoint_tests {
             .is_some_and(|armed| armed.last_used.contains_key(name))
     }
 
-    /// Whether `name` is sealed as a permanently-exempt baseline name.
     fn is_baseline(shell: &Shell, name: &str) -> bool {
         shell
             .local
@@ -486,28 +423,22 @@ mod chokepoint_tests {
             .is_some_and(|armed| armed.baseline.contains(name))
     }
 
-    /// The ledger's committed-run clock, for asserting the tick.
     fn epoch(shell: &Shell) -> u64 {
         shell.local.bindings.0.as_ref().expect("armed").epoch
     }
 
-    /// `name`'s last-used epoch, for asserting renewal (or its absence).
     fn last_used_of(shell: &Shell, name: &str) -> u64 {
         shell.local.bindings.0.as_ref().expect("armed").last_used[name]
     }
 
-    /// Idle out `name`'s lease relative to the current epoch by running
-    /// `n` unrelated runs, so a later renewal is observable against a
-    /// genuinely stale timestamp rather than one that happens to already
-    /// equal the current epoch.
+    /// Age every lease by `n` unrelated runs, so a later renewal is measured
+    /// against a genuinely stale timestamp rather than the current epoch.
     fn idle_spin(shell: &mut Shell, n: u32) {
         for i in 0..n {
             top_level(shell, &format!("let _idle_spin_{i} = 0")).expect("idle spin");
         }
     }
 
-    /// The `HandleState` of the handle bound to `name`. Panics if `name`
-    /// isn't a `Value::Handle`.
     fn handle_state(shell: &Shell, name: &str) -> HandleState {
         match shell.scope_lookup(name) {
             Some(Value::Handle(h)) => *h.state.lock().unwrap(),
@@ -546,7 +477,7 @@ mod chokepoint_tests {
     }
 
     /// Two mutually-recursive top-level `let`s form one `LetRec` group
-    /// (`syntax::group`'s SCC pre-pass); both names must be leased.
+    /// (`syntax::group`'s SCC pre-pass), and both names must still be leased.
     #[test]
     fn letrec_group_is_leased() {
         let mut shell = armed_shell(64);
@@ -581,9 +512,9 @@ mod chokepoint_tests {
         assert!(!is_baseline(&shell, "use_internal"));
     }
 
-    /// A prelude name and a host-seeded name (a host verb call preceding
-    /// arming, mirroring `seed_var`/rc `bindings:`) are both baseline
-    /// — visible at arm time, so never lease candidates.
+    /// A prelude name and a host-seeded one (a host verb call preceding
+    /// arming, as exarch's `seed_var` and rc `bindings:` make) are alike
+    /// visible at arm time, so alike baseline.
     #[test]
     fn prelude_and_host_seeds_are_baseline() {
         let mut shell = crate::boot::boot_shell(
@@ -607,7 +538,7 @@ mod chokepoint_tests {
         assert!(!is_leased(&shell, "host_seed"));
     }
 
-    // ── use observation (parcel 3) ────────────────────────────────────────
+    // ── use observation ───────────────────────────────────────────────────
 
     /// An ordinary expression referencing a stale name renews it to the
     /// run's own epoch — the run's-own-program harvest seam.
@@ -626,9 +557,8 @@ mod chokepoint_tests {
         );
     }
 
-    /// A run that fails to typecheck ticks the clock (aging every leased
-    /// name) but harvests nothing — `compile_run` never returns a `Comp` to
-    /// walk, so a stale name stays exactly as stale as it was.
+    /// A run that fails to typecheck still ages every lease but harvests
+    /// nothing: `compile_run` returns no `Comp` to walk.
     #[test]
     fn static_failure_ticks_but_renews_nothing() {
         let mut shell = armed_shell(64);
@@ -671,9 +601,8 @@ mod chokepoint_tests {
         );
     }
 
-    /// A registered hook run through `run`'s `Program::Hook` is not a
-    /// tool call: it ticks no epoch and renews nothing, even though its body
-    /// reads a name the run's own harvest would otherwise have caught.
+    /// `run`'s `Program::Hook` arm is not a tool call: it ticks no epoch and
+    /// renews nothing, even a name its body reads.
     #[test]
     fn hook_door_neither_ticks_nor_renews() {
         let mut shell = armed_shell(64);
@@ -741,10 +670,9 @@ mod chokepoint_tests {
         );
     }
 
-    /// `remove_plugin_hooks` drops exactly the hooks in one plugin's
-    /// namespace — the mechanism a failed plugin load rolls back through and
-    /// an unload reverses through — leaving other plugins' and the session's
-    /// hooks untouched.  `unregister_hook` drops a single named hook.
+    /// `remove_plugin_hooks` drops exactly one plugin's namespace — what a
+    /// failed load rolls back through and an unload reverses through —
+    /// leaving other plugins' and the session's hooks alone.
     #[test]
     fn plugin_hooks_removed_by_namespace() {
         use crate::types::{DefaultPolicy, HookName, HookSig};
@@ -776,22 +704,19 @@ mod chokepoint_tests {
         reg(&mut shell, HookName::plugin("q", "prompt"));
         reg(&mut shell, HookName::session("startup"));
 
-        // A single-name drop removes just that hook.
         assert!(shell.unregister_hook(&HookName::plugin("p", "factory")));
         assert!(!shell.has_hook(&HookName::plugin("p", "factory")));
         assert!(!shell.unregister_hook(&HookName::plugin("p", "factory")));
 
-        // A namespace sweep removes the rest of plugin `p`, nothing else.
         assert_eq!(shell.remove_plugin_hooks("p"), 1);
         assert!(!shell.has_hook(&HookName::plugin("p", "prompt")));
         assert!(shell.has_hook(&HookName::plugin("q", "prompt")));
         assert!(shell.has_hook(&HookName::session("startup")));
     }
 
-    /// A `source`d file referencing a name that exists only in the caller's
-    /// scope — never mentioned anywhere in the outer run's own compiled
-    /// program — is still renewed: the `check_source` harvest seam, not the
-    /// run's-own-program seam, is what catches it here.
+    /// A `source`d file's reference to a caller-scope name the outer run's
+    /// own program never mentions still renews — the `check_source` seam,
+    /// not the run's-own-program seam, catches this one.
     #[test]
     fn sourced_module_reference_renews() {
         let mut shell = armed_shell(64);
@@ -817,10 +742,9 @@ mod chokepoint_tests {
         );
     }
 
-    /// A name installed by a runtime mechanism the elaborator could not
-    /// see — here, `source` — compiles its later bare-word reference as an
-    /// ordinary `Exec` rather than `App`; `classify_command`'s
-    /// `Resolution::Env` arm still renews it at dispatch time.
+    /// A name installed where the elaborator cannot see it — here by `source`
+    /// — compiles its later bare-word reference as an `Exec`, not an `App`,
+    /// so only `classify_command`'s `Resolution::Env` arm can renew it.
     #[test]
     fn env_resolved_command_head_renews() {
         let mut shell = armed_shell(64);
@@ -847,9 +771,8 @@ mod chokepoint_tests {
         );
     }
 
-    /// A name mentioned only inside a double-quoted interpolated string
-    /// renews — exercising the walker's `CompKind::Interpolation` arm
-    /// end-to-end through a real run.
+    /// A name mentioned only inside a double-quoted string renews — the
+    /// walker's `CompKind::Interpolation` arm, through a real run.
     #[test]
     fn interpolated_reference_renews() {
         let mut shell = armed_shell(64);
@@ -865,16 +788,13 @@ mod chokepoint_tests {
         );
     }
 
-    // ── the prune verb (parcel 4) ──────────────────────────────────────────
+    // ── the prune verb ─────────────────────────────────────────────────────
 
-    /// A pruned name is gone from scope *and* from the next run's type
-    /// seed: `unset` drops the `Binding` (value and scheme together) in one
-    /// act, so a later reference reads as an ordinary undefined variable —
-    /// core's unmodified runtime diagnostic (`eval_val`'s `Val::Variable`
-    /// arm), not a stale-scheme surprise. An unbound name is not a static
-    /// type error in this language (the checker admits any reference,
-    /// scheme or not; only evaluation resolves it), so the pruned-name
-    /// symptom is this `Ran` error, not a `Static` diagnostic.
+    /// A pruned name leaves scope *and* the next run's type seed together —
+    /// `unset` drops the whole `Binding`, value and scheme in one act — so a
+    /// later reference is an ordinary undefined variable, not a stale-scheme
+    /// surprise. The checker admits any reference and only evaluation
+    /// resolves it, so the symptom is a `Ran` error, not a `Static` one.
     #[test]
     fn prune_removes_name_and_type_seed() {
         let mut shell = armed_shell(2);
@@ -924,10 +844,9 @@ mod chokepoint_tests {
         }
     }
 
-    /// A running worker pins its name: the first prune, while `sleep`
-    /// still runs, yields no notice at all and leaves the entry untouched.
-    /// Cancelling settles the handle; idling it out again, the second
-    /// prune now removes it like any ordinary scratch value.
+    /// A running worker pins its name: the first prune, with `sleep` still
+    /// running, yields no notice and leaves the entry alone. Cancelling
+    /// settles the handle, and the second prune takes it like any scratch.
     #[test]
     fn running_handle_pins_name_then_settles_then_prunes() {
         let mut shell = armed_shell(2);
@@ -950,16 +869,15 @@ mod chokepoint_tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-        // The `cancel $h_pin` run itself referenced (and so renewed)
-        // h_pin; idle it back out before pruning again.
+        // The `cancel $h_pin` run referenced, and so renewed, h_pin.
         idle_spin(&mut shell, 2);
 
         let notices = shell.prune_idle_bindings();
         assert_eq!(notices[0].name, "h_pin", "a settled handle must now prune");
     }
 
-    /// A handle that settles on its own (never pinned at all) is ordinary
-    /// scratch once idle — no special casing beyond the pin check.
+    /// A handle that settles on its own is ordinary scratch once idle — no
+    /// special casing beyond the pin check.
     #[test]
     fn settled_handle_is_ordinary_scratch() {
         let mut shell = armed_shell(2);
@@ -983,10 +901,9 @@ mod chokepoint_tests {
         assert_eq!(notices[0].kind, "Handle");
     }
 
-    /// A ledger entry whose install a panic rollback undid — simulated here
-    /// with the same mobile install/restore motion the run door's own
-    /// rollback performs — is dropped silently at the next prune: no
-    /// notice, no error.
+    /// A ledger entry whose install a panic rollback undid — simulated with
+    /// the same mobile save/restore motion the run door performs — is
+    /// dropped silently at the next prune: no notice, no error.
     #[test]
     fn orphan_entry_dropped_silently() {
         let mut shell = armed_shell(2);
@@ -1013,11 +930,10 @@ mod chokepoint_tests {
         assert!(!is_leased(&shell, "orphan_x"), "the orphan must be gone");
     }
 
-    /// A name a host verb wrote directly (bypassing the install chokepoint,
-    /// as every host verb call does) is neither baseline nor tracked. The
-    /// adoption sweep — which runs on every prune pass, even one that
-    /// prunes nothing — leases it from this sighting forward rather than
-    /// leaving it an immortal untracked name.
+    /// A name a host verb wrote directly, bypassing the install chokepoint
+    /// as every host verb does, is neither baseline nor tracked. The adoption
+    /// sweep runs on every prune pass, even one that prunes nothing, and
+    /// leases such a name from this sighting rather than leave it immortal.
     #[test]
     fn stray_untracked_name_is_adopted_not_pruned() {
         let mut shell = armed_shell(2);
@@ -1040,8 +956,8 @@ mod chokepoint_tests {
         );
     }
 
-    /// A caller not at session scope — a mid-frame lifecycle-hook-shaped
-    /// caller — is refused outright: `None`, not a partial or unsafe prune.
+    /// A caller not at session scope — a lifecycle hook, say — is refused
+    /// outright rather than served a partial prune from a transient frame.
     #[test]
     fn prune_refused_mid_frame() {
         let mut shell = armed_shell(2);
@@ -1061,7 +977,6 @@ mod chokepoint_tests {
         );
     }
 
-    /// Nothing idle enough yet: the verb is a clean no-op.
     #[test]
     fn nothing_expired_prunes_nothing() {
         let mut shell = armed_shell(64);
@@ -1072,12 +987,11 @@ mod chokepoint_tests {
         );
     }
 
-    // ── the large-binding warning (parcel 6) ────────────────────────────────
+    // ── the large-binding warning ───────────────────────────────────────────
 
     /// A session-scope install meeting the threshold writes exactly one
-    /// warning onto its run's stderr, naming the binding and its byte
-    /// estimate. A rebind that still meets the threshold warns again — no
-    /// de-duplication.
+    /// warning onto its run's stderr, and a rebind still over it warns
+    /// again — no de-duplication.
     #[test]
     fn large_binding_threshold_warns_on_run_stderr() {
         let mut shell = armed_shell_with(64, 8);
@@ -1103,8 +1017,6 @@ mod chokepoint_tests {
         );
     }
 
-    /// An install whose estimate falls short of the threshold warns not
-    /// at all.
     #[test]
     fn sub_threshold_install_does_not_warn() {
         let mut shell = armed_shell_with(64, 1_000_000);

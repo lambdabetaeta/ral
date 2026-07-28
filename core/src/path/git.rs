@@ -1,16 +1,10 @@
-//! Git directory discovery for the `gitdir:` sigil.
-//!
-//! Walks up from a directory to find the first `.git` entry, then
-//! resolves worktree pointers (`gitdir: <path>`) to the actual
-//! git directory.  Used by [`freeze_one`](super::sigil::freeze_one)
-//! to expand `gitdir:` tokens.
+//! Git directory discovery, for the `gitdir:` sigil that
+//! [`freeze_one`](super::sigil::freeze_one) expands at policy freeze.
 
 use std::path::{Path, PathBuf};
 
-/// Walk up from `cwd` and return the first `.git` entry found (file or
-/// directory).
-///
-/// Returns `None` when `cwd` is not inside a git repository.
+/// The first `.git` at or above `cwd` — a directory in a plain clone,
+/// a file in a worktree or submodule.
 pub fn find_git_entry(cwd: &Path) -> Option<PathBuf> {
     cwd.ancestors().find_map(|dir| {
         let dg = dir.join(".git");
@@ -18,10 +12,8 @@ pub fn find_git_entry(cwd: &Path) -> Option<PathBuf> {
     })
 }
 
-/// Discover the real git directory for `cwd`, resolving the `gitdir:`
-/// pointer when `.git` is a worktree file rather than a directory.
-///
-/// Returns `None` when `cwd` is not inside a git repository.
+/// The real git directory for `cwd`, following the `gitdir:` pointer
+/// when `.git` is a file rather than a directory.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:git-dir-discovery] reads the .git worktree pointer at session startup to discover the actual git directory; not turn-time I/O"
@@ -33,7 +25,7 @@ pub fn discover_git_dir(cwd: &Path) -> Option<PathBuf> {
         return Some(dot_git);
     }
 
-    // Worktree: .git is a file containing "gitdir: <path>"
+    // A worktree's `.git` is a file whose body is `gitdir: <path>`.
     let contents = std::fs::read_to_string(&dot_git).ok()?;
     let gitdir_path = contents
         .lines()
@@ -44,10 +36,10 @@ pub fn discover_git_dir(cwd: &Path) -> Option<PathBuf> {
     let resolved = if crate::path::is_absolute(gitdir_path) {
         PathBuf::from(gitdir_path)
     } else {
-        // Relative to the .git file's parent directory
         dot_git.parent()?.join(gitdir_path)
     };
 
-    // Normalize through the same fold-dots kernel the grant side uses.
+    // Same fold-dots kernel that mints a `NormalizedPrefix`, so what comes
+    // back here can be matched against grant prefixes.
     Some(crate::path::lex::fold_dots(&resolved))
 }

@@ -1,36 +1,12 @@
-//! Control-flow types: `Escape` / `Break` / `Tail` / `TailCall` / `Control`.
+//! The evaluator's control-flow currencies: `Escape` and `Break` for exits,
+//! `Tail` and `TailCall` for the trampoline, `Control` for their union.
 //!
-//! The orthogonal layers:
-//!
-//! - [`Escape`] — non-catchable exits from a delimited scope (process
-//!   exit, stopped job).
-//! - [`Break`] — what `try` decides about: `Error` (catchable) vs
-//!   `Escape` (propagates).
-//! - [`Tail`] — the tail-position property of an evaluation context:
-//!   whether the redex sits under a trivial continuation.  Threaded as
-//!   a parameter of computation evaluation and *granted* by an
-//!   eliminator to a chosen sub-computation, never read from machine
-//!   state.
-//! - [`TailCall`] — the signal an eliminator emits when handed
-//!   [`Tail::Yes`]: a callee and its arguments, absorbed by the
-//!   trampoline before reaching any boundary.
-//! - [`Control`] — evaluator-private union of [`Break`] and [`TailCall`];
-//!   the carrier for raw evaluator returns.
-//! - [`PolicyError`] — off to the side, not part of the `Break`/`Tail`
-//!   lattice: the error currency of the capability decoder and the path
-//!   sigil freeze pass, which cannot escape and so never touch `Break`
-//!   until a caller converts one at the boundary.
-//!
-//! Type aliases:
-//! - [`Settled<T>`] = `Result<T, Break>` — what callers outside the
-//!   evaluator see after tail calls have been landed.
-//! - [`Raw<T>`] = `Result<T, Control>` — evaluator-internal; may carry
-//!   a tail call.
-//!
-//! Privacy: `TailCall`, `Control`, and `Raw` are `pub(crate)`, so the
-//! type system rejects any path that would let a tail call cross a
-//! public boundary.  No runtime guard is needed — the invariant is
-//! enforced by Rust visibility.
+//! `Tail` is not machine state: an eliminator is handed its own tail-ness and
+//! may grant it to one final sub-computation, so failing to thread it costs a
+//! frame rather than letting a tail call escape a live one.  That a tail call
+//! never crosses a public boundary is enforced by visibility alone —
+//! `TailCall`, `Control` and `Raw` are `pub(crate)`, and `absorb_tail` in
+//! `core/src/evaluator.rs` is the seam that lands one.
 
 use super::error::Error;
 use super::value::Value;
@@ -54,16 +30,12 @@ pub enum Break {
     Escape(Escape),
 }
 
-/// A capability-policy decode/freeze failure: a message plus an optional
-/// hint, nothing else.
+/// A capability-policy decode/freeze failure.
 ///
-/// The capability decoder and the sigil freeze pass beneath it
-/// ([`crate::path::sigil`]) are pure: the author of a `grant [...]` or
-/// capability file is the live user, so a malformed shape is a "no"
-/// reported back, never a process exit.  Its own error type makes that a
-/// fact the type checker verifies rather than one a reader trusts —
-/// `Break` is minted from it only at the boundary where a caller needs
-/// one.
+/// The capability decoder and the sigil freeze pass ([`crate::path::sigil`])
+/// answer a malformed grant with a "no", never a process exit; having no
+/// `Escape` arm is how the type checker holds them to it.  A `Break` is minted
+/// only at the boundary that needs one.
 #[derive(Debug, Clone)]
 pub struct PolicyError {
     pub message: String,
@@ -94,9 +66,8 @@ impl From<PolicyError> for Break {
     }
 }
 
-/// `as_map`/`as_map_ref`/`as_list` raise a bare `Error` — a shape
-/// mismatch, never a process exit — so the decoder can absorb one
-/// directly into its own currency.
+/// The `as_map`/`as_list` coercions raise a bare `Error` — a shape mismatch,
+/// never an exit — so the decoder absorbs one directly.
 impl From<Error> for PolicyError {
     fn from(e: Error) -> Self {
         match e.hint {
@@ -106,46 +77,34 @@ impl From<Error> for PolicyError {
     }
 }
 
-/// The tail-position property of an evaluation context: whether the
-/// redex sits under a trivial continuation.
-///
-/// Threaded as a parameter of [`eval_comp`](crate::evaluator::comp::eval_comp).
-/// The default at every recursive call is [`Tail::No`]; an eliminator
-/// must *choose* to grant [`Tail::Yes`], and only ever by forwarding its
-/// own tail-ness to a single final sub-computation. Because tail-ness is
-/// granted rather than ambient, forgetting to thread it is safe (the
-/// sub-computation simply runs under a non-trivial continuation) rather
-/// than wrong (a tail call escaping a live frame).
+/// The tail-position property of an evaluation context: whether the redex sits
+/// under a trivial continuation.  Threaded as a parameter of `eval_comp`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tail {
     Yes,
     No,
 }
 
-/// Evaluator-private tail-call signal. Emitted by the application and
-/// `case` eliminators only when handed [`Tail::Yes`]; absorbed by the
-/// trampoline before any boundary sees it.
+/// The tail-call signal, emitted by the application and `case` eliminators
+/// only when handed [`Tail::Yes`].
 #[derive(Debug)]
 pub(crate) struct TailCall {
     pub callee: Value,
     pub args: Vec<Value>,
 }
 
-/// Evaluator-internal control-flow union. Carries either an absorbable
-/// tail call or a [`Break`] propagated unchanged.
+/// Evaluator-internal union: an absorbable tail call, or a [`Break`] untouched.
 #[derive(Debug)]
 pub(crate) enum Control {
     Break(Break),
     Tail(TailCall),
 }
 
-/// Result with [`Break`] error: tail calls have been absorbed.
+/// Result whose error is a [`Break`]: tail calls have been absorbed.
 pub type Settled<T> = Result<T, Break>;
 
-/// Raw evaluator return: may carry an absorbable tail call.
+/// Evaluator return that may still carry a tail call.
 pub(crate) type Raw<T> = Result<T, Control>;
-
-// ── From impls ───────────────────────────────────────────────────────
 
 impl From<Error> for Break {
     fn from(e: Error) -> Self {

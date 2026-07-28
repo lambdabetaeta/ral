@@ -1,26 +1,15 @@
-//! Builtin command bindings and registration.
+//! Builtins: the commands implemented in Rust that run inside the shell process.
 //!
-//! Builtins are commands implemented in Rust that run inside the shell
-//! process.  Each builtin is registered in a single
-//! `builtin_registry!` entry that names the builtin, its computation-
-//! type hint, its fixed arity (if a first-class function), its one-line
-//! doc, and its runtime body — so adding a new builtin can update only
-//! one place and the six facets cannot drift apart.  The macro emits a
-//! [`CORE_BUILTINS`] static (a `&[BuiltinEntry]`) consumed by each shell's
-//! builtin table.
-//!
-//! The prelude (a ral script baked into the binary) is evaluated once
-//! per process; its top-level bindings are cloned into every fresh
-//! environment via [`register`].
+//! `builtin_registry!` binds each builtin's names, arity, type rule, doc and
+//! runtime body in one entry — so those facets cannot drift apart — and expands
+//! them into the [`CORE_BUILTINS`] static every shell's builtin table is seeded
+//! from.
 
 use crate::diagnostic;
 use crate::types::{
     Binding, Break, BuiltinBody, BuiltinEntry, Env, Error, Escape, Mooring, Settled, Shell, Value,
 };
-// The registry names its type rules explicitly here — `BuiltinTypeRule` and
-// its `Scheme`/`Sig` variants, plus the `scheme`/`sig` factory modules — so
-// an entry can write `ty: Scheme(None, scheme::length)` or `ty: Sig(sig::RANGE)`
-// without the `BuiltinTypeRule::` prefix on every line.
+// Variants unprefixed, so an entry reads `ty: Sig(sig::RANGE)`.
 use crate::typecheck::builtins::BuiltinTypeRule;
 use crate::typecheck::builtins::BuiltinTypeRule::{Scheme, Sig};
 use crate::typecheck::builtins::{scheme, sig};
@@ -45,9 +34,6 @@ pub use util::value_to_json_lossy_bytes;
 pub mod util;
 pub mod uutils;
 
-// ── builtin_arity_from ───────────────────────────────────────────────────
-
-/// Expand `_` to `None`, or a number literal `n` to `Some(n)`.
 macro_rules! builtin_arity_from {
     (_) => {
         None
@@ -57,8 +43,7 @@ macro_rules! builtin_arity_from {
     };
 }
 
-/// True if a declared `arity:` agrees with a signature's structural
-/// arity (`Option` equality, usable in const context).
+/// `Option` equality, spelled out because `PartialEq` is not const.
 const fn arity_agrees(declared: Option<usize>, structural: Option<usize>) -> bool {
     match (declared, structural) {
         (Some(a), Some(b)) => a == b,
@@ -67,32 +52,15 @@ const fn arity_agrees(declared: Option<usize>, structural: Option<usize>) -> boo
     }
 }
 
-/// Single source of truth for the runtime side of every builtin.
+/// One entry per builtin, expanded into [`CORE_BUILTINS`].
 ///
-/// Every entry binds six facets at once: the user-visible names, the
-/// computation-type hint consumed by the inference engine, a fixed arity
-/// (if the builtin is a first-class function with a fixed argv), the doc
-/// string the `help` builtin prints, the type-checker rule, and a
-/// `call` block that produces the runtime result.  The macro emits a
-/// single [`BuiltinEntry`] per name into the [`CORE_BUILTINS`] static
-/// array, so all facets observe the same registration and no
-/// out-of-band match table can drift from the docs/types/arity.
+/// `arity:` is authoritative for a `Scheme` rule and is injected into the
+/// emitted [`BuiltinTypeRule`]; a `Sig` already implies a structural arity, so
+/// there the two are compared during the static's const evaluation and a
+/// mismatch is a build error.  `arity: _` means no fixed argv, and `$name`
+/// resolves only when the type rule carries an explicit value form.
 ///
-/// The `arity:` field is authoritative for `Scheme` rules: the
-/// written value is injected into the emitted [`BuiltinTypeRule`].  For
-/// `Sig` rules the structural arity follows from the signature's argument
-/// policy, so the written `arity:` is checked against it at compile time
-/// (the static is const-evaluated, and a mismatch is a const-panic build
-/// error) — the two cannot drift apart.
-///
-/// Entries with `arity: _` have no fixed argv (command-only, or `detach`'s
-/// open `ArgSig::Any`); `$name` is available only if the type signature has
-/// an explicit value form.
-///
-/// The `call` block is a non-capturing closure `|args, mooring, shell| body`
-/// returning `Settled<Value>`; the macro wraps it into a per-entry
-/// adapter function, nested in `__core_thunks` so the variant name
-/// cannot collide with a public type in scope.
+/// `call` must be a non-capturing closure — it is coerced to a fn pointer.
 macro_rules! builtin_registry {
     (
         $(
@@ -106,9 +74,7 @@ macro_rules! builtin_registry {
             }
         ),+ $(,)?
     ) => {
-        // Per-entry adapter fns.  Nested in a module so variant names
-        // (e.g. `Map`, `Echo`) cannot collide with public types in
-        // scope at this module level.
+        // A module, so a variant name like `Map` cannot collide with a type in scope.
         mod __core_thunks {
             #[allow(unused_imports)]
             use super::*;
@@ -126,12 +92,11 @@ macro_rules! builtin_registry {
             )+
         }
 
-        /// Core builtins: every host-implemented name the language ships
-        /// with, expanded from the registry into a single static slice.
+        /// Every host-implemented name the language ships with.
         ///
-        /// Installed into every fresh [`Shell`] by [`Shell::new`], whose
-        /// builtin table the typechecker reads directly — no separate
-        /// lookup path.
+        /// Installed into each fresh [`Shell`] by [`Shell::new`]; the checker
+        /// seeds from that same table (`Shell::session_schemes`), so there is no
+        /// second lookup path to drift from it.
         pub static CORE_BUILTINS: &[BuiltinEntry] = &[
             $(
                 $(#[$meta])*
@@ -392,16 +357,13 @@ builtin_registry! {
     Cancel { names: ["cancel"], arity: 1, ty: Scheme(None, scheme::cancel_op),
         doc: "cancel <handle>  — cancel a running concurrent block.",
         call: |args, _mooring, shell| concurrency::builtin_cancel(args, shell), },
-    // Bundled uutils tools (cat, yes, head, wc, ...) are not builtins.
-    // `runtime::command` routes a bare invocation either through an
-    // in-process `uumain` call (the clean-terminal fast path) or by
-    // spawning the `ral --ral-bundled-tool <tool>` command image as an
-    // ordinary child, so they ride through the same wait / signal /
-    // exit-code boundary as a system binary — one spawn site, one
-    // broken-pipe rule.  See [`crate::builtins::uutils::is_uutils_tool`].
-    // _type's signature carries a probe diagnostic: typing is ordinary
-    // `α → F α`, and the inferencer prints the resolved α as a separate
-    // side effect. Runtime is a passthrough.
+    // The bundled uutils tools (cat, yes, head, wc, …) are deliberately absent:
+    // `runtime::command` runs them either as an in-process `uumain` call or as a
+    // `ral --ral-bundled-tool <tool>` child, so they cross the same wait / signal /
+    // exit-code boundary as a system binary.  See `builtins::uutils::is_uutils_tool`.
+
+    // `_type` types as an ordinary `α → F α`; the printing is a side effect of its
+    // `BuiltinDiagnostic::TypeProbe`, and the runtime body is the identity.
     TypeOf { names: ["_type"], arity: 1, ty: Sig(sig::TYPE_PROBE),
         doc: "_type <val>  — print inferred type at compile time; passthrough at runtime.",
         call: |args, _mooring, _shell| Ok(args.first().cloned().unwrap_or(Value::Unit)), },
@@ -411,40 +373,31 @@ builtin_registry! {
     Explain { names: ["explain"], arity: 1, ty: Sig(sig::EXPLAIN),
         doc: "explain <name>  — print documentation for one name: doc, type signature, and source location.",
         call: |args, _mooring, shell| Ok(help::builtin_explain(args, shell)), },
-    // `_ed-*` builtins (16 entries) ride the REPL's boot surface; see
+    // The `_ed-*` family rides the REPL's boot surface instead; see
     // `ral::repl::plugin_ed_builtins::ED_BUILTINS`.
     AnsiOk { names: ["_ansi-ok"], arity: 0, ty: Scheme(None, scheme::pure_bool),
         doc: "_ansi-ok  — true if stdout supports ANSI colour (respects NO_COLOR / non-tty).",
         call: |_args, _mooring, _shell| Ok(Value::Bool(crate::ansi::use_ui_color())), },
 }
 
-/// A [`BuiltinTable`](crate::types::BuiltinTable) seeded with [`CORE_BUILTINS`].
-///
-/// The host-less surface a shell-free checker (e.g.
-/// [`SessionSchemes`](crate::typecheck::SessionSchemes)'s manual
-/// `Default`) type-checks against, absent any host dressing.
+/// A [`BuiltinTable`](crate::types::BuiltinTable) of [`CORE_BUILTINS`] alone —
+/// what a checker with no live shell
+/// ([`SessionSchemes`](crate::typecheck::SessionSchemes)'s `Default`) types
+/// against, absent any host dressing.
 pub fn core_builtin_table() -> crate::types::BuiltinTable {
     let mut table = crate::types::BuiltinTable::default();
     table.install_static(CORE_BUILTINS);
     table
 }
 
-/// `watch` — the detached-streaming concurrency builtin, kept out of
-/// [`CORE_BUILTINS`] and exposed for a host's boot surface to carry.
+/// `watch` — a spawn whose output streams live to the caller's stdout,
+/// line-framed, kept out of [`CORE_BUILTINS`] for a host's boot surface to carry.
 ///
-/// A watched worker is line-framed (`concurrency::builtin_watch` over
-/// `spawn_child`'s `ChildIoMode::Watch`) and streams live to the caller's
-/// stdout as it runs, so it is admissible only where that sink is durable
-/// enough to outlive the run — an interactive or batch ral host, whose
-/// stdout is the real terminal or pipe.  An agent host (exarch), whose
-/// active streams are per-call capture buffers, does not install it; naming
-/// `watch` there is then a compile-time unknown-name diagnostic, not a
-/// builtin that resolves and refuses at call time.
-///
-/// Only this entry is public — the implementation (`builtin_watch`,
-/// `spawn_child`, `Sink::LineFramed`) and the type scheme (`scheme::watch`)
-/// stay private to core.  Implemented in core but registered by the host —
-/// the shape [`SERVICE_BUILTIN`] mirrors with the hosts swapped.
+/// That sink must outlive the run, so only the interactive and batch ral hosts
+/// install it; exarch's active streams are per-call capture buffers, and naming
+/// `watch` there is an unknown-name diagnostic at compile time rather than a
+/// builtin that resolves and then refuses.  [`SERVICE_BUILTIN`] is the same
+/// shape with the hosts swapped.
 pub static WATCH_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
     name: Cow::Borrowed("watch"),
     type_rule: BuiltinTypeRule::Scheme(Some(2), scheme::watch),
@@ -452,28 +405,14 @@ pub static WATCH_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
     body: BuiltinBody::Static(concurrency::builtin_watch),
 }];
 
-/// `service` — the durable-birth concurrency builtin, kept out of
-/// [`CORE_BUILTINS`] and exposed for a host's boot surface to carry:
-/// [`WATCH_BUILTIN`]'s mechanism, its mirror image host-wise.
+/// `service` — an ordinary buffered spawn registered under the durable lease
+/// class: no idle reap, no absolute backstop, bounded instead by the description
+/// its birth requires.
 ///
-/// A `service`-born worker is an ordinary buffered spawn
-/// (`concurrency::builtin_service` over `spawn_child`) registered under
-/// the durable lease class: no idle reap, no absolute backstop — its bound
-/// is legibility, not time, and legibility is structural: the mandatory
-/// description a `service` birth carries is what a host tracks it by.
-/// Cancellable through its handle, dead with `/clear` or the process
-/// (`decisions/260705_leases-and-budgets`).  That distinction only exists
-/// where a lease frame does, so availability inverts `watch`'s: the agent
-/// host (exarch), whose frame reaps ordinary workers, installs it; the
-/// interactive and batch ral hosts — which install `watch` — leave
-/// `service` out, because they grant no lease and every spawn of theirs
-/// already lives until cancel or exit.  Naming `service` there is a
-/// compile-time unknown-name diagnostic, not a builtin that resolves and
-/// refuses at call time.
-///
-/// Only this entry is public — the implementation (`builtin_service`, the
-/// durable registration in `spawn_child`) and the type scheme
-/// (`scheme::service`) stay private to core, exactly as with `watch`.
+/// Availability inverts [`WATCH_BUILTIN`]'s.  Only a host with a lease frame has
+/// anything to exempt a worker from, so exarch installs it while the ral hosts —
+/// whose spawns already live until cancel or exit — leave it out, making the name
+/// a compile-time unknown there rather than a call-time refusal.
 pub static SERVICE_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
     name: Cow::Borrowed("service"),
     type_rule: BuiltinTypeRule::Scheme(Some(2), scheme::service),
@@ -481,28 +420,19 @@ pub static SERVICE_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
     body: BuiltinBody::Static(concurrency::builtin_service),
 }];
 
-/// `detach` — the ownership-renouncing concurrency builtin.
+/// `detach` — a birth this session renounces: the process reparents to init.
 ///
-/// Kept out of [`CORE_BUILTINS`] beside [`WATCH_BUILTIN`] and
-/// [`SERVICE_BUILTIN`], and carried only by a host that arms a detach policy
-/// ([`crate::types::Shell::arm_detach`]): installing the builtin and arming
-/// the policy are one host act, so absence is an unknown-name diagnostic and
-/// never a veto (`decisions/260617_watch-repl-builtin`).
+/// Carried only by a host that also arms a detach policy
+/// ([`crate::types::Shell::arm_detach`]) — one act, so absence is an unknown-name
+/// diagnostic and never a veto.  Whether
+/// a call that does resolve may *spend* the verb is the separate capability
+/// question, asked of the live grant stack
+/// ([`crate::types::GrantStack::permits_detach`]) and answered as a refusal.
 ///
-/// That absence answers only whether the *host* has the verb.  Whether a
-/// given call may spend it is a capability question, asked of the live
-/// grant stack ([`crate::types::GrantStack::permits_detach`]) and answered
-/// as a refusal — the ordinary shape for a frame-scoped denial.
-///
-/// The other three verbs vary policy over one type; this one changes the
-/// type. It is a variadic effect, not a function — there is no first-class
-/// `$detach` — and it returns a plain record rather than a
-/// [`Value::Handle`](crate::types::Value::Handle), because the process it
-/// births is reparented to init and no eliminator in this session can reach
-/// it (`decisions/260725_survives-exit-is-its-own-verb`).
-///
-/// Unix only: the birth is a double-fork, which Windows has no analogue of,
-/// so on Windows `detach` is simply absent.
+/// The other three verbs vary policy over one type; this one changes it — a
+/// variadic effect, hence no `$detach`, returning a plain record rather than a
+/// [`Value::Handle`] because no eliminator here can reach what it births.  The
+/// birth is a double-fork, which Windows has no analogue of.
 #[cfg(unix)]
 pub static DETACH_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
     name: Cow::Borrowed("detach"),
@@ -511,20 +441,13 @@ pub static DETACH_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
     body: BuiltinBody::Static(concurrency::builtin_detach),
 }];
 
-/// Synthesise a first-class thunk for a [`BuiltinEntry`] so a
-/// `$name` reference resolves to a function value.
+/// Synthesise the first-class thunk a `$name` reference resolves to: an n-ary
+/// lambda over a name-dispatched [`crate::ir::CompKind::Exec`], where `n` is the
+/// entry's fixed arity.  `None` for builtins with no value form.
 ///
-/// The thunk
-/// wraps an n-ary lambda around a name-dispatched
-/// [`crate::ir::CompKind::Exec`], where `n` is the entry's fixed
-/// arity, so the resulting value plays the same role as any
-/// user-written closure.  Returns `None` for builtins without a
-/// first-class value form.
-///
-/// The body uses [`crate::ir::CommandWord::Name`] rather than calling the
-/// entry's thunk directly — that way a future `within [handlers:
-/// …]` frame still intercepts the reified primitive when the
-/// synthesised lambda is later applied.
+/// The body dispatches by [`crate::ir::CommandWord::Name`] rather than calling
+/// the entry's thunk, so a `within [handlers: …]` frame installed later still
+/// intercepts the reified primitive when the lambda is applied.
 pub fn synthesize_builtin_value(entry: &BuiltinEntry) -> Option<Value> {
     use crate::ir::{CommandName, CommandWord, CompKind, Exec, IrPattern, Val};
     use crate::source::Spanned;
@@ -538,12 +461,6 @@ pub fn synthesize_builtin_value(entry: &BuiltinEntry) -> Option<Value> {
     }
     let name: &str = entry.name.as_ref();
 
-    // Body: Exec(Name(name), [Variable("__b0"), …]) — name-dispatched
-    // at call time, so a `within [handlers: …]` frame can intercept a
-    // reified builtin the same way it intercepts a bare-command call.
-    // Each curried bound arg `__b{i}` becomes a `Single` element with
-    // no span — synthetic thunks built here have no surface position
-    // to attribute.
     let arg_vars: crate::ir::Args = (0..arity)
         .map(|i| {
             Spanned::synthetic(crate::ir::ValListElem::Single(Val::Variable(format!(
@@ -556,16 +473,14 @@ pub fn synthesize_builtin_value(entry: &BuiltinEntry) -> Option<Value> {
         args: arg_vars,
         redirects: Vec::new(),
     }));
-    // Wrap in nested lambda abstractions from innermost outward: __b{n-1}. … __b0. body.
+    // Innermost outward, leaving `__b0` outermost so it binds the first argument.
     for i in (0..arity).rev() {
         body = Spanned::synthetic(CompKind::Lam {
             param: IrPattern::Name(format!("__b{i}")),
             body: Arc::new(body),
         });
     }
-    // The outermost wrap is `Lam` whenever arity > 0; lift its param so
-    // the produced value is a `Value::Lambda` directly.  Arity 0 yields
-    // a `Value::Block` whose body is the bare `Exec`.
+    // Arity 0 never wraps, so the bare `Exec` becomes a `Block`, not a `Lambda`.
     let captured = Arc::new(Env::default());
     Some(match body.item {
         CompKind::Lam {
@@ -583,19 +498,18 @@ pub fn synthesize_builtin_value(entry: &BuiltinEntry) -> Option<Value> {
     })
 }
 
-/// Register prelude definitions into the environment.
+/// Clone the prelude's top-level bindings into `shell`'s environment.
+///
+/// The prelude — a ral script baked into the binary — is evaluated once per
+/// process; every later shell gets a copy of what that run left behind.
 pub fn register(shell: &mut Shell, prelude_comp: &Arc<crate::ir::Comp>) {
     static PRELUDE_BINDINGS: OnceLock<HashMap<String, Binding>> = OnceLock::new();
 
-    // Evaluate the prelude once per process, then clone the resulting
-    // top-level bindings into each fresh environment.
     let bindings = PRELUDE_BINDINGS.get_or_init(|| {
         let mut prelude_env = Shell::new(crate::io::TerminalState::default());
 
-        // Bare-word `true`/`false` are already classified by
-        // `Val::from_word` in the elaborator, but `$true` / `$false`
-        // need an actual binding to resolve — these entries cover that
-        // explicit-sigil path.
+        // `Val::from_word` already classifies bare `true`/`false` in the
+        // elaborator; these bindings exist only so `$true` / `$false` resolve.
         prelude_env
             .mobile
             .scope
@@ -626,23 +540,19 @@ pub fn register(shell: &mut Shell, prelude_comp: &Arc<crate::ir::Comp>) {
             .set_binding(name.clone(), binding.clone());
     }
 
-    // Push a user scope so that prelude bindings (scopes[0]) can be
-    // distinguished from user bindings (scopes[1..]) in the lookup chain.
+    // Keep the prelude alone in scopes[0], so a lookup can tell a prelude
+    // binding from a user one.
     shell.mobile.scope.push_scope();
 }
 
 pub use print::{PrintParams, REPL_PRINT_PARAMS, pretty_print};
 
-/// Apply a thunk (`Block` or `Lambda`) `val` to `args` while a run frame is
-/// already installed.
-///
-/// Any other `Value` produces a descriptive error.  Used
-/// by builtins that accept function arguments and by the run door's hook
-/// arm ([`crate::Shell::run`]), which establishes the frame first.
+/// Apply a thunk (`Block` or `Lambda`) to `args`, with a run frame already
+/// installed: builtins that take function arguments call this, as does the run
+/// door's hook arm ([`crate::Shell::run`]), which establishes that frame first.
 ///
 /// # Errors
-/// Returns `Err` if `val` is neither a `Block` nor a `Lambda`, or if
-/// evaluating the applied thunk fails.
+/// If `val` is neither a `Block` nor a `Lambda`, or the applied thunk fails.
 pub fn apply(val: &Value, args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     match val {
         Value::Lambda { .. } | Value::Block { .. } => {

@@ -1,51 +1,33 @@
-//! Call-by-push-value intermediate representation.
+//! Call-by-push-value intermediate representation: the target of
+//! elaboration ([`crate::elaborator`]), the input to evaluation.
 //!
-//! The IR is the target of elaboration ([`crate::elaborator`]) and the
-//! input to evaluation.  It follows a *call-by-push-value* (CBPV)
-//! discipline: [`Val`] is inert data (strings, lists, maps, thunks),
-//! [`Comp`] is effectful and sequenced.  This split guarantees that
-//! effects are always explicit — a value can never diverge or perform I/O.
-//!
-//! Every [`Comp`] node carries an optional [`crate::source::Span`] for error reporting
-//! (synthetic nodes — builtins, prelude, generated code — have `span: None`).
-//! Sub-`Val` positions inside a `Comp` that the typechecker narrows onto
-//! (`If.cond`, `Case.scrutinee`/`table`, per-arg in `Args`, per-key in
-//! `Index.keys`) use the [`Spanned`] wrapper from the AST, so the span
-//! rides with the value rather than being parked on the parent.
+//! [`Val`] is inert data and [`Comp`] is effectful, so a value can never
+//! diverge or perform I/O.  The [`Spanned`] wrapper puts a source range on
+//! every [`Comp`] and on each sub-`Val` position the typechecker narrows
+//! onto, so a span rides with the value rather than the parent; `None`
+//! means the node is synthetic — a builtin, the prelude, generated code.
 
 use crate::mode::{ByteMode, Wire};
 use crate::path::tilde::TildePath;
 use crate::source::Spanned;
 use crate::syntax::ast::{BinaryOp, Pattern, RedirectMode};
 
-/// IR-side pattern.
-///
-/// Identical in shape to [`crate::syntax::ast::Pattern`] but with
-/// map-pattern defaults represented as pre-elaborated computations
-/// ([`Arc<Comp>`]) instead of raw [`crate::syntax::ast::Ast`].  This is what the
-/// elaborator hands to the typechecker and the evaluator — no parser
-/// syntax survives the elaboration phase.
+/// A [`crate::syntax::ast::Pattern`] whose map-pattern defaults are already
+/// elaborated to computations: no parser syntax survives elaboration.
 pub type IrPattern = Pattern<Arc<Comp>>;
-/// IR-side lambda parameter — a pattern with elaborated defaults.
 pub type Param = IrPattern;
 
 // ── Values ──────────────────────────────────────────────────────────────
-//
-// `Val` is CBPV's value category: inert data requiring no evaluation.
-// Typed numeric and boolean literals (`Int`, `Float`, `Bool`) exist so
-// that `$[...]` can lower into plain `Bind`-sequences without going
-// through string-literal parsing.
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Structured command head for external dispatch.
+/// The head word of a command, in the shape the source wrote it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandName {
-    /// Ordinary unresolved head, subject to alias/builtin/PATH lookup.
     Bare(String),
-    /// Slash-bearing literal path, executed directly.
+    /// Slash-bearing literal path: skips the lookup chain, exec'd as written.
     Path(String),
-    /// Tilde-prefixed path, expanded only at the process boundary.
+    /// Tilde-headed path, carried unexpanded until command resolution.
     TildePath(TildePath),
 }
 
@@ -58,60 +40,37 @@ impl CommandName {
     }
 }
 
-/// A value — inert data, no effects.
-///
-/// Values are the CBPV value category: they require no evaluation and
-/// can be passed, stored, and pattern-matched freely.  The evaluator
-/// produces values; computations consume and return them.
+/// The CBPV value category: inert data, requiring no evaluation.  The typed
+/// literals exist so that `$[…]` lowers into plain `Bind` sequences rather
+/// than round-tripping through string parsing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Val {
-    /// The unit value — result of side-effect-only computations.
     Unit,
-    /// A string value.  Produced by quoted source (`'x'` / `"x"`) and
-    /// by bare-word elaboration after [`Val::from_word`] has decided
-    /// the token isn't `true`/`false`/`unit` or numeric — see the
-    /// elaborator for the single classification point.
     String(String),
-    /// Integer literal.  Produced by `$[…]` expressions and by
-    /// [`Val::from_word`] on bare-word tokens that parse as `i64`.
     Int(i64),
-    /// Floating-point literal.  Produced by `$[…]` expressions and by
-    /// [`Val::from_word`] on bare-word tokens that contain `.` and
-    /// parse as `f64`.
     Float(f64),
-    /// Boolean literal.  Produced by `$[…]` expressions and by
-    /// [`Val::from_word`] on the bare words `true` and `false`.
     Bool(bool),
-    /// A bound variable reference, resolved at evaluation time.
     Variable(String),
-    /// A suspended computation (CBPV thunk).  Created by `{ … }` blocks
-    /// and lambda abstractions; eliminated by `Force`.
+    /// A suspended computation, eliminated by [`CompKind::Force`].
     Thunk(Arc<Comp>),
-    /// A list literal, possibly containing spread (`...x`) elements.
     List(Vec<ValListElem>),
-    /// A map literal, possibly containing spread (`...x`) entries.
     Map(Vec<ValMapEntry>),
-    /// A variant constructor: `` `label `` (no payload) or `` `label payload ``.
-    /// The label is stored without its leading backtick.
+    /// `` `label `` or `` `label payload ``; the label is stored without
+    /// its leading backtick.
     Variant {
         label: String,
         payload: Option<Box<Self>>,
     },
-    /// Home-directory expansion: `~`, `~user`, `~/path`, or `~user/path`.
     TildePath(TildePath),
 }
 
 impl Val {
-    /// Classify a bare-word token (`Ast::Word::Plain` / `Ast::Word::Slash`)
-    /// into the most specific [`Val`] variant, falling back to
-    /// [`Val::String`] when the word doesn't match a literal shape.
-    /// The shape rules live in [`crate::syntax::ast::WordLiteral::classify`].
+    /// Classify a bare word into its most specific [`Val`] variant, by the
+    /// shape rules of [`crate::syntax::ast::WordLiteral::classify`].
     ///
-    /// This is a known defect: classification is eager and type-blind, so
-    /// a numeric-looking bare word meant as argv data is read as a number
-    /// and stringified back losslessly only when its canonical form matches
-    /// its source (`007` ⇒ `7`, `1.50` ⇒ `1.5`). The planned fix moves
-    /// classification into type-directed inference.
+    /// Eager and type-blind: a numeric-looking word meant as argv data is
+    /// read as a number, and stringifies back unchanged only where its
+    /// source was already canonical (`007` ⇒ `7`, `1.50` ⇒ `1.5`).
     pub fn from_word(s: &str) -> Self {
         use crate::syntax::ast::WordLiteral;
         match WordLiteral::classify(s) {
@@ -124,59 +83,40 @@ impl Val {
     }
 }
 
-/// An element of a list literal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ValListElem {
-    /// A single element.
     Single(Val),
-    /// A spread element (`...x`), spliced into the surrounding list.
+    /// `...x`, spliced into the surrounding list.
     Spread(Val),
 }
 
-/// An entry of a map literal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ValMapEntry {
-    /// A key-value pair.
     Entry(Val, Val),
-    /// A spread entry (`...x`), merged into the surrounding map.
+    /// `...x`, merged into the surrounding map.
     Spread(Val),
 }
 
-/// Positional arguments to a call (`App` or `Exec`).
-///
-/// Each element is a [`Spanned<ValListElem>`] — the [`Spanned`] carries
-/// the parser's byte range for the whole argument slot (including the
-/// `...` for spread), so per-argument diagnostics underline the offending
-/// arg.  Synthetic / hoisted calls use [`Spanned::synthetic`] entries.
-///
-/// Conceptually distinct from a list *value* (`Val::List`): args have
-/// positional semantics, spread splices into the call's argument list,
-/// and the typechecker narrows source positions per-element.  The shape
-/// is the same — `Single`/`Spread` of `Val` — but giving the concept its
-/// own type lets the spans live with the values rather than parked on
-/// the enclosing `Comp`.
+/// Positional arguments to a call ([`CompKind::App`] or [`CompKind::Exec`]).
+/// Each span covers a whole argument slot, the `...` of a spread included,
+/// so a unification failure underlines one argument, not the whole call.
 pub type Args = Vec<Spanned<ValListElem>>;
 
-/// Helpers that interpret an [`Args`] as positional arguments.  Free
-/// functions rather than methods because [`Args`] is a type alias.
+/// Readers of an [`Args`].  Free functions, not methods — [`Args`] is a
+/// type alias.
 pub mod args {
     use super::{Args, Val, ValListElem};
 
-    /// Walk every sub-value in the args list, regardless of whether each
-    /// element is `Single` or `Spread`.
-    ///
-    /// Used by passes that need to
-    /// visit every Val in argument position without distinguishing the
-    /// two (mode analysis, best-effort sub-expression typing).
+    /// Every sub-value in argument position, `Single` and `Spread` alike,
+    /// for the inference passes that type sub-expressions best-effort.
     pub fn iter_subvals(args: &Args) -> impl Iterator<Item = &Val> {
         args.iter().map(|e| match &e.item {
             ValListElem::Single(v) | ValListElem::Spread(v) => v,
         })
     }
 
-    /// View the args as a literal positional-arg list, if statically
-    /// possible: no `Spread` elements.  Returns `None` for spread-bearing
-    /// calls — those have dynamic arity and demand weaker static checks.
+    /// The args as a literal positional list, or `None` if any element is a
+    /// `Spread` — dynamic arity, so callers fall back to weaker checks.
     pub fn positional(args: &Args) -> Option<Vec<&Val>> {
         let mut out = Vec::with_capacity(args.len());
         for e in args {
@@ -189,21 +129,14 @@ pub mod args {
     }
 }
 
-/// Target of an I/O redirect.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ValRedirectTarget {
-    /// Redirect to/from a file path.
     File(Val),
-    /// Redirect to/from a file descriptor number.
     Fd(u32),
 }
 
-/// IR-side I/O redirect: file descriptor, mode, and target value.
-///
-/// Owned as a field of [`CompKind::Exec`] (fused into the spawn syscall,
-/// which installs descriptors and execs atomically) or
-/// [`ScopeOp::Redirect`] (a redirect-frame scope wrapping an arbitrary
-/// body).  Never appears as a wrapper.
+/// An I/O redirect.  Always owned by whatever it applies to — [`Exec`] or
+/// [`ScopeOp::Redirect`] — never a wrapper of its own.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RedirectV {
     pub fd: u32,
@@ -213,13 +146,8 @@ pub struct RedirectV {
 
 // ── Computations ────────────────────────────────────────────────────────
 
-/// A computation node — effectful, sequenced — with an optional source span.
-///
-/// This is the primary IR type that the evaluator interprets.  Every node
-/// carries its own [`crate::source::Span`] (via the wrapping `Spanned`), set once during
-/// elaboration, so error messages can point back to the originating source
-/// text.  Synthetic nodes (builtins, prelude, generated code) carry
-/// `span: None`.
+/// A computation with the source span elaboration gave it — the type the
+/// evaluator interprets.
 pub type Comp = Spanned<CompKind>;
 
 /// True if this computation is a single external/builtin command call —
@@ -237,16 +165,12 @@ pub fn is_single_command(comp: &Comp) -> bool {
     }
 }
 
-/// Every name `comp` can reference: [`Val::Variable`] occurrences and
-/// `Exec`/`^` command-head names, collected by an exhaustive walk over
-/// `CompKind` / `Val` / `IrPattern` map-defaults / redirect targets
-/// (`decisions/260629_agent-binding-reaping`, the binding-lease ledger's
-/// renewal harvest). No wildcard arm anywhere in the walk: a new `CompKind`
-/// or `Val` variant is a compile error here rather than a silently
-/// unharvested reference. Over-approximate by design — a name in an
-/// untaken branch (the other arm of an `if`, an unmatched `case` table
-/// entry) still renews, which only ever lengthens a lease, never shortens
-/// one.
+/// Every name `comp` can reference, for the binding-lease ledger in
+/// `core/src/types/shell/bindings.rs` to renew.  No wildcard arm anywhere
+/// in the walk, so a new `CompKind` or `Val` variant is a compile error
+/// here rather than a silently unharvested reference.  Over-approximate by
+/// design: a name in an untaken branch renews too, and a lease only ever
+/// lengthens.
 pub(crate) fn referenced_names(comp: &Comp) -> Vec<&str> {
     let mut out = Vec::new();
     walk_comp(comp, &mut out);
@@ -371,11 +295,9 @@ fn walk_args<'a>(args: &'a Args, out: &mut Vec<&'a str>) {
     }
 }
 
-/// The head name of both dispatch forms — `Name` (binding → handler → PATH)
-/// and `^name` (handler → PATH, skipping binding) — collected regardless of
-/// dispatch shape: over-approximating a name a `^`-bypassed head could never
-/// actually renew from is harmless, the same safe direction as an untaken
-/// branch.
+/// Both dispatch forms contribute their head name.  A `^name` head can
+/// never reach a binding, so collecting it over-approximates — the same
+/// safe direction as an untaken branch.
 fn walk_command_word<'a>(word: &'a CommandWord, out: &mut Vec<&'a str>) {
     if let CommandName::Bare(name) = word.name() {
         out.push(name);
@@ -392,9 +314,8 @@ fn walk_redirects<'a>(redirects: &'a [RedirectV], out: &mut Vec<&'a str>) {
 }
 
 /// Map-pattern defaults are the only sub-position of an [`IrPattern`] that
-/// can reference a name — the pattern's own names are bound, not
-/// referenced. Recurses through `List` elements so a nested destructuring
-/// pattern's defaults are found too.
+/// can reference a name; the pattern's own names are bound, not referenced.
+/// Recurses so a nested destructuring's defaults are found too.
 fn walk_pattern_defaults<'a>(pattern: &'a IrPattern, out: &mut Vec<&'a str>) {
     match pattern {
         IrPattern::Wildcard | IrPattern::Name(_) => {}
@@ -440,201 +361,126 @@ fn walk_scope_op<'a>(op: &'a ScopeOp, out: &mut Vec<&'a str>) {
     }
 }
 
-/// The computation proper — the CBPV computation category.
-///
-/// Each variant corresponds to a distinct form of effectful term.
-/// The evaluator pattern-matches on `CompKind` to step the computation.
-/// Notation in variant docs follows Levy's CBPV conventions.
+/// The CBPV computation category — the evaluator steps a program by
+/// matching on this.  Variant docs use Levy's CBPV notation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CompKind {
-    /// force V — run a thunk (CBPV force).
+    /// force V — run a thunk.
     Force(Val),
-    /// A lambda abstraction — a computation that, when evaluated, captures a closure.
+    /// λ — evaluates to a closure.
     Lam { param: Param, body: Arc<Comp> },
     /// return V — produce a value.
     Return(Val),
-    /// M to x. N — sequence: run M, bind result to x, continue with N.
+    /// M to x. N — run `comp`, bind its result, continue with `rest`.
     Bind {
         comp: Arc<Comp>,
         pattern: IrPattern,
         rest: Arc<Comp>,
-        /// The checker's generalised scheme for the bound name, written
-        /// by the annotation pass for a top-level `Bind` with a `Name`
-        /// pattern; the evaluator installs it next to the value so the
-        /// next run's check can be seeded from the live binding.  Closed
-        /// (every variable ground or quantified) so it survives across
-        /// per-run unifiers.  `None` until the checker runs, and always
-        /// `None` for destructuring patterns.  Boxed so the optional
-        /// scheme stays one pointer wide on the `Bind` node.
+        /// Written by the annotation pass for a top-level `Bind` over a
+        /// `Name` pattern, and installed beside the value so the next run's
+        /// check starts from the live binding.  Closed — every variable
+        /// ground or quantified — so it survives across per-run unifiers.
         scheme: Option<Box<crate::typecheck::Scheme>>,
-        /// The ground output mode for the bound computation `comp`: the
-        /// evaluator's bind rule reads it to decide stdout capture.  The
-        /// elaborator emits the [`ByteMode::Empty`] placeholder; the
-        /// annotation pass overwrites it with the checker's verdict.
+        /// Ground output mode of `comp`; the evaluator's bind rule reads it
+        /// to decide stdout capture.  The elaborator emits the
+        /// [`ByteMode::Empty`] placeholder, the annotation pass the verdict.
         rhs_output: ByteMode,
     },
-    /// CBPV application: head is a function-typed computation, `args` is
-    /// the positional argument list.  Typing: `M : A → B, V : A ⊢ M V : B`.
-    ///
-    /// This is the lambda-calculus elimination form, used when the head
-    /// resolves to a bound value (`$f x`, `(|x| body) x`, etc.).  It does
-    /// not carry redirects: redirects are a shell effect, not a property
-    /// of function application.  Trailing redirects around a CBPV
-    /// application elaborate to [`ScopeOp::Redirect`] wrapping a thunk of
-    /// the `App`.
-    ///
-    /// Each argument is a [`Spanned<ValListElem>`] — `Single`/`Spread` of
-    /// [`Val`] paired with the parser's byte range for that argument slot,
-    /// so the typechecker can narrow a per-argument unification failure
-    /// onto the offending argument rather than the whole call.  A
-    /// list-literal argument (`f [...$xs]`) is one `Single`-wrapped
-    /// `Val::List`; an argument-position spread (`f ...$xs`) is a
-    /// `Spread`.  Synthetic / hoisted applications use
-    /// [`Spanned::synthetic`] entries.
+    /// `M : A → B, V : A ⊢ M V : B` — the elimination form taken when the
+    /// head resolves to a bound value (`$f x`, `(|x| body) x`).  It carries
+    /// no redirects, those being a shell effect and not a property of
+    /// application; trailing ones become a [`ScopeOp::Redirect`] around it.
     App { head: Arc<Comp>, args: Args },
-    /// Shell command invocation: name-dispatched (binding → handler →
-    /// PATH) or pinned to a statically-resolved builtin.  Trailing I/O
-    /// redirects are fused into the call itself: the spawn syscall installs
-    /// descriptors and execs atomically, so the redirect list is a field of
-    /// `Exec` rather than a wrapping scope.
-    ///
-    /// This is the effect-boundary form: anything outside this variant
-    /// cannot reach the handler/PATH dispatch chain or an external
-    /// program.  CBPV applications go through [`CompKind::App`].
+    /// Shell command invocation, and the effect boundary — nothing outside
+    /// this variant reaches the dispatch chain or an external program.
+    /// Redirects fuse into the call rather than wrapping it, because the
+    /// spawn syscall installs descriptors and execs atomically.
     Exec(Exec),
-    /// Pipeline: concurrent stages connected by Unix pipes.
-    /// Each stage runs in parallel; stdout of stage N feeds stdin of stage N+1.
+    /// Concurrent stages joined by Unix pipes: stdout of stage N feeds
+    /// stdin of stage N+1.
     Pipeline {
         stages: Vec<Arc<Comp>>,
-        /// One ground [`Wire`] per stage — exactly `stages.len()` of them.
+        /// One ground [`Wire`] per stage, exactly `stages.len()` of them.
         /// The elaborator emits an all-[`Wire::EMPTY`] placeholder; the
-        /// checker's annotation pass overwrites it with the inferred byte
-        /// channels, which pipeline staging then reads to wire each stage.
-        /// A `Wire` is `Copy` and rides unboxed.
+        /// annotation pass writes the byte channels the evaluator wires from.
         wires: Vec<Wire>,
-        /// One inferred *value* type per stage — the data flowing out of
-        /// it — parallel to `stages`/`wires`.  The elaborator emits a
-        /// `Unit` placeholder; the annotation pass overwrites it with the
-        /// resolved per-stage types.  Retained for the structural REPL's
-        /// typed spine; the evaluator never reads it, so an un-annotated
-        /// pipeline (which never reaches the evaluator) keeps the
-        /// placeholder harmlessly.
+        /// The inferred value type out of each stage, parallel to `stages`.
+        /// Only the structural REPL's typed spine reads it, so an
+        /// un-annotated pipeline keeps the `Unit` placeholder harmlessly.
         stage_types: Vec<crate::typecheck::Ty>,
     },
-    /// Binary primitive on already-evaluated values (`$[a + b]`,
-    /// `$[a == b]`, …).  Arity-correct by construction — the inner
-    /// `BinaryOp` excludes the unary `not`, which has its own
-    /// [`CompKind::Not`] variant.
+    /// Binary primitive on already-evaluated values (`$[a + b]`, `$[a == b]`).
     Binary(BinaryOp, Val, Val),
-    /// Unary logical negation: `not v` on a `Bool` value.  Separate
-    /// from [`CompKind::Binary`] so the IR can't represent the
-    /// nonsense "`Not` applied to two operands" / "`Add` applied to
-    /// one operand"; the evaluator and typechecker dispatch on
-    /// variant rather than a runtime arity guard.
+    /// `not v` on a `Bool`.  Its own variant so the IR cannot spell a
+    /// two-operand `not` or a one-operand `Add`; evaluator and typechecker
+    /// dispatch on the tag rather than a runtime arity guard.
     Not(Val),
-    /// Indexing: `V[k1][k2]` — eliminate a collection value by a sequence
-    /// of key values.  Computation-typed only because it can fail
-    /// (key not found, out of bounds); target and keys are pure values.
-    ///
-    /// Each key is a [`Spanned<Val>`] carrying the byte range the
-    /// parser read for that `[k]` (including the surrounding brackets),
-    /// so a per-key unification failure underlines the offending key.
-    /// Synthetic fixtures use [`Spanned::synthetic`].
+    /// `V[k1][k2]` — computation-typed only because it can fail (key not
+    /// found, out of bounds); target and keys are themselves pure.
     Index {
         target: Val,
         keys: Vec<Spanned<Val>>,
     },
-    /// Fallback chain (`a ? b ? c`): try each computation in order;
-    /// return the first that succeeds.
+    /// Fallback chain (`a ? b ? c`) — the first computation that succeeds.
     Chain(Vec<Arc<Comp>>),
-    /// String interpolation (effectful — variable lookups can fail).
+    /// String interpolation, effectful because a lookup can fail.
     Interpolation(Vec<Val>),
-    /// Sequence of computations (last value is the result).
+    /// Sequence; the last value is the result.
     Seq(Vec<Arc<Comp>>),
-    /// Simultaneous fixed point for mutually recursive functions.  Each
-    /// binding's RHS is a thunk value (CBPV: mutual recursion requires the
-    /// fixpoint to close over thunked references to its siblings).
-    /// slot = None: establish all bindings in the current shell, return Unit.
-    /// slot = Some(i): re-establish group in a temporary scope, return lambda for binding i.
+    /// Simultaneous fixed point for mutual recursion.  Each RHS is a thunk,
+    /// since the fixpoint must close over references to its siblings.
+    /// `slot: None` establishes the whole group in the current shell and
+    /// returns Unit; `Some(i)` re-establishes it in a temporary scope and
+    /// returns the lambda for binding `i`.
     LetRec {
         slot: Option<usize>,
         bindings: Arc<Vec<(String, Val)>>,
     },
-    /// Conditional: `cond` is a Bool value; the chosen branch (`then`
-    /// or `else_`) runs inline.  CBPV: `if V then M else N` with
-    /// `V : Bool` and `M, N : C` for the same comp type `C`.
-    ///
-    /// `cond` is a [`Spanned<Val>`]; its span is the byte range the
-    /// parser captured for the condition expression, used by the
-    /// typechecker to underline the offending cond on a non-Bool
-    /// diagnostic.  Synthesised conditionals (short-circuit `&&` /
-    /// `||` lowering, nested elsif arms) use [`Spanned::synthetic`] —
-    /// the typechecker falls back to the enclosing pos.
+    /// `if V then M else N` with `V : Bool` and `M, N : C`; the chosen
+    /// branch runs inline.
     If {
         cond: Spanned<Val>,
         then: Arc<Comp>,
         else_: Arc<Comp>,
     },
-    /// Sum eliminator: `scrutinee` is a variant value; `table` is a
-    /// tag-keyed record of thunks; the matching handler is forced on
-    /// the payload.  Typechecking guarantees coverage; an unmatched
-    /// label at runtime is an internal error.
-    ///
-    /// `scrutinee` and `table` are each [`Spanned<Val>`] carrying
-    /// the parser ranges of the surface operands so the typechecker
-    /// can narrow a "case needs a variant" diagnostic onto the
-    /// scrutinee, and any handler-shape diagnostic onto the table.
-    /// Synthetic IR uses [`Spanned::synthetic`].
+    /// Sum eliminator: `table` is a tag-keyed record of thunks, the matching
+    /// one forced on the scrutinee's payload.  The checker proves coverage
+    /// only for a literal table; an opaque one can still miss at runtime,
+    /// which `evaluator::case` reports as a checker bug.
     Case {
         scrutinee: Spanned<Val>,
         table: Spanned<Val>,
     },
-    /// Effect-frame scope: install an effect for the duration of a
-    /// body, then restore.  Includes the control-operator forms
-    /// (`try`/`guard`/`within`/`grant`/`audit`) and `redirect`, which
-    /// is the redirect-frame scope used whenever a non-`Exec` body
-    /// needs trailing I/O redirects.
+    /// Effect-frame scope: install an effect for the duration of a body,
+    /// then restore.
     Scope(ScopeOp),
 }
 
-/// Body of a [`CompKind::Exec`].  Carries its own redirect list, fused
-/// into the syscall — there is no separate redirect wrapper for shell
-/// calls.
+/// Body of a [`CompKind::Exec`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Exec {
     pub head: CommandWord,
-    /// Positional arguments, mirroring [`CompKind::App`]'s `args`.
-    /// Each element coerces to its string form at the syscall
-    /// boundary; spread (`^cmd ...$xs`) is a `Spread` element.
+    /// Each element coerces to its string form at the syscall boundary.
     pub args: Args,
     pub redirects: Vec<RedirectV>,
 }
 
-/// Dispatch shape of an [`Exec`] head.
-///
-/// Two variants, two rules:
-/// `Name` goes through binding, handler, then PATH lookup;
-/// `External` is the `^name` form, which skips binding but is still
-/// contained by any enclosing
-/// `within [handlers:]` frame.  The `^name` form is its own variant
-/// rather than a flag on `Name` so the IR shape carries the dispatch
-/// decision instead of burying it as a boolean.
+/// Dispatch shape of an [`Exec`] head — a variant rather than a flag on
+/// `Name`, so the IR shape carries the decision instead of burying it in a
+/// boolean.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandWord {
-    /// Name-dispatched call: binding → handler → PATH at evaluation
-    /// time.
+    /// Resolved at evaluation time: binding, then builtin, then handler,
+    /// then PATH.
     Name(CommandName),
-    /// `^name` form: skip binding lookup and resolve through user
-    /// handlers, then PATH. Still subject to `within [handlers:]`
-    /// containment — the bypass is on the binding lookup, not on the frame.
+    /// `^name` — skips binding and builtin lookup but still resolves through
+    /// handlers, so an enclosing `within [handlers:]` frame still contains
+    /// it.  The bypass is on the lookup, not on the frame.
     External(CommandName),
 }
 
 impl CommandWord {
-    /// The head name, common to both variants.  Consumers that need
-    /// to distinguish `Name` from `External` (the `^name` form) match
-    /// on the variant directly; the dispatch decision lives in the
-    /// tag, not in a boolean projection.
+    /// The head name, common to both variants.
     pub fn name(&self) -> &CommandName {
         match self {
             Self::Name(n) | Self::External(n) => n,
@@ -642,41 +488,27 @@ impl CommandWord {
     }
 }
 
-/// The effect-frame variants.
-///
-/// Each describes a particular effect
-/// installed for the duration of a body computation, then restored
-/// when the body returns or escapes.  Carried directly by
-/// [`CompKind::Scope`] — there is no wrapper struct, since no
-/// invariant lives outside the variant payload.
+/// The effect frames: each installs an effect for the duration of a body,
+/// then restores it when the body returns or escapes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ScopeOp {
-    /// `try BODY HANDLER` — run `body`, catching any error and
-    /// dispatching to `handler` (a thunk of one argument).
+    /// `try BODY HANDLER` — catch an error out of `body` and pass it to
+    /// `handler`, a thunk of one argument.
     Try { body: Val, handler: Val },
-    /// `guard BODY CLEANUP` — run `body`, then unconditionally run
-    /// `cleanup` (a thunk).  Cleanup failures are reported but do not
-    /// mask the body's result.
+    /// `guard BODY CLEANUP` — `cleanup` runs unconditionally; a failure in
+    /// it is reported but does not mask the body's result.
     Guard { body: Val, cleanup: Val },
-    /// `within OPTS BODY` — install option overrides for the duration
-    /// of `body`.  `opts` is the option map (evaluated at runtime);
-    /// `body` is a thunk-shaped value invoked under the scope.
+    /// `within OPTS BODY` — install the option overrides in `opts`, a map
+    /// evaluated at runtime, for the duration of `body`.
     Within { opts: Val, body: Val },
-    /// `grant CAPS BODY` — attenuate the active capability set across
-    /// `body`.  `caps` describes the capability map; `body` is a
-    /// thunk-shaped value invoked under the attenuated frame.
+    /// `grant CAPS BODY` — attenuate the active capability set across `body`.
     Grant { caps: Val, body: Val },
-    /// `audit BODY` — run `body` while recording an audit subtree;
-    /// the resulting node is reified into a value.
+    /// `audit BODY` — record an audit subtree over `body` and reify the
+    /// resulting node as a value.
     Audit { body: Val },
-    /// Redirect frame: install the given redirects, evaluate `body`,
-    /// restore on exit.  Used whenever a CBPV `App` or a nested
-    /// `Scope` carries trailing I/O redirects; `Exec` fuses its
-    /// redirects directly and does not go through this variant.
-    /// `body` is an `Arc<Comp>` rather than a thunk-shaped `Val` —
-    /// the redirect frame always wraps a computation, so the IR
-    /// makes that statically true and the invoke arm needs no
-    /// runtime fallback.
+    /// Redirect frame for a body that cannot fuse its own redirects — a
+    /// CBPV `App`, or a nested `Scope`.  `body` is an `Arc<Comp>` and not a
+    /// thunk-shaped `Val`, so the invoke arm needs no runtime fallback.
     Redirect {
         body: Arc<Comp>,
         redirects: Vec<RedirectV>,
@@ -691,8 +523,6 @@ mod tests {
     use crate::syntax::ast::{BinaryOp, RedirectMode};
     use crate::typecheck::Ty;
 
-    /// A numeric-looking bare word classifies to its `Int`/`Float`
-    /// reading; `true`/`unit` to `Bool`/`Unit`; anything else to `String`.
     #[test]
     fn from_word_classifies_canonical_numbers() {
         assert_eq!(Val::from_word("5"), Val::Int(5));
@@ -714,14 +544,10 @@ mod tests {
         Arc::new(Spanned::synthetic(CompKind::Return(var(name))))
     }
 
-    /// One synthetic `Comp` exercising every `CompKind`, every `Val`, and
-    /// every `ScopeOp` variant, each tagging the names it references with a
-    /// distinct `r_*` label and the names it merely *binds* (pattern names,
-    /// a `LetRec` group's own names) with a `bound_*`/`*_bound` label that
-    /// must never appear in the harvest. Asserts the walker finds exactly
-    /// the referenced set — not a subset (a wildcard-arm regression would
-    /// silently drop one), not a superset (a bound name leaking in would
-    /// over-renew in a way this test, not just the type system, must catch).
+    /// One synthetic `Comp` touching every `CompKind`, `Val`, and `ScopeOp`
+    /// variant: `r_*` labels what it references, `*_bound` what it merely
+    /// binds.  The harvest is asserted *exactly* — a subset would hide a
+    /// wildcard-arm regression, a superset a bound name over-renewing.
     #[test]
     fn referenced_names_walks_every_variant() {
         let lam_param = IrPattern::Map(vec![crate::syntax::ast::MapPatternEntry {
@@ -777,8 +603,7 @@ mod tests {
             redirects: vec![RedirectV {
                 fd: 0,
                 mode: RedirectMode::Read,
-                // A non-File target contributes no reference — proves the
-                // walker doesn't over-collect from an `Fd` redirect.
+                // An `Fd` target contributes no reference to over-collect.
                 target: ValRedirectTarget::Fd(9),
             }],
         }));
@@ -980,8 +805,6 @@ mod tests {
              letrec_name_bound) must be absent"
         );
 
-        // Bound names — pattern targets and the LetRec group's own names —
-        // must never be treated as references.
         for bound in [
             "lam_param_bound",
             "bind_map_bound",

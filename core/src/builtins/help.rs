@@ -1,8 +1,6 @@
-//! The `help` / `explain` subsystem.
-//!
-//! `help` prints the at-a-glance command index; `explain <name>` resolves
-//! one builtin, prelude function, or host-registered library entry to its
-//! doc, type signature, and source location.
+//! `help` prints the command index; `explain <name>` resolves one builtin,
+//! prelude function, or host-installed library entry to its doc, its type,
+//! and where the shell would find it.
 
 use crate::ansi::{self, BOLD, CYAN, DIM, RESET};
 use crate::typecheck::{builtin_type_hint, fmt_scheme};
@@ -11,10 +9,8 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::OnceLock;
 
-/// Return the formatted scheme of a prelude function, read from the
-/// shell's own prelude scope — the baked `Bind` nodes carry the
-/// checker's harvested schemes, so there is nothing to look up beyond
-/// the shell's environment.
+/// The baked prelude's `Bind` nodes carry the checker's harvested schemes,
+/// so the shell's own prelude scope is the whole registry.
 fn prelude_type_hint(name: &str, shell: &Shell) -> Option<String> {
     let scheme = shell
         .mobile
@@ -25,24 +21,21 @@ fn prelude_type_hint(name: &str, shell: &Shell) -> Option<String> {
     Some(fmt_scheme(scheme))
 }
 
-/// Collect a `name → doc` map into a vector of pairs sorted by name.
 fn sorted_pairs(map: &HashMap<String, String>) -> Vec<(String, String)> {
     let mut v: Vec<(String, String)> = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     v.sort_by(|a, b| a.0.cmp(&b.0));
     v
 }
 
-/// Return all host-registered library names with their doc strings, sorted
-/// alphabetically.
+/// Empty until a host calls [`Shell::install_library_docs`].
 fn library_all_docs(shell: &Shell) -> Vec<(String, String)> {
     sorted_pairs(&shell.session.library_docs)
 }
 
-/// Scan the embedded prelude source for `## doc` / `let name` pairs and return
-/// the resulting map, initialised once.  A function's summary is the first
-/// paragraph of its doc comment: consecutive `## ` lines are joined with single
-/// spaces, and a blank `##` line closes the summary so trailing detail
-/// paragraphs are excluded.
+/// Scrape `## doc` / `let name` pairs from the prelude source — the same file
+/// the baked prelude comes from, read a second way, since only the values and
+/// schemes survive baking.  A summary is the first paragraph: doc lines join
+/// with spaces, a bare `##` closes it, anything else discards it.
 fn prelude_docs() -> &'static HashMap<String, String> {
     static DOCS: OnceLock<HashMap<String, String>> = OnceLock::new();
     DOCS.get_or_init(|| {
@@ -81,28 +74,21 @@ fn prelude_docs() -> &'static HashMap<String, String> {
     })
 }
 
-/// Return the doc comment for a prelude function.
 fn prelude_doc(name: &str) -> Option<String> {
     prelude_docs().get(name).cloned()
 }
 
-/// The documented prelude function names (the keys of [`prelude_docs`]),
-/// unsorted.
-///
-/// An embedding host folds these into its own at-a-glance command
-/// index beside the builtins; `explain <name>` then resolves each through
-/// [`prelude_doc`].
+/// The documented prelude function names, unsorted.  An embedding host folds
+/// these into its own command index beside [`Shell::builtin_names`].
 pub fn prelude_names() -> Vec<&'static str> {
     prelude_docs().keys().map(String::as_str).collect()
 }
 
-/// Return all prelude names with their doc strings, sorted alphabetically.
 fn prelude_all_docs() -> Vec<(String, String)> {
     sorted_pairs(prelude_docs())
 }
 
-/// The ANSI color tuple `(bold, cyan, dim, reset)` used by `help`/`explain`
-/// output, collapsed to empty strings when color is disabled.
+/// `(bold, cyan, dim, reset)`, all empty when color is off.
 fn ui_colors() -> (&'static str, &'static str, &'static str, &'static str) {
     if ansi::use_ui_color() {
         (BOLD, CYAN, DIM, RESET)
@@ -111,8 +97,6 @@ fn ui_colors() -> (&'static str, &'static str, &'static str, &'static str) {
     }
 }
 
-/// Format a full entry: name, one-line doc, type hint, and optional source
-/// location.  Shared by `help` and `explain`.
 fn fmt_entry(
     name: &str,
     doc: &str,
@@ -129,7 +113,6 @@ fn fmt_entry(
     s
 }
 
-/// Format a one-line `name — doc` entry.  Shared by `help` and `explain`.
 fn fmt_line(name: &str, doc: &str, (cyan, dim, reset): (&str, &str, &str)) -> String {
     format!("  {cyan}{name}{reset} {dim}—{reset} {doc}\n")
 }
@@ -230,7 +213,9 @@ pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Value {
     Value::Unit
 }
 
-/// Test whether `name` matches the search `pattern`, case-insensitively.
+/// The fallback search `explain` runs when a name resolves to nothing: a
+/// case-insensitive regex, degrading to substring for a pattern that will not
+/// compile.
 #[cfg(feature = "grep")]
 fn name_matches(pattern: &str, name: &str) -> bool {
     match grep::regex::RegexMatcherBuilder::new()
@@ -245,13 +230,14 @@ fn name_matches(pattern: &str, name: &str) -> bool {
     }
 }
 
-/// Test whether `name` matches the search `pattern`, case-insensitively.
+/// Case-insensitive substring search; without `grep` there is no regex.
 #[cfg(not(feature = "grep"))]
 fn name_matches(pattern: &str, name: &str) -> bool {
     name.to_lowercase().contains(&pattern.to_lowercase())
 }
 
-/// Return a type string for a builtin, falling back to its type rule.
+/// A command-only builtin has no first-class scheme for `builtin_type_hint`
+/// to format, so the fallback reads a pipeline shape off its signature.
 fn type_for(name: &str, table: &crate::types::BuiltinTable) -> String {
     builtin_type_hint(table, name).unwrap_or_else(|| {
         use crate::typecheck::builtins::{BuiltinTypeRule, CompTemplate, ModeTemplate};
@@ -287,7 +273,9 @@ fn type_for(name: &str, table: &crate::types::BuiltinTable) -> String {
     })
 }
 
-/// Resolve `name` to a one-line description of where the shell would find it.
+/// Where the shell would find `name`.  Probes handlers before builtins, the
+/// reverse of `command_call::resolve`; `HandlerEntry::vet` refuses a handler
+/// name that is already a builtin or a binding, so the two orders agree.
 fn which_line(name: &str, shell: &Shell) -> Option<String> {
     if shell.mobile.scope.get_local(name).is_some() {
         return Some(format!("{name}: local"));
@@ -295,9 +283,8 @@ fn which_line(name: &str, shell: &Shell) -> Option<String> {
     if shell.mobile.scope.get_prelude(name).is_some() {
         return Some(format!("{name}: prelude"));
     }
-    // Handler-stack arrivals (aliases and active `within` frames) report
-    // before the builtin/external resolution so the user sees what
-    // actually fires, not what would have fired without them.
+    // An alias is a handler frame too, so it must be named before the
+    // handler arm swallows it.
     if shell.has_alias(name) {
         return Some(format!("{name}: alias"));
     }
@@ -326,8 +313,6 @@ fn which_line(name: &str, shell: &Shell) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// A summary sentence that wraps across several `## ` lines is joined
-    /// into one line, not truncated to its last physical line.
     #[test]
     fn multiline_doc_summary_joins_first_paragraph() {
         let lines_doc = prelude_doc("lines").expect("lines has a doc comment");
@@ -341,8 +326,6 @@ mod tests {
         );
     }
 
-    /// A blank `##` line closes the summary paragraph, so a function whose
-    /// doc has trailing detail paragraphs lists only its lead sentence.
     #[test]
     fn blank_doc_line_ends_the_summary() {
         let par_doc = prelude_doc("par").expect("par has a doc comment");
@@ -352,10 +335,8 @@ mod tests {
         );
     }
 
-    /// A shell no host has installed library docs into carries no
-    /// `Library:` section — the honesty gain of moving the docs off a
-    /// process-global registry and onto the session that actually holds
-    /// them.
+    /// Library docs hang off the session, not a process-global registry, so
+    /// a shell no host dressed shows no `Library:` section at all.
     #[test]
     fn bare_shell_help_has_no_library_section() {
         let mut shell = Shell::default();
@@ -370,8 +351,7 @@ mod tests {
     }
 
     /// [`Shell::install_library_docs`] is the one door onto
-    /// `session.library_docs`: once a host installs an entry through it,
-    /// `help` lists it under `Library:` and `explain` resolves its doc.
+    /// `session.library_docs`.
     #[test]
     fn installed_library_docs_surface_in_help_and_explain() {
         let mut shell = Shell::default();

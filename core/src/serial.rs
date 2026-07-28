@@ -1,20 +1,12 @@
-//! Serialisable mirror of `Value` and `Env`.
+//! Serialisable mirrors of `Value` and `Env`.
 //!
-//! [`FOValue`] is a serde-round-trippable *first-order* value: unit, bool,
-//! int, float, string, bytes, and lists/maps/variants thereof — data all
-//! the way down, first-order by construction rather than by a checked
-//! invariant.  It is generic over an extension slot `X` (default
-//! [`NoExt`], which is uninhabited) so a closure-carrying variant can be
-//! added without touching the shared data arms.
-//!
-//! [`SerialValue`] instantiates that slot with [`Closure`]: the
-//! child-eval / pipeline-stage helper IPC (`child_eval`, framed by
-//! `subprocess_codec`) needs to send a computation's captured closure
-//! across a process boundary as JSON, alongside [`SerialEnvSnapshot`] (a
-//! serde-round-trippable mirror of `Env`).  Shared scopes are
-//! deduplicated via an interning table ([`InternCtx`]) so the O(2^N)
-//! tree-unfolding hazard cannot occur regardless of the captured-env
-//! shape.
+//! [`FOValue`] is first-order by construction — data all the way down — over
+//! an extension slot uninhabited by default ([`NoExt`]).  [`SerialValue`]
+//! fills the slot with [`Closure`] so the re-exec'd child IPC (`child_eval`,
+//! `subprocess`, the pipeline stage helper) can ship a captured environment
+//! as JSON.  Scopes intern by `Arc` identity ([`InternCtx`]) and rebuild
+//! topologically ([`build_arcs`]), so sharing survives the crossing rather
+//! than unfolding into an exponential tree.
 
 use crate::ir::Comp;
 use crate::types::{Binding, Env, Error, Value};
@@ -22,12 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-/// Transport floats by their IEEE-754 bit pattern.  JSON's number type
-/// has no representation for NaN or ±∞ — `serde_json` writes them as
-/// `null` and rejects `null` on the way back, breaking the totality
-/// contract for the value wire.  A `f64`'s bits are a `u64`, which JSON
-/// carries exactly, so every float — finite or not — round-trips
-/// losslessly.
+/// Floats cross as their IEEE-754 bits.  JSON has no number for NaN or ±∞:
+/// `serde_json` writes them as `null` and then refuses to read it back.
 mod float_bits {
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -44,12 +32,9 @@ mod float_bits {
     }
 }
 
-/// A serialisable *first-order* ral value: unit, bool, int, float (by
-/// bits), string, bytes, and lists/maps/variants thereof — data all the
-/// way down.
-///
-/// `X` is the extension slot, uninhabited by default: a bare
-/// `FOValue` is first-order by construction, not by a checked invariant.
+/// A first-order ral value — data all the way down.  The extension slot `X`
+/// is uninhabited by default, so a bare `FOValue` is first-order by
+/// construction rather than by a checked invariant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FOValue<X = NoExt> {
@@ -83,21 +68,20 @@ pub enum FOValue<X = NoExt> {
     Ext(X),
 }
 
-/// Uninhabited: no `Ext` arm can exist for a bare `FOValue`.
+/// Uninhabited: a bare `FOValue` has no `Ext` arm.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoExt {}
 
-/// What the in-kernel helper IPC (`child_eval` / pipeline stages) adds to
-/// [`FOValue`]: closures with interned scopes.
+/// What the re-exec'd child IPC adds to [`FOValue`]: closures over interned
+/// scopes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Closure {
     Lambda(SerialLambda),
     Block(SerialThunk),
 }
 
-/// Serde mirror of [`Value`] used by the child-eval / pipeline-stage
-/// helper IPC.  `Handle` values cannot cross the wire and produce an
-/// error when encountered.
+/// [`FOValue`] with closures, for the re-exec'd child IPC.  A `Handle` has no
+/// wire form; encoding one is an error.
 pub type SerialValue = FOValue<Closure>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -113,44 +97,29 @@ pub struct SerialThunk {
     pub captured: SerialEnvSnapshot,
 }
 
-/// A shell snapshot in serialised form.
-///
-/// Each element of `scopes` is an
-/// index into a companion scope table (owned by the request/response
-/// envelope — see `child_eval`).  The table is a flat `Vec` of scope
-/// entries, serialised at most once per `Arc`-shared allocation.
+/// An [`Env`] in wire form: one [`ScopeTable`] index per scope, resolved
+/// against the table carried on the enclosing request/response envelope.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SerialEnvSnapshot {
     pub scopes: Vec<u32>,
 }
 
-/// Serde mirror of a scope [`Binding`]: the value in wire form, the
-/// scheme as itself (already serde-round-trippable — it is what the
-/// prelude bake serialises).
+/// Wire mirror of a [`Binding`]: the value converted, the scheme as itself.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SerialBinding {
     pub value: SerialValue,
     pub scheme: Option<crate::typecheck::Scheme>,
 }
 
-/// The interned scope table: one row of `(name, SerialBinding)` pairs
-/// per `Arc`-shared scope allocation, in DFS intern order.
-///
-/// Owned by
-/// the request/response envelope and rebuilt into [`ScopeArcs`] by
-/// [`build_arcs`] on the receiving side.
+/// One row per `Arc`-shared scope, in DFS intern order; [`build_arcs`]
+/// rebuilds it into [`ScopeArcs`] on the receiving side.
 pub type ScopeTable = Vec<Vec<(String, SerialBinding)>>;
 
 // ── Interning context ─────────────────────────────────────────────────────
 //
-// `InternCtx` tracks Arc pointer identity so a scope shared by multiple
-// closures is serialised once and referenced by index everywhere else.
-//
-// Scopes are interned DFS but their references are unordered: a scope may
-// hold a closure whose captured shell points back at an earlier-interned
-// sibling (common when inner scopes carry functions captured from outer
-// ones).  `build_arcs` therefore topologically sorts by dependency
-// instead of trusting id order.
+// Scopes intern in DFS order, but their references are unordered: a scope may
+// hold a closure whose captured env points back at an earlier-interned sibling.
+// `build_arcs` therefore sorts by dependency rather than trusting id order.
 
 pub struct InternCtx {
     pub scope_table: ScopeTable,
@@ -179,18 +148,13 @@ impl InternCtx {
         )]
         let id = self.scope_table.len() as u32;
         self.ptr_to_id.insert(ptr, id);
-        self.scope_table.push(Vec::new()); // placeholder
+        self.scope_table.push(Vec::new()); // reserve the row: recursion may reach this id
         let mut entries = Vec::with_capacity(scope.len());
         for (k, b) in scope.iter() {
-            // Bindings that transitively contain a live in-process resource
-            // (a `Handle`) cannot cross a process boundary.  Drop them here
-            // rather than failing the whole snapshot: unrelated handles in
-            // scope must not poison a stage that does not reference them.
-            // A stage that *does* reach for the dropped name will get a
-            // clean unbound-name error from the helper.  We don't descend
-            // through `Thunk` boundaries: a thunk's captured env is interned
-            // scope-by-scope through this same routine, which independently
-            // drops handle-bearing bindings inside the captured env.
+            // A binding reaching a `Handle` cannot cross a process boundary.
+            // Drop it rather than fail the snapshot: an unrelated handle must
+            // not poison a stage that never names it, and one that does name
+            // it gets a clean unbound-name error instead.
             if value_carries_handle(&b.value) {
                 continue;
             }
@@ -213,14 +177,10 @@ impl Default for InternCtx {
     }
 }
 
-/// True when `value` transitively contains a `Handle` reachable without
-/// crossing a `Thunk` boundary.  Thunks carry their own captured env, which
-/// `intern_scope` sanitizes recursively, so a handle deep inside a thunk's
-/// closure does not require dropping the *thunk* binding.
-///
-/// The match over `Value` is intentionally exhaustive: a new variant must
-/// be classified here as scalar (no handle), container (descend), or
-/// closure (don't descend) rather than silently passing as handle-free.
+/// Whether `value` reaches a `Handle` without crossing a closure boundary — a
+/// closure's captured env is interned through `intern_scope`, which drops
+/// handle-bearing bindings there.  The match is exhaustive on purpose: a new
+/// `Value` variant must be classified rather than pass as handle-free.
 fn value_carries_handle(value: &Value) -> bool {
     match value {
         Value::Handle(_) => true,
@@ -229,8 +189,6 @@ fn value_carries_handle(value: &Value) -> bool {
         Value::Variant {
             payload: Some(p), ..
         } => value_carries_handle(p),
-        // Closures carry their own captured env, sanitized separately by
-        // `intern_scope`, so we do not descend into them here.
         Value::Variant { payload: None, .. }
         | Value::Lambda { .. }
         | Value::Block { .. }
@@ -246,13 +204,12 @@ fn value_carries_handle(value: &Value) -> bool {
 /// One reconstructed `Arc<HashMap>` per scope table row (`None` until built).
 pub type ScopeArcs = Vec<Option<Arc<HashMap<String, Binding>>>>;
 
-/// Topologically reconstruct one `Arc<HashMap>` per scope from a scope table,
-/// building each scope only once all of its dependencies are built.
+/// Rebuild one `Arc<HashMap>` per scope table row, each once its dependencies
+/// are built.
 ///
 /// # Errors
-/// Returns `Err` if a scope reference is out of range or unresolved, if
-/// reconstructing a binding's value fails, or if the dependency graph is
-/// cyclic (no scope makes progress in a pass).
+/// A scope reference out of range or unresolved, a binding that fails to
+/// decode, or a cycle — a pass in which no scope makes progress.
 pub fn build_arcs(scope_table: &ScopeTable) -> Result<ScopeArcs, Error> {
     let n = scope_table.len();
     let mut arcs: ScopeArcs = vec![None; n];
@@ -306,10 +263,9 @@ pub fn build_arcs(scope_table: &ScopeTable) -> Result<ScopeArcs, Error> {
     Ok(arcs)
 }
 
-/// The match over `SerialValue` is intentionally exhaustive: a new variant
-/// must declare here whether it carries scope references (a closure) or
-/// nested values (a container) so its dependency edges are never silently
-/// dropped from the topological build in [`build_arcs`].
+/// The match is exhaustive on purpose: a new [`SerialValue`] variant must
+/// declare whether it carries scope references, or its dependency edges go
+/// silently missing from [`build_arcs`].
 fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
     match value {
         SerialValue::Ext(Closure::Lambda(l)) => {
@@ -350,13 +306,11 @@ fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
 // ── Value conversions ─────────────────────────────────────────────────────
 
 impl FOValue<Closure> {
-    /// Encode a runtime [`Value`] into its serialisable first-order form,
-    /// interning any captured closure environments through `ctx`.
+    /// Encode a runtime [`Value`], interning captured closure environments
+    /// through `ctx`.
     ///
     /// # Errors
-    /// Returns `Err` if `value` is or transitively contains a `Value::Handle`
-    /// (a process-local resource that cannot cross a sandbox boundary), or if
-    /// interning a captured environment encounters a cyclic scope reference.
+    /// `value` is or reaches a `Value::Handle`, which has no wire form.
     pub fn from_runtime(value: &Value, ctx: &mut InternCtx) -> Result<Self, Error> {
         Ok(match value {
             Value::Unit => Self::Unit,
@@ -398,14 +352,8 @@ impl FOValue<Closure> {
                 captured: SerialEnvSnapshot::from_runtime(captured, ctx)?,
             })),
             Value::Handle(_) => {
-                // Handles are local, process-local references to a
-                // worker thread; the sandbox child cannot ship one
-                // back to the parent because the parent has no way to
-                // join a thread that lives in a different address space.
-                // Surface this as a clear evaluation error (rather than
-                // a generic IPC failure) so the user can fix the
-                // body — typically by `await`ing inside the confined
-                // block.
+                // A handle names a worker thread in this process, and no
+                // receiver can join a thread in another address space.
                 return Err(
                     Error::new("cannot return a handle from sandboxed evaluation", 1)
                         .with_hint("await the handle before leaving the confined block"),
@@ -414,13 +362,12 @@ impl FOValue<Closure> {
         })
     }
 
-    /// Decode this first-order form back into a runtime [`Value`], resolving
-    /// captured closure environments against the reconstructed scope `arcs`.
+    /// Decode back into a runtime [`Value`], resolving captured environments
+    /// against `arcs`.
     ///
     /// # Errors
-    /// Returns `Err` if a nested value fails to decode, or if a captured
-    /// environment references a scope id that is out of range or unresolved
-    /// in `arcs`.
+    /// A nested value fails to decode, or a captured environment names a scope
+    /// id out of range or unresolved in `arcs`.
     pub fn into_runtime(self, arcs: &ScopeArcs) -> Result<Value, Error> {
         Ok(match self {
             Self::Unit => Value::Unit,
@@ -464,10 +411,8 @@ impl FOValue<Closure> {
 impl TryFrom<&Value> for FOValue {
     type Error = Error;
 
-    /// The one first-order check for the host seam: recursion over the
-    /// nine data variants IS the predicate, rather than a separate check
-    /// followed by a hopeful re-encode.  `Lambda`, `Block`, and `Handle`
-    /// are rejected outright.
+    /// Recursion over the data variants *is* the host seam's first-orderness
+    /// check, rather than a separate test followed by a hopeful re-encode.
     fn try_from(v: &Value) -> Result<Self, Error> {
         Ok(match v {
             Value::Unit => Self::Unit,
@@ -504,9 +449,8 @@ impl TryFrom<&Value> for FOValue {
 }
 
 impl From<FOValue> for Value {
-    /// Total: first-order values are a subset of `Value`.  `Ext` is
-    /// unreachable for `X = NoExt` — `match x {}` discharges it without
-    /// a catch-all.
+    /// Total: first-order values are a subset of `Value`, and `Ext` is
+    /// unreachable at `X = NoExt`.
     fn from(fo: FOValue) -> Self {
         match fo {
             FOValue::Unit => Self::Unit,
@@ -535,8 +479,8 @@ impl SerialEnvSnapshot {
     /// Intern every scope of `env` into `ctx`, recording their table ids.
     ///
     /// # Errors
-    /// Returns `Err` if interning a scope encounters a cyclic scope reference
-    /// or if encoding one of its bindings' values fails.
+    /// Encoding one of a scope's bindings fails; handle-bearing bindings are
+    /// dropped rather than raised.
     pub fn from_runtime(env: &Env, ctx: &mut InternCtx) -> Result<Self, Error> {
         let scopes = env
             .scope_iter()
@@ -548,8 +492,7 @@ impl SerialEnvSnapshot {
     /// Rebuild an [`Env`] from this snapshot's scope ids against `arcs`.
     ///
     /// # Errors
-    /// Returns `Err` if any recorded scope id is out of range or unresolved
-    /// in `arcs`.
+    /// A recorded scope id is out of range or unresolved in `arcs`.
     pub fn into_runtime(self, arcs: &ScopeArcs) -> Result<Env, Error> {
         let scopes = self
             .scopes
@@ -574,24 +517,11 @@ mod tests {
     use super::*;
     use crate::ir::{CompKind, IrPattern};
 
-    /// The body the sandbox child runs is a thunk's [`Arc<Comp>`], carried
-    /// inside a [`SerialValue::Ext`] closure and framed by the IPC codec as
-    /// JSON (`subprocess_codec::write_frame`).  A lambda whose body holds
-    /// interior mode annotations — a [`Wire`] per pipeline stage, a ground
-    /// RHS output mode on each `Bind` — must keep those verdicts across the
-    /// wire, since the child reads modes off the node rather than
-    /// re-inferring (there is no thunk-root wire, so the only annotations
-    /// to preserve are these interior ones).
-    ///
-    /// This builds the annotated body through the checker, ships a lambda
-    /// carrying it through the same `serde_json` codec the IPC frame uses,
-    /// and asserts the deserialised body is bit-identical — `Comp`'s
-    /// `PartialEq` is structural, so the assertion covers the `wires` and
-    /// `rhs_output` slots on the nested nodes.
+    /// The child reads modes off the node rather than re-inferring, so a
+    /// lambda body must carry its interior verdicts across the wire — a wire
+    /// per pipeline stage, a ground RHS output mode on each `Bind`.  There is
+    /// no thunk-root wire, so those interior slots are the whole of it.
     fn annotated_lambda_body() -> Arc<Comp> {
-        // A `Bind` (the `let y` RHS records a ground output mode) followed
-        // by a two-stage `Pipeline` (each stage records a ground wire),
-        // both interior to the lambda body — the shape the ADR names.
         let src = r"let f = { |x| let y = /bin/echo $x; /bin/cat | /bin/cat }";
         let ast = crate::parse(src).expect("parse");
         let comp = crate::elaborate(&ast, HashSet::default(), "").expect("elaborate");
@@ -632,9 +562,8 @@ mod tests {
         }
     }
 
-    /// `(byte pipeline wire found, byte bind rhs_output found)` over a
-    /// body.  The elaborator's placeholder is all-`Empty`, so a `Bytes`
-    /// edge is the checker's verdict written onto the node.
+    /// `(byte pipeline wire, byte bind rhs_output)`.  The elaborator's
+    /// placeholder is all-`Empty`, so a `Bytes` edge can only be the checker's.
     fn interior_annotations(body: &Comp) -> (bool, bool) {
         use crate::mode::ByteMode;
         let (mut wires, mut rhs) = (false, false);
@@ -668,8 +597,7 @@ mod tests {
             captured: SerialEnvSnapshot { scopes: Vec::new() },
         }));
 
-        // The codec the child-eval / pipeline-stage helper frame uses:
-        // `serde_json` (`subprocess_codec::write_frame`).
+        // The same `serde_json` codec `subprocess_codec` frames with.
         let json = serde_json::to_vec(&lambda).expect("serialise lambda");
         let back: SerialValue = serde_json::from_slice(&json).expect("deserialise lambda");
 
@@ -685,11 +613,8 @@ mod tests {
         assert!(rhs, "bind rhs_output survives the round-trip");
     }
 
-    /// A scope whose captured closure references an id past the end of
-    /// the table is an out-of-range reference, not a cycle: the build is
-    /// unsatisfiable for a reason `into_runtime` already names precisely,
-    /// and `build_arcs` reports it with that same wording rather than the
-    /// misleading "cyclic scope dependencies".
+    /// A reference past the end of the table is out of range, not a cycle:
+    /// the build must say so rather than blame the fallthrough case.
     #[test]
     fn out_of_range_scope_ref_is_not_reported_as_cyclic() {
         use crate::ir::Val;
@@ -713,13 +638,8 @@ mod tests {
         );
     }
 
-    /// Non-finite floats cross the value wire by bits.  JSON has no
-    /// number for NaN or ±∞; serialising the `f64` directly would write
-    /// `null` and reject it on decode, contradicting the totality
-    /// contract.  Each case round-trips through the same `serde_json`
-    /// codec the IPC frame uses and is compared by bits — `NaN != NaN`
-    /// under `f64`'s `PartialEq`, so the assertion must inspect the
-    /// representation, not the value.
+    /// Compared by bits, not by value: `NaN != NaN` under `f64`'s
+    /// `PartialEq`, so the assertion must inspect the representation.
     #[test]
     fn non_finite_floats_round_trip_by_bits() {
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.0, 1.5] {

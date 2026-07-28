@@ -1,25 +1,24 @@
-//! Usage accumulation, pricing projection, and token formatting.
+//! Token counts and dollar cost for one turn, and the shared rendering of both.
 
 use genai::adapter::AdapterKind;
 use std::fmt;
 
 #[derive(Default, Clone, Copy)]
 pub struct Usage {
+    /// genai's `prompt_tokens`, which already includes both cache counts below;
+    /// `ModelPricing::dollars` subtracts them before billing the remainder.
     pub input: u64,
     pub output: u64,
-    /// Tokens written into the prompt cache, or `None` when unreported.
+    /// `None` when the provider reports no cache figures; printed `—`, not `0`.
     pub cache_creation: Option<u64>,
-    /// Tokens read from the prompt cache, or `None` when unreported.
     pub cache_read: Option<u64>,
     pub dollars: f64,
-    /// Whether the turn belongs to a flat subscription.
     pub unmetered: bool,
 }
 
-/// Merge two optional per-turn counts, keeping `None` only when *both*
-/// sides are `None` — so accumulation preserves "this provider never
-/// reports the metric" rather than folding it into a reported zero, the
-/// distinction [`Usage::parts`]'s cache-visibility check relies on.
+/// Sum two per-turn counts, yielding `None` only when both sides are: a total
+/// must not fold "never reported" into a reported zero, which [`Usage::parts`]
+/// would then print as `0` rather than `—`.
 fn add_opt_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     match (left, right) {
         (Some(x), Some(y)) => Some(x + y),
@@ -35,19 +34,16 @@ impl std::ops::AddAssign for Usage {
         self.cache_creation = add_opt_u64(self.cache_creation, rhs.cache_creation);
         self.cache_read = add_opt_u64(self.cache_read, rhs.cache_read);
         self.dollars += rhs.dollars;
-        // A running total (e.g. a session spanning a mid-run provider
-        // switch) reads unmetered if *any* folded-in turn was — `parts()`
-        // then shows "subscription" for the whole total, even one still
-        // carrying dollars accumulated from metered turns before the switch.
+        // A total spanning a provider switch reads unmetered if any turn was,
+        // so `parts` says "subscription" over real dollars from the metered ones.
         self.unmetered = self.unmetered || rhs.unmetered;
     }
 }
 
 /// Humanise a token count with the one format shared by every surface.
 pub fn humanize_tokens(n: u64) -> String {
-    // The cutoff sits just below a full million so a count that would
-    // otherwise round to "1000.0k" in the thousands branch below instead
-    // reports "1.0m".
+    // Just under a million: otherwise the thousands branch rounds 999_999 to
+    // "1000.0k".
     if n >= 999_950 {
         #[allow(
             clippy::cast_precision_loss,
@@ -68,11 +64,12 @@ pub fn humanize_tokens(n: u64) -> String {
     }
 }
 
-/// The humanised pieces of a usage line.
+/// The humanised pieces of a usage line: `Display` below joins them for the
+/// log, `tui::line::usage_text` styles the same pieces for the status bar.
 pub struct UsageParts {
     pub input: String,
     pub output: String,
-    /// `(write, read)` when the cache segment is worth showing.
+    /// `(write, read)`; `None` hides the cache segment entirely.
     pub cache: Option<(String, String)>,
     pub cost: String,
 }
@@ -83,9 +80,7 @@ impl Usage {
             Some(n) => humanize_tokens(n),
             None => "—".into(),
         };
-        // `Some(0)` — the provider reports the metric but nothing happened
-        // this turn — hides the segment same as `None`, which means it
-        // doesn't report the metric at all.
+        // A reported zero hides the segment too: no cache traffic, nothing to say.
         let show_cache = matches!(self.cache_creation, Some(n) if n > 0)
             || matches!(self.cache_read, Some(n) if n > 0);
         UsageParts {
@@ -97,6 +92,8 @@ impl Usage {
             } else if self.dollars > 0.0 {
                 format!("${:.4}", self.dollars)
             } else {
+                // Metered yet costing nothing means `pricing::lookup_for` found
+                // no rate for the model, not that the turn was free.
                 "—".into()
             },
         }
@@ -114,12 +111,9 @@ impl fmt::Display for Usage {
     }
 }
 
-/// Build a turn's [`Usage`] from genai's raw counts, pricing it only when
-/// `metered` — a subscription/flat-rate turn still reports token counts but
-/// leaves `dollars` at `0.0`, so [`Usage::parts`] shows "subscription"
-/// rather than a fabricated cost. A raw count that fails to convert to
-/// `u64` (negative — a provider bug, never legitimate) clamps to `0` rather
-/// than panicking.
+/// A turn's [`Usage`] from genai's raw counts, priced only when `metered` (as
+/// `Transport::metered` decides): a subscription turn reports tokens but never
+/// a cost.  A negative raw count — a provider bug — clamps to `0`.
 pub(super) fn usage_from(
     model: &str,
     raw: &genai::chat::Usage,

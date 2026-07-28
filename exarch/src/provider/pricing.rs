@@ -1,15 +1,10 @@
-//! Per-token pricing, fetched once per process from `OpenRouter`'s
-//! `GET /api/v1/models` and cached.
+//! Per-token pricing and model capabilities, fetched once per process from
+//! `OpenRouter`'s `GET /api/v1/models` and cached.
 //!
-//! The catalog backs Anthropic, `OpenAI`, and the `OpenRouter` wire itself
-//! — OR republishes those upstream cards verbatim.  `DeepSeek` is the
-//! exception: OR lists its generic aliases as $0 (its own free-tier
-//! promotion), so native `DeepSeek` traffic consults a hardcoded table
-//! sourced from <https://api-docs.deepseek.com/quick_start/pricing>,
-//! which also carries a peak-hour surcharge on top of the regular
-//! rate (see [`is_peak_hour`]).
-//! Bare suffix lookups (`mercury-2`) resolve to their prefixed
-//! catalog entry via [`add_bare_aliases`].
+//! OR republishes the upstream cards verbatim, so the one catalog prices
+//! Anthropic, `OpenAI` and the OR wire alike.  `DeepSeek` is the exception:
+//! OR publishes its generic aliases at $0, so native `DeepSeek` traffic bills
+//! off the hardcoded table in `deepseek_price`.
 
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -18,32 +13,23 @@ use tokio::sync::OnceCell;
 
 const MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 
+/// Dollars per *token*, not the per-million figures the vendors publish.  A
+/// `0.0` cache rate means the catalog carried none, and `dollars` bills those
+/// tokens at `input` instead.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct ModelPricing {
-    /// Dollars per token, base input rate.
     pub input: f64,
-    /// Dollars per token, output rate.
     pub output: f64,
-    /// Dollars per token charged on cache hits.  `0.0` when the model
-    /// has no separate cache-read rate — callers fall back to `input`.
     pub cache_read: f64,
-    /// Dollars per token charged when writing to the prompt cache.
-    /// `0.0` when the model has no separate cache-write rate — callers
-    /// fall back to `input`.
     pub cache_write: f64,
 }
 
 impl ModelPricing {
-    /// Total cost in dollars for one turn given the four token counts
-    /// genai surfaces.  `cache_creation` and `cache_read` are stripped
-    /// from `input` before billing uncached tokens at the base rate —
-    /// genai's Anthropic adapter reports `prompt_tokens` as the *sum*
-    /// of all three so the same split is correct for every provider
-    /// (`OpenAI` / `DeepSeek` pass `cache_creation = 0`, leaving the
-    /// uncached term unchanged).  When the catalog publishes no
-    /// separate cache rate, those tokens fall back to the base input
-    /// rate — matching OR's own accounting for models without
-    /// dedicated cache pricing.
+    /// Cost of one turn from the four counts genai surfaces.  genai reports
+    /// `prompt_tokens` as the *sum* of uncached, cache-creation and cache-read
+    /// tokens, so the two cache counts come off `input` before it bills at the
+    /// base rate; a provider that never caches passes zeros and the uncached
+    /// term is unchanged.
     pub fn dollars(&self, input: u64, output: u64, cache_creation: u64, cache_read: u64) -> f64 {
         let uncached_input = input
             .saturating_sub(cache_creation)
@@ -73,70 +59,44 @@ impl ModelPricing {
     }
 }
 
-/// Model capability snapshot pulled from `OpenRouter`'s
-/// `/api/v1/models` response.  `None` / empty fields mean the catalog
-/// entry omitted them (or the catalog has not been fetched).
-///
-/// Fields we *don't* keep:
-/// - `pricing` legs other than prompt/completion/cache live in
-///   [`ModelPricing`].
-/// - `top_provider`, `architecture`, `canonical_slug`/`name`/`description`,
-///   `created`, `per_request_limits` — none are wired to a current code
-///   path; add when a concrete consumer exists.
+/// What the catalog says a model can do.  A `None` or empty field means the
+/// entry omitted it, or the catalog has not been fetched.
 #[derive(Clone, Default, Debug)]
 pub struct ModelCaps {
-    /// Total context window in tokens (`context_length`).
     pub context_window: Option<u64>,
-    /// `supported_parameters` — list of names the model accepts on a
-    /// request (e.g. `tools`, `reasoning`, `response_format`).  Empty
-    /// when the catalog didn't surface one or the model is unlisted.
-    /// Lets the caller fail fast on a model that doesn't admit
-    /// `tools` rather than hitting a 4xx mid-stream.
+    /// Request knobs the model accepts: `tools`, `reasoning`, `temperature`…
     pub supported_parameters: Vec<String>,
 }
 
 impl ModelCaps {
-    /// Does the model advertise `param` in its `supported_parameters`?
-    /// Returns `true` when the list is empty (unknown / catalog miss):
-    /// the data is informative, not a gate, so a caller shouldn't refuse
-    /// a parameter just because the catalog didn't surface the field.
+    /// Does the model advertise `param`?  An empty list is a catalog miss, not
+    /// a denial, so it answers `true` — the picker's knobs and synod's effort
+    /// mask stay open on a model the catalog simply never listed.
     pub fn supports(&self, param: &str) -> bool {
         self.supported_parameters.is_empty() || self.supported_parameters.iter().any(|p| p == param)
     }
 }
 
-/// Pricing + caps share the same `/api/v1/models` payload, so a single
-/// `OnceCell` holds both keyed maps and the `lookup`/`caps` helpers read
-/// out of it.  Two separate cells would duplicate the
-/// HTTP call (and tear if only one were populated).
+/// Prices and caps ride one payload, so one cell holds both maps: two cells
+/// would fetch twice, and could tear with only one of them populated.
 static CATALOG: OnceCell<Snapshot> = OnceCell::const_new();
 
-/// Populate the `OpenRouter` pricing and capability caches from
-/// `/api/v1/models` if they haven't already been populated.
-///
-/// Safe to call concurrently; only the first caller does the fetch.  On
-/// failure (network down, `OpenRouter` changed the response shape, etc.)
-/// both caches initialise empty so [`lookup`] / [`caps`] return `None`
-/// and the renderer falls back to `—`, exactly as before any fetch.
+/// Fetch the catalog, once per process; concurrent callers share the one
+/// fetch.  A failed fetch caches an *empty* snapshot rather than retrying, so
+/// every lookup stays `None` for the life of the process: `Usage::parts`
+/// prints `—` for cost and the status line drops its ctx segment.
 pub async fn ensure_loaded() {
     CATALOG
         .get_or_init(|| async { fetch().await.unwrap_or_default() })
         .await;
 }
 
-/// Return the per-token pricing for `model` if `ensure_loaded` has been
-/// awaited and `model` is in the catalog.  Returns `None` otherwise.
-///
-/// Prefer [`lookup_for`] when the caller knows the wire adapter: the
-/// `OpenRouter` catalog is authoritative for Anthropic / `OpenAI` / OR
-/// itself, but `DeepSeek`'s generic aliases are listed as $0 in OR
-/// (`OpenRouter`'s own free-tier promotion) while the native `DeepSeek`
-/// API charges.  [`lookup_for`] routes to the correct source.
+/// Catalog pricing for `model`, `None` before [`ensure_loaded`] finishes or on
+/// a miss.  A caller that knows the wire adapter wants [`lookup_for`], which
+/// routes `DeepSeek` away from the catalog.
 pub(crate) fn lookup(model: &str) -> Option<ModelPricing> {
     CATALOG.get()?.prices.get(model).copied()
 }
-
-// region:    --- DeepSeek hardcoded pricing
 
 /// One side (regular or peak) of a `DeepSeek` rate card, in dollars per
 /// 1M tokens.
@@ -147,25 +107,18 @@ struct DeepSeekRates {
     cache_read: f64,
 }
 
-/// True when `hour` (0..=23, UTC) falls in one of `DeepSeek`'s
-/// peak-pricing windows: 01:00-04:00 and 06:00-10:00 UTC.  Peak
-/// pricing was announced alongside the v4 rate card but is not live
-/// yet; wiring the window in now means exarch bills the right rate
-/// the moment `DeepSeek` turns it on, with no code change needed then.
+/// `DeepSeek`'s peak-pricing windows, 01:00-04:00 and 06:00-10:00, on `hour`
+/// in 0..=23 UTC.  Both ends are half-open, as `DeepSeek` states them.
 fn is_peak_hour(hour: i8) -> bool {
     (1..4).contains(&hour) || (6..10).contains(&hour)
 }
 
-/// Return the official `DeepSeek` API per-token pricing for `model`.
-///
-/// `OpenRouter` lists many `DeepSeek` aliases as $0 (its own free-tier
-/// promotion), so the OR catalog is not authoritative for native
-/// `DeepSeek` traffic.  These rates, including the peak-hour surcharge,
-/// come from <https://api-docs.deepseek.com/quick_start/pricing>.
+/// `DeepSeek`'s own API rates, which double inside the peak windows.  OR
+/// publishes many `DeepSeek` aliases at $0 and `build_snapshot` drops
+/// zero-rate entries, so the catalog would price this traffic at nothing.
 fn deepseek_price(model: &str) -> Option<ModelPricing> {
-    // `deepseek-chat` / `deepseek-reasoner` are aliases for
-    // `deepseek-v4-flash` (non-thinking / thinking modes); pricing is
-    // identical between the two modes.
+    // `deepseek-chat` and `deepseek-reasoner` are the non-thinking and
+    // thinking faces of `deepseek-v4-flash`, priced alike.
     const FLASH: DeepSeekRates = DeepSeekRates {
         input: 0.14,
         output: 0.28,
@@ -217,12 +170,8 @@ fn deepseek_price(model: &str) -> Option<ModelPricing> {
     })
 }
 
-/// Return the per-token pricing for `model` from the correct source
-/// for `adapter`.
-///
-/// For `DeepSeek` this consults the official `DeepSeek`
-/// API rates first and falls back to the `OpenRouter` catalog; for
-/// every other adapter it uses the OR catalog directly.
+/// Pricing for `model` from whichever source is authoritative for `adapter`:
+/// the native rates first for `DeepSeek`, the catalog for everyone else.
 pub fn lookup_for(model: &str, adapter: genai::adapter::AdapterKind) -> Option<ModelPricing> {
     if adapter == genai::adapter::AdapterKind::DeepSeek {
         deepseek_price(model).or_else(|| lookup(model))
@@ -231,39 +180,21 @@ pub fn lookup_for(model: &str, adapter: genai::adapter::AdapterKind) -> Option<M
     }
 }
 
-// endregion: --- DeepSeek hardcoded pricing
-
-/// Return a cloned capability snapshot for `model` if the `OpenRouter`
-/// catalog has been fetched.
-///
-/// `None` for native-provider models —
-/// `OpenRouter` is the only catalog exarch pulls.  `ModelCaps` holds
-/// owned `String`/`Vec` fields so this clones; the caller usually
-/// pulls one or two fields and drops the rest.
+/// Capabilities for `model`, cloned out of the catalog.
 pub fn caps(model: &str) -> Option<ModelCaps> {
     CATALOG.get()?.caps.get(model).cloned()
 }
 
-/// Capability snapshot for `model`, defaulting the record on a catalog miss.
-///
-/// The miss is an unlisted native-provider model, or a lookup before the
-/// catalog loads.  The `OpenRouter` catalog backs every provider — OR
-/// republishes upstream cards, so a native Anthropic / `OpenAI` launch hits
-/// the same context-window / capability data as its OR-fronted equivalent.
-/// A missing entry defaults every field so the banner renders `—` for what
-/// it cannot resolve.
+/// [`caps`], defaulting on a miss — an unlisted model, or a call before the
+/// catalog loads.  A native id is not a miss: `add_bare_aliases` bridges it to
+/// the OR-fronted entry for the same model, which carries the same card.
 pub fn caps_or_default(model: &str) -> ModelCaps {
     caps(model).unwrap_or_default()
 }
 
-/// The total context window in tokens for `model`, when the `OpenRouter`
-/// catalog has been fetched and lists it.
-///
-/// A targeted accessor that skips
-/// the `ModelCaps` clone [`caps`] makes — the compaction trigger reads
-/// only this one field, at every turn boundary.  `None` for a native
-/// provider or before the catalog loads, so the caller falls back to the
-/// byte heuristic; it self-heals once [`ensure_loaded`] completes.
+/// The context window for `model`, skipping the [`ModelCaps`] clone [`caps`]
+/// makes — `agent::deliberate` reads this one field at every turn boundary to
+/// decide whether to compact, and falls back to its byte heuristic on `None`.
 pub fn context_window(model: &str) -> Option<u64> {
     CATALOG.get()?.caps.get(model)?.context_window
 }
@@ -301,14 +232,12 @@ fn build_snapshot(data: Vec<ModelEntry>) -> Snapshot {
                 .as_deref()
                 .map_or(0.0, parse_price),
         };
-        // Skip entries whose base rates failed to parse — they'd just
-        // bill at $0 and produce misleading display.  Falling through
-        // to `lookup -> None` keeps the renderer honest with `—`.
+        // An entry whose base rates didn't parse would bill at $0; leaving it
+        // out makes it a miss instead, which renders honestly as `—`.
         if p.input > 0.0 || p.output > 0.0 {
             prices.insert(entry.id.clone(), p);
         }
-        // Caps are independent of pricing: even an entry that failed
-        // pricing parse can carry usable context-window info.
+        // Caps outlive a failed pricing parse — the window is still usable.
         let context_window = entry.context_length;
         let supported_parameters = entry.supported_parameters.clone();
         let any = context_window.is_some() || !supported_parameters.is_empty();
@@ -327,29 +256,14 @@ fn build_snapshot(data: Vec<ModelEntry>) -> Snapshot {
     Snapshot { prices, caps }
 }
 
-/// `OpenRouter` accepts both the prefixed form (`inception/mercury-2`) and
-/// the bare suffix (`mercury-2`) on the wire — its alias router resolves
-/// the latter to the former.  The local catalog is keyed by the full id,
-/// so a user who passes the bare name on the command line gets a lookup
-/// miss and `—` for cost.  Mirror OR's behaviour by indexing each entry
-/// under its bare suffix as well, but *only* when that suffix is unique
-/// across the catalog: an ambiguous bare alias would silently bind to
-/// whichever vendor sorted first, which is worse than a miss.
-///
-/// `OpenRouter` additionally separates a model's version with a dot
-/// (`anthropic/claude-opus-4.8`), whereas the native Anthropic provider
-/// names the very same model with a dash (`claude-opus-4-8`) — exarch
-/// passes the native id through, so the dotted catalog key never matches.
-/// Bridge the two by *also* indexing each qualifying entry under the
-/// dash-normalized form of its bare suffix (every `.` replaced by `-`),
-/// so `anthropic/claude-opus-4.8` is reachable as both `claude-opus-4.8`
-/// and `claude-opus-4-8`.  The dash form inherits the same source-suffix
-/// uniqueness guard, is generated only when the bare suffix actually
-/// carries a `.`, never overwrites a literal catalog key, and is dropped
-/// on any collision — whether two distinct dotted suffixes normalize onto
-/// one dash key, or the dash key coincides with another entry's plain bare
-/// suffix — each guard for the same reason the bare alias has it: an alias
-/// that could bind to the wrong rate is worse than a miss.
+/// Index each entry under its bare suffix too (`inception/mercury-2` →
+/// `mercury-2`), the second spelling OR's router accepts on the wire, and — for
+/// a dotted suffix — under its dash form (`anthropic/claude-opus-4.8` →
+/// `claude-opus-4-8`), the name the native Anthropic provider gives the same
+/// model.  An alias lands only when nothing else can claim its key: the source
+/// suffix must be unique across the catalog, a dash key must not tie any other
+/// alias, and a literal catalog key always wins.  Binding to the wrong
+/// vendor's rate is worse than the miss.
 fn add_bare_aliases<V: Clone>(map: &mut HashMap<String, V>) {
     let mut suffix_count: HashMap<&str, usize> = HashMap::new();
     for key in map.keys() {
@@ -359,11 +273,8 @@ fn add_bare_aliases<V: Clone>(map: &mut HashMap<String, V>) {
     }
     let unique_suffix = |suffix: &str| suffix_count.get(suffix).copied() == Some(1);
 
-    // The collision guard for the dash alias.  A dash alias may only land
-    // when no other alias would also claim its key, so it counts both
-    // sources of alias keys: the plain bare suffix lands under the suffix
-    // verbatim, and a dotted suffix additionally under its dash-normalized
-    // form.  A dash key that ties either is dropped.
+    // Both sources a dash key can come from: every plain bare suffix, and the
+    // normalized form of every dotted one.  A dash key that ties is dropped.
     let mut dash_count: HashMap<String, usize> = HashMap::new();
     for key in map.keys() {
         if let Some((_, suffix)) = key.split_once('/')
@@ -399,10 +310,9 @@ fn add_bare_aliases<V: Clone>(map: &mut HashMap<String, V>) {
     map.extend(aliases);
 }
 
-/// `OpenRouter` posts prices as strings (in $/token) so they can carry
-/// more precision than an f32 round-trip would preserve.  Anything we
-/// can't parse becomes `0.0`, which is filtered out by the caller for
-/// base rates and treated as "no separate rate" for cache rates.
+/// `OpenRouter` posts prices as decimal strings in $/token.  Anything
+/// unparseable becomes `0.0`: dropped by `build_snapshot` for a base rate,
+/// read as "no separate rate" for a cache rate.
 fn parse_price(s: &str) -> f64 {
     s.parse().unwrap_or(0.0)
 }
@@ -436,10 +346,6 @@ struct Pricing {
 mod tests {
     use super::*;
 
-    /// Peak windows are 01:00-04:00 and 06:00-10:00 UTC; every other
-    /// hour is regular-priced.  Boundaries are half-open (start
-    /// inclusive, end exclusive), matching how `DeepSeek` documents
-    /// the windows.
     #[test]
     fn is_peak_hour_matches_documented_windows() {
         for h in 0i8..24 {
@@ -460,9 +366,7 @@ mod tests {
         assert_eq!(parse_price("nonsense"), 0.0);
     }
 
-    /// Verify the response shape matches a realistic /models payload.
-    /// Anchors the deserialise against the `OpenRouter` contract so a
-    /// breaking change there fails this test rather than silently
+    /// Pins the wire shape, so a change at OR fails here rather than silently
     /// emptying the cache at runtime.
     #[test]
     fn deserialises_minimal_models_payload() {
@@ -492,9 +396,8 @@ mod tests {
         assert!(resp.data[1].pricing.input_cache_read.is_some());
     }
 
-    /// Capability fields (`context_length`, `supported_parameters`) must both
-    /// be `#[serde(default)]` so a missing field on any entry doesn't nuke
-    /// the whole catalog parse.
+    /// Both cap fields default, so one entry omitting them cannot fail the
+    /// whole catalog parse.
     #[test]
     fn deserialises_full_caps_payload() {
         let raw = r#"{
@@ -516,10 +419,8 @@ mod tests {
         assert!(e.supported_parameters.iter().any(|p| p == "tools"));
     }
 
-    /// Bare suffixes (`mercury-2`) must resolve when the catalog has a
-    /// single prefixed entry (`inception/mercury-2`).  OR's router
-    /// accepts both forms on the wire, so the user's `--model mercury-2`
-    /// produces a successful LLM call but, without aliasing, a $0 cost.
+    /// Without the alias, `--model mercury-2` makes a successful call that
+    /// costs $0 on the banner.
     #[test]
     fn bare_alias_resolves_unique_suffix() {
         let mut m: HashMap<String, u32> = HashMap::new();
@@ -528,13 +429,11 @@ mod tests {
         add_bare_aliases(&mut m);
         assert_eq!(m.get("mercury-2"), Some(&42));
         assert_eq!(m.get("claude-opus-4"), Some(&99));
-        // The original prefixed keys are still present.
         assert_eq!(m.get("inception/mercury-2"), Some(&42));
     }
 
-    /// When two vendors publish the same bare name, the alias is
-    /// ambiguous and must NOT be inserted — silently picking one would
-    /// charge the wrong price.  The user has to pass the prefixed form.
+    /// Two vendors, one bare name: picking either would charge the wrong
+    /// price, so the user must pass the prefixed form.
     #[test]
     fn bare_alias_skips_ambiguous_suffix() {
         let mut m: HashMap<String, u32> = HashMap::new();
@@ -549,12 +448,8 @@ mod tests {
         assert_eq!(m.get("vendor-b/foo"), Some(&2));
     }
 
-    /// Anthropic claude-opus-4 rates as OR publishes them: input
-    /// $15/M, output $75/M, `cache_write` 1.25× input, `cache_read` 0.10×
-    /// input.  Bills uncached input + `cache_creation` × `cache_write` +
-    /// `cache_read` × `cache_read` + output × output, with cache tokens
-    /// stripped from `input` first (genai sums all three on
-    /// `prompt_tokens` for the Anthropic adapter).
+    /// Anthropic claude-opus-4 rates as OR publishes them: $15/M in, $75/M
+    /// out, cache write 1.25× and cache read 0.10× the input rate.
     #[test]
     fn dollars_anthropic_cache_split() {
         let p = ModelPricing {
@@ -573,9 +468,7 @@ mod tests {
         assert!((d - expected).abs() < 1e-12, "got {d}, expected {expected}");
     }
 
-    /// Models without separate cache rates bill cache tokens at the
-    /// base input rate.  The fallback must NOT silently bill cache
-    /// tokens at $0 — that would systematically underreport cost on
+    /// The fallback must not bill cache tokens at $0, which would underreport
     /// every OpenAI-family turn that hits the prompt cache.
     #[test]
     fn dollars_falls_back_to_input_when_cache_rates_absent() {
@@ -586,8 +479,7 @@ mod tests {
             cache_write: 0.0,
         };
         let d = p.dollars(1000, 100, 0, 400);
-        // 600 uncached × 2e-6 + 0 × 2e-6 + 400 × 2e-6 + 100 × 8e-6
-        // = (600 + 400) × 2e-6 + 100 × 8e-6 = 2e-3 + 8e-4 = 2.8e-3
+        // The split collapses: 600 uncached and 400 read both bill at `input`.
         #[allow(
             clippy::suboptimal_flops,
             reason = "hand-computed reference value in a test; keep the readable literal form"
@@ -596,9 +488,6 @@ mod tests {
         assert!((d - expected).abs() < 1e-12, "got {d}, expected {expected}");
     }
 
-    /// A bare key that already exists in the catalog (some vendor
-    /// publishes `<name>` with no prefix) must not be overwritten by an
-    /// alias from a prefixed entry — the literal entry wins.
     #[test]
     fn bare_alias_does_not_overwrite_existing_bare_entry() {
         let mut m: HashMap<String, u32> = HashMap::new();
@@ -608,12 +497,8 @@ mod tests {
         assert_eq!(m.get("foo"), Some(&10));
     }
 
-    /// `OpenRouter` separates a version with a dot
-    /// (`anthropic/claude-opus-4.8`); the native Anthropic provider uses
-    /// a dash (`claude-opus-4-8`) for the same model.  A unique dotted
-    /// suffix must resolve under its dotted bare form, its dash form, AND
-    /// the original prefixed key — otherwise every modern native-Anthropic
-    /// launch bills at $0.
+    /// All three spellings must resolve, or every native-Anthropic launch
+    /// bills at $0.
     #[test]
     fn dash_alias_resolves_unique_dotted_suffix() {
         let mut m: HashMap<String, u32> = HashMap::new();
@@ -624,8 +509,6 @@ mod tests {
         assert_eq!(m.get("anthropic/claude-opus-4.8"), Some(&7));
     }
 
-    /// An ambiguous dotted suffix is as unsafe as an ambiguous bare one:
-    /// neither the dotted bare alias nor the dash alias may be inserted.
     #[test]
     fn dash_alias_skips_ambiguous_suffix() {
         let mut m: HashMap<String, u32> = HashMap::new();
@@ -638,9 +521,6 @@ mod tests {
         assert_eq!(m.get("vendor-b/model-4.5"), Some(&2));
     }
 
-    /// The dash alias must never clobber a literal catalog key already
-    /// living at the dash form — the literal entry wins, exactly as the
-    /// bare alias yields to a pre-existing bare entry.
     #[test]
     fn dash_alias_does_not_overwrite_existing_literal_key() {
         let mut m: HashMap<String, u32> = HashMap::new();
@@ -648,16 +528,12 @@ mod tests {
         m.insert("anthropic/claude-opus-4.8".into(), 20);
         add_bare_aliases(&mut m);
         assert_eq!(m.get("claude-opus-4-8"), Some(&10));
-        // The dotted bare alias is still safe to add.
         assert_eq!(m.get("claude-opus-4.8"), Some(&20));
     }
 
-    /// A dash-normalized alias must not collide with another vendor's
-    /// plain unique bare suffix: `anthropic/claude-opus-4.8` normalizes to
-    /// `claude-opus-4-8`, which is also `vendor/claude-opus-4-8`'s own bare
-    /// suffix.  The plain bare suffix binds deterministically to its own
-    /// entry and the dash alias is dropped, so the rate is never the
-    /// HashMap-iteration-order coin-flip an unseeded guard produced.
+    /// A dash alias can land on another vendor's plain bare suffix.  The plain
+    /// suffix keeps its own key deterministically; without the guard the rate
+    /// would follow `HashMap` iteration order.
     #[test]
     fn dash_alias_yields_to_plain_bare_suffix_collision() {
         let mut m: HashMap<String, u32> = HashMap::new();
@@ -676,10 +552,8 @@ mod tests {
         );
     }
 
-    /// Two distinct dotted suffixes can normalize to the same dash key
-    /// (`a-1.0` and `a.1-0` both → `a-1-0`).  That collision is ambiguous,
-    /// so neither contributes a dash alias — though each keeps its own
-    /// unique dotted bare alias.
+    /// Two dotted suffixes can normalize onto one dash key, so neither may
+    /// claim it — each still keeps its own dotted bare alias.
     #[test]
     fn dash_alias_skips_colliding_normalized_key() {
         let mut m: HashMap<String, u32> = HashMap::new();

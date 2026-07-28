@@ -1,10 +1,8 @@
-//! The one gate where a kit's ral value becomes a typed
-//! [`crate::bus::card::Card`].
+//! A kit's `` `card `` value into the typed [`Card`] model.
 //!
-//! Decoding is total: it degrades rather than raises.  An unknown mark
-//! falls back to plain text, a malformed field to its default — so the
-//! card always exists, and the renderer downstream never has to reckon
-//! with one that isn't there.
+//! Decoding is total: an unknown mark or malformed field degrades to plain
+//! text rather than dropping the card around it, since a card is a deliberate
+//! user-facing act.  `decode_surface` in `shell_eval.rs` calls in here.
 
 use ral_core::Value as RalValue;
 
@@ -12,18 +10,10 @@ use super::diff::{Hunk, Row, Seg};
 use super::value::{count_field, map_of, str_field};
 use super::{Card, Field, FieldVal, Mark, Measure, Role, Span};
 
-/// Decode the value a ral kit handed to `surface` into a [`crate::bus::card::Card`].
+/// Decode the value a kit handed to `surface` into a [`Card`].
 ///
-/// The canonical shape is `` `card [mark, mark, …] `` — a variant whose
-/// payload is a *list* of mark variants, each carrying a record payload.
-/// A bare known mark surfaced unwrapped (`` `diff […] ``) is lifted into a
-/// one-mark card for the model's convenience.  Anything else returns
-/// `None` and is dropped.
-///
-/// Decoding never fails *within* a recognised card: an unknown mark label
-/// or role degrades to plain `text` rather than dropping the whole card,
-/// because a card is a deliberate user-facing act, not a sentinel that
-/// might be malformed.
+/// The shape is `` `card [mark, mark, …] ``; a known mark surfaced bare
+/// (`` `diff […] ``) lifts into a one-mark card.  Anything else is `None`.
 pub(crate) fn value_to_card(v: &RalValue) -> Option<Card> {
     let RalValue::Variant { label, payload } = v else {
         return None;
@@ -31,8 +21,7 @@ pub(crate) fn value_to_card(v: &RalValue) -> Option<Card> {
     if label == "card" {
         let marks = match payload.as_deref() {
             Some(RalValue::List(items)) => items.iter().map(decode_mark).collect(),
-            // A `card` with a non-list payload is still a deliberate
-            // surface; render whatever single mark it holds, or nothing.
+            // A non-list payload is still a deliberate surface: its one mark.
             Some(other) => vec![decode_mark(other)],
             None => Vec::new(),
         };
@@ -44,16 +33,10 @@ pub(crate) fn value_to_card(v: &RalValue) -> Option<Card> {
     }
 }
 
-/// Decode a `` `pin ``/`` `unpin `` *disposition wrapper* into its register key
-/// and optional body card.
+/// Decode a `` `pin ``/`` `unpin `` wrapper into its register key and body card.
 ///
-/// The shape is `` `pin [key: "…", body: `card […]] ``
-/// — a render document keyed to a register slot — or `` `unpin [key: "…"] `` to
-/// drop the slot.  The `body` is decoded by the **unchanged** [`value_to_card`],
-/// so the wrapper carries only *placement*; an absent — or empty — body is the
-/// same as `` `unpin ``, so a pin with nothing left to show drops the slot.
-/// Anything else returns `None`, the same graceful degradation as
-/// [`value_to_card`]; the decoder seam then drops it.
+/// The wrapper carries placement only; an absent or empty body reads as
+/// `` `unpin ``, so a pin with nothing left to show drops the slot.
 pub(crate) fn value_to_pin(v: &RalValue) -> Option<(String, Option<Card>)> {
     let RalValue::Variant { label, payload } = v else {
         return None;
@@ -73,16 +56,14 @@ pub(crate) fn value_to_pin(v: &RalValue) -> Option<(String, Option<Card>)> {
     }
 }
 
-/// The mark tags a kit may surface — the decodable subset of
-/// [`crate::bus::card::Mark`]; [`crate::bus::card::Mark::Listing`] is
-/// host-composed only — also the set lifted into a one-mark card when
-/// surfaced unwrapped.
+/// The mark labels a bare surface lifts into a one-mark card: [`decode_mark`]'s
+/// arms, less [`Mark::Listing`], which only the host composes.
 fn is_mark_label(label: &str) -> bool {
     matches!(label, "text" | "measure" | "fields" | "diff" | "raw")
 }
 
-/// Decode one mark.  Total: an unrecognised or malformed mark becomes a
-/// plain `text` span carrying the value's display, never a drop or panic.
+/// Decode one mark; anything unrecognised or malformed becomes a plain-text
+/// span of the value's display, never a drop or a panic.
 fn decode_mark(v: &RalValue) -> Mark {
     let RalValue::Variant { label, payload } = v else {
         return plain_text(&v.to_string());
@@ -111,8 +92,6 @@ fn decode_mark(v: &RalValue) -> Mark {
     }
 }
 
-/// A one-span plain-text mark — the degradation target for an unknown or
-/// malformed mark.
 fn plain_text(text: &str) -> Mark {
     Mark::Text {
         spans: vec![Span {
@@ -122,7 +101,6 @@ fn plain_text(text: &str) -> Mark {
     }
 }
 
-/// Decode the `spans` field of a `text` mark (or a `text`-valued field).
 fn decode_spans(m: &ral_core::types::Map) -> Vec<Span> {
     match m.get("spans") {
         Some(RalValue::List(items)) => items.iter().map(decode_span).collect(),
@@ -130,8 +108,6 @@ fn decode_spans(m: &ral_core::types::Map) -> Vec<Span> {
     }
 }
 
-/// Decode one span record `[role?, text]`.  A bare string is a roleless
-/// span; anything stranger falls back to the value's display.
 fn decode_span(v: &RalValue) -> Span {
     match v {
         RalValue::Map(m) => Span {
@@ -149,8 +125,7 @@ fn decode_span(v: &RalValue) -> Span {
     }
 }
 
-/// Decode a `measure` record; `None` (→ plain-text fallback) when the
-/// magnitude `value` is absent or not an integer.
+/// The magnitude `value` is the one field a measure cannot default.
 fn decode_measure(m: &ral_core::types::Map) -> Option<Measure> {
     Some(Measure {
         label: str_field(m, "label").unwrap_or_default(),
@@ -160,8 +135,6 @@ fn decode_measure(m: &ral_core::types::Map) -> Option<Measure> {
     })
 }
 
-/// Decode the `rows` field of a `fields` mark into aligned `(label, value)`
-/// fields.
 fn decode_rows(m: &ral_core::types::Map) -> Vec<Field> {
     match m.get("rows") {
         Some(RalValue::List(items)) => items.iter().map(decode_field).collect(),
@@ -169,12 +142,8 @@ fn decode_rows(m: &ral_core::types::Map) -> Vec<Field> {
     }
 }
 
-/// Decode one `[label: …, value: …]` row record.  Rows are records, not
-/// positional pairs, because ral types a list homogeneously — a `String`
-/// label and a variant value could not share one positional list.  The
-/// value column nests marks: a bare string is roleless inline text, a
-/// `text` mark its spans, a `measure` mark a nested measure; anything else
-/// renders as its display.
+/// A row is a record, not a positional pair, because ral types a list
+/// homogeneously: a `String` label and a variant value could not share one.
 fn decode_field(v: &RalValue) -> Field {
     let Some(m) = map_of(v) else {
         return Field {
@@ -203,10 +172,8 @@ fn decode_field(v: &RalValue) -> Field {
     Field { label, value }
 }
 
-/// Decode a `diff` record: its `path` and a `hunks` list of hunk records,
-/// the whole-file shape `edit` emits.  A missing `hunks` lifts to an empty
-/// vec so a bare diff still renders; `None` (→ plain-text fallback) only
-/// when there is no `path`.
+/// Decode a kit-composed `diff` — by hand, the shape `whole_file_hunks` builds
+/// for the host's own write cards.  Only `path` is required.
 fn decode_diff(m: &ral_core::types::Map) -> Option<Mark> {
     let path = str_field(m, "path")?;
     let hunks = match m.get("hunks") {
@@ -216,9 +183,7 @@ fn decode_diff(m: &ral_core::types::Map) -> Option<Mark> {
     Some(Mark::Diff { path, hunks })
 }
 
-/// Decode one hunk record: a `start` line (defaulting to 1) and its `rows`
-/// list of `{ tag, text }` records.  A missing `rows` defaults to empty, so
-/// a partially-formed hunk still renders rather than dropping.
+/// A missing `start` defaults to 1: hunk rows count from the original line 1.
 fn decode_hunk(m: &ral_core::types::Map) -> Hunk {
     let rows = match m.get("rows") {
         Some(RalValue::List(items)) => items.iter().filter_map(map_of).map(decode_row).collect(),
@@ -230,9 +195,8 @@ fn decode_hunk(m: &ral_core::types::Map) -> Hunk {
     }
 }
 
-/// Decode one row record: its `tag` (`context` / `del` / `add`) and its
-/// `segs` list.  An unrecognized or missing tag degrades to context — the row
-/// is never dropped or panicked on, so the whole diff still renders.
+/// An unrecognised or missing `tag` degrades to context, the one row kind that
+/// claims nothing changed.
 fn decode_row(m: &ral_core::types::Map) -> Row {
     let segs = match m.get("segs") {
         Some(RalValue::List(items)) => items.iter().filter_map(map_of).map(decode_seg).collect(),
@@ -245,8 +209,6 @@ fn decode_row(m: &ral_core::types::Map) -> Row {
     }
 }
 
-/// Decode one segment record: its `emph` flag (defaulting to unemphasised)
-/// and `text`.
 fn decode_seg(m: &ral_core::types::Map) -> Seg {
     Seg {
         emph: matches!(m.get("emph"), Some(RalValue::Bool(true))),
@@ -254,8 +216,7 @@ fn decode_seg(m: &ral_core::types::Map) -> Seg {
     }
 }
 
-/// Decode a `raw` mark's `bytes`: a `Bytes` value verbatim, a string's
-/// UTF-8, or a list of integers as bytes.
+/// A kit has no byte literal, so a string or a list of integers reads as bytes.
 fn decode_raw_bytes(m: &ral_core::types::Map) -> Vec<u8> {
     match m.get("bytes") {
         Some(RalValue::Bytes(b)) => b.clone(),
@@ -284,9 +245,7 @@ mod tests {
             ))),
         }
     }
-    /// A diff-row record: a `tag` and a one-segment `segs` list carrying
-    /// `text` (unemphasised) — the shape [`decode_row`] lifts back into a
-    /// [`crate::bus::card::Row`].
+    /// The record shape [`decode_row`] lifts back into a [`Row`].
     fn seg_row(tag: &str, text: &str) -> RalValue {
         RalValue::map(vec![
             ("tag".into(), s(tag)),
@@ -297,7 +256,6 @@ mod tests {
         ])
     }
 
-    /// A full card with one of every mark decodes structurally, in order.
     #[test]
     fn decodes_every_mark() {
         let v = card_value(vec![
@@ -359,8 +317,6 @@ mod tests {
         assert!(matches!(&marks[4], Mark::Raw { bytes } if bytes == b"hi"));
     }
 
-    /// A non-`card` variant is dropped (→ `None`); a *bare known mark* is
-    /// lifted into a one-mark card for convenience.
     #[test]
     fn drops_non_card_but_lifts_bare_mark() {
         assert!(value_to_card(&RalValue::String("nope".into())).is_none());
@@ -381,8 +337,7 @@ mod tests {
         assert!(matches!(&marks[0], Mark::Diff { .. }));
     }
 
-    /// An unknown *mark* inside a card degrades to plain text, never a drop
-    /// or a panic — the whole card still renders.
+    /// The sibling marks of an unknown one still render.
     #[test]
     fn unknown_mark_degrades_to_plain_text() {
         let v = card_value(vec![

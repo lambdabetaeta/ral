@@ -1,6 +1,8 @@
-//! The write-back pass: rebuild a checked comp with the inferencer's mode
-//! verdicts, generalised schemes, and ground pipeline wires written into the
-//! IR.  Runs after inference succeeds, driven from [`super::typecheck`].
+//! Write-back pass: rebuild a checked comp with the inferencer's verdicts —
+//! generalised schemes, ground byte modes, pipeline wires — in place of the
+//! elaborator's placeholders.  [`super::typecheck`] runs it on a clean
+//! inference, over the very tree that was inferred: [`InferCtx`]'s side maps
+//! are keyed by node address.
 
 use super::env::{InferCtx, TyEnv};
 use super::generalize::generalize;
@@ -13,26 +15,16 @@ use crate::source::Spanned;
 use crate::syntax::ast::MapPatternEntry;
 use std::sync::Arc;
 
-/// Rebuild `comp` with the checker's mode verdicts written into the IR:
-/// each `Bind`'s generalised scheme and ground RHS output mode, and each
-/// pipeline stage's ground [`Wire`].
+/// Rebuild `comp`; `spine` marks the `Bind`s that install into the persistent
+/// session scope — a `Seq`'s parts and a `Bind`'s `rest`, never a thunk body or
+/// an `if` branch — and only those carry a scheme.  Generalising against an
+/// empty environment closes it: a run's unifier dies with the run and restarts
+/// its variable ids at zero, so a scheme left open would alias the next run's
+/// fresh variables.
 ///
-/// Schemes are written on the top-level spine only — the statement
-/// positions whose `Bind`s install into the persistent scope at
-/// evaluation: a `Seq`'s parts and a `Bind`'s `rest`.  A `Bind` under a
-/// thunk or an `if` branch evaluates in a block scope and never installs
-/// into the session, so it carries no scheme.  The `spine` flag tracks
-/// that position: only those two descents keep it set.
-///
-/// The recorded pre-generalisation type is closed by generalising against
-/// the empty environment: that resolves it against the final unifier and
-/// quantifies every residual variable, which is exactly the closure
-/// condition a scheme must satisfy to survive into the next run's check.
-///
-/// Wires and RHS output modes are written everywhere they were recorded,
-/// at any depth — inside thunk bodies, branches, pipeline stages.  A node
-/// inference never visited keeps the elaborator's `Empty` placeholder.
-/// Every other field, and every span, is rebuilt bit-identically.
+/// [`Wire`]s and modes are written wherever inference recorded one, at any
+/// depth; an unvisited node keeps its placeholder, and every other field and
+/// span is rebuilt bit-identically.
 pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
     let item = match &comp.item {
         CompKind::Seq(parts) => CompKind::Seq(
@@ -64,8 +56,6 @@ pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
                     );
                     Box::new(scheme)
                 });
-            // A node inference never visited keeps the elaborator's
-            // placeholder; every other node takes the checker's verdict.
             let rhs_output = ctx
                 .bind_outputs
                 .get(&(std::ptr::from_ref::<Comp>(comp) as usize))
@@ -97,9 +87,6 @@ pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
                         })
                 })
                 .collect();
-            // Resolve each stage's recorded value type against the final
-            // unifier; a stage inference never visited keeps the elaborator's
-            // `Unit` placeholder.
             let stage_types = stages
                 .iter()
                 .zip(stage_types)
@@ -178,8 +165,6 @@ pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
     Spanned::with_span(comp.span, item)
 }
 
-/// Annotate the [`Val`] category — descending into thunk bodies (always
-/// non-spine) and the values nested in lists, maps, and variants.
 fn annotate_val(val: &Val, ctx: &mut InferCtx) -> Val {
     match val {
         Val::Thunk(comp) => Val::Thunk(Arc::new(annotate(comp, ctx, false))),
@@ -209,12 +194,10 @@ fn annotate_val(val: &Val, ctx: &mut InferCtx) -> Val {
     }
 }
 
-/// Rebuild a [`Spanned<Val>`] sub-position, keeping its span.
 fn annotate_spanned_val(value: &Spanned<Val>, ctx: &mut InferCtx) -> Spanned<Val> {
     Spanned::with_span(value.span, annotate_val(&value.item, ctx))
 }
 
-/// Annotate one list/argument element, descending into its value.
 fn annotate_list_elem(elem: &ValListElem, ctx: &mut InferCtx) -> ValListElem {
     match elem {
         ValListElem::Single(v) => ValListElem::Single(annotate_val(v, ctx)),
@@ -270,8 +253,7 @@ fn annotate_scope(op: &ScopeOp, ctx: &mut InferCtx) -> ScopeOp {
     }
 }
 
-/// Annotate a pattern's elaborated map-default comps — the only `Comp`
-/// positions a pattern carries.  Every default body is non-spine.
+/// Map-pattern defaults are the only `Comp` a pattern carries.
 fn annotate_pattern(pattern: &IrPattern, ctx: &mut InferCtx) -> IrPattern {
     match pattern {
         IrPattern::Wildcard | IrPattern::Name(_) => pattern.clone(),

@@ -1,9 +1,6 @@
-//! The durable audit trail behind every host-side CONNECT tunnel.
-//!
-//! Bundled as [`Egress`], threaded through [`crate::agent::Agent`] exactly
-//! as `disk_warn_bytes` is. Runs entirely host-side; constructed once at
-//! trunk launch and inherited verbatim by every spawned child — a spawn
-//! shares its parent's IT policy and audit trail, never a fresh one.
+//! The IT-set network policy and the durable trail behind every CONNECT
+//! tunnel: opened once per front-end process, host side, and inherited
+//! verbatim by every child. `guest-net`'s proxy is the only writer of records.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -27,18 +24,12 @@ fn now_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// Rotation threshold: past this, the next write rotates the live file to
-/// `.1` first. 32 MiB holds weeks of tunnel records.
+/// Past this, the next write rotates the live file aside to `.1` first.
 const ROTATE_AT_BYTES: u64 = 32 * 1024 * 1024;
 
-/// The durable, append-only network ledger.
-///
-/// One compact JSON object per line: an append-mode file's single `write()`
-/// lands atomically at the end, so concurrent exarch/synod processes can
-/// share the file without interleaving records. Rotation is additionally
-/// guarded by an `flock` on a sibling lock file (Unix only), so two
-/// processes racing the size check cannot each rotate and destroy the
-/// other's history.
+/// The durable, append-only network ledger, one compact JSON object per line:
+/// an append-mode `write()` lands atomically at the end, so concurrent
+/// processes on one app's ledger never interleave records.
 #[derive(Clone)]
 pub struct AuditLog(Arc<Mutex<LedgerFile>>);
 
@@ -49,10 +40,10 @@ struct LedgerFile {
     rotation_lock: std::fs::File,
 }
 
-/// Holds `rotation_lock` exclusively for the check-size/rotate/write
-/// sequence, across processes as well as threads. Unlocked on every path via
-/// `Drop`, including error returns. Locks a dup'd fd so the borrow of the
-/// `LedgerFile` it comes from ends before `record` needs to mutate it.
+/// Held across the whole check-size/rotate/write sequence, between processes
+/// as well as threads, so two racing the size check cannot each rotate and
+/// destroy the other's history. Locks a dup'd fd so the borrow of the
+/// `LedgerFile` it came from ends before `record` mutates it.
 #[cfg(unix)]
 struct RotationGuard(std::fs::File);
 
@@ -109,8 +100,7 @@ impl AuditLog {
         }))))
     }
 
-    /// Open this app's ledger at `$XDG_STATE_HOME/<app>/net-audit.jsonl`,
-    /// once per process, append-mode.
+    /// Open this app's ledger at `$XDG_STATE_HOME/<app>/net-audit.jsonl`.
     ///
     /// # Errors
     /// Returns `Err` if the ledger cannot be created or opened.
@@ -124,20 +114,17 @@ impl AuditLog {
     /// A ledger at a caller-chosen path, for tests.
     ///
     /// # Panics
-    /// Panics if the file cannot be created — a test fixture failure, not a
-    /// runtime condition to recover from.
+    /// Panics if the file cannot be created.
     #[must_use]
     pub fn for_test(path: &std::path::Path) -> Self {
         Self::at(path).expect("test audit ledger")
     }
 
     /// Append one record. `Err` means the gate must close: an unauditable
-    /// proxy does not proxy. A poisoned lock (only reachable after a prior
-    /// panic mid-write) is also `Err`.
+    /// proxy does not proxy.
     ///
     /// # Errors
-    /// Returns `Err` if the ledger's lock is poisoned, if rotation fails, or
-    /// if the write itself fails.
+    /// Returns `Err` on a poisoned lock, a failed rotation, or a failed write.
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:silent:net-audit] checks the ledger's on-disk size before deciding whether to rotate it."
@@ -168,8 +155,7 @@ impl AuditLog {
             .0
             .lock()
             .map_err(|_| std::io::Error::other("network audit ledger lock poisoned"))?;
-        // Cross-process rotation guard; non-Unix falls back to the mutex
-        // above, which only serialises threads within this process.
+        // Off Unix only the mutex above serialises, and only within this process.
         #[cfg(unix)]
         let _rotation_guard = RotationGuard::take(&ledger.rotation_lock)?;
         if ledger.file.metadata()?.len() + line.len() as u64 > ROTATE_AT_BYTES {
@@ -185,8 +171,7 @@ impl PartialEq for AuditLog {
     }
 }
 
-/// The IT-set policy and the durable audit ledger, threaded everywhere
-/// `disk_warn_bytes` is. Cheap to clone; children inherit both verbatim.
+/// Policy and ledger travel together, into an `Agent` like `disk_warn_bytes`.
 #[derive(Clone)]
 pub struct Egress {
     pub policy: Arc<crate::net_policy::NetPolicy>,
@@ -200,12 +185,10 @@ impl PartialEq for Egress {
 }
 
 impl Egress {
-    /// Load the real IT policy and open this app's real audit ledger —
-    /// the one production call site, at trunk launch.
+    /// The real policy and this app's real ledger, once per front-end launch.
     ///
     /// # Errors
-    /// Returns `Err` if the policy fails to load or the audit ledger cannot
-    /// be opened, naming which of the two failed.
+    /// Returns `Err` naming whichever of the two failed.
     pub fn open(app: crate::bootstrap::App) -> Result<Self, String> {
         let policy = crate::net_policy::load()?;
         Ok(Self {
@@ -214,12 +197,11 @@ impl Egress {
         })
     }
 
-    /// A test double: a permissive policy (`example.com` and `a.example`),
-    /// and a throwaway ledger under a fresh per-call path.
+    /// A test double: a permissive policy (`example.com`, `a.example`, search
+    /// on — mirrored by `agent::build`'s fixture) and a throwaway ledger.
     ///
     /// # Panics
-    /// Panics if either fixture host fails to parse — it cannot, since both
-    /// are literal valid host names.
+    /// Panics if either fixture host fails to parse; both are valid literals.
     #[must_use]
     pub fn for_test() -> Self {
         let policy = crate::net_policy::NetPolicy {
@@ -254,8 +236,6 @@ mod tests {
         ))
     }
 
-    /// Two successive records land as two independently-parseable JSON
-    /// lines — an allowed tunnel and a refused one alike.
     #[test]
     fn audit_log_records_two_independently_parseable_lines() {
         let path = tmp_path("audit-two-lines");
@@ -290,17 +270,14 @@ mod tests {
         assert!(lines[1].contains("b.example") && lines[1].contains("false"));
     }
 
-    /// Once the ledger exceeds its cap, the next write rotates the old
-    /// contents to `.1` and keeps appending to a fresh file.
     #[test]
     fn a_ledger_that_exceeds_its_cap_rotates_and_keeps_appending() {
         let path = tmp_path("audit-rotate");
         let rotated = path.with_extension("jsonl.1");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&rotated);
-        // Sized before the ledger opens, through a write handle: an
-        // append-mode handle carries no write access on Windows, which
-        // refuses `set_len` against it.
+        // Through a write handle, before the ledger opens: an append-mode
+        // handle carries no write access on Windows, which refuses `set_len`.
         std::fs::File::create(&path)
             .and_then(|f| f.set_len(ROTATE_AT_BYTES))
             .expect("oversized ledger");
@@ -323,15 +300,9 @@ mod tests {
         );
     }
 
-    /// Two independent `AuditLog` handles on the same path — standing in for
-    /// two racing processes, since each has its own in-process mutex — write
-    /// across the cap boundary concurrently. The `flock` must serialise the
-    /// check-size/rotate/write sequence between them so every record lands
-    /// exactly once across the live file and its rotated `.1`.
-    ///
-    /// Unix-only because the lock is: [`RotationGuard`] is `cfg(unix)`,
-    /// so on Windows nothing serialises check-size/rotate/write between
-    /// processes and there is no guarantee here to assert.
+    /// Two `AuditLog` handles on one path stand in for two racing processes:
+    /// each has its own mutex, so only the `flock` can serialise them — and
+    /// only on Unix, where `RotationGuard` exists.
     #[cfg(unix)]
     #[test]
     fn rotation_under_cross_process_contention_loses_no_record() {
@@ -388,9 +359,6 @@ mod tests {
         }
     }
 
-    /// A record that cannot be written reports `Err` rather than being
-    /// silently dropped — including when the ledger's lock is poisoned by
-    /// an earlier panic.
     #[test]
     fn a_record_that_cannot_be_written_reports_err() {
         let path = tmp_path("audit-poisoned");

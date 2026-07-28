@@ -1,7 +1,5 @@
-//! Application dispatch: `App` is CBPV function application and `Exec`
-//! is external command execution. The same code path serves pipelines,
-//! so the entry points thread an `upstream` value from the previous
-//! stage into the call's argument list.
+//! Application dispatch: `App` is CBPV application, `Exec` an external
+//! command. Pipelines reuse both, passing the `x` of `x | f` as `upstream`.
 
 use crate::ir::{Args, Comp, CompKind, RedirectV, ScopeOp, ValListElem};
 use crate::types::{Error, Mooring, Raw, Shell, Tail, TailCall, Value};
@@ -13,10 +11,8 @@ use super::{apply, redirect};
 use crate::runtime::command::EvalRedirectV;
 use crate::runtime::command_call;
 
-/// Dispatches `App`, `Exec`, and redirect-scoped calls. A present
-/// `upstream` value is appended to the call's argument list;
-/// computations that are not call-shaped fall through to [`eval_comp`],
-/// and any upstream value is then applied to the result via [`apply`].
+/// Dispatches `App`, `Exec`, and redirect-scoped calls, appending `upstream`
+/// to the arguments; anything else falls through to [`eval_comp`].
 pub(crate) fn invoke(
     comp: &Arc<Comp>,
     upstream: Option<Value>,
@@ -27,7 +23,6 @@ pub(crate) fn invoke(
     match &comp.item {
         CompKind::Exec(e) => {
             let (mut arg_vals, redir_eval) = eval_call_parts(&e.args, &e.redirects, shell)?;
-            // Append the value from the previous pipeline stage, if any.
             arg_vals.extend(upstream);
             command_call::run_call(&e.head, &arg_vals, &redir_eval, comp.span, mooring, shell)
         }
@@ -37,15 +32,11 @@ pub(crate) fn invoke(
             args: app_args,
             ..
         } => {
-            // The head and arguments are evaluated, not tail-called:
-            // they produce values the application consumes.
+            // Evaluated, not tail-called: the application consumes their values.
             let head_val = eval_comp(head, mooring, shell, Tail::No)?;
             let mut arg_vals = eval_call_args(app_args, shell)?;
             arg_vals.extend(upstream);
-            // CBPV application requires at least one argument; a spread
-            // of an empty list (`f ...$xs` with `$xs == []`) can leave
-            // the argument list empty, in which case the App reduces to
-            // its head.
+            // `f ...$xs` with an empty `$xs` leaves nothing to apply.
             if arg_vals.is_empty() {
                 Ok(head_val)
             } else {
@@ -54,6 +45,8 @@ pub(crate) fn invoke(
         }
 
         CompKind::Scope(ScopeOp::Redirect { body, redirects }) => {
+            // Forwarding `tail` is safe: the frame absorbs the tail call
+            // inside itself, so the callee still sees the redirected fds.
             redirect::within_redirect_frame(redirects, mooring, shell, |shell| {
                 invoke(body, upstream, tail, mooring, shell)
             })
@@ -63,21 +56,16 @@ pub(crate) fn invoke(
             let result = eval_comp(comp, mooring, shell, Tail::No)?;
             match upstream {
                 None => Ok(result),
-                // Applying the upstream value to a bare-value stage (a
-                // function reference consuming `x | f`) is itself the
-                // stage's tail call: route through `eval_app` so a
-                // granted tail position emits a [`TailCall`] and a final
-                // pipeline stage trampolines rather than recurses.
+                // For a bare-value stage (`x | f`, `f` a plain reference) this
+                // application is the stage's own tail call, hence `eval_app`.
                 Some(v) => eval_app(result, vec![v], tail, mooring, shell),
             }
         }
     }
 }
 
-/// Eliminator for CBPV application. A Lambda or Block handed
-/// [`Tail::Yes`] emits [`TailCall`] for the trampoline; otherwise it
-/// applies directly. Any other value is a type error. The caller
-/// guarantees `args` is non-empty.
+/// Eliminator for CBPV application: a Lambda or Block in tail position yields
+/// a [`TailCall`] for the trampoline instead. `args` must be non-empty.
 fn eval_app(
     name: Value,
     args: Vec<Value>,
@@ -97,12 +85,9 @@ fn eval_app(
     }
 }
 
-/// Evaluates the arguments and trailing redirects of an `Exec`
-/// together. Shared between [`invoke`]'s `Exec` arm and the pipeline
-/// External case in [`crate::runtime::pipeline::resolve`].
-///
-/// Upstream values from pipeline stages are appended later, in
-/// `pipeline::invoke`, not here.
+/// Evaluates an `Exec`'s arguments and trailing redirects together. Also the
+/// argv path for a directly-spawned external stage, in
+/// `runtime::pipeline::resolve`.
 pub(crate) fn eval_call_parts(
     args: &Args,
     redirects: &[RedirectV],
@@ -113,9 +98,6 @@ pub(crate) fn eval_call_parts(
     Ok((arg_vals, redir_eval))
 }
 
-/// Flattens an `Args` list into a positional `Vec<Value>`: `Single`
-/// elements contribute one value, `Spread` elements splice an
-/// evaluated list.
 fn eval_call_args(args: &Args, shell: &mut Shell) -> Result<Vec<Value>, Error> {
     let mut out = Vec::with_capacity(args.len());
     for elem in args {

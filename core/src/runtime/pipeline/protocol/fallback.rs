@@ -1,15 +1,11 @@
-//! Fallback backend for targets that are neither Unix nor Windows
-//! (wasm and similar).  Process-staged pipelines have no transport on
-//! such a target — there is no `self_reexec` to spawn a helper — so this
-//! backend exists only to keep the protocol module compiling, mirroring
-//! the `cfg(not(any(unix, windows)))` stubs in [`crate::process::signal`].
-//! Every operation that would touch a channel errors; none is reachable.
+//! Stub backend for targets that are neither Unix nor Windows.  Process-staged
+//! pipelines need `self_reexec`, which only the Unix and Windows arms of
+//! `helper` define, so nothing here is reachable: it keeps `protocol` compiling.
 
 use super::common::{EnvNames, pipe_error};
 use crate::types::{Break, Settled};
 use std::io::{Read, Write};
 
-/// Stub channel: no transport exists, so both `Read` and `Write` error.
 pub(crate) struct Channel;
 
 impl Read for Channel {

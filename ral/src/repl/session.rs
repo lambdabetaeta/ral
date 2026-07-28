@@ -143,12 +143,8 @@ impl Session {
             runtime.clone(),
         );
 
-        // TODO Phase 2 Task 5: when RAL_WIRE is set, construct
-        // WireTransport instead of IdentityTransport.  The REPL
-        // session currently uses shell_mut() for prompt rendering,
-        // terminal title, and frontend.read(), which require
-        // IdentityTransport — these need WireTransport equivalents
-        // before the REPL can switch.
+        // Prompt rendering, the terminal title, and `frontend.read()` all reach
+        // through `shell_mut()`, which only `IdentityTransport` offers.
         let transport = ral_core::transport::IdentityTransport::new(shell);
 
         Ok(Self {
@@ -269,11 +265,10 @@ impl Drop for Session {
     /// `Session`, so a crash mid-iteration neither orphans a stopped process
     /// group nor drops the session's history.
     ///
-    /// The exit story is a warn-then-sweep fold over the session's ledger
-    /// (`decisions/260705_session-ledger`): a still-running worker handle
-    /// has no pgid to sweep — it dies with the process — so it is named
-    /// here, once, before the pgid groups are taken down exactly as
-    /// before. Naming never gates or delays the exit it announces.
+    /// Warn, then sweep: a still-running worker handle has no pgid to sweep —
+    /// it dies with the process — so it is named here, once, before the pgid
+    /// groups are taken down.  Naming never gates or delays the exit it
+    /// announces.
     fn drop(&mut self) {
         self.transport.detach();
         self.frontend.save_history();

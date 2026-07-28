@@ -1,46 +1,31 @@
-//! Linux sandbox using bubblewrap (`bwrap`).
+//! Linux sandbox: the bubblewrap (`bwrap`) argv that confines a process.
 //!
-//! A ral subprocess is re-exec'd inside `bwrap` when `--sandbox-projection`
-//! is provided on startup (see [`super::early_init`]).  External commands
-//! spawned by that child inherit the same mount namespace and seccomp
-//! filter.
+//! Two callers build one envelope. `super::reexec` re-execs ral itself here
+//! for a grant body, and `super::launch` wraps a single external child;
+//! whatever the re-exec'd ral spawns inherits its mount namespace and
+//! seccomp filter.  The filter is applied only on x86-64 and aarch64.
 //!
-//! On x86-64 and aarch64 a seccomp-BPF filter is additionally applied via a
-//! memfd, blocking dangerous syscalls (`ptrace`, `kexec_load`, `bpf`, etc.)
-//! while allowing everything else.
-//!
-//! Network filtering is all-or-nothing: `--unshare-net` removes the network
-//! namespace entirely.  [`SandboxProjection::net`] is therefore a boolean
-//! allow/deny bit, not an endpoint list.
+//! bwrap has no endpoint filter — `--unshare-net` drops the network
+//! namespace whole — so `SandboxProjection::net` is a bit, not a list.
 
 use crate::types::{FsProjection, SandboxProjection};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// Build a [`Command`] that runs `name` inside a `bwrap` sandbox
-/// configured by `policy`.
+/// Build the [`Command`] that runs `name` under `bwrap` for `policy`: binds
+/// derived from the policy prefixes, `deny_paths` overlaid last.
 ///
-/// Read-only and read-write bind mounts are
-/// derived from the policy prefixes, with `deny_paths` overlaid read-only
-/// after broad writable binds.
+/// `chdir` is the in-sandbox cwd — bwrap starts the child in its
+/// mount-namespace root — so a per-command launch passes the target's
+/// logical cwd, while the grant-body re-exec and the profile dump pass
+/// `None` and let the re-exec'd ral thread cwd into its own children.
 ///
-/// `chdir` is the in-sandbox working directory: bwrap runs the child in
-/// its mount-namespace root unless told otherwise, so a per-command
-/// launch must pass the target's logical cwd here.  The grant-body
-/// re-exec and profile-dump call sites pass `None` (the re-exec'd ral
-/// inherits the launcher cwd and threads logical cwd into its own
-/// children).
-///
-/// `ownership` decides `--die-with-parent` alone.  See [`Ownership`] for
-/// why a surrendered launch must not carry it: the flag is
-/// `PR_SET_PDEATHSIG(SIGKILL)` over the whole envelope, which for a
-/// double-forked survivor either kills it moments after birth or never
-/// fires at all, depending on which of bwrap's `prctl` and the
-/// intermediate's `_exit` the scheduler runs first.  Neither outcome is a
-/// lifetime anyone asked for.  Everything else about the envelope — mount
-/// namespace, net namespace, seccomp filter — is unchanged, so the
-/// survivor is confined exactly as a kept child would have been.
+/// `ownership` decides `--die-with-parent` and nothing else.  The flag is
+/// `PR_SET_PDEATHSIG(SIGKILL)` over the whole envelope, so a surrendered
+/// (detached) launch must not carry it: the survivor would be killed
+/// moments after birth, or never, as the scheduler ordered bwrap's `prctl`
+/// against the intermediate's `_exit`.  Confinement is otherwise identical.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:surface:bwrap-launch] Builds the bwrap-wrapped external exec image the model launches under a Linux sandbox projection. The exec card is fused onto this image at command::run, which emits the exec event with the resolved argv and exit status when the spawn/wait completes."
@@ -56,13 +41,10 @@ pub(crate) fn make_command_with_policy(
     let bind_spec = policy.bind_spec();
     let mut ro_binds = default_ro_binds();
     ro_binds.extend(bind_spec.read_prefixes.iter().cloned());
-    // Bind the exe *file itself* when `name` is an absolute path — bwrap
-    // must be able to see it to `execvp`.  Default bind prefixes cover
-    // /bin, /usr, etc.; anything outside them (Nix store paths,
-    // ~/.cargo/bin, ...) needs explicit binding, or the exec fails with
-    // ENOENT inside the sandbox.  Bind the file, not its parent: sibling
-    // executables and configs still fall under the policy declared by
-    // the caller's `fs:` capability.
+    // bwrap cannot `execvp` what it cannot see, and the default prefixes
+    // miss Nix store paths, ~/.cargo/bin and the like — an unbound exe
+    // fails with ENOENT inside the sandbox.  Bind the file, not its parent:
+    // siblings stay under whatever the caller's `fs:` capability declared.
     if crate::path::is_absolute(name) {
         ro_binds.push(name.to_string());
     }
@@ -97,29 +79,20 @@ pub(crate) fn make_command_with_policy(
             }
         }
         FsProjection::Unrestricted => {
-            // No fs attenuation in the stack: pass fs through.  bwrap is
-            // only here for the seccomp envelope, and the parent-death tie
-            // where one applies; the grant body should see the host
-            // filesystem unchanged.
-            // `--dev-bind / /` mount-binds the whole tree including
-            // device nodes (`--bind` would skip them).
+            // Nothing in the stack attenuated fs, so bwrap is here only for
+            // the seccomp envelope and the parent-death tie.  `--dev-bind`
+            // carries device nodes across; `--bind` would skip them.
             c.args(["--dev-bind", "/", "/"]);
         }
     }
-    // `deny_paths` carve out fully-forbidden subtrees inside otherwise
-    // bound prefixes.  bwrap has no negative path rule, so we overlay
-    // an empty tmpfs at each denied path; reads find an empty dir,
-    // writes land in throwaway memory.  This is the "last mount wins"
-    // analogue of Seatbelt's deny rules — both reads and writes denied,
-    // matching the FsPolicy docs.
+    // bwrap has no negative path rule, so each denied path gets an empty
+    // tmpfs laid over it after the binds: last mount wins, reads find an
+    // empty dir, writes land in throwaway memory.
     //
-    // The overlay is NOT gated on the path already existing.  Unlike
-    // `--bind SRC DEST`, whose source must exist, `--tmpfs DEST` creates
-    // its mount point, so an existence guard here would leave a deny path
-    // that is absent at sandbox entry but lies under a writable bind
-    // unmasked — a spawned child could then create and write it, a gap
-    // Seatbelt does not share (its subpath deny matches by path, not
-    // inode).
+    // Deliberately not gated on existence.  `--tmpfs DEST` creates its own
+    // mount point (unlike `--bind SRC DEST`), and a guard here would leave
+    // a deny path that is absent at entry but under a writable bind
+    // unmasked — a child could then create and write it.
     let mut denied_binds = bind_spec.deny_paths;
     denied_binds.sort();
     denied_binds.dedup();
@@ -138,18 +111,11 @@ pub(crate) fn make_command_with_policy(
     c
 }
 
-/// Build a raw seccomp-BPF filter (array of `sock_filter` structs) that:
-///
-///  1. Kills the process if the syscall ABI does not match the expected arch.
-///  2. Kills the process for each listed dangerous syscall.
-///  3. Allows everything else.
-///
-/// `bwrap` reads the raw `sock_filter` bytes from the fd given to
-/// `--seccomp` and constructs the `sock_fprog` internally before calling
-/// `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ...)`.
+/// A seccomp-BPF program: kill on an ABI mismatch, kill each denied
+/// syscall, allow the rest.  `bwrap` reads these raw `sock_filter` bytes
+/// from the `--seccomp` fd and builds the `sock_fprog` itself.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn build_seccomp_filter() -> Vec<u8> {
-    // BPF instruction codes used below.
     const LD_W_ABS: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS
     const JEQ_K: u16 = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
     const RET_K: u16 = 0x06; // BPF_RET | BPF_K
@@ -177,11 +143,11 @@ fn build_seccomp_filter() -> Vec<u8> {
     ];
 
     let mut prog = BpfProg::new();
-    // Reject the wrong ABI before doing anything else.
+    // Syscall numbers are per-ABI, so the arch check must precede every
+    // comparison against `nr` or a foreign ABI renumbers past the denies.
     prog.insn(LD_W_ABS, 0, 0, ARCH);
     prog.insn(JEQ_K, 1, 0, AUDIT_ARCH); // jt=1: skip the next kill on match
     prog.insn(RET_K, 0, 0, KILL);
-    // For each clause: load nr; if nr == k, fall through to KILL; else skip.
     prog.insn(LD_W_ABS, 0, 0, NR);
     for &nr in denied {
         #[allow(
@@ -196,9 +162,8 @@ fn build_seccomp_filter() -> Vec<u8> {
     prog.into_bytes()
 }
 
-/// Tiny accumulator for `sock_filter`-shaped BPF instructions.
-/// Each instruction is `(opcode: u16, jt: u8, jf: u8, k: u32)` packed
-/// little-endian, exactly the layout the kernel expects.
+/// Accumulates `(opcode, jt, jf, k)` instructions packed little-endian,
+/// exactly the `sock_filter` layout the kernel expects.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 struct BpfProg(Vec<u8>);
 
@@ -219,10 +184,9 @@ impl BpfProg {
     }
 }
 
-/// Write the seccomp filter into a memfd, `dup2` it to FD 100, and clear
-/// `CLOEXEC` so `bwrap` can read FD 100 after exec.  The `pre_exec`
-/// closure runs in the forked child right before `bwrap` is exec'd;
-/// `bwrap` then applies the filter to itself and every process it spawns.
+/// Park the filter in a memfd on FD 100 with `CLOEXEC` cleared, so it
+/// survives the exec into `bwrap`, which reads it for `--seccomp 100` and
+/// applies it to itself and everything it spawns.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn apply_seccomp(cmd: &mut Command, filter: Vec<u8>) {
     const SECCOMP_FD: libc::c_int = 100;
@@ -278,15 +242,14 @@ fn apply_seccomp(cmd: &mut Command, filter: Vec<u8>) {
     }
 }
 
-/// Re-exec the current ral process under `bwrap` with `policy` enforced.
-/// Blocks until the child exits, returning its status as a `u8`.
+/// Re-exec this ral process under `bwrap` with `policy` enforced, blocking
+/// until it exits.
 pub(super) fn respawn_under_bwrap(
     exe: &Path,
     args: &[String],
     policy: &SandboxProjection,
 ) -> Result<u8, String> {
-    // Kept: this respawn is a child we wait on, so its envelope should not
-    // outlive us even if we die abruptly.
+    // We wait on this one, so its envelope must not outlive an abrupt death.
     let mut cmd = make_command_with_policy(
         exe.to_string_lossy().as_ref(),
         args,
@@ -304,9 +267,8 @@ pub(super) fn respawn_under_bwrap(
             format!("ral: failed to enter sandbox: {e}")
         }
     })?;
-    // Bwrap respawn is a one-shot helper that cannot be SIGSTOP'd by
-    // user code (its only purpose is to bootstrap the sandboxed ral),
-    // so the WUNTRACED ceremony of ChildHandle would be pointless here.
+    // A bootstrap helper no user code can name, hence never SIGSTOP, so
+    // `ChildHandle`'s WUNTRACED ceremony would buy nothing.
     #[allow(clippy::disallowed_methods)]
     let status = child
         .wait()
@@ -318,20 +280,18 @@ pub(super) fn respawn_under_bwrap(
     Ok(status.code().unwrap_or(1).clamp(0, 255) as u8)
 }
 
-/// System paths that are always bind-mounted read-only.  `/etc` is
-/// intentionally excluded; only the files needed for dynamic linking, name
-/// resolution, user lookup, and toolchain resolution are listed.
+/// System paths always bound read-only.  `/etc` wholesale is excluded —
+/// only the files dynamic linking, name resolution, user lookup and
+/// toolchain resolution need.
 fn default_ro_binds() -> Vec<String> {
     [
         "/bin",
         "/usr",
         "/lib",
         "/lib64",
-        // `/dev` and `/proc` are deliberately absent: the virtual `--dev`
-        // and `--proc` mounts at the top of `make_command_with_policy`
-        // supply minimal safe versions, and a real read-only bind here
-        // would shadow them (last mount wins).  `/sys` has no bwrap
-        // virtual-mount op, so it is bound read-only.
+        // `/dev` and `/proc` are absent: the virtual `--dev`/`--proc` mounts
+        // emitted first supply minimal versions, and a real bind here would
+        // shadow them.  `/sys` has no bwrap virtual op, so it is bound.
         "/sys",
         "/etc/ld.so.conf",
         "/etc/ld.so.conf.d",
@@ -342,13 +302,13 @@ fn default_ro_binds() -> Vec<String> {
         "/etc/ssl",
         "/etc/ca-certificates",
         "/etc/pki",
-        // getpwuid / getgrgid sit in libc startup paths; without these,
-        // many programs can't even resolve $HOME.
+        // getpwuid/getgrgid sit in libc startup paths: without these many
+        // programs cannot even resolve $HOME.
         "/etc/passwd",
         "/etc/group",
         // Debian/Ubuntu toolchain symlinks (cc → gcc-13, etc.).
         "/etc/alternatives",
-        // Linuxbrew prefix; analogous to /opt/homebrew on macOS.
+        // Linuxbrew: a system prefix that happens to live under /home.
         "/home/linuxbrew/.linuxbrew",
     ]
     .iter()
@@ -408,13 +368,13 @@ mod tests {
         );
     }
 
-    /// A deny path absent at sandbox entry but under a writable bind must
-    /// still be overlaid (see the `denied_binds` comment in the source).
+    /// A deny path absent at entry, yet under a writable bind, must still
+    /// be masked — or a child could create it.
     #[test]
     fn deny_overlay_is_emitted_for_a_nonexistent_path() {
         let dir =
             std::env::temp_dir().join(format!("ral-bwrap-deny-absent-{}", std::process::id()));
-        // Deliberately NOT created — the point is the deny target is absent.
+        // Deliberately not created: the deny target must be absent.
         let denied = dir.join("secret-not-yet-created");
         let policy = SandboxProjection {
             fs: FsProjection::Restricted(FsPolicy {
@@ -445,11 +405,8 @@ mod tests {
         );
     }
 
-    /// Ownership decides `--die-with-parent` and nothing else.  A kept
-    /// child's envelope is tied to our death; a surrendered one's must not
-    /// be, or the survivor is killed moments after birth — while every
-    /// other confinement flag stays identical, so what the survivor may
-    /// touch is exactly what a kept child could have.
+    /// A kept child's envelope is tied to our death and a surrendered one's
+    /// must not be, while every other confinement flag stays identical.
     #[test]
     fn only_the_parent_death_tie_distinguishes_a_surrendered_launch() {
         let policy = SandboxProjection {

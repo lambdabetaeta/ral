@@ -1,13 +1,9 @@
-//! Shared helpers for tag syntax and tag-keyed row labels.
-//!
-//! Runtime variants keep bare labels (`ok`, `err`, `more`, `done`).
-//! Surface syntax and row/map keys use a backtick sigil (`` `ok ``).
+//! The sigil that marks a tag: bare on runtime variants, prefixed on the
+//! single-string row and map keys the parser, typechecker, and IR share.
 
-/// Prefix used by surface tags and tag-keyed row labels.
 pub const TAG_PREFIX: char = '`';
 
-/// Build the internal row/map key for a tag label (`ok` → `` `ok ``).
-/// Used for both row labels (records, variants) and map keys.
+/// Row/map key for a tag label: `ok` → `` `ok ``.
 pub fn tag_row_label(label: &str) -> String {
     format!("{TAG_PREFIX}{label}")
 }

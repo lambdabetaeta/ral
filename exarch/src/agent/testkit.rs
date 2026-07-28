@@ -1,7 +1,5 @@
-//! Shared test scaffolding for the `agent` test modules: the fixtures and
-//! drivers exercised from two or more of `build.rs`, `attend.rs`, `deliberate.rs`,
-//! `shell.rs` and `resources.rs`. A helper used by only one of those files
-//! lives in that file's own `mod tests` instead.
+//! Fixtures shared by two or more `mod tests` across the crate; a helper only
+//! one of them needs belongs in that file instead.
 
 #![allow(
     clippy::disallowed_methods,
@@ -24,12 +22,11 @@ use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled};
 use std::borrow::Cow;
 use std::sync::Arc;
 
-/// A scripted provider behind the `Arc` the attend loop threads.
 pub(crate) fn scripted(model: &str, script: Script) -> Arc<Provider> {
     Arc::new(Provider::scripted(model, ProviderKind::Openai, script))
 }
 
-/// Boundary read of an Int-answering probe class — ticks no ledger.
+/// A boundary read — unlike `scope_has` it ticks no epoch and no ledger.
 pub(crate) fn probe_int(session: &Agent, class: &str) -> i64 {
     match session.seat.transport().probe(FOValue::Variant {
         label: class.into(),
@@ -40,19 +37,15 @@ pub(crate) fn probe_int(session: &Agent, class: &str) -> i64 {
     }
 }
 
-/// Whether `name` resolves in scope, observed through a real dispatched
-/// eval (a `VALUE:` section vs an undefined-variable error).  The eval
-/// ticks the ral epoch and the binding ledger like any call — a
-/// lease-sensitive test must count it in its idle arithmetic.
+/// Whether `name` resolves, asked through a real eval — which ticks the ral
+/// epoch and the binding-lease ledger, so an idle-arithmetic test must count it.
 pub(crate) fn scope_has(session: &mut Agent, name: &str) -> bool {
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, session.id);
     let content = session
         .run_shell(format!("probe-{name}"), &format!("${name}"), 5, &emit)
         .content;
-    // A non-transportable result (a closure-valued binding) still
-    // proves the name resolved — presence, not the value, is the
-    // question here.
+    // A closure-valued binding never crosses the seam, but it did resolve.
     if content.contains("VALUE:") || content.contains("not transportable across the host seam") {
         return true;
     }
@@ -82,11 +75,10 @@ pub(crate) fn ral_call(id: &str, cmd: &str) -> ToolCall {
     }
 }
 
-/// A trunk built through the production `Agent::root` path, parameterised on
-/// `interactive` — the one bit that decides whether the trunk converses.
+/// A trunk through the real `Agent::root` path; `interactive` makes it converse.
 pub(crate) fn trunk(dir: &std::path::Path, interactive: bool) -> Agent {
-    // Keyed by the caller's own `tmp` dir, so two tests building trunks
-    // concurrently never share (and wipe) one pid-keyed scratch.
+    // Tagged by the caller's `tmp` dir: `Scratch::for_test` wipes any scratch
+    // of the same tag, and the pid alone is shared by concurrent tests.
     let tag = dir
         .file_name()
         .expect("tmp dir has a name")
@@ -116,9 +108,8 @@ pub(crate) fn trunk(dir: &std::path::Path, interactive: bool) -> Agent {
     .expect("root trunk")
 }
 
-/// Drive a forked peer to quiescence through `provider`, returning the
-/// `(outcome, text)` its parent's spawn site would deliver — it renders the
-/// faithful reply payload to text exactly as the peer edge does.
+/// Drive a forked peer to quiescence, returning the `(outcome, text)` the spawn
+/// site in `shell_eval/tools/agent.rs` would deliver to its parent.
 pub(crate) fn drive_peer(child: &mut Agent, provider: Arc<Provider>) -> (AgentOutcome, String) {
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, child.id);
@@ -130,10 +121,8 @@ pub(crate) fn drive_peer(child: &mut Agent, provider: Arc<Provider>) -> (AgentOu
 
 // ── worker registry: `/clear` cascade, lease-reap drain ───────────────
 
-/// A worker body that blocks until cancelled, so a test can catch it
-/// mid-flight. Named distinctly from `shell_eval/builtins.rs`'s own
-/// test-only blocker (`test-block-forever`) so registering both in the
-/// same test binary never collides on name.
+/// Named apart from `shell_eval/builtins.rs`'s `test-block-forever`, since one
+/// test binary installs both.
 pub(crate) fn builtin_test_clear_block_forever(
     _args: &[Value],
     mooring: &Mooring,
@@ -149,19 +138,11 @@ pub(crate) fn scheme_test_clear_block_forever(_u: &mut Unifier) -> Scheme {
     mk_scheme(&[], &[], &[], thunk(pure(Ty::Unit)))
 }
 
-/// Gate for `test-clear-block-until-released`: until the owning test
-/// stores `true`, the body never polls `process::check`, so it cannot
-/// observe a cancellation. `/clear` cancels workers *before* it drops
-/// the queued inbox, so a fast-settling worker can land its deferred
-/// batch inside the clear and have it legitimately dropped there — the
-/// latch holds the worker un-settleable until `/clear` has returned,
-/// pinning the settled-*across*-the-clear interleaving the late-surface
-/// test exists to exercise.
+/// Gates `test-clear-block-until-released`: while false it cannot settle inside
+/// the window where `/clear` has cancelled workers but not yet dropped the inbox.
 pub(crate) static CLEAR_RELEASE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// A worker body deaf to cancellation until [`CLEAR_RELEASE`] is set,
-/// settling on it at the next poll after that.
 pub(crate) fn builtin_test_clear_block_until_released(
     _args: &[Value],
     mooring: &Mooring,

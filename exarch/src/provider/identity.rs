@@ -31,8 +31,7 @@ impl ProviderKind {
             ),
             Self::Deepseek => ("deepseek", "deepseek-chat", "DEEPSEEK_API_KEY"),
             Self::Gemini => ("gemini", "gemini-2.5-pro", "GEMINI_API_KEY"),
-            // opencode issues one key per account and tells Zen from Go apart
-            // by endpoint, so both read the same `OPENCODE_API_KEY`.
+            // opencode issues one key per account; the endpoint alone tells Zen from Go.
             Self::OpencodeZen => ("opencode-zen", "glm-5.1", "OPENCODE_API_KEY"),
             Self::OpencodeGo => ("opencode-go", "glm-5.2", "OPENCODE_API_KEY"),
             Self::Xai => ("xai", "grok-4.3", "XAI_API_KEY"),
@@ -40,9 +39,8 @@ impl ProviderKind {
         }
     }
 
-    /// Base URL for providers that need a custom endpoint.
-    ///
-    /// Must end with `/`: genai joins the service path onto it.
+    /// Base URL for providers that need a custom endpoint. Must end with `/`:
+    /// genai joins the service path onto it.
     pub fn endpoint(self) -> Option<&'static str> {
         match self {
             Self::Openrouter => Some("https://openrouter.ai/api/v1/"),
@@ -76,22 +74,17 @@ impl ProviderKind {
 /// An unusual provider declared in `config.ral`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CustomProvider {
-    /// The provider's display label and stable identity.
     pub label: String,
-    /// Its API-key environment variable, or `None` for a no-auth endpoint.
+    /// Its API-key environment variable; `None` for a no-auth endpoint.
     pub key_env: Option<String>,
-    /// The base URL genai points traffic at.
     pub endpoint: String,
-    /// The configured wire protocol.
     pub adapter: AdapterKind,
 }
 
 /// A signed-in `ChatGPT` account, as a selectable provider identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatGptAccount {
-    /// The `OpenAI` account id this selection maps to.
     pub account_id: String,
-    /// The account's stable, human-readable handle.
     pub label: String,
 }
 
@@ -107,15 +100,12 @@ impl ChatGptAccount {
 
 /// A famous provider, custom endpoint, or signed-in `ChatGPT` account.
 ///
-/// Equality, ordering, and hashing use the label alone: it is the unique key
-/// shared by credential resolution, model listing, and selection.
+/// Equality, ordering, and hashing go by label alone: it is the key under which
+/// credentials, model lists, and transports are all stored.
 #[derive(Clone, Debug)]
 pub enum ProviderId {
-    /// A built-in provider.
     Famous(ProviderKind),
-    /// An unusual provider declared in `config.ral`.
     Custom(Arc<CustomProvider>),
-    /// A signed-in `ChatGPT` account.
     ChatGpt(Arc<ChatGptAccount>),
 }
 
@@ -200,14 +190,13 @@ impl Ord for ProviderId {
     }
 }
 
-/// How a provider's plan reads, for both metering and labelling.
+/// How a provider's plan reads in the interface: a metered key, an OAuth
+/// `ChatGPT` login, or a flat rate. Labelling only; cost metering rides
+/// `Transport::metered`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Subscription {
-    /// A metered API key.
     Metered,
-    /// A `ChatGPT` plan login authorised over OAuth.
     ChatGpt,
-    /// A flat-rate plan declared by the provider.
     FlatRate,
 }
 
@@ -222,13 +211,11 @@ pub(crate) fn provider_label(subscription: Subscription, base: &str) -> String {
 
 /// The wire adapter for a specific `model` under `id`.
 ///
-/// Only `OpenAI` is model-sensitive: some of its models still speak the classic
-/// Chat Completions API rather than Responses, and genai's
-/// [`AdapterKind::from_model`] name-sniffs across every vendor to guess which.
-/// A hit outside `OpenAI`/`OpenAIResp` means the name coincidentally matched
-/// another vendor's convention rather than `OpenAI`'s own split, so it is
-/// discarded in favour of `OpenAIResp`. Every other provider is not
-/// model-sensitive and always serves through [`ProviderId::default_adapter`].
+/// Only `OpenAI` splits by model: some of its models still speak the classic
+/// Chat Completions API rather than Responses. `AdapterKind::from_model`
+/// name-sniffs across every vendor, so a verdict outside the two `OpenAI`
+/// adapters is a coincidental match on another vendor's convention, not
+/// `OpenAI`'s own split, and is discarded.
 pub(super) fn adapter_for_provider_model(id: &ProviderId, model: &str) -> AdapterKind {
     match id {
         ProviderId::Famous(ProviderKind::Openai) => {

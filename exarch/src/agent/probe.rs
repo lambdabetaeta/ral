@@ -1,20 +1,15 @@
-//! Reading engine state across the probe rail.
+//! Decoding the engine's probe answers into host-side data.
 //!
-//! The host cannot hold the engine's live types: a `WorkerEntry`'s handle is
-//! not transportable across the seat boundary, so state comes back as
-//! decoded data rows rather than a reach for the live core value.
-//! [`ProbedWorker`] is that decoding, and [`Agent::probe_workers`]/
-//! [`Agent::probe_env_var`] are the two probes that produce it.
+//! A wire seat puts the engine in another process, so live core values never
+//! cross it: `ral_core::transport::answer_probe` encodes, this decodes.
+//! Probe only at a run boundary — mid-dispatch answers engine-busy, which
+//! panics here.
 
 use crate::agent::Agent;
 use ral_core::serial::FOValue;
 
-/// A `` `workers `` probe row, decoded — the fields
-/// [`Agent::resource_rows`] and [`Agent::reconcile_service_pins`] actually
-/// read off the shell's worker registry, carried as data across the probe
-/// rail rather than the live core `WorkerEntry` (whose handle is not
-/// transportable). `pub(crate)` so [`crate::bus::card::services_pin_card`] can
-/// render it without reaching back for the live core type.
+/// A `` `workers `` probe row, decoded.  `pub(crate)` so
+/// [`crate::bus::card::services_pin_card`] can render it.
 pub(crate) struct ProbedWorker {
     pub(crate) id: u64,
     pub(crate) cmd: String,
@@ -26,10 +21,6 @@ pub(crate) struct ProbedWorker {
 }
 
 impl Agent {
-    /// The `` `workers `` probe, decoded — the fields
-    /// [`Self::resource_rows`] and [`Self::reconcile_service_pins`] actually
-    /// read, never the live core `WorkerEntry` (a probe answer is data, not
-    /// a handle: no live `Mutex`, no cancel scope).
     pub(super) fn probe_workers(&self) -> Vec<ProbedWorker> {
         let items = match self.seat.transport().probe(FOValue::Variant {
             label: "workers".into(),
@@ -116,10 +107,9 @@ impl Agent {
             .collect()
     }
 
-    /// The `` `env-var `` probe, decoded: `` `some [value] `` / `` `none ``
-    /// back to `Option<String>`. The only two readers of this dynamic env
-    /// overlay are [`Self::check_disk_warn`] and [`Self::resource_rows`],
-    /// and both are pure: neither ticks a ledger.
+    /// The `` `env-var `` probe, decoded.  Answers the engine's environment —
+    /// its dynamic overlay over its own process env — which on a wire seat is
+    /// not this process's.
     pub(super) fn probe_env_var(&self, name: &str) -> Option<String> {
         match self.seat.transport().probe(FOValue::Variant {
             label: "env-var".into(),

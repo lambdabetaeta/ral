@@ -1,39 +1,28 @@
-//! Exit-code hint lookup.
+//! A table from (command basename, exit status) to a short explanation, read by
+//! `Error::from_command_failure`.  Finding the file is the host's job; parse the
+//! text here and install with `Shell::set_exit_hints`.
 //!
-//! `ExitHints` is a pure lookup table mapping (command, exit-status) pairs to
-//! short human-readable explanations.  File loading is the caller's concern;
-//! populate the table via [`ExitHints::from_text`] and install it into [`crate::Shell`].
-//!
-//! # Table format
-//!
-//! One entry per line: `<command> <status> <hint text>`.
-//! `<command>` is the bare program name or `*` for any command.
-//! Lines starting with `#` and blank lines are ignored.
+//! One entry per line, `<command> <status> <hint text>`; `*` matches any command,
+//! and `#` lines and blanks are ignored.
 
 use std::collections::HashMap;
 
-/// Table of (command, status) → hint.
-///
-/// Load with [`ExitHints::from_text`]; install into [`crate::types::Shell`].
+/// Table of (command basename, exit status) → hint.
 #[derive(Default)]
 pub struct ExitHints {
-    /// Key: (`command_basename`, status).  `"*"` matches any command.
     table: HashMap<(String, i32), String>,
 }
 
 impl ExitHints {
-    /// Build a hint table from text in the standard format.
+    /// Parse a hint table; malformed lines are skipped rather than reported.
     pub fn from_text(text: &str) -> Self {
         Self { table: parse(text) }
     }
 
-    /// Return a hint for the given command basename and exit status, or `None`.
+    /// Hint for a command's exit status: the command's own entry, else the wildcard.
     ///
-    /// Lookup order:
-    /// 1. Command-specific entry.
-    /// 2. Wildcard (`*`) entry.
-    ///
-    /// Signal-terminated statuses are not decoded into synthetic hints.
+    /// Signals never reach here — the caller consults this only for
+    /// `CommandFailure::ExitCode`, so no status is ever a 128+N encoding.
     pub fn lookup(&self, cmd: &str, status: i32) -> Option<String> {
         let name = crate::path::basename(cmd);
 
@@ -67,9 +56,8 @@ fn parse(text: &str) -> HashMap<(String, i32), String> {
             continue;
         };
         if !hint.is_empty() {
-            // Key on the basename, exactly as `lookup` does — a table entry
-            // written as a full path (`/usr/bin/foo`) must still match a
-            // lookup for that command, which is always basename-keyed.
+            // Key on the basename, as `lookup` does, so an entry written as a
+            // full path still matches.
             let name = crate::path::basename(cmd);
             map.insert((name.to_string(), status), hint.to_string());
         }

@@ -1,28 +1,9 @@
-//! Process subsystem: outcomes, signals, cancellation, and process-group placement.
+//! Running an external command: launch, process-group placement, cancellation,
+//! and the outcome the OS reports.
 //!
-//! The concerns sitting under this umbrella:
-//!
-//!   * **Outcomes** ([`outcome`]) — structured shapes for what the OS
-//!     reported when an external command finished ([`Signal`],
-//!     [`WaitOutcome`]), plus the user-facing failure types the
-//!     evaluator surfaces ([`SpawnFailure`], [`CommandFailure`]).
-//!   * **Signals & placement** ([`signal`]) — the escalation ladder polled
-//!     by the evaluator, the platform-specific signal-handler / job-control
-//!     machinery (`signal::unix`, `signal::windows`), and [`PgidPolicy`] /
-//!     [`ChildHandle`] for process-group placement at spawn time.
-//!   * **Cancellation** ([`cancel`]) — [`CancelScope`] and its typed
-//!     [`DurableRoot`] / [`ForegroundScope`] relation for cooperative
-//!     structured-concurrency cancellation, plus the ambient cells the
-//!     handlers contribute a cause to.
-//!   * **Launch** ([`launch`]) — the owned [`Launch`] value the runtime
-//!     hands the subsystem to spawn one external command.
-//!   * **Jail** ([`jail`]) — the guest-only per-exec decision (fresh
-//!     uid/gid, transient cgroup) and, on Linux, the thin syscall edge
-//!     that carries it out.
-//!   * **Lease** ([`lease`]) — [`TerminalLease`], the unforgeable
-//!     controlling-terminal-foreground authority.
-//!   * **Reaper** ([`reaper`]) — the process-global deadline daemon that
-//!     fires an armed lifetime ceiling as a [`CancelCause::Deadline`].
+//! Cancellation is the subsystem's common currency — a signal handler, a
+//! terminal interrupt, and an elapsed deadline all arrive as a [`CancelCause`]
+//! on a [`CancelScope`], observed at the evaluator's poll points via [`check`].
 
 pub mod cancel;
 pub mod jail;

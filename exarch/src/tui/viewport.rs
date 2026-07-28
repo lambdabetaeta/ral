@@ -1,18 +1,10 @@
 //! Per-session collapsible scrollback.
 //!
-//! [`Viewport`] owns the session's [`Block`] buffer, the in-flight
-//! markdown accumulator, its own scroll position, and an append-only tee
-//! to the per-session `user.log`.  It turns session-local content events
-//! (tokens, boundaries, pre-rendered chrome) into blocks, and flattens
-//! those blocks into the visual rows the renderer paints.
-//!
-//! Scrollback is owned here, not delegated to the host terminal: the
-//! whole alt-screen frame is redrawn each tick from
-//! [`Viewport::render_window`], and each tab keeps its own
-//! [`Viewport::offset`] so switching panes never disturbs another's
-//! position.  Every line that lands in a block is also written to
-//! `user.log` — a tool call in full, script included — so the on-disk
-//! file is the durable counterpart to `events.json`.
+//! A [`Viewport`] turns one session's content events into [`Block`]s, flattens
+//! those into the renderer's visual rows, and tees every committed line to the
+//! session's `user.log` — the durable counterpart to `events.json`.  The whole
+//! alt-screen frame is redrawn each tick, so scrollback is ours, not the host
+//! terminal's, and every tab keeps its own scroll position.
 
 use super::block::{AgentSlot, Block, RailShape, Reveal, append_visual_rows};
 use super::fidelity::{self, Fidelity};
@@ -31,20 +23,15 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Max scrollback blocks retained in heap per viewport; older blocks are
-/// already durable in `user.log`/`events.json` and are evicted oldest-first
-/// once the window is exceeded.
+/// Scrollback blocks held in heap; past this they are evicted oldest-first,
+/// already durable in `user.log`/`events.json`.
 pub(super) const VIEWPORT_MAX_BLOCKS: usize = 500;
-/// Max rendered rows retained — an eviction trigger alongside
-/// [`VIEWPORT_MAX_BLOCKS`], for the rarer oversized block (a huge diff, a
-/// long tool result) that would blow the row budget well before the block
-/// count does.
+/// Rendered-row cap — a second eviction trigger, for the oversized block that
+/// blows the row budget long before the block count does.
 pub(super) const VIEWPORT_MAX_ROWS: usize = 20_000;
 
-/// The three facts kept for a dead sub-agent view once its linger window
-/// elapses ([`super::LINGER`]): everything else — blocks, the flatten, the
-/// streaming buffers, the pinned register — is dropped. No reload-from-log
-/// machinery is built; the log stays readable outside the TUI.
+/// All that outlives a dead sub-agent view once [`super::LINGER`] elapses.
+/// Nothing is ever reloaded from the log; it stays readable outside the TUI.
 pub(super) struct Tombstone {
     pub(super) id: AgentId,
     pub(super) error: bool,
@@ -52,8 +39,7 @@ pub(super) struct Tombstone {
 }
 
 impl Tombstone {
-    /// The tombstone's one-line rendering: dim chrome naming the agent, its
-    /// final status, and where its full transcript still lives.
+    /// The row `Tabs::tombstone_lines` collects for the `/resources` fold.
     pub(super) fn line(&self) -> Line<'static> {
         let status = if self.error { "error" } else { "done" };
         Line::from(format!(
@@ -65,87 +51,62 @@ impl Tombstone {
 }
 
 pub(super) struct Viewport {
-    /// The session's scrollback, oldest block first — each block alongside
-    /// its rendered `user.log` row count ([`Entry`]).
+    /// The session's scrollback, oldest block first.
     blocks: Vec<Entry>,
-    /// Set once this view has been evicted into a tombstone
-    /// ([`Self::evict_to_tombstone`]); `blocks` is empty from that point on.
-    /// `None` for a live (or still-lingering) view.
+    /// Set once evicted ([`Self::evict_to_tombstone`]); `blocks` is empty from
+    /// that point on, and `None` for a live or still-lingering view.
     tombstone: Option<Tombstone>,
-    /// This session's agent palette slot, stamped onto every block at
-    /// push. Root is `0`; subagents take the next slot at birth.
+    /// Palette slot stamped onto every block at push; root is `0`.
     agent: AgentSlot,
-    /// This session's cumulative token spend, summed from every
-    /// `Kind::Usage` event routed to it. Drives the matrix's per-agent
-    /// value readout; the global `App::total_usage` stays for `rule_line`.
+    /// This session's spend — the matrix's per-agent readout, where
+    /// `App::total_usage` is the rule line's sum over all of them.
     usage: Usage,
-    /// In-progress assistant text since the last fence-safe paragraph
-    /// boundary.  It never streams as prose — [`Self::render_window`]
-    /// projects only its growing magnitude as a provisional rail seat
-    /// ([`Self::streaming_seat`]) until a fence-safe break or the turn's end
-    /// commits it as a [`Block::markdown`].
+    /// Assistant text since the last fence-safe paragraph break.  It never
+    /// streams as prose: only its magnitude shows ([`Self::streaming_seat`])
+    /// until a break or the turn's end commits it as a [`Block::markdown`].
     open: String,
-    /// In-progress reasoning text.  Grows as `Kind::Thinking` events arrive;
-    /// rendered as a live deliberation block above the answer stream. Cleared
-    /// when the final reasoning commits as its own [`Block::thinking`].
+    /// In-flight reasoning, likewise shown as magnitude only, cleared when
+    /// [`Self::commit_thinking`] lands the authoritative [`Block::thinking`].
     thinking: String,
-    /// Top visible visual row.  Owned per-viewport so each tab keeps its
-    /// place; recomputed against the frame height in [`Self::render_window`].
+    /// Top visible visual row, per-viewport so each tab keeps its place.
     offset: usize,
-    /// Follow the tail: while set, [`Self::render_window`] pins the viewport
-    /// to the absolute bottom (the trailing row).  Cleared when the user
-    /// scrolls (either direction), re-armed when they scroll back down.
+    /// Follow the tail.  Cleared by a scroll either way, re-armed at the bottom.
     sticky: bool,
-    /// Memoised flatten of [`Self::blocks`] into wrapped visual rows.
     flat: Flat,
-    /// Append-only tee of every committed line to the session's
-    /// `user.log`, flushed as each block lands so the rendered transcript
-    /// survives an abnormal exit.
+    /// Tee of every committed line to `user.log`, flushed as each block lands
+    /// so the rendered transcript survives an abnormal exit.
     log: io::BufWriter<Box<dyn io::Write + Send>>,
     log_path: PathBuf,
-    /// Whether the last line written to the log was blank, so leading
-    /// block blanks collapse against it exactly as they do on screen.
+    /// Whether the last logged line was blank, so blanks collapse on disk as
+    /// they do on screen.
     log_prev_blank: bool,
-    /// The worker's current phase label and its start instant — the live
-    /// phase driving the status line's elapsed-wait bar.  Set by
-    /// [`Self::set_phase`], cleared by [`Self::clear_phase`] (or restarted by
-    /// a superseding `set_phase`).  `None` when the viewport is between
-    /// phases, leaving the bar hidden.
+    /// The live phase and its start — the elapsed-wait bar; `None` hides it.
     phase: Option<(String, Instant)>,
-    /// Kit-authored *state*: an ordered `key → Card` register, the
-    /// model-authored dual of the matrix.  Re-pinning a key overwrites its
-    /// card in place ([`Self::set_pin`]); `` `unpin `` drops it
-    /// ([`Self::drop_pin`]).  Rendered as the reserved right-hand register
-    /// column, never logged, and wiped by [`Self::reset`] so a pin is
-    /// generation-bounded exactly as [`Self::blocks`] is.  A `Vec` of pairs,
-    /// not a map, so render order is first-seen insertion order.
+    /// Kit-authored *state*: a `key → Card` register drawn as the right-hand
+    /// column.  Never logged, and wiped by [`Self::reset`] so a pin is
+    /// generation-bounded like the scrollback.  A `Vec`, not a map, so render
+    /// order is first-seen insertion order.
     pins: Vec<(String, Card)>,
 }
 
-/// The visible slice of a viewport plus the scroll readout the rule line needs.
 pub(super) struct RenderWindow {
     pub(super) lines: Vec<Line<'static>>,
     pub(super) offset: usize,
-    /// How far the window has scrolled through the buffer, as a percent in
-    /// `0..=100`, or `None` when the whole buffer fits and there is nothing to
-    /// scroll.  Computed here beside the `offset` it derives from; the rule
-    /// line renders it as a fixed-position magnitude (`⇣ 72%`, `⇣ bot`) in
-    /// place of the deleted right-margin scrollbar.
+    /// Progress through the buffer in `0..=100`, or `None` when it all fits.
+    /// The rule line shows it in place of a right-margin scrollbar.
     pub(super) scroll_pct: Option<u16>,
 }
 
-/// One scrollback entry: the block plus its rendered `user.log` row count
-/// ([`Viewport::log_block`], [`Viewport::rewrite_log`]), captured where it
-/// is already computed. Summed over [`Viewport::blocks`], it is the
-/// [`VIEWPORT_MAX_ROWS`] eviction trigger.
+/// A scrollback block beside its `user.log` row count, captured where that
+/// count is already computed; summed, it is the [`VIEWPORT_MAX_ROWS`] trigger.
 struct Entry {
     block: Block,
     rows: usize,
 }
 
-/// Memoised whole-buffer flatten: every block's lines wrapped to `width`
-/// into `rows`, with `row_block[i]` the block each visual row came from.
-/// Rebuilt when `dirty` or when asked at a different width.
+/// Memoised whole-buffer flatten: block lines wrapped to `width`, `row_block[i]`
+/// naming the block row `i` came from, and the `virtual_think_*` record of the
+/// live thinking seat — rows the render splices in that back no text.
 #[derive(Default)]
 struct Flat {
     width: u16,
@@ -157,23 +118,17 @@ struct Flat {
     virtual_think_widths: Vec<usize>,
 }
 
-/// Where visual row `row` resolves against [`Flat`]'s virtual thinking
-/// seat: either a row backed by the committed flatten (indexed after
-/// subtracting the seat, if `row` falls past it), or a row inside the seat
-/// itself, which has no backing text row of its own.
+/// Where a visual row lands relative to the spliced thinking seat: in the
+/// committed flatten (re-indexed if it falls past the seat), or in the seat.
 enum RowSite {
     Committed(usize),
     Seat(usize),
 }
 
-/// Walk `open` for the latest paragraph break reached at fence depth
-/// zero.  Returns the byte index *after* the `\n\n` so `open.drain(..idx)`
-/// peels off the committable prefix; `None` means commit waits — no `\n\n`
-/// yet, or every candidate sits inside an open code fence.
-///
-/// Fence depth toggles on lines whose first non-whitespace token is
-/// three-or-more backticks or tildes; nested fences are not a thing in
-/// `CommonMark`, so a single bit suffices.
+/// The byte index just past the last `\n\n` at fence depth zero, so
+/// `open.drain(..idx)` peels off the committable prefix; `None` means every
+/// candidate sits inside an open fence.  `CommonMark` has no nested fences, so
+/// one bit of depth suffices.
 fn safe_paragraph_break(open: &str) -> Option<usize> {
     let bytes = open.as_bytes();
     let mut depth = 0u8;
@@ -196,22 +151,15 @@ fn safe_paragraph_break(open: &str) -> Option<usize> {
     last_safe
 }
 
-/// Whether `block` opens its own rail-run rather than continuing a prior
-/// prose paragraph's.  A run of consecutive [`Block::markdown_src`] blocks
-/// is one response — committed piecewise only because streaming commits
-/// each fence-safe paragraph as its own block
-/// ([`Viewport::flush_complete_paragraphs`]) — so the rail marks it once,
-/// on its head row; a continuation paragraph passes `lead = false`, keeping
-/// the gutter but dropping its redundant `·`.  Read off arrival order, like
-/// every other projection in the flatten: `prev` is the block immediately
-/// preceding `block`, `None` at the buffer's head.
+/// Whether `block` opens its own rail run.  Streaming commits each fence-safe
+/// paragraph separately ([`Viewport::flush_complete_paragraphs`]), so a run of
+/// markdown blocks is one response and only its head wears the `·`.
 fn opens_rail_run(prev: Option<&Block>, block: &Block) -> bool {
     !(block.markdown_src().is_some() && prev.is_some_and(|p| p.markdown_src().is_some()))
 }
 
-/// Open `path` as the session's rendered-text log, truncating any prior
-/// content.  Falls back to a discarding sink when the file can't be
-/// opened, so a log-path failure never disables the viewport.
+/// Open the session's rendered-text log, truncating any prior content.  Falls
+/// back to a discarding sink, so a log-path failure never disables the viewport.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:viewport-log] opens the viewport's rendered-text log; render dump infra, not turn-time data I/O"
@@ -227,10 +175,9 @@ fn open_log(path: &Path) -> io::BufWriter<Box<dyn io::Write + Send>> {
     io::BufWriter::new(sink)
 }
 
-/// Copy an already-flushed `user.log` at `src` to the user-chosen `dest`
-/// for `/export`.  The caller resolves `dest`, refuses to overwrite it, and
-/// flushes the log first; this is the doored copy, kept beside [`open_log`]
-/// so all `user.log` I/O lives in one place.
+/// Copy a flushed `user.log` to `dest` for `/export` — the caller resolves
+/// `dest`, refuses to overwrite, and flushes.  Beside [`open_log`], so all
+/// `user.log` I/O lives in one place.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:export] copies a flushed user.log to the user-chosen export path; output infra, not turn-time data I/O"
@@ -240,8 +187,6 @@ pub(super) fn export_log(src: &Path, dest: &Path) -> io::Result<u64> {
 }
 
 impl Viewport {
-    /// Build a viewport that tees its rendered text to `log_path`.
-    /// `agent` is this session's palette slot, stamped onto every block.
     pub(super) fn new(log_path: PathBuf, agent: AgentSlot) -> Self {
         Self {
             blocks: Vec::new(),
@@ -261,27 +206,21 @@ impl Viewport {
         }
     }
 
-    /// This session's agent palette slot.
     pub(super) fn agent(&self) -> AgentSlot {
         self.agent
     }
 
-    /// Fold one turn's token usage into this session's cumulative spend.
-    /// Called from the `Kind::Usage` handler alongside `App::total_usage`.
+    /// Fold one turn's spend in; the same event also feeds `App::total_usage`.
     pub(super) fn add_usage(&mut self, u: Usage) {
         self.usage += u;
     }
 
-    /// This session's cumulative token spend — the matrix's value readout.
     pub(super) fn usage(&self) -> Usage {
         self.usage
     }
 
-    /// Per-step "had a tool call" flags, oldest step first: scan the
-    /// blocks, opening a step at each [`Block::is_step`] boundary, and
-    /// mark the open step `true` once a tool-call block lands within it.
-    /// One bool per step — the matrix renders `●` for `true`, `○` for
-    /// `false`.  Empty when no step boundary has landed yet.
+    /// Per-step "had a tool call" flags, oldest first — one bool per
+    /// [`Block::is_step`] boundary, which the matrix renders `●` or `○`.
     pub(super) fn steps(&self) -> Vec<bool> {
         let mut steps: Vec<bool> = Vec::new();
         for entry in &self.blocks {
@@ -296,9 +235,8 @@ impl Viewport {
         steps
     }
 
-    /// Total lines this session touched: the summed [`Block::lines_changed`]
-    /// over its diff blocks.  Drives the matrix's size readout; `0` for a
-    /// read-only agent, and prose volume never inflates it.
+    /// Summed [`Block::lines_changed`] over this session's diffs — the matrix's
+    /// size readout.  `0` for a read-only agent; prose never inflates it.
     pub(super) fn lines_touched(&self) -> u32 {
         self.blocks
             .iter()
@@ -306,17 +244,14 @@ impl Viewport {
             .sum()
     }
 
-    /// Whether the session's last block is an error — the matrix renders
-    /// the row's leading cell as `╳` rather than the done/running glyph.
+    /// Whether the session's last block is an error — the matrix leads a dying
+    /// row with `╳` rather than `√`.
     pub(super) fn last_is_error(&self) -> bool {
         self.blocks.last().is_some_and(|e| e.block.is_error())
     }
 
-    /// The viewport's probe figures for the `/resources` fold:
-    /// `(blocks, rows, bytes)` — scrollback blocks, the memoised flatten's
-    /// visual rows, and those rows' summed text bytes.  Reads only what the
-    /// renderer already keeps (the flatten is as of the last paint), so the
-    /// probe is a read of display state, never a re-render.
+    /// `(blocks, rows, bytes)` for the `/resources` fold, read off the flatten
+    /// as of the last paint — a read of display state, never a re-render.
     pub(super) fn probe_figures(&self) -> (u64, u64, u64) {
         let bytes: usize = self
             .flat
@@ -330,43 +265,34 @@ impl Viewport {
             bytes as u64,
         )
     }
-    /// Begin a new phase, restarting the elapsed-wait clock from now.  A
-    /// superseding phase simply replaces the live slot — phases never
-    /// overlap, each restarts the bar.
+    /// Begin a phase, restarting the elapsed-wait clock; phases never overlap.
     pub(super) fn set_phase(&mut self, label: String) {
         self.phase = Some((label, Instant::now()));
     }
 
-    /// Clear the live phase, hiding the elapsed-wait bar.  A no-op when no
-    /// phase is live, so it is safe to call on every non-`Phase` event.
+    /// Clear the live phase, hiding the elapsed-wait bar.  A no-op when none is
+    /// live, so every non-`Phase` event may call it.
     pub(super) fn clear_phase(&mut self) {
         self.phase = None;
     }
 
-    /// The live phase label, if one is in progress — the `phase…` text
-    /// readout alongside the elapsed-wait bar.
     pub(super) fn phase_label(&self) -> Option<&str> {
         self.phase.as_ref().map(|(label, _)| label.as_str())
     }
 
-    /// Wall-time elapsed in the current phase, if one is live — the
-    /// magnitude the elapsed-wait bar encodes. `None` between phases.
     pub(super) fn phase_elapsed(&self) -> Option<Duration> {
         self.phase.as_ref().map(|(_, start)| start.elapsed())
     }
 
-    /// Wipe scrollback, scroll state, and streaming buffer, and truncate
-    /// the `user.log` by reopening it.  Used by `/clear` on the root.
+    /// Wipe scrollback, scroll state, and streaming buffers, truncating
+    /// `user.log` by reopening it.  `/clear` on the root.
     pub(super) fn reset(&mut self) {
         *self = Self::new(self.log_path.clone(), self.agent);
     }
 
-    /// Evict this view's heap state into a [`Tombstone`] carrying exactly the
-    /// agent id, its final status (read off the last block before it is
-    /// dropped, the same signal [`Self::last_is_error`] exposes), and the log
-    /// path — the scrollback, flatten, streaming buffers, and pinned register
-    /// are already durable in `user.log` and are dropped, never re-read. A
-    /// no-op once already a tombstone.
+    /// Drop this view's heap state for a [`Tombstone`], reading the final status
+    /// off the last block before that block goes.  Idempotent: by a second call
+    /// the view is clean, so re-reading the status would record a lie.
     pub(super) fn evict_to_tombstone(&mut self, id: AgentId) {
         if self.tombstone.is_some() {
             return;
@@ -384,14 +310,11 @@ impl Viewport {
         self.log = io::BufWriter::new(Box::new(io::sink()));
     }
 
-    /// The tombstone, once evicted — `None` for a live (or still-lingering)
-    /// view.  `.tombstone().is_some()` is the "was this view evicted?" query.
     pub(super) fn tombstone(&self) -> Option<&Tombstone> {
         self.tombstone.as_ref()
     }
 
-    /// Final flush of the `user.log` at session end; lines are already
-    /// written as each block lands.  Caller owns the I/O error policy.
+    /// Final flush at session end; the caller owns the I/O error policy.
     pub(super) fn flush_log(&mut self) -> io::Result<&Path> {
         self.log.flush()?;
         Ok(&self.log_path)
@@ -399,9 +322,8 @@ impl Viewport {
 
     // ── content ──────────────────────────────────────────────────────────
 
-    /// Append a tool call as its own collapsible block.  `context` is the
-    /// turn's degradation floor, stamped so the coalesced intent line
-    /// drains its saturation under context pressure (Move 7).
+    /// Append a tool call as its own collapsible block.  `context` is the turn's
+    /// degradation floor, so the intent line drains under context pressure.
     pub(super) fn push_tool_call(
         &mut self,
         tool: &'static str,
@@ -412,9 +334,8 @@ impl Viewport {
         self.push_block(Block::tool_call(tool, summary, cmd, context));
     }
 
-    /// Append a harness act as its own standalone block — a barrier the
-    /// coalescing projection never folds into a `ral` run, since an act
-    /// changes the world outside the turn rather than observing it.
+    /// Append a harness act — a barrier the coalescing projection never folds
+    /// into a `ral` run, since an act changes the world rather than observing it.
     pub(super) fn push_act(
         &mut self,
         verb: &'static str,
@@ -425,9 +346,7 @@ impl Viewport {
         self.push_block(Block::act(verb, subject, payload, failed));
     }
 
-    /// Append an async subagent's landed result as its own collapsible
-    /// block — collapsed to a one-line header, dialed open to the full
-    /// result rendered as markdown.
+    /// Append an async subagent's landed result, collapsed to a one-line header.
     pub(super) fn push_subagent(
         &mut self,
         name: String,
@@ -439,27 +358,23 @@ impl Viewport {
         self.push_block(Block::subagent(name, text, error, elapsed, fidelity));
     }
 
-    /// Append a single-file diff block; it re-renders from its hunks at
-    /// every width and disclosure level.
+    /// Append a single-file diff; it re-renders from its hunks at every width
+    /// and disclosure level.
     pub(super) fn push_patch(&mut self, path: String, hunks: Vec<Hunk>) {
         self.push_block(Block::patch(path, hunks));
     }
 
-    /// Append a surfaced render document as its own block — a `card` of
-    /// Bertin marks (roled text, a measure, a fields matrix, raw ink, or a
-    /// richer composite the single-`diff` aggregation path didn't claim).
-    /// A surfaced card is the model's own communication, a barrier the
-    /// coalescing projection never folds.
+    /// Append a surfaced render document — the model's own communication, so
+    /// the coalescing projection never folds it.
     pub(super) fn push_card(&mut self, card: Card) {
         self.push_block(Block::card(card));
     }
 
     // ── pinned state (the register) ────────────────────────────────────────
-    // The in-place analogue of `push_card`: a pin writes a keyed register slot
-    // instead of appending a block, and touches neither the flatten nor the
-    // log — pinned state is ambient, not scrollback.
+    // The in-place analogue of `push_card`: a pin writes a keyed slot, touching
+    // neither flatten nor log — pinned state is ambient, not scrollback.
 
-    /// Overwrite (or insert, keeping first-seen order) the register slot `key`.
+    /// Overwrite the register slot `key`, or append it, keeping first-seen order.
     pub(super) fn set_pin(&mut self, key: String, card: Card) {
         match self.pins.iter_mut().find(|(k, _)| *k == key) {
             Some((_, slot)) => *slot = card,
@@ -467,34 +382,26 @@ impl Viewport {
         }
     }
 
-    /// Drop the register slot `key`, if present.
     pub(super) fn drop_pin(&mut self, key: &str) {
         self.pins.retain(|(k, _)| k != key);
     }
 
-    /// The pinned register slots in stable insertion order — the register
-    /// column's content for the focused session.
     pub(super) fn pins(&self) -> &[(String, Card)] {
         &self.pins
     }
 
-    /// Append a foldable observation card — a read, grep, or exec the projection
-    /// folds under its call, carrying the `count` it represents for the run's
-    /// census.  `kind` and `count` come straight off the buffered effects the
-    /// host grouped into this card.  Writes use [`Self::push_write_card`].
+    /// Append a foldable observation card — a read, grep or exec the projection
+    /// folds under its call, `count` being its weight in the run's census.
     pub(super) fn push_observation_card(&mut self, card: Card, kind: ObservationKind, count: u32) {
         self.push_block(Block::observation_card(card, kind, count));
     }
 
-    /// Append a write card — a barrier that ends the current ral block, like a
-    /// diff, never folded into a run.  The card carries the `write <path>
-    /// <outcome>` heading and a preview of what was written.
+    /// Append a write card — a barrier ending the current ral run, like a diff.
     pub(super) fn push_write_card(&mut self, card: Card) {
         self.push_block(Block::write_card(card));
     }
 
-    /// Append pre-rendered chrome (step header, error, banner, subagent
-    /// breadcrumb).  `shape` lets the rail dispatch on the chrome sub-kind.
+    /// Append pre-rendered chrome; `shape` lets the rail dispatch on the sub-kind.
     pub(super) fn push_chrome(&mut self, shape: RailShape, lines: Vec<Line<'static>>) {
         self.push_block(Block::chrome(shape, lines));
     }
@@ -505,15 +412,10 @@ impl Viewport {
         self.push_block(Block::plain_call(detail));
     }
 
-    /// Attach a tool result's magnitude — `text.lines().count()` — to the
-    /// call it belongs to: the most-recent call-bearing block, searched
-    /// backward from the tail since a `Card` side effect may land
-    /// between a call and its result.  The search halts at the first
-    /// [`Block::is_call`] — a dialable tool call *or* a plain tool call —
-    /// so a plain call's result stops there and never reaches past it to clobber an
-    /// earlier dialable call's size bar.  Only a dialable call carries a size
-    /// bar, so landing on a plain call (which has none) is a no-op that still halts.
-    /// Marks the flatten stale so the collapsed header re-renders.
+    /// Attach a tool result's line count to the nearest call behind the tail —
+    /// a card may land between a call and its result.  The walk halts at the
+    /// first [`Block::is_call`], plain or dialable, so a plain call's result
+    /// cannot reach past it to an earlier call's size bar.
     pub(super) fn set_result_size(&mut self, text: &str) {
         #[allow(
             clippy::cast_possible_truncation,
@@ -528,15 +430,10 @@ impl Viewport {
         }
     }
 
-    /// Commit a reasoning phase.  If the turn has a coalescing `∴` block
-    /// ([`Self::thinking_target`] — only prose or a prompt breaks the run,
-    /// tool calls do not), append to it: its provisional deltas are
-    /// superseded by this authoritative text and its header ticks in place.
-    /// Otherwise insert a new thinking block before the trailing markdown
-    /// run.
-    /// `answer_chars` is the current turn's answer mass — the deliberation
-    /// grain's say-side, so the committed `∴` block's think/say ratio
-    /// reflects how dearly the answer was bought.
+    /// Commit a reasoning phase into the turn's coalescing `∴` block
+    /// ([`Self::thinking_target`]), superseding its provisional deltas, or into
+    /// a fresh block before the trailing markdown run.  `answer_chars` is the
+    /// say-side of the deliberation ratio.
     pub(super) fn commit_thinking(&mut self, text: String, answer_chars: u32) {
         let preserve_scrollback = self.looking_at_pushed_thinking();
         self.thinking.clear();
@@ -546,24 +443,18 @@ impl Viewport {
         }
     }
 
-    /// Whether the view is parked on scrollback the live thinking seat had
-    /// pushed down.  When it is, turning that seat into a real collapsed block
-    /// must not re-arm tail-follow and yank those rows back up under the
-    /// reader; the next render clamps only if the buffer truly can no longer
-    /// hold the offset.
+    /// Whether the view is parked on scrollback the live thinking seat pushed
+    /// down; turning that seat into a real block must then not re-arm
+    /// tail-follow and yank those rows back up under the reader.
     fn looking_at_pushed_thinking(&self) -> bool {
         !self.sticky
             && self.flat.virtual_think_len > 0
             && self.offset <= self.flat.virtual_think_at + self.flat.virtual_think_len
     }
 
-    /// Append a live reasoning chunk from the model's thinking phase.  When
-    /// the turn already has a coalescing `∴` block ([`Self::thinking_target`])
-    /// the delta streams into that block's provisional buffer — its magnitude
-    /// ticks in place, nothing appears or moves.  Otherwise it grows the
-    /// provisional thinking buffer; `thinking_seat` renders it above the
-    /// streaming answer seat until `commit_thinking` supersedes it with a
-    /// real block.
+    /// Append a live reasoning delta: into the coalescing `∴` block's
+    /// provisional buffer when the turn has one ([`Self::thinking_target`]), so
+    /// its magnitude ticks in place and nothing moves, else into the seat.
     pub(super) fn push_thinking(&mut self, text: &str) {
         if let Some(idx) = self.thinking_target() {
             self.blocks[idx].block.push_provisional_thinking(text);
@@ -573,10 +464,9 @@ impl Viewport {
         self.flat.dirty = true;
     }
 
-    /// The block index the turn's reasoning coalesces into: the most recent
-    /// `∴` block with no prose or prompt after it.  Tool calls and other
-    /// chrome do not break the run — only an answer paragraph (the reader has
-    /// been spoken to since) or a new human turn seeds a fresh block.
+    /// The block the turn's reasoning coalesces into: the latest `∴` block with
+    /// no prose or prompt after it.  Tool calls do not break the run — only
+    /// having spoken to the reader, or a new human turn, seeds a fresh block.
     fn thinking_target(&self) -> Option<usize> {
         let idx = self.blocks.iter().rposition(|e| e.block.is_thinking())?;
         let unbroken = !self.blocks[idx + 1..]
@@ -585,14 +475,13 @@ impl Viewport {
         unbroken.then_some(idx)
     }
 
-    /// Push streamed assistant text; commit any fence-safe paragraphs at
-    /// the turn's `context_floor` (the degradation seed).
+    /// Push streamed text, committing any fence-safe paragraph at `context_floor`.
     pub(super) fn push_token(&mut self, text: &str, context_floor: u8) {
         self.open.push_str(text);
         self.flush_complete_paragraphs(context_floor);
     }
 
-    /// End a streaming step: commit whatever remains in `open`.
+    /// End a streaming step: commit the pending reasoning, then `open`.
     pub(super) fn close_boundary(&mut self, context_floor: u8) {
         if !self.thinking.trim().is_empty() {
             let text = std::mem::take(&mut self.thinking);
@@ -601,10 +490,9 @@ impl Viewport {
         }
         self.flush_open(context_floor);
     }
-    /// Commit the longest fence-safe prefix of `open` as one markdown
-    /// block.  Committing elsewhere would split a code fence across two
-    /// `render_md` calls, so when no safe break exists the buffer keeps
-    /// growing until the fence closes or the turn ends.
+    /// Commit the longest fence-safe prefix of `open` as one markdown block.
+    /// Breaking elsewhere would split a code fence across two `render_md` calls,
+    /// so with no safe break the buffer grows until the fence or the turn closes.
     pub(super) fn flush_complete_paragraphs(&mut self, context_floor: u8) {
         let Some(idx) = safe_paragraph_break(&self.open) else {
             return;
@@ -617,8 +505,7 @@ impl Viewport {
         self.push_block(Block::markdown(chunk, fidelity));
     }
 
-    /// Commit whatever remains in `open` as a final markdown block.
-    /// Called at turn end and `/clear`.
+    /// Commit what remains in `open`, at turn end or on `/clear`.
     pub(super) fn flush_open(&mut self, context_floor: u8) {
         let leftover = std::mem::take(&mut self.open);
         if leftover.trim().is_empty() {
@@ -628,11 +515,9 @@ impl Viewport {
         self.push_block(Block::markdown(leftover, fidelity));
     }
 
-    /// The fidelity to stamp on a committing markdown block: the turn-level
-    /// `context_floor` (passed by `App`) plus a per-block echo delta — the
-    /// trigram overlap of `text` with the most-recent `ral` script in this
-    /// session, when the latest tool call was `ral`.  Context is the floor
-    /// every paragraph inherits; echo is the per-paragraph modifier.
+    /// The fidelity to stamp on a committing markdown block: `context_floor` is
+    /// the turn-level floor every paragraph inherits, the echo delta its
+    /// per-paragraph modifier against the most recent `ral` script.
     fn commit_fidelity(&self, text: &str, context_floor: u8) -> Fidelity {
         let echo = self
             .blocks
@@ -647,8 +532,6 @@ impl Viewport {
         }
     }
 
-    /// Append `block`, tee its log projection, mark the flatten stale so the
-    /// next render rebuilds it, and enforce the window caps.
     fn push_block(&mut self, block: Block) {
         let rows = self.log_block(&block);
         self.blocks.push(Entry { block, rows });
@@ -656,11 +539,9 @@ impl Viewport {
         self.enforce_window_caps();
     }
 
-    /// Evict oldest-first once either window cap is crossed — the dropped
-    /// blocks are already durable in `user.log`/`events.json` and are never
-    /// re-read from heap.  Walked once from the tail to find the longest
-    /// suffix satisfying both caps, then the rest is dropped in a single
-    /// `drain`.
+    /// Evict oldest-first once either cap is crossed: one walk from the tail for
+    /// the longest suffix satisfying both, then one `drain`.  The newest block
+    /// always survives, however oversized.
     fn enforce_window_caps(&mut self) {
         let mut kept = 0usize;
         let mut rows = 0usize;
@@ -725,11 +606,9 @@ impl Viewport {
         }
     }
 
-    /// Tee a block's full content to `user.log`, collapsing redundant
-    /// blank separators against the previous line exactly as the screen
-    /// flatten does. Returns its line count — the row-cap estimate
-    /// ([`Self::push_block`]) reuses this rather than paying for a second
-    /// pass over the block.
+    /// Tee a block to `user.log`, collapsing blanks exactly as the screen
+    /// flatten does, and return its line count — the row cap reuses that rather
+    /// than paying a second pass over the block.
     fn log_block(&mut self, block: &Block) -> usize {
         let lead = opens_rail_run(self.blocks.last().map(|e| &e.block), block);
         let lines = block.log_lines(self.agent, lead);
@@ -738,12 +617,10 @@ impl Viewport {
         n
     }
 
-    /// Rebuild the whole log from `self.blocks` — used when an existing
-    /// block was mutated or a new one inserted mid-vector (a thinking-block
-    /// append or insert), rather than appended. Also refreshes each entry's
-    /// row count from the same pass (no second walk) and re-enforces the
-    /// window caps, since an in-place append can grow a block past the row
-    /// budget without changing [`Self::blocks`]'s length.
+    /// Rebuild the whole log — a thinking block mutated in place or inserted
+    /// mid-vector cannot be appended.  Refreshes each entry's row count in the
+    /// same pass and re-enforces the caps, which an in-place append can breach
+    /// without changing the block count.
     fn rewrite_log(&mut self) {
         let rendered = self
             .blocks
@@ -788,10 +665,8 @@ impl Viewport {
 
     // ── interaction ──────────────────────────────────────────────────────
 
-    /// Resolve visual row `row` against the virtual thinking seat: a row
-    /// backed by the committed flatten, or a row inside the seat itself.
     /// The one statement of the seat-splice arithmetic; [`Self::block_at`],
-    /// [`Self::flat_row`], and [`Self::row_width`] are each one-liners over it.
+    /// [`Self::flat_row`], and [`Self::row_width`] are one-liners over it.
     fn row_site(&self, row: usize) -> RowSite {
         let think_at = self.flat.virtual_think_at;
         let think_len = self.flat.virtual_think_len;
@@ -804,8 +679,8 @@ impl Viewport {
         }
     }
 
-    /// The block owning visual row `row`, or `None` past the buffer's
-    /// end.  Valid against the most recent [`Self::render_window`].
+    /// The block owning visual row `row` — valid only against the most recent
+    /// [`Self::render_window`], which is what fixed the seat's position.
     pub(super) fn block_at(&self, row: usize) -> Option<usize> {
         match self.row_site(row) {
             RowSite::Committed(r) => self.flat.row_block.get(r).copied(),
@@ -813,10 +688,8 @@ impl Viewport {
         }
     }
 
-    /// Map a visual row back to its index in the flattened row buffer, or
-    /// `None` when it lands in the virtual thinking seat (which has no backing
-    /// text row) or past the buffer's end.  Mirrors [`Self::block_at`] so the
-    /// mouse layer's absolute virtual rows resolve to the right text.
+    /// Visual row to index in `flat.rows`, or `None` inside the thinking seat
+    /// (no backing text) or past the end.
     fn flat_row(&self, row: usize) -> Option<usize> {
         match self.row_site(row) {
             RowSite::Committed(r) => (r < self.flat.rows.len()).then_some(r),
@@ -824,9 +697,8 @@ impl Viewport {
         }
     }
 
-    /// Rendered cell width of visual row `row` — its content's extent, not
-    /// the pane's — so a gesture can be bound tight to the text and ignore
-    /// the dead margin past where the line ends.  `None` past the buffer.
+    /// Rendered cell width of visual row `row` — its content's extent, not the
+    /// pane's, so a gesture binds tight to the text and ignores the dead margin.
     pub(super) fn row_width(&self, row: usize) -> Option<usize> {
         match self.row_site(row) {
             RowSite::Committed(r) => self.flat.rows.get(r).map(Line::width),
@@ -834,28 +706,25 @@ impl Viewport {
         }
     }
 
-    /// Whether the block at `idx` is dialable — a stable property of its
-    /// kind, independent of its current level, so a wheel resting on its
-    /// glyph can claim the gesture even when the level is already clamped.
+    /// Whether the block at `idx` is dialable — a property of its kind, not its
+    /// level, so a wheel on its glyph claims the gesture even when clamped.
     pub(super) fn block_dialable(&self, idx: usize) -> bool {
         self.blocks.get(idx).is_some_and(|e| e.block.dialable())
     }
 
-    /// Dial the block at `idx` by `delta` if it is dialable, returning
-    /// whether it changed — so the caller can tell a real dial from a
-    /// gesture on inert chrome or a clamped level.
+    /// Dial the block at `idx`, reporting whether it changed — so the caller
+    /// can tell a real dial from a gesture on inert chrome or a clamped level.
     pub(super) fn dial_block(&mut self, idx: usize, delta: i8) -> bool {
         self.mutate_block(idx, |b| b.dial(delta))
     }
 
-    /// Cycle the block at `idx` between L1 and L3 — the click-on-rail
-    /// affordance — returning whether it changed.
+    /// Cycle the block at `idx` between L1 and L3 — the click-on-rail affordance.
     pub(super) fn cycle_block(&mut self, idx: usize) -> bool {
         self.mutate_block(idx, Block::cycle)
     }
 
-    /// Apply `f` to the dialable block at `idx`, marking the flatten stale
-    /// when its memo actually dropped, and report whether it changed.
+    /// Apply `f` to the dialable block at `idx`, staling the flatten if the
+    /// level moved.
     fn mutate_block(&mut self, idx: usize, f: impl FnOnce(&mut Block)) -> bool {
         let Some(entry) = self.blocks.get_mut(idx) else {
             return false;
@@ -890,9 +759,8 @@ impl Viewport {
         }
     }
 
-    /// Plain text the drag-selection copies.  `lo` and `hi` are each
-    /// `(row, col)` where `col` is a cell-column within the text area
-    /// (0 = left edge); the rail glyph is stripped automatically.
+    /// Plain text a drag selection copies.  `col` is a cell-column within the
+    /// text area (0 = left edge); the rail glyph is stripped automatically.
     pub(super) fn selection_text(&self, lo: (usize, u16), hi: (usize, u16)) -> String {
         let (lo_row, lo_col) = lo;
         let (hi_row, hi_col) = hi;
@@ -918,30 +786,24 @@ impl Viewport {
             (lo_row, lo_col)
         };
         let mut parts: Vec<String> = Vec::new();
-        // First row: from first_col to end.
         if let Some(r) = self.flat_row(first_row) {
             parts.push(plain_slice(&self.flat.rows[r], first_col, u16::MAX));
         }
-        // Middle rows: full lines.
         for row in (first_row + 1)..last_row {
             if let Some(r) = self.flat_row(row) {
                 parts.push(plain(&self.flat.rows[r]));
             }
         }
-        // Last row: from start to last_col.
         if let Some(r) = self.flat_row(last_row) {
             parts.push(plain_slice(&self.flat.rows[r], 0, last_col));
         }
         parts.join("\n")
     }
 
-    /// The assistant's latest reply as raw markdown: the trailing
-    /// contiguous run of [`Block::markdown_src`] prose blocks, concatenated
-    /// in order.  Each fence-safe paragraph commits as its own block, so
-    /// the run reassembles the multi-paragraph answer verbatim; a tool
-    /// call, card, or chrome block bounds it.  Edges trimmed; empty when
-    /// the last block is not prose (the turn ended on a diff or a card).
-    /// What `/copy` puts on the clipboard.
+    /// The assistant's latest reply as raw markdown — what `/copy` copies.  Each
+    /// paragraph committed separately, so the trailing prose run reassembles the
+    /// answer; a call, card, or chrome block bounds it, and ending the turn on
+    /// one leaves the reply empty.
     pub(super) fn latest_reply_md(&self) -> String {
         let mut tail: Vec<&str> = self
             .blocks
@@ -956,9 +818,8 @@ impl Viewport {
     // ── rendering ────────────────────────────────────────────────────────
 
     /// The provisional seat for in-flight reasoning, matching the committed
-    /// block's collapsed (L1) header: a blank separator, then the deliberation
-    /// grain beside a `size_bar` — no prose.  The caller seats the `∴` rail glyph
-    /// on the first content row (matching `render_with`).
+    /// block's collapsed header row for row so committing shifts nothing: a
+    /// blank, then the deliberation grain beside a [`size_bar`] — no prose.
     fn thinking_seat(&self) -> Vec<Line<'static>> {
         if self.thinking.trim().is_empty() {
             return vec![];
@@ -1000,15 +861,9 @@ impl Viewport {
             .unwrap_or(self.flat.rows.len())
     }
 
-    /// The provisional rail seat for the in-flight response: a single row
-    /// projecting only the *magnitude* of the streamed-but-uncommitted
-    /// [`Self::open`] buffer — the markdown rail shape (`·`), lightened by its
-    /// line count, then a [`size_bar`] of the same — and never its text.
-    /// `None` between turns, when `open` is empty.  Drawn as the trailing row
-    /// by [`Self::render_window`] and superseded the instant
-    /// [`Self::flush_open`] commits the real [`Block::markdown`] at the
-    /// boundary: the growing edge reads as accruing volume while the settled
-    /// transcript above it stays a finished image.
+    /// The trailing seat for the in-flight response: one row projecting only the
+    /// *magnitude* of [`Self::open`], never its text, so the growing edge reads
+    /// as accruing volume while the transcript above stays a finished image.
     fn streaming_seat(&self) -> Option<Line<'static>> {
         if self.open.trim().is_empty() {
             return None;
@@ -1024,18 +879,15 @@ impl Viewport {
         ]))
     }
 
-    /// The visible slice at `width` × `height`, after re-flattening if
-    /// stale and resolving the scroll position: while `sticky`, `offset` is
-    /// pinned to the tail (`max_off`); otherwise the stored `offset` is
-    /// clamped to `max_off` and `sticky` re-arms once it reaches the bottom.
+    /// The visible slice at `width` × `height`.  While `sticky`, `offset` is
+    /// pinned to the tail; otherwise it is clamped to `max_off` and `sticky`
+    /// re-arms once it reaches the bottom.
     pub(super) fn render_window(&mut self, width: u16, height: usize) -> RenderWindow {
         self.reflow(width);
-        // The provisional thinking seat (when the model is reasoning) renders
-        // before the trailing markdown answer run.  That lets answer
-        // paragraphs keep committing live without visually jumping ahead of
-        // the deliberation they follow.
+        // The thinking seat renders *before* the trailing answer run, so
+        // paragraphs keep committing live without jumping ahead of the
+        // deliberation they follow.
         let mut think = self.thinking_seat();
-        // Seat the rail on the thinking rows, matching committed-block rendering.
         if !think.is_empty() {
             #[allow(
                 clippy::cast_possible_truncation,
@@ -1051,9 +903,8 @@ impl Viewport {
         }
         let mut seat: Vec<Line<'static>> = self.streaming_seat().into_iter().collect();
         let committed = self.flat.rows.len();
-        // The seat continues the trailing answer run when there is one; when
-        // it instead follows a thinking seat or a non-markdown block, it opens
-        // a fresh run and wears the same blank separator a committing lead
+        // Following a thinking seat or a non-markdown block, the streaming seat
+        // opens a fresh run, so it wears the blank separator a committing lead
         // paragraph would.
         if !seat.is_empty()
             && self.trailing_markdown_start().is_none()
@@ -1077,10 +928,6 @@ impl Viewport {
             self.offset = self.offset.min(max_off);
             self.sticky = self.offset >= max_off;
         }
-        // Scroll position as a percentage of the scrollable range: `0%` at the
-        // top, `100%` once `offset` reaches `max_off` (the tail).  `None` when
-        // the whole buffer fits, so the rule line shows no readout.  `offset`
-        // is clamped to `max_off` so it stays within the valid scroll range.
         #[allow(
             clippy::cast_possible_truncation,
             reason = "scroll percentage already clamped to 0..=100"
@@ -1106,21 +953,11 @@ impl Viewport {
 
     /// Rebuild [`Self::flat`] when stale or asked at a new width.
     ///
-    /// The flatten is the **coalescing projection**: an observation run
-    /// ([`Block::observation`] — a call and its reads/greps/execs, bridged
-    /// across the interior step boundaries between consecutive calls,
-    /// [`Self::observation_run_end`]) folds into one dialable ral block
-    /// ([`super::group`]); every genuine barrier — a diff, a write, a
-    /// surfaced card, markdown, a subagent result, or chrome — renders as
-    /// its own block exactly as before, save a step boundary interior to a
-    /// run, which is folded away.  The projection reads what arrival order
-    /// already adjoins; nothing about how blocks are pushed, logged, or
-    /// aggregated changes.
-    /// Each visual row maps to its source block index — a group's rows to
-    /// its anchor call — so the dial, click, and copy paths address whole
-    /// projected blocks.  Each segment's leading blank collapses against an
-    /// already-blank tail so a step separator before leading-blank chrome
-    /// reads as one gap.
+    /// The flatten is the coalescing projection: an observation run — a call and
+    /// its reads, greps and execs ([`Self::observation_run_end`]) — folds into
+    /// one dialable ral block ([`super::group`]), while every genuine barrier
+    /// keeps its own.  Each visual row maps to its source block, a group's rows
+    /// to its anchor call, so dial, click and copy address whole blocks.
     fn reflow(&mut self, width: u16) {
         if !self.flat.dirty && self.flat.width == width {
             return;
@@ -1131,9 +968,8 @@ impl Viewport {
         let mut row_block: Vec<usize> = Vec::new();
         let mut i = 0;
         while i < self.blocks.len() {
-            // `prompt` is true only for the human turn — the flatten paints its
-            // full-width rule fence here, where the content width is known, so
-            // the rule spans the reading column as the turn's opening seam.
+            // `prompt` carries the human turn's rule fence down to
+            // `append_visual_rows`, the one place the content width is known.
             let (anchor, lines, prompt) = if self.blocks[i].block.observation() {
                 let end = self.observation_run_end(i);
                 let anchor = self.group_anchor(i, end);
@@ -1154,6 +990,8 @@ impl Viewport {
                 i += 1;
                 segment
             };
+            // A segment's leading blanks collapse against an already-blank tail,
+            // so a step separator before leading-blank chrome reads as one gap.
             let mut first = 0;
             if rows.last().is_some_and(is_blank) {
                 while first < lines.len() && is_blank(&lines[first]) {
@@ -1176,24 +1014,15 @@ impl Viewport {
         };
     }
 
-    /// The end (exclusive) of the maximal observation run starting at
-    /// `start` — the span of [`Block::observation`] blocks the projection
-    /// coalesces into one ral block, **bridged across the step boundaries
-    /// interior to it**.  Each call is its own provider round-trip, so a
-    /// [`Block::is_step`] chrome (`Kind::Step`) lands between consecutive
-    /// calls; left a barrier it would cut every burst back to a single call.
-    /// A step boundary is provider bookkeeping, not content: when it falls
-    /// *between* run members it is subsumed (and never rendered); a step at
-    /// the run's tail is also subsumed — the step carries no content and the
-    /// run's own rail already marks its edge.
+    /// End (exclusive) of the maximal [`Block::observation`] run at `start`,
+    /// bridged across step boundaries.  Each call is its own provider
+    /// round-trip, so a [`Block::is_step`] chrome lands between consecutive
+    /// calls; left a barrier it would cut every burst back to one call.
     fn observation_run_end(&self, start: usize) -> usize {
-        // `end` advances past every run member and any step, so a trailing
-        // step is folded into the run rather than rendered as its own block.
         let mut end = start;
         let mut i = start;
         while i < self.blocks.len() {
             let block = &self.blocks[i].block;
-            // A run member or a step both fold into the run; anything else ends it.
             if block.observation() || block.is_step() {
                 i += 1;
                 end = i;
@@ -1204,13 +1033,9 @@ impl Viewport {
         end
     }
 
-    /// Render the observation run `start..end` as one coalesced ral block:
-    /// build a [`group::Call`] per tool call (its effects being the
-    /// observation cards that follow it in the run), render the body at the
-    /// run's disclosure level, and prepend the data-encoding rail — the
-    /// disclosure triangle, the agent hue, the run's aggregate magnitude —
-    /// to the first content row.  The level lives on the run's `anchor` call
-    /// ([`Self::group_anchor`]); a run is opened by a call, so it has one.
+    /// Render the observation run `start..end` as one coalesced ral block: a
+    /// [`group::Call`] per tool call, the body at the `anchor` call's disclosure
+    /// level, and the rail — triangle, hue, aggregate magnitude — on row one.
     fn render_group(
         &self,
         start: usize,
@@ -1231,19 +1056,17 @@ impl Viewport {
         lines
     }
 
-    /// The anchor block of an observation run — its first tool call, whose
-    /// [`Block::level`] is the run's disclosure level.  Falls back to the
-    /// run's first block when (defensively) no call leads it.
+    /// A run's anchor: its first tool call, whose [`Block::level`] is the run's
+    /// disclosure level.  Falls back to the head if, defensively, none leads it.
     fn group_anchor(&self, start: usize, end: usize) -> usize {
         (start..end)
             .find(|&i| self.blocks[i].block.is_tool_call())
             .unwrap_or(start)
     }
 
-    /// Build the run's calls in arrival order: each tool call opens a
-    /// [`group::Call`]; the observation cards that follow it (until the next
-    /// call) are its effects — both their rendered rows and their census
-    /// [`group::Tally`], folded by `|>` kind.
+    /// The run's calls in arrival order: each tool call opens a [`group::Call`],
+    /// and the observation cards up to the next call are its effects — rendered
+    /// rows plus a [`group::Tally`] folded by `|>` kind.
     fn group_calls(&self, start: usize, end: usize) -> Vec<group::Call> {
         let mut calls: Vec<group::Call> = Vec::new();
         let mut effects: Vec<Line<'static>> = Vec::new();
@@ -1298,10 +1121,8 @@ mod tests {
             .collect()
     }
 
-    /// The register is keyed state: a repeated key overwrites its slot in
-    /// place (no new slot, order preserved), `drop_pin` removes just that
-    /// slot, and `reset` wipes the whole register — the generation discipline
-    /// that bounds it to a session exactly as it bounds the scrollback.
+    /// Re-pinning overwrites a slot in place, `drop_pin` removes one, `reset`
+    /// wipes the lot — the same generation discipline that bounds scrollback.
     #[test]
     fn pins_overwrite_in_place_and_keep_insertion_order() {
         use crate::bus::card::Mark;
@@ -1312,34 +1133,28 @@ mod tests {
         vp.set_pin("build".into(), raw(b"ok"));
         assert_eq!(keys(&vp), ["tasks", "build"]);
 
-        // Re-pinning a key overwrites in place: no new slot, order unchanged,
-        // the card replaced.
         vp.set_pin("tasks".into(), raw(b"v2"));
         assert_eq!(keys(&vp), ["tasks", "build"]);
         assert!(matches!(&vp.pins()[0].1.0[..], [Mark::Raw { bytes }] if bytes == b"v2"));
 
-        // Drop removes just the named slot; reset wipes the register.
         vp.drop_pin("tasks");
         assert_eq!(keys(&vp), ["build"]);
         vp.reset();
         assert!(vp.pins().is_empty(), "reset wipes the register");
     }
 
-    /// While a response streams, the uncommitted `open` buffer renders as a
-    /// single trailing seat row — the markdown rail glyph and a size-bar of
-    /// its line count — and never its text.  The prose appears only when the
-    /// boundary commits it as a block, at which point the seat gives way.
+    /// A streaming response renders as one trailing magnitude row and never its
+    /// text; the prose appears only when the boundary commits it.
     #[test]
     fn streaming_renders_a_magnitude_seat_not_text() {
         let mut vp = viewport();
-        // A fenced script with no fence-safe paragraph break: nothing commits,
-        // so the whole chunk stays in `open`.
+        // An unclosed fence has no fence-safe break, so nothing commits.
         vp.push_token("```ral\nlet x = 1\nlet y = 2\n", 0);
         assert!(vp.open.contains("let x = 1"));
 
         let w = vp.render_window(READ_W, 24);
         let seat_line = w.lines.last().expect("a seat row while streaming");
-        // The leading span is the markdown rail glyph (`plain` would strip it).
+        // Read off the spans, since `plain` would strip the rail glyph.
         assert_eq!(
             seat_line.spans.first().map(|s| s.content.as_ref()),
             Some("· "),
@@ -1352,8 +1167,6 @@ mod tests {
             "seat withholds the streamed text: {seat:?}"
         );
 
-        // The boundary commits the buffer: the seat gives way to the rendered
-        // prose block, and `open` is drained.
         vp.close_boundary(0);
         assert!(vp.open.is_empty());
         let w = vp.render_window(READ_W, 24);
@@ -1470,8 +1283,7 @@ mod tests {
         );
     }
 
-    /// A committed prompt opens with a full-width rule fence (its boundary
-    /// mark) and carries no background band — background belongs to code now.
+    /// A prompt opens with a rule fence and no band — background belongs to code.
     #[test]
     fn prompt_opens_with_a_rule_fence_no_band() {
         let mut vp = viewport();
@@ -1492,8 +1304,7 @@ mod tests {
         }
     }
 
-    /// Between turns the buffer is empty, so there is no seat: the window is
-    /// exactly the committed flatten.
+    /// Between turns `open` is empty, so the window is exactly the flatten.
     #[test]
     fn no_seat_between_turns() {
         let mut vp = viewport();
@@ -1506,10 +1317,9 @@ mod tests {
         );
     }
 
-    /// Scrolling down while sticky must not over-scroll past `max_off`:
-    /// [`Self::scroll_down`] clears `sticky`, so [`Self::render_window`]
-    /// takes the non-sticky clamp — bounding `offset` to `max_off` — rather
-    /// than pinning it to the tail.
+    /// `scroll_down` clears `sticky`, so `render_window` takes the clamping
+    /// branch — scrolling down at the bottom must not over-scroll past
+    /// `max_off` and blank the rows below.
     #[test]
     fn scroll_down_while_sticky_clamps_to_max_off() {
         let mut vp = viewport();
@@ -1525,12 +1335,9 @@ mod tests {
             );
         }
         let height = 10;
-        // First render establishes sticky at the bottom.
         let w0 = vp.render_window(READ_W, height);
         assert!(vp.sticky, "a fresh viewport follows the tail");
         let max_off = w0.offset;
-        // Scrolling down while sticky should be a no-op (already at the
-        // bottom), not an over-scroll blanking rows below.
         vp.scroll_down(5);
         let w1 = vp.render_window(READ_W, height);
         assert_eq!(
@@ -1545,11 +1352,9 @@ mod tests {
         assert!(vp.sticky, "re-armed at the bottom after the clamp");
     }
 
-    /// A committed thinking block must stay visible in a sticky viewport.
-    /// The provisional seat renders near the bottom (before the trailing
-    /// markdown run); the committed block must land at the same position,
-    /// not jump to after the last prompt where a sticky viewport would
-    /// scroll past it.
+    /// The committed thinking block must land where the seat rendered, before
+    /// the trailing markdown run — not after the last prompt, where a sticky
+    /// viewport would scroll straight past it.
     #[test]
     fn committed_thinking_stays_visible_in_sticky_viewport() {
         let mut vp = viewport();
@@ -1566,7 +1371,6 @@ mod tests {
         }
         vp.push_thinking("considering the shape\n");
         vp.push_token("First paragraph.\n\nSecond paragraph.", 0);
-        // While thinking is live, the provisional seat is visible.
         let live = vp.render_window(READ_W, 8);
         let live_text = live.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
         let live_thinking = rail_rows(&live.lines, "∴ ");
@@ -1574,8 +1378,6 @@ mod tests {
             !live_thinking.is_empty(),
             "live thinking has its rail: {live_text:?}"
         );
-        // Commit the thinking — the real block should land where the
-        // provisional seat was, not jump above the visible window.
         vp.commit_thinking("considering the shape\n".into(), vp.current_answer_chars());
         vp.close_boundary(0);
         let committed = vp.render_window(READ_W, 8);
@@ -1594,9 +1396,8 @@ mod tests {
 
     // ── viewport window caps and tombstones ────────────────────────────────
 
-    /// Each pushed block's log rendering, joined into one string — lets a
-    /// test read back which marker survived without hard-coding the render
-    /// shape.
+    /// A block's log rendering as one string, so a test can read back which
+    /// marker survived without hard-coding the render shape.
     fn block_text(b: &Block) -> String {
         b.log_lines(AgentSlot(0), true)
             .iter()
@@ -1605,8 +1406,7 @@ mod tests {
             .join(" ")
     }
 
-    /// Pushing past `VIEWPORT_MAX_BLOCKS` evicts the oldest blocks first: the
-    /// count never exceeds the cap, and the newest survives.
+    /// Past `VIEWPORT_MAX_BLOCKS` the oldest go first, and the newest survives.
     #[test]
     fn window_evicts_oldest_blocks_first_past_the_block_cap() {
         let mut vp = viewport();
@@ -1630,14 +1430,12 @@ mod tests {
         );
     }
 
-    /// A run of oversized blocks blows the row budget well before the block
-    /// count does; the row cap evicts oldest-first on its own, independent of
-    /// the block-count cap.
+    /// The row cap evicts oldest-first on its own, without the block-count cap.
     #[test]
     fn window_evicts_oldest_blocks_first_past_the_row_cap() {
         let mut vp = viewport();
-        // Five ~6,000-line blocks: 30,000 raw lines against a 20,000-row cap,
-        // with only 5 blocks pushed — nowhere near `VIEWPORT_MAX_BLOCKS`.
+        // 30,000 raw lines against a 20,000-row cap, from only five blocks —
+        // nowhere near `VIEWPORT_MAX_BLOCKS`.
         for block in 0..5 {
             let lines = (0..6000)
                 .map(|i| Line::from(format!("b{block} line {i}")))
@@ -1663,8 +1461,7 @@ mod tests {
         );
     }
 
-    /// Eviction into a tombstone carries exactly the agent id, the final
-    /// status, and the log path — everything else (blocks, pins) is dropped.
+    /// A tombstone carries the id, the status, and the log path; the rest goes.
     #[test]
     fn evict_to_tombstone_keeps_exactly_the_three_facts() {
         let mut vp = viewport();
@@ -1683,7 +1480,6 @@ mod tests {
         assert!(vp.blocks.is_empty(), "the scrollback is dropped");
         assert!(vp.pins().is_empty(), "the pinned register is dropped");
 
-        // Its one-line rendering names the agent, the status, and the path.
         let rendered = plain(&t.line());
         assert!(rendered.contains("42"), "{rendered:?}");
         assert!(rendered.contains("done"), "{rendered:?}");
@@ -1693,8 +1489,7 @@ mod tests {
         );
     }
 
-    /// The tombstone's status is read off the view's last block before it is
-    /// dropped: an error-terminated session tombstones as an error.
+    /// The status is read off the last block before that block is dropped.
     #[test]
     fn evict_to_tombstone_reads_error_status_off_the_last_block() {
         let mut vp = viewport();
@@ -1704,17 +1499,14 @@ mod tests {
         assert!(vp.tombstone().unwrap().error);
     }
 
-    /// Re-evicting an already-tombstoned view is a no-op — the first
-    /// tombstone's facts (and its status) are not overwritten by whatever
-    /// state (or lack of it) exists at the second call.
+    /// Re-evicting is a no-op: the view is clean by then, so re-reading its
+    /// status would overwrite the first tombstone's with a lie.
     #[test]
     fn evict_to_tombstone_is_idempotent() {
         let mut vp = viewport();
         vp.push_chrome(RailShape::Error, vec![Line::from("boom")]);
         vp.evict_to_tombstone(1);
         assert!(vp.tombstone().unwrap().error);
-        // A second call (e.g. a defensive re-tick) must not reset the id or
-        // status even though the view is now clean (no error block).
         vp.evict_to_tombstone(999);
         assert_eq!(vp.tombstone().unwrap().id, 1, "the id is not overwritten");
         assert!(
@@ -1723,11 +1515,9 @@ mod tests {
         );
     }
 
-    /// An act is a barrier.  A `ral` call on either side of it coalesces
-    /// only with its own neighbours: the run scan ends at the act, so the
-    /// act renders standalone under its own `↗` shape between two separate
-    /// `▸` runs — never swallowed into a burst of reads and greps, and never
-    /// contributing an intent row to one.
+    /// An act is a barrier: the run scan ends at it, so it renders standalone
+    /// under its own `↗` between two separate `▸` runs, never swallowed into a
+    /// burst of reads.
     #[test]
     fn an_act_breaks_a_run_of_observations() {
         let mut vp = viewport();
@@ -1759,18 +1549,15 @@ mod tests {
             runs[0] < act[0] && act[0] < runs[1],
             "the act holds its arrival position between the two runs"
         );
-        // The act's own row is its three columns — not an intent line folded
-        // under a run's head.
+        // Its own row is three columns, not an intent line under a run's head.
         assert_eq!(
             plain(&w.lines[act[0]]),
             "message    hunter              focus on the renderer first"
         );
     }
 
-    /// A desk act stamps no magnitude anywhere.  Its result never reaches
-    /// `set_result_size`, and — because an act is not a call-bearing block —
-    /// the `ral` result that follows it walks *past* it to the call that
-    /// actually earned the bar, instead of being intercepted.
+    /// An act is not a call-bearing block, so a `ral` result landing after one
+    /// walks past it to the call that actually earned the bar.
     #[test]
     fn an_acts_result_stamps_no_bar_and_shields_no_call() {
         let mut vp = viewport();
@@ -1781,8 +1568,6 @@ mod tests {
             0,
         );
         vp.push_act("cancel", Some("hunter".into()), String::new(), false);
-        // The `ral` call's own result, landing after the act it interleaved
-        // with, must reach the call.
         vp.set_result_size(&"a line\n".repeat(40));
 
         let w = vp.render_window(READ_W, 40);

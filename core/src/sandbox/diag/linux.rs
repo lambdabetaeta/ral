@@ -1,16 +1,10 @@
-//! Linux seccomp denial reader.
+//! Linux seccomp denial reader for `sandbox::diag`, mirroring `diag/macos.rs`.
 //!
-//! The seccomp BPF filter installed by `bwrap --seccomp` returns
-//! `SECCOMP_RET_KILL_THREAD` on each denied syscall; the kernel ends
-//! the offending thread with SIGSYS and emits a `type=1326` audit
-//! record carrying pid, comm, exe, arch, syscall, and ip.  We read
-//! these via `journalctl -k --since <window>` (systemd-based distros),
-//! with `dmesg --since <window>` as a fallback for unreadable journals
-//! or non-systemd hosts, bounded to the same wall window.
-//!
-//! bwrap's mount-namespace restrictions, by contrast, surface as
-//! ENOENT on the affected syscall with no kernel-side deny event;
-//! those are not harvested here.
+//! bwrap's filter returns `SECCOMP_RET_KILL_THREAD`, so a denied syscall kills
+//! the thread with SIGSYS and leaves a `type=1326` audit record; we read those
+//! from `journalctl -k`, or `dmesg` where the journal is absent or unreadable.
+//! Mount attenuation leaves no record at all — an unbound path is merely absent,
+//! and the caller just sees ENOENT.
 
 use std::time::Duration;
 
@@ -19,9 +13,7 @@ use std::time::Duration;
     reason = "[io-door:silent:journal-read] Spawns journalctl/dmesg to harvest the kernel's seccomp-denial audit window for a sandbox diagnostic. A post-mortem diagnostic probe, not the model's exec image — raises no exec card."
 )]
 pub(super) fn read_window(elapsed: Duration) -> Option<String> {
-    // `journalctl --since` accepts relative strings like "2 seconds
-    // ago"; pad by one second to cover sub-second calls, mirroring
-    // the macOS reader.
+    // Pad by a second so a sub-second call still spans its own denials.
     let secs = elapsed.as_secs().saturating_add(1).to_string();
     let since = format!("{secs} seconds ago");
     let journal = std::process::Command::new("journalctl")
@@ -54,9 +46,7 @@ pub(super) fn is_denial_line(line: &str) -> bool {
     line.contains("type=1326")
 }
 
-/// `... audit: type=1326 audit(…): … pid=12345 comm="rustc" …`
-/// → `Some(12345)`.  The leading space on ` pid=` is what
-/// distinguishes the audit record's `pid=` from its `ppid=`.
+/// The audit record's ` pid=`; the leading space is what excludes `ppid=`.
 pub(super) fn extract_pid(line: &str) -> Option<u32> {
     let after_pid = line.split_once(" pid=")?.1;
     let end = after_pid
@@ -65,10 +55,7 @@ pub(super) fn extract_pid(line: &str) -> Option<u32> {
     after_pid[..end].parse().ok()
 }
 
-/// Split a denial line into `(operation, path)`.  The `type=1326`
-/// seccomp audit record names the blocked syscall but carries no path,
-/// so the operation is the `syscall=<n>` token and the path is always
-/// `None`; the hint degrades to a pathless explanation accordingly.
+/// The blocked `syscall=<n>`; a `type=1326` record carries no path, so always `None`.
 pub(super) fn parse_denial(line: &str) -> Option<(&str, Option<&str>)> {
     let after = line.split_once("syscall=")?.1;
     let end = after

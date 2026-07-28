@@ -1,32 +1,17 @@
 //! The coalesced ral block — a render-time projection over arrival order.
 //!
-//! A contiguous run of *observation-only* `ral` calls (calls whose effects
-//! are reads, greps, or execs — never a diff or a write) reads as one
-//! dialable object instead of one block per call.  This is a projection in
-//! the flatten ([`super::viewport::Viewport`]): nothing about how blocks are
-//! pushed, logged, or aggregated changes — the grouping reads what arrival
-//! order already adjoins.  A diff or a write is a *barrier*: it ends the
-//! current block, renders as its own always-visible block, and a fresh
-//! block starts after it.
+//! A contiguous run of observation-only `ral` calls (reads, greps, execs) reads
+//! as one dialable object; a diff or a write is a barrier that ends the run and
+//! renders as its own always-visible block.  Nothing about how blocks are pushed
+//! or logged changes — [`super::viewport`] gathers the run in arrival order and
+//! this module renders its body at one of four [`Reveal`] rungs:
 //!
-//! The block dials through four [`Reveal`] rungs, the coalesced run being the
-//! one object that reaches the **L0 floor**:
-//!
-//! - **L0, the census** — one line tallying the run's `|>` effects by verb:
-//!   *"Ran 5 scripts, 3 binaries, read 4 files, searched 2 times."*  Scripts
-//!   are the run's calls; binaries/files/searches are its `|> exec`/`read`/
-//!   `grep` effects.  Writes never appear — a write is a barrier that ends the
-//!   run.  The run is dialed *down* to here; it never opens at L0.
-//! - **L1, the live tip** — one line: the latest *settled* call's intent and
-//!   a *vertical* sparkline (one bar per call, height ∝ its result magnitude,
-//!   left→right in call order), then that call's effects.  Earlier calls are
-//!   just their bar; the text refreshes to the newest call once its result
-//!   lands — a call still in flight registers only as its bar, so the settled
-//!   tip below never blanks between one call and the next.  The bar count *is*
-//!   the count — no `×N`.
-//! - **L2, the full list** — every call: its intent, its effects, and its
-//!   bar.
-//! - **L3, everything** — L2 plus each call's full ral `cmd` source.
+//! - `Census` — one line tallying the run's `|>` effects by verb.  A run is the
+//!   only object that reaches this floor, and only by being dialed *down* to it.
+//! - `Summary` — the latest *settled* call's intent and effects, plus a
+//!   sparkline of one bar per call; the bar count stands in for an `×N`.
+//! - `Context` — every call: intent, bar, effects.
+//! - `Full` — that, plus each call's ral `cmd` source.
 
 use std::fmt::Write;
 
@@ -40,10 +25,9 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-/// The scalar parts of one call, borrowed straight off its
-/// [`super::block::Block`] — the projection reads these without copying the
-/// script.  The viewport pairs them with the call's rendered effect rows to
-/// build a [`Call`].
+/// One call's scalars, borrowed off its [`super::block::Block`] rather than
+/// copied.  [`super::viewport`] pairs them with the call's rendered effect rows
+/// to build a [`Call`].
 #[derive(Clone, Copy)]
 pub(super) struct CallParts<'a> {
     pub(super) intent: &'a str,
@@ -52,24 +36,17 @@ pub(super) struct CallParts<'a> {
     pub(super) context: u8,
 }
 
-/// The `|>` effects a run folds, tallied by census bucket — the figures the
-/// L0 census line counts.  A write never enters an observation run (it is a
-/// barrier), so it has no bucket here; the script count is the call count, not
-/// a field.
+/// The run's `|>` effects by census bucket.  A write is a barrier, never a run
+/// member, so it has no bucket; the script count is the call count, not a field.
 #[derive(Clone, Copy, Default)]
 pub(super) struct Tally {
-    /// `|> exec` — external programs run.
     binaries: u32,
-    /// `|> read` — files read.
     files: u32,
-    /// `|> grep` — searches.
     searches: u32,
 }
 
 impl Tally {
-    /// Fold `n` effects of `kind` into the tally — the seam the viewport folds
-    /// each observation block through as it gathers a run.  Writes never reach
-    /// here: a write is a run barrier (`CardOrigin::Write`), never folded.
+    /// Fold `n` effects of `kind` in, as `Viewport::group_calls` gathers a run.
     pub(super) fn add(&mut self, kind: ObservationKind, n: u32) {
         match kind {
             ObservationKind::Exec => self.binaries += n,
@@ -78,7 +55,6 @@ impl Tally {
         }
     }
 
-    /// Sum another call's tally into this one.
     fn merge(&mut self, other: Self) {
         self.binaries += other.binaries;
         self.files += other.files;
@@ -86,11 +62,8 @@ impl Tally {
     }
 }
 
-/// One observation call as the projection renders it: the model's stated
-/// intent, the script behind it, the call's result magnitude (drives its
-/// sparkline bar), the turn's context floor (distress on the intent line,
-/// never on a bar), the census [`Tally`] of its `|>` effects, and the
-/// pre-rendered, rail-less rows of the reads/greps/execs it produced.
+/// One observation call as rendered: the magnitude drives its sparkline bar, the
+/// context is the turn's floor, and the effect rows arrive already rail-less.
 pub(super) struct Call {
     intent: String,
     cmd: String,
@@ -101,9 +74,6 @@ pub(super) struct Call {
 }
 
 impl Call {
-    /// Build a call from its borrowed [`CallParts`], the census [`Tally`] of
-    /// the effects that followed it, and their rail-less rows — both gathered
-    /// in arrival order.
     pub(super) fn new(parts: CallParts<'_>, tally: Tally, effects: Vec<Line<'static>>) -> Self {
         Self {
             intent: parts.intent.to_string(),
@@ -116,31 +86,25 @@ impl Call {
     }
 }
 
-/// Columns reserved at the right edge for the bar column: the bars' last
-/// glyph lands `BAR_PAD` columns shy of the content width, so the per-call
-/// bars in the list and the whole-run sparkline at the tip stack into one
-/// comparable column down the page regardless of intent length.
+/// Columns held clear at the right edge, so the per-call bars and the tip's
+/// sparkline stack into one comparable column whatever an intent's length.
 const BAR_PAD: usize = 4;
 
-/// Most calls shown in the sparkline bar chart.  Longer runs keep only their tail.
+/// Most bars the sparkline draws; a longer run keeps only its tail.
 const MAX_SPARKLINE: usize = 30;
 
-/// Two-space indent for a call's intent in the L2/L3 list, and the gap that
-/// separates an intent from its right-pinned bars.
+/// A list intent's indent, and the least gap between an intent and its bar.
 const INTENT_INDENT: &str = "  ";
 const GAP: usize = 2;
 
-/// Four-space indent for a call's effects and source under its intent.
 const BODY_INDENT: &str = "    ";
 
-/// The column an intent's last bar glyph lands in, given the content `width`.
 fn bar_col(width: usize) -> usize {
     width.saturating_sub(BAR_PAD)
 }
 
-/// The run's aggregate magnitude — the summed result magnitudes of its
-/// calls, the figure the data-encoding rail's value-step reads.  `None`
-/// when no call carried a result (the rail then renders at the base hue).
+/// The run's summed result magnitudes — what the rail's value step encodes.
+/// `None` when no call carried a result, and the rail then renders at base hue.
 pub(super) fn aggregate_magnitude(calls: &[Call]) -> Option<u32> {
     calls
         .iter()
@@ -148,12 +112,9 @@ pub(super) fn aggregate_magnitude(calls: &[Call]) -> Option<u32> {
         .reduce(|a, b| a + b)
 }
 
-/// Render a coalesced ral block's rail-less body at `level`.  The caller
-/// ([`super::viewport`]) prepends the data-encoding rail — the disclosure
-/// triangle `▸`/`▽`, the agent hue, the aggregate magnitude — to the first
-/// content row, exactly as it does for a single block.  `calls` is the
-/// run's calls in arrival order; it is never empty (a run is opened by its
-/// first call).
+/// Render the run's rail-less body at `level`.  [`super::viewport`] prepends the
+/// data-encoding rail to the first content row, exactly as for a single block.
+/// `calls` is in arrival order and never empty — a run is opened by a call.
 pub(super) fn body(calls: &[Call], level: Reveal, width: usize) -> Vec<Line<'static>> {
     match level {
         Reveal::Census => census(calls, width),
@@ -163,29 +124,20 @@ pub(super) fn body(calls: &[Call], level: Reveal, width: usize) -> Vec<Line<'sta
     }
 }
 
-/// L1: the latest call's intent on the head line — the row the viewport seats
-/// the rail on — the whole-block sparkline pinned to the right bar column, then
-/// the latest call's effects.  Only the newest call shows as text; every
-/// earlier call is just its bar in the sparkline.
+/// `Summary`: the tip call's intent on the head row — the row the viewport seats
+/// the rail on — the whole-run sparkline pinned right, then that call's effects.
 fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
-    // The tip narrates the latest *settled* call — the most recent one whose
-    // result has landed (`magnitude.is_some()`) — not a call still in flight.
-    // A pending call has no effects yet, so anchoring the tip on `calls.last()`
-    // would blank the prior call's reads the instant the next call opens, then
-    // refill them when its result arrives a frame later: a momentary shrink
-    // that reads as a flicker. The in-flight call still registers as its own
-    // bar in the sparkline (the growing edge reads as accruing volume), while
-    // the settled tip below holds a finished image until the new result
-    // replaces it atomically. Falls back to the run's opening call — in flight,
-    // with nothing yet to show — before any result has landed.
+    // Anchor on the latest *settled* call, not `calls.last()`: a call still in
+    // flight has no effects yet, so the tip would blank the previous call's
+    // reads for a frame — a flicker.  The pending call still shows as its own
+    // bar, so the count stays honest.
     let tip = calls
         .iter()
         .rev()
         .find(|c| c.magnitude.is_some())
         .unwrap_or_else(|| calls.last().expect("a run has at least one call"));
     let mut ls = vec![Line::default()];
-    // The head row carries no lead of its own: the rail the viewport prepends
-    // is its whole left margin.
+    // The head row opens flush: the rail the viewport prepends is its margin.
     ls.extend(pinned_intent(
         &[],
         RAIL_W,
@@ -194,19 +146,16 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
         &sparkline(calls),
         width,
     ));
-    // The effects nest under the intent: they hang at [`RAIL_W`] — the column
-    // the intent text opens at on the head row once the viewport prepends the
-    // rail — so each observation reads as belonging to the call above it, and
-    // its machine wash starts there.
+    // The effects hang at RAIL_W — where the intent opens once the rail is
+    // prepended — so each reads as belonging to the call above it.
     let effect_indent = " ".repeat(RAIL_W);
     ls.extend(indent_rows(&tip.effects, &effect_indent, width));
     ls
 }
 
-/// L0: the run reduced to one slate census line — its calls counted as
-/// scripts, its `|>` effects summed by bucket and named by verb.  Carries the
-/// leading blank every group body opens with; the viewport prepends the rail
-/// to the census row, so its continuations (a rare wrap) hang under [`RAIL_W`].
+/// `Census`: the run in one slate line — its calls counted as scripts, its `|>`
+/// effects summed by bucket and named by verb.  The viewport prepends the rail
+/// to the census row, so a wrapped continuation hangs under [`RAIL_W`].
 fn census(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     let mut tally = Tally::default();
     for call in calls {
@@ -231,9 +180,8 @@ fn census(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     ls
 }
 
-/// Compose the census sentence: "Ran N scripts" always (a run has a call),
-/// then the non-empty buckets in fixed order — binaries under the shared
-/// "Ran", then the read and search verbs — each pluralised by its count.
+/// "Ran N scripts" always, then the non-empty buckets in fixed order — binaries
+/// share the "Ran"; reads and searches bring their own verb.
 fn census_line(scripts: u32, tally: Tally) -> String {
     let mut s = format!("Ran {}", count(scripts, "script", "scripts"));
     if tally.binaries > 0 {
@@ -249,13 +197,12 @@ fn census_line(scripts: u32, tally: Tally) -> String {
     s
 }
 
-/// `"<n> <noun>"`, the noun pluralised by `n` — the census's count phrase.
 fn count(n: u32, singular: &str, plural: &str) -> String {
     format!("{n} {}", if n == 1 { singular } else { plural })
 }
 
-/// L2/L3: every call as its own intent + right-aligned bar, its effects
-/// below, and — when `source` — its full ral `cmd` between the two.
+/// `Context`/`Full`: every call as its own intent and right-aligned bar, its
+/// effects below, and — when `source` — its ral `cmd` between the two.
 fn full_list(calls: &[Call], source: bool, width: usize) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
     for (i, call) in calls.iter().enumerate() {
@@ -271,12 +218,9 @@ fn full_list(calls: &[Call], source: bool, width: usize) -> Vec<Line<'static>> {
     ls
 }
 
-/// One call's intent rows in the list: the intent indented and wrapped under
-/// its hanging indent, its single sparkline bar right-aligned to [`bar_col`]
-/// so the bars form a comparable column.  The run's first intent row is the
-/// one the viewport seats the rail on (`railed`), so it drops its own indent
-/// and lets the rail be its margin; every later row carries [`INTENT_INDENT`]
-/// — the same two columns, so the intents align down the block.
+/// One call's intent rows, wrapped under a hanging indent with its bar pinned to
+/// the shared column.  The `railed` row is the one the viewport seats the rail
+/// on, so it drops its own indent and lets the rail be its margin.
 fn intent_row(call: &Call, railed: bool, width: usize) -> Vec<Line<'static>> {
     let lead: Vec<Span<'static>> = if railed {
         Vec::new()
@@ -293,17 +237,11 @@ fn intent_row(call: &Call, railed: bool, width: usize) -> Vec<Line<'static>> {
     )
 }
 
-/// Lay one intent out as a left text block with its bar(s) pinned to the
-/// right.  `lead` opens row 0 — the bare indent in the list, nothing on a
-/// railed row — its measured width part of the left margin; `rail_offset` is
-/// the rest, the columns the viewport prepends to row 0 ([`RAIL_W`] on the row
-/// it seats the rail on, `0` elsewhere), so the wrapped continuations hang at
-/// the sum and the bars target `bar_col(width) - rail_offset` to land in the
-/// shared column once the row shifts.  `bars` is the right-aligned sparkline —
-/// the whole run at the tip, one glyph per row in the list.  The intent wraps
-/// to clear the bar band on every row, and the turn's `context` floor
-/// distress-modulates each row (the bar's height stays the magnitude it
-/// encodes; only the intent ink drains its saturation).
+/// Lay one intent out as a left text block with its `bars` pinned right.  `lead`
+/// and `rail_offset` together are the row's margin — the offset being what the
+/// viewport will prepend to row 0 — so the bars target
+/// `bar_col(width) - rail_offset` and land in the shared column once row 0
+/// shifts.  The `context` floor drains a row's ink, never a bar's height.
 fn pinned_intent(
     lead: &[Span<'static>],
     rail_offset: usize,
@@ -318,9 +256,8 @@ fn pinned_intent(
     let bars_w = bars.width();
     let bars_left = (bar_last + 1).saturating_sub(bars_w);
     let body_w = bars_left.saturating_sub(lead_w + GAP).max(8);
-    // The intent is work-narration, not the answer: it sits in the SLATE
-    // ground tier so the model's prose (BASE_FG) reads as the figure. SLATE
-    // also gives the context drain a hue to desaturate — white had none.
+    // The intent is work-narration, not the answer: SLATE seats it below the
+    // model's prose and gives the context drain a hue to desaturate.
     let ink = Style::default().fg(SLATE);
     let mut out: Vec<Line<'static>> = Vec::new();
     push_wrapped(&mut out, intent, body_w, |chunk, first| {
@@ -345,12 +282,8 @@ fn pinned_intent(
     out
 }
 
-/// The call's full ral `cmd` source rows (L3), each syntax-highlighted and
-/// washed into the recessed [`CODE_BG`] machine panel inset under
-/// [`BODY_INDENT`] — the panel's left edge — so the script reads as code
-/// beneath its intent.  The highlighted spans hang under that margin (plus the
-/// source line's own leading whitespace) and the wash runs to the right edge
-/// ([`wash_inset`]).
+/// A call's ral `cmd` at the `Full` rung, syntax-highlighted and washed into the
+/// recessed [`CODE_BG`] panel inset under [`BODY_INDENT`].
 fn source_rows(call: &Call, width: usize) -> Vec<Line<'static>> {
     let mut ls = Vec::new();
     for line in highlight_ral(&call.cmd) {
@@ -359,9 +292,8 @@ fn source_rows(call: &Call, width: usize) -> Vec<Line<'static>> {
     ls
 }
 
-/// The whole-block sparkline: one [`line::spark_glyph`] per call, in call
-/// order, as one slate span — decorative ink reading as a bar chart of how
-/// much each call moved, the bar count standing in for an `×N`.
+/// The whole-run sparkline: one [`line::spark_glyph`] per call in call order, as
+/// one slate span — a bar chart of how much each call moved.
 fn sparkline(calls: &[Call]) -> Span<'static> {
     let skip = calls.len().saturating_sub(MAX_SPARKLINE);
     let glyphs: String = calls
@@ -372,8 +304,6 @@ fn sparkline(calls: &[Call]) -> Span<'static> {
     Span::styled(glyphs, Style::default().fg(SLATE))
 }
 
-/// One call's single sparkline bar — the same glyph as the whole-block
-/// sparkline, for the right-aligned per-row column in the list views.
 fn bar(magnitude: Option<u32>) -> Span<'static> {
     Span::styled(
         line::spark_glyph(magnitude).to_string(),
@@ -381,12 +311,10 @@ fn bar(magnitude: Option<u32>) -> Span<'static> {
     )
 }
 
-/// Re-indent a call's pre-rendered effect rows, dropping the leading blank
-/// `render_card` opens with so the effects sit flush under the intent, then
-/// wash each into the recessed [`CODE_BG`] machine panel inset under `indent`
-/// ([`wash_inset`]) — observation output shares the machine region with the
-/// script, and in the L2/L3 list passing the script's [`BODY_INDENT`] keeps the
-/// two one rectangle.
+/// Re-indent a call's effect rows — dropping the leading blank
+/// [`line::render_card`] opens with — and wash each into the [`CODE_BG`] panel at
+/// `indent`; the list passes the script's own margin, so the two read as one
+/// rectangle.
 fn indent_rows(rows: &[Line<'static>], indent: &str, width: usize) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     for l in rows.iter().filter(|l| !line::is_blank(l)) {
@@ -395,14 +323,10 @@ fn indent_rows(rows: &[Line<'static>], indent: &str, width: usize) -> Vec<Line<'
     out
 }
 
-/// Inset `body` under a left margin of `indent` and wash its content into the
-/// recessed [`CODE_BG`] panel from that margin to `width` — the machine region
-/// as a *left-inset rectangle*.  The `indent` columns stay unwashed, so the
-/// panel's left edge aligns with the content (and thus nests under the intent);
-/// the wash still runs to the right margin, so the region reads as a stratum,
-/// not a content-hugging swatch.  Script and effects pass the *same* margin, so
-/// a coalesced run reads as one rectangle, not a stepped pair.  Wrapped
-/// continuations hang under the margin.  Appends the rendered rows to `out`.
+/// Inset `body` under `indent` and wash its content into the recessed
+/// [`CODE_BG`] panel.  The indent stays unwashed so the panel's left edge aligns
+/// with the content, but the wash runs to `width` so the region reads as a
+/// stratum, not a swatch.
 fn wash_inset(out: &mut Vec<Line<'static>>, body: &Line<'static>, indent: &str, width: usize) {
     let indent_w = UnicodeWidthStr::width(indent);
     let body_w = width.saturating_sub(indent_w).max(1);
@@ -434,11 +358,8 @@ mod tests {
         )
     }
 
-    /// The coalesced script renders as a left-inset `CODE_BG` panel: the
-    /// [`BODY_INDENT`] margin stays unwashed, every row's content from that
-    /// margin to the right edge is washed and padded to the full width, so the
-    /// machine region reads as one clean rectangle whose left edge aligns with
-    /// the content — no ragged right edge, no wash spilling under the rail.
+    /// The script paints a left-inset panel: [`BODY_INDENT`] stays unwashed and
+    /// every row is washed to the full width — no ragged right edge.
     #[test]
     fn source_rows_paint_an_inset_panel() {
         let c = Call::new(
@@ -470,7 +391,6 @@ mod tests {
         }
     }
 
-    /// The rail-less plain text of a line, span contents joined.
     fn plain(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
@@ -487,11 +407,9 @@ mod tests {
         s.len() - s.trim_start().len()
     }
 
-    /// L1 head row: `<intent>…<sparkline>`, opening flush — the rail the
-    /// viewport prepends is its whole left margin.  The row's display width is
-    /// pinned so the sparkline's last glyph lands at `bar_col` once the
-    /// viewport shifts the row by [`RAIL_W`]; the wrapped continuation hangs
-    /// under the intent — at [`RAIL_W`] — not back under the rail.
+    /// The head row opens flush and is pinned so the sparkline's last glyph
+    /// lands at `bar_col` once the viewport shifts the row by [`RAIL_W`]; the
+    /// continuation hangs under the intent, not back under the rail.
     #[test]
     fn live_tip_pins_sparkline_and_hangs_intent() {
         let width = 100;
@@ -510,12 +428,9 @@ mod tests {
         assert_eq!(indent_of(&rows[1]), RAIL_W);
     }
 
-    /// A call still in flight (no result yet, `magnitude: None`) carries no
-    /// effects, so anchoring the tip on `calls.last()` would blank the prior
-    /// call's reads until the new result lands.  The tip instead narrates the
-    /// latest *settled* call, while the pending call still adds its bar to the
-    /// sparkline — the count stays the real count and the settled image below
-    /// never blanks between one call and the next.
+    /// A pending call carries no effects, so anchoring the tip on `calls.last()`
+    /// would blank the prior call's reads; the tip narrates the latest settled
+    /// call while the pending one still adds its bar.
     #[test]
     fn live_tip_anchors_on_latest_settled_call_not_a_pending_one() {
         let width = 100;
@@ -528,8 +443,7 @@ mod tests {
             "tip narrates the settled call"
         );
         assert!(!head.contains("pending grep"), "not the in-flight call");
-        // The pending call still counts toward the sparkline, as its shortest
-        // bar — the row width stays pinned to the run's full count.
+        // The pending call still counts toward the sparkline, as its shortest bar.
         assert!(head.ends_with(line::spark_glyph(None)));
         assert_eq!(
             UnicodeWidthStr::width(head.as_str()),
@@ -537,12 +451,9 @@ mod tests {
         );
     }
 
-    /// L2 list rows: the run's first intent row is the one the viewport seats
-    /// the rail on, so it opens flush and targets `bar_col - RAIL_W` — landing
-    /// in the shared bar column once the row shifts.  Every later intent row
-    /// carries its own [`INTENT_INDENT`] and pins to `bar_col` directly, so
-    /// both the intents and the bars line up down the block; continuations
-    /// hang under the intent either way.
+    /// The run's first intent row is the railed one: it opens flush and targets
+    /// `bar_col - RAIL_W`, landing in the same column as every later row, which
+    /// carries [`INTENT_INDENT`] and pins to `bar_col` directly.
     #[test]
     fn intent_rows_pin_bars_in_one_column() {
         let width = 100;

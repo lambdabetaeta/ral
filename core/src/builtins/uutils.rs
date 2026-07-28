@@ -1,11 +1,10 @@
-/// Declare two parallel lists of bundled coreutils tools — `cross`
-/// (always available when the `coreutils` feature is on) and `unix`
-/// (additionally available when `coreutils-unix-only` is on, gated to
-/// `cfg(unix)` because the underlying uucore modules they pull in are
-/// Unix-only).  The macro emits one merged `COREUTILS_TOOLS` slice and
-/// one `coreutils_invoke` whose Unix-only arms are themselves
-/// `cfg(unix)`-gated, so a Windows build with only `coreutils` active
-/// links exclusively the cross-platform set.
+//! Coreutils, diffutils and ripgrep linked into the ral binary, and the
+//! exit-code protocol the two bundled-tool placements share.
+
+/// Declare the bundled coreutils tools once — `cross`, plus a `unix` list
+/// whose `uu_*` crates pull in Unix-only uucore modules and so cannot link
+/// on Windows — and emit the name slices and the dispatch arms from it, so
+/// a tool added to one is added to all.
 #[cfg(feature = "coreutils")]
 macro_rules! declare_coreutils {
     (
@@ -18,10 +17,7 @@ macro_rules! declare_coreutils {
             use $umodule;
         )+)?
 
-        /// Names of every coreutils tool the helper subprocess can dispatch.
-        /// The macro derives this list and the dispatch arms below from a
-        /// single declaration, so a tool added in one is added in both.
-        /// Consulted by [`is_uutils_tool`] together with [`DIFFUTILS_TOOLS`].
+        /// Every coreutils tool this build can dispatch on this platform.
         pub(crate) const COREUTILS_TOOLS: &[&str] = &[
             $($cname,)+
             $($(
@@ -30,17 +26,9 @@ macro_rules! declare_coreutils {
             )+)?
         ];
 
-        /// Names declared in the `unix:` block above.
-        ///
-        /// These are the coreutils tools whose upstream `uu_*` crate
-        /// depends on Unix-only uucore modules (`entries`, `process`,
-        /// `signals`) and so is never linked on Windows.  Present
-        /// unconditionally, not `cfg(unix)`-gated like
-        /// [`COREUTILS_TOOLS`]'s corresponding entries: a caller
-        /// outside this crate that must know "this bundled-tool name
-        /// doesn't exist on Windows" — exarch's profile loader drops
-        /// dead exec grants for these names on non-Unix — gets one
-        /// authoritative list instead of a second hardcoded copy.
+        /// The `unix:` names, listed on every platform — unlike their gated
+        /// [`COREUTILS_TOOLS`] entries — so exarch's `drop_dead_exec_grants`
+        /// can strip the grants Windows cannot honour while compiling here.
         pub const COREUTILS_UNIX_ONLY_TOOLS: &[&str] = &[
             $($( $uname, )+)?
         ];
@@ -58,26 +46,17 @@ macro_rules! declare_coreutils {
     };
 }
 
-/// Bundled diffutils tools — currently `cmp` and `diff`, both gated on the
-/// `diffutils` Cargo feature.  Each ships an argv-style shim that runs in
-/// the helper subprocess; the parent process never executes them in-process.
+/// Bundled diffutils tools, shimmed by `cmp_main` and `diff_main` below.
 #[cfg(feature = "diffutils")]
 pub(crate) const DIFFUTILS_TOOLS: &[&str] = &["cmp", "diff"];
 
-/// Bundled ripgrep tool — `rg`, gated on the `ripgrep` Cargo feature.
+/// The bundled ripgrep tool, shimmed by `rg_main` below.
 #[cfg(feature = "ripgrep")]
 pub(crate) const RIPGREP_TOOLS: &[&str] = &["rg"];
 
-/// True when `name` is one of the bundled tools — coreutils,
-/// diffutils, or ripgrep.  Two callers consult this predicate:
-/// `command::run` dispatches `uutils_invoke` in-process when the sinks
-/// are plain Terminal/Stderr, and otherwise spawns the
-/// `ral --ral-bundled-tool <tool>` exec image as an ordinary child; and
-/// a bundled byte pipeline stage launches the same `--ral-bundled-tool`
-/// child placement.  Both paths converge on `uutils_invoke` running in a
-/// context where stdout/stderr are plain Terminal/Stderr sinks, so the
-/// in-binary implementation is authoritative on every platform
-/// regardless of what PATH would have turned up.
+/// True when `name` is a bundled tool.  `command::vet` routes these to an
+/// `ExecImage::BundledTool` and skips the PATH probe entirely, so the
+/// in-binary implementation wins over any same-named system binary.
 #[cfg_attr(
     not(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")),
     allow(
@@ -101,14 +80,9 @@ pub(crate) fn is_uutils_tool(name: &str) -> bool {
     false
 }
 
-/// Restore SIGPIPE to its default disposition.
-///
-/// Rust's runtime sets
-/// SIGPIPE=IGN before main; uucore writes therefore see EPIPE and return 1
-/// instead of dying from SIGPIPE.  A non-final pipeline stage that exits 1
-/// is indistinguishable from a real error — `yes | head` would mis-report
-/// failure.  Call this once at startup so every in-process uutils call and
-/// pipeline helper benefits.
+/// Restore SIGPIPE to `SIG_DFL`, once per binary at startup.  Rust's runtime
+/// ignores it before `main`, so a uucore write to a closed pipe returns EPIPE
+/// and exits 1 — indistinguishable from real failure in `yes | head`.
 #[cfg(unix)]
 pub fn init_signal_dispositions() {
     unsafe {
@@ -116,24 +90,16 @@ pub fn init_signal_dispositions() {
     }
 }
 
-/// Reset uucore's process-global `EXIT_CODE` to 0.
-///
-/// Must be called before
-/// each in-process `uumain` invocation since the previous call may have
-/// left a non-zero code.  When `coreutils` is not active (only diffutils
-/// or ripgrep are bundled), this is a no-op.
+/// Clear uucore's process-global `EXIT_CODE`, which each `uumain` must be
+/// entered with: the previous call may have left a non-zero code behind.
 #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
 pub fn reset_exit_code() {
     #[cfg(feature = "coreutils")]
     uucore::error::set_exit_code(0);
 }
 
-/// Read uucore's process-global `EXIT_CODE`.
-///
-/// The return value of `uumain`
-/// is not the exit code seen by the utility's own error machinery — the
-/// true exit code is tracked in this atomic.  When `coreutils` is not
-/// active, returns 0 (diffutils / ripgrep don't use the uucore exit code).
+/// Read uucore's process-global `EXIT_CODE`: a utility's error machinery
+/// reports through this cell, not through `uumain`'s return value.
 #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
 pub fn get_exit_code() -> i32 {
     #[cfg(feature = "coreutils")]
@@ -146,14 +112,8 @@ pub fn get_exit_code() -> i32 {
     }
 }
 
-/// Dispatch a bundled tool in-process.  Diffutils tools (`cmp`, `diff`)
-/// are matched first since they're a tiny set; anything else falls through
-/// to coreutils.  Each branch is feature-gated, so a build with only
-/// `diffutils` (or only `coreutils`, or only `ripgrep`) compiles down to a
-/// single arm.
-///
-/// Callers must handle fd redirection, `EXIT_CODE` reset, panic isolation,
-/// and CWD save/restore.  This function is the bare dispatch.
+/// Bare dispatch to a bundled tool's shim.  Callers own fd redirection,
+/// `EXIT_CODE` reset, panic isolation and cwd save/restore.
 #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
 pub(crate) fn uutils_invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
     #[cfg(feature = "diffutils")]
@@ -179,22 +139,12 @@ pub(crate) fn uutils_invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
     }
 }
 
-/// Invoke bundled `tool` in this process and return its exit code.  Builds
-/// argv (`tool` in slot 0, then `args`), resets uucore's exit-code cell,
-/// dispatches via [`uutils_invoke`], then combines the direct return with
-/// the cell (`if global == 0 { code } else { global }`, since a utility's
-/// error machinery reports through the cell rather than the `uumain`
-/// return).
-///
-/// Slot 0 carries the tool name for every tool — [`uutils_invoke`]'s `rg`
-/// arm drops it internally (`ral-ripgrep-core` wants argv without argv[0]);
-/// coreutils/diffutils keep it.
-///
-/// This is the bare exit-code protocol shared by the two bundled-tool
-/// placements.  Callers own the concerns the placements differ on: the
-/// inline path (`run_uutils_in_process`) serialises the exit-code cell,
-/// saves/restores cwd, and isolates panics; the child placement
-/// (`try_run_bundled_tool`) relies on its inherited execution context.
+/// Run bundled `tool` here, combining `uumain`'s return with the exit-code
+/// cell.  Argv slot 0 carries the tool name for every tool; [`uutils_invoke`]'s
+/// `rg` arm drops it again.  Both placements share this much and no more: the
+/// inline one (`run_uutils_in_process`) adds cell serialisation, cwd
+/// save/restore and panic isolation, while the child (`try_run_bundled_tool`)
+/// inherits its execution context from the exec.
 #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
 pub(crate) fn invoke_bundled(tool: &str, args: &[String]) -> i32 {
     let os_args: Vec<std::ffi::OsString> = std::iter::once(std::ffi::OsString::from(tool))
@@ -206,10 +156,8 @@ pub(crate) fn invoke_bundled(tool: &str, args: &[String]) -> i32 {
     if global == 0 { code } else { global }
 }
 
-/// `rg` shim, dispatched via [`uutils_invoke`] — from the in-process
-/// fast path or from the `ral --ral-bundled-tool rg` child placement.
-/// `ral-ripgrep-core` expects argv without argv[0], so we drop the
-/// tool-name slot and pass through the original user arguments unchanged.
+/// `rg` shim.  `ral_ripgrep_core::run_cli` wants argv without argv[0], so
+/// drop the tool-name slot [`invoke_bundled`] puts there.
 #[cfg(feature = "ripgrep")]
 fn rg_main<I: Iterator<Item = std::ffi::OsString>>(mut args: I) -> i32 {
     let _argv0 = args.next();
@@ -271,10 +219,6 @@ declare_coreutils! {
         "stat" => uu_stat,
         "tac" => uu_tac,
         "test" => uu_test,
-        // `uu_timeout` needs `uucore`'s Unix-only `process`/`signals`
-        // features and does not build on Windows.  A native Windows
-        // `timeout` (`WaitForSingleObject` racing the deadline, Job-Object
-        // kill on expiry) is deferred.
         "timeout" => uu_timeout,
     }
 }
@@ -283,12 +227,9 @@ declare_coreutils! {
 mod hygiene_tests {
     use super::*;
 
-    /// Regression pin: every `unix:`-declared tool name is advertised in
-    /// `COREUTILS_TOOLS` exactly when the platform and feature both allow
-    /// it, never merely because the feature is on.
-    /// Keyed against the real `cfg!` rather than a fixed platform, like
-    /// `capability::exec`'s `lookup_literal_case_mismatch_follows_real_platform`,
-    /// so this is honest (and still runs) on every host.
+    /// A `unix:` name is advertised when the platform and the feature both
+    /// allow it, never merely because the feature is on.  Keyed on the real
+    /// `cfg!` rather than a fixed platform, so it is honest on any host.
     #[test]
     fn unix_only_tools_are_advertised_iff_unix_and_feature_on() {
         for name in COREUTILS_UNIX_ONLY_TOOLS {
@@ -301,25 +242,11 @@ mod hygiene_tests {
     }
 }
 
-/// `cmp` shim, dispatched via [`uutils_invoke`] — from the in-process
-/// fast path or from the `ral --ral-bundled-tool cmp` child placement.
-/// Argv layout matches `parse_params`'s expectation: argv[0] is the tool
-/// name, argv[1..] are user arguments.  Faithful translation of upstream
-/// `diffutilslib::cmp::main` (`src/cmp.rs:476`), with two structural
-/// divergences forced by upstream's API:
-///
-///   * No same-file/both-stdin shortcut.  Upstream's `main` checks
-///     `params.from == "-" && params.to == "-"
-///      || same_file::is_same_file(&params.from, &params.to)` and returns
-///     SUCCESS without re-reading.  `cmp::Params.from` and `params.to`
-///     are private, so we cannot replicate the test; `cmp::cmp` re-does
-///     the I/O and reports `Equal`, giving the same exit code at higher
-///     I/O cost.
-///   * No `--quiet` suppression.  Upstream's `main` skips the `eprintln!`
-///     under `params.quiet`; that field is also private.  We always
-///     emit the error.
-///
-/// Bump diffutils → re-audit this function against the new `cmp::main`.
+/// `cmp` shim, translating upstream `diffutilslib::cmp::main` minus two
+/// things its private `Params` fields put out of reach: the same-file /
+/// both-stdin shortcut (we re-read and report `Equal` — same exit code,
+/// more I/O) and `--quiet` suppression of the error line.  Re-audit
+/// against `cmp::main` when diffutils is bumped.
 #[cfg(feature = "diffutils")]
 fn cmp_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
     use diffutilslib::cmp::{self, Cmp};
@@ -340,17 +267,11 @@ fn cmp_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
     }
 }
 
-/// `diff` shim, line-for-line translation of upstream `diff::main`
-/// (`src/diff.rs:21` in `diffutils-0.5.0`).  Upstream's `diff::main`
-/// lives in the binary crate (not the library), so it cannot be called
-/// directly; this is the closest we can get.
-///
-/// `params::Params` exposes its fields as `pub`, so unlike `cmp_main`
-/// the only divergences are surface ones: the helper subprocess returns
-/// `i32` rather than `ExitCode`, and `Format::Ed` errors return 2
-/// directly instead of killing the process.
-///
-/// Bump diffutils → re-audit this function against the new `diff::main`.
+/// `diff` shim.  Upstream's `diff::main` lives in the diffutils binary
+/// crate, out of a library's reach, so it is transcribed here; `Params` is
+/// fully public, so unlike `cmp_main` this loses nothing — it only returns
+/// `i32` rather than `ExitCode`, and a `Format::Ed` error returns 2 instead
+/// of killing the process.  Re-audit against `diff::main` on a bump.
 #[cfg(feature = "diffutils")]
 fn diff_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
     use diffutilslib::params::{Format, parse_params};

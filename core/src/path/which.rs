@@ -1,30 +1,17 @@
 //! `PATH` search: locate a bare command name on disk.
 //!
-//! Sibling to the grant pipeline — same "given a string, find the
-//! absolute file" question, but `$PATH` is just a colon-separated list
-//! of directories walked in turn ([`path_dirs`]), so the sigil/lex/canon
-//! stages don't apply.  `runtime::command::CommandIdentity` builds on
-//! [`locate`] so dispatch and grant admission see one walk per call.
-//!
-//! The primary entry points are [`resolve_in_path`] (pure-string walker,
-//! bare names only) and [`locate`] (full resolution: separator-bearing
-//! names, an explicit `cwd` to anchor relative `PATH` entries, and the
-//! executable-bit check the OS would apply).
+//! Sibling to the grant pipeline, but `$PATH` is only a colon-separated
+//! list walked in turn, so the sigil/lex/canon stages do not apply.
+//! Dispatch arrives via `runtime::command::identity` and completion via
+//! [`commands_on_path`], both onto the same walk and the same
+//! executable-bit rule.
 
 use std::path::{Path, PathBuf};
 
-/// Walk `path` (a colon-separated `PATH` string) looking for an
-/// executable file named `name`.
-///
-/// Returns the absolute path of
-/// the first hit, or `None` if none of `path`'s directories
-/// contain an executable `name`.
-///
-/// Returns `None` immediately if `name` contains a separator —
-/// that is treated as a path, not a bare command, and is not the
-/// business of `PATH` lookup.  Thin wrapper over [`locate`] for
-/// the common case where the caller has a `PATH` string in hand
-/// and no shell context to anchor relative entries against.
+/// First executable named `name` on the colon-separated `path`; `None`
+/// when `name` bears a separator, which is a path, not `PATH`'s business.
+/// Supplies no `cwd`, so a relative `PATH` entry resolves against the
+/// process cwd — callers holding a shell want [`locate`].
 pub fn resolve_in_path(name: &str, path: &str) -> Option<String> {
     if name_has_separator(name) {
         return None;
@@ -32,19 +19,10 @@ pub fn resolve_in_path(name: &str, path: &str) -> Option<String> {
     locate(name, Some(path), None).map(|p| p.to_string_lossy().into_owned())
 }
 
-/// Resolve a command head — bare name or path — to its executable
-/// target on disk, using `path_value` as the colon-separated `PATH`
-/// and `cwd` to anchor relative paths and relative `PATH` entries.
-///
-/// - Names containing a separator are treated as paths: an absolute
-///   name is checked as-is; a relative one is anchored against `cwd`
-///   (or returned unchanged when `cwd` is `None`).
-/// - Bare names are walked against `path_value`.  Relative `PATH`
-///   entries (rare but legal, e.g. `./bin`) are anchored against
-///   `cwd` so the walk has the same notion of "here" as the caller.
-///
-/// Returns the resolved [`PathBuf`] when the candidate is a regular
-/// file with the executable bit set; otherwise `None`.
+/// Resolve a command head to its executable on disk: a separator-bearing
+/// name is a path anchored against `cwd`, a bare name is walked against
+/// `path_value`.  `Some` only for a regular file carrying the executable
+/// bit — the check the OS would apply at spawn.
 pub fn locate(name: &str, path_value: Option<&str>, cwd: Option<&Path>) -> Option<PathBuf> {
     if name_has_separator(name) {
         let candidate = anchor_to_cwd(PathBuf::from(name), cwd);
@@ -81,9 +59,8 @@ fn anchor_to_cwd(p: PathBuf, cwd: Option<&Path>) -> PathBuf {
     }
 }
 
-/// Split a colon-separated `PATH` string into directories, anchoring each
-/// relative entry against `cwd` (matching [`locate`]'s rule).  The shared
-/// walk behind [`locate`], [`commands_on_path`], and [`file_exists_on_path`].
+/// The one directory list behind [`locate`], [`commands_on_path`], and
+/// [`file_exists_on_path`]; relative entries (`./bin`) anchor to `cwd`.
 fn path_dirs(path_value: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
     std::env::split_paths(&std::ffi::OsString::from(path_value))
         .map(|dir| anchor_to_cwd(dir, cwd))
@@ -109,17 +86,9 @@ fn is_executable_file(p: &Path) -> bool {
     }
 }
 
-/// Enumerate names of executable files reachable through `path_value`,
-/// in PATH-entry order.
-///
-/// Each directory is anchored to `cwd` if it is
-/// relative (matching [`locate`]'s rule).  Inaccessible or non-directory
-/// entries are skipped; entries within a directory are not sorted.
-///
-/// Used by completion to mirror what `locate` will find: same dirs, same
-/// anchor, same executable-bit rule.  The result is unsorted and may
-/// repeat a name across directories; callers that want stable order or
-/// deduplication apply their own.
+/// Names of the executables reachable through `path_value`, in `PATH`
+/// order; unreadable entries are skipped.  Unsorted, and a name repeats
+/// once per directory holding it — completion sorts and dedupes its own.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:which-readdir] `which`/completion probe: enumerates each PATH directory to list executable names; an executable-probe scan, not turn-time model data I/O, raises no surface card."
@@ -143,13 +112,9 @@ pub fn commands_on_path(path_value: &str, cwd: Option<&Path>) -> Vec<String> {
     out
 }
 
-/// Walk PATH looking for a regular file named `name`, ignoring the
-/// executable bit and anchoring relative PATH entries against `cwd`
-/// (like [`locate`]).
-///
-/// Used to improve error messages: when PATH search skips a file because
-/// it lacks `+x`, we can report "permission denied" (126) instead of
-/// "command not found" (127).
+/// A regular file named `name` on `PATH`, executable bit ignored, so
+/// `runtime::command::vet` can answer 126 (permission denied) where a
+/// plain miss would answer 127.
 pub fn file_exists_on_path(name: &str, path: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     if name_has_separator(name) {
         return None;
@@ -160,10 +125,9 @@ pub fn file_exists_on_path(name: &str, path: &str, cwd: Option<&Path>) -> Option
         .find(|candidate| candidate.is_file())
 }
 
-/// Windows PATHEXT expansion.  When invoked without an explicit
-/// extension, the Windows command resolver tries each suffix in
-/// `%PATHEXT%` (defaulting to `.COM;.EXE;.BAT;.CMD`).  We mirror the
-/// same fallback so `locate("python")` finds `python.exe`.
+/// Mirror the Windows resolver's `%PATHEXT%` fallback, so
+/// `locate("python")` finds `python.exe`.  `capability::exec` keeps its
+/// own copy of the default list to strip suffixes off grant keys.
 #[cfg(windows)]
 #[allow(
     clippy::disallowed_methods,
@@ -228,9 +192,8 @@ mod tests {
         let bin = tmp.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         touch(&bin.join("runme"), 0o755);
-        // Relative PATH entry resolves against the supplied cwd, not the
-        // process cwd — the prompt would otherwise stop reflecting the
-        // shell's notion of "here."
+        // Against the supplied cwd, not the process cwd: otherwise the
+        // prompt stops reflecting the shell's notion of "here".
         let names = commands_on_path("./bin", Some(tmp.path()));
         assert!(names.contains(&"runme".to_string()), "got {names:?}");
     }
@@ -239,7 +202,6 @@ mod tests {
     fn commands_on_path_skips_missing_dirs() {
         let tmp = tempfile::tempdir().unwrap();
         let absent = tmp.path().join("does-not-exist");
-        // No panic, no error — just an empty result for the bad entry.
         let names = commands_on_path(absent.to_str().unwrap(), None);
         assert!(names.is_empty(), "got {names:?}");
     }

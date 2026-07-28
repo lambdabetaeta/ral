@@ -1,37 +1,20 @@
-//! Tilde paths: parse and expand.
+//! Tilde paths: the `~`/`~user`/`~/sub` shape the lexer hands to the parser,
+//! AST, IR and typechecker, and the one expansion of it — `path::sigil`, `cd`,
+//! command identity and REPL completion all resolve through
+//! [`expand_tilde_path`], so the rule is one-and-the-same.
 //!
-//! `TildePath` is the syntactic shape produced by the lexer for
-//! tilde-headed words (`~`, `~user`, `~/sub`, `~user/sub`).  Lives
-//! here rather than in `util.rs` because expansion belongs to the
-//! path-resolution pipeline; the lexer/parser/AST/IR/typecheck
-//! layers all import it from here.
+//! A *named* user has no answer off Unix (no `getpwnam(3)` analogue), so
+//! [`get_user_home`] returns `None` rather than fabricate `/home/<name>` and
+//! each caller picks its own honest fallback: the policy freeze, `cd` and
+//! interpolation error; command resolution falls back to the literal spelling;
+//! completion offers no candidates.  Bare `~`/`~/...` never come this way.
 //!
-//! `expand_tilde_path` is the only place that maps a tilde shape
-//! to a concrete home-relative path; `get_user_home` is the
-//! `getpwnam(3)` wrapper used for `~user` resolution.  The xdg
-//! sigil expander in `path::sigil` and the `cd` builtin both go
-//! through this function so the rule is one-and-the-same.
-//!
-//! `~user` (a *named* user, as opposed to bare `~`/`~/...`, which
-//! never call [`get_user_home`]) has no answer off Unix: there is no
-//! `getpwnam(3)` analogue, and Windows user profile directories aren't
-//! enumerable from a username without an NT account lookup this
-//! codebase doesn't carry.  [`get_user_home`] returns `None` there
-//! rather than fabricating `/home/<name>`, and [`expand_tilde_path`]
-//! propagates that as `None` — every caller decides its own honest
-//! fallback (see the call sites: a policy freeze errors, a `cd`
-//! errors, an interpolated value errors, PATH/command resolution and
-//! tab completion pass the literal spelling through unexpanded).
-//!
-//! Also home to the `$HOME` / `$USER` lookup helpers (`home`,
-//! `home_from_env`, `home_from_env_or_dot`, `user_name`,
-//! `user_name_from_env`), which pin which env var each resolution reads
-//! and what fallback it uses; `path.rs` re-exports them.
+//! Also the `$HOME`/`$USER` lookups, which pin the env var each one reads;
+//! `path.rs` re-exports them.
 
 use serde::{Deserialize, Serialize};
 
-/// Structured tilde path syntax: `~`, `~user`, `~/path`, or
-/// `~user/path`.
+/// Structured tilde syntax: `~`, `~user`, `~/path`, or `~user/path`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TildePath {
     pub user: Option<String>,
@@ -39,8 +22,7 @@ pub struct TildePath {
 }
 
 impl TildePath {
-    /// Recognise the shape; returns `None` when the input does
-    /// not begin with `~`.
+    /// Recognise the shape; `None` when the input does not begin with `~`.
     pub fn parse(input: &str) -> Option<Self> {
         let rest = input.strip_prefix('~')?;
         match rest.split_once('/') {
@@ -55,12 +37,9 @@ impl TildePath {
         }
     }
 
-    /// Reconstruct the literal `~user/suffix` spelling this value
-    /// parsed from.  Used as the honest fallback at call sites that
-    /// cannot fail (PATH/command resolution) when [`expand_tilde_path`]
-    /// returns `None`: passing the un-expanded spelling through means
-    /// resolution fails downstream as an ordinary missing-path/missing-
-    /// command error, rather than silently matching a fabricated path.
+    /// Reconstruct the spelling this parsed from — the fallback at call sites
+    /// that cannot fail, where an unexpanded `~user` dies downstream as an
+    /// ordinary missing-command error rather than matching a fabricated path.
     pub fn to_literal(&self) -> String {
         let user = self.user.as_deref().unwrap_or_default();
         let suffix = self.suffix.as_deref().unwrap_or_default();
@@ -68,11 +47,9 @@ impl TildePath {
     }
 }
 
-/// Look up `username`'s home directory via `nix::unistd::User::from_name`,
-/// which wraps the reentrant `getpwnam_r(3)`.
-///
-/// Falls back to `/home/<name>` when the lookup fails or the
-/// username contains a NUL byte.
+/// `username`'s home via the reentrant `getpwnam_r(3)`, falling back to the
+/// conventional `/home/<name>` when the lookup misses or the name contains a
+/// NUL byte.
 #[cfg(unix)]
 pub fn get_user_home(username: &str) -> Option<String> {
     match nix::unistd::User::from_name(username) {
@@ -81,12 +58,9 @@ pub fn get_user_home(username: &str) -> Option<String> {
     }
 }
 
-/// No `getpwnam(3)` analogue exists off Unix, and there is no honest
-/// way to turn a bare username into a Windows profile directory
-/// without an account lookup this codebase doesn't carry — so a named
-/// user's home is unresolvable here.  Bare `~`/`~/...` never call this
-/// (they resolve against the caller-supplied `home`, i.e. `%USERPROFILE%`
-/// on Windows), so only `~user`/`~user/...` are affected.
+/// A named user's home is unresolvable off Unix — there is no `getpwnam(3)`
+/// analogue and no way to turn a bare username into a Windows profile
+/// directory without an account lookup this codebase doesn't carry.
 #[cfg(not(unix))]
 #[allow(
     clippy::too_long_first_doc_paragraph,
@@ -96,13 +70,8 @@ pub fn get_user_home(_username: &str) -> Option<String> {
     None
 }
 
-/// Expand a tilde shape against a home directory.
-///
-/// `home` is the current user's home (used for `~` and `~/...`, always
-/// resolvable); `~user` / `~user/...` resolves through
-/// [`get_user_home`], which is `None` off Unix — see the module note.
-/// `None` propagates; every caller picks its own honest fallback. No
-/// filesystem access — pure once `home` and `user` are fixed.
+/// Expand a tilde shape against `home`, the current user's home; a named
+/// `user` routes through [`get_user_home`] instead, and so is `None` off Unix.
 pub fn expand_tilde_path(user: Option<&str>, suffix: Option<&str>, home: &str) -> Option<String> {
     let base = match user {
         None => home.to_string(),
@@ -114,14 +83,10 @@ pub fn expand_tilde_path(user: Option<&str>, suffix: Option<&str>, home: &str) -
     })
 }
 
-/// Abbreviate `path` for display by folding a leading `home` prefix to
-/// `~`. The inverse of [`expand_tilde_path`] for the `~` case.
-///
-/// `home` must match on a path-component boundary: home `/home/al`
-/// abbreviates `/home/al` and `/home/al/src`, but leaves `/home/alex`
-/// untouched (a `starts_with` on the raw string would wrongly clip it).
-/// Returns the path's own string form when `home` is empty or is not a
-/// component prefix.
+/// Fold a leading `home` prefix to `~` for display, inverting
+/// [`expand_tilde_path`]'s `~` case.  The match is on component boundaries, so
+/// home `/home/al` leaves `/home/alex` alone where a `starts_with` on the raw
+/// string would clip it.
 pub fn abbreviate_home(path: &std::path::Path, home: &str) -> String {
     if home.is_empty() {
         return path.to_string_lossy().into_owned();
@@ -135,9 +100,8 @@ pub fn abbreviate_home(path: &std::path::Path, home: &str) -> String {
 
 // ── $HOME / $USER lookup ──────────────────────────────────────────────
 
-/// Look up `HOME`, preferring the supplied dynamic env overrides:
-/// `$HOME`, then `$USERPROFILE` (Windows).  Empty string when
-/// nothing is set.
+/// `$HOME`, then `$USERPROFILE` (Windows), each read from `env_overrides`
+/// before the host env; empty string when nothing is set.
 pub fn home(env_overrides: &crate::types::EnvVars) -> String {
     env_overrides
         .get_or_host("HOME")
@@ -145,23 +109,21 @@ pub fn home(env_overrides: &crate::types::EnvVars) -> String {
         .unwrap_or_default()
 }
 
-/// Look up `HOME` from the process env only — for callers that
-/// have no dynamic env at hand (REPL completion, policy loaders).
+/// [`home`] with no overrides — for callers holding no shell env (REPL
+/// completion, policy loaders).
 pub fn home_from_env() -> String {
     home(&crate::types::EnvVars::new())
 }
 
-/// `home_from_env`, falling back to `.` when unset, so callers that
-/// join paths against home never panic on an empty base (REPL
-/// completion, env seeding).
+/// [`home_from_env`], falling back to `.`, so callers joining onto home never
+/// build a path off an empty base.
 pub fn home_from_env_or_dot() -> String {
     let h = home_from_env();
     if h.is_empty() { ".".into() } else { h }
 }
 
-/// Look up the current user name, preferring the supplied dynamic
-/// env overrides: `$USER`, then `$USERNAME` (Windows).  `"?"` when
-/// nothing is set, matching the prompt/audit placeholder.
+/// `$USER`, then `$USERNAME` (Windows), overrides before the host env; `"?"`
+/// when nothing is set, matching the prompt/audit placeholder.
 pub fn user_name(env_overrides: &crate::types::EnvVars) -> String {
     env_overrides
         .get_or_host("USER")
@@ -169,9 +131,8 @@ pub fn user_name(env_overrides: &crate::types::EnvVars) -> String {
         .unwrap_or_else(|| "?".into())
 }
 
-/// Look up the user name from the process env only — for callers
-/// with no dynamic env at hand (REPL prompt, host snapshot, shell
-/// seeding).
+/// [`user_name`] with no overrides — for callers holding no shell env (REPL
+/// prompt, host snapshot, shell seeding).
 pub fn user_name_from_env() -> String {
     user_name(&crate::types::EnvVars::new())
 }
@@ -193,11 +154,8 @@ mod tests {
         );
     }
 
-    /// Unix's `get_user_home` fabricates a conventional `/home/<name>`
-    /// only as a last resort, when `getpwnam_r` itself cannot find the
-    /// user — a pre-existing behaviour this task doesn't change. Uses a
-    /// username vanishingly unlikely to exist so the test hits that
-    /// fallback branch rather than a real account.
+    /// The username is chosen to be vanishingly unlikely to exist, so the test
+    /// reaches the `/home/<name>` fallback rather than a real account.
     #[cfg(unix)]
     #[test]
     fn unix_named_user_falls_back_when_lookup_misses() {
@@ -208,11 +166,8 @@ mod tests {
         );
     }
 
-    /// The behaviour the plan requires: off Unix there is no
-    /// `getpwnam(3)` analogue, so a *named* user's home is
-    /// unresolvable — `None`, never a fabricated `/home/<name>`. This
-    /// only runs where it is meaningful (Windows CI); on Unix hosts the
-    /// sibling test above pins the real behaviour instead.
+    /// Runs only where it is meaningful (Windows CI); the sibling test above
+    /// pins the Unix half.
     #[cfg(not(unix))]
     #[test]
     fn non_unix_named_user_is_unresolvable_not_fabricated() {

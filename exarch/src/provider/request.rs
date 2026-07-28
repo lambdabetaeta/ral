@@ -7,14 +7,12 @@ use genai::chat::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Per-selection reasoning and sampling controls.
+/// Per-selection reasoning and sampling controls. A `None` field sends no
+/// option at all, unlike `ReasoningEffort::Zero` — an explicit "no reasoning".
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub struct Tuning {
-    /// The reasoning effort, or `None` for the adapter default.
     pub effort: Option<ReasoningEffort>,
-    /// The sampling temperature, or `None` for the adapter default.
     pub temperature: Option<f64>,
-    /// The nucleus-sampling top-p, or `None` for the adapter default.
     pub top_p: Option<f64>,
 }
 
@@ -29,15 +27,11 @@ impl Tuning {
     }
 }
 
-/// The effort ladder, ascending, shared by every front-end that offers a
-/// discrete reasoning-effort control.
-///
-/// Exarch's `/model` overlay draws it as a rung ramp, synod's menu reads it
-/// as a plain list. `auto` first (the default, no option sent); then
-/// genai's keyword rungs from `zero` up to `max`. `XHigh`'s keyword is
-/// `xhigh`; `Budget`/`Minimal` are intentionally omitted (the former carries
-/// a raw token count with no place on an ordered ladder, the latter is a
-/// legacy pre-gpt-5 alias for `low`).
+/// The effort ladder, ascending: `auto` sends no option, then genai's keyword
+/// rungs from `zero` (explicit opt-out) up to `max`. Exarch's `/model` picker
+/// indexes into it and draws a glyph per rung, so the order is load-bearing;
+/// synod serves the same labels flat. `Budget` (a raw token count, unorderable)
+/// and `Minimal` (legacy pre-gpt-5) stay off it.
 pub const EFFORT_LADDER: &[(&str, Option<ReasoningEffort>)] = &[
     ("auto", None),
     ("zero", Some(ReasoningEffort::Zero)),
@@ -48,13 +42,12 @@ pub const EFFORT_LADDER: &[(&str, Option<ReasoningEffort>)] = &[
     ("max", Some(ReasoningEffort::Max)),
 ];
 
-/// Resolve a ladder label to its effort, strictly — an unrecognised label is
-/// a caller error (a typo'd `--effort`, a stale menu choice), not a silent
-/// fallback to `auto`.
+/// Resolve a ladder label to its effort, strictly — an unrecognised label is a
+/// caller error (a stale menu choice reaching synod's `resolve_tuning`), never
+/// a silent fallback to `auto`.
 ///
 /// # Errors
-/// Returns `Err` naming `label` and listing the valid ladder labels when it
-/// matches none of them.
+/// Returns `Err` naming `label` and the valid rungs.
 pub fn effort_by_label(label: &str) -> Result<Option<ReasoningEffort>, String> {
     EFFORT_LADDER
         .iter()
@@ -70,13 +63,8 @@ pub fn effort_by_label(label: &str) -> Result<Option<ReasoningEffort>, String> {
         })
 }
 
-/// The ladder label naming `effort` — the inverse of [`effort_by_label`],
-/// for a front-end reporting back which rung is in force.
-///
-/// `None` for an effort the ladder does not name: the deliberately omitted
-/// `Budget`/`Minimal` variants, which no ladder round trip can produce.
-/// Matches by [`ReasoningEffort::variant_name`], the same coarse key
-/// [`Tuning`]'s `PartialEq` uses.
+/// The ladder label naming `effort`, the inverse of [`effort_by_label`], for a
+/// front-end reporting which rung is in force. `None` off the ladder.
 pub fn effort_label(effort: &Option<ReasoningEffort>) -> Option<&'static str> {
     EFFORT_LADDER
         .iter()
@@ -88,24 +76,20 @@ pub fn effort_label(effort: &Option<ReasoningEffort>) -> Option<&'static str> {
         .map(|(label, _)| *label)
 }
 
-/// The ladder label whose effort matches [`Tuning::initial`].
-///
-/// The rung a freshly-opened control should land on, read off the ladder
-/// itself rather than restated as a literal that could drift out of step
-/// with it.
+/// The rung a freshly-opened control lands on, read off the ladder rather than
+/// restated as a literal that could drift out of step with it.
 ///
 /// # Panics
-/// Panics if no ladder entry's effort matches [`Tuning::initial`]'s — a
-/// broken invariant of this module, not a condition a caller can trigger.
+/// Panics if [`Tuning::initial`]'s effort names no rung — this module's own
+/// invariant, not a condition a caller can trigger.
 pub fn default_effort_label() -> &'static str {
     effort_label(&Tuning::initial().effort)
         .expect("Tuning::initial()'s effort must appear on the effort ladder")
 }
 
-/// Manual impl: genai's `ReasoningEffort` has no derived `PartialEq`, so
-/// this compares by [`ReasoningEffort::variant_name`] instead of
-/// structurally — coarser only for `Budget(u32)`, a variant
-/// [`EFFORT_LADDER`] never produces.
+/// genai's `ReasoningEffort` has no `PartialEq`, so efforts compare by
+/// [`ReasoningEffort::variant_name`] — coarser than structural equality only
+/// for `Budget(u32)`, which [`EFFORT_LADDER`] never produces.
 impl PartialEq for Tuning {
     fn eq(&self, other: &Self) -> bool {
         let key =
@@ -116,9 +100,9 @@ impl PartialEq for Tuning {
     }
 }
 
-/// `OpenRouter`'s provider-routing extra body: pins the request to `slug`
-/// with fallbacks disabled, so a route the user chose explicitly errors
-/// out instead of silently landing on a different upstream.
+/// `OpenRouter`'s provider-routing extra body: pin to `slug` with fallbacks
+/// off, so an explicitly chosen route errors rather than silently landing on a
+/// different upstream.
 fn openrouter_extra_body(slug: &str) -> serde_json::Value {
     serde_json::json!({
         "provider": {
@@ -128,10 +112,9 @@ fn openrouter_extra_body(slug: &str) -> serde_json::Value {
     })
 }
 
-/// Assemble the per-request `ChatOptions`.  The four `capture_*` flags are
-/// forced on regardless of `tuning`: `step_out_from_end` in `stream.rs`
-/// reads usage, content, tool calls, and reasoning back off every
-/// `StreamEnd`, so none of them can be left off.
+/// Assemble the per-request `ChatOptions`. The four `capture_*` flags are on
+/// regardless of `tuning`: `step_out_from_end` in `stream.rs` reads usage,
+/// content, tool calls, and reasoning back off every `StreamEnd`.
 pub(super) fn complete_options(
     cache_key: &str,
     max_tokens_override: Option<u32>,
@@ -162,11 +145,10 @@ pub(super) fn complete_options(
     options
 }
 
-/// Shape the transcript for prompt caching, routing the system prompt per
-/// adapter: `OpenAIResp` (Responses API) takes it via `with_system`'s bare
-/// `String` field, which can carry no cache breakpoint, so it bypasses the
-/// message path entirely; every other adapter gets a cache-marked system
-/// `ChatMessage` prepended instead.  The last message is marked too, so
+/// Shape the transcript for prompt caching. `OpenAIResp` carries the system
+/// prompt in the Responses API's bare `instructions` string, which admits no
+/// cache breakpoint, so it bypasses the message path; the rest get a
+/// cache-marked system message prepended. The last message is marked too, so
 /// consecutive turns share the largest possible cached prefix.
 pub(super) fn build_cached_request(
     adapter: AdapterKind,
@@ -188,27 +170,17 @@ pub(super) fn build_cached_request(
     ChatRequest::new(all)
 }
 
-/// The tool array a request carries: the `ral` wire tool under
-/// `tool_enabled`, and the provider's own built-in web-search tool under
-/// `search`.
+/// The tools a request carries: the `ral` wire tool under `tool_enabled`, the
+/// provider's built-in web search under `search`.
 ///
-/// The built-in only rides the request on the three adapters genai actually
-/// maps `Tool::new_web_search()` for — `OpenAIResp` (`web_search`),
-/// `Anthropic` (`web_search_20250305`), `Gemini` (`googleSearch`). Every
-/// other adapter, including the plain `OpenAI` chat-completions one, gets
-/// nothing: that adapter has no built-in mapping and would instead serialise
-/// `ToolName::WebSearch` as an ordinary function tool literally named
-/// `WebSearch` with a null schema, which is junk on the wire, not a tool.
-///
-/// `OpenAIResp` alone also carries `ToolConfig::Custom(json!({"external_web_access": true}))`,
-/// which is codex's switch from its cached search index to live internet
-/// access. That config is OpenAI-specific and must not reach Anthropic:
-/// genai `x_merge`s a `Custom` config straight onto the tool object, and
-/// Anthropic's `web_search_20250305` instead expects `max_uses`/
-/// `allowed_domains`, so the field would be rejected there.
-/// `ToolConfig::WebSearch(WebSearchConfig)` is not an alternative for
-/// `OpenAIResp` either — the fork's OpenAI-Responses arm has a literal
-/// `// FIXME: Implement what is posible in filters` and drops it.
+/// Search rides only the adapters genai maps `Tool::new_web_search()` to a
+/// native tool for; the rest, plain `OpenAI` included, would serialise
+/// `ToolName::WebSearch` into the function-name slot as junk on the wire.
+/// `external_web_access` — codex's switch from its cached index to the live
+/// internet — is `Custom` because genai's Responses arm drops the typed
+/// `ToolConfig::WebSearch`, and `OpenAIResp`-only because genai merges a
+/// `Custom` config onto the tool object, where Anthropic's
+/// `web_search_20250305` would reject the unknown field.
 pub(super) fn tool_defs(adapter: AdapterKind, tool_enabled: bool, search: bool) -> Vec<Tool> {
     let mut tools: Vec<Tool> = tool_enabled
         .then(crate::shell_eval::tools::wire_tool)

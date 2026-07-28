@@ -1,104 +1,34 @@
-//! Exarch's per-exchange cancellation, layered on top of ral's SIGINT handling.
+//! Exarch's per-exchange cancellation, chained onto ral's signal handling.
 //!
-//! ral's `signal::install_handlers` translates a delivered signal into a
-//! [`CancelCause`] on the published
-//! cancel slots, so the evaluator unwinds at its next poll; that
-//! interrupts an in-flight tool call but leaves exarch's attend loop free
-//! to keep going.  Here we add a cancellation [`Token`]: every agent holds one sticky token for its
-//! life (registered in the fleet so the subtree cascade always reaches the
-//! live exchange), and the attend loop [`reset`](Token::reset)s its flag at each
-//! genuine exchange boundary so a prior exchange's Esc never bleeds into the next.
-//! The token is threaded down through [`crate::agent::Agent::deliberate`] → [`crate::agent::Agent::run_batch`] → tools, cancelled
-//! by the chained signal handler, by a per-tab exchange interrupt
-//! ([`crate::fleet::registry::AgentRegistry::interrupt`]), by the registry cascade (`agent-cancel`, the
-//! ceiling, `/clear`), and raced by the HTTP request future, so one
-//! cancellation stops the exchange and returns to the prompt.  The cause a token
-//! carries decides how far it reaches: an
-//! [`Interrupt`](ral_core::process::CancelCause) unwinds only the in-flight
-//! exchange and the agent re-parks; any stronger cause terminates the agent.
+//! Every agent holds one sticky [`Token`] for its life, registered in the fleet
+//! so the subtree cascade always reaches the live exchange; the attend loop
+//! [`reset`](Token::reset)s it at each genuine exchange boundary, so a prior
+//! exchange's Esc never bleeds into the next.  The cause a token carries decides
+//! its reach: an `Interrupt` drops only the in-flight exchange and the agent
+//! re-parks, anything stronger ends the agent.
 //!
-//! Ctrl-C and Esc are a *per-tab exchange interrupt* — they unwind the focused
-//! tab's current exchange, never cascade to descendants, never end the agent.  On
-//! the trunk they route through [`raise_interrupt`], which cancels the trunk's
-//! published token and asks ral to cancel the current run's foreground scope
-//! with [`CancelCause::Interrupt`](ral_core::process::CancelCause), so the
-//! foreground evaluation unwinds at its next poll; on any other focused tab
-//! they route through [`crate::fleet::registry::AgentRegistry::interrupt`], which cancels that agent's
-//! own token *and* its session's durable root with the same cause (only the
-//! trunk's session publishes the process signal slots; a sub-agent's eval is
-//! reached through that per-session handle).  No global counter is ticked on
-//! the interrupt path, so there is nothing to escalate toward a force-exit.
+//! Esc and Ctrl-C are a per-tab exchange interrupt — never a cascade, never an
+//! agent's death, and they never tick ral's escalation ladder.  The trunk routes
+//! through [`raise_interrupt`] and the published slot; any other focused tab
+//! through [`crate::fleet::registry::AgentRegistry::interrupt`], which cancels
+//! that agent's own token and whatever foreground scope its run holds, never its
+//! durable root.  Only the trunk publishes to the slot.
 //!
-//! The signal handler cannot hold a token by value, so the trunk
-//! [`publish`]es its token's flag into a process-global *slot* (an
-//! `AtomicPtr`, the lock-free `ArcSwap` analogue — a signal handler must
-//! not lock) for the handler to set.  The slot points into the trunk's
-//! own sticky [`Token`]'s `Arc<AtomicU8>`; [`publish`] leaks one strong
-//! share of that `Arc` so the pointee outlives every guard and every other
-//! share, making the published pointer safe for a handler to dereference
-//! at any time, including one that loaded it just before the slot was
-//! restored.  A signal-driven cancellation is observed through the threaded
-//! [`Token`] every cancel check already holds (`is_set` reads the slot
-//! directly, but only in tests).  The slot is published by [`publish`]'s
-//! RAII guard and restored to its prior publication on drop, which only
-//! stops the slot from tracking a retired trunk's token; only the trunk
-//! publishes (a sub-agent's token is reached through the fleet registry,
-//! never the slot).
+//! On Unix `install` chains SIGINT into ral's *non-escalating* `relay_handler`,
+//! never the `term_handler` whose third delivery `_exit`s: a stray SIGINT
+//! reaching the supervising TUI must cancel the exchange, not kill exarch.
+//! SIGTERM and SIGHUP keep `term_handler` and stamp the token `Terminate`, so a
+//! park reading the token agrees with ral's root about why the agent is ending.
 //!
-//! `install` replaces the disposition with a handler that sets the current
-//! root token *and* forwards directly into ral's own handlers, so
-//! statement-level unwinding still works.  A forwarded SIGINT goes to ral's
-//! *non-escalating* `relay_handler`,
-//! not the `term_handler` whose third signal `_exit`s: a SIGINT reaching
-//! the supervising TUI — from a stray child, another process, anything —
-//! must only cancel the current exchange, never force-exit exarch.  SIGTERM/SIGHUP
-//! keep ral's `term_handler`, since those are deliberate termination
-//! requests: it cancels the durable root with `Terminate` — reaching the
-//! foreground exchange and every detached worker — and force-exits on the third
-//! delivery; the chained handler stamps the trunk's own token with the same
-//! `Terminate` cause, so a park reading the token agrees with ral's root
-//! about why the agent is ending.  By convention `install` still runs after
-//! `ral_core::process::install_handlers`, but the forwarding targets are the
-//! static accessors `relay_handler`/
-//! `term_handler` rather than a
-//! captured disposition, so that ordering is documentation, not a
-//! correctness requirement.  [`crate::bootstrap::boot_shell`] owns that
-//! ceremony for exarch session shells, including `/clear` rebuilds.
-//!
-//! Windows has no single process-wide disposition to capture and replace:
-//! `SetConsoleCtrlHandler` instead keeps a list of handler routines, run
-//! last-registered-first until one returns `TRUE`.  `install` registers its
-//! own routine there — strictly after `ral_core::process::install_handlers`
-//! runs, which puts exarch's routine ahead of ral's `ctrlc`-installed one in
-//! that list; unlike Unix's static forwarding targets, this ordering is a
-//! genuine correctness requirement here, since the list position decides
-//! which routine runs first.  On Ctrl-C or
-//! Ctrl-Break — the same two events [`cancels_exchange`] recognises — it calls
-//! [`raise`] and `ral_core::process::relay_interrupt` directly: the
-//! non-escalating relay that cancels the current run's foreground scope
-//! and fans a Ctrl-Break out to every live, non-detached pipeline group,
-//! the same contract Unix's `relay_handler` gives a forwarded SIGINT.  It
-//! then returns `TRUE` ("handled"), so ral's own `ctrlc`-installed
-//! disposition — whose ladder ticks a counter toward `TerminateJobObject`
-//! and `ExitProcess` — never runs for these two events: a trunk interrupt
-//! can only ever cancel the exchange, never escalate, and never reaches a
-//! detached worker's group.  Every other console event (window close,
-//! logoff, shutdown) is a genuine termination request, not an exchange-cancel:
-//! [`cancels_exchange`] answers `false` for those, exarch's handler returns
-//! `FALSE` in turn, and ral's escalating disposition runs exactly as it
-//! would without exarch installed — the Windows analogue of SIGTERM/SIGHUP
-//! staying on Unix's escalating `term_handler`.
-//!
-//! The Esc key never reaches `SetConsoleCtrlHandler` at all: the TUI's own
-//! read loop captures it as a raw key event (raw mode disables
-//! `ENABLE_PROCESSED_INPUT`, so Windows stops turning Ctrl-C into a console
-//! event too — both arrive as ordinary key events instead) and calls
-//! [`raise_interrupt`] directly, which reaches the same non-escalating
-//! relay through [`deliver_interrupt`].  `console_ctrl_handler`'s
-//! registration still earns its keep for Ctrl-Break, which — unlike
-//! Ctrl-C — always raises a console event regardless of
-//! `ENABLE_PROCESSED_INPUT`, and for the termination events, which have no
-//! raw-mode key-event counterpart at all.
+//! Windows has no single disposition to replace — `SetConsoleCtrlHandler` keeps
+//! a list, run last-registered-first until one returns `TRUE` — so there
+//! `install` must run after `ral_core::process::install_handlers` to sit ahead
+//! of ral's `ctrlc` routine, a correctness requirement rather than the Unix
+//! convention.  Esc and Ctrl-C never reach that list anyway: raw mode clears
+//! `ENABLE_PROCESSED_INPUT` and both arrive as ordinary key events.  The
+//! registration earns its keep for Ctrl-Break, which raises a console event
+//! regardless, and for the termination events, which have no key-event twin.
+//! On both, [`crate::bootstrap::boot_shell`] owns the install ceremony.
 
 use ral_core::process::CancelCause;
 use std::sync::Arc;
@@ -106,54 +36,41 @@ use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
 /// An agent's cancellation handle.
 ///
-/// Cloning shares the same flag (an
-/// `Arc<AtomicU8>`, holding the [`CancelCause`] a cancel was raised with, `0`
-/// while un-cancelled), so the registry entry's clone and the attend loop's
-/// clone are one token — cancelling either halts the agent's exchange.
+/// Clones share one flag, so the registry's entry and the attend loop hold the
+/// same token: cancelling either halts the agent's exchange.
 #[derive(Clone, Default)]
 pub struct Token(Arc<AtomicU8>);
 
 impl Token {
-    /// A fresh, un-cancelled token.  Each agent owns one for its life; the
-    /// trunk additionally [`publish`]es its token to the signal slot.
+    /// A fresh, un-cancelled token.  Each agent owns one for its life.
     pub fn new() -> Self {
         Self(Arc::new(AtomicU8::new(0)))
     }
 
-    /// True once this token (or, since clones share the flag, any of its
-    /// shares) has been cancelled — for *any* cause.  The `deliberate` loop and the
-    /// provider poll this to unwind whatever exchange is in flight.
+    /// True once cancelled for *any* cause — what `deliberate` and the provider
+    /// poll to unwind the exchange in flight.
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Relaxed) != 0
     }
 
-    /// True when a *terminate*-cause cancel is in force — any cause but an
-    /// [`Interrupt`](CancelCause).  A non-`Held` park ends the agent on this;
-    /// a bare interrupt only drops the in-flight exchange and the agent re-parks.
+    /// True when a terminate-class cause is in force — anything but
+    /// [`Interrupt`](CancelCause).  A non-`Held` park ends the agent on this.
     pub fn terminated(&self) -> bool {
         let flag = self.0.load(Ordering::Relaxed);
         flag != 0 && flag != CancelCause::Interrupt as u8
     }
 
-    /// Cancel this token and every share of it, recording `cause`.  Raises
-    /// the flag to the maximum of its current value and `cause` — the same
-    /// monotone escalation [`ral_core::process::CancelScope::cancel`] gives ral's own scopes — so
-    /// a later, weaker cause (an Esc `Interrupt` arriving after an
-    /// `agent-cancel` `Explicit`) can never mask a stronger one already in
-    /// force.
+    /// Cancel this token and every share of it, recording `cause`.  Monotone,
+    /// like `CancelScope::cancel`: a weaker cause arriving later (an Esc
+    /// `Interrupt` after an `agent-cancel` `Explicit`) can never mask a stronger
+    /// one already in force.
     pub fn cancel(&self, cause: CancelCause) {
         self.0.fetch_max(cause as u8, Ordering::Relaxed);
     }
 
-    /// Clear a bare interrupt — the per-exchange reset the attend loop runs at a
-    /// genuine exchange boundary, so a prior exchange's Esc never bleeds into the
-    /// next.  A compare-exchange from exactly [`Interrupt`](CancelCause::Interrupt)
-    /// to `0`: any terminate-class cause already recorded (`Explicit`,
-    /// `Deadline`, ...) is left in force, since an exchange boundary must never
-    /// erase a cascade cancellation that landed between the attend loop's
-    /// pop and this reset.  Each agent holds one sticky token (registered
-    /// once, so the subtree cascade always reaches the live exchange); the
-    /// boundary clears its flag rather than swapping the `Arc`.
+    /// Clear a bare interrupt, leaving any terminate-class cause in force: an
+    /// exchange boundary must never erase a cascade cancellation that landed
+    /// between the attend loop's pop and this reset.
     pub fn reset(&self) {
         let _ = self.0.compare_exchange(
             CancelCause::Interrupt as u8,
@@ -164,28 +81,17 @@ impl Token {
     }
 }
 
-/// The trunk's token flag, published for the signal handler.  Null when no
-/// trunk is publishing.  Holds a pointer into the [`Token`]'s `Arc`, made
-/// immortal by [`publish`]'s deliberate leak so the pointee outlives every
-/// guard.
+/// The trunk's token flag, published for the signal handler; null when no trunk
+/// is publishing.  The pointee is immortal, by [`publish`]'s deliberate leak.
 static CURRENT: AtomicPtr<AtomicU8> = AtomicPtr::new(std::ptr::null_mut());
 
-/// Publish an existing token to the signal slot for as long as the returned
-/// guard lives.
+/// Publish `token`'s flag to the signal slot for as long as the guard lives.
 ///
-/// The trunk (the parent-less agent) calls it once, holding the
-/// guard for its whole attend loop, so a SIGINT/SIGTERM/Ctrl-C cancels the trunk's
-/// current exchange through the token it already threads — without the
-/// per-exchange-mint dance, because the boundary [`reset`](Token::reset)s the same
-/// sticky token instead of swapping it.  A signal handler that has already
-/// loaded the slot's pointer may dereference it at any later instant,
-/// including after the guard has dropped and restored the slot, so the
-/// published allocation must outlive the guard rather than merely the
-/// publishing interval: this leaks one strong share of the token's `Arc`,
-/// making the pointee live for the rest of the process.  That leak is
-/// bounded and deliberate — production calls this once per process, with
-/// the trunk holding the guard for its whole attend loop, plus a handful of calls
-/// from tests.
+/// A handler that has already loaded the slot's pointer may dereference it at
+/// any later instant, including after the guard dropped and restored the slot,
+/// so the pointee must outlive the guard rather than the publishing interval:
+/// this leaks one strong share of the token's `Arc`.  Bounded — the trunk calls
+/// this once, holding the guard for its whole attend loop.
 pub fn publish(token: &Token) -> SlotGuard {
     std::mem::forget(token.0.clone());
     let flag: *const AtomicU8 = Arc::as_ptr(&token.0);
@@ -195,11 +101,8 @@ pub fn publish(token: &Token) -> SlotGuard {
 
 /// RAII handle for the published slot: restores the prior publication on drop.
 ///
-/// A swap, not a clear, so an inner publication nested inside an outer one —
-/// an overlapping `publish` — reveals the outer token again rather than
-/// leaving the slot null underneath it.  The pointee is immortal (leaked by
-/// [`publish`]), so the guard bounds only *when* the slot fires, not how long
-/// the allocation behind it lives.
+/// A swap, not a clear, so an inner publication nested inside an outer one
+/// reveals the outer token again rather than leaving the slot null beneath it.
 pub struct SlotGuard {
     prev: *mut AtomicU8,
 }
@@ -210,59 +113,47 @@ impl Drop for SlotGuard {
     }
 }
 
-/// True if the trunk's published slot reads cancelled.  A test probe for the
-/// signal-handler slot: production code observes cancellation through the
-/// threaded [`Token`] directly, so the slot's boolean is read only here.
-/// False when no trunk is publishing.
+/// True if the trunk's published slot reads cancelled — a test probe only, since
+/// production observes cancellation through the threaded [`Token`].
 #[cfg(all(test, unix))]
 pub(crate) fn is_set() -> bool {
     let p = CURRENT.load(Ordering::Acquire);
-    // SAFETY: a non-null slot points into the allocation `publish` leaks, so
-    // the pointee is live for the rest of the process (see `publish`).
+    // SAFETY: a non-null slot points into the allocation `publish` leaks, so the
+    // pointee outlives the process.
     !p.is_null() && unsafe { (*p).load(Ordering::Relaxed) } != 0
 }
 
-/// Raise `cause` on the trunk's published token (signal-handler safe: a
-/// single atomic load of the slot plus a `fetch_max`, so a weaker cause can
-/// never mask a stronger one already recorded).  A no-op when no trunk is
-/// publishing.
+/// Raise `cause` on the trunk's published token, or nothing when none is
+/// published.  Signal-handler safe: one atomic load plus a `fetch_max`.
 fn raise(cause: CancelCause) {
     let p = CURRENT.load(Ordering::Acquire);
     if !p.is_null() {
-        // SAFETY: a non-null slot points into the allocation `publish` leaks,
-        // so the pointee is live for the rest of the process (see `publish`).
+        // SAFETY: a non-null slot points into the allocation `publish` leaks, so
+        // the pointee outlives the process.
         unsafe { (*p).fetch_max(cause as u8, Ordering::Relaxed) };
     }
 }
 
-/// The trunk-only half of Esc/Ctrl-C: cancel the trunk's published token
-/// with `Interrupt` and unwind its current exchange via [`deliver_interrupt`].
-///
-/// Any other focused tab instead goes through [`crate::fleet::registry::AgentRegistry::interrupt`],
-/// which reaches that agent's own token directly rather than the slot (see
-/// the module doc).
+/// The trunk-only half of Esc/Ctrl-C: `Interrupt` on the published token, then
+/// [`deliver_interrupt`] to unwind the exchange.  Any other focused tab goes
+/// through [`crate::fleet::registry::AgentRegistry::interrupt`] instead, which
+/// reaches that agent's own token rather than the slot.
 pub fn raise_interrupt() {
     raise(CancelCause::Interrupt);
     deliver_interrupt();
 }
 
-/// Install the chained signal handler.
+/// Install the chained signal handler: SIGINT into ral's non-escalating
+/// `relay_handler`, SIGTERM/SIGHUP into its escalating `term_handler`.
 ///
-/// By convention runs *after* [`ral_core::process::install_handlers`], though
-/// [`chained`] forwards into ral's handlers via the static accessors
-/// `relay_handler`/
-/// `term_handler` rather than a captured
-/// disposition, so the ordering is documentation, not a correctness
-/// requirement.  SIGINT forwards into the non-escalating `relay_handler`,
-/// which requests the cooperative foreground unwind and relays to external
-/// pipeline groups but never `_exit`s; SIGTERM/SIGHUP forward into the
-/// escalating `term_handler`, the right ladder for a deliberate termination
-/// request.
+/// [`chained`] forwards through those static accessors rather than a captured
+/// disposition, so running after `ral_core::process::install_handlers` is
+/// convention, not a correctness requirement.
 #[cfg(unix)]
 pub fn install() {
-    // SAFETY: `chained`'s body (a `fetch_max` on the published slot plus a
-    // direct call into `relay_handler`/`term_handler`, both plain
-    // async-signal-safe fn items) is safe to run from a signal handler.
+    // SAFETY: `chained`'s body is a `fetch_max` on the published slot plus a
+    // direct call into `relay_handler`/`term_handler`, both plain fn items —
+    // async-signal-safe throughout.
     unsafe {
         libc::signal(libc::SIGINT, chained as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, chained as *const () as libc::sighandler_t);
@@ -284,35 +175,25 @@ extern "C" fn chained(sig: libc::c_int) {
     }
 }
 
-/// Raw mode disables `ISIG`, so pressing Ctrl-C no longer causes the
-/// kernel to deliver SIGINT to the foreground job.  Recreate that
-/// missing terminal behaviour, then cancel the current run's foreground
-/// scope so the evaluator unwinds the foreground at its next poll.
+/// Recreate the SIGINT raw mode swallowed — `ISIG` is off, so the kernel no
+/// longer delivers one to the foreground job — then unwind ral's foreground.
 ///
-/// A foreground external child still gets a real SIGINT via its own
-/// process group ([`ral_core::process::interrupt_foreground_child`]) — killing *another* group
-/// carries no escalation.  For ral itself we cancel the current run's
-/// foreground scope with [`CancelCause::Interrupt`](ral_core::process::CancelCause):
-/// the evaluator unwinds the foreground at its next poll, while detached
-/// workers — parented at the durable root, not the foreground — are
-/// spared, and there is no global counter to escalate toward a
-/// third-signal `_exit`.
+/// A foreground external child gets a real SIGINT through its own process group
+/// ([`ral_core::process::interrupt_foreground_child`]); signalling *another*
+/// group carries no escalation.  For ral itself we cancel the run's foreground
+/// scope, sparing detached workers (parented at the durable root) and ticking no
+/// counter toward a third-signal `_exit`.
 #[cfg(unix)]
 fn deliver_interrupt() {
     ral_core::process::interrupt_foreground_child();
     ral_core::process::request_foreground_cancel(ral_core::process::CancelCause::Interrupt);
 }
 
-/// Raw mode suppresses the console's automatic Ctrl-C handling — Esc and
-/// Ctrl-C both surface as ordinary key events instead (see the module
-/// doc).  Call ral's non-escalating relay directly, in-process: it cancels
-/// the current run's foreground scope and fans a Ctrl-Break out to every
-/// live, non-detached pipeline group, exactly what [`console_ctrl_handler`]
-/// does for a real console event.  A `GenerateConsoleCtrlEvent` re-injection
-/// was tried and rejected here: it broadcasts to the whole console group and
-/// re-enters `SetConsoleCtrlHandler`'s chain, ticking ral's escalation
-/// counter on every trunk interrupt — exactly the contract this module must
-/// not violate.
+/// Raw mode suppresses the console's automatic Ctrl-C handling, so Esc and
+/// Ctrl-C both surface as ordinary key events.  Call ral's non-escalating relay
+/// in-process: re-injecting with `GenerateConsoleCtrlEvent` would broadcast to
+/// the whole console group and re-enter `SetConsoleCtrlHandler`'s chain, ticking
+/// ral's escalation counter on every trunk interrupt.
 #[cfg(windows)]
 fn deliver_interrupt() {
     ral_core::process::relay_interrupt();
@@ -322,23 +203,14 @@ fn deliver_interrupt() {
 fn deliver_interrupt() {}
 
 /// Whether a delivered Windows console-control event is an exchange-cancel
-/// gesture — Ctrl-C or Ctrl-Break, the same two events the `ctrlc` crate
-/// reacts to — that exarch's handler fully handles itself.
+/// gesture — Ctrl-C or Ctrl-Break — that exarch's handler fully handles itself.
 ///
-/// Pulled out of [`console_ctrl_handler`] as a pure function of the event
-/// code so the decision is unit-testable without a real console handler —
-/// `SetConsoleCtrlHandler` cannot be exercised in a test, but the decision
-/// it drives can, the same reason [`Token`]'s cause is a plain `u8` rather
-/// than something only readable inside a handler.
-///
-/// The single bool doubles as both "does this cancel the exchange" and "does
-/// exarch report the event as handled": for Ctrl-C/Ctrl-Break exarch
-/// performs the whole non-escalating relay itself and must stop the event
-/// from reaching ral's escalating disposition next in the handler list, so
-/// the two questions have one answer.  Every other event (window close,
-/// logoff, shutdown) is a genuine termination request with no exchange to
-/// cancel, and exarch leaves it unhandled so ral's own disposition still
-/// applies its escalation ladder — see the module doc.
+/// A pure function of the event code, so the decision is unit-testable on every
+/// host: `SetConsoleCtrlHandler` cannot be exercised in a test, but what it
+/// drives can.  The single bool answers "does this cancel the exchange" and
+/// "does exarch report the event handled" at once, because exarch performs the
+/// whole relay itself and must stop the event from reaching ral's escalating
+/// disposition next in the list.
 #[cfg_attr(
     not(windows),
     allow(
@@ -353,31 +225,22 @@ pub(crate) fn cancels_exchange(ctrl_type: u32) -> bool {
     ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT
 }
 
-/// Set-once guard for [`install`]'s `SetConsoleCtrlHandler` registration.
-/// Unlike Unix's `libc::signal`, which simply overwrites the same
-/// disposition on every call, `SetConsoleCtrlHandler(_, TRUE)` *appends* a
-/// new handler routine to the process's list each time it is called — so
-/// without this guard, every `/clear` rebuild (each of which re-runs
-/// [`crate::bootstrap::boot_shell`], and so `install`) would register
-/// another copy.  Harmless individually ([`raise`] is idempotent), but
-/// unbounded growth over repeated rebuilds is not the "install once, keep
-/// working" contract `install` has on Unix.
+/// Set-once guard for `install`'s registration: `SetConsoleCtrlHandler(_, TRUE)`
+/// *appends* a routine on every call, where Unix's `libc::signal` overwrites the
+/// same disposition, so without this each `/clear` rebuild would add a copy.
 #[cfg(windows)]
 static WIN_CTRL_HANDLER_INSTALLED: std::sync::Once = std::sync::Once::new();
 
-/// Register exarch's console-ctrl handler.
+/// Register exarch's console-ctrl handler, once.
 ///
-/// Must run after `ral_core::process::install_handlers` (see the module doc
-/// for why); the handler translates Ctrl-C/Ctrl-Break into an exchange-cancel
-/// via [`cancels_exchange`] and reports those two events as handled so ral's
-/// own escalating disposition never runs for them, deferring to it only for
-/// the genuine termination events.
+/// Must run after `ral_core::process::install_handlers`, so this routine sits
+/// ahead of ral's in the list Windows runs newest-first.
 #[cfg(windows)]
 pub fn install() {
     WIN_CTRL_HANDLER_INSTALLED.call_once(|| {
         // SAFETY: `console_ctrl_handler` matches `PHANDLER_ROUTINE`'s
-        // `unsafe extern "system" fn(u32) -> BOOL` signature; `TRUE` (`1`)
-        // adds it to the process's handler list rather than removing it.
+        // `unsafe extern "system" fn(u32) -> BOOL` signature; `TRUE` (`1`) adds
+        // it to the process's handler list rather than removing it.
         unsafe {
             windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
                 Some(console_ctrl_handler),
@@ -388,17 +251,12 @@ pub fn install() {
 }
 
 /// The routine Windows calls on Ctrl-C/Ctrl-Break/console-close events.
-/// Runs on a dedicated OS thread (not signal context), so plain atomics —
-/// the same ones [`raise`] already uses for the Unix handler — are all it
-/// needs. A safe `extern "system" fn` coerces to `PHANDLER_ROUTINE`'s
-/// `unsafe extern "system" fn` pointer type, the same way `chained` (the
-/// Unix counterpart, just above) is a plain `extern "C" fn`.
 ///
-/// A Ctrl-C/Ctrl-Break is handled here in full — [`raise`] plus
-/// [`ral_core::process::relay_interrupt`], the same non-escalating relay
-/// [`deliver_interrupt`] calls for a raw-mode key event — and reported
-/// `TRUE` so ral's own escalating disposition never runs for it.  Every
-/// other event reports `FALSE`, deferring to ral's disposition unchanged.
+/// Runs on a dedicated OS thread rather than in signal context, so plain atomics
+/// are all it needs.  A Ctrl-C/Ctrl-Break is handled here in full — the same
+/// non-escalating relay `deliver_interrupt` calls for a raw-mode key event —
+/// and reported `TRUE`; every other event reports `FALSE`, deferring to ral's
+/// escalating disposition unchanged.
 #[cfg(windows)]
 extern "system" fn console_ctrl_handler(ctrl_type: u32) -> windows_sys::core::BOOL {
     if cancels_exchange(ctrl_type) {
@@ -409,9 +267,8 @@ extern "system" fn console_ctrl_handler(ctrl_type: u32) -> windows_sys::core::BO
     windows_sys::Win32::Foundation::FALSE
 }
 
-/// [`cancels_exchange`] is a plain function of a `u32` event code, so it is
-/// exercised natively on every platform this crate builds for — no
-/// `cfg(windows)`, no real console handler required.
+/// `cancels_exchange` is a plain function of a `u32` event code, so it is
+/// exercised natively on every platform this crate builds for.
 #[cfg(test)]
 mod cancels_exchange_tests {
     use super::cancels_exchange;
@@ -435,10 +292,9 @@ mod cancels_exchange_tests {
     }
 }
 
-/// [`Token::cancel`]/[`Token::reset`] are plain atomics over a
-/// [`CancelCause`] encoding, so their escalation and reset semantics are
-/// exercised natively on every platform this crate builds for — no signal
-/// handler, no slot, required.
+/// `Token::cancel`/`Token::reset` are plain atomics over a `CancelCause`
+/// encoding, so their escalation and reset semantics are exercised natively on
+/// every platform — no signal handler, no slot.
 #[cfg(test)]
 mod token_tests {
     use super::*;
@@ -497,25 +353,20 @@ mod token_tests {
 mod tests {
     //! Tests for exarch's raw-mode cancel path.
     //!
-    //! Unix-only: the chained-handler design under test exists only on
-    //! Unix.  On Windows `install` is a no-op and `deliver_interrupt`
-    //! emits an asynchronous `CTRL_C_EVENT` that the OS routes through
-    //! the console subsystem, so a synchronous unit assertion against
-    //! `ral_core::process` state is not meaningful there.
+    //! Unix-only: the chained-disposition design under test is Unix's, and
+    //! Windows registers a console-handler routine instead — one no test can
+    //! make `SetConsoleCtrlHandler` invoke.
 
     use super::*;
     use crate::agent::Agent;
     use std::sync::Mutex;
 
-    /// Both tests touch process-global state (the escalation ladder and the
+    /// These tests touch process-global state (the escalation ladder, the
     /// `CURRENT` slot), so they must not run concurrently.
     static SERIAL: Mutex<()> = Mutex::new(());
 
-    /// Esc cancels the trunk's published token (and, via `deliver_interrupt`,
-    /// the current run's foreground scope — exercised by `ral_core`'s own
-    /// slot tests), but never ticks ral's escalation ladder: detached
-    /// workers are cancelled through the registry cascade, not the
-    /// foreground, so they survive an Esc that stops the trunk alone.
+    /// The ladder is ral's road to a force-exit; an Esc must never take a step
+    /// down it.
     #[test]
     fn esc_cancels_token_without_ticking_escalation_ladder() {
         let _g = SERIAL.lock().unwrap();
@@ -533,11 +384,8 @@ mod tests {
         ral_core::process::clear();
     }
 
-    /// Esc routes through `raise_interrupt`; pressing it repeatedly must
-    /// never escalate toward a force-exit.  The Esc path cancels the
-    /// trunk's token and the foreground scope and never touches the
-    /// escalation ladder, so non-escalation holds by construction — the
-    /// ladder stays un-ticked no matter how many times Esc is pressed.
+    /// Non-escalation must hold however many times Esc is pressed, not just for
+    /// the first.
     #[test]
     fn repeated_interrupt_never_force_exits() {
         let _g = SERIAL.lock().unwrap();
@@ -556,10 +404,8 @@ mod tests {
         ral_core::process::clear();
     }
 
-    /// The exchange-boundary reset clears a prior exchange's Esc so it does not bleed
-    /// into the next.  The trunk holds one sticky published token; the attend
-    /// loop [`Token::reset`]s its flag at each genuine boundary rather than
-    /// swapping the `Arc`, and the slot keeps tracking that same token.
+    /// The boundary clears the sticky token's flag rather than swapping the
+    /// `Arc`, so the slot keeps tracking that same token across exchanges.
     #[test]
     fn reset_clears_prior_exchange_cancel() {
         let _g = SERIAL.lock().unwrap();
@@ -570,7 +416,6 @@ mod tests {
         raise_interrupt();
         assert!(token.is_cancelled(), "Esc cancels the published token");
         assert!(is_set(), "the slot reports cancelled");
-        // The attend loop's per-exchange reset clears the flag for the next exchange.
         token.reset();
         assert!(
             !token.is_cancelled(),
@@ -583,9 +428,8 @@ mod tests {
         ral_core::process::clear();
     }
 
-    /// The attend loop threads *clones* of the published token into
-    /// `deliberate`/`run_batch`/tools; cancelling the published token cancels every
-    /// clone, so an Esc landing mid-exchange halts the in-flight tool call.
+    /// The attend loop threads *clones* into `deliberate`/`run_batch`/tools, so
+    /// an Esc landing mid-exchange must halt the in-flight tool call.
     #[test]
     fn published_token_clone_shares_cancellation() {
         let _g = SERIAL.lock().unwrap();
@@ -603,16 +447,9 @@ mod tests {
         ral_core::process::clear();
     }
 
-    /// `boot_shell` installs ral's bare handlers, then re-chains exarch's
-    /// cancel handler before returning.  Without the re-install, the bare
-    /// ral `term_handler` would run alone after any shell rebuild: `raise`
-    /// (the token half of the chain) would never fire, and the delivered
-    /// SIGINT would tick ral's escalation ladder.  With the chain in place
-    /// a SIGINT sets the token and routes into the *non-escalating*
-    /// `relay_handler`, which cancels the foreground run without ever
-    /// ticking the third-signal `_exit` ladder — so the two observable
-    /// signatures (token set, ladder un-ticked) together prove the chain
-    /// is installed and a delivered SIGINT can only cancel, never force-exit.
+    /// Without `boot_shell`'s re-chaining, ral's bare handler would run alone
+    /// after a rebuild: a delivered SIGINT would miss the token and tick the
+    /// escalation ladder.
     #[test]
     #[ignore = "delivers a real process-wide SIGINT — driven in its own process by signal_delivery_tests_own_their_process"]
     fn boot_shell_restores_the_chain_after_handler_clobber() {
@@ -638,13 +475,9 @@ mod tests {
         ral_core::process::clear();
     }
 
-    /// `/clear` can be the first action after a delivered termination
-    /// signal.  The signal's cooperative delivery (a cause on the cancel
-    /// slots) dies with the run that unwound on it, but its escalation
-    /// tick would otherwise outlive the run — leaving the rebuilt
-    /// session one delivery closer to the third-signal `_exit`.  The
-    /// exarch shell constructor resets the ladder before loading the
-    /// library.
+    /// A signal's cooperative delivery dies with the run that unwound on it, but
+    /// its escalation tick would outlive the run — leaving a rebuilt session one
+    /// delivery closer to the third-signal `_exit`.
     #[test]
     #[ignore = "invokes the SIGTERM handler, root-cancelling every published slot — driven in its own process by signal_delivery_tests_own_their_process"]
     fn clear_resets_the_escalation_ladder_on_reboot() {
@@ -656,9 +489,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut session = Agent::for_test(&dir, "system").expect("test session");
 
-        // Seed the ladder exactly as a delivered SIGTERM would: through
-        // ral's own term handler.  No run is running, so the published
-        // cancel slots are null and the delivery is the tick alone.
+        // Seed the ladder exactly as a delivered SIGTERM would.  No run is
+        // running, so the published cancel slots are null and the delivery is
+        // the tick alone.
         ral_core::process::term_handler()(libc::SIGTERM);
         assert!(
             ral_core::process::escalation_pending(),
@@ -685,15 +518,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Drive the two `#[ignore]`d signal-delivery tests above in a child
-    /// process they own outright.  Delivered signals are process-wide — a
-    /// raised SIGINT cancels the process's published foreground exchange, and
-    /// the SIGTERM handler root-cancels every published slot — so inside
-    /// the parallel test binary they terminate whatever *other* test
-    /// happens to be mid-exchange.  The `SERIAL` lock cannot help: the victims
-    /// are readers that never know to take it.  Re-execing the test binary
-    /// filtered to exactly these tests gives them the singleton process the
-    /// signal machinery is designed around.
+    /// Drive the two `#[ignore]`d tests above in a child process they own.
+    /// Delivered signals are process-wide, so in the parallel test binary they
+    /// terminate whatever *other* test is mid-exchange; `SERIAL` cannot help,
+    /// since the victims are readers that never know to take it.
     #[test]
     fn signal_delivery_tests_own_their_process() {
         let exe = std::env::current_exe().expect("test binary path");
@@ -708,8 +536,8 @@ mod tests {
             .output()
             .expect("spawn the child test process");
         let stdout = String::from_utf8_lossy(&out.stdout);
-        // The pass-count check guards the filters: a renamed test would
-        // otherwise make the child silently run nothing and still exit 0.
+        // Without the pass count, a renamed test would make the child silently
+        // run nothing and still exit 0.
         assert!(
             out.status.success() && stdout.contains("2 passed"),
             "child signal tests failed or did not both run:\n{stdout}\n{}",
@@ -717,10 +545,6 @@ mod tests {
         );
     }
 
-    /// An inner `publish` nested inside an outer one restores the outer
-    /// publication on drop, rather than leaving the slot null underneath
-    /// it, so a nested exchange hands the signal path back to the exchange
-    /// that contains it.
     #[test]
     fn inner_publish_restores_the_outer_token_on_drop() {
         let _g = SERIAL.lock().unwrap();
@@ -750,11 +574,9 @@ mod tests {
         ral_core::process::clear();
     }
 
-    /// The chained handler maps each signal to its own cause: SIGINT is a
-    /// per-tab interrupt, SIGTERM/SIGHUP a genuine termination request —
-    /// stamping every signal `Interrupt` would misreport the cause during
-    /// a real termination and let a park `UntilCancelled` on the trunk
-    /// token survive its own SIGTERM.
+    /// Stamping every signal `Interrupt` would misreport the cause during a real
+    /// termination and let a park `UntilCancelled` on the trunk token survive
+    /// its own SIGTERM.
     #[test]
     fn chained_maps_each_signal_to_its_own_cause() {
         let _g = SERIAL.lock().unwrap();

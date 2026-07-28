@@ -1,10 +1,9 @@
-//! Map / value predicates: `keys`, `has`, `is-empty`, `equal`, `lt`, `gt`.
-//! The filesystem predicates (`exists`, `is-file`, …) live in [`super::fs`]
-//! beside the other path-resolving builtins.
+//! Map and value predicates: `keys`, `has`, `is-empty`, `equal`, `lt`, `gt`.
+//! The filesystem probes (`exists`, `is-file`, …) live in [`super::fs`].
 //!
-//! Each comparison records its boolean outcome in `shell.last_status` so
-//! that pipeline `?` chaining and `if` see a familiar exit-code-shaped
-//! signal alongside the returned `Bool`.
+//! Each Bool also lands in `$STATUS` (true → 0), so a bare predicate reads like
+//! POSIX `test`.  Comparison belongs to [`super::util`], shared with the `$[…]`
+//! operators in [`crate::evaluator::expr`], so the two cannot drift.
 
 use crate::types::{Break, Error, Settled, Shell, Value, as_map_ref};
 

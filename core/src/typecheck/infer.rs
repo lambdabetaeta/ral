@@ -1,9 +1,5 @@
-//! Type inference: `infer_val`, `infer_comp`, and supporting helpers.
-//!
-//! `infer_val` synthesizes a value type (Ty) for a Val node.
-//! `infer_comp` synthesizes a computation type (`CompTy`) for a Comp node.
-//! Both are mutually recursive: thunk bodies are inferred as computations,
-//! and return values are inferred as values.
+//! Type synthesis for the CBPV pair: `infer_val` yields a `Ty`, `infer_comp` a
+//! `CompTy`, mutually recursive through thunks.
 
 use super::builtins::{FieldSchema, plugin_entry_field_ty};
 use super::env::{InferCtx, TyEnv};
@@ -21,11 +17,9 @@ use crate::syntax::ast::{BinaryOp, BinaryOpKind};
 use crate::syntax::tag::{is_tag_label, tag_row_label};
 use std::sync::Arc;
 
-/// Walk a row spine and collect (label, `payload_ty`) pairs in order of first
-/// appearance, stopping at the first non-Extend node (Empty or unresolved
-/// variable).  Caller is expected to have applied substitutions; a duplicated
-/// label resolves last-wins (the deeper, later occurrence's payload type),
-/// matching the runtime's last-wins semantics for duplicate keys.
+/// Labels of a *resolved* row spine in first-appearance order, stopping at the
+/// first non-`Extend`.  A repeated label keeps the deepest payload — last-wins,
+/// as `Value::map` is at runtime.
 fn collect_extends(row: &Row) -> Vec<(String, Ty)> {
     let mut out: Vec<(String, Ty)> = Vec::new();
     let mut cur = row;
@@ -43,29 +37,14 @@ fn collect_extends(row: &Row) -> Vec<(String, Ty)> {
     }
 }
 
-/// Best-effort lookup from a `case` arm's row label to the span of
-/// the handler body the user wrote at that arm.
-///
-/// `table` is expected to be the second operand of `case` — a literal
-/// `Val::Map` of `(label → handler thunk)` entries.  For each entry
-/// whose key is a tag-shaped literal and whose value is a `Val::Thunk`,
-/// record `(label_with_leading_backtick, handler_body_span)`.  Any other
-/// shape (spread, runtime key, non-thunk handler) is silently skipped
-/// — the caller falls back to the enclosing `case` span when no entry
-/// matches.
-///
-/// The "handler body span" peers past the lambda's wrapping `Lam` node
-/// (whose span is the enclosing statement, not the body) to the actual
-/// body Comp the user wrote.  Without that, `{ |s| body }` arms would
-/// resolve back to the enclosing `let`/`case` span and the caret would
-/// underline the whole `case` form — exactly what we're trying to
-/// avoid.
+/// Each `case` arm's tag label paired with its handler body's span, so an
+/// arm-local complaint underlines the arm and not the whole `case` form.
+/// Anything but a literal tag key over a `Val::Thunk` is skipped, and the
+/// caller falls back to the `case` span.
 fn collect_handler_spans(table: &Val) -> std::collections::HashMap<String, crate::source::Span> {
     fn handler_body_span(inner: &Comp) -> Option<crate::source::Span> {
         match &inner.item {
-            // `{ |p| body }` elaborates to `Lam { param, body }`; the
-            // outer Lam's span is the surrounding statement, but
-            // `body.span` is the user-written body itself.
+            // A `Lam`'s own span is the enclosing statement; the body's is the arm.
             crate::ir::CompKind::Lam { body, .. } => body.span.or(inner.span),
             _ => inner.span,
         }
@@ -93,18 +72,11 @@ fn collect_handler_spans(table: &Val) -> std::collections::HashMap<String, crate
     out
 }
 
-/// Heuristic: did the user almost certainly write a single `"..."` string
-/// that the lexer split at an unescaped inner `"`?  Recognised pattern:
-/// the head came from a quoted-string source (a `Val::String` or a
-/// `CompKind::Interpolation`), AND the args list contains both a string
-/// chunk and a hoisted non-string fragment — that's the IR shape the
-/// lexer produces when it closes the outer string on an inner `"` and
-/// the body in between contains an interpolation / subshell that gets
-/// hoisted into its own bind (so it lands as `Val::Variable` in arg
-/// position).  Pure `'foo' bar baz` (head-string + bare-word args) keeps
-/// the generic hint: every arg is a `Val::String` after [`Val::from_word`]
-/// classifies it, so the "non-string fragment" half of the conjunction
-/// is false and we fall through.
+/// Heuristic: did the lexer close a `"…"` on an unescaped inner quote?  The
+/// giveaway is a quoted head whose args mix a string chunk with a hoisted
+/// non-string fragment — the interpolation between the quotes, bound out into
+/// its own variable.  Bare words are all `Val::String` after [`Val::from_word`],
+/// so `'foo' bar baz` falls through to the generic hint.
 fn looks_like_nested_quote_mistake(head: &Comp, args: &[&Val]) -> bool {
     let head_from_quoted = matches!(
         head.item,
@@ -115,12 +87,9 @@ fn looks_like_nested_quote_mistake(head: &Comp, args: &[&Val]) -> bool {
     head_from_quoted && any_string_arg && any_non_string_arg
 }
 
-/// Recognise the IR shape the elaborator produces for `alias name { body }`.
-///
-/// Returns `Ok(Some((name, thunk)))` when the shape matches; `Ok(None)`
-/// when the head is not `alias` (normal exec, fall through); `Err(msg)`
-/// when the head is `alias` but the shape is malformed — a bug in the
-/// elaborator or an adversarial IR.
+/// The elaborator's IR shape for `alias name { body }`.  `Ok(None)` means the
+/// head is not `alias` and the caller falls through to a normal exec; `Err`
+/// means it is `alias`, malformed.
 fn alias_statement_shape(part: &Comp) -> Result<Option<(&str, &Arc<Comp>)>, &'static str> {
     let CompKind::Exec(exec) = &part.item else {
         return Ok(None);
@@ -169,8 +138,7 @@ pub fn infer_comp(ctx: &mut InferCtx, env: &mut TyEnv, comp: &Comp) -> CompTy {
     Inferencer { ctx, env }.infer_comp(comp)
 }
 
-/// Inference state.  Both the struct and its fields are `pub(super)` —
-/// only code inside `typecheck/` can name it or read/mutate its fields.
+/// Inference state, built directly by the entry points in `typecheck.rs`.
 pub(super) struct Inferencer<'a> {
     pub(super) ctx: &'a mut InferCtx,
     pub(super) env: &'a mut TyEnv,
@@ -211,11 +179,8 @@ impl Inferencer<'_> {
                 }
             }
             IrPattern::Map(entries) => {
-                // Required entries (no default) shape the value's row;
-                // defaulted entries do not — the field may be absent and
-                // the default supplies the binding instead.  The field's
-                // type stays a fresh tyvar in either case, refined by
-                // uses of the bound name.
+                // Only entries without a default shape the row: a defaulted
+                // field may be absent, with the default supplying the binding.
                 let tail = self.ctx.unifier.fresh_row_var();
                 let mut row = Row::Var(tail);
                 let mut field_tys = Vec::with_capacity(entries.len());
@@ -249,12 +214,9 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Value observed when a byte-output computation crosses a value boundary.
-    ///
-    /// Most computations carry their real value directly.  A byte-output
-    /// computation whose value is `Unit` is the one intentional exception:
-    /// the bytes are the value at `let`/force-like boundaries, decoded as a
-    /// `String` by the evaluator after stripping one trailing newline.
+    /// The value seen when a computation crosses a value boundary.  A
+    /// byte-output computation returning `Unit` is the one exception: its bytes
+    /// *are* the value, which the evaluator decodes as a `String`.
     pub(super) fn observed_value_ty(&mut self, ty: Ty, output: PipeMode) -> Ty {
         match (
             self.ctx.unifier.resolve_mode(&output),
@@ -265,33 +227,24 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Single-step force of a producer's return type at a value edge.
-    ///
-    /// A bare-block producer stage (`{ … }`) has return type
-    /// `Ty::Thunk(body)` — the suspended body computation.  At a value
-    /// edge the runtime forces it exactly once (`run_value_fold` runs
-    /// the block, yielding the body's result), so the value that
-    /// crosses to the consumer is the *body's* return
-    /// type.  Deref one thunk level to mirror that; a non-thunk producer
-    /// value (a `List`, a `Return`-typed stage's concrete value, or a
-    /// free var the consumer will constrain) passes through unchanged so
-    /// existing value-edge shapes (`[1,2,3] | { |xs| … }`) are untouched.
+    /// The value that actually crosses a pipeline's value edge.  The runtime
+    /// forces a producer exactly once there — `force_pipe_value` in
+    /// `runtime/pipeline.rs`, the twin of this function — so a block producer
+    /// contributes its *body's* return type, not the thunk.
     fn deref_forced_producer(&mut self, ty: Ty) -> Ty {
         match self.ctx.unifier.resolve_ty(&ty) {
             Ty::Thunk(inner) => match self.ctx.unifier.resolve_comp_ty(&inner) {
                 CompTy::Return(_, inner_ty) => *inner_ty,
-                // A `Fun`-shaped thunk (a `{ |x| … }` lambda producer with
-                // no upstream) is itself the produced value — forcing a
-                // lambda yields the lambda, matching `step_force`.  Leave
-                // the thunk in place so the consumer sees the function.
+                // Forcing a lambda is the identity, so a `Fun`-shaped thunk is
+                // itself the produced value: leave it for the consumer.
                 _ => ty,
             },
             _ => ty,
         }
     }
 
-    /// Project the I/O end (input or output) of a computation type, peering
-    /// past `Fun` arrows.  An unresolved comp var yields a fresh mode.
+    /// One end of a computation's channel spec, peering past `Fun` arrows; an
+    /// unresolved comp var yields a fresh mode.
     fn comp_end_mode(&mut self, cty: &CompTy, pick: fn(PipeSpec) -> PipeMode) -> PipeMode {
         match self.ctx.unifier.resolve_comp_ty(cty) {
             CompTy::Return(spec, _) => pick(spec),
@@ -300,15 +253,10 @@ impl Inferencer<'_> {
         }
     }
 
-    /// A stage's own channel signature for the annotation pass.
-    ///
-    /// A stage consumed as a value argument (the data-last fold's
-    /// function) takes its upstream on the value edge, so its input
-    /// channel is `∅`; its output is whatever the application result
-    /// emits — `infer_pipeline` has already rewritten the stage's type to
-    /// that result, so `comp_output_mode` reads it directly (a `{ |x|
-    /// echo $x }` consumer emits `Bytes`).  Otherwise both channel modes
-    /// come from the stage's [`PipeSpec`], not peering past `Fun` arrows.
+    /// A stage's own channel signature, for the annotation pass.  A stage
+    /// consumed as a value argument takes its upstream off the value edge, so
+    /// its input is `∅`; its output is that of the application result, which
+    /// `infer_pipeline` has already rewritten the stage's type to.
     fn stage_own_spec(&mut self, cty: &CompTy, consumed_as_value: bool) -> PipeSpec {
         if consumed_as_value {
             return PipeSpec {
@@ -330,12 +278,9 @@ impl Inferencer<'_> {
         self.comp_end_mode(cty, |s| s.output)
     }
 
-    /// Union of two branch modes: exactly one branch runs, so a clash is
-    /// not a contradiction but an unknown — the conditional's mode is
-    /// then a fresh variable a downstream stage can pin.  Agreement (or a
-    /// variable on either side) unifies as usual.  A conditional that
-    /// emits bytes in one arm and a value in the other (`if c { echo x }
-    /// else {}`) is accepted rather than rejected.
+    /// The mode of two arms only one of which runs, so a clash is not a
+    /// contradiction but an unknown: it yields a fresh variable a downstream
+    /// stage can pin, and `if c { echo x } else {}` is accepted.
     pub(super) fn union_mode(&mut self, a: PipeMode, b: PipeMode) -> PipeMode {
         if self.ctx.unifier.unify_mode(&a, &b).is_err() {
             self.ctx.unifier.fresh_mode()
@@ -355,12 +300,10 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Merge a conditional's branches into one computation type.  The
-    /// return value type is shared — every branch must produce the same
-    /// value (`unify_ty` reports a real disagreement) — but the
-    /// pipeline I/O modes are *unioned* via [`Self::union_mode`], not
-    /// equated, since only one branch runs.  A non-`Return` branch (a
-    /// bare lambda arm) falls back to strict computation-type unification.
+    /// Merge a conditional's branches: the value type is shared, since every
+    /// branch must produce the same value, but the channel modes are only
+    /// *unioned* via [`Self::union_mode`], since only one branch runs.  A
+    /// non-`Return` branch falls back to strict computation-type unification.
     fn merge_branches(&mut self, branches: Vec<CompTy>, why: &Reason) -> CompTy {
         let mut iter = branches.into_iter();
         let Some(mut acc) = iter.next() else {
@@ -387,10 +330,10 @@ impl Inferencer<'_> {
         acc
     }
 
-    /// Eventual return type of a computation, peering past `Fun` arrows
-    /// the same way [`Self::comp_end_mode`] peers past them for modes.
-    /// An unresolved `Var` yields a fresh type — callers that need the
-    /// constraint propagated back must unify themselves.
+    /// Eventual return type, peering past `Fun` arrows as
+    /// [`Self::comp_end_mode`] does for modes.  An unresolved `Var` yields a
+    /// fresh type, so a caller needing the constraint propagated must unify it
+    /// back itself.
     fn comp_return_ty(&mut self, cty: &CompTy) -> Ty {
         match self.ctx.unifier.resolve_comp_ty(cty) {
             CompTy::Return(_, ty) => *ty,
@@ -399,19 +342,12 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Does this pipeline consumer take its upstream as a *value
-    /// argument* rather than over the byte channel?  A consumer applied
-    /// to the piped value is function-shaped — a bare lambda (`Fun`), a
-    /// block literal carrying one (`Return(_, Thunk(Fun))`), or a head
-    /// still unknown enough to become one (a `Var`).  A consumer that is
-    /// a concrete non-thunk stage (`Return(_, τ)` for a byte decoder like
-    /// `from-X`) reads its input over the channel, so a value producer
-    /// feeding it is a `∅`-into-`Bytes` channel adjacency, not an
-    /// application.  A stage whose input mode resolves to ground `Bytes`
-    /// concretely reads the byte channel, so it takes the channel edge
-    /// regardless of how polymorphic its return value is.  Peers past
-    /// block-literal thunks the same way [`Self::autoderef_thunk_return`]
-    /// does, without planting constraints.
+    /// Does this consumer take its upstream as a value argument rather than
+    /// over the byte channel?  Function-shaped heads do — a bare lambda, a
+    /// block carrying one, a head still free enough to become one — but a
+    /// ground `Bytes` input overrides that, and a concrete non-thunk `Return`
+    /// (a `from-X` decoder) reads the channel.  Peers past block-literal thunks
+    /// as [`Self::autoderef_thunk_return`] does, but plants no constraints.
     fn consumes_value_arg(&mut self, cty: &CompTy) -> bool {
         match self.ctx.unifier.resolve_comp_ty(cty) {
             CompTy::Fun(..) | CompTy::Var(_) => true,
@@ -433,13 +369,10 @@ impl Inferencer<'_> {
             match self.ctx.unifier.resolve_comp_ty(&cty) {
                 CompTy::Return(_, ty) => match self.ctx.unifier.resolve_ty(&ty) {
                     Ty::Thunk(inner) => cty = *inner,
-                    // Free type variable in head position: this matches the
-                    // runtime behavior where eval_app's Thunk arm trampoline-
-                    // forces a Thunk value before applying args.  At type
-                    // level we constrain the head to be a Thunk and continue
-                    // unfolding.  Without this, a parameter `$f` whose type
-                    // is yet unknown would fail to unify when args are
-                    // applied.
+                    // A still-free head must become a thunk: the trampoline's
+                    // `apply` forces a `Value::Block` callee before applying
+                    // args, so a parameter `$f` of unknown type has to unfold
+                    // the same way rather than fail to unify.
                     Ty::Var(_) => {
                         let inner = self.ctx.unifier.fresh_comp_ty();
                         self.ctx.unify_ty(
@@ -457,10 +390,8 @@ impl Inferencer<'_> {
     }
 
     pub(super) fn apply_args(&mut self, mut cty: CompTy, args: &crate::ir::Args) -> CompTy {
-        // Precise per-arg checking is only possible when the args list
-        // has no spreads.  With spread the arity is dynamic; we still
-        // infer sub-expressions for type errors inside them, but don't
-        // constrain the function's parameter list.
+        // A spread makes the arity dynamic: infer the subexpressions so errors
+        // inside them still surface, but constrain no parameter.
         let Some(positional) = crate::ir::args::positional(args) else {
             for sub in crate::ir::args::iter_subvals(args) {
                 let _ = self.infer_val(sub);
@@ -469,11 +400,8 @@ impl Inferencer<'_> {
         };
         for (i, arg) in positional.into_iter().enumerate() {
             cty = self.autoderef_thunk_return(cty);
-            // Narrow pos to this argument's source range so a per-arg
-            // unify failure underlines the offending argument rather
-            // than the whole call.  Synthetic entries (no span,
-            // hoisted applications) fall back to the call's own pos
-            // via `with_span`'s `None`-as-no-op branch.
+            // Underline the offending argument, not the whole call.  A
+            // synthetic entry carries no span, and `with_span` leaves pos alone.
             cty = self.with_span(args[i].span, |this| {
                 let arg_ty = this.infer_val(arg);
                 let result = this.ctx.unifier.fresh_comp_ty();
@@ -485,13 +413,9 @@ impl Inferencer<'_> {
         cty
     }
 
-    /// If `head_ty` resolves to a `Return(_, ty)` where `ty` is concretely
-    /// not a function — i.e. not a `Thunk` and not a free type variable that
-    /// could later become one — return that `ty`.  Otherwise return `None`.
-    ///
-    /// Used by `CompKind::App` to detect `'foo' bar baz` and friends and
-    /// raise a surface-level diagnostic before the general unifier
-    /// mismatch fires.
+    /// The head's value type when it is concretely not a function — neither a
+    /// `Thunk` nor a variable that could still become one.  Lets the `App` rule
+    /// name `'foo' bar baz` before the general unifier mismatch fires.
     fn command_non_function_ty(&mut self, head_ty: &CompTy) -> Option<Ty> {
         match self.ctx.unifier.resolve_comp_ty(head_ty) {
             CompTy::Return(_, ty) => match self.ctx.unifier.resolve_ty(&ty) {
@@ -506,20 +430,16 @@ impl Inferencer<'_> {
         let cty = self.autoderef_thunk_return(cty);
         let result = self.ctx.unifier.fresh_comp_ty();
         let expected = CompTy::Fun(Box::new(piped_ty.clone()), Box::new(result.clone()));
-        // The consumer is a value-arg function (the caller routes only
-        // `Fun`/`Var` consumers here; a `Return` stage takes the channel
-        // edge instead), so the produced value must fit its first
-        // parameter.  A clash here is a genuine arg-shape error.
+        // Only consumers `consumes_value_arg` accepted are routed here, so a
+        // clash is a genuine argument-shape error, not a channel adjacency.
         let step_stream = self.piped_ty_is_step_shaped(piped_ty);
         self.ctx
             .unify_comp_ty(&cty, &expected, Reason::PipedValue { step_stream });
         result
     }
 
-    /// Does the piped value's type resolve to a variant whose row carries
-    /// a Step label (`` `more `` / `` `done ``)?  Diagnostic-only: the
-    /// answer shapes the unification hint in [`Self::apply_piped_value`],
-    /// never the types.
+    /// Diagnostic only: does the piped value carry a Step tag?  The answer
+    /// shapes the hint in [`Self::apply_piped_value`], never the types.
     fn piped_ty_is_step_shaped(&mut self, ty: &Ty) -> bool {
         let Ty::Variant(row) = self.ctx.unifier.apply_ty(ty) else {
             return false;
@@ -531,9 +451,8 @@ impl Inferencer<'_> {
             .any(|(l, _)| l == &more_tag || l == &done_tag)
     }
 
-    /// The value shape returned by `from-lines`: a recursive Step stream
-    /// of Strings, i.e. `` `more {head: String, tail: Thunk(F Step)}`` or
-    /// `` `done ``.  The recursion closes through a comp-var root, not a `TyVar`.
+    /// The value `from-lines` returns: a recursive Step stream of Strings.  The
+    /// recursion closes through a comp var, not a `TyVar`.
     pub(super) fn lines_step_ty(&mut self) -> Ty {
         let tail_comp = self.ctx.unifier.fresh_comp_ty();
         let more_tag = more_tag();
@@ -564,14 +483,10 @@ impl Inferencer<'_> {
         step
     }
 
-    /// Validate a map literal's entries against a per-key `schema`.
-    ///
-    /// For each entry, the value is inferred (so side-effects and inner
-    /// type errors surface); additionally, if the key is a literal the
-    /// `schema` knows, the value's type is unified against the expected
-    /// one.  Unknown keys, spreads, and dynamic keys stay runtime-
-    /// dispatched.  Shared by `within`, `grant`, and rc plugin entries —
-    /// three shapes of the same "optional-args map" idiom.
+    /// Check a map literal's entries against a per-key `schema`: every value is
+    /// inferred, and a literal key the schema knows also pins its value's type.
+    /// Unknown, spread, and dynamic keys stay runtime-dispatched.  Shared by
+    /// `within` and `grant` in `typecheck/scope.rs` and by rc plugin entries.
     pub(super) fn check_map_entry_fields(
         &mut self,
         entries: &[ValMapEntry],
@@ -598,9 +513,9 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Infer an rc `plugins:` list: validate each literal-map entry against
-    /// the plugin-entry schema, with no cross-entry unification so entries
-    /// with mixed shapes coexist.  The list's element type is a fresh var.
+    /// An rc `plugins:` list.  Each literal-map entry is checked against the
+    /// plugin-entry schema, with no cross-entry unification, so entries of
+    /// mixed shape coexist.
     fn infer_plugins_list(&mut self, elems: &[ValListElem]) -> Ty {
         for elem in elems {
             match elem {
@@ -621,14 +536,9 @@ impl Inferencer<'_> {
         Ty::List(Box::new(self.ctx.unifier.fresh_ty()))
     }
 
-    /// Instantiate `scheme` and apply the resulting body to a positional
-    /// `args` list.  Strips the outer `Thunk`, then runs `apply_args`.
-    /// Used by every entry-point dispatcher that lands on a scheme — the
-    /// registry's `Scheme` rule and the host-scheme fallback.  Going
-    /// through `instantiate()` prevents quantifier-var sharing across call
-    /// sites, so callers can pass a `Scheme` reference directly without
-    /// instantiating first.  For mono schemes `instantiate` short-circuits
-    /// to a clone of the body, so there is no overhead in the common case.
+    /// Instantiate `scheme`, strip its outer `Thunk`, and apply the body to
+    /// `args`.  Instantiating here is what keeps quantified variables from
+    /// being shared between call sites, so callers hand in a `Scheme` as is.
     pub(super) fn apply_scheme(
         &mut self,
         scheme: &super::scheme::Scheme,
@@ -639,11 +549,10 @@ impl Inferencer<'_> {
     }
 
     /// Infer the arm for head `name`, pin its `PipeSpec` to the head's, and
-    /// generalise.  Reinterpreting a known head preserves that head's modes;
-    /// an unknown head's modes are whatever the arm defines.  The arm's value
-    /// type stays whatever inference yields.  Reinterpreting a known head with
-    /// incompatible modes surfaces as a positioned
-    /// [`TypeErrorKind::ModeMismatch`] (`docs/SPEC.md` §4.2.1).
+    /// generalise.  Reinterpreting a known head preserves that head's modes and
+    /// a clash becomes a positioned [`TypeErrorKind::ModeMismatch`]; an unknown
+    /// head takes whatever modes the arm defines.  The arm's value type stays
+    /// free.
     pub(super) fn handler_comp_scheme(&mut self, name: &str, comp: &Comp) -> Scheme {
         let cty = self.infer_handler_comp(comp);
         if let Err(mismatch) = self.pin_arm_to_head(name, &cty) {
@@ -659,15 +568,11 @@ impl Inferencer<'_> {
         super::generalize::generalize(&mut self.ctx.unifier, self.env, &thunk_ty)
     }
 
-    /// Head `name`'s known `PipeSpec`: the spec carried by its handler
-    /// scheme when one is already in scope, so reinterpreting a known head
-    /// constrains the arm to that head's modes.  An unknown head carries no
-    /// spec, so it yields a fully fresh `F[μ, ν]` and the arm defines the
-    /// head's modes; the byte-channel discipline is enforced where pipeline
-    /// channels connect (`docs/SPEC.md` §4.2.1).  A scheme that does not
-    /// resolve to a `Return` constrains nothing, so it too yields a fully
-    /// fresh spec.  Lexical bindings and builtins never reach here — the
-    /// install guards reject those names before any arm is inferred.
+    /// Head `name`'s known `PipeSpec`, from its handler scheme when one is in
+    /// scope.  An unknown head — or a scheme that is not a `Return` —
+    /// constrains nothing and gets a fresh `F[μ, ν]`, leaving the byte-channel
+    /// discipline to the pipeline edges.  `reject_handler_for_binding` turns
+    /// lexical bindings and builtins away before any arm reaches here.
     fn head_pipe_spec(&mut self, name: &str) -> PipeSpec {
         let spec = self.env.lookup_handler(name).cloned().and_then(|handler| {
             let cty = self.instantiate_comp(&handler.scheme);
@@ -679,11 +584,9 @@ impl Inferencer<'_> {
         spec.unwrap_or_else(|| self.ctx.unifier.fresh_spec())
     }
 
-    /// Peel the leading `Fun` arrows of an alias arm to reach the body's
-    /// computation.  An arm with a parameter is typed `Fun(argv, body)`
-    /// (the calling convention forces it on the argv list); the head's
-    /// pipeline modes live on the *body's* `Return`, so mode pinning works
-    /// past the parameter arrows.
+    /// Peel an alias arm's leading `Fun` arrows: the calling convention forces
+    /// the arm on the argv list, so the head's pipeline modes live on the
+    /// body's `Return`, past the parameter arrow.
     fn alias_arm_body(&mut self, cty: &CompTy) -> CompTy {
         match self.ctx.unifier.resolve_comp_ty(cty) {
             CompTy::Fun(_, body) => self.alias_arm_body(&body),
@@ -691,11 +594,10 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Unify the arm's `PipeSpec` against head `name`'s known spec, leaving
-    /// the arm's value type free.  Forcing the arm's `CompTy` to a `Return`
-    /// shape is infallible; the only failure is a ground mode clash, returned
-    /// distinctly so the install path can reject it while the static path
-    /// positions it.
+    /// Unify the arm's `PipeSpec` against head `name`'s, leaving its value type
+    /// free.  The only failure is a ground mode clash, returned rather than
+    /// reported so `alias_arm_scheme` in `typecheck.rs` can refuse the install
+    /// while `handler_comp_scheme` merely positions it.
     pub(super) fn pin_arm_to_head(
         &mut self,
         name: &str,
@@ -708,9 +610,8 @@ impl Inferencer<'_> {
         self.ctx.unifier.unify_mode(&arm_output, &head.output)
     }
 
-    /// Instantiate `scheme` and strip the outer `Thunk` that schemes
-    /// carry, yielding the bare computation type — a fresh comp var if
-    /// the instantiated body is not a thunk.
+    /// Instantiate `scheme` and strip the outer `Thunk` schemes carry; a
+    /// non-thunk body yields a fresh comp var.
     fn instantiate_comp(&mut self, scheme: &Scheme) -> CompTy {
         match instantiate(&mut self.ctx.unifier, scheme) {
             Ty::Thunk(body) => *body,
@@ -718,18 +619,11 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Apply an alias/handler arm to a call site's arguments.
-    ///
-    /// A parameterised arm is typed `Fun(List(elem), body)`: the calling
-    /// convention forces it on the argv *list*, so every supplied argument
-    /// must inhabit the arm's element type `elem`.  Unifying each argument
-    /// against `elem` connects the call site to the arm's parameter —
-    /// without it an arm whose body constrains `elem` (e.g. `$[$a[0] + 1]`
-    /// pinning `elem` to `Integer`) accepted any argument and deferred the
-    /// clash to runtime.  Spreads splice a whole list, so each is unified
-    /// against `List(elem)`.  A nullary arm carries no parameter; its
-    /// arguments are inferred for inner errors but discarded, matching the
-    /// runtime, which ignores them.
+    /// Apply an alias/handler arm to a call site's arguments.  A parameterised
+    /// arm is `Fun(List(elem), body)`, so each argument unifies against `elem`
+    /// and each spread against `List(elem)`; without that, an arm whose body
+    /// pins `elem` accepts anything and defers the clash to runtime.  A nullary
+    /// arm discards its arguments, as the runtime does.
     fn apply_alias_arm(&mut self, scheme: &Scheme, args: &crate::ir::Args) -> CompTy {
         let cty = self.instantiate_comp(scheme);
         let CompTy::Fun(param, body) = self.ctx.unifier.resolve_comp_ty(&cty) else {
@@ -764,14 +658,10 @@ impl Inferencer<'_> {
         *body
     }
 
-    /// The runtime handler calling convention: an alias arm is forced on
-    /// the argv list.  When `param` is `Some`, the arm is a lambda whose
-    /// parameter binds the argv (`Ty::List` of a fresh element type)
-    /// inside a fresh scope; the arm's type keeps its `Fun(argv, body)`
-    /// shape so the call site can unify the supplied arguments against the
-    /// parameter type ([`Self::apply_alias_arm`]).  When `None`, the arm is
-    /// a bare body inferred inside that same scope frame with no argument
-    /// bound.
+    /// The runtime handler calling convention: an arm is forced on the argv
+    /// list, so a parameter binds a `Ty::List` and the arm keeps its
+    /// `Fun(argv, body)` shape for [`Self::apply_alias_arm`] to unify call-site
+    /// arguments against.
     pub(super) fn infer_alias_arm(&mut self, param: Option<&IrPattern>, body: &Comp) -> CompTy {
         match param {
             Some(param) => {
@@ -787,11 +677,9 @@ impl Inferencer<'_> {
         }
     }
 
-    /// The ordinary calling convention for a value binding installed as a
-    /// lexical scope binding: a lambda is a function `Fun(param, body)`
-    /// whose parameter binds a fresh value type (independent per
-    /// parameter) inside a fresh scope, a block is its bare body inferred
-    /// in that same scope frame.
+    /// The ordinary convention, for a value installed as a lexical binding: a
+    /// lambda is `Fun(param, body)` over a fresh value type, a block is its
+    /// bare body.  Contrast [`Self::infer_alias_arm`], which forces argv.
     pub(super) fn infer_binding_value(&mut self, param: Option<&IrPattern>, body: &Comp) -> CompTy {
         match param {
             Some(param) => {
@@ -853,15 +741,13 @@ impl Inferencer<'_> {
     }
 
     fn exec_comp_ty(&mut self, name: &str, args: &crate::ir::Args, external_only: bool) -> CompTy {
-        // Binding first: lexical/prelude names beat handlers and external
-        // commands.  A binding hit is final; errors in callability do not
-        // fall through to shell-style command lookup.
+        // Lookup order — binding, builtin, handler, external — with builtins
+        // ahead of aliases and `within [handlers:]` because they are language
+        // names, not user handlers.  A binding hit is final.
         if !external_only && let Some(scheme) = self.env.lookup_binding(name).cloned() {
             return self.apply_scheme(&scheme, args);
         }
 
-        // Builtin binding.  These are language names, not user handlers,
-        // so they are consulted before aliases and `within [handlers:]`.
         if !external_only && let Some(entry) = self.env.builtins.get(name) {
             use super::builtins::BuiltinTypeRule;
             match entry.type_rule {
@@ -877,10 +763,8 @@ impl Inferencer<'_> {
             return self.apply_alias_arm(&handler.scheme, args);
         }
 
-        // Fallback: a name that is neither a binding, a builtin, nor a
-        // handler is an external command.  Prelude functions reach the
-        // checker as bound variables (`App`), never as a bare `Exec` head,
-        // so no internal classification is needed here.
+        // Anything left is an external command: prelude functions arrive as an
+        // `App` on a bound variable, never as a bare `Exec` head.
         self.external_exec_comp_ty(args)
     }
 
@@ -902,27 +786,14 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Walk a `Seq`'s statements in order, binding alias definitions into
-    /// the current `TyEnv` scope as they are encountered so subsequent
-    /// statements in the same Seq can resolve against them.  Always runs
-    /// normal inference on every statement afterwards — the binding is
-    /// additive, not a replacement, so errors inside the alias body still
-    /// surface through the alias builtin's own type rule.
+    /// Walk a `Seq`, binding each `alias` definition into the current `TyEnv`
+    /// scope as it is met so later statements resolve against it.  The caller's
+    /// `with_scope` frame is what stops those bindings outliving the `Seq`.
     ///
-    /// The Seq must run inside a `with_scope` frame (added at the caller
-    /// in `infer_comp`'s `Seq` arm) so the bindings do not leak past the
-    /// Seq's lexical extent.  Aliases inside conditional or function
-    /// bodies aren't at Seq level, so they don't leak — documented
-    /// behaviour.
-    ///
-    /// An alias whose thunk is not a literal lambda is still bound, typed
-    /// by its body — `handler_comp_scheme` falls to the nullary arm when
-    /// the thunk IR is not a `Lam` (e.g. a computed thunk `alias g $h`).
-    /// Binding it means `g x` is a static arity mismatch rather than a
-    /// silently discarded `x`.  A bare-block alias (`alias g { ... }`) is
-    /// rejected at runtime install — the canonical form is `{ |args| … }`
-    /// — but the static layer stays lenient here, since a thunk's runtime
-    /// value is not known statically.
+    /// An alias whose thunk is not a literal lambda is still bound, typed as a
+    /// nullary arm, so `g x` is a static arity mismatch rather than a silently
+    /// discarded `x`.  Runtime install refuses a bare-block alias outright; the
+    /// static layer stays lenient, a thunk's runtime value being unknown here.
     pub(super) fn infer_seq_with_alias_bindings(
         &mut self,
         parts: &[Arc<Comp>],
@@ -956,14 +827,11 @@ impl Inferencer<'_> {
                 }
                 Ok(None) => {}
             }
-            // The alias body was already inferred above via
-            // `handler_comp_scheme`, which is the sole authority for its
-            // type and has already emitted any diagnostics. Falling
-            // through to `infer_comp` would dispatch the same
-            // `Exec("alias", …)` through `sig::ALIAS`, re-inferring the
-            // identical thunk body and duplicating every diagnostic
-            // inside it. The statement's own type is the `ALIAS` builtin's
-            // fixed pure-Unit result, so synthesize that instead.
+            // `handler_comp_scheme` above is the sole authority for the arm's
+            // type and has already spoken.  Falling through would re-dispatch
+            // the same `Exec("alias", …)` through the `ALIAS` builtin sig and
+            // duplicate every diagnostic inside the thunk, so synthesize that
+            // sig's fixed pure-`Unit` result instead.
             last = if alias_already_typed {
                 super::builtins::pure(Ty::Unit)
             } else {
@@ -975,14 +843,10 @@ impl Inferencer<'_> {
         self.lift_seq_output(last, emits_bytes)
     }
 
-    /// A `Seq`'s stdout is everything its statements write, so its
-    /// byte-output mode is a join over the sequence: `Bytes` if *any*
-    /// statement emits bytes, not merely the last.  The return value and
-    /// input mode stay the last statement's — only the output mode is
-    /// lifted, so a byte-emitting body (e.g. the `map-lines`/`filter-lines`
-    /// callbacks that `echo` per line) classifies as byte-output.  A
-    /// `Fun`-tailed sequence is a block that yields a function, not a
-    /// pipeline stage, so it keeps its shape.
+    /// A `Seq`'s stdout is everything its statements write, so its output mode
+    /// joins over the whole sequence, not just the last — a body that `echo`es
+    /// per line is byte-output.  Only that mode lifts, and a `Fun`-tailed
+    /// sequence yields a function, not a stage, so it keeps its shape.
     fn lift_seq_output(&mut self, last: CompTy, emits_bytes: bool) -> CompTy {
         if !emits_bytes {
             return last;
@@ -1001,22 +865,11 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Infer a `Chain`: `a ? b ? c …` returns whichever arm succeeds
-    /// at runtime, so the chain's overall *value type* can be any of
-    /// the arms' return types — a union we don't have a precise way
-    /// to spell.  Typecheck each arm independently for errors within
-    /// it, but expose the chain's return type as a fresh variable so
-    /// downstream consumers don't accidentally pin themselves to one
-    /// arm's choice and silently miscompute when another arm wins.
-    /// (Previous code returned the *last* arm's type, which is
-    /// unsound: `(return 1) ? (return "hi")` was typed `String` even
-    /// though the value at runtime was `1: Int`.)
-    ///
-    /// The pipeline I/O modes, by contrast, are *unioned* across the
-    /// arms via [`Self::union_mode`] — exactly as [`Self::merge_branches`]
-    /// does for a conditional — since only one arm runs: `tmux a ? tmux b`
-    /// emits bytes whichever arm wins, so the chain is byte-output rather
-    /// than the value edge `CompTy::pure` would force.
+    /// `a ? b ? c` yields whichever arm succeeds, a union the type language
+    /// cannot spell: each arm is checked for its own errors, but the chain's
+    /// value type is a fresh variable, so no consumer pins itself to one arm
+    /// and miscomputes when another wins.  The channel modes *are* unioned via
+    /// [`Self::union_mode`] — `tmux a ? tmux b` emits bytes either way.
     fn infer_chain(&mut self, parts: &[Arc<Comp>]) -> CompTy {
         let arm_specs: Vec<PipeSpec> = parts
             .iter()
@@ -1046,9 +899,6 @@ impl Inferencer<'_> {
         });
 
         if all_literal_keys && !entries.is_empty() {
-            // `all_literal_keys` rules out non-string keys for every
-            // `Entry`, so the match below is exhaustive without a
-            // wildcard `Entry(_, _)` arm.
             let mut spread_rows = Vec::new();
             let mut field_entries = Vec::new();
             for entry in entries {
@@ -1081,10 +931,8 @@ impl Inferencer<'_> {
                 }
             }
 
-            // A duplicate explicit key resolves last-wins, matching the
-            // runtime `Value::map` (`[x: 1, x: 2]` denotes `[x: 2]`).  Keep
-            // each label's final value type; first-appearance order is
-            // retained only to give the row spine a deterministic shape.
+            // Last-wins on a duplicate key, as `Value::map` is at runtime;
+            // first-appearance order only fixes the row spine's shape.
             let mut deduped: Vec<(String, Ty)> = Vec::new();
             for (key, value_ty) in field_entries {
                 match deduped.iter_mut().find(|(k, _)| *k == key) {
@@ -1103,19 +951,11 @@ impl Inferencer<'_> {
             }
             Ty::Record(row)
         } else {
-            // Dynamic-key map (`[$k: v, …]`) — the type is `Map<elem>`,
-            // where `elem` is shared by every entry's value and every
-            // spread's element type.  Unifying all of them rules out the
-            // silent-mistyping shape: without the constraint a literal
-            // like `[$k: 1, $j: "hi"]` would check as `Map<α>` with α
-            // free, leaving the consumer free to pick (e.g. `Map<Int>`)
-            // while a String still sits at one key.
-            //
-            // Every dynamic key must itself be a `String` — the runtime
-            // rejects non-string keys with a sigil-1 error, so we lift
-            // that check up to typecheck time.  A literal like `[2: foo]`
-            // is an Int-vs-String type error rather than a deferred
-            // runtime failure.
+            // A dynamic-key map is `Map<elem>` with one `elem` shared by every
+            // value and spread: without that, `[$k: 1, $j: "hi"]` checks as
+            // `Map<α>` and lets the consumer pick `Map<Int>` over a String.
+            // Keys must be `String` — the runtime rejects others at status 1,
+            // so `[2: foo]` is lifted to a type error here.
             let elem = self.ctx.unifier.fresh_ty();
             for entry in entries {
                 match entry {
@@ -1205,10 +1045,9 @@ impl Inferencer<'_> {
             }
             Val::Map(entries) => self.infer_map_val(entries),
             Val::Variant { label, payload } => {
-                // Variant construction is open: `` `ok 5 `` infers
-                // [`ok: Int | ρ] where ρ is a fresh row variable.  The
-                // label is stored *with* its leading backtick in the row so that
-                // alphabet checks at unify time treat it as a tag.
+                // Construction is open: `` `ok 5 `` gets a fresh row tail.  The
+                // label keeps its backtick so unification reads it as a tag —
+                // the tag and bare alphabets do not unify.
                 let payload_ty = match payload {
                     Some(p) => self.infer_val(p),
                     None => Ty::Unit,
@@ -1224,67 +1063,40 @@ impl Inferencer<'_> {
     }
 
     fn infer_pipeline(&mut self, stages: &[Arc<Comp>]) -> CompTy {
-        // The parser guarantees ≥2 stages: a single-stage parse is
-        // unwrapped to the bare stage and never becomes Ast::Pipeline,
-        // and the elaborator preserves that shape.
+        // The parser unwraps a single-stage pipeline to the bare stage and the
+        // elaborator preserves that shape, so a `Pipeline` node always has two.
         debug_assert!(stages.len() >= 2, "Pipeline carries ≥2 stages");
 
         let mut stage_tys: Vec<CompTy> =
             stages.iter().map(|stage| self.infer_comp(stage)).collect();
         // A stage consumed as a value argument is the data-last fold's
-        // function: its input channel is `∅` (the upstream arrives as the
-        // final argument, not over a byte pipe), while its output channel
-        // is whatever its application body emits — a `{ |x| echo $x }`
-        // consumer is a `Bytes` producer for the stage after it.  The
-        // rewrite below replaces such a stage's type with its application
-        // body; record the value-input fact now so the annotation pass
-        // and the pipeline's tail output mode read input `∅` paired with
-        // the applied body's output.
+        // function: its upstream arrives as the final argument, so its input
+        // channel is `∅` while its output is whatever its body emits.  The
+        // rewrite below replaces such a stage's type with its application body,
+        // so record the fact here, while the original shape is still visible.
         let mut consumed_as_value = vec![false; stage_tys.len()];
         for i in 0..stage_tys.len() - 1 {
-            // A clash on this edge underlines its consumer stage (the stage
-            // that fails to accept the upstream), falling back to the
-            // producer.  Without this narrowing the diagnostic carries
-            // whatever `ctx.pos` the last-inferred stage left behind, so a
-            // clash on an early edge would underline the final stage.
+            // Underline the consumer that refuses the upstream; otherwise the
+            // caret follows whatever `ctx.pos` the last-inferred stage left, so
+            // a clash on an early edge would point at the final stage.
             let edge_span = stages[i + 1].span.or(stages[i].span);
             let out = self.comp_output_mode(&stage_tys[i]);
             let out_resolved = self.ctx.unifier.resolve_mode(&out);
 
-            // A value-producing stage (`∅` output) feeding a value-arg
-            // function consumer is data-last application: `x | f` is
-            // `f !{x}`, and `apply_piped_value` flows the produced value
-            // into the function's first parameter.  A
-            // value producer feeding a non-application stage (a concrete
-            // `Return`, e.g. a `from-X` byte decoder) is a plain channel
-            // edge: unify the modes so a `∅`-into-`Bytes` adjacency is
-            // rejected as the §4.2.1 mismatch it is, rather than forced
-            // through the function path.  `consumes_value_arg` peers past
-            // block-literal thunks so a `{ |v| … }` consumer still takes
-            // the application path.
+            // A value producer feeding a value-arg consumer is the data-last
+            // application `x | f` = `f !{x}`.  Feeding anything else — a
+            // concrete `Return` such as a `from-X` decoder — it is a plain
+            // channel edge, so `∅`-into-`Bytes` is rejected: values do not
+            // silently cross a byte edge, they must be encoded and decoded.
             //
-            // A still-unresolved output mode is the diverging-producer
-            // case (`{ fail … }`, whose `fail` carries fresh, quantified
-            // channel modes): it grounds to `∅` (value edge) per the
-            // `Var → Empty` grounding rule, so when the consumer takes a
-            // value arg it is a value edge too.  Treat it like `None`
-            // here, otherwise the producer's *thunk* value type is
-            // unified against the consumer's parameter (e.g. `{Command α}`
-            // vs `Int`) instead of forcing the producer and piping its
-            // return type — the runtime would then hand the consumer the
-            // unforced producer block rather than running it.
+            // An unresolved output is the diverging producer (`{ fail … }`,
+            // whose modes are fresh and quantified).  `InferCtx::ground` will
+            // settle it to `∅`, so count it a value edge already; otherwise the
+            // producer's *thunk* type meets the consumer's parameter and the
+            // runtime hands over the unforced block instead of running it.
             let out_is_value_edge = matches!(out_resolved, PipeMode::None | PipeMode::Var(_));
             if out_is_value_edge && self.consumes_value_arg(&stage_tys[i + 1]) {
                 let (piped_ty, _, _) = self.extract_return(&stage_tys[i]);
-                // A bare-block producer (`{ … }`) is a `Return(_,
-                // Thunk(body))`: the runtime forces it once before the
-                // value crosses the edge (see `run_value_fold`), so the
-                // piped value is the *body's*
-                // return type, not the thunk itself.  Deref one thunk
-                // level to mirror that single force — without this a
-                // `{ fail … } | { |v| … }` producer pipes `{Command α}`
-                // into the consumer's parameter, clashing with whatever
-                // concrete type the consumer expects.
                 let piped_ty = self.deref_forced_producer(piped_ty);
                 let next = stage_tys[i + 1].clone();
                 stage_tys[i + 1] =
@@ -1299,24 +1111,17 @@ impl Inferencer<'_> {
             });
         }
 
-        // Pipeline shape: input from the first stage, output mode and
-        // return type from the last.  `Fun` at the tail is the
-        // byte-pipe-to-value-arg case (e.g. `cat foo | length`): the
-        // typechecker doesn't yet model that connection structurally,
-        // so `comp_return_ty` drills past the arrows the same way
-        // `comp_output_mode` does for modes.  For a `Var`-resolved
-        // last we then unify it back against the synthesized `Return`
-        // shape, so consumers of the pipeline see the actual return
-        // type rather than an unrelated fresh variable.
+        // Input from the first stage, output and return type from the last.  A
+        // `Fun` tail is the byte-pipe-into-value-arg case (`cat foo | length`),
+        // not modelled structurally, so drill past the arrows.  A `Var` tail is
+        // unified back against the synthesized `Return`, or the pipeline's own
+        // consumers would see an unrelated fresh variable.
         let input = self.comp_input_mode(&stage_tys[0]);
         let last_consumed = consumed_as_value[stage_tys.len() - 1];
         let last = stage_tys
             .last()
             .expect("≥2 stages by invariant above")
             .clone();
-        // The tail's contribution to the pipeline's output channel: a
-        // value-arg-consumed last stage emits no bytes on its own channel,
-        // so the pipeline is a value producer there.
         let output = self.stage_own_spec(&last, last_consumed).output;
         let ret_ty = self.comp_return_ty(&last);
         if matches!(self.ctx.unifier.resolve_comp_ty(&last), CompTy::Var(_)) {
@@ -1330,9 +1135,8 @@ impl Inferencer<'_> {
             self.ctx.unify_comp_ty(&last, &bound, Reason::ReturnShape);
         }
 
-        // Record each stage's byte channels and value type for the
-        // annotation pass.  The modes and type vars may still be
-        // unresolved; they resolve once the whole walk's constraints are in.
+        // For the annotation pass, keyed by node address; still-unresolved
+        // modes and vars settle once the whole walk's constraints are in.
         for (i, (stage, ty)) in stages.iter().zip(&stage_tys).enumerate() {
             let spec = self.stage_own_spec(ty, consumed_as_value[i]);
             let value_ty = self.comp_return_ty(ty);
@@ -1354,24 +1158,17 @@ impl Inferencer<'_> {
         CompTy::pure(current_ty)
     }
 
-    /// One step of an indexing chain — `current_ty[key]`.  Runs under
-    /// the caller's narrowed pos (`infer_index` wraps each call in
-    /// `with_span`) so any unify failure here underlines just this
-    /// step rather than the whole chain.
+    /// One step of an indexing chain, run under the pos `infer_index` narrowed
+    /// to this key, so a failure underlines the step and not the whole chain.
     fn infer_index_step(&mut self, current_ty: &Ty, key: &Val) -> Ty {
         let resolved = self.ctx.unifier.apply_ty(current_ty);
         match resolved {
             Ty::List(elem) => {
-                // List index: the key must be `Int`, so unifying it
-                // against `Ty::Int` rejects `xs["foo"]` on a `[_]`.
                 let key_ty = self.infer_val(key);
                 self.ctx.unify_ty(&key_ty, &Ty::Int, Reason::ListIndexKey);
                 *elem
             }
             Ty::Map(elem) => {
-                // Map index: key must be `String`.  Same shape of
-                // discarded-key-type unsoundness as the List case
-                // above.
                 let key_ty = self.infer_val(key);
                 self.ctx.unify_ty(&key_ty, &Ty::String, Reason::MapIndexKey);
                 *elem
@@ -1382,11 +1179,9 @@ impl Inferencer<'_> {
                 self.ctx.unifier.fresh_ty()
             }
             _ => {
-                // A statically-known string key (quoted or bare-non-numeric
-                // after `Val::from_word` classification) reads a record
-                // field; bare-numeric `Val::Int` keys flow through the
-                // dynamic-key arm below and reject with the "can't index
-                // …" hint (no record uses an Int field name).
+                // `Val::from_word` leaves a bare non-numeric word a `String`,
+                // and only a `String` key reads a record field; a bare number
+                // falls to the dynamic arm, no record having an Int field name.
                 let record_label = match key {
                     Val::String(label) => Some(label.clone()),
                     _ => None,
@@ -1399,11 +1194,9 @@ impl Inferencer<'_> {
                         Box::new(field_ty.clone()),
                         Box::new(tail_row),
                     ));
-                    // When the target is concretely *not* a record
-                    // (Int, String, Bool, …), the raw unify error
-                    // surfaces `Int vs [b: α, ...ρ]` — accurate but
-                    // hostile.  Catch the concrete case and produce a
-                    // sentence the user can act on.
+                    // A raw unify error on a concretely non-record target reads
+                    // `Int vs [b: α, ...ρ]` — accurate but hostile.  Say it in
+                    // a sentence instead.
                     let resolved = self.ctx.unifier.apply_ty(current_ty);
                     let concretely_non_record = !matches!(resolved, Ty::Record(_) | Ty::Var(_));
                     if concretely_non_record {
@@ -1417,21 +1210,11 @@ impl Inferencer<'_> {
                     }
                     field_ty
                 } else {
-                    // Dynamic-key index on a non-List/Map/Thunk
-                    // target.  Catching this case is what makes
-                    // `let x = 42; $x[$k]` a typecheck error rather
-                    // than a deferred runtime failure.
-                    //
-                    // For a free target, use the key's type to pin
-                    // it: `Int` ⇒ `List<elem>`, `String` ⇒
-                    // `Map<elem>`.  Otherwise leave it; whatever pins
-                    // it later will run through the List/Map arms
-                    // above and unify the key correctly.
-                    //
-                    // For a target whose shape is already known and
-                    // isn't `List` / `Map` / `Thunk`, raise a
-                    // typecheck error — no value of that shape
-                    // accepts dynamic indexing.
+                    // Catching this here is what makes `let x = 42; $x[$k]` a
+                    // type error rather than a deferred runtime failure.  A
+                    // free target is pinned by the key's type — `Int` ⇒ `List`,
+                    // `String` ⇒ `Map` — and otherwise left for whatever pins
+                    // it later, which re-enters through the arms above.
                     let key_ty = self.infer_val(key);
                     let elem = self.ctx.unifier.fresh_ty();
                     let resolved_target = self.ctx.unifier.apply_ty(current_ty);
@@ -1483,12 +1266,8 @@ impl Inferencer<'_> {
                 found: found_resolved,
             });
         }
-        // If the scrutinee already has a known payload at this label
-        // (e.g. the scrutinee was inferred from a literal `\`ok 5`),
-        // force the handler's payload to agree with it here, while
-        // pos is on the arm.  Without this the mismatch only surfaces
-        // in the final row-unify, where pos has been restored and the
-        // caret lands on the entire `case` form.
+        // Force agreement while pos is still on the arm; the final row-unify
+        // would report it with the caret on the whole `case` form.
         if let Some(scrut_payload) = scrut_payloads.get(label)
             && self
                 .ctx
@@ -1515,28 +1294,18 @@ impl Inferencer<'_> {
         scrutinee: &crate::source::Spanned<Val>,
         table: &crate::source::Spanned<Val>,
     ) -> CompTy {
-        // Scrutinee is a variant value; table is a record-of-thunks value.
-        // CBPV: `case` is the eliminator over a sum value with a record of
-        // continuations — both operands sit in value position.
+        // CBPV: `case` eliminates a sum with a record of continuations, so both
+        // operands sit in value position.
         let scrutinee_span = scrutinee.span;
         let table_span = table.span;
         let scrut_ty = self.with_span(scrutinee_span, |this| this.infer_val(&scrutinee.item));
         let table_ty = self.with_span(table_span, |this| this.infer_val(&table.item));
         let result_cty = self.ctx.unifier.fresh_comp_ty();
 
-        // Pre-build a lookup from handler label → that handler's inner
-        // Comp span (the body of the thunk the user wrote at this arm).
-        // When a per-arm payload-mismatch fires, we point the caret at
-        // *that arm* rather than at the whole `case` form — `let r =
-        // case x [\`ok: { … }, \`err: { … }]` is far too wide a target
-        // for what is conceptually a single-arm complaint.
         let handler_spans = collect_handler_spans(&table.item);
 
-        // Shape constraints.  If the scrutinee is already concretely
-        // *not* a variant (Int, String, Record, …), prefer a friendly
-        // "case needs a variant" diagnostic over the raw row-shape
-        // mismatch — the latter prints `[...ρ]` which a beginner has
-        // no way to read.
+        // A scrutinee that is concretely not a variant gets a sentence: the raw
+        // row mismatch prints `[...ρ]`, which a beginner cannot read.
         let scrut_resolved = self.ctx.unifier.apply_ty(&scrut_ty);
         let scrut_row_var = self.ctx.unifier.fresh_row_var();
         self.with_span(scrutinee_span, |this| match scrut_resolved {
@@ -1561,29 +1330,22 @@ impl Inferencer<'_> {
             );
         });
 
-        // Resolve the handler row.  Record literals always close to Empty,
-        // so this returns a clean label list under normal use.
+        // A record literal closes to `Empty`, so this is a clean label list
+        // under normal use.
         let handler_resolved = self.ctx.unifier.apply_row(&Row::Var(handler_row_var));
         let handler_labels = collect_extends(&handler_resolved);
 
-        // Pre-resolve the scrutinee's per-label payload types so the
-        // per-arm loop can unify each handler's payload against its
-        // matching scrut payload *under the arm's own pos*.  Anything
-        // here that's still a Var was contributed by the handlers and
-        // is fine to leave for the final row-unify pass.
+        // Pre-resolved so each arm can unify its payload under its own pos; a
+        // residual `Var` here came from the handlers and waits for the final
+        // row-unify.
         let scrut_resolved_row = self.ctx.unifier.apply_row(&Row::Var(scrut_row_var));
         let scrut_payloads: std::collections::HashMap<String, Ty> =
             collect_extends(&scrut_resolved_row).into_iter().collect();
 
-        // Per-label connection: each handler at `.l` must be a thunk of
-        // a function `payload_l → result_cty`.  Build the closed
-        // scrutinee row from these payload types as we go.
+        // Each handler at `l` is a thunk of `payload_l → result_cty`; the
+        // closed scrutinee row is built from those payloads as we go.
         let mut closed_scrut = Row::Empty;
         for (label, handler_ty) in handler_labels.iter().rev() {
-            // Narrow pos to *this arm's* body for the duration of the
-            // per-arm work, so an arm-local error (handler shape,
-            // payload type, return-type disagreement) underlines that
-            // arm rather than the entire `case` form.
             let arm_span = handler_spans.get(label.as_str()).copied();
             let closed_payload = self.with_span(arm_span, |this| {
                 this.check_case_arm(label, handler_ty, &result_cty, &scrut_payloads)
@@ -1595,17 +1357,10 @@ impl Inferencer<'_> {
             );
         }
 
-        // Force scrutinee row to exactly the handler label set.  Row mismatch
-        // becomes CaseNotExhaustive: an extra label on the handler side means
-        // the handler covers a constructor the scrutinee can never produce;
-        // a missing label means the scrutinee has a constructor with no arm.
-        //
-        // But when the handler row is still a bare variable — the table came
-        // from a lambda parameter or an unchecked name rather than a record
-        // literal — the handler set is *unknown*, not missing. Closing it to
-        // Empty and unifying would falsely report every scrutinee tag as
-        // uncovered. Defer to runtime, matching the checker's existing
-        // leniency for unbound names.
+        // Force the scrutinee row to exactly the handler label set, restating a
+        // row mismatch as exhaustiveness.  A handler row still a bare variable
+        // — the table came from a parameter, not a literal — is *unknown*, not
+        // empty: closing it would call every scrutinee tag uncovered.
         if !matches!(handler_resolved, Row::Var(_))
             && let Err(kind) = self
                 .ctx
@@ -1630,13 +1385,10 @@ impl Inferencer<'_> {
         result_cty
     }
 
-    /// Establish each binding as a self-referential mono thunk, then infer
-    /// every RHS in that recursive environment, unifying it against its own
-    /// thunk type.  Returns the per-binding computation types (`betaᵢ`) — the
-    /// shared core of both `LetRec` arms.  The caller decides what to do with
-    /// the still-installed mono self-bindings: `slot: None` generalises and
-    /// rebinds them into the current scope; `slot: Some(i)` infers inside a
-    /// throwaway scope and returns binding `i`'s type.
+    /// Bind each name to a self-referential mono thunk, infer every RHS in that
+    /// recursive environment, and unify each against its own thunk type.  The
+    /// mono self-bindings are left installed: `infer_letrec` drops and
+    /// generalises them, `infer_letrec_slot` discards the whole scope.
     fn infer_letrec_betas(&mut self, bindings: &[(String, Val)]) -> Vec<CompTy> {
         let betas: Vec<CompTy> = bindings
             .iter()
@@ -1660,13 +1412,10 @@ impl Inferencer<'_> {
         betas
     }
 
-    /// `LetRec { slot: Some(i) }` re-establishes the group in a throwaway
-    /// scope and returns binding `i`'s lambda.  Infer the whole group inside a
-    /// `with_scope` frame so its type errors surface and the self-bindings do
-    /// not leak, and yield binding `i`'s thunk type as the produced value.
-    /// These nodes are synthesised by `eval_letrec` at runtime, so the path is
-    /// normally exercised only when such IR is re-checked; inferring the
-    /// bodies keeps it sound rather than returning an unconstrained fresh var.
+    /// `LetRec { slot: Some(i) }` yields binding `i`'s lambda, inferring the
+    /// whole group in a throwaway scope so its errors surface and the
+    /// self-bindings do not leak.  `eval_letrec` synthesises these nodes, so
+    /// the path runs only when such IR is re-checked.
     fn infer_letrec_slot(&mut self, bindings: &[(String, Val)], slot: usize) -> CompTy {
         self.with_scope(|this| {
             let betas = this.infer_letrec_betas(bindings);
@@ -1680,13 +1429,10 @@ impl Inferencer<'_> {
 
     fn infer_letrec(&mut self, bindings: &[(String, Val)]) -> CompTy {
         let betas = self.infer_letrec_betas(bindings);
-        // Drop the mono self-bindings before generalising.  If they
-        // stayed in env, `env_free_vars` would see their (post-body)
-        // free comp/ty/row vars as residuals and `generalize` would
-        // refuse to quantify them — which silently un-poly's every
-        // recursive scheme and lets one call site bind a polymorphic
-        // var that all other call sites then share.  Re-bind below
-        // with the polymorphic schemes once each is built.
+        // Drop the mono self-bindings before generalising: left in env, their
+        // free vars would count as residuals in `env_free_vars` and
+        // `generalize` would refuse to quantify them, silently un-poly'ing
+        // every recursive scheme.  Rebound below with the polymorphic ones.
         for (name, _) in bindings {
             self.env.unbind(name);
         }
@@ -1762,7 +1508,6 @@ impl Inferencer<'_> {
     }
 
     pub(super) fn infer_comp(&mut self, comp: &Comp) -> CompTy {
-        // Update position from the node's span.
         if let Some(span) = comp.span {
             self.ctx.pos = Some(span);
         }
@@ -1787,14 +1532,10 @@ impl Inferencer<'_> {
                 ..
             } => {
                 let inner_ty = self.infer_comp(inner);
-                // A `Fun` RHS is a lambda: evaluating it builds a closure
-                // and emits no bytes, so its output channel is `∅`.  Any
-                // other shape carries its `Return` spec's output mode.
-                //
-                // At a byte-output let boundary, `Unit` means "the bytes are
-                // the value"; value-returning byte computations (`hostname`:
-                // String, `to-json`: Bytes, `echo log; length xs`: Int) keep
-                // their proper return value.
+                // A `Fun` RHS is a lambda: evaluating it builds a closure and
+                // emits nothing, so its output is `∅`.  Anything else carries
+                // its own, and `observed_value_ty` then decides whether the
+                // bytes or the return value is what the name binds.
                 let (bound_ty, rhs_output) =
                     if let CompTy::Fun(..) = self.ctx.unifier.resolve_comp_ty(&inner_ty) {
                         (Ty::Thunk(Box::new(inner_ty)), PipeMode::None)
@@ -1824,12 +1565,9 @@ impl Inferencer<'_> {
             }
             CompKind::App { head, args } => {
                 let head_ty = self.infer_comp(head);
-                // Surface the common surface error — a literal value
-                // (`'foo'`, `42`, ...) used as a command head with args —
-                // before falling into the general `Cmd a vs a → b`
-                // mismatch path, which prints implementation jargon.
-                // We only flag this when there's at least one positional
-                // arg; a spread-only call still wants the cascading check.
+                // Name a literal used as a command head before the general
+                // `Cmd a vs a → b` mismatch says it in jargon.  Needs a
+                // positional arg; a spread-only call wants the cascading check.
                 let positional = crate::ir::args::positional(args).unwrap_or_default();
                 if !positional.is_empty()
                     && let Some(ty) = self.command_non_function_ty(&head_ty)
@@ -1839,9 +1577,8 @@ impl Inferencer<'_> {
                         ty,
                         split_string_suspect,
                     });
-                    // Still type-check the args for cascading errors, then
-                    // return a fresh result so the outer pipeline / chain
-                    // type-checks against something coherent.
+                    // Check the args anyway, then hand the enclosing pipeline
+                    // or chain a coherent fresh result.
                     for sub in crate::ir::args::iter_subvals(args) {
                         let _ = self.infer_val(sub);
                     }
@@ -1875,11 +1612,8 @@ impl Inferencer<'_> {
             }
             CompKind::Index { target, keys } => self.infer_index(target, keys),
             CompKind::Seq(comps) => {
-                // Run the seq inside a fresh TyEnv frame so alias bindings
-                // introduced by statements in this Seq do not leak past the
-                // Seq's lexical extent.  The alias-binding logic lives in
-                // `infer_seq_with_alias_bindings`; `with_scope` supplies the
-                // push/pop.
+                // The frame `infer_seq_with_alias_bindings` requires, so its
+                // alias bindings die with the `Seq`.
                 self.with_scope(|this| this.infer_seq_with_alias_bindings(comps, Ty::Unit))
             }
             CompKind::LetRec {
@@ -1892,10 +1626,7 @@ impl Inferencer<'_> {
             } => self.infer_letrec_slot(bindings, *i),
             CompKind::If { cond, then, else_ } => {
                 let cond_ty = self.infer_val(&cond.item);
-                // Narrow pos to the cond's own span (when the parser
-                // captured one) before the Bool unify so a non-Bool
-                // diagnostic underlines just the cond, not the whole
-                // `if … else …` form.
+                // Underline just the cond, not the whole `if … else …` form.
                 self.with_span(cond.span, |this| {
                     this.ctx.unify_ty(&cond_ty, &Ty::Bool, Reason::IfCond);
                 });
@@ -1910,12 +1641,10 @@ impl Inferencer<'_> {
                 ScopeOp::Try { body, handler } => self.infer_try(body, handler),
                 ScopeOp::Guard { body, cleanup } => self.infer_guard(body, cleanup),
                 ScopeOp::Audit { body } => self.infer_audit(body),
-                // Redirect-frame scope: a transparent passthrough for
-                // the body's I/O modes — the redirect installs fds
-                // for the body's duration but does not change its
-                // type signature.  Unlike the other scope ops the
-                // body is an `Arc<Comp>` rather than a thunk-shaped
-                // `Val`, so we infer it directly.
+                // A redirect installs fds for the body's duration without
+                // touching its type.  Its body is an `Arc<Comp>`, not a
+                // thunk-shaped `Val` like the other scope ops, so infer it
+                // directly.
                 ScopeOp::Redirect { body, .. } => self.infer_comp(body),
             },
         };

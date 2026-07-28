@@ -1,119 +1,35 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 //
-// This module is a close port of `wxc_common/src/filesystem_dacl.rs` from
-// github.com/microsoft/mxc @ 0e7c3dd (the `DaclManager` apply/restore
-// engine), adapted to ral's naming, error types, and `windows-sys` binding.
-// Each ported unit carries a `// after mxc filesystem_dacl.rs::<fn>`
-// breadcrumb naming its upstream counterpart, for future diffing against
-// upstream.
+// A port of `filesystem_dacl.rs` from Microsoft's mxc at 0e7c3dd — the
+// `DaclManager` apply/restore engine — respelled for ral's error types and
+// `windows-sys` bindings. Names match upstream's unless a comment says
+// otherwise, so a unit here diffs against the one it was taken from.
 
-//! Crash-safe grant-ACE apply/restore engine for the `AppContainer` sandbox
-//! backend.
+//! Crash-safe grant-ACE apply/restore for the `AppContainer` sandbox backend.
 //!
-//! [`DaclManager`] stamps allow-ACEs for an `AppContainer` SID onto host
-//! filesystem prefixes so a LowBox-token child can read or read-write them,
-//! and reverts every stamp it made — on explicit [`DaclManager::restore`] or
-//! on [`Drop`]. The *manager* is **session-scoped, not per-spawn**:
-//! [`crate::sandbox::windows::session`] creates exactly one `DaclManager`
-//! per shell session (one ledger, one restore point) and holds it in
-//! session-global state; [`crate::sandbox::windows::session::teardown`] is
-//! what finally calls [`restore`](DaclManager::restore), and only runs at
-//! session end.  *Authority*, by contrast, is **projection-keyed**: the
-//! session mints one `AppContainer` SID per distinct fs projection, so the
-//! ACEs stamped for a SID are exactly that projection's paths, and a
-//! confined child's OS-level authority is its own declared projection —
-//! never the union of what other projections in the session stamped.  A
-//! narrower `grant` therefore gets a narrower SID, enforced at the kernel.
+//! `DaclManager` stamps allow-ACEs for an `AppContainer` SID onto host
+//! filesystem prefixes so a LowBox-token child can reach them, and reverts
+//! every stamp it made. `session` holds exactly one manager per shell session
+//! and its `teardown` is what finally restores; authority, though, is
+//! projection-keyed — one SID per distinct fs projection, so a child's
+//! kernel-enforced reach is its own projection, never the union of what the
+//! session stamped. ACEs consequently outlive the grant frame that asked for
+//! them: a detached worker keeps the authority it was born with, and a SID no
+//! live child holds is inert, since only this session's spawns can mint one.
 //!
-//! ACEs persist until session teardown rather than being reverted when a
-//! grant frame exits.  That is deliberate, and safe: a detached worker
-//! spawned under a SID legitimately outlives its frame with the authority
-//! it was born with (revoking ACEs under it would break its opens without
-//! revoking its token), and once no live child holds a SID its lingering
-//! ACEs are inert — no other token carries that SID, and only this
-//! session's own spawns can mint one.
+//! Per grant the ordering is: take the path's named mutex, scan the explicit
+//! ACEs our SID already holds, **persist the ledger, then** apply. A process
+//! that dies mid-sequence leaves in the XDG state directory everything needed
+//! to undo an apply that may or may not have landed; `recover_orphaned_state`
+//! sweeps those ledgers at the next session's boot. A restore that fails keeps
+//! its entry, in memory and on disk, so a later attempt retries it.
 //!
-//! # Design
-//!
-//! - **Inheritable ACEs.** Directories get `OBJECT_INHERIT_ACE |
-//!   CONTAINER_INHERIT_ACE`; `SetNamedSecurityInfoW`'s automatic propagation
-//!   handles both the add and the remove, so there is no manual descendant
-//!   walk.
-//! - **ACE-merge resilience.** `SetEntriesInAclW(GRANT)` coalesces rights for
-//!   the same trustee into a single ACE, so a second grant to a SID that
-//!   already has an explicit ACE silently *merges* rather than adds a
-//!   second entry. Before every apply we capture *every* explicit
-//!   (non-inherited) ACE already on the target for our SID — allow or deny —
-//!   into [`AppliedAce::prior_state`]. Restore then issues a full rebuild
-//!   (drop our SID's explicit ACEs, replay `prior_state` verbatim) rather
-//!   than trusting `REVOKE_ACCESS` to undo only our contribution.
-//!
-//! # Crash-safety protocol
-//!
-//! The ordering the whole engine exists to protect, per grant:
-//!
-//! 1. Acquire the per-path named mutex ([`PathMutexGuard`]) so no other ral
-//!    session touches the same path's DACL concurrently.
-//! 2. Scan the target's current DACL for explicit ACEs already held by our
-//!    SID ([`scan_explicit_aces_for_sid`]) — this is the state a crash must
-//!    restore.
-//! 3. **Write the ledger to disk before touching the DACL.** The in-memory
-//!    entry is appended and [`DaclManager::persist_ledger`] durably commits
-//!    the whole applied-list (stage to `.tmp`, `fsync`, rename over the
-//!    destination) *before* any Win32 apply call runs. If the process dies
-//!    between steps 3 and 4, the ledger already names everything needed to
-//!    undo — nothing is lost.
-//! 4. Apply the ACE via `SetEntriesInAclW` + `SetNamedSecurityInfoW`.
-//! 5. Release the mutex (guard drop).
-//!
-//! Restore reverses a single entry by re-acquiring its path's mutex and
-//! rebuilding the DACL from the captured `prior_state` — never a bare
-//! `REVOKE_ACCESS` (see [`replace_explicit_aces_for_sid`] for why). On
-//! success the entry is dropped from the ledger; on failure it is *retained*
-//! on disk and in memory so a later `restore()` call, or the next session's
-//! [`recover_orphaned_state`] sweep, can retry — a transient failure never
-//! silently loses track of a host ACL mutation.
-//!
-//! [`recover_orphaned_state`] is the orphan sweep: it inspects every ledger
-//! file under the state directory, classifies its owning process as
-//! live-or-dead (PID reuse is defeated by comparing the recorded process
-//! *creation time* against the live process's, via `GetProcessTimes`; see
-//! [`process_alive_with_image`]), and restores the DACLs a dead owner left
-//! stamped. W1c calls this once at session boot, before any grant is
-//! applied; it is not wired to anything from this module.
-//!
-//! # Ledger directory
-//!
-//! Ledgers live under the per-user ral state directory (the `state` XDG
-//! kind — see [`crate::path::basedir`] — joined with `ral/sandbox-dacl`),
-//! not a hardcoded `%LOCALAPPDATA%` path, so overriding `XDG_STATE_HOME`
-//! (as tests do) relocates it. Three file species can appear there:
-//!
-//! - `<run-id>.json` — a fully written, owner-active ledger.
-//! - `<run-id>.json.tmp` — an in-progress atomic write; harmless leftover
-//!   from a crash mid-write, cleaned up at the start of the next write to
-//!   the same path.
-//! - `<run-id>.json.corrupt` — quarantine of a ledger that failed to parse
-//!   during recovery, kept for inspection rather than silently discarded.
-//!
-//! # Caveats carried over from upstream
-//!
-//! - **The container id must be unique to its stamper.** Two concurrent
-//!   stampers sharing one `AppContainer` SID clobber each other's grants —
-//!   the merge-then-restore dance above only defends against *sequential*
-//!   overlapping grants on one path, not concurrent ones from two SIDs that
-//!   happen to be the same string. The session satisfies this by deriving
-//!   profile names from its pid plus a per-session counter (one per
-//!   projection), and by serializing all stamping under the session lock.
-//! - **Apply/restore is O(prefixes) syscalls.** Each prefix is its own
-//!   mutex acquisition, DACL scan, and `SetNamedSecurityInfoW` round trip;
-//!   there is no batching across prefixes.
-//!
-//! Note: the module-level `#[cfg(windows)]` lives on the `mod dacl;`
-//! declaration in `sandbox/windows.rs` (inherited from `sandbox.rs`'s
-//! `#[cfg(windows)] mod windows;`). Repeating it here as an inner
-//! `#![cfg(windows)]` would trip clippy's `duplicated_attributes` lint.
+//! Two concurrent stampers must never share an `AppContainer` SID — the
+//! merge-then-restore dance below defends only against *sequential*
+//! overlapping grants on one path. `session` guarantees it by naming profiles
+//! from its pid plus a per-session counter, and serializing all stamping under
+//! its lock.
 
 use std::ffi::c_void;
 use std::fs;
@@ -148,34 +64,16 @@ use windows_sys::Win32::System::Threading::{
     WaitForSingleObject,
 };
 
-// -------------------------------------------------------------------------
-// Access masks
-// -------------------------------------------------------------------------
-
-/// Access mask granted on a read-write prefix: read + write + execute +
-/// delete. `FILE_GENERIC_EXECUTE` is required so the `AppContainer` child can
-/// `SetCurrentDirectoryW` into the granted directory — the API opens the
-/// target with `FILE_TRAVERSE`, which is the same bit (`0x20`) as
-/// `FILE_EXECUTE` for files.
-///
-/// after mxc `filesystem_dacl.rs::RW_MASK` (0e7c3dd)
-///
-/// Deliberate side-effect: because the ACE is inheritable, the same bit
-/// propagates as `FILE_EXECUTE` to every file descendant. Accepted for the
-/// same reasons upstream accepts it: workloads routinely need to execute
-/// helper binaries under a granted scratch tree; NTFS has no primitive for
-/// "traverse but never execute" (the two rights share a bit, distinguished
-/// only by the kernel's per-object-type interpretation); and the
-/// `AppContainer` is already a code-execution sandbox, so `FILE_EXECUTE` on a
-/// host file grants nothing a compromised child couldn't already do
-/// in-memory.
+/// Rights stamped on a read-write prefix. `FILE_GENERIC_EXECUTE` is there for
+/// `FILE_TRAVERSE`, without which the child cannot `SetCurrentDirectoryW` in;
+/// NTFS cannot grant the one without the other, so inheritance carries
+/// `FILE_EXECUTE` down to every file — accepted, since the `AppContainer`
+/// already sandboxes code execution.
 pub(crate) const RW_MASK: u32 =
     FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
 
-/// Access mask granted on a read-only prefix: read + execute, for the same
-/// `chdir`-needs-`FILE_TRAVERSE` reason as [`RW_MASK`].
-///
-/// after mxc `filesystem_dacl.rs::RO_MASK` (0e7c3dd)
+/// Rights stamped on a read-only prefix; execute is there for the same
+/// `FILE_TRAVERSE` reason as [`RW_MASK`].
 pub(crate) const RO_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
 
 const _: () = {
@@ -185,74 +83,45 @@ const _: () = {
         (RW_MASK & RO_MASK) == RO_MASK,
         "RW must be a superset of RO"
     );
-    // FILE_TRAVERSE == FILE_EXECUTE == 0x20 is part of FILE_GENERIC_EXECUTE.
-    // Both masks must carry it so `chdir` into a granted directory works.
+    // FILE_TRAVERSE and FILE_EXECUTE are both 0x20, inside FILE_GENERIC_EXECUTE.
     assert!(RW_MASK & 0x20 == 0x20, "RW must grant FILE_TRAVERSE");
     assert!(RO_MASK & 0x20 == 0x20, "RO must grant FILE_TRAVERSE");
 };
 
-// -------------------------------------------------------------------------
-// Widths Win32 asks for
-//
-// The three constants below exist only to say, once, what the ABI makes
-// this file say repeatedly: a Rust `size_of` is a `usize`, a windows-sys
-// flag constant is a `u32`, and the Win32 fields they are handed to are
-// narrower.  Each narrowing is a formality over a fixed layout or a known
-// bit, and naming it here is both more readable at the call site and a
-// single place to have written down why it cannot lose anything.
-// -------------------------------------------------------------------------
-
-/// `ACL_SIZE_INFORMATION`'s own byte count, as the `u32`
-/// [`GetAclInformation`] wants for `nAclInformationLength`.
+/// `ACL_SIZE_INFORMATION`'s byte count, as the `u32` [`GetAclInformation`]
+/// wants for `nAclInformationLength`.
 #[allow(
     clippy::cast_possible_truncation,
     reason = "a fixed three-DWORD Win32 layout; the size is a compile-time constant of 12, nowhere near u32::MAX"
 )]
 const ACL_SIZE_INFORMATION_CB: u32 = std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32;
 
-/// An empty `ACL` header's byte count, as the `u32` [`InitializeAcl`] wants
-/// — the floor every ACL this file builds is sized up from.
+/// An empty `ACL` header's byte count — the floor every ACL built here is
+/// sized up from, as the `u32` [`InitializeAcl`] wants.
 #[allow(
     clippy::cast_possible_truncation,
     reason = "a fixed eight-byte Win32 header; the size is a compile-time constant nowhere near u32::MAX"
 )]
 const ACL_CB: u32 = std::mem::size_of::<ACL>() as u32;
 
-/// [`INHERITED_ACE`] as the `u8` an `ACE_HEADER`'s `AceFlags` field is.
-///
-/// windows-sys types the ACE flag constants as `u32`, but the header field
-/// they are read out of is one byte wide; every flag fits, this one being
-/// bit 4.
+/// [`INHERITED_ACE`] as the `u8` an `ACE_HEADER`'s `AceFlags` field is:
+/// windows-sys types the flag constants `u32`, but the field is one byte.
 #[allow(
     clippy::cast_possible_truncation,
     reason = "INHERITED_ACE is 0x10, and AceFlags — the field it is tested against — is a single byte"
 )]
 const INHERITED_ACE_FLAG: u8 = INHERITED_ACE as u8;
 
-// -------------------------------------------------------------------------
-// Public error type
-// -------------------------------------------------------------------------
-
 /// Errors returned by [`DaclManager`] and [`recover_orphaned_state`].
-///
-/// after mxc `filesystem_dacl.rs::DaclError` (0e7c3dd)
 #[derive(Debug)]
 pub enum DaclError {
-    /// Caller passed a UNC network path; only local paths are supported.
     NetworkPathRejected(PathBuf),
-    /// The path could not be resolved (does not exist).
     PathNotFound(PathBuf),
-    /// `WRITE_DAC` denied on the target.
     WriteDacDenied { path: PathBuf, reason: String },
-    /// Any other Win32 failure.
     Win32 { path: PathBuf, reason: String },
-    /// Ledger file I/O error.
     LedgerIo(io::Error),
-    /// Ledger file failed to parse.
     LedgerParse(String),
-    /// SID string could not be parsed.
     InvalidSid(String),
-    /// Timed out waiting on the per-path serialization mutex.
     MutexTimeout { path: PathBuf, timeout_ms: u32 },
 }
 
@@ -291,40 +160,24 @@ impl From<io::Error> for DaclError {
     }
 }
 
-// -------------------------------------------------------------------------
-// Ledger types
-// -------------------------------------------------------------------------
-
-/// Distinguishes allow vs deny ACEs captured as prior state.  Grants applied
-/// by this module are always [`Self::Allow`]; [`Self::Deny`] exists so a
-/// pre-existing explicit deny ACE left by another tool (`icacls`, a prior
-/// session) is captured and replayed verbatim on restore rather than
-/// dropped.
-///
-/// after mxc `filesystem_dacl.rs::AceType` (0e7c3dd)
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 enum AceType {
     Allow,
     Deny,
 }
 
-/// One explicit (non-inherited) ACE that existed on the target *before* we
-/// applied — captured so restore can reconstruct the exact pre-apply DACL,
-/// defeating `SetEntriesInAclW`'s rights-coalescing for the same trustee.
-///
-/// after mxc `filesystem_dacl.rs::PriorAce` (0e7c3dd)
+/// One explicit (non-inherited) ACE the target carried before we applied,
+/// including a deny some other tool left. `SetEntriesInAclW` coalesces rights
+/// per trustee, so our stamp merges into any ACE our SID already had and no
+/// revoke can pick it back apart; restore rebuilds from these instead.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 struct PriorAce {
     ace_type: AceType,
     access_mask: u32,
-    /// Raw `AceFlags` byte with `INHERITED_ACE` masked off (only explicit
-    /// ACEs are ever captured here).
+    /// Raw `AceFlags` with `INHERITED_ACE` masked off.
     inherit_flags: u8,
 }
 
-/// Persisted record of one applied ACE.
-///
-/// after mxc `filesystem_dacl.rs::AppliedAce` (0e7c3dd)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AppliedAce {
     canonical_path: PathBuf,
@@ -333,40 +186,27 @@ struct AppliedAce {
     ace_type: AceType,
     /// Whether `OI|CI` were set (directories only).
     inheritable: bool,
-    /// Every explicit ACE for our SID that existed before we applied,
-    /// regardless of type.  Empty means "nothing to restore to but a bare
-    /// revoke".
-    ///
-    /// `default` keeps ledgers written before this field existed parseable:
-    /// an empty vector is exactly the pre-`prior_state` recovery semantics —
-    /// restore drops our SID's explicit ACEs (bare revoke) without replaying
-    /// any captured prior ACE, which is what the old code always did.
+    /// Empty means restore has nothing to replay and simply drops our SID's
+    /// explicit ACEs; `default` so a ledger written without the field reads
+    /// that way too.
     #[serde(default)]
     prior_state: Vec<PriorAce>,
 }
 
-/// Ledger written before each ACE is applied, so a crash between the apply
-/// and the next checkpoint still leaves enough on disk to undo.
-///
-/// after mxc `filesystem_dacl.rs::StateFile` (0e7c3dd)
+/// Upstream calls this `StateFile`, and its I/O `write_state_file` /
+/// `read_state_file`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Ledger {
     run_id: String,
     pid: u32,
     image_name: String,
-    /// Owning process *creation* time as a Windows FILETIME, captured once
-    /// at [`DaclManager::new`].  Recovery compares this against the live
-    /// process's creation time before classifying the ledger as active,
-    /// defeating PID reuse (a crashed owner's PID later recycled by an
-    /// unrelated process).
+    /// The owner's creation time as a Windows FILETIME. Recovery matches it
+    /// against the live process's, so a recycled PID never looks alive.
     started_at_filetime: u64,
     applied: Vec<AppliedAce>,
-    /// Names of the `AppContainer` profiles this session has registered, one
-    /// per distinct fs projection, recorded via
-    /// [`DaclManager::record_profile`] *before* the OS-level create (the
-    /// same ledger-before-mutation ordering as ACEs), so the orphan sweep
-    /// deletes a crashed session's profiles alongside restoring its ACEs.
-    /// `default` keeps ledgers written before this field existed parseable.
+    /// `AppContainer` profile names, recorded before the OS-level create so
+    /// the orphan sweep deletes a crashed session's profiles alongside its
+    /// ACEs. `default` so a ledger written without the field still parses.
     #[serde(default)]
     profiles: Vec<String>,
 }
@@ -374,39 +214,19 @@ struct Ledger {
 /// Aggregated outcome of [`recover_orphaned_state`].
 #[derive(Debug, Default)]
 pub struct RecoveryReport {
-    /// Number of ledger files inspected.
     pub files_processed: usize,
-    /// Total ACEs successfully removed across all orphaned ledgers.
     pub aces_restored: usize,
-    /// `AppContainer` profiles deleted (or found already gone) across all
-    /// orphaned ledgers.
     pub profiles_deleted: usize,
-    /// ACEs pruned because their target path no longer exists — there is
-    /// nothing to restore on a deleted file, so the entry is dropped rather
-    /// than retained-and-retried forever.
+    /// ACEs dropped because their target no longer exists: nothing to restore
+    /// on a deleted file, so retrying it every boot would be forever.
     pub aces_pruned_missing: usize,
-    /// Per-file or per-path errors, formatted for logging.
     pub errors: Vec<String>,
 }
 
-// -------------------------------------------------------------------------
-// DaclManager: the guard
-// -------------------------------------------------------------------------
-
-/// Crash-safe guard for filesystem DACL grants.
-///
-/// Apply grants via [`grant_appcontainer_access`](Self::grant_appcontainer_access);
-/// call [`restore`](Self::restore) to undo explicitly, or simply drop the
-/// guard — [`Drop`] restores best-effort. [`crate::sandbox::windows::session`]
-/// holds exactly one of these per shell session (not one per spawn): create
-/// it once at session start, grant into it — under each projection's own
-/// SID — on every command that confines one, and drop (or `restore`) it
-/// once at session end. It also ledgers the session's `AppContainer` profile
-/// registrations ([`record_profile`](Self::record_profile) /
-/// [`forget_profile`](Self::forget_profile)) so the orphan sweep deletes a
-/// crashed session's profiles.
-///
-/// after mxc `filesystem_dacl.rs::DaclManager` (0e7c3dd)
+/// Crash-safe guard for filesystem DACL grants: grant into it under each
+/// projection's own SID, then [`restore`](Self::restore) or just drop it.
+/// `session` keeps one per shell session, never one per spawn, and ledgers
+/// its `AppContainer` profile registrations here as well.
 #[derive(Debug)]
 pub struct DaclManager {
     run_id: String,
@@ -418,11 +238,8 @@ pub struct DaclManager {
 }
 
 impl DaclManager {
-    /// Create a new manager.  The ledger directory is created if missing; a
-    /// fresh run id is generated and the (empty) ledger is not written until
-    /// the first ACE is applied.
-    ///
-    /// after mxc `filesystem_dacl.rs::DaclManager::new` (0e7c3dd)
+    /// Creates the ledger directory if missing; the ledger file itself waits
+    /// until there is something to record.
     pub fn new() -> Result<Self, DaclError> {
         let dir = ensure_ledger_dir()?;
         let run_id = generate_run_id();
@@ -438,13 +255,10 @@ impl DaclManager {
         })
     }
 
-    /// Record an `AppContainer` profile name in the ledger, durably, *before*
-    /// the caller registers it with the OS — the same
-    /// ledger-before-mutation ordering [`apply_one`](Self::apply_one)
-    /// protects for ACEs.  A crash between this write and the
-    /// `CreateAppContainerProfile` call leaves recovery attempting to
-    /// delete a profile that was never created, which it treats as already
-    /// gone.
+    /// Durably record a profile name *before* the caller registers it with
+    /// the OS — the same ledger-before-mutation ordering ACEs get. A crash in
+    /// between leaves recovery trying to delete a profile that never existed,
+    /// which is the harmless direction to fail in.
     pub fn record_profile(&mut self, name: &str) -> Result<(), DaclError> {
         self.profiles.push(name.to_string());
         if let Err(e) = self.persist_ledger() {
@@ -454,15 +268,13 @@ impl DaclManager {
         Ok(())
     }
 
-    /// Drop a profile name from the ledger after the caller has deleted the
-    /// OS-level profile.  Removes the ledger file outright once nothing —
-    /// no ACE, no profile — remains recorded.
+    /// Call once the OS-level profile is gone. The ledger file disappears
+    /// outright when nothing — no ACE, no profile — is left recorded.
     pub fn forget_profile(&mut self, name: &str) -> Result<(), DaclError> {
         self.profiles.retain(|p| p != name);
         self.checkpoint()
     }
 
-    /// Persist the ledger, or remove it when it records nothing.
     fn checkpoint(&self) -> Result<(), DaclError> {
         if self.applied.is_empty() && self.profiles.is_empty() {
             remove_ledger_best_effort(&self.ledger_path);
@@ -472,18 +284,11 @@ impl DaclManager {
         }
     }
 
-    /// Warnings accumulated during apply/restore (non-fatal issues).
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
 
-    /// Grant the `AppContainer` SID read-write access on `readwrite` prefixes
-    /// and read-only access on `readonly` prefixes, stamping an allow-ACE
-    /// for each and capturing its prior ACE state first.  `sid_str` is the
-    /// per-session `AppContainer` SID (see the module-level caveat: it must
-    /// not be shared by two concurrent stampers).
-    ///
-    /// after mxc `filesystem_dacl.rs::DaclManager::grant_appcontainer_access` (0e7c3dd)
+    /// Stamp an allow-ACE for `sid_str` on every prefix given.
     pub fn grant_appcontainer_access(
         &mut self,
         sid_str: &str,
@@ -499,22 +304,13 @@ impl DaclManager {
         Ok(())
     }
 
-    /// Stamp an explicit **deny**-ACE for `sid_str` on each path in `denied`,
-    /// denying the full `FILE_ALL_ACCESS` surface.  Callers use this for a
-    /// `deny_path` nested inside a granted read/write prefix: the enclosing
-    /// allow-ACE is inheritable, so it would otherwise propagate down and
-    /// expose the nested path; an explicit deny stamped here precedes the
-    /// inherited allow in canonical ACL order (`SetEntriesInAclW` places
-    /// explicit-deny before inherited-allow), so the deny wins.  A
-    /// `deny_path` *not* inside any granted prefix needs no stamp — the
-    /// `AppContainer` is deny-by-default, so it is already unreachable.
-    ///
-    /// Denies go through the same [`apply_one`](Self::apply_one) lifecycle as
-    /// grants — per-path mutex, prior-state capture, ledger-before-apply — so
-    /// [`restore`](Self::restore) and [`recover_orphaned_state`] revert them
-    /// identically.
-    ///
-    /// after mxc `filesystem_dacl.rs::DaclManager::add_deny_aces` (0e7c3dd)
+    /// Stamp an explicit deny-ACE for `sid_str` over the whole
+    /// `FILE_ALL_ACCESS` surface. Explicit deny precedes inherited allow in
+    /// canonical ACL order, so a deny nested inside a granted prefix beats the
+    /// enclosing grant. `session::confine` stamps every declared deny path,
+    /// including ones outside every grant: an `AppContainer` token still
+    /// carries `Everyone` and the system-wide `ALL APPLICATION PACKAGES`
+    /// grants, so "outside our grants" is not the same as unreachable.
     pub fn add_deny_aces(&mut self, sid_str: &str, denied: &[PathBuf]) -> Result<(), DaclError> {
         // FILE_ALL_ACCESS = STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x1FF.
         let deny_mask: u32 = 0x001F_01FF;
@@ -524,16 +320,13 @@ impl DaclManager {
         Ok(())
     }
 
-    /// Idempotently remove every ACE this manager has applied.  Failures are
-    /// per-entry: a transient error on one path does not block the rest and
-    /// is recorded into [`warnings`](Self::warnings); the failed entry is
-    /// retained (in memory and on the ledger) so a future `restore()` call,
-    /// or [`recover_orphaned_state`] on the next session's boot, can retry.
-    /// Only fatal ledger I/O surfaces as `Err`.
-    ///
-    /// after mxc `filesystem_dacl.rs::DaclManager::restore` (0e7c3dd)
+    /// Idempotently remove every ACE this manager applied. A failure on one
+    /// path blocks none of the others: it lands in
+    /// [`warnings`](Self::warnings) and its entry is kept, in memory and on
+    /// the ledger, for a later `restore` or the next boot's sweep to retry.
+    /// Only ledger I/O is fatal enough to surface as `Err`.
     pub fn restore(&mut self) -> Result<(), DaclError> {
-        // Tail-first (LIFO): the last ACE applied is the first removed.
+        // Tail-first: the last ACE applied is the first removed.
         let mut remaining: Vec<AppliedAce> = Vec::new();
         while let Some(entry) = self.applied.pop() {
             match restore_one(&entry) {
@@ -547,15 +340,13 @@ impl DaclManager {
                 }
             }
         }
-        // `remaining` was pushed in pop order (newest first); reverse to
-        // restore the original apply order so a future retry again
-        // processes tail-first.
+        // Pushed newest-first; reverse back to apply order so a retry again
+        // goes tail-first.
         remaining.reverse();
         self.applied = remaining;
         self.checkpoint()
     }
 
-    /// after mxc `filesystem_dacl.rs::DaclManager::apply_one` (0e7c3dd)
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:silent:dacl-apply] Stats the grant target to choose OI|CI inheritance before stamping the allow-ACE. Sandbox grant-application infrastructure, not model data I/O — raises no surface card."
@@ -575,8 +366,8 @@ impl DaclManager {
             })?
             .is_dir();
 
-        // Hold the per-path mutex for the whole scan-persist-apply sequence
-        // so no other ral session's stamper can interleave.
+        // Held for the whole scan-persist-apply sequence, so no other ral
+        // session's stamper interleaves with it.
         let _guard = PathMutexGuard::acquire(&canonical)?;
 
         let prior_state = scan_explicit_aces_for_sid(&canonical, sid_str)?;
@@ -590,10 +381,8 @@ impl DaclManager {
             prior_state,
         };
 
-        // Ledger before apply (the crash-safety ordering the whole engine
-        // exists for): if the process dies right after this, recovery has
-        // everything needed to undo an apply that may or may not have
-        // reached the Win32 call.
+        // Ledger before apply: dying right here must still leave recovery
+        // able to undo a Win32 call that may or may not have run.
         self.applied.push(entry.clone());
         if let Err(e) = self.persist_ledger() {
             self.applied.pop();
@@ -623,7 +412,6 @@ impl DaclManager {
 }
 
 impl Drop for DaclManager {
-    /// after mxc `filesystem_dacl.rs::DaclManager::drop` (0e7c3dd)
     fn drop(&mut self) {
         if let Err(e) = self.restore() {
             crate::diagnostic::shell_warning(&format!(
@@ -633,12 +421,9 @@ impl Drop for DaclManager {
     }
 }
 
-/// Scan the ledger directory and reap every ledger whose owning process is
-/// no longer alive, restoring the DACL state it recorded.  W1c calls this
-/// once at session boot, before any grant is applied; nothing in this
-/// module wires it up.
-///
-/// after mxc `filesystem_dacl.rs::recover_orphaned_state` (0e7c3dd)
+/// Reap every ledger whose owning process is gone, restoring the DACL state
+/// it recorded and deleting the profiles it registered. `session::boot_recover`
+/// runs this once at session start, before any grant is applied.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:dacl-ledger-sweep] Startup orphan sweep: lists the ledger directory, quarantines unparseable ledgers by rename, and removes fully-recovered ones. Sandbox crash-recovery infrastructure, not model data I/O."
@@ -702,13 +487,9 @@ pub fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
                 }
             }
         }
-        // Delete the dead session's AppContainer profiles. Never retained
-        // for retry: the ledger is written before the OS-level create, so a
-        // recorded profile may never have existed (deletion then reports
-        // not-found, counted as already gone), and a genuinely undeletable
-        // profile is an inert registry entry — no process can acquire its
-        // SID except a spawn this codebase performs — so noting the failure
-        // beats re-attempting it at every boot forever.
+        // Never retained for retry. The ledger precedes the OS-level create,
+        // so a recorded profile may never have existed; and an undeletable one
+        // is inert, since only a spawn from this codebase can acquire its SID.
         for name in &ledger.profiles {
             match super::appcontainer::delete_profile_by_name(name) {
                 Ok(()) => report.profiles_deleted += 1,
@@ -741,12 +522,8 @@ pub fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
     Ok(report)
 }
 
-// -------------------------------------------------------------------------
-// Ledger directory and file I/O
-// -------------------------------------------------------------------------
-
-/// The per-user ledger directory: the XDG `state` base joined with
-/// `ral/sandbox-dacl` (see [`crate::path::basedir`]).
+/// Under the XDG `state` base rather than a hardcoded `%LOCALAPPDATA%`, so
+/// `XDG_STATE_HOME` relocates it — which is how the tests get a private one.
 fn ledger_dir() -> PathBuf {
     crate::path::basedir::resolve_xdg(
         crate::path::basedir::XdgKind::State,
@@ -766,12 +543,9 @@ fn ensure_ledger_dir() -> Result<PathBuf, DaclError> {
     Ok(dir)
 }
 
-/// Crash-safe write: stage to `<path>.tmp`, `fsync`, then atomically replace
-/// the destination via rename (`MoveFileExW(..., MOVEFILE_REPLACE_EXISTING)`
-/// on Windows). Recovery on the next boot therefore observes either the
-/// prior complete ledger or the new one, never a half-written file.
-///
-/// after mxc `filesystem_dacl.rs::write_state_file` (0e7c3dd)
+/// Stage to `<path>.tmp`, `fsync`, then rename over the destination, so the
+/// next boot's sweep sees either the previous complete ledger or this one,
+/// never a half-written file.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:dacl-ledger-write] Atomic ledger write for the DACL crash-safety protocol: stage to <path>.tmp, fsync, rename over the destination. Sandbox infrastructure, not model data I/O."
@@ -780,8 +554,8 @@ fn write_ledger(path: &Path, ledger: &Ledger) -> Result<(), DaclError> {
     let json = serde_json::to_vec_pretty(ledger)
         .map_err(|e| DaclError::LedgerParse(format!("serialize: {e}")))?;
     let tmp = tmp_path_for(path);
-    // Best-effort: clear any leftover tmp from a previous crashed write so
-    // `create_new` below doesn't spuriously fail with ERROR_FILE_EXISTS.
+    // A tmp left by a crashed write would fail `create_new` below with
+    // ERROR_FILE_EXISTS; clearing it is best-effort.
     match fs::remove_file(&tmp) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -824,13 +598,9 @@ fn remove_ledger(path: &Path) -> io::Result<()> {
     fs::remove_file(path)
 }
 
-/// Retries on `ERROR_SHARING_VIOLATION`/`ERROR_LOCK_VIOLATION`: a concurrent
-/// writer mid `<path>.tmp` -> `<path>` rename briefly holds the destination
-/// open exclusively, and antivirus on-access scanners can surface the same
-/// transient errors. Without the retry a perfectly-good ledger would be
-/// quarantined as corrupt.
-///
-/// after mxc `filesystem_dacl.rs::read_state_file` (0e7c3dd)
+/// Retries `ERROR_SHARING_VIOLATION`/`ERROR_LOCK_VIOLATION`: a concurrent
+/// writer mid-rename, or an on-access virus scanner, holds the file for a
+/// moment, and without the retry a good ledger gets quarantined as corrupt.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:dacl-ledger-read] Reads back a persisted ledger for orphan recovery / crash-safety bookkeeping. Sandbox infrastructure, not model data I/O."
@@ -886,18 +656,10 @@ fn current_image_basename() -> String {
         .unwrap_or_else(|| "ral.exe".to_string())
 }
 
-// -------------------------------------------------------------------------
-// Path canonicalization
-// -------------------------------------------------------------------------
-
-/// Classify whether an already-canonical path refers to a local object.
-/// `canonicalise_strict` on Windows emits `\\?\X:\...` for local drive
-/// paths and `\\?\UNC\server\share\...` for network shares; a caller may
-/// also pass a `\\.\Volume{GUID}\...` DOS-device-namespace path directly,
-/// which is local too even though canonicalisation does not normally
-/// produce it.
-///
-/// after mxc `filesystem_dacl.rs::ensure_local_canonical_prefix` (0e7c3dd)
+/// `canonicalise_strict` emits `\\?\X:\...` for a local drive and
+/// `\\?\UNC\server\share\...` for a share; a caller may also hand us a
+/// `\\.\Volume{GUID}\...` DOS-device path, local too though canonicalisation
+/// never produces it.
 fn ensure_local_canonical_prefix(canonical: &Path) -> Result<(), DaclError> {
     let s = canonical.to_string_lossy();
     let bytes = s.as_bytes();
@@ -919,7 +681,6 @@ fn ensure_local_canonical_prefix(canonical: &Path) -> Result<(), DaclError> {
     Ok(())
 }
 
-/// after mxc `filesystem_dacl.rs::canonicalize_local` (0e7c3dd)
 fn canonicalize_local(path: &Path) -> Result<PathBuf, DaclError> {
     let canonical = match crate::path::canon::canonicalise_strict(path) {
         Ok(p) => p,
@@ -937,31 +698,19 @@ fn canonicalize_local(path: &Path) -> Result<PathBuf, DaclError> {
     Ok(canonical)
 }
 
-// -------------------------------------------------------------------------
-// Win32: SID parsing (RAII)
-// -------------------------------------------------------------------------
-
-/// Owned PSID returned by `ConvertStringSidToSidW`; frees via `LocalFree` on
-/// drop.
-///
-/// after mxc `filesystem_dacl.rs::OwnedSid` (0e7c3dd)
+/// Owned PSID from `ConvertStringSidToSidW`, freed with `LocalFree`.
 struct OwnedSid(PSID);
 
-// SAFETY: a `PSID` from `ConvertStringSidToSidW` is a private, immutable
-// `LocalAlloc`'d buffer — nothing else in the process holds or mutates it.
-// Sharing the pointer value across threads (as [`well_known_ac_sids`]'s
-// process-wide cache does) is sound because every use is a read-only Win32
-// call (`EqualSid`, `AddAccessAllowedAceEx`, …); ownership for the eventual
-// `LocalFree` still belongs to whichever `OwnedSid` value is dropped, same
-// as upstream (filesystem_dacl.rs::OwnedSid, 0e7c3dd, which asserts the
-// same two impls).
+// SAFETY: the buffer is a private, immutable `LocalAlloc` — nothing else in
+// the process holds or mutates it — and every use is a read-only Win32 call
+// (`EqualSid`, `AddAccessAllowedAceEx`, …), so `well_known_ac_sids`'s
+// process-wide cache may share the pointer across threads. The `LocalFree`
+// still belongs to whichever `OwnedSid` is dropped.
 unsafe impl Send for OwnedSid {}
 unsafe impl Sync for OwnedSid {}
 
-/// The longest well-formed SID the Win32 SID grammar can produce is well
-/// under 200 characters (15 sub-authorities x ~10 digits, plus the `S-1-`
-/// prefix and separators); cap generously at 256 to reject obviously
-/// malformed input before engaging the Win32 parser.
+/// The SID grammar tops out well under 200 characters (15 sub-authorities of
+/// ~10 digits); 256 turns away junk before the Win32 parser sees it.
 const MAX_SID_STRING_LEN: usize = 256;
 
 impl OwnedSid {
@@ -977,8 +726,8 @@ impl OwnedSid {
         }
         let wide: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
         let mut psid: PSID = std::ptr::null_mut();
-        // SAFETY: `wide` is a NUL-terminated UTF-16 buffer kept alive for the
-        // call; `psid` is an out-param the callee fills on success.
+        // SAFETY: `wide` is NUL-terminated and outlives the call; `psid` is an
+        // out-param the callee fills on success.
         let ok = unsafe { ConvertStringSidToSidW(wide.as_ptr(), &raw mut psid) };
         if ok == 0 {
             return Err(DaclError::InvalidSid(format!(
@@ -1006,8 +755,7 @@ impl OwnedSid {
 impl Drop for OwnedSid {
     fn drop(&mut self) {
         if !self.0.is_null() {
-            // SAFETY: `self.0` was allocated by `ConvertStringSidToSidW`
-            // (which uses `LocalAlloc` internally) and is freed exactly once.
+            // SAFETY: `LocalAlloc`'d by `ConvertStringSidToSidW`, freed once.
             unsafe {
                 windows_sys::Win32::Foundation::LocalFree(self.0);
             }
@@ -1015,12 +763,7 @@ impl Drop for OwnedSid {
     }
 }
 
-// -------------------------------------------------------------------------
-// Win32: per-path mutex (RAII)
-// -------------------------------------------------------------------------
-
-/// FNV-1a 64-bit hash.  Sufficient for mutex-name uniqueness — not a
-/// security boundary.
+/// FNV-1a. Enough to keep mutex names apart; not a security boundary.
 fn fnv1a64(s: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.bytes() {
@@ -1030,31 +773,28 @@ fn fnv1a64(s: &str) -> u64 {
     h
 }
 
-/// after mxc `filesystem_dacl.rs::mutex_name_for` (0e7c3dd)
 fn mutex_name_for(canonical: &Path) -> String {
     let key = canonical.to_string_lossy().to_lowercase();
     let h = fnv1a64(&key);
     format!("Local\\ral.sandbox.dacl.{h:016x}")
 }
 
-/// after mxc `filesystem_dacl.rs::PathMutexGuard` (0e7c3dd)
 struct PathMutexGuard {
     handle: HANDLE,
     acquired: bool,
 }
 
-/// Concurrent ral sessions applying ACEs to the same path are expected to
-/// serialize on the order of seconds at most; 30s is a generous upper bound
-/// that still surfaces an actionable error rather than hanging indefinitely
-/// if a peer has wedged.
+/// Two ral sessions stamping the same path should serialize in seconds at
+/// worst; the cap exists so a wedged peer surfaces an error instead of
+/// hanging us.
 const PATH_MUTEX_WAIT_MS: u32 = 30_000;
 
 impl PathMutexGuard {
     fn acquire(canonical: &Path) -> Result<Self, DaclError> {
         let name = mutex_name_for(canonical);
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-        // SAFETY: `wide` is NUL-terminated and kept alive for the call; no
-        // security attributes, not initially owned.
+        // SAFETY: `wide` is NUL-terminated and outlives the call; no security
+        // attributes, not initially owned.
         let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
         if handle.is_null() {
             return Err(DaclError::Win32 {
@@ -1071,9 +811,9 @@ impl PathMutexGuard {
             });
         }
         if wait == WAIT_ABANDONED {
-            // The previous holder died without releasing; we still own the
-            // mutex, and orphan recovery reconciles any DACL state it left
-            // behind, so proceed rather than fail.
+            // The previous holder died without releasing, but we own the
+            // mutex all the same, and the orphan sweep reconciles whatever
+            // DACL state it left — so proceed rather than fail.
             crate::dbg_trace!(
                 "sandbox-win-dacl",
                 "acquired abandoned mutex for {}: previous holder terminated without releasing",
@@ -1110,8 +850,8 @@ impl PathMutexGuard {
 
 impl Drop for PathMutexGuard {
     fn drop(&mut self) {
-        // SAFETY: `self.handle` is a valid mutex handle owned by this guard;
-        // released only if actually acquired, then always closed.
+        // SAFETY: a valid mutex handle owned by this guard; released only if
+        // actually acquired, then always closed.
         unsafe {
             if self.acquired {
                 ReleaseMutex(self.handle);
@@ -1120,10 +860,6 @@ impl Drop for PathMutexGuard {
         }
     }
 }
-
-// -------------------------------------------------------------------------
-// Win32: apply / scan / restore a single ACE
-// -------------------------------------------------------------------------
 
 fn wide(p: &Path) -> Vec<u16> {
     p.as_os_str()
@@ -1138,9 +874,8 @@ fn trustee_for(sid: &OwnedSid) -> TRUSTEE_W {
         MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
         TrusteeForm: TRUSTEE_IS_SID,
         TrusteeType: TRUSTEE_IS_UNKNOWN,
-        // The trustee-by-SID form reinterprets this field as the PSID
-        // pointer per the Win32 contract; both are raw `*mut _` under
-        // windows-sys so the cast is a bit-preserving reinterpret.
+        // The trustee-by-SID form reinterprets this field as the PSID; both
+        // are raw `*mut _` here, so the cast preserves the bits.
         ptstrName: sid.as_psid().cast::<u16>(),
     }
 }
@@ -1159,15 +894,12 @@ fn win32_err_str(path: &Path, msg: &str) -> DaclError {
     }
 }
 
-/// Apply a single explicit allow-or-deny ACE to `path`'s DACL via
-/// `SetEntriesInAclW` + `SetNamedSecurityInfoW`.  `SetEntriesInAclW` merges
-/// the new ACE into the existing DACL in canonical order — explicit-deny
-/// before explicit-allow before inherited — so a deny stamped on a path that
-/// inherits an allow from an enclosing grant wins.  The caller
-/// ([`DaclManager::apply_one`]) holds the per-path mutex for the whole
-/// scan-persist-apply sequence.
-///
-/// after mxc `filesystem_dacl.rs::apply_explicit_ace` (0e7c3dd)
+/// Merge one explicit allow-or-deny ACE into `path`'s DACL, under the path
+/// mutex the caller holds across scan, ledger, and this. `SetEntriesInAclW`
+/// inserts in canonical order — explicit deny, explicit allow, inherited — so
+/// a deny beats an allow inherited from an enclosing grant; and a directory
+/// gets `OI|CI`, whose propagation Win32 handles in both directions, which is
+/// why nothing here walks descendants.
 fn apply_explicit_ace(
     path: &Path,
     sid_str: &str,
@@ -1195,8 +927,8 @@ fn apply_explicit_ace(
     let path_w = wide(path);
     let mut existing_dacl: *mut ACL = std::ptr::null_mut();
     let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-    // SAFETY: all pointers are either NUL-terminated wide buffers kept
-    // alive for the call, or out-params owned by this stack frame.
+    // SAFETY: every pointer is either a NUL-terminated wide buffer that
+    // outlives the call or an out-param owned by this stack frame.
     let rc = unsafe {
         GetNamedSecurityInfoW(
             path_w.as_ptr(),
@@ -1215,7 +947,7 @@ fn apply_explicit_ace(
 
     let mut new_dacl: *mut ACL = std::ptr::null_mut();
     // SAFETY: `ea` outlives the call; `existing_dacl` came from the query
-    // above (may be null, which SetEntriesInAclW accepts as "no prior DACL").
+    // above, and null there means "no prior DACL", which the callee accepts.
     let rc = unsafe { SetEntriesInAclW(1, &raw const ea, existing_dacl, &raw mut new_dacl) };
     if rc != ERROR_SUCCESS {
         unsafe {
@@ -1258,20 +990,15 @@ fn apply_explicit_ace(
     Ok(())
 }
 
-/// Restore the target's DACL to its pre-apply state: acquire the per-path
-/// mutex, then delegate to [`replace_explicit_aces_for_sid`].
-///
-/// after mxc `filesystem_dacl.rs::restore_one` (0e7c3dd)
+/// Put one target's DACL back the way the entry found it, under the same
+/// per-path mutex the apply took.
 fn restore_one(entry: &AppliedAce) -> Result<(), DaclError> {
     let _guard = PathMutexGuard::acquire(&entry.canonical_path)?;
     replace_explicit_aces_for_sid(&entry.canonical_path, &entry.sid_string, &entry.prior_state)
 }
 
-/// Scan the DACL on `canonical` and return every explicit (non-inherited)
-/// ACE attached to `sid_str`, allow or deny.  Called under the per-path
-/// mutex so the captured state is consistent with the apply that follows.
-///
-/// after mxc `filesystem_dacl.rs::scan_explicit_aces_for_sid` (0e7c3dd)
+/// Every explicit (non-inherited) ACE on `canonical` for `sid_str`. Runs under
+/// the path mutex, so what it sees still holds when the apply lands.
 fn scan_explicit_aces_for_sid(canonical: &Path, sid_str: &str) -> Result<Vec<PriorAce>, DaclError> {
     let sid = OwnedSid::parse(sid_str)?;
     let path_w = wide(canonical);
@@ -1302,7 +1029,7 @@ fn scan_explicit_aces_for_sid(canonical: &Path, sid_str: &str) -> Result<Vec<Pri
     }
 
     let mut info = ACL_SIZE_INFORMATION::default();
-    // SAFETY: `info` is a stack out-param sized exactly to the class asked for.
+    // SAFETY: `info` is a stack out-param sized to the class asked for.
     let ok = unsafe {
         GetAclInformation(
             existing_dacl,
@@ -1325,13 +1052,12 @@ fn scan_explicit_aces_for_sid(canonical: &Path, sid_str: &str) -> Result<Vec<Pri
     let mut prior: Vec<PriorAce> = Vec::new();
     for i in 0..info.AceCount {
         let mut ace_ptr: *mut c_void = std::ptr::null_mut();
-        // SAFETY: `i` is within `info.AceCount`, which GetAclInformation
-        // just reported for this exact ACL.
+        // SAFETY: `i` is within the count just reported for this ACL.
         if unsafe { GetAce(existing_dacl, i, &raw mut ace_ptr) } == 0 {
             continue;
         }
-        // SAFETY: `ace_ptr` was filled by a successful GetAce; every ACE
-        // begins with an ACE_HEADER.
+        // SAFETY: filled by a successful GetAce; every ACE opens with an
+        // ACE_HEADER.
         let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
         if (header.AceFlags & INHERITED_ACE_FLAG) != 0 {
             continue;
@@ -1341,16 +1067,15 @@ fn scan_explicit_aces_for_sid(canonical: &Path, sid_str: &str) -> Result<Vec<Pri
             0x01 => AceType::Deny,
             _ => continue, // object/compound/audit ACEs are not our concern
         };
-        // ACCESS_ALLOWED_ACE and ACCESS_DENIED_ACE share layout up to and
-        // including the inline SidStart dword.
+        // ACCESS_ALLOWED_ACE and ACCESS_DENIED_ACE share their layout up to
+        // and including the inline SidStart dword.
         let mask_and_sid = ace_ptr as *const ACCESS_ALLOWED_ACE;
-        // SAFETY: same ACE, reinterpreted per the shared prefix layout.
+        // SAFETY: same ACE, read through that shared prefix.
         let ace_mask = unsafe { (*mask_and_sid).Mask };
-        // SAFETY: `SidStart` is the first dword of the inline SID; its
-        // address is exactly where the ACE's SID bytes begin.
+        // SAFETY: `SidStart` is the first dword of the inline SID, so its
+        // address is where the SID bytes begin.
         let ace_sid = (unsafe { &raw const (*mask_and_sid).SidStart }) as PSID;
-        // SAFETY: both pointers reference valid SID buffers for the
-        // duration of this call.
+        // SAFETY: both point at valid SID buffers for this call.
         if unsafe { EqualSid(ace_sid, sid.as_psid()) } != 0 {
             prior.push(PriorAce {
                 ace_type,
@@ -1365,23 +1090,14 @@ fn scan_explicit_aces_for_sid(canonical: &Path, sid_str: &str) -> Result<Vec<Pri
     Ok(prior)
 }
 
-// -------------------------------------------------------------------------
-// Effective-access filter: skip grants the well-known AC SIDs already cover
-// -------------------------------------------------------------------------
-
-/// SIDs every `AppContainer` process token implicitly belongs to. A grant to
-/// any of these is observed by every `AppContainer` the OS launches, so a
-/// per-session grant that only restates it is redundant — and, on a system
-/// path this session's account does not own, would fail `WRITE_DAC` for no
-/// gain.
+/// SIDs every `AppContainer` token implicitly carries, so a grant restating
+/// one of them buys nothing — and on a system path this account does not own
+/// would fail `WRITE_DAC` for nothing.
 ///
-/// - `S-1-15-2-1` — `APPLICATION PACKAGE AUTHORITY\ALL APPLICATION PACKAGES`.
-/// - `S-1-15-2-2` — `APPLICATION PACKAGE AUTHORITY\ALL RESTRICTED APPLICATION PACKAGES`.
-/// - `S-1-1-0`    — `Everyone`. `AppContainer` tokens DO retain Everyone; they
-///   strip `Authenticated Users` and `Users`, so those are deliberately
-///   omitted here.
-///
-/// after mxc `filesystem_dacl.rs::WELL_KNOWN_AC_SIDS` (0e7c3dd)
+/// - `S-1-15-2-1` — `ALL APPLICATION PACKAGES`.
+/// - `S-1-15-2-2` — `ALL RESTRICTED APPLICATION PACKAGES`.
+/// - `S-1-1-0` — `Everyone`, which an `AppContainer` token does keep; it
+///   strips `Authenticated Users` and `Users`, so those are absent by design.
 const WELL_KNOWN_AC_SIDS: &[&str] = &["S-1-15-2-1", "S-1-15-2-2", "S-1-1-0"];
 
 fn well_known_ac_sids() -> &'static [OwnedSid] {
@@ -1396,20 +1112,12 @@ fn well_known_ac_sids() -> &'static [OwnedSid] {
         .as_slice()
 }
 
-/// Walk the effective DACL on `path` and compute the access mask granted to
-/// a process whose only relevant identities are the well-known
-/// AppContainer-membership SIDs ([`WELL_KNOWN_AC_SIDS`]). Inherited ACEs are
-/// included; explicit grants to a *specific* `AppContainer` SID are not — the
-/// caller is presumably deciding whether such a grant is needed.
-///
-/// Walking is canonical: a `DENY` ACE matching one of these SIDs marks bits
-/// as denied, and a later `ALLOW` ACE can only add bits that have not
-/// already been denied — matching Windows' own access-check order. Returns
-/// 0 when the DACL is empty or NULL (treated as "grants nothing", not
-/// "grants everything" — the caller falls back to attempting the real
-/// grant, which may then fail `WRITE_DAC`).
-///
-/// after mxc `filesystem_dacl.rs::compute_appcontainer_effective_access` (0e7c3dd)
+/// What [`WELL_KNOWN_AC_SIDS`] alone grant on `path`: inherited ACEs count,
+/// explicit grants to a specific `AppContainer` SID do not, since the caller
+/// is deciding whether such a grant is still needed. The walk follows
+/// Windows' own access check — a matching deny marks bits off, and a later
+/// allow can only add bits not already denied. A NULL or empty DACL yields 0,
+/// "grants nothing", so the caller tries the real grant instead of assuming.
 fn compute_appcontainer_effective_access(path: &Path) -> Result<u32, DaclError> {
     let well_known = well_known_ac_sids();
     let path_w = wide(path);
@@ -1440,7 +1148,7 @@ fn compute_appcontainer_effective_access(path: &Path) -> Result<u32, DaclError> 
     }
 
     let mut info = ACL_SIZE_INFORMATION::default();
-    // SAFETY: `info` is a stack out-param sized exactly to the class asked for.
+    // SAFETY: `info` is a stack out-param sized to the class asked for.
     let ok = unsafe {
         GetAclInformation(
             existing_dacl,
@@ -1461,12 +1169,11 @@ fn compute_appcontainer_effective_access(path: &Path) -> Result<u32, DaclError> 
     let mut denied: u32 = 0;
     for i in 0..info.AceCount {
         let mut ace_ptr: *mut c_void = std::ptr::null_mut();
-        // SAFETY: `i` is within `info.AceCount`, which GetAclInformation
-        // just reported for this exact ACL.
+        // SAFETY: `i` is within the count just reported for this ACL.
         if unsafe { GetAce(existing_dacl, i, &raw mut ace_ptr) } == 0 {
             continue;
         }
-        // SAFETY: filled by a successful GetAce; every ACE begins with an
+        // SAFETY: filled by a successful GetAce; every ACE opens with an
         // ACE_HEADER.
         let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
         let ace_type = match header.AceType {
@@ -1475,10 +1182,10 @@ fn compute_appcontainer_effective_access(path: &Path) -> Result<u32, DaclError> 
             _ => continue,
         };
         let mask_and_sid = ace_ptr as *const ACCESS_ALLOWED_ACE;
-        // SAFETY: same shared-prefix reasoning as scan_explicit_aces_for_sid.
+        // SAFETY: the shared-prefix layout again, as in scan_explicit_aces_for_sid.
         let ace_mask = unsafe { (*mask_and_sid).Mask };
         let ace_sid = (unsafe { &raw const (*mask_and_sid).SidStart }) as PSID;
-        // SAFETY: both pointers reference valid SID buffers for this call.
+        // SAFETY: both point at valid SID buffers for this call.
         let matches = well_known
             .iter()
             .any(|s| unsafe { EqualSid(ace_sid, s.as_psid()) } != 0);
@@ -1496,12 +1203,11 @@ fn compute_appcontainer_effective_access(path: &Path) -> Result<u32, DaclError> 
     Ok(allowed)
 }
 
-/// Whether the well-known AppContainer-membership SIDs already grant
-/// `needed_mask` on `path`, without any per-session ACE. `false` on any
-/// error reading the DACL — the caller then attempts (and may fail) the
-/// real grant rather than silently assuming a coverage it could not verify.
+/// Whether `needed_mask` is already covered without any per-session ACE.
+/// A DACL that cannot be read answers `false`: better to attempt the grant
+/// and fail than to assume a coverage nothing verified.
 ///
-/// after mxc `fallback_detector.rs::appcontainer_already_grants` (0e7c3dd)
+/// after mxc `fallback_detector.rs::appcontainer_already_grants`
 fn appcontainer_already_grants(path: &Path, needed_mask: u32) -> bool {
     match compute_appcontainer_effective_access(path) {
         Ok(effective) => (effective & needed_mask) == needed_mask,
@@ -1509,20 +1215,13 @@ fn appcontainer_already_grants(path: &Path, needed_mask: u32) -> bool {
     }
 }
 
-/// Drop every path in `paths` that the well-known `AppContainer` SIDs already
-/// grant `needed_mask` on — a per-session ACE restating that access would
-/// be redundant, and on a system path this session's account does not own
-/// would fail `WRITE_DAC` for no gain. This is the gap that would otherwise
-/// block W2: stamping a `system:`-sigil root (e.g. `System32`, which
-/// `ALL APPLICATION PACKAGES` already reads system-wide) would fail closed
-/// for a non-admin session even though nothing needed stamping.
+/// Drop the paths already covered by the well-known SIDs. Without this a
+/// non-admin session stamping a system root — `System32`, which
+/// `ALL APPLICATION PACKAGES` reads system-wide anyway — would fail closed on
+/// `WRITE_DAC` for a grant nobody needed. Grants only: `session::confine`
+/// never filters deny paths, since a group grant cannot subtract access.
 ///
-/// Only grant paths are filtered here. `deny_paths` are never filtered —
-/// denying is about *subtracting* access, which a well-known-group grant
-/// cannot do, so every deny is still attempted (see
-/// [`crate::sandbox::windows::session::confine`]).
-///
-/// after mxc `dispatcher.rs::filter_paths_needing_grant` (0e7c3dd)
+/// after mxc `dispatcher.rs::filter_paths_needing_grant`
 pub(crate) fn filter_paths_needing_grant(paths: Vec<PathBuf>, needed_mask: u32) -> Vec<PathBuf> {
     paths
         .into_iter()
@@ -1530,12 +1229,8 @@ pub(crate) fn filter_paths_needing_grant(paths: Vec<PathBuf>, needed_mask: u32) 
         .collect()
 }
 
-/// Canonical-order bucket for an ACE (per Microsoft's documented "order of
-/// ACEs in a DACL"): explicit deny, then explicit allow, then explicit
-/// other, then inherited (any type, original order preserved within each
-/// bucket).  Smaller bucket sorts earlier.
-///
-/// after mxc `filesystem_dacl.rs::canonical_bucket` (0e7c3dd)
+/// Canonical DACL order, smallest first: explicit deny, explicit allow,
+/// explicit other, then everything inherited regardless of type.
 fn canonical_bucket(ace_type: u8, inherited: bool) -> u8 {
     if inherited {
         3
@@ -1548,17 +1243,12 @@ fn canonical_bucket(ace_type: u8, inherited: bool) -> u8 {
     }
 }
 
-/// Rebuild `path`'s DACL by dropping every explicit ACE whose trustee is
-/// `sid_str`, then re-appending `replay` ACEs (also for `sid_str`) in
-/// canonical order.  Inherited ACEs and explicit ACEs for other trustees
-/// are preserved verbatim.
-///
-/// `SetEntriesInAclW(REVOKE_ACCESS)` is not used for restore: on some
-/// Windows builds it fails to remove explicit `ACCESS_DENIED` ACEs, leaving
-/// residue after what should be a full revoke.  Manual ACL surgery here
-/// gives deterministic control over what survives.
-///
-/// after mxc `filesystem_dacl.rs::replace_explicit_aces_for_sid` (0e7c3dd)
+/// Rebuild `path`'s DACL with every explicit ACE for `sid_str` dropped and
+/// the `replay` ones put back in canonical order; inherited ACEs and other
+/// trustees survive verbatim. `SetEntriesInAclW(REVOKE_ACCESS)` would be the
+/// obvious shortcut, but on some Windows builds it leaves explicit
+/// `ACCESS_DENIED` ACEs behind after what should be a full revoke, so the
+/// surgery is done by hand.
 fn replace_explicit_aces_for_sid(
     path: &Path,
     sid_str: &str,
@@ -1620,12 +1310,9 @@ fn replace_explicit_aces_for_sid(
     Ok(())
 }
 
-/// The pure-rebuild half of [`replace_explicit_aces_for_sid`]: walks the
-/// existing DACL, filters explicit ACEs for our SID, adds replay ACEs, and
-/// returns a `Vec<u32>` whose bytes are the new ACL (`Vec<u32>` guarantees
-/// 4-byte alignment, which `InitializeAcl` requires).
-///
-/// after mxc `filesystem_dacl.rs::replace_explicit_aces_for_sid_inner` (0e7c3dd)
+/// The pure half of [`replace_explicit_aces_for_sid`]. The new ACL comes back
+/// as a `Vec<u32>` because `InitializeAcl` wants 4-byte alignment and that is
+/// the cheapest way to promise it.
 fn replace_explicit_aces_for_sid_inner(
     path: &Path,
     sid: &OwnedSid,
@@ -1652,8 +1339,7 @@ fn replace_explicit_aces_for_sid_inner(
 
     if !existing_dacl.is_null() {
         let mut info = ACL_SIZE_INFORMATION::default();
-        // SAFETY: `existing_dacl` is non-null and came from a successful
-        // GetNamedSecurityInfoW query.
+        // SAFETY: non-null, and from a successful GetNamedSecurityInfoW.
         let ok = unsafe {
             GetAclInformation(
                 existing_dacl,
@@ -1662,13 +1348,10 @@ fn replace_explicit_aces_for_sid_inner(
                 AclSizeInformation,
             )
         };
-        // A failure here must not silently degrade to "no kept entries":
-        // that would rebuild the target's DACL as if every other
-        // trustee's explicit ACE (allow or deny) had never existed,
-        // dropping them from a user directory. Propagate instead, matching
-        // upstream (filesystem_dacl.rs::replace_explicit_aces_for_sid_inner,
-        // 0e7c3dd) and this file's own `scan_explicit_aces_for_sid`, which
-        // treats the same call's failure as fatal.
+        // Degrading to "no kept entries" would rebuild the DACL as if every
+        // other trustee's explicit ACE had never existed, silently stripping
+        // a user directory. Propagate, as `scan_explicit_aces_for_sid` does
+        // for the same call.
         if ok == 0 {
             return Err(win32_err_str(
                 path,
@@ -1677,7 +1360,7 @@ fn replace_explicit_aces_for_sid_inner(
         }
         for i in 0..info.AceCount {
             let mut ace_ptr: *mut c_void = std::ptr::null_mut();
-            // SAFETY: `i` is within `info.AceCount` for this ACL.
+            // SAFETY: `i` is within the count just reported for this ACL.
             if unsafe { GetAce(existing_dacl, i, &raw mut ace_ptr) } == 0 {
                 continue;
             }
@@ -1687,9 +1370,9 @@ fn replace_explicit_aces_for_sid_inner(
             let mut drop_it = false;
             if !inherited && (header.AceType == 0x00 || header.AceType == 0x01) {
                 let ace_struct = ace_ptr as *const ACCESS_ALLOWED_ACE;
-                // SAFETY: same shared-prefix reasoning as scan_explicit_aces_for_sid.
+                // SAFETY: the shared-prefix layout again.
                 let ace_sid = (unsafe { &raw const (*ace_struct).SidStart }) as PSID;
-                // SAFETY: both are valid SID buffers for this call.
+                // SAFETY: both point at valid SID buffers for this call.
                 if unsafe { EqualSid(ace_sid, sid.as_psid()) } != 0 {
                     drop_it = true;
                 }
@@ -1720,8 +1403,8 @@ fn replace_explicit_aces_for_sid_inner(
         next_order += 1;
     }
 
-    // Stable sort by (bucket, original order): preserves the original DACL
-    // layout inside each bucket so unrelated ACEs never shuffle.
+    // Stable, so within a bucket the original DACL layout holds and
+    // unrelated ACEs never shuffle.
     entries.sort_by_key(|e| match e {
         Entry::Kept { bucket, order, .. } | Entry::Replay { bucket, order, .. } => {
             (*bucket, *order)
@@ -1729,7 +1412,7 @@ fn replace_explicit_aces_for_sid_inner(
     });
 
     // Per-ACE byte size: ACE_HEADER (4) + ACCESS_MASK (4) + SID bytes.
-    // SAFETY: `sid` owns a valid PSID for the duration of this call.
+    // SAFETY: `sid` owns a valid PSID for this call.
     let sid_len: u32 = unsafe { GetLengthSid(sid.as_psid()) };
     let per_replay_size: u32 = 8 + sid_len;
     let replay_bytes: u32 =
@@ -1746,8 +1429,8 @@ fn replace_explicit_aces_for_sid_inner(
     let mut new_acl_buf: Vec<u32> = vec![0u32; dwords];
     let new_acl_ptr = new_acl_buf.as_mut_ptr().cast::<ACL>();
 
-    // SAFETY: `new_acl_buf` is a freshly allocated, zeroed, 4-byte-aligned
-    // buffer at least `new_acl_size` bytes long.
+    // SAFETY: freshly allocated, zeroed, 4-byte-aligned, and at least
+    // `new_acl_size` bytes long.
     if unsafe { InitializeAcl(new_acl_ptr, new_acl_size, ACL_REVISION) } == 0 {
         return Err(win32_err_str(
             path,
@@ -1755,16 +1438,14 @@ fn replace_explicit_aces_for_sid_inner(
         ));
     }
 
-    // Both `AddAce` and the typed `AddAccess{Allowed,Denied}AceEx` family
-    // append at the tail of the ACL despite the latter's name — neither
-    // canonicalizes on insert — so emission order here drives the final
-    // canonical order directly.
+    // Neither `AddAce` nor the `AddAccess{Allowed,Denied}AceEx` family
+    // canonicalizes on insert — both simply append — so emission order here
+    // is the final ACL order.
     for entry in &entries {
         match entry {
             Entry::Kept { ptr, size, .. } => {
-                // SAFETY: `new_acl_ptr` was just initialized above; `ptr`
-                // points at a live ACE of exactly `size` bytes from the
-                // still-valid `existing_dacl` query.
+                // SAFETY: `new_acl_ptr` was initialized above; `ptr` is a live
+                // ACE of exactly `size` bytes in the still-valid query result.
                 if unsafe { AddAce(new_acl_ptr, ACL_REVISION, u32::MAX, *ptr, *size) } == 0 {
                     return Err(win32_err_str(
                         path,
@@ -1774,8 +1455,8 @@ fn replace_explicit_aces_for_sid_inner(
             }
             Entry::Replay { prior, .. } => {
                 let flags = u32::from(prior.inherit_flags);
-                // SAFETY: `new_acl_ptr` is valid and has room (sized above
-                // to include every replay entry); `sid` is a valid PSID.
+                // SAFETY: `new_acl_ptr` was sized above to hold every replay
+                // entry; `sid` is a valid PSID.
                 let ok = unsafe {
                     match prior.ace_type {
                         AceType::Allow => AddAccessAllowedAceEx(
@@ -1811,17 +1492,12 @@ fn replace_explicit_aces_for_sid_inner(
     Ok(new_acl_buf)
 }
 
-// -------------------------------------------------------------------------
-// Win32: process-alive check (orphan recovery)
-// -------------------------------------------------------------------------
-
-/// RAII wrapper around a process `HANDLE`.
 struct ProcessHandleGuard(HANDLE);
 
 impl Drop for ProcessHandleGuard {
     fn drop(&mut self) {
         if !self.0.is_null() {
-            // SAFETY: `self.0` is a valid handle opened by `OpenProcess`.
+            // SAFETY: a valid handle from `OpenProcess`.
             unsafe {
                 CloseHandle(self.0);
             }
@@ -1829,17 +1505,12 @@ impl Drop for ProcessHandleGuard {
     }
 }
 
-/// Liveness probe for orphan recovery.  Returns `true` if a process with
-/// `pid` is running, has the expected image basename, and (when
-/// `expected_start_filetime` is `Some` and non-zero) has a kernel-recorded
-/// creation time exactly equal to the recorded value — `GetProcessTimes`
-/// returns a fixed timestamp for a process's whole lifetime, so exact
-/// equality is the right test; any deviation means a different process now
-/// holds the recorded PID (PID reuse).  `None`/`Some(0)` preserves
-/// PID-and-image-only liveness for ledgers written before this field
-/// existed.
-///
-/// after mxc `filesystem_dacl.rs::process_alive_with_image` (0e7c3dd)
+/// True when `pid` runs under the expected image basename and, given a
+/// non-zero `expected_start_filetime`, was created at exactly that instant.
+/// `GetProcessTimes` reports one fixed timestamp for a process's whole life,
+/// so equality is the right test and any deviation means the PID has been
+/// recycled. `None` or zero falls back to pid-and-image, all an older ledger
+/// records.
 fn process_alive_with_image(
     pid: u32,
     expected_image: &str,
@@ -1855,13 +1526,13 @@ fn process_alive_with_image(
     }
     let handle = ProcessHandleGuard(handle);
 
-    /// Wide chars of room for the image path — `MAX_PATH` is 260, and
-    /// the extended-length forms this may see stay well inside this.
+    /// Wide chars of room: `MAX_PATH` is 260, and the extended-length forms
+    /// this may meet stay well inside.
     const IMAGE_NAME_CHARS: u32 = 1024;
     let mut buf = [0u16; IMAGE_NAME_CHARS as usize];
     let mut sz: u32 = IMAGE_NAME_CHARS;
-    // SAFETY: `handle.0` is valid (checked above); `buf`/`sz` are stack
-    // locals sized to the buffer.
+    // SAFETY: `handle.0` was checked above; `buf`/`sz` are stack locals
+    // sized to the buffer.
     let ok = unsafe {
         QueryFullProcessImageNameW(
             handle.0,
@@ -1903,17 +1574,14 @@ fn process_alive_with_image(
     live == recorded
 }
 
-/// Process creation time of the *current* process as a Windows FILETIME
-/// (100-ns intervals since 1601-01-01 UTC).  `GetCurrentProcess` returns a
-/// pseudo-handle that does not need closing.
-///
-/// after mxc `filesystem_dacl.rs::process_creation_filetime` (0e7c3dd)
+/// This process's creation time as a Windows FILETIME: 100-ns intervals
+/// since 1601-01-01 UTC.
 fn process_creation_filetime() -> Result<u64, DaclError> {
     let mut creation = FILETIME::default();
     let mut exit = FILETIME::default();
     let mut kernel = FILETIME::default();
     let mut user = FILETIME::default();
-    // SAFETY: `GetCurrentProcess` returns a pseudo-handle needing no close;
+    // SAFETY: `GetCurrentProcess` yields a pseudo-handle needing no close;
     // the four out-params are stack locals of the right type.
     let ok = unsafe {
         GetProcessTimes(
@@ -1935,10 +1603,6 @@ fn process_creation_filetime() -> Result<u64, DaclError> {
     }
     Ok((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
 }
-
-// -------------------------------------------------------------------------
-// Tests
-// -------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(
@@ -2003,11 +1667,9 @@ mod tests {
         assert!(parsed.profiles.is_empty());
     }
 
-    // The RW_MASK/RO_MASK shape invariants (superset relationship,
-    // FILE_TRAVERSE presence) are compile-time `const _: () = assert!(...)`
-    // checks at the mask declarations above, not a runtime test: a value
-    // drift fails the build itself rather than silently passing on a host
-    // where the test suite is filtered.
+    // The mask-shape invariants are `const _` asserts at the declarations
+    // above, not tests here, so drift fails the build rather than depending
+    // on someone running an unfiltered suite.
 
     #[test]
     fn canonical_bucket_orders_deny_before_allow_before_other_before_inherited() {
@@ -2097,8 +1759,8 @@ mod tests {
             t > UNIX_EPOCH_AS_FILETIME,
             "process_creation_filetime ({t}) should be > Unix epoch ({UNIX_EPOCH_AS_FILETIME})"
         );
-        // Pure arithmetic "now" in FILETIME units (no extra Win32 feature
-        // needed just for this bound check).
+        // "Now" in FILETIME units by arithmetic, so the bound check pulls in
+        // no extra Win32 feature.
         let now_ft = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(u64::MAX, |d| {
@@ -2154,13 +1816,10 @@ mod tests {
 
     // ---------------- integration tests -----------------
     //
-    // These mutate real filesystem ACLs under a tempdir and run only on
-    // Windows CI (this whole module is cfg(windows)-gated).  Each scopes
-    // XDG_STATE_HOME to a fresh tempdir, serialized by `ENV_LOCK` so
-    // `RUST_TEST_THREADS > 1` (`.cargo/config.toml`) can't interleave two
-    // tests' env mutations.  `crate::test_env` is Unix-only (its only
-    // consumers today are `cfg(unix)` tests), so this module keeps its own
-    // copy of the same pattern rather than lifting that gate.
+    // These mutate real filesystem ACLs, each under its own XDG_STATE_HOME,
+    // serialized by `ENV_LOCK` because the suite runs multi-threaded and two
+    // tests' env mutations must not interleave. `crate::test_env` is the same
+    // pattern but `cfg(unix)`, so this module keeps a copy of it.
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -2171,8 +1830,8 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let state_home = scratch.path().to_string_lossy().into_owned();
         let prev = std::env::var_os("XDG_STATE_HOME");
-        // SAFETY: serialized by ENV_LOCK above; no other thread in this
-        // process reads/writes XDG_STATE_HOME while the guard is held.
+        // SAFETY: ENV_LOCK is held, so no other thread reads or writes
+        // XDG_STATE_HOME meanwhile.
         unsafe {
             std::env::set_var("XDG_STATE_HOME", &state_home);
         }
@@ -2216,10 +1875,9 @@ mod tests {
             let target = td.path().to_path_buf();
             let everyone = "S-1-1-0";
 
-            // First apply: RO. Second apply via a separate manager: RW.
-            // The two grants merge in the DACL (same trustee), so restoring
-            // the second manager must use its captured prior_state (the
-            // first grant's ACE) to unwind correctly.
+            // RO, then RW from a separate manager. Same trustee, so the two
+            // merge into one ACE and the second manager can only unwind via
+            // the prior_state it captured.
             let mut outer = DaclManager::new().unwrap();
             outer
                 .grant_appcontainer_access(everyone, &[], std::slice::from_ref(&target))
@@ -2290,11 +1948,9 @@ mod tests {
                 &[PathBuf::from(r"\\someserver\share\foo")],
                 &[],
             );
-            // The exact variant depends on how canonicalisation resolves an
-            // unreachable server name on the test host; all three are
-            // "never silently succeeds on a UNC path".
-            // `ensure_local_canonical_prefix`'s own unit tests above cover
-            // the classification deterministically.
+            // Which variant depends on how the host resolves an unreachable
+            // server name; all three mean "never silently succeeded". The
+            // unit tests above pin the classification deterministically.
             match &err {
                 Err(
                     DaclError::NetworkPathRejected(_)
@@ -2318,9 +1974,8 @@ mod tests {
                 let mut m = DaclManager::new().unwrap();
                 m.grant_appcontainer_access("S-1-1-0", std::slice::from_ref(&target), &[])
                     .unwrap();
-                // Forge a ledger with a dead PID so recovery picks it up,
-                // then tell our manager not to also restore (isolating the
-                // recovery path).
+                // Forge a dead-PID ledger for recovery to find, then empty
+                // this manager so only the recovery path does the undoing.
                 let dir = ensure_ledger_dir().unwrap();
                 let synthetic = dir.join("pid-2147483646-orphan.json");
                 let l = Ledger {
@@ -2356,10 +2011,9 @@ mod tests {
     fn recovery_deletes_dead_sessions_profiles() {
         with_scoped_state_dir(|| {
             // One profile genuinely registered, one ledgered but never
-            // created (the crash window between record_profile and the OS
-            // create). Recovery must delete the first and consume the
-            // ledger either way — a recorded-but-absent profile is never
-            // retried forever.
+            // created — the crash window between record_profile and the OS
+            // create. Recovery deletes the first and consumes the ledger
+            // either way, so the absent one is not retried forever.
             let created = format!("ral.test.recovery.{}", std::process::id());
             let ghost = format!("ral.test.recovery.ghost.{}", std::process::id());
             let profile =
@@ -2430,10 +2084,9 @@ mod tests {
         });
     }
 
-    /// Full DACL walk (inherited ACEs included, unlike
-    /// [`scan_explicit_aces_for_sid`]) returning, in ACL order, the
-    /// `(AceType byte, inherited?)` of every allow/deny ACE for `sid_str` —
-    /// so a test can assert canonical ordering.
+    /// Every allow/deny ACE for `sid_str` as `(AceType byte, inherited?)` in
+    /// ACL order — inherited ones included, unlike
+    /// [`scan_explicit_aces_for_sid`] — so a test can assert the ordering.
     fn sid_ace_sequence(path: &Path, sid_str: &str) -> Vec<(u8, bool)> {
         let sid = OwnedSid::parse(sid_str).unwrap();
         let path_w = wide(path);
@@ -2485,9 +2138,6 @@ mod tests {
         out
     }
 
-    /// A deny stamped on a path nested inside a granted (inheritable) prefix
-    /// produces an explicit deny-ACE that precedes the inherited allow in
-    /// canonical order — so the deny wins — and is fully reverted on restore.
     #[test]
     fn deny_nested_in_grant_overrides_inherited_allow_and_reverts() {
         with_scoped_state_dir(|| {
@@ -2502,13 +2152,10 @@ mod tests {
                 .unwrap();
             m.add_deny_aces(sid, std::slice::from_ref(&child)).unwrap();
 
-            // Exactly one explicit (non-inherited) ACE for the SID on the
-            // child, and it is a deny.
             let explicit = scan_explicit_aces_for_sid(&child, sid).unwrap();
             assert_eq!(explicit.len(), 1, "one explicit ACE expected: {explicit:?}");
             assert_eq!(explicit[0].ace_type, AceType::Deny);
 
-            // Canonical order: the explicit deny precedes the inherited allow.
             let seq = sid_ace_sequence(&child, sid);
             let deny_idx = seq
                 .iter()
@@ -2528,8 +2175,6 @@ mod tests {
         });
     }
 
-    /// The deny stamp goes through the same ledger as a grant: recorded in
-    /// memory and persisted to disk with `AceType::Deny`.
     #[test]
     fn deny_ace_recorded_in_ledger() {
         with_scoped_state_dir(|| {
@@ -2561,11 +2206,6 @@ mod tests {
         });
     }
 
-    /// A fresh temp dir grants the well-known AC SIDs nothing, so the
-    /// filter keeps it; once `Everyone` is explicitly granted the needed
-    /// mask, the filter drops it as redundant. Mirrors upstream's
-    /// `filter_paths_needing_grant_drops_well_known_grant`
-    /// (dispatcher.rs, 0e7c3dd).
     #[test]
     fn filter_paths_needing_grant_drops_well_known_grant() {
         with_scoped_state_dir(|| {
@@ -2598,8 +2238,6 @@ mod tests {
         });
     }
 
-    /// `compute_appcontainer_effective_access` returns 0 on a fresh temp
-    /// dir (no well-known-SID grant present).
     #[test]
     fn effective_access_is_zero_on_fresh_dir() {
         with_scoped_state_dir(|| {

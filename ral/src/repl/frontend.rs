@@ -103,9 +103,8 @@ pub(super) enum Continuation {
 /// Fold continuation lines into `first` until the buffer is a complete
 /// input, joining with newlines.  The backend owns the actual read (and
 /// its own prompt / abort detection) via `next`; this drives the shared
-/// `needs_continuation` loop both frontends previously duplicated — the
-/// site where the Ctrl-D divergence crept in.  A [`Continuation::Discard`]
-/// returns the empty string.
+/// `needs_continuation` loop, the one place both frontends agree on Ctrl-D.
+/// A [`Continuation::Discard`] returns the empty string.
 pub(super) fn join_continuation(first: String, mut next: impl FnMut() -> Continuation) -> String {
     let mut buf = first;
     while ral_core::syntax::parser::needs_continuation(&buf) {

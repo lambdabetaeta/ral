@@ -2,12 +2,9 @@
 //!
 //! [`sandbox_projection`] meet-folds the whole dynamic
 //! [`GrantStack`](crate::types::GrantStack) into the
-//! [`SandboxProjection`] the sandbox backends render — the fs, net, and
-//! exec dimensions intersected across every layer.  It returns `None`
-//! when no layer imposes a restriction the OS must enforce, so callers
-//! can cheaply skip sandbox setup.  The point-of-use gates that share
-//! this authority model — and the audit trail the exec/fs ones carry —
-//! live in the sibling [`super::enforce`].
+//! [`SandboxProjection`] the sandbox backends render.  The point-of-use
+//! gates over that same authority live in the sibling
+//! [`super::enforce`].
 
 use super::exec::{ExecNames, ExecVerdict, evaluate_exec};
 use crate::path::{NormalizedPrefix, PrefixSet, Resolver};
@@ -17,14 +14,10 @@ use crate::types::{
 use std::collections::BTreeSet;
 
 /// Meet-fold the stack's fs, net, and exec dimensions into the
-/// OS-renderable projection.  Returns `None` when no layer imposes fs
-/// or net restrictions — nor, on macOS, an exec restriction Seatbelt
-/// enforces — so callers can cheaply skip OS sandbox setup.
-///
-/// Takes exactly what the fold consults: the grant stack, the `Resolver`
-/// bound to the caller's home/cwd (for prefix and deny-path resolution),
-/// and the `PATH` override under which literal exec keys resolve. No
-/// other part of `Context` feeds this projection.
+/// OS-renderable projection, with literal exec keys resolved under
+/// `path_env`, the shell's `PATH` override.  `None` when no layer
+/// restricts fs or net — nor, on macOS, exec — so the caller can skip
+/// OS sandbox setup entirely.
 pub(crate) fn sandbox_projection(
     grants: &GrantStack,
     resolver: &Resolver,
@@ -43,6 +36,8 @@ pub(crate) fn sandbox_projection(
         write_prefixes =
             write_prefixes.meet(Some(PrefixSet::resolve(resolver, &fs.write_prefixes)));
         for p in &fs.deny_paths {
+            // Both spellings, or a backend that masks the literal path
+            // (bwrap's tmpfs overlay) misses a symlinked deny target.
             deny_paths.push(p.clone());
             deny_paths.push(NormalizedPrefix::from_surface(resolver.check(p.as_str())));
         }
@@ -53,12 +48,9 @@ pub(crate) fn sandbox_projection(
     }
 
     let exec = reduce_exec(grants, resolver, path_env);
-    // Exec attenuation only triggers an OS-layer sandbox where the
-    // backend can actually filter exec — Seatbelt on macOS does it via
-    // the rendered `(allow file-read* process-exec …)` rule; bwrap on
-    // Linux has no path-exec filter, so paying the sandbox-subprocess
-    // cost there buys nothing.  In-ral exec gating still runs on every
-    // platform regardless.
+    // Attenuated exec is worth an OS sandbox only where the backend can
+    // filter exec: Seatbelt renders a path rule, bwrap has none.  The
+    // in-ral exec gate runs on every platform regardless.
     #[cfg(target_os = "macos")]
     let exec_triggers_sandbox = !matches!(exec, ExecProjection::Unrestricted);
     #[cfg(not(target_os = "macos"))]
@@ -88,25 +80,11 @@ pub(crate) fn sandbox_projection(
     })
 }
 
-/// Reduce the exec component of the stack into an [`ExecProjection`].
-///
-/// `Unrestricted` means no layer attenuated exec; the OS profile leaves
-/// `process-exec` open and the in-ral gate is the only check.
-/// `Restricted` carries five sets, computed as follows (their OS
-/// rendering is documented on [`ExecProjection`]):
-///
-///   * `allow_dirs` — subpath keys carrying `Allow`, met by prefix
-///     across opining layers.
-///   * `deny_dirs`, `deny_paths`, `deny_basenames` — subpath, absolute,
-///     and bare-name keys carrying `Deny`, each unioned across layers (a
-///     `Deny` is sticky).  A bare name vetoes a command wherever it
-///     lands, closing the interpreter-bypass route (`sh -c git`).
-///   * `allow_paths` — literal exec keys resolved to absolute paths and
-///     kept where the full-stack live verdict admits them.  A literal
-///     and a covering allow-dir meet only once the name is resolved, so
-///     the decision defers to [`evaluate_exec`] over the resolved
-///     identity (see [`admitted_literal_paths`]) rather than
-///     intersecting names and dirs as separate maps.
+/// Reduce the exec component of the stack into an [`ExecProjection`],
+/// whose doc gives the OS rendering of each set.  Allows meet across
+/// layers, denies union — a `Deny` is sticky — and a bare-name `Deny`
+/// lands in `deny_basenames`, vetoing the command wherever it resolves
+/// and closing the interpreter-bypass route (`sh -c git`).
 fn reduce_exec(grants: &GrantStack, resolver: &Resolver, path_env: &str) -> ExecProjection {
     let mut subpath_allow: Option<PrefixSet> = None;
     let mut subpath_deny = PrefixSet::default();
@@ -154,9 +132,8 @@ fn reduce_exec(grants: &GrantStack, resolver: &Resolver, path_env: &str) -> Exec
 }
 
 /// Resolve one literal exec key to the absolute path the OS gate names.
-/// Absolute keys pass through as written; bare names resolve through the
-/// grant's PATH override only — no host fallback, so an unresolvable
-/// name fails closed (see reduced-authority-witness B6).
+/// Bare names walk the grant's `PATH` override alone — no host fallback,
+/// so an unresolvable name fails closed (reduced-authority-witness B6).
 fn resolve_literal(name: &str, path_env: &str) -> Option<String> {
     if crate::path::is_absolute(name) {
         Some(name.to_string())
@@ -165,23 +142,15 @@ fn resolve_literal(name: &str, path_env: &str) -> Option<String> {
     }
 }
 
-/// Resolve every literal exec key named in the stack and keep the paths
-/// whose natural invocation the full-stack live verdict admits — the
-/// same [`evaluate_exec`] the in-ral gate runs.
+/// Keep the literal exec keys whose resolved path the live stack verdict
+/// admits, so the OS profile admits exactly what the in-ral gate does.
 ///
-/// A literal admitted by one layer can be covered only by a *sibling*
-/// layer's allow-dir — `git: Allow` in one layer, `/usr/bin/` in
-/// another.  The two dimensions meet only once the name is resolved to a
-/// path, so the allow decision runs through [`evaluate_exec`] over the
-/// resolved identity rather than combining names and dirs separately.
-/// The OS profile then admits a path only where the live gate does.
-///
-/// The verdict query mirrors [`ExecNames`] for a real invocation:
-/// allow-narrow is the key and its resolved path; deny-broad adds the
-/// resolved basename, so a sibling `git: Deny` still vetoes a
-/// `/usr/bin/git` literal exactly as it would at runtime.  An
-/// unresolvable admitted name fails closed, with a trace it can no longer
-/// be pinned.
+/// A literal named in one layer can be covered only by a *sibling*
+/// layer's allow-dir — `git: Allow` here, `/usr/bin/` there — and the
+/// two meet only once the name is resolved, hence [`evaluate_exec`] over
+/// the resolved identity rather than an intersection of names and dirs.
+/// The [`ExecNames`] query is the one a real invocation makes, deny
+/// broadened to the basename, so a sibling `git: Deny` still vetoes.
 fn admitted_literal_paths(
     grants: &GrantStack,
     names: &BTreeSet<String>,

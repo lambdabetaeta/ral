@@ -1,8 +1,7 @@
-//! Tail-call trampoline. [`apply`] applies a callee to arguments and
-//! loops on `Control::Tail`, so every tail-call signal emitted by the
-//! evaluator body is absorbed here before control returns. Every
-//! public entry into evaluation (`evaluate`, [`apply`]) hands back a
-//! [`Settled<Value>`] — [`Tail`] cannot escape this module.
+//! Tail-call trampoline: [`apply`] applies a callee to arguments and loops
+//! on an escaping [`TailCall`] instead of recursing. Every tail call the
+//! evaluator emits lands here, directly or through `super::absorb_tail`,
+//! and only a `Settled<Value>` leaves.
 
 use super::comp::eval_comp;
 use super::pattern::assign_pattern;
@@ -11,26 +10,14 @@ use crate::types::{
     Break, Control, Env, Error, Mooring, Raw, Settled, Shell, Tail, TailCall, ThunkBody, Value,
 };
 
-/// One lambda call frame: evaluate the body *in place* on the caller's
-/// shell via [`Shell::with_thunk_body`] — the body shares the caller's
-/// run, session, and local state by identity, swapping in only a mobile
-/// rescoped to the lambda's `captured` environment plus a fresh frame.
-/// `pat` is bound to `arg` in that frame (pattern binding lives in this
-/// evaluator layer, not on `Shell`), then `body` runs. As a
-/// [`ThunkBody::Lambda`] the frame enters with a fresh `$?` and folds
-/// `{last_status, cwd}` back. The single call site supplies one `body`
-/// closure that closes a curried inner `Lam` into a fresh
-/// `Value::Lambda` via [`close_lam`](super::val::close_lam), otherwise
-/// evaluates the body via [`eval_comp`].
+/// One β-step, run in place on the caller's shell: [`Shell::with_thunk_body`]
+/// swaps in a mobile rescoped to `captured` plus a fresh frame, `pat` is bound
+/// to `arg` there, and `body` runs — sharing the caller's run, session and
+/// local state by identity.
 ///
-/// `is_last` is the lambda body's tail position — true when this is the
-/// final argument of the call, so the body's final computation sits
-/// under the trivial continuation that returns from the call. The
-/// trampoline is the sole mint point for [`Tail::Yes`] besides an
-/// eliminator forwarding its own tail-ness; `body` consults `is_last`
-/// to decide what tail to grant its computation. A tail call escapes as
-/// `Err(Control::Tail)` past the in-place run (the fold-back has already
-/// happened) and lands in the trampoline loop below.
+/// As a [`ThunkBody::Lambda`] the frame enters with a fresh `$?` and folds
+/// `{last_status, cwd}` back on the way out. The fold happens even when `body`
+/// escapes with a tail call, which is what lets that call abandon the frame.
 fn apply_lambda_frame(
     captured: &Env,
     pat: &IrPattern,
@@ -47,15 +34,12 @@ fn apply_lambda_frame(
     })
 }
 
-/// Applies `callee` to `args`, looping on [`Tail`] for O(1)
-/// tail-call space.
+/// Applies `callee` to `args`, looping on [`TailCall`] for O(1) tail-call
+/// space.
 ///
-/// A recursion cap (`shell.mobile.control.recursion_limit`) raises a
-/// clean error before the host stack can overflow; tail calls land
-/// in the loop without entering a new frame, so they do not count
-/// against the cap. The cap defaults to `DEFAULT_RECURSION_LIMIT`
-/// and is overridden by the rc `recursion_limit:` key or the
-/// `--recursion-limit` flag.
+/// The `recursion_limit` cap raises a clean error before the host stack can
+/// overflow; a tail call re-enters the loop rather than a frame, so it never
+/// counts against the cap.
 pub(crate) fn apply(
     callee: Value,
     args: Vec<Value>,
@@ -91,8 +75,6 @@ fn apply_inner(
 ) -> Settled<Value> {
     loop {
         match &callee {
-            // Lambda — apply one arg per iteration; with no args, the
-            // lambda is a value, return it as-is.
             Value::Lambda {
                 param,
                 body,
@@ -106,17 +88,13 @@ fn apply_inner(
                 let captured = captured.clone();
                 let arg = args.remove(0);
                 let is_last = args.is_empty();
-                // The body sits in tail position exactly when this is
-                // the call's final argument: its value is what the call
-                // returns, under the trivial continuation the trampoline
-                // provides.
+                // Only the final argument's body is in tail position: the
+                // loop below is the trivial continuation it returns through.
                 let body_tail = if is_last { Tail::Yes } else { Tail::No };
-                // Curried lambdas (`λx.λy.M`) are flattened by the
-                // elaborator, so `body` itself can be `Lam`. Closing the
-                // inner `Lam` directly avoids `eval_comp`'s `Lam` arm,
-                // which would wrongly raise the "bare lambda in
-                // computation position" error for a legitimate curried
-                // application.
+                // The elaborator strips the `return thunk(...)` around a
+                // curried inner lambda, so `body` may itself be a `Lam`.
+                // Closing it here avoids `eval_comp`'s `Lam` arm, which
+                // rejects a bare lambda in computation position.
                 let result = apply_lambda_frame(&captured, &param, &arg, mooring, shell, |child| {
                     match super::val::close_lam(&body, child) {
                         Some(lam) => Ok(lam),
@@ -127,14 +105,9 @@ fn apply_inner(
                     return done;
                 }
             }
-            // Block — force through the block boundary so the
-            // install-vs-discard mobile policy matches `force` and
-            // `grant` / `within`.
-            //
-            // The block body sits in tail position exactly when no
-            // arguments remain to apply; `eval_block` forwards that
-            // grant into the body's mobile so its final call
-            // trampolines here rather than recursing on the host stack.
+            // Applying a block eliminates it through `eval_block`, so it
+            // obeys the same scope-isolated, mobile-discarding contract as
+            // `force`.
             Value::Block { body, captured } => {
                 let block_tail = if args.is_empty() { Tail::Yes } else { Tail::No };
                 let body = body.clone();
@@ -144,7 +117,6 @@ fn apply_inner(
                     return done;
                 }
             }
-            // Not a function: done if no args, error otherwise.
             _ if args.is_empty() => return Ok(callee),
             _ => {
                 let hint = if matches!(callee, Value::Unit) {
@@ -161,12 +133,12 @@ fn apply_inner(
     }
 }
 
-/// One trampoline step: `Some(done)` to exit, `None` to iterate.
+/// One trampoline step: `Some(done)` to exit, `None` to iterate with the new
+/// callee and arguments.
 ///
-/// `Control::Tail` is absorbed here — the loop continues with the
-/// new callee and arguments. Every other [`Control`] variant
-/// collapses to a [`Break`] returned to the caller as
-/// [`Settled<Value>`].
+/// The cancel check sits on the tail edge because a tail loop unwinds through
+/// no frame boundary — for a body that neither binds nor sequences, this is
+/// the only place a cancellation reaches it.
 fn step(
     result: Raw<Value>,
     callee: &mut Value,
@@ -196,12 +168,9 @@ mod tests {
     use super::*;
     use crate::io::TerminalState;
 
-    /// When `call_depth` has already reached the configured limit,
-    /// entering `apply` raises a clean error instead of recursing
-    /// further. This is the unit-level analogue of "the host stack
-    /// is about to overflow" — exercising it through real recursion
-    /// in a debug build would exhaust the OS stack before the
-    /// counter trips.
+    /// Entering `apply` at the limit raises a clean error. The depth is
+    /// pre-loaded because real recursion in a debug build would exhaust the
+    /// OS stack before the counter tripped.
     #[test]
     fn cap_fires_at_limit() {
         let mut shell = Shell::new(TerminalState::default());
@@ -223,18 +192,17 @@ mod tests {
             }
             other => panic!("expected recursion-limit error, got {other:?}"),
         }
-        // call_depth must be unchanged on the early-return path.
+        // The early return must leave the counter untouched.
         assert_eq!(shell.mobile.control.call_depth, 8);
     }
 
-    /// One apply call below the cap increments and decrements
-    /// `call_depth` cleanly, leaving it at its original value.
+    /// `Value::Unit` with no arguments returns without recursing, so the
+    /// increment/decrement bracket must leave `call_depth` where it started.
     #[test]
     fn cap_not_fired_below_limit() {
         let mut shell = Shell::new(TerminalState::default());
         shell.mobile.control.recursion_limit = 8;
         shell.mobile.control.call_depth = 7;
-        // Value::Unit with no args returns Ok(Unit) without recursing.
         let _ = apply(Value::Unit, vec![], &Mooring::adrift(), &mut shell);
         assert_eq!(shell.mobile.control.call_depth, 7);
     }

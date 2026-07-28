@@ -1,23 +1,11 @@
-//! Token-level syntax highlighting for ral code shown in the TUI.
+//! Token-level syntax highlighting for the ral source the TUI shows in its
+//! code panels.
 //!
-//! The scripts the model writes — coalesced source on a ral block (L3) and
-//! the body of an expanded single tool call — read as code rather than flat
-//! ink: keyword, string, variable, tag, and punctuation each take a muted
-//! hue from the [`super::line`] code palette; everything else keeps the
-//! default code ink (white).  The language's own lexer
-//! ([`ral_core::syntax::lexer`]) is the definition of what a token *is*, so
-//! the colouring tracks the grammar exactly and needs no second parser.
-//!
-//! The model's scripts are often mid-stream or broken, so highlighting
-//! degrades gracefully: a lex error (including an incomplete one — an
-//! unterminated string, an unbalanced brace) falls back to one default-ink
-//! line per source line.  Either way the rendered text is byte-for-byte the
-//! input — the highlighter only *colours* spans, it never adds or drops a
-//! character.
-//!
-//! Nested interpolation streams — a double-quoted string's `$…` splices and
-//! `$[…]` / `$name[k]` derefs — are coloured as their single enclosing
-//! class, not recursed into.
+//! The language's own lexer (`ral_core::syntax::lexer`) is the definition of
+//! what a token is, so the colouring tracks the grammar and needs no second
+//! parser.  Whatever happens the rendered text is byte-for-byte the input:
+//! nothing here adds or drops a character, it only hands spans a hue from
+//! [`super::palette`].
 
 use super::line::fold_styled_lines;
 use super::palette::{CODE_KEYWORD, CODE_STRING, CODE_TAG, CODE_VARIABLE, SLATE};
@@ -28,34 +16,27 @@ use ratatui::{
     text::{Line, Span},
 };
 
-/// Highlight `src` as a list of styled lines, one per source line.
+/// Highlight `src` as one styled line per source line.
 ///
-/// On a clean lex, walks the token stream by byte offset: the gap before
-/// each token (indentation, inter-token whitespace, comments — none of which
-/// the lexer emits as tokens) renders as default ink, and the token's own
-/// text takes its [`class`] style.  On a lex error the whole source falls
-/// back to default ink.  Both paths split the styled span stream into lines
-/// the same way, so a multi-line string or a blank line round-trips.
+/// The lexer emits neither whitespace nor comments, so the gap before each
+/// token renders as default ink.  A lex error — the common mid-stream case,
+/// an unterminated string or an unbalanced brace — colours nothing at all
+/// rather than guess.
 pub(super) fn highlight_ral(src: &str) -> Vec<Line<'static>> {
     let spans = match lex(src) {
         Ok(tokens) => highlighted_spans(src, &tokens),
-        // Incomplete or invalid code (the common mid-stream case): colour
-        // nothing rather than guess, but still lay the source out faithfully.
         Err(_) => vec![Span::styled(src.to_string(), default_ink())],
     };
     into_lines(spans)
 }
 
-/// The default code ink — white, the colour every non-classified token and
-/// the error fallback wear.
 fn default_ink() -> Style {
     Style::default().fg(Color::White)
 }
 
-/// Walk the token stream, emitting the gap before each token as default ink
-/// and the token's text in its [`class`] style.  Token spans are ordered and
-/// non-overlapping and the trailing `Eof` sits at the end of the source, so
-/// concatenating the gaps and token texts reproduces `src` exactly.
+/// Emit each token's text in its `class` style and the gap before it as
+/// default ink.  Token spans are ordered and non-overlapping and the trailing
+/// `Eof` sits at the end of the source, so the concatenation is `src` exactly.
 fn highlighted_spans(src: &str, tokens: &[(Token, ral_core::source::Span)]) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut cursor = 0usize;
@@ -78,11 +59,9 @@ fn highlighted_spans(src: &str, tokens: &[(Token, ral_core::source::Span)]) -> V
     spans
 }
 
-/// The style one token wears.  String, variable (`$…`), and tag (`` `… ``)
-/// take their own hue; the bracket/brace/operator punctuation reuses
-/// [`SLATE`]; a plain word takes the keyword hue when it is a ral keyword
-/// ([`is_keyword`]); everything else — non-keyword words, expression blocks,
-/// redirects, separators — keeps the default ink.
+/// The style one token wears.  Punctuation shares [`SLATE`], a plain word
+/// takes the keyword hue only when [`is_keyword`] says so, and a string or
+/// deref is coloured whole — its nested `$…` splices are not recursed into.
 fn class(tok: &Token) -> Style {
     let fg = match tok {
         Token::SingleQuoted(_) | Token::DoubleQuoted(_) => CODE_STRING,
@@ -109,11 +88,8 @@ fn class(tok: &Token) -> Style {
     Style::default().fg(fg)
 }
 
-/// Split a flat styled-span stream into lines on embedded `\n`, mirroring
-/// [`str::lines`]: a trailing newline does not yield a final empty line, so
-/// the line count matches the source's and the renderers emit no stray panel
-/// row.  Each newline is the split point and is dropped, so rejoining the
-/// lines with `\n` reproduces the span stream's text.
+/// Split the span stream on embedded `\n`, mirroring [`str::lines`]: a
+/// trailing newline yields no final empty line, so no panel gains a stray row.
 fn into_lines(spans: Vec<Span<'static>>) -> Vec<Line<'static>> {
     fold_styled_lines(
         spans.into_iter().map(|s| (s.content.into_owned(), s.style)),
@@ -125,12 +101,12 @@ fn into_lines(spans: Vec<Span<'static>>) -> Vec<Line<'static>> {
 mod tests {
     use super::*;
 
-    /// The plain text of a line — span contents joined, styling dropped.
+    /// A line's text, styling dropped.
     fn text(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    /// The fg colour of the span covering `needle` in a single-line highlight.
+    /// The fg of the span whose text is exactly `needle`, in a one-line source.
     fn fg_of(src: &str, needle: &str) -> Option<Color> {
         let lines = highlight_ral(src);
         assert_eq!(lines.len(), 1, "expected one line for {src:?}");
@@ -143,19 +119,15 @@ mod tests {
             .fg
     }
 
-    /// A clean statement: the keyword, the string literal, and the bound name
-    /// each take their expected ink.
     #[test]
     fn classifies_keyword_string_and_name() {
         let src = "let x = 'hi'";
         assert_eq!(fg_of(src, "let"), Some(CODE_KEYWORD));
         assert_eq!(fg_of(src, "'hi'"), Some(CODE_STRING));
-        // `x` is a bound name, not a keyword, so it keeps the default ink.
+        // `x` is a bound name, not a keyword.
         assert_eq!(fg_of(src, "x"), Some(Color::White));
     }
 
-    /// A deref and a tag take the variable and tag inks; brackets are
-    /// punctuation.
     #[test]
     fn classifies_deref_tag_and_punctuation() {
         let src = "[`ok $x]";
@@ -165,8 +137,6 @@ mod tests {
         assert_eq!(fg_of(src, "]"), Some(SLATE));
     }
 
-    /// Invalid / incomplete code (here an unterminated string) must never
-    /// panic: it falls back to a single default-ink span carrying the source.
     #[test]
     fn invalid_code_falls_back_to_default_ink() {
         let lines = highlight_ral("let x = 'unterminated");
@@ -181,8 +151,6 @@ mod tests {
         assert_eq!(text(&lines[0]), "let x = 'unterminated");
     }
 
-    /// Reassembling the highlighted lines reproduces the input verbatim — the
-    /// highlighter only colours, it never drops or adds a character.
     #[test]
     fn reassembled_text_equals_input() {
         for src in [

@@ -1,13 +1,7 @@
-//! Sub-agent spawn machinery — the fork-detach-register spine shared by
-//! `/branch` and the desk's `agent-start` arm.
-//!
-//! Launch-only and always asynchronous: every call forks a child, runs it on
-//! a detached thread through the same [`Agent::attend`] loop, and returns a
-//! start receipt immediately.  The child's single result is delivered later
-//! to the parent's inbox at quiescence.
-//!
-//! The full prompt — every line — is rendered to the rail before spawn, so
-//! the user can see what the child was asked to do.
+//! The fork-detach-register spine behind `/branch` and the desk's
+//! `agent-start`.  Every spawn is launch-only: the child runs the same
+//! [`Agent::attend`] loop on a detached thread, and its single result reaches
+//! the parent's inbox later, at quiescence.
 
 use crate::agent::Agent;
 use crate::bus::{AgentId, AgentOutcome, AgentResult, Emitter, Kind, Mailbox, Post};
@@ -16,14 +10,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Instant;
 
-/// Monotonic dispatch counter, used to mint `branch-{N}` labels for a
-/// `/branch` spawn.  Lives as long as the process — the TUI only needs each
-/// child's label to be distinguishable from its siblings on screen.
+/// Mints `branch-{N}` labels; a label need only be distinguishable from the
+/// siblings on screen, so a process-lifetime counter suffices.
 static DISPATCH_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// Fork the trunk's conversation into a new tab.  A branch converses (parks
-/// for the human), so it registers without a ceiling and pushes no result
-/// upward; `prompt` seeds a first exchange, or `None` parks and waits.
+/// Fork the trunk's conversation into a new tab.  A branch converses, so it
+/// registers without a lease and pushes no result upward; `None` parks for
+/// the human instead of seeding a first exchange.
 pub(crate) fn spawn_branch(
     session: &Agent,
     prompt: Option<&str>,
@@ -47,54 +40,40 @@ pub(crate) fn spawn_branch(
     )
 }
 
-/// The tool-specific half of an async spawn: everything that varies between
-/// the `agent` builtin's two `type`s (`amnemon`/`mnemon`) and `/branch`, as
-/// opposed to the fork-detach-register mechanics every one of them shares
-/// ([`spawn_async`]).
+/// The half of an async spawn that varies between `agent-start`'s two kinds
+/// (`amnemon`/`mnemon`) and `/branch`; [`spawn_async`] holds the half they
+/// share.
 pub(crate) struct AsyncSpawn {
-    /// The acting name the rail shows: the bare imperative on the harness
-    /// path (`spawn`), the slash command on `/branch`.
+    /// The acting name on the rail: `spawn` on the harness path, the slash
+    /// command on `/branch`.
     pub verb: &'static str,
     pub name: String,
-    /// The child's launch prompt, or `None` to park and wait — a branch, which
-    /// converses for the human rather than running a seeded exchange.
+    /// `None` parks for the human rather than seeding a first exchange.
     pub prompt: Option<String>,
-    /// Whether this spawn was launched by a desk harness verb (`amnemon`/
-    /// `mnemon` via `agent-start`) rather than `/branch`, a human slash
-    /// command with no desk verb behind it at all. Decides which rail chrome
-    /// the spawn line wears: a harness verb never crossed the provider
-    /// boundary, so it renders as [`Kind::HarnessCall`]; `/branch` renders as
-    /// an ordinary [`Kind::ToolCall`].
+    /// A desk harness verb rather than `/branch`.  A harness verb never crossed
+    /// the provider boundary, so the rail dresses it as [`Kind::HarnessCall`];
+    /// `/branch` gets an ordinary [`Kind::ToolCall`].
     pub harness: bool,
 }
 
-/// What a spawn hands back: the child's identity as the host and the
-/// model each render in their own vocabulary.  Only ever built for a child
-/// that is genuinely running — a spawn that never got a worker thread, or
-/// whose registration was refused, returns `Err(String)` instead
-/// ([`spawn_async`]).
+/// A start receipt, built only for a child genuinely running: a refused
+/// registration or an unspawnable thread yields `Err(String)` instead.
 pub(crate) struct SpawnedChild {
     pub id: crate::bus::AgentId,
     pub name: String,
     pub log_dir: String,
 }
 
-/// Fork-then-detach: hand an already-forked, already-capped `child` to a
-/// worker thread that attends it to completion off the parent's critical
-/// path, and return the child's identity immediately.  This is the one
-/// launch-only, always-asynchronous shape every `agent` spawn and `/branch`
-/// share; each caller differs only in how it built `child` and `spec`.
+/// Hand an already-forked, already-capped `child` to a worker thread that
+/// attends it off the parent's critical path, and return its identity at once.
+/// Callers differ only in how they built `child` and `spec`.
 ///
-/// The registration itself can refuse for two reasons, closed by
-/// [`AgentRegistry::register`] under its own lock: this agent's own entry
-/// vanished between the tool call starting and the registry lock (an
-/// `agent-cancel`/`/clear` racing the spawn), or `name` is already borne by
-/// another live agent (two same-name spawns racing in one batch). Either way
-/// there is no registry entry to unwind — the registration never happened —
-/// so the call simply returns `Err`. If instead the OS refuses to spawn the
-/// worker thread *after* a successful registration, that entry is unwound
-/// through [`AgentRegistry::settle`] before returning `Err`. Every caller's
-/// receipt collapses to that plain error instead of a start receipt.
+/// [`AgentRegistry::register`] refuses, under its own lock, when this agent's
+/// entry vanished between the tool call and that lock (an `agent-cancel` or
+/// `/clear` racing the spawn), or when `name` is already borne by a live agent
+/// (two same-name spawns racing in one batch); neither leaves an entry to
+/// unwind.  A thread that fails to spawn *after* a successful registration
+/// does, and is unwound through [`AgentRegistry::settle`] below.
 ///
 /// # Errors
 /// Returns `Err(String)` if the registration is refused or the worker
@@ -113,36 +92,27 @@ pub(crate) fn spawn_async(
         prompt,
         harness,
     } = spec;
-    // Capture everything off the child before it moves into the worker
-    // thread: its identity, log directory, own cancellation token and
-    // provider handle, the registry entry's generation, and the parent's
-    // mailbox (the child's upward result edge).  The child is registered
-    // under *this* agent as its parent, so the subtree cascade reaches it.
+    // Everything below is taken off `child` before it moves into the worker.
     let agent_id = child.id;
     let log_dir = child.log_dir();
     let log_dir_str = log_dir.display().to_string();
     let cancel = child.cancel_token().clone();
-    // The child's eval-layer cancel reach, registered so the cascade can
-    // unwind a `ral` eval already in flight when a terminate-class cancel
-    // lands, and a per-tab interrupt can unwind just the in-flight exchange
+    // Registered so a terminate-class cancel can unwind a `ral` eval already in
+    // flight, and a per-tab interrupt can unwind just the in-flight exchange
     // without touching the root a later exchange would inherit.
     let reach = child.seat.eval_reach();
-    // The child's inbox sender, registered so the frontend can steer or
-    // wake this tab.  Cheap-clone, taken off `child` before it moves into
-    // the worker thread (alongside the one the streaming `child_emit`
-    // carries).
+    // Registered so the frontend can steer or wake this tab.
     let child_mailbox = child.mailbox();
-    // The child's own provider handle (seeded at `fork` from this agent's
-    // current provider), registered so a `/model` on this tab swaps the
-    // child's provider alone.
+    // Seeded at `fork` from this agent's current provider and registered apart
+    // from it, so a later `/model` on either never disturbs the other.
     let child_provider = child.provider_handle();
     // A returning sub-agent holds `reply`; a conversing branch does not.  This
-    // one fact gates the reaper ceiling, the tab kind, and the settle epilogue.
+    // one fact gates the lease, the tab kind, and the settle epilogue.
     let delivers = child.returns();
     let generation = match registry.register(Registration {
         id: agent_id,
         parent: Some(parent),
-        lease: delivers.then_some(AGENT_LEASE_IDLE), // a returning worker is reaped if abandoned; a branch keeps no lease
+        lease: delivers.then_some(AGENT_LEASE_IDLE), // an hour of silence must not reap a conversation
         name: name.clone(),
         log_dir: log_dir.clone(),
         cancel,
@@ -163,17 +133,11 @@ pub(crate) fn spawn_async(
             ));
         }
     };
-    // An owned, `'static` clone for the worker thread; `registry` itself
-    // stays free for the unwind path below if the thread never spawns.
+    // `registry` itself stays free for the unwind path below.
     let worker_registry = AgentRegistry::clone(registry);
-    // A live tab whenever the bus outlives the exchange (the TUI): a real
-    // emitter cloned off the session sender, stamped with the child's id
-    // and carrying the child's own mailbox.  Off a per-exchange bus (headless)
-    // the child is muted *on the display* — an emitter whose receiver is
-    // already dropped — so it never streams; but either way it carries the
-    // child's own `Transcript`, so its operational trace is recorded
-    // regardless of whether anyone is watching.  Its model view returns
-    // through its forked `AgentLog`, its reply through the inbox.
+    // Off a per-exchange bus (headless) the child's receiver is already
+    // dropped, so it streams nowhere; either way it carries its own
+    // `Transcript`, and its trace is recorded whether or not anyone watches.
     let child_emit = if emit.is_session_lived() {
         emit.child(agent_id, child.mailbox(), child.transcript())
     } else {
@@ -183,16 +147,12 @@ pub(crate) fn spawn_async(
     let born_name = name.clone();
     let born_parent = parent;
     let worker_name = name.clone();
-    // Seed the launch exchange into the child's own inbox: the only downward
-    // edge is this one write.  A branch has no prompt — it parks for the human.
+    // The only downward edge into the child is this one write.
     if let Some(p) = &prompt {
         child.seed(p.clone());
     }
-    // The dispatch shows on the rail before the spawn, so the user can see
-    // exactly what the child was asked to do. A harness verb never crossed
-    // the provider boundary and changes the world outside the exchange, so it
-    // renders as an act — verb, subject, payload; `/branch` is a human slash
-    // command, rendered as an ordinary `ToolCall`.
+    // The dispatch reaches the rail before the spawn, so the user can see every
+    // line the child was asked to act on.
     let cmd = prompt.unwrap_or_else(|| "(waiting for you)".to_string());
     if harness {
         emit.emit(Kind::HarnessCall {
@@ -212,10 +172,8 @@ pub(crate) fn spawn_async(
         .name(format!("exarch-agent-{agent_id}"))
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            // registered before the first token and ages out after the
-            // last; on a muted emitter both are no-ops.  The id routes
-            // every event to the child's own tab through the TUI's existing
-            // draw path.
+            // Opens the child's tab before its first token, and the stamped id
+            // routes every later event to it; a no-op on a muted emitter.
             child_emit.emit(Kind::Born {
                 log_dir: log_dir.clone(),
                 name: born_name,
@@ -223,9 +181,6 @@ pub(crate) fn spawn_async(
                 branch: !delivers,
             });
             let (outcome, payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // The child attends on its own provider handle, seeded at
-                // `fork` from this agent's current provider, so a later
-                // `/model` on either never disturbs the other.
                 child.attend(&mut crate::agent::NoControl, &child_emit)
             }))
             .unwrap_or_else(|_| {
@@ -233,28 +188,24 @@ pub(crate) fn spawn_async(
                 (AgentOutcome::Failed("sub-agent panicked".into()), None)
             });
             child_emit.emit(Kind::Died);
-            // A returning sub-agent delivers its one result upward and then
-            // self-settles; a branch converses, pushes nothing, and leaves its
-            // entry to outlive this worker (dropped by `/clear`/`/close`).
+            // A branch pushes nothing and leaves its entry to outlive this
+            // worker, for `/clear` or `/close` to drop.
             if delivers {
-                // A model parent reads the reply as prose in its context, so
-                // the peer edge renders the faithful payload to text here.
+                // The parent reads this as prose in its own context, so the
+                // faithful payload is rendered to text at this edge.
                 let text = payload
                     .as_ref()
                     .map(crate::agent::render_reply)
                     .unwrap_or_default();
-                // Deliver, then retire: `crate::bus`'s module doc names this
-                // ordering "the pattern" for a producer whose settling both
-                // changes a verdict input and delivers a message.  The
-                // parent's park verdict reads child liveness (the registry)
-                // and delivery (its inbox) under two different locks, and
-                // pops its queue only after the verdict — so the push must
-                // come first: a parent that observes this entry gone is then
-                // guaranteed to find the result already queued, and cannot
-                // quiesce between the two facts and drop it.  Staleness
-                // (this worker settling across a `/clear`) is decided at the
-                // consuming edge instead: the attend loop's generation
-                // admission reads the birth `generation` stamped here.
+                // Deliver, then retire.  The parent's park verdict reads child
+                // liveness (the registry) and delivery (its inbox) under two
+                // different locks, and pops its queue only after the verdict,
+                // so the push must come first: a parent that observes this
+                // entry gone is then guaranteed to find the result already
+                // queued, and cannot quiesce between the two facts and drop it.
+                // Staleness — this worker settling across a `/clear` — is
+                // decided at the consuming edge instead, by the attend loop's
+                // admission of the birth `generation` stamped here.
                 let rejected = parent_mailbox.push(Post::AgentResult(AgentResult {
                     name: worker_name,
                     outcome,
@@ -262,10 +213,8 @@ pub(crate) fn spawn_async(
                     elapsed: started.elapsed(),
                     generation,
                 }));
-                // No synchronous caller to return this to — the spawn's own
-                // tool_result already returned the "started" receipt — so the
-                // drop is reported through the child's own error vocabulary
-                // instead of silently vanishing.
+                // The spawn's tool result already returned a "started" receipt,
+                // so there is no synchronous caller left to hand this to.
                 if let Err(reject) = rejected {
                     child_emit.emit(Kind::Error(format!(
                         "the parent's inbox rejected this result: {reject}"
@@ -281,13 +230,10 @@ pub(crate) fn spawn_async(
             log_dir: log_dir_str,
         }),
         Err(e) => {
-            // The registration above ran before the OS thread ever existed —
-            // register-after-spawn would race a conversing child's own first
-            // `park_mode` read of `is_live(self.id)` against the parent's
-            // post-spawn `register` call, so the entry must be unwound here
-            // instead of never having been created.  No worker will ever call
-            // `settle`, so this is the one place that can: the registry ends
-            // up exactly as if the spawn had never been attempted.
+            // Registration must precede the thread: registering after it would
+            // race a conversing child's first `park_mode` read of `is_live`
+            // against this call.  So the entry exists and must be unwound, and
+            // with no worker to ever `settle`, this is the one place that can.
             registry.settle(agent_id, generation);
             let msg = format!("could not spawn a worker thread for agent {agent_id}: {e}");
             emit.emit(Kind::Error(msg.clone()));

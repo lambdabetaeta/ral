@@ -1,15 +1,11 @@
-//! The fleet: the run as a whole.
+//! The fleet: what every agent node of a run shares — one agent registry, one
+//! event bus, one transport engine.  It drives no exchange of its own; the
+//! trunk and each child attend to themselves, and the fleet is only where the
+//! frontend reads "all live agents" and the bus to drain.
 //!
-//! Where an [`Agent`](crate::agent::Agent) is one uniform node, the `Fleet` is
-//! the thin object that holds what every node *shares* — the one agent
-//! registry, the one event bus, and the one transport engine.  It owns no
-//! exchange logic: the trunk and each child attend to themselves; the fleet
-//! is just where the frontend reads "all live agents" and "the bus to drain".
-//!
-//! It is built by the frontend ([`crate::tui::run`] / [`crate::headless::run`])
-//! from handles the trunk already minted at construction — the same registry
-//! and engine the trunk and every fork hold — so the fleet and its nodes never
-//! disagree about what is shared.
+//! The frontend ([`crate::tui::run`] / [`crate::headless::run`]) builds it over
+//! the trunk's own registry and inbox and the engine every provider is built
+//! on — never fresh ones — so no node can disagree about what is shared.
 
 pub(crate) mod desk;
 pub mod registry;
@@ -20,14 +16,11 @@ use crate::provider;
 use registry::AgentRegistry;
 use std::sync::Arc;
 
-/// The shared spine of a run: the registry, the bus, and the transport engine.
-/// Thin by design — see the module docs.
+/// The one registry, bus, and engine every node of the run shares.
 pub struct Fleet {
-    /// Every live agent, the shared map cloned to each node.  "All live agents"
-    /// is its contents; the fleet is alive while it is non-empty.
     pub agents: AgentRegistry,
-    /// The one fan-out event bus the frontend drains.
+    /// Fan-in: every node emits into it, and only the frontend drains it.
     pub(crate) bus: FleetBus,
-    /// The shared transport borrowed by every provider in the fleet.
+    /// A `/model` switch mints its replacement provider on this same engine.
     pub engine: Arc<provider::Engine>,
 }

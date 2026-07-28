@@ -1,29 +1,16 @@
-//! Display helpers for types in error messages and `:type` output.
+//! Rendering types as text, for error messages and `:type` output.
 //!
-//! Pure functions over the type algebra — they do not call into the unifier
-//! and do not modify any state.  Each `fmt_*` function renders a type as a
-//! human-readable string.  `fmt_scheme` handles the quantifier prefix and
-//! assigns Greek-letter names to quantified variables.
-//!
-//! Diagnostic-side rendering goes through [`FmtCtx::for_value_types`]: it
-//! walks the type(s) you're about to print, mints a Greek letter for every
-//! distinct free unification variable in first-appearance order, and gives
-//! back a context you pass to [`fmt_ty_ctx`].  The same variable then prints
-//! as the same letter everywhere it appears, on both sides of a `couldn't
-//! match` message — GHC's "rigid type variable" trick, minus the rigidity.
-//! This first-appearance naming is the one rule the `absorb_*` walkers and
-//! [`fmt_scheme`] both follow.
+//! Pure functions over the type algebra; nothing here consults the unifier.
+//! A diagnostic that prints two types must give a shared variable the same
+//! name in both, so callers first build one [`FmtCtx`] over everything they
+//! are about to render: it mints Greek letters in first-appearance order.
 
 use super::scheme::Scheme;
 use super::ty::{CompTy, CompTyVar, ModeVar, PipeMode, Row, RowVar, Ty, TyVar};
 use std::collections::HashMap;
 
-/// Greek-letter alphabets used to name unification variables in
-/// diagnostics.  Picked to match GHC and the HM literature: lower-case
-/// Greek for value types, `ϕ χ ψ ω` for computation types (suspended
-/// commands), `μ ν ξ π` for pipeline modes (Greek 'pipe' adjacent
-/// letters), `ρ σ τ υ` for row tails.  Cycle through the alphabet by
-/// appending an integer when we run out of fresh letters.
+// One alphabet per kind of unification variable, kept disjoint so a letter
+// alone tells the reader which kind it names.
 const TY_LETTERS: &[&str] = &["α", "β", "γ", "δ", "ε", "ζ", "η", "θ", "ι", "κ"];
 const COMP_LETTERS: &[&str] = &["ϕ", "χ", "ψ", "ω"];
 const MODE_LETTERS: &[&str] = &["μ", "ν", "ξ", "π"];
@@ -33,21 +20,15 @@ fn pick(letters: &[&str], idx: usize) -> String {
     if idx < letters.len() {
         letters[idx].to_string()
     } else {
-        // After exhausting the alphabet, subscript with an index:
-        // α, β, …, κ, α1, β1, … — visually clear that they're still
-        // type variables, not new symbols.
         format!("{}{}", letters[idx % letters.len()], idx / letters.len())
     }
 }
 
-/// Formatting context: maps unification variables to display names.
+/// Display names for unification variables.
 ///
-/// Variables not in the map fall back to placeholders (`_` for types,
-/// `...` for rows) — appropriate for `:type` output where the user is
-/// looking at *one* type and the variable identity isn't load-bearing.
-/// Diagnostics that mention multiple types should always pre-populate
-/// via [`FmtCtx::for_value_types`] so the same variable prints the same
-/// way on both sides.
+/// A variable absent from the map prints as a placeholder (`_`, or `...` for
+/// a row tail) — right for `:type` on a single type, wrong for a diagnostic
+/// naming two, which must go through [`FmtCtx::for_value_types`].
 #[derive(Default)]
 pub struct FmtCtx {
     pub ty_names: HashMap<TyVar, String>,
@@ -73,11 +54,9 @@ impl FmtCtx {
         self.mode_names.get(&v).cloned()
     }
 
-    /// Build a context that names every free unification variable
-    /// appearing in the given types (see the module doc for the
-    /// first-appearance naming rule).  The caller passes whichever types
-    /// will be rendered side-by-side so shared variables get one
-    /// consistent name.
+    /// Name every unification variable in `types`, in first-appearance order.
+    /// Pass every type that will be rendered side by side, so a variable they
+    /// share gets one name.
     pub fn for_value_types(types: &[&Ty]) -> Self {
         let mut ctx = Self::default();
         for t in types {
@@ -86,9 +65,6 @@ impl FmtCtx {
         ctx
     }
 
-    /// Walk `ty` and assign a Greek letter to every unification variable
-    /// (value, computation, mode, row) we haven't seen yet, in
-    /// first-appearance order.
     pub(super) fn absorb_ty(&mut self, ty: &Ty) {
         match ty {
             Ty::Var(v) => {
@@ -172,8 +148,8 @@ pub fn fmt_ty_ctx(ty: &Ty, ctx: &FmtCtx) -> String {
     }
 }
 
-/// Like [`fmt_row_ctx`] but with `|` separators — the surface convention for
-/// variant rows, distinguishing them from tag-keyed records (which use `,`).
+/// Variant rows, with `|` between the arms.  Records and variants both render
+/// inside `[…]`, so the separator is all that tells the two apart.
 pub fn fmt_variant_row_ctx(row: &Row, ctx: &FmtCtx) -> String {
     fmt_row_with_sep(row, ctx, " | ")
 }
@@ -182,12 +158,8 @@ pub fn fmt_row_ctx(row: &Row, ctx: &FmtCtx) -> String {
     fmt_row_with_sep(row, ctx, ", ")
 }
 
-/// Shared body for record/variant row rendering.  `sep` is the
-/// separator between field/arm entries; an open tail (`Row::Var`) prints
-/// as ` ...` (or ` ...ρ` when the variable has a name in `ctx`) so the
-/// tail is visually distinct from the labelled fields — `[a: Int, b:
-/// String, ...]` reads as "two known fields, possibly more", which is
-/// what an open row means.
+/// Shared body for record and variant rows.  An open tail prints as `...`
+/// (`...ρ` once named), so `[a: Int, ...]` reads "one known field, maybe more".
 fn fmt_row_with_sep(row: &Row, ctx: &FmtCtx, sep: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -204,8 +176,8 @@ fn fmt_row_with_sep(row: &Row, ctx: &FmtCtx, sep: &str) -> String {
                 break;
             }
             Row::Extend(l, ty, rest) => {
-                // Under scoped-label semantics the first occurrence of a label
-                // is the visible one; shadowed duplicates are not shown.
+                // Row unification walks the spine head-first and matches the
+                // first occurrence of a label, so show only that one.
                 if seen.insert(l.as_str()) {
                     parts.push(format!("{l}: {}", fmt_ty_ctx(ty, ctx)));
                 }
@@ -249,17 +221,13 @@ fn fmt_mode_field_ctx(mode: PipeMode) -> Option<String> {
     }
 }
 
-/// Format a pipeline mode for standalone display (e.g. in error messages).
+/// Format a pipeline mode on its own, outside any type.
 pub fn fmt_mode(mode: &PipeMode) -> String {
     fmt_mode_ctx(mode, &FmtCtx::default())
 }
 
-/// Like [`fmt_mode`] but consults `ctx` for a friendly name on
-/// unbound mode variables.
-///
-/// When the variable has been pre-named by
-/// [`FmtCtx::for_value_types`], it prints as `μ`/`ν`/…;
-/// otherwise it falls back to `_`.
+/// Like [`fmt_mode`], but a mode variable takes its name from `ctx` when it
+/// has one there.
 pub fn fmt_mode_ctx(mode: &PipeMode, ctx: &FmtCtx) -> String {
     match mode {
         PipeMode::None => "(no channel)".into(),
@@ -268,8 +236,6 @@ pub fn fmt_mode_ctx(mode: &PipeMode, ctx: &FmtCtx) -> String {
     }
 }
 
-/// Assign each variable in `order` its Greek letter by position — the
-/// shared body of the four scheme naming maps.
 fn names_in_order<V: Copy + Eq + std::hash::Hash>(
     order: &[V],
     letters: &[&str],
@@ -281,17 +247,14 @@ fn names_in_order<V: Copy + Eq + std::hash::Hash>(
         .collect()
 }
 
-/// Format a type scheme with proper quantifier prefix and named variables.
+/// Format a scheme with its ∀ prefix, naming variables by their position in
+/// the scheme's quantifier lists.
 ///
-/// Type variables are assigned Greek letters (α, β, γ, …); computation-type
-/// variables get ϕ, χ, ψ, ω, …; row variables get ρ, σ, τ, …  Mode variables
-/// never surface in the Command body rendering (a `Var` channel prints as
-/// nothing, only `Bytes` shows), so they are omitted from the ∀ prefix.  The
-/// body strips the outer `Thunk` wrapper so the displayed form is a `Command`
-/// type rather than `{Command …}`.
+/// Mode variables are named but never quantified: a mode variable prints as
+/// nothing inside a `Command` type, so its binder would dangle.  The outer
+/// `Thunk` is stripped, so a command reads `Command …`, not `{Command …}`.
 pub fn fmt_scheme(scheme: &Scheme) -> String {
-    // Cyclic-binding roots quantify alongside the plain vars, appended
-    // after them in first-appearance order.
+    // Roots of cyclic bindings are quantified too, after the plain vars.
     let mut ty_order: Vec<TyVar> = scheme.ty_vars.clone();
     for (root, _) in &scheme.ty_bindings {
         let v = TyVar(*root);
@@ -314,9 +277,6 @@ pub fn fmt_scheme(scheme: &Scheme) -> String {
         row_names: names_in_order(&scheme.row_vars, ROW_LETTERS),
     };
 
-    // Mode variables are named (for any body that shows them) but left out
-    // of the prefix: none surface in the Command form, and a quantifier
-    // with no occurrence in the body would be a dangling binder.
     let quant_parts: Vec<String> = ty_order
         .iter()
         .map(|v| ctx.ty_names[v].clone())
@@ -330,7 +290,6 @@ pub fn fmt_scheme(scheme: &Scheme) -> String {
         format!("∀{}. ", quant_parts.join(" "))
     };
 
-    // Strip the outer Thunk wrapper produced by the `thunk(...)` helper.
     let body = match &scheme.ty {
         Ty::Thunk(cty) => fmt_comp_ty_ctx(cty, &ctx),
         other => fmt_ty_ctx(other, &ctx),

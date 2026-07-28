@@ -3,17 +3,11 @@
 use crate::types::{Break, Env, Error, HandleInner, Settled, Shell, Value, sig, sig_hint};
 use std::sync::Arc;
 
-/// `2^63`: the half-open upper bound an `f64` magnitude must stay under to be
-/// representable as `i64`.  `i64::MAX` (`2^63 - 1`) rounds up to `2^63` as an
-/// `f64`, so the comparison is strict against this value.
+/// `i64::MAX` is not itself an `f64` — it rounds up to exactly this, so the
+/// magnitude bound is strict.
 pub(crate) const I64_BOUND: f64 = 9_223_372_036_854_775_808.0;
 
-/// Cast a finite, integral `f64` to `i64`, refusing a magnitude outside the
-/// `i64` range rather than saturating it silently (`as i64` clamps to the
-/// nearest bound, which would misreport the input).  `name` rides the error.
-///
-/// # Errors
-/// Returns `Err` if `f` is not in `[-2^63, 2^63)`.
+/// Cast an integral `f64` to `i64`, refusing what `as i64` would silently saturate.
 pub(crate) fn f64_to_i64(name: &str, f: f64) -> Settled<i64> {
     if (-I64_BOUND..I64_BOUND).contains(&f) {
         #[allow(
@@ -26,7 +20,7 @@ pub(crate) fn f64_to_i64(name: &str, f: f64) -> Settled<i64> {
     }
 }
 
-/// Return an error if `args` has fewer than `min` elements.
+/// Arity floor for a builtin; `name` rides the error text.
 ///
 /// # Errors
 /// Returns `Err` if `args.len() < min`.
@@ -38,7 +32,6 @@ pub fn check_arity(args: &[Value], min: usize, name: &str) -> Settled<()> {
     Ok(())
 }
 
-/// Extract a `HandleInner` reference from `val`, or return a typed error.
 pub(crate) fn expect_handle<'a>(val: &'a Value, cmd: &str) -> Settled<&'a HandleInner> {
     match val {
         Value::Handle(h) => Ok(h),
@@ -55,7 +48,6 @@ pub(crate) fn expect_handle<'a>(val: &'a Value, cmd: &str) -> Settled<&'a Handle
     }
 }
 
-/// Extract the body and captured scope from a `Block`, or return a typed error.
 pub(crate) fn expect_thunk(val: &Value, cmd: &str) -> Settled<(Arc<crate::ir::Comp>, Arc<Env>)> {
     match val {
         Value::Block { body, captured } => Ok((Arc::clone(body), Arc::clone(captured))),
@@ -104,10 +96,8 @@ pub(crate) fn as_byte_list(val: &Value, ctx: &str) -> Settled<Vec<u8>> {
     Ok(out)
 }
 
-/// The closed taxonomy of comparable runtime values.  Comparison over a
-/// computation value (Lambda/Block/Handle) is undeliverable — there is no
-/// extensional equality on suspensions — so it is an error, never a silent
-/// `false`.  `equal` and the ordering primitives share this judgment.
+/// Suspensions have no extensional equality, so asking errors rather than
+/// answering a non-reflexive `false`.
 fn uncomparable(a: &Value, b: &Value, op: &str) -> Break {
     sig_hint(
         format!(
@@ -119,10 +109,7 @@ fn uncomparable(a: &Value, b: &Value, op: &str) -> Break {
     )
 }
 
-/// Total structural equality over comparable values.  Mixed Int/Float
-/// compares numerically; Bytes and Variant are structural; a computation
-/// value on either side is uncomparable (errors rather than reporting
-/// `false`, so reflexivity holds on every comparable value).
+/// Structural equality, shared by `equal` and by `==`/`!=` in `$[…]`.
 pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
     Ok(match (a, b) {
         (Value::Unit, Value::Unit) => true,
@@ -155,9 +142,8 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
         (Value::Bytes(x), Value::Bytes(y)) => x == y,
         (Value::List(xs), Value::List(ys)) => {
             if xs.len() == ys.len() {
-                // Comparability is checked pairwise before equality is
-                // decided, so every pair's error surfaces regardless of
-                // what an earlier (unrelated) pair happened to compare to.
+                // Collect before folding: a short-circuiting `all` would let an
+                // early `false` mask a later pair's uncomparability.
                 let pairwise = xs
                     .iter()
                     .zip(ys.iter())
@@ -169,10 +155,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
             }
         }
         (Value::Map(xs), Value::Map(ys)) => {
-            // Both sides iterate sorted-by-key, so a single zip suffices:
-            // either the key streams agree pointwise or the maps differ.
-            // As with List, each pair's comparability is checked
-            // independently of the others before equality is decided.
+            // Both sides iterate sorted by key, so a pointwise zip decides it.
             if xs.len() == ys.len() {
                 let pairwise = xs
                     .iter()
@@ -211,11 +194,9 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
     })
 }
 
-/// Total ordering over the comparison taxonomy: Int·Int as `i64` (no f64
-/// precision loss above 2^53), Int/Float lifted to f64, String·String
-/// lexicographic.  NaN and every other pairing are uncomparable.  Backs
-/// `lt`/`gt`, `sort-list`, and the `$[…]` ordering operators, so the
-/// expression evaluator and the builtins cannot drift.
+/// Ordering on numbers and strings.  Int·Int compares as `i64`, so integers
+/// past 2^53 order exactly rather than through f64.  Backs `lt`/`gt`,
+/// `sort-list`, and the `$[…]` comparisons, which therefore cannot drift.
 pub(crate) fn value_ordering(a: &Value, b: &Value, op: &str) -> Settled<std::cmp::Ordering> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => Ok(x.cmp(y)),
@@ -257,11 +238,9 @@ pub fn arg0_str(args: &[Value], name: &str) -> Settled<String> {
     Ok(args[0].to_string())
 }
 
-/// Resolve `path` against the within-scoped cwd and capability-check it for
-/// read, returning the resolved path.
-///
-/// The resolve+`check_fs_read` idiom every fs query builtin opens with, so
-/// probing honours `within [dir: …]` rather than resolving against the OS cwd.
+/// Resolve `path` against the `within [dir: …]` scoped cwd and capability-check
+/// it for read — the move every fs query builtin opens with, so probing never
+/// falls back to the OS cwd.
 ///
 /// # Errors
 /// Returns `Err` if the read capability check denies the resolved path.
@@ -271,27 +250,21 @@ pub fn checked_read_path(shell: &mut Shell, path: &str) -> Settled<crate::path::
     Ok(rp)
 }
 
-/// True if `path` resolves and passes the read capability check — the
-/// skip-denied test a directory-walk loop uses to drop an off-limits entry
-/// without aborting the whole walk.
+/// [`checked_read_path`] as a predicate, so a walk skips an off-limits entry
+/// instead of aborting.
 pub fn admits_read(shell: &mut Shell, path: &str) -> bool {
     let rp = shell.resolve(path);
     shell.check_fs_read(&rp).is_ok()
 }
 
-/// Resolve the shell's stdin to one buffered byte reader, applying the
-/// stdin-draining policy every reading builtin shares: prefer the shell's
-/// installed `Source` reader (a pipeline pipe or a `<` redirect); else
-/// error if startup stdin was a terminal (the reading builtins want bytes,
-/// not an interactive prompt); else fall back to the process's
-/// `stdin().lock()` (the script-run case where stdin is inherited but no
-/// `Source` was installed).  Both the byte-blob reader
-/// ([`super::codecs::read_stdin_bytes`]) and the line iterator
-/// ([`for_each_stdin_line`]) drain through it, so the three-arm policy
-/// lives in one place.  `name` rides the no-input error.
+/// The one stdin policy every reading builtin shares: an installed `Source`
+/// (pipeline pipe or `<` redirect) if there is one; else a refusal when startup
+/// stdin was a terminal, since these builtins want bytes and not a prompt; else
+/// the inherited fd 0.  The [`super::codecs`] decoders and
+/// [`for_each_stdin_line`] both drain through here.
 pub(crate) fn stdin_reader(name: &str, shell: &mut Shell) -> Settled<Box<dyn std::io::BufRead>> {
-    // An explicit empty source reads as immediate EOF — no fd-0 fall-through,
-    // and no "no input" error (the run deliberately installed no input).
+    // `Empty` is a deliberate no-input marker: immediate EOF, never the "no
+    // input" error and never a fall-through to fd 0.
     if matches!(shell.io.stdin, crate::io::Source::Empty) {
         return Ok(Box::new(std::io::empty()));
     }
@@ -306,12 +279,10 @@ pub(crate) fn stdin_reader(name: &str, shell: &mut Shell) -> Settled<Box<dyn std
     Ok(Box::new(std::io::stdin().lock()))
 }
 
-/// Iterate the shell's stdin one line at a time, invoking `f` per line.
-/// `name` rides the error messages.
+/// Iterate the shell's stdin line by line through [`stdin_reader`].
 ///
 /// # Errors
-/// Returns `Err` if stdin cannot be resolved (see [`stdin_reader`]), if
-/// reading a line fails, or if `f` returns `Err`.
+/// Returns `Err` if stdin cannot be resolved, if a read fails, or if `f` does.
 pub fn for_each_stdin_line(
     name: &str,
     shell: &mut Shell,
@@ -326,7 +297,7 @@ pub fn for_each_stdin_line(
 }
 
 #[cfg(feature = "grep")]
-/// Render the useful part of a regex parser error for a builtin surface.
+/// Dig the cause line out of the regex crate's multi-line parse error.
 pub fn regex_err(ctx: &str, pattern: &str, full: &str) -> String {
     let cause = full
         .lines()
@@ -337,11 +308,9 @@ pub fn regex_err(ctx: &str, pattern: &str, full: &str) -> String {
     format!("{ctx}: invalid pattern '{pattern}': {cause}")
 }
 
-/// Total, never-failing JSON projection for the `--audit` dump.
-///
-/// Byte fields render as lossy-UTF-8 strings, non-finite Floats fall to
-/// `null`, and computation values become type-tagged stubs — legibility
-/// over round-trip fidelity.
+/// Total JSON projection for the `--audit` dump: lossy UTF-8 for Bytes, `null`
+/// for non-finite Floats, type-tagged stubs for suspensions.  Legibility over
+/// round-trip fidelity — none of it decodes back.
 pub fn value_to_json_lossy_bytes(v: &Value) -> serde_json::Value {
     match v {
         Value::Unit => serde_json::Value::Null,
@@ -382,10 +351,8 @@ mod stdin_tests {
     use crate::types::Shell;
     use std::io::Read;
 
-    /// An explicit empty stdin source reads as immediate EOF — not the "no
-    /// input" error and, crucially, *not* a fall-through to fd 0. This is the
-    /// guarantee an exarch tool run (`RunStdin::Empty`) relies on so a tool
-    /// command that reads stdin can never steal the TUI's controlling terminal.
+    /// The guarantee an exarch tool run (`RunStdin::Empty`) rests on: a tool
+    /// command reading stdin can never steal the TUI's controlling terminal.
     #[test]
     fn empty_source_reads_as_eof() {
         let mut shell = Shell::default();
@@ -395,8 +362,8 @@ mod stdin_tests {
         let n = reader.read_to_end(&mut buf).expect("read");
         assert_eq!(n, 0, "Empty source yields no bytes");
         assert!(buf.is_empty());
-        // The source is a persistent marker: a second read still sees Empty,
-        // never collapsing to `Terminal` (fd-0 fall-through).
+        // A persistent marker: a second read still sees `Empty`, never
+        // collapsing to `Terminal` and its fd-0 fall-through.
         assert!(matches!(shell.io.stdin, Source::Empty));
     }
 }

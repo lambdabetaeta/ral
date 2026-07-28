@@ -1,25 +1,11 @@
-//! Abstract syntax tree.
+//! Abstract syntax tree: the parser's output, the elaborator's input, untyped
+//! and shaped exactly like the surface syntax.
 //!
-//! The AST is produced by the parser and consumed by the elaborator. It is a
-//! direct, untyped representation of the surface syntax: commands,
-//! pipelines, blocks, lambdas, let-bindings, conditionals, and value
-//! literals.
-//!
-//! # Spans
-//!
-//! Source spans live on a separate [`Stmt`] wrapper, never on [`Ast`] itself.
-//! Every statement position — top-level scripts, block bodies, lambda bodies,
-//! and pipeline stages — is a `Vec<Stmt>`, with each `Stmt` carrying the span
-//! of its first token.  The elaborator stamps that span as its
-//! `current_span` before processing the underlying `Ast`, so diagnostic spans
-//! attach at the statement boundary.  Narrower spans, where they matter, live
-//! on the inner [`Spanned`] nodes a form carries (per-argument on `Call`,
-//! per-operand on `Case`, the value on `Let`, list/map elements, …); a form
-//! with no narrower span of its own inherits the enclosing statement's span
-//! through that stamping.
-//!
-//! The tree is serialisable (via `serde`) for debugging and the `to-json`
-//! builtin.
+//! Spans never sit on [`Ast`] itself. They ride the [`Stmt`] wrapper at every
+//! statement position and the inner [`Spanned`] nodes a form carries where a
+//! narrower caret is worth having. The elaborator stamps a statement's span as
+//! its current position before lowering, so a form with no span of its own
+//! inherits the enclosing statement's.
 
 use crate::path::tilde::TildePath;
 use crate::source::Spanned;
@@ -27,14 +13,14 @@ use crate::syntax::tag::tag_row_label;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-/// Structured unquoted word shape, determined once by the lexer.
+/// Unquoted word, shaped once by the lexer. A leading slash or tilde marks it
+/// as a path, and in head position that skips name lookup entirely.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Word {
-    /// Slash-free unquoted word.
     Plain(String),
-    /// Slash-bearing unquoted word such as `./x` or `/bin/x`.
+    /// `./x`, `/bin/x`
     Slash(String),
-    /// Tilde-prefixed word such as `~`, `~user`, or `~/x`.
+    /// `~`, `~user`, `~/x`
     Tilde(TildePath),
 }
 
@@ -47,227 +33,151 @@ impl Word {
     }
 }
 
-/// Top-level AST node. Each variant corresponds to a syntactic form in ral.
-///
-/// The tree is flat: there is no separate "statement" vs "expression"
-/// distinction at this level. The elaborator and evaluator interpret
-/// context (command position, value position, thunk, etc.) from the
-/// surrounding structure.
+/// One syntactic form. The tree is flat — no statement/expression split here;
+/// command position, value position, and thunk are read off the surrounding
+/// structure by the elaborator and the evaluator.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Ast {
-    /// A structured unquoted word.
     Word(Word),
-    /// A literal string value.
     Literal(String),
-    /// Variable reference: $name
+    /// `$name`
     Variable(String),
-    /// Variable binding: pattern = expr.
-    ///
-    /// `pattern`'s span narrows a pattern-shape diagnostic (`let [a, b] = 42`
-    /// against a non-list value) onto the pattern; `value`'s span narrows a
-    /// value-side unify failure onto the right-hand expression.
+    /// `pattern = expr`
     Let {
         pattern: Spanned<Pattern>,
         value: Spanned<Box<Self>>,
     },
-    /// Explicit value-to-command lift: `return [<value>]`.  The value's
-    /// span narrows a value-inference diagnostic onto the expression.
+    /// `return [<value>]` — the explicit lift from value to command.
     Return(Option<Spanned<Box<Self>>>),
-    /// Command-position invocation: a head applied to arguments, with
-    /// an optional run of trailing I/O redirects.  At the surface
-    /// level this is a single form — the elaborator decides whether
-    /// it becomes a name-dispatched [`crate::ir::CompKind::Exec`] (system call)
-    /// or a [`crate::ir::CompKind::App`] (CBPV elimination, when the head
-    /// resolves to a bound value).
-    ///
-    /// Each argument is a [`Spanned<Ast>`] so a per-argument unification
-    /// failure narrows onto that argument; synthetic test fixtures use
-    /// [`Spanned::synthetic`].
+    /// A head applied to arguments, plus any trailing redirects. One surface
+    /// form, two lowerings: the elaborator emits
+    /// [`crate::ir::CompKind::Exec`] for a name it dispatches, and
+    /// [`crate::ir::CompKind::App`] when the head resolves to a bound value.
     Call {
         head: Head,
         args: Vec<Spanned<Self>>,
         redirects: Vec<Redirect>,
     },
-    /// Control-operator scope form (`try`/`guard`/`within`/`grant`/`audit`),
-    /// with an optional run of trailing I/O redirects.  Operand shape is
-    /// fixed per-variant (see [`ScopeAst`]); the parser validates arity.
+    /// `try`/`guard`/`within`/`grant`/`audit`, plus any trailing redirects.
+    /// Operand shape is fixed per [`ScopeAst`] variant; the parser checks arity.
     Scope {
         op: ScopeAst,
         redirects: Vec<Redirect>,
     },
-    /// A pipeline: cmd1 | cmd2 | cmd3.  Each stage is a [`Stmt`] so the
-    /// elaborator can stamp each stage's span before lowering it.
+    /// `cmd1 | cmd2 | cmd3`
     Pipeline(Vec<Stmt>),
-    /// Chained commands: cmd1 ? cmd2 ? cmd3.  Each stage's span narrows a
-    /// per-stage diagnostic onto that stage.
+    /// `cmd1 ? cmd2 ? cmd3`
     Chain(Vec<Spanned<Self>>),
-    /// Background execution: `command &`.  The `Spanned` narrows a
-    /// diagnostic onto the backgrounded expression.
+    /// `command &`
     Background(Spanned<Box<Self>>),
-    /// A block: { ... }.  The body is a statement sequence — see [`Stmt`].
+    /// `{ … }`
     Block(Vec<Stmt>),
-    /// A lambda: { |params| body }.  The body is a statement sequence.
-    ///
-    /// The wrapping `Spanned` on `param` covers the parameter pattern's
-    /// parsed range so a pattern-shape diagnostic at call time narrows
-    /// onto the parameter rather than the whole lambda literal.
+    /// `{ |param| … }` — always exactly one parameter; the parser curries the
+    /// rest into nested lambdas.
     Lambda {
         param: Spanned<Param>,
         body: Vec<Stmt>,
     },
-    /// A list literal: [a, b, c]
+    /// `[a, b, c]`
     List(Vec<ListElem>),
-    /// A map literal: [key: val, key: val]
+    /// `[key: val, key: val]`
     Map(Vec<MapEntry>),
-    /// String interpolation: "hello $name".  Each segment (a literal
-    /// fragment or a `$name` / `$[expr]` insertion) carries its span so a
-    /// per-segment diagnostic narrows onto that segment.
+    /// `"hello $name"`, one segment per literal fragment or `$…` insertion.
     Interpolation(Vec<Spanned<Self>>),
-    /// Variant constructor: `` `label `` (nullary) or `` `label payload `` where the
-    /// payload is the next adjacent atom.  The `label` is stored without its
-    /// leading backtick.  Tag-keyed record entries are *not* `Ast::Tag` —
-    /// they go through `Ast::Map` with [`MapKey::Tag`] keys.  The payload's
-    /// span narrows a wrong-payload diagnostic onto it.
+    /// `` `label `` or `` `label payload ``, where the payload is the next
+    /// adjacent atom and `label` drops its backtick. Tag-*keyed* records are
+    /// not this: they are `Map` entries with [`MapKey::Tag`] keys.
     Tag {
         label: String,
         payload: Option<Spanned<Box<Self>>>,
     },
-    /// Sum eliminator: `case <scrutinee> [`l₁: h₁, …, `lₙ: hₙ]`.  The
-    /// `table` is required to be a tag-keyed record literal whose values
-    /// are handler thunks (`{ |x| body }`).  Type-checking and the runtime
-    /// connect the scrutinee's variant row to the handler row label by
-    /// label.
-    ///
-    /// Each operand is `Spanned<Box<Ast>>` so the typechecker can
-    /// narrow a "case needs a variant" diagnostic onto the scrutinee
-    /// expression, and any handler-shape diagnostic onto the table.
+    /// The sum eliminator, matching the scrutinee's variant row against the
+    /// table's handler row label by label. Both operands parse as bare atoms;
+    /// only the typechecker insists on a variant and a tag-keyed record of
+    /// handler thunks, so its complaint can name the resolved types.
     Case {
         scrutinee: Spanned<Box<Self>>,
         table: Spanned<Box<Self>>,
     },
-    /// Expression block: `$[expr]`
+    /// `$[expr]`
     Expr(Box<Expr>),
-    /// Indexing: `$name[k1][k2]`
-    ///
-    /// `target`'s span narrows a target diagnostic (block-target
-    /// indexing, …) onto the target; each key's span (covering `[k]`
-    /// including the brackets) narrows a per-key unification failure onto
-    /// that key.  Synthetic test fixtures use [`Spanned::synthetic`].
+    /// `$name[k1][k2]`; each key's span covers its brackets too.
     Index {
         target: Spanned<Box<Self>>,
         keys: Vec<Spanned<Self>>,
     },
-    /// Force: ! atom.  The `Spanned` covers the whole `!atom` extent (the
-    /// `!` token plus the forced operand) so a force-on-non-thunk
-    /// diagnostic underlines it; synthetic fixtures elide the span via
-    /// [`Spanned::synthetic`].
+    /// `!atom`; the span covers the `!` along with the operand.
     Force(Spanned<Box<Self>>),
-    /// Argument-position spread: `f ...x`.  Distinct from
-    /// [`ListElem::Spread`] (a list-literal element) so the elaborator
-    /// can splice `x`'s elements into the call's argument list while
-    /// keeping `f [...x]` as a single list argument.  Only valid as an
-    /// immediate child of [`Ast::Call`]'s `args`; elaboration rejects
-    /// it elsewhere.  The operand's span narrows a spread-of-non-list
-    /// diagnostic onto it.
+    /// `f ...x`, distinct from [`ListElem::Spread`] so the elaborator can splice
+    /// `x`'s elements into the argument list while `f [...x]` stays one list
+    /// argument. The parser mints it in argument position and nowhere else.
     Spread(Spanned<Box<Self>>),
-    /// Conditional: `if cond then [elsif cond then]* [else else_]`.
-    /// One-armed form (single branch, no `else`) has type Unit; multi-
-    /// armed form requires every branch and the `else` to agree on
-    /// type.
-    ///
-    /// The leading `if` and any `elsif`s collapse into one `branches`
-    /// vector — they are semantically identical (a cond paired with a
-    /// body, evaluated in order until one matches).  Each branch spans
-    /// both cond and body so a diagnostic narrows onto the offending
-    /// fragment; `else_` is the optional final body, also spanned.
+    /// `if cond then [elsif cond then]* [else else_]`. The leading `if` and the
+    /// `elsif`s collapse into one `branches` vector, being the same thing. With
+    /// no `else` the form is Unit; with one, every branch must agree on a type.
     If {
         branches: Vec<IfBranch>,
         else_: Option<Spanned<Box<Self>>>,
     },
 }
 
-/// One branch of an [`Ast::If`]: a condition expression paired with
-/// the body to run when that condition is the first to match.
-///
-/// Both
-/// halves carry spans so the typechecker can narrow a non-Bool cond
-/// or a branch-body type mismatch onto the offending fragment.
+/// One branch of an [`Ast::If`]: a condition and the body to run when that
+/// condition is the first to match.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IfBranch {
     pub cond: Spanned<Box<Ast>>,
     pub body: Spanned<Box<Ast>>,
 }
 
-/// One statement in a statement-sequence position (top-level program, block
-/// body, lambda body, pipeline stage).
+/// One statement of a sequence: a program, a block body, a lambda body, a
+/// pipeline stage.
 ///
-/// The wrapping `Spanned` carries the
-/// statement's span — `start_of_first_token .. end_of_last_token` — so the
-/// elaborator can stamp it on emitted IR for diagnostics.  Covering the
-/// full extent matters: when an error fires at the outermost `Comp` (e.g.
-/// `return [1, hello]` — the offending element has no span of its own
-/// because [`crate::ir::Val`] is unspanned), the caret falls back to *this*
-/// span, so it needs to underline the whole statement, not just the leading
-/// keyword.  Synthetic statements (test fixtures, generated pattern-default
-/// wrappers) carry `span: None`; the elaborator's "no narrower position"
-/// no-op branch keeps the enclosing position in those cases.
-///
-/// Statements never appear *inside* sub-expressions: a `Let` value or a
-/// `Call` argument is a bare [`Ast`].  The split keeps span overhead on
-/// statement boundaries.
+/// The span runs first token to last, not just the keyword, and that matters:
+/// an error raised at the outermost `Comp` has nothing narrower to point at,
+/// since [`crate::ir::Val`] is unspanned, so the caret falls back to this and
+/// must underline the whole statement. Synthetic statements carry no span at
+/// all, and the elaborator then keeps the position it already had.
 pub type Stmt = Spanned<Ast>;
 
-/// Parsed command head.
-///
-/// This is a closed syntactic category: parser and elaborator do not need to
-/// recover head meaning from a generic `Ast`.
+/// Parsed command head — a closed category, so nothing downstream has to
+/// recover a head's meaning from a generic [`Ast`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Head {
-    /// Bare command name, subject to value/alias/builtin/PATH lookup.
+    /// Bare name, subject to value/alias/builtin/PATH lookup.
     Bare(String),
-    /// External-only bare command head: `^name`.
+    /// `^name` — external programs only, and exempt from the reserved-word
+    /// ban, so `^try` runs the program of that name.
     ExternalName(String),
-    /// Slash-bearing literal path head such as `./x` or `/bin/x`.
+    /// `./x`, `/bin/x`
     Path(String),
-    /// Tilde path head such as `~/x`.
+    /// `~/x`
     TildePath(TildePath),
-    /// Any explicit value head (`$f`, `!$f`, block literal, etc.).
+    /// An explicit value head: `$f`, `!$f`, a block literal.
     Value(Box<Ast>),
 }
 
-/// Binding pattern for `let` and lambda parameters.
+/// Binding pattern, shared by `let` and lambda parameters. There is no
+/// alternative to fall through to, so a shape mismatch at bind time is an
+/// error rather than a failure to match.
 ///
-/// Patterns are irrefutable: they always bind. Wildcard (`_`) discards
-/// the value; name binds it; list and map patterns destructure structured
-/// values at bind time.
-///
-/// The type parameter `D` is the form of map-pattern defaults: parser
-/// output uses [`Ast`] (the default), IR uses an already-elaborated
-/// computation (see [`crate::ir::IrPattern`]).  Lambda parameters and
-/// `let` bindings share this single shape; lambda params may carry
-/// defaults too via [`Pattern::Map`].
+/// `D` is the shape of map-pattern defaults: surface [`Ast`] from the parser,
+/// an already-elaborated computation in [`crate::ir::IrPattern`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Pattern<D = Ast> {
-    /// `_` -- discard the value.
+    /// `_` — discard the value.
     Wildcard,
-    /// Bind the value to a name.
     Name(String),
-    /// `[a, b, ...rest]` -- destructure a list. The optional `rest`
-    /// captures the tail as a new list.
+    /// `[a, b, ...rest]`, where `rest` takes the tail as a new list.
     List {
         elems: Vec<Self>,
         rest: Option<String>,
     },
-    /// `[key: pat = default, ...]` -- destructure a map. Each entry is
-    /// a [`MapPatternEntry`] holding the key, sub-pattern, and optional
-    /// default.  The default's representation depends on `D`: surface
-    /// AST or elaborated IR.
+    /// `[key: pat = default, …]`
     Map(Vec<MapPatternEntry<D>>),
 }
 
-/// One entry in a [`Pattern::Map`]: a static key, the sub-pattern bound
-/// to that field, and an optional default that fires when the key is
-/// absent from the value being destructured.
+/// One entry of a [`Pattern::Map`]: a static key, the sub-pattern bound to that
+/// field, and a default that fires when the key is absent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MapPatternEntry<D = Ast> {
     pub key: MapKey,
@@ -275,56 +185,32 @@ pub struct MapPatternEntry<D = Ast> {
     pub default: Option<D>,
 }
 
-/// Lambda parameter. Always a single pattern; multi-parameter lambdas
-/// are desugared by the parser into nested single-parameter lambdas
-/// (currying).
+/// Lambda parameter.
 pub type Param = Pattern;
 
 /// Element of a list literal.
-///
-/// A spread (`...expr`) splices another list
-/// into the enclosing one.  Each variant's inner `Spanned<Ast>` covers
-/// the element's parsed range so a per-element diagnostic (a
-/// heterogeneous-list type mismatch, a spread of a non-list) narrows
-/// onto the offending element rather than the whole list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ListElem {
-    /// An ordinary element.
     Single(Spanned<Ast>),
-    /// `...expr` -- splice the elements of `expr` into this list.
+    /// `...expr` — splice `expr`'s elements into this list.
     Spread(Spanned<Ast>),
 }
 
 /// Entry of a map literal.
-///
-/// Each variant's value-side `Spanned<Ast>`
-/// covers the value expression's parsed range so a per-entry diagnostic
-/// (a wrong-shape value, a spread of a non-map) narrows onto the
-/// offending value rather than the whole map.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MapEntry {
-    /// `key: value` with a statically-known label (bare identifier,
-    /// quoted string, or backtick tag — encoded in the [`MapKey`]).
+    /// `key: value` with a label known statically — see [`MapKey`].
     Entry { key: MapKey, value: Spanned<Ast> },
-    /// `$name: value` — the key is the runtime value of `name`.
-    /// Distinct from [`MapEntry::Entry`] so the surface form is typed
-    /// rather than encoded as `Ast::Variable` riding a generic key slot.
+    /// `$name: value` — the key is `name`'s value at runtime.
     Deref { name: String, value: Spanned<Ast> },
     /// `...expr` — splice another map's entries into this one.
     Spread(Spanned<Ast>),
 }
 
-/// Static map / record key — bare identifier or backtick tag.
-///
-/// Surface `host` and `'host'` both parse to [`MapKey::Bare`]; surface
-/// `` `host `` parses to [`MapKey::Tag`] carrying the bare label (no
-/// sigil).  The single-string internal row representation (bare label
-/// unchanged; tag label prefixed via [`crate::syntax::tag::tag_row_label`]) is
-/// produced by [`MapKey::row_label`] when the IR or typechecker needs
-/// a row-label `String`.
-///
-/// The typed key keeps the alphabet readable off the variant rather
-/// than by inspecting the leading character of a stringly-typed key.
+/// Static record key. Both `host` and `'host'` parse to [`MapKey::Bare`];
+/// `` `host `` parses to [`MapKey::Tag`] carrying the label without its sigil.
+/// Holding the alphabet on the variant spares every reader from sniffing the
+/// leading character of a stringly-typed key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MapKey {
     Bare(String),
@@ -332,8 +218,8 @@ pub enum MapKey {
 }
 
 impl MapKey {
-    /// Internal row-label representation: bare label unchanged; tag
-    /// label prefixed via [`crate::syntax::tag::tag_row_label`].
+    /// The single-string row label the IR and typechecker want: bare unchanged,
+    /// tag prefixed by [`crate::syntax::tag::tag_row_label`].
     pub fn row_label(&self) -> String {
         match self {
             Self::Bare(s) => s.clone(),
@@ -341,8 +227,8 @@ impl MapKey {
         }
     }
 
-    /// True for tag-alphabet keys.  The parser uses this to enforce
-    /// that a single map literal / pattern doesn't mix alphabets.
+    /// True for tag-alphabet keys. The parser reads it to bar a single map
+    /// literal or pattern from mixing the two alphabets.
     pub fn is_tag(&self) -> bool {
         matches!(self, Self::Tag(_))
     }
@@ -354,35 +240,24 @@ pub enum Expr {
     Number(f64),
     Bool(bool),
     Variable(String),
-    /// `$name[k₁][k₂] …` inside `$[…]`.  Name-target only — the surface
-    /// syntax doesn't support arbitrary-target indexing here.  Each key
-    /// carries its own parsed span so a per-key unification failure
-    /// narrows onto the offending key, matching [`Ast::Index`].
+    /// `$name[k₁][k₂] …` inside `$[…]`. Name targets only — unlike
+    /// [`Ast::Index`], the surface syntax admits no arbitrary target here.
     Index(String, Vec<Spanned<Ast>>),
-    /// `!atom` inside `$[…]`.  The `Spanned` covers the forced operand
-    /// so a force-on-non-thunk diagnostic underlines just the operand,
-    /// matching [`Ast::Force`].
+    /// `!atom` inside `$[…]`; the span covers only the operand.
     Force(Spanned<Box<Ast>>),
     BinOp(Box<Self>, BinaryOp, Box<Self>),
-    /// Unary logical negation: `not e` (strict).
+    /// `not e`, strict.
     Not(Box<Self>),
-    /// Short-circuit conjunction: `a && b`.  RHS is evaluated only if
-    /// LHS is `true`.  Desugars in the elaborator to `_if a { b } { return false }`.
+    /// `a && b` — short-circuiting, so the RHS runs only when the LHS is true.
     And(Box<Self>, Box<Self>),
-    /// Short-circuit disjunction: `a || b`.  RHS is evaluated only if
-    /// LHS is `false`.
+    /// `a || b` — short-circuiting, so the RHS runs only when the LHS is false.
     Or(Box<Self>, Box<Self>),
 }
 
-/// Binary primitive operator on values (arithmetic, comparison, equality).
-/// The unary `not` lives on its own at [`Expr::Not`] / `CompKind::Not`,
-/// so each `BinaryOp` variant is unambiguously two-operand.
-///
-/// The flat enum is what surfaces on the wire (parser → IR → IPC serde);
-/// downstream callers that need to dispatch on the operation *category*
-/// use [`BinaryOp::kind`] to project into [`BinaryOpKind`], whose
-/// per-category sub-enums make the helpers' invariants type-enforced
-/// instead of asserted via `unreachable!`.
+/// Binary primitive on values: arithmetic, ordering, equality. The flat enum is
+/// what crosses the wire, parser to IR to IPC; a caller that wants to dispatch
+/// on category projects it through [`BinaryOp::kind`] into [`BinaryOpKind`],
+/// whose sub-enums let each handler match exhaustively without a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinaryOp {
     Add,
@@ -398,8 +273,8 @@ pub enum BinaryOp {
     Ge,
 }
 
-/// Arithmetic sub-operations: numeric, may overflow, division and modulo
-/// reject a zero divisor, modulo additionally rejects floats.
+/// Numeric, and may overflow. Division and modulo reject a zero divisor;
+/// modulo also rejects floats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArithOp {
     Add,
@@ -409,7 +284,7 @@ pub enum ArithOp {
     Mod,
 }
 
-/// Ordering sub-operations: numeric only, always return [`bool`].
+/// Numeric operands only; always a [`bool`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompareOp {
     Lt,
@@ -418,19 +293,14 @@ pub enum CompareOp {
     Ge,
 }
 
-/// Equality sub-operations: structural on any value, always return [`bool`].
+/// Structural on any value; always a [`bool`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EqOp {
     Eq,
     Ne,
 }
 
-/// Category-tagged projection of [`BinaryOp`].
-///
-/// Constructed via
-/// [`BinaryOp::kind`].  Dispatching on this rather than the flat enum
-/// lets each category's handler accept its own narrowed sub-enum, so
-/// the match arms inside are exhaustive without a wildcard fallback.
+/// Category-tagged projection of [`BinaryOp`], built by [`BinaryOp::kind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOpKind {
     Arith(ArithOp),
@@ -462,24 +332,21 @@ pub enum RedirectMode {
     StreamWrite,
     Append,
     Read,
-    /// `<< str` — feed a string value to stdin (fd 0). The target word
-    /// is the payload itself, not a file path; at evaluation one newline
-    /// immediately at the front of the value is dropped, so a multiline
-    /// body may start on the line below the command.
+    /// `<< str` — feed a string to stdin. The target word is the payload
+    /// itself, not a path, and one leading newline is dropped at evaluation so
+    /// a multiline body may start on the line below the command.
     HereString,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RedirectTarget {
-    /// The redirect's word operand: a file path for the file modes, the
-    /// payload string for [`RedirectMode::HereString`].
+    /// A file path, or the payload for [`RedirectMode::HereString`].
     File(Box<Ast>),
     Fd(u32),
 }
 
-/// I/O redirect attached to a command-position node.  Owned by
-/// [`Ast::Call`] and [`Ast::Scope`] as fields rather than mixed into
-/// argument lists, so redirects can never be confused with values.
+/// An I/O redirect. It is a field of [`Ast::Call`] and [`Ast::Scope`] rather
+/// than an entry in their argument lists, so it can never pass for a value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Redirect {
     pub fd: u32,
@@ -487,12 +354,8 @@ pub struct Redirect {
     pub target: RedirectTarget,
 }
 
-/// Operand shape of a control-operator scope form.
-///
-/// Each variant
-/// matches a surface keyword (`try`/`guard`/`within`/`grant`/`audit`);
-/// arity, operand description, and constructor-from-operands are
-/// declared together in [`ScopeAst::KEYWORDS`].
+/// Operand shape of a control-operator scope form, one variant per surface
+/// keyword. Arity and construction are declared in [`ScopeAst::KEYWORDS`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ScopeAst {
     /// `try BODY HANDLER` — run `body`; on error, dispatch to `handler`.
@@ -507,16 +370,9 @@ pub enum ScopeAst {
     Audit { body: Box<Ast> },
 }
 
-/// Parser metadata for one control-operator keyword:
-///
-/// the surface
-/// name, its operand arity, a human-readable operand description for
-/// arity-mismatch diagnostics, and a constructor that destructures
-/// the arity-validated operand vector into the matching [`ScopeAst`].
-///
-/// Kept next to [`ScopeAst`] so each entry holds everything the
-/// parser needs to recognise the keyword in one place; the parser
-/// dispatches by name through [`ScopeAst::lookup_keyword`].
+/// Everything the parser needs for one control-operator keyword: the surface
+/// name, the operand arity, a description of the operands for the
+/// arity-mismatch message, and a constructor from the validated operand vector.
 pub struct ScopeKeyword {
     pub name: &'static str,
     pub arity: usize,
@@ -525,9 +381,9 @@ pub struct ScopeKeyword {
 }
 
 impl ScopeAst {
-    /// All recognised control-operator keywords.  The parser's
-    /// `is_reserved` predicate consults [`Self::lookup_keyword`] on
-    /// this list to bar these names from binding positions.
+    /// Every control-operator keyword. [`crate::syntax::is_keyword`] reads this
+    /// list, so the parser's ban on these names in binding positions and
+    /// exarch's syntax highlighter cannot drift apart.
     pub const KEYWORDS: &'static [ScopeKeyword] = &[
         ScopeKeyword {
             name: "try",
@@ -590,8 +446,7 @@ impl ScopeAst {
         },
     ];
 
-    /// Look up a control-operator keyword by surface name.  Returns
-    /// `None` if `name` is not a recognised keyword.
+    /// Look up a control-operator keyword by surface name.
     pub fn lookup_keyword(name: &str) -> Option<&'static ScopeKeyword> {
         Self::KEYWORDS.iter().find(|kw| kw.name == name)
     }
@@ -599,17 +454,10 @@ impl ScopeAst {
 
 // ── Utilities ────────────────────────────────────────────────────────────
 
-/// Syntactic classification of a bare-word string into a value-literal
-/// shape.
-///
-/// The single source of truth for "does this bare word look like
-/// a literal rather than a command name?" — used at parse time to skip
-/// the [`Ast::Call`] wrapper, and again at elaboration to choose the
-/// appropriate typed [`crate::ir::Val`] variant (see
-/// [`crate::ir::Val::from_word`]).
-///
-/// Floats require an embedded `.` to disambiguate from identifiers that
-/// happen to f64-parse (e.g. `1e5` stays a `String`).
+/// The value-literal shape of a bare word: the one answer to "literal or
+/// command name?", read by the parser to skip the [`Ast::Call`] wrapper and by
+/// elaboration through [`crate::ir::Val::from_word`]. A float wants an embedded
+/// `.`, so `1e5`, which merely happens to f64-parse, stays a string.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WordLiteral {
     Bool(bool),
@@ -662,23 +510,18 @@ impl<D> Pattern<D> {
 }
 
 impl Ast {
-    /// True for AST nodes that elaborate to a thunk value — a `{…}`
-    /// block (nullary thunk) or a `{|param| …}` lambda (closure).
-    /// Used by `group.rs` to decide which `let` RHS expressions can
-    /// participate in a `LetRec`: only those whose RHS is itself a
-    /// thunk value can close over forward references without
-    /// requiring the binding to be settled first.
+    /// True for the forms that elaborate to a thunk: a `{…}` block or a
+    /// `{|p| …}` lambda. `syntax::group` admits only these into a `LetRec`,
+    /// since only a thunk can close over a forward reference without the
+    /// binding being settled first.
     pub fn is_thunk_form(&self) -> bool {
         matches!(self, Self::Lambda { .. } | Self::Block(_))
     }
 
-    /// The bound name and (spanned) right-hand side of a top-level
-    /// `let name = rhs` whose pattern is a bare [`Pattern::Name`].  `None`
-    /// for any other statement — including a destructuring `let [a, b] = …`,
-    /// which binds no single name and so is neither a `LetRec` knot member
-    /// nor a single worksheet node.  The value keeps its [`Spanned`] wrapper
-    /// so callers that need the RHS span (`group.rs`) and those that need
-    /// only the RHS AST (the worksheet) share this one shape.
+    /// The name and right-hand side of a `let name = rhs`. `None` for anything
+    /// else, a destructuring `let [a, b] = …` included: it binds no single name
+    /// and so is neither a `LetRec` member nor a worksheet node. The [`Spanned`]
+    /// survives because `syntax::group` wants the RHS span.
     pub fn as_name_let(&self) -> Option<(&str, &Spanned<Box<Self>>)> {
         match self {
             Self::Let { pattern, value } => match &pattern.item {
@@ -691,10 +534,8 @@ impl Ast {
 }
 
 impl ScopeAst {
-    /// Operands of this scope form, in source order (e.g. `try BODY
-    /// HANDLER` → `[body, handler]`).  Mirrors the per-variant arity
-    /// declared in [`Self::KEYWORDS`]; consumed by free-variable
-    /// collection.
+    /// Operands in source order, matching the arity in [`Self::KEYWORDS`].
+    /// Free-variable collection walks them.
     pub fn operands(&self) -> Vec<&Ast> {
         match self {
             Self::Try { body, handler } => vec![body, handler],

@@ -1,17 +1,11 @@
 //! Collapsible scrollback blocks.
 //!
-//! A viewport's scrollback is a sequence of [`Block`]s, not a flat line
-//! buffer.  Four block kinds are *dialable* — tool calls, patches, subagent
-//! results, and harness acts — each carrying a disclosure [`Block::level`] (1–3)
-//! that grades how much it reveals: from a one-line summary (L1) through a
-//! few lines of context (L2) to the full source (L3).  A block is dialable
-//! only if it has a real summary to collapse to; model prose ([`BlockKind::
-//! Markdown`]) has none — its answer is product to read, not process to
-//! reduce — so it always renders full and is inert to the dial.  Chrome is
-//! already 1–few lines, so it too stays full.  Each block memoises the lines
-//! it last produced, keyed by the width it was asked for, so re-flattening
-//! the buffer each frame re-renders only the block the user just dialed, or
-//! the whole buffer once on a resize.
+//! A viewport's scrollback is a sequence of [`Block`]s, each on a rung of the
+//! [`Reveal`] ladder.  Only a kind with a summary to collapse to is dialable —
+//! tool calls, diffs, subagent results, acts, thinking; prose is product to
+//! read rather than process to reduce, and chrome is already a line or two, so
+//! both render full.  A block memoises the lines it last produced, keyed by the
+//! width asked for, so a dial re-renders one block and a resize the buffer.
 
 use super::fidelity::Fidelity;
 use super::group;
@@ -24,147 +18,109 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::time::Duration;
 
-/// Index into the agent rail palette ([`super::palette::AGENT_HUES`]). Root is `0`;
-/// each subagent takes the next slot at birth, wrapping modulo the
-/// palette length. Carried by value on every [`Block`] so the rail
-/// renders agent identity without a lookup on `App`.
+/// Index into [`super::palette::AGENT_HUES`], wrapping: root is `0`, each
+/// subagent the next slot at birth.  Carried by value, so the rail needs no
+/// lookup on `App`.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub(super) struct AgentSlot(pub u8);
 
-/// Coarse chrome sub-kind the rail dispatches on. Patches and tool calls
-/// derive their rail shape from their own [`BlockKind`] variant; chrome
-/// carries this discriminant so the rail need not re-parse built lines.
+/// Coarse chrome sub-kind, carried so the rail need not re-parse built lines.
+/// Every other kind derives its shape from its [`BlockKind`] variant.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub(super) enum RailShape {
-    /// A step boundary — renders the `━` rail marker.
     Step,
-    /// An error — renders `╳`.
     Error,
-    /// Ambient chrome outside the transcript proper — wears the `▪` square. The
-    /// default: a meta-notice (a model switch, an export, a stop reason, a stream
-    /// stall) is an annotation, not a navigable block, so it earns a subtle glyph.
+    /// A meta-notice — a model switch, an export, a stall: an annotation
+    /// rather than a navigable block.
     #[default]
     Plain,
-    /// The human's submitted prompt — marked by its [`super::palette::PROMPT_INK`]
-    /// body tint and the `❖` rail fence, with a full-width rule above its first
-    /// row (painted by the flatten).  No background band — background is the
-    /// machine's.
+    /// The human's turn, tinted [`super::palette::PROMPT_INK`] and ruled
+    /// full-width by the flatten.  No band — background is the machine's.
     Prompt,
 }
 
-/// Where a [`BlockKind::Card`] came from — the distinction the coalescing
-/// projection ([`super::group`]) reads to tell an *effect* it may fold into
-/// a ral block from a *barrier* that splits one.
+/// Where a [`BlockKind::Card`] came from — what the coalescing projection
+/// ([`super::group`]) reads to tell an *effect* it may fold into a ral block
+/// from a *barrier* that splits one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum CardOrigin {
-    /// A read / grep / exec the model's call produced — an observation
-    /// effect, foldable into the call's coalesced block.  Carries the `|>`
-    /// effect `kind` and the `count` it folds (a grouped card comma-joins
-    /// several of one kind), the census tally the coalesced run's L0 sums.
+    /// A read / grep / exec a call produced: foldable, carrying its `|>` kind
+    /// and how many it folds (one card may comma-join several) for the census.
     Observation { kind: ObservationKind, count: u32 },
-    /// A write redirect — an effect, but never folded: a write ends the
-    /// current ral block exactly as a diff does, and renders standalone.
+    /// A write redirect — an effect, but a barrier all the same: like a diff it
+    /// ends the current ral block.
     Write,
-    /// A diff (`edit`'s `▎ diff`) or a deliberately `surface`d rich card —
-    /// the model's own communication, a barrier that splits the block and
-    /// stays standalone.
+    /// A diff or a deliberately `surface`d card — the model's own
+    /// communication, a barrier.
     Surfaced,
 }
 
-/// The reasoning a turn produced. It is its own dialable block: the
-/// collapsed form gives only a grain and size; higher rungs reveal the
-/// drained trace. `answer_chars` is the whole turn's answer mass, the
-/// deliberation grain's denominator.  `provisional` holds the live phase's
-/// streamed deltas: they tick the header's magnitude in place — the block
-/// never moves — and are superseded wholesale when the phase's authoritative
-/// reasoning commits via [`Block::append_thinking`].  Only `text` is ever
-/// revealed by the dial or teed to the log.
+/// A turn's reasoning.  `answer_chars` is its answer mass, the deliberation
+/// grain's denominator.  `provisional` holds the live phase's streamed deltas —
+/// they tick the header's magnitude in place and are dropped wholesale once
+/// [`Block::append_thinking`] commits the phase's authoritative text; only
+/// `text` is ever revealed or logged.
 pub(super) struct Thinking {
     pub(super) text: String,
     pub(super) answer_chars: u32,
     pub(super) provisional: String,
 }
 
-/// What a block carries.  Each variant renders as a pure function of its
-/// data, the target width, and the block's disclosure [`level`].
+/// What a block carries — each variant a pure function of its data, the target
+/// width, and the block's rung.
 pub(super) enum BlockKind {
-    /// A tool call worth revealing: `summary` is the one-line label
-    /// shown reduced, `details` the full ral source shown revealed.
-    /// Summary-less calls have nothing to reveal and arrive as
-    /// [`BlockKind::PlainTool`] instead.
+    /// `summary` is the collapsed label, `details` the ral source behind it.  A
+    /// summary-less call arrives as [`BlockKind::PlainTool`] instead.
     DiallableTool {
         tool: &'static str,
         summary: String,
         details: String,
     },
-    /// A summary-less tool call, shown standalone as `▸ details`.
-    /// `details` is the text to show, or `None` for a parse-failure
-    /// placeholder ([`crate::shell_eval::tools::ral::INVALID_INPUT`]): such a call renders
+    /// A summary-less tool call, inert under the shut triangle.  `details` is
+    /// `None` for a parse failure (`INVALID_INPUT`): such a call renders
     /// nothing, present only as the boundary a stray result stops at.
-    /// Inert (nothing to dial); wears the shut tool-call triangle `▸`.
     PlainTool { details: Option<String> },
-    /// A harness **act** — `spawn`, `cancel`, `message`, `reply`,
-    /// `schedule`, `unschedule`.  An act changes the world outside the turn,
-    /// so it is not an observation: it never coalesces into a `ral` run, it
-    /// carries no magnitude, and it renders as three columns — `verb`,
-    /// `subject`, `payload` — with `failed` tiering the payload hot.
-    /// Dialable: reduced (L1) the payload truncates into its column, revealed
-    /// (L2/L3) it wraps in full.
+    /// A harness act — `spawn`, `cancel`, `message`, `reply`, `schedule`,
+    /// `unschedule`.  It changes the world outside the turn, so it is no
+    /// observation: never coalesced into a `ral` run, and carrying no magnitude.
     Act {
         verb: &'static str,
         subject: Option<String>,
         payload: String,
         failed: bool,
     },
-    /// Streamed assistant prose; re-wrapped from source at every width.
-    /// Prose is product — always full, inert to the dial, wearing `·`.
+    /// Streamed assistant prose, re-wrapped from source at every width.
     Markdown { src: String },
-    /// A model reasoning trace, separate from the answer it produced.
-    /// It is dialable: L1 is the deliberation header, L2 a few rows of
-    /// drained trace, L3 the full trace.
+    /// A reasoning trace, separate from the answer it produced.
     Thinking(Thinking),
-    /// An async subagent's final result, landed in root's scrollback.
-    /// Dialable like a tool call: collapsed (L1) to a one-line header
-    /// (`name` · `elapsed` · a size-bar for `text` length, plus an error
-    /// suffix when `error` is set), dialed open (L3) to the full `text`
-    /// rendered as markdown.  Carries its own `name`/`elapsed`/`error`
-    /// because `Markdown` can't, and keeps the `↘` rail identity a `Card`
-    /// would lose.
+    /// An async subagent's result, landed in root's scrollback.  Its own kind
+    /// because `Markdown` cannot carry `name`/`elapsed`/`error` and a `Card`
+    /// would lose the `↘` identity.
     Subagent {
         name: String,
         text: String,
         error: Option<String>,
         elapsed: Duration,
     },
-    /// A render document a kit surfaced — an ordered stack of Bertin
-    /// [`Card`] marks, re-rendered from data at every width and disclosure
-    /// level.  A card holding a `diff` mark is dialable (L1 header ↔ L3
-    /// full); one of only `text`/`fields`/`measure`/`raw` is chrome-level.
-    /// `origin` tells the coalescing projection whether the card is a model
-    /// *effect* it may fold into a ral block or a *barrier* that splits one.
+    /// A render document a kit surfaced — a stack of [`Card`] marks re-rendered
+    /// from data at every width.  Only one holding a `diff` mark is dialable.
     Card { card: Card, origin: CardOrigin },
-    /// Pre-built chrome whose builder already wrapped to [`READ_W`] — a
-    /// step separator, prompt echo, error, banner, subagent breadcrumb, or
-    /// a summary-less tool call.  `shape` lets the rail (and the size/grain
-    /// moves) dispatch on the chrome sub-kind without re-parsing the built
-    /// lines.
+    /// Pre-built chrome whose builder already wrapped to [`READ_W`].
     Chrome {
         shape: RailShape,
         lines: Vec<Line<'static>>,
     },
 }
 
-/// Number of source/content lines L2 reveals around the summary — the
-/// `±N` context window for the partial views of every dialable kind.
+/// Content lines L2 reveals past the summary, for every dialable kind.
 const N: usize = 3;
 
-/// How much of a dialable block the rail discloses, low to high — `Ord`
-/// compares the rungs.  The reachable band is `[floor, Full]`; only a `|>` run
-/// reaches `Census` (see [`Block::floor`]).  The wheel steps one rung and
-/// stops at the band edge; the click steps one rung and wraps `Full → floor`.
+/// How much of a dialable block is disclosed, low to high; `Ord` compares the
+/// rungs.  The reachable band is `[Block::floor, Full]` — only a `|>` run
+/// reaches `Census`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(super) enum Reveal {
-    /// L0: a run's `|>` effects tallied — "Ran 5 scripts, read 4 files, …".
+    /// L0: a run's `|>` effects tallied, rendered by [`super::group`] alone.
     Census,
     /// L1: the live tip, or a collapsed one-line header.
     Summary,
@@ -174,12 +130,8 @@ pub(super) enum Reveal {
     Full,
 }
 
-/// Render pending user prompts through the same prompt chrome path committed
-/// prompts use in the viewport: [`line::user_prompt`] builds the body,
-/// [`Block::render_with`] seats the `❖` rail glyph, and
-/// [`append_visual_rows`] adds the prompt fence, terminal wrapping, and the
-/// queued-only wash.  The returned rows are capped for the frame's queue
-/// budget; any cap marker is chrome, not another prompt.
+/// Rows for the prompts still waiting to be sent — the very chrome a committed
+/// prompt wears, washed to read as pending and capped to `max_rows`.
 pub(super) fn queued_prompt_rows(
     messages: &[String],
     width: u16,
@@ -222,14 +174,11 @@ pub(super) fn queued_prompt_rows(
     out
 }
 
-/// Append block-rendered logical lines as visual rows.  This is the shared
-/// final step for transcript flattening and the queued-prompt projection:
-/// fold rows through [`line::wrap_line`], and when `prompt` is set, insert the same
-/// full-width prompt fence immediately before the first visible prompt row.
-/// `wash` preserves the same rows while tinting a queued prompt's body as
-/// pending; the fence stays outside it, since a boundary marks the plane's
-/// edge rather than lying within it — so a prompt's rule reads the same
-/// committed or queued.
+/// Wrap block-rendered logical lines into visual rows — the shared last step of
+/// the transcript flatten and the queued-prompt projection.  With `prompt` set
+/// the fence goes in above the first visible row and outside any `wash`: a
+/// boundary marks the plane's edge rather than lying within it, so a prompt's
+/// rule reads the same committed or queued.
 pub(super) fn append_visual_rows(
     out: &mut Vec<Line<'static>>,
     lines: &[Line<'static>],
@@ -259,7 +208,6 @@ fn wash_row(row: Line<'static>, width: u16, wash: Option<Color>) -> Line<'static
 }
 
 impl Reveal {
-    /// The next rung up, saturating at `Full`.
     fn up(self) -> Self {
         match self {
             Self::Census => Self::Summary,
@@ -268,7 +216,6 @@ impl Reveal {
         }
     }
 
-    /// The next rung down, saturating at `Census`.
     fn down(self) -> Self {
         match self {
             Self::Full => Self::Context,
@@ -281,34 +228,22 @@ impl Reveal {
 /// A block paired with the lines it last rendered, memoised by width.
 pub(super) struct Block {
     kind: BlockKind,
-    /// Disclosure rung on the [`Reveal`] ladder.  Set at construction per kind
-    /// (conservative defaults preserve today's rendering), walked by
-    /// [`Self::dial`] (wheel) and [`Self::cycle`] (click) within the band
-    /// `[Self::floor, Full]`.  Inert on prose and chrome, which always render
-    /// full.
     level: Reveal,
-    /// The epistemic signal this block carries — context pressure and echo
-    /// similarity, set at markdown commit (Move 7).  Sound (`0/0`) on every
-    /// other kind, so only assistant prose degrades its medium.
+    /// The epistemic signal — context pressure and echo, set at markdown
+    /// commit.  Sound (`0/0`) elsewhere, so only prose degrades its medium.
     fidelity: Fidelity,
-    /// A tool call's result magnitude — `text.lines().count()` of its
+    /// A tool call's result magnitude — the line count of its
     /// [`crate::bus::Kind::ToolResult`], attached after the fact by
-    /// [`super::viewport::Viewport::set_result_size`].  Feeds the
-    /// collapsed header's size-bar; `None` until the result lands (and
-    /// always, on non-`DiallableTool` blocks).
+    /// `Viewport::set_result_size`.
     result_size: Option<u32>,
-    /// Lines for the current state at [`Self::cache_w`], or `None` when
-    /// stale — never rendered, toggled open/shut, or asked at a new
-    /// width.
+    /// Lines for the current state at `cache_w`, `None` once stale.
     cache: Option<Vec<Line<'static>>>,
     cache_w: u16,
 }
 
 impl Block {
-    /// Build a block at its kind's default level — conservative so
-    /// nothing changes visually until the user dials: `DiallableTool` and
-    /// `Subagent` at L1 (their collapsed headers), every other kind at L3
-    /// (today's full render).
+    /// Build at the kind's default rung: tool calls, subagent results, acts and
+    /// thinking arrive collapsed to their headers, every other kind full.
     fn new(kind: BlockKind, fidelity: Fidelity) -> Self {
         let level = match kind {
             BlockKind::DiallableTool { .. }
@@ -327,10 +262,8 @@ impl Block {
         }
     }
 
-    /// `context` is the turn's degradation floor, stamped onto the call so
-    /// its coalesced intent line drains its saturation under context
-    /// pressure exactly as committed prose does (Move 7); echo does not
-    /// apply — an intent is the model's stated purpose, not committed prose.
+    /// `context` is the turn's degradation floor, so the coalesced intent line
+    /// drains as committed prose does; echo cannot apply to a stated purpose.
     pub(super) fn tool_call(
         tool: &'static str,
         summary: String,
@@ -346,7 +279,6 @@ impl Block {
             Fidelity { context, echo: 0 },
         )
     }
-    /// A harness act — the desk verb's row, standalone and never folded.
     pub(super) fn act(
         verb: &'static str,
         subject: Option<String>,
@@ -366,8 +298,6 @@ impl Block {
     pub(super) fn markdown(src: String, fidelity: Fidelity) -> Self {
         Self::new(BlockKind::Markdown { src }, fidelity)
     }
-    /// A completed thinking trace. It is logged and rendered as its own
-    /// dialable block; answer prose remains a separate markdown run.
     pub(super) fn thinking(text: String, answer_chars: u32) -> Self {
         Self::new(
             BlockKind::Thinking(Thinking {
@@ -378,9 +308,7 @@ impl Block {
             Fidelity::default(),
         )
     }
-    /// An async subagent's final result. `fidelity` rides the existing
-    /// [`Block::fidelity`] field so the revealed markdown degrades with
-    /// root's context floor exactly as committing prose does.
+    /// `fidelity` is root's, so the revealed markdown degrades as its prose does.
     pub(super) fn subagent(
         name: String,
         text: String,
@@ -398,52 +326,35 @@ impl Block {
             fidelity,
         )
     }
-    /// A surfaced render document — the model's own communication, a
-    /// barrier the coalescing projection never folds.
     pub(super) fn card(card: Card) -> Self {
         Self::card_with(card, CardOrigin::Surfaced)
     }
-    /// A foldable observation effect: a read / grep / exec
-    /// ([`CardOrigin::Observation`], carrying the census `count` it folds).
-    /// Distinct from [`Self::card`] so the projection can fold it into its call.
     pub(super) fn observation_card(card: Card, kind: ObservationKind, count: u32) -> Self {
         Self::card_with(card, CardOrigin::Observation { kind, count })
     }
-    /// A write effect ([`CardOrigin::Write`], a barrier): the `write <path>
-    /// <outcome>` heading and a preview of what it wrote.  Like a diff, it ends
-    /// the current ral block and renders standalone — never folded into a run.
     pub(super) fn write_card(card: Card) -> Self {
         Self::card_with(card, CardOrigin::Write)
     }
     fn card_with(card: Card, origin: CardOrigin) -> Self {
         Self::new(BlockKind::Card { card, origin }, Fidelity::default())
     }
-    /// A single-file diff, the common card the patch-aggregation path emits:
-    /// one `card` carrying one `diff` mark, so the rail renders `▎` and the
-    /// disclosure dial reveals the located hunks.  A diff is a barrier, so it
-    /// carries [`CardOrigin::Surfaced`] — the projection never folds it.
     pub(super) fn patch(path: String, hunks: Vec<Hunk>) -> Self {
         Self::card(Card(vec![Mark::Diff { path, hunks }]))
     }
     pub(super) fn chrome(shape: RailShape, lines: Vec<Line<'static>>) -> Self {
         Self::new(BlockKind::Chrome { shape, lines }, Fidelity::default())
     }
-    /// A summary-less tool call.  `details` is the text to show standalone,
-    /// or `None` for an invalid-input placeholder (an invisible call boundary).
     pub(super) fn plain_call(details: Option<String>) -> Self {
         Self::new(BlockKind::PlainTool { details }, Fidelity::default())
     }
 
-    /// The block's current disclosure rung.
     pub(super) fn level(&self) -> Reveal {
         self.level
     }
 
-    /// The block's magnitude, where defined: total changed lines
-    /// (deletions + additions) for a patch, source-line count for prose (a
-    /// markdown block or a subagent result), `None` elsewhere.  The rail's
-    /// value-step and the header size-bar both read this, so prose volume
-    /// lightens the rail the way line counts do for a diff.
+    /// Changed lines for a patch, source lines for prose (markdown, thinking, a
+    /// subagent result).  The rail's value-step reads it, so prose volume
+    /// lightens the rail as a diff's does.
     #[allow(
         clippy::cast_possible_truncation,
         reason = "transcript-block line count; u32 headroom far exceeds any in-memory transcript"
@@ -460,12 +371,9 @@ impl Block {
         }
     }
 
-    /// The block's contribution to the session's *code* footprint — the
-    /// changed lines of a diff card.  Distinct from [`Self::magnitude`],
-    /// which also counts prose volume (markdown, a subagent result) for the
-    /// rail's value channel: the matrix's "lines touched" readout is a
-    /// write footprint, so prose must not inflate it.  `None` on every kind
-    /// but a diff-bearing card.
+    /// The session's *code* footprint — a diff card's changed lines and nothing
+    /// else.  Distinct from [`Self::magnitude`], which counts prose too: the
+    /// matrix's "lines touched" is a write footprint, not a volume.
     pub(super) fn lines_changed(&self) -> Option<u32> {
         match &self.kind {
             BlockKind::Card { card, .. } => card.magnitude(),
@@ -473,11 +381,6 @@ impl Block {
         }
     }
 
-    /// True for the block kinds whose disclosure [`Self::level`] the user
-    /// can dial — those with something foldable: tool calls, subagent
-    /// results, a thinking trace, and a card carrying a `diff` mark.
-    /// Plain prose has only product to read, so it is inert; a diff-less
-    /// card is chrome-level, and chrome is inert.
     pub(super) fn dialable(&self) -> bool {
         match &self.kind {
             BlockKind::DiallableTool { .. }
@@ -491,32 +394,25 @@ impl Block {
         }
     }
 
-    /// True for a tool call — the one block kind a result magnitude
-    /// attaches to via [`Self::set_result_size`].
+    /// The one kind [`Self::set_result_size`] attaches a magnitude to.
     pub(super) fn is_tool_call(&self) -> bool {
         matches!(self.kind, BlockKind::DiallableTool { .. })
     }
 
-    /// True for a summary-less plain tool call.
     pub(super) fn is_plain_call(&self) -> bool {
         matches!(self.kind, BlockKind::PlainTool { .. })
     }
 
-    /// True for a *call-bearing* block — a dialable tool call or a plain
-    /// one.  [`Self::set_result_size`] walks back to the first of these so a
-    /// plain call's result halts here rather than reaching past it.
+    /// A landing result walks back to the nearest of these, so a plain call
+    /// halts the search rather than being reached past.
     pub(super) fn is_call(&self) -> bool {
         self.is_tool_call() || self.is_plain_call()
     }
 
-    /// True for a block the coalescing projection folds into a ral block —
-    /// a tool call, or a read / grep / exec effect.  Everything else (a
-    /// diff, a write, a surfaced card, markdown, chrome, a subagent result)
-    /// is a *barrier* that splits one block from the next — except a step
-    /// boundary interior to a run, which is neither content (it is not an
-    /// observation here) nor a barrier: the viewport's run scan
-    /// ([`super::viewport::Viewport::observation_run_end`]) bridges it as
-    /// provider bookkeeping.
+    /// True for a block the coalescing projection folds into a ral block — a
+    /// tool call, or a read / grep / exec effect.  Everything else is a
+    /// *barrier* splitting one block from the next, save a step boundary
+    /// interior to a run, which the viewport's run scan bridges as bookkeeping.
     pub(super) fn observation(&self) -> bool {
         matches!(
             self.kind,
@@ -528,9 +424,7 @@ impl Block {
         )
     }
 
-    /// This observation's census contribution: the `|>` effect kind it
-    /// surfaces and how many it folds, for the coalesced run's L0 tally.
-    /// `None` on every block but a folded observation card.
+    /// This observation's census contribution — its `|>` kind and count.
     pub(super) fn io_tally(&self) -> Option<(ObservationKind, u32)> {
         match &self.kind {
             BlockKind::Card {
@@ -541,10 +435,8 @@ impl Block {
         }
     }
 
-    /// This call's projected view for the coalesced ral block: its intent
-    /// (`summary`), script (`details`), result magnitude, and the turn's
-    /// context floor (distress on the intent line).  `None` on any block
-    /// that is not a tool call, so only a call opens a slot in the group.
+    /// This call's parts for the coalesced ral block.  `None` on anything but a
+    /// tool call, so only a call opens a slot in the group.
     pub(super) fn call_view(&self) -> Option<group::CallParts<'_>> {
         match &self.kind {
             BlockKind::DiallableTool {
@@ -559,9 +451,7 @@ impl Block {
         }
     }
 
-    /// An observation effect's rail-less rows, rendered as the io card it
-    /// carries, for folding under its call's intent in the coalesced block.
-    /// Empty for any non-observation block.
+    /// An effect's rail-less rows, to fold under its call's intent.
     pub(super) fn effect_lines(&self) -> Vec<Line<'static>> {
         match &self.kind {
             BlockKind::Card {
@@ -572,10 +462,9 @@ impl Block {
         }
     }
 
-    /// The `ral` script this block ran, if it is a `ral` tool call — the
-    /// echo signal compares committing prose against it.  `None` for any
-    /// other kind, including a non-`ral` tool call, so only a genuine
-    /// just-run script can register as an echo.
+    /// The `ral` script this block ran — what [`Fidelity`]'s echo signal
+    /// compares committing prose against.  A non-`ral` call yields `None`, so
+    /// only a real just-run script can register as an echo.
     pub(super) fn ral_cmd(&self) -> Option<&str> {
         match &self.kind {
             BlockKind::DiallableTool { tool, details, .. } if *tool == "ral" => Some(details),
@@ -583,10 +472,8 @@ impl Block {
         }
     }
 
-    /// The raw markdown source of a prose block, `None` on every other
-    /// kind.  `/copy` walks the trailing run of these to reassemble the
-    /// assistant's latest reply verbatim — each fence-safe paragraph
-    /// commits as its own block, so the run is the multi-paragraph answer.
+    /// `/copy` walks the trailing run of these — each fence-safe paragraph is
+    /// its own block, so the run is the whole reply.
     pub(super) fn markdown_src(&self) -> Option<&str> {
         match &self.kind {
             BlockKind::Markdown { src, .. } => Some(src),
@@ -594,20 +481,16 @@ impl Block {
         }
     }
 
-    /// True for an assistant prose block.
     pub(super) fn is_markdown(&self) -> bool {
         matches!(self.kind, BlockKind::Markdown { .. })
     }
 
-    /// True for a committed thinking block.
     pub(super) fn is_thinking(&self) -> bool {
         matches!(self.kind, BlockKind::Thinking(_))
     }
 
-    /// Append `more` to an existing thinking block's trace, accumulating
-    /// `answer_chars` into its deliberation-grain denominator.  The phase's
-    /// authoritative text supersedes whatever provisional deltas streamed in
-    /// ahead of it.  A no-op on any non-`Thinking` block.
+    /// Append to the trace, accumulating `answer_chars` into the grain's
+    /// denominator; this text supersedes whatever deltas streamed ahead of it.
     pub(super) fn append_thinking(&mut self, more: &str, answer_chars: u32) {
         if let BlockKind::Thinking(t) = &mut self.kind {
             t.provisional.clear();
@@ -620,9 +503,8 @@ impl Block {
         }
     }
 
-    /// Stream a live reasoning delta into the block's provisional buffer:
-    /// the header's magnitude ticks in place while the block itself never
-    /// moves.  A no-op on any non-`Thinking` block.
+    /// Stream a live reasoning delta: the header's magnitude ticks in place
+    /// while the block itself never moves.
     pub(super) fn push_provisional_thinking(&mut self, more: &str) {
         if let BlockKind::Thinking(t) = &mut self.kind {
             t.provisional.push_str(more);
@@ -630,8 +512,7 @@ impl Block {
         }
     }
 
-    /// True for a step-boundary chrome block — the column unit the
-    /// matrix's per-agent step cells count.
+    /// True for a step boundary — what the matrix's per-agent step cells count.
     pub(super) fn is_step(&self) -> bool {
         matches!(
             self.kind,
@@ -642,8 +523,7 @@ impl Block {
         )
     }
 
-    /// True for an error chrome block — drives the matrix's `╳` cell when
-    /// the session's last block is a failure.
+    /// Drives the matrix's `╳` cell when the session's last block is a failure.
     pub(super) fn is_error(&self) -> bool {
         matches!(
             self.kind,
@@ -654,9 +534,7 @@ impl Block {
         )
     }
 
-    /// True for the human turn's prompt echo — the one block in the light
-    /// stratum, banded full-width by the flatten ([`super::viewport`]) as a
-    /// scrollback landmark.
+    /// The human turn's echo — the one block the flatten rules full-width.
     pub(super) fn is_prompt(&self) -> bool {
         matches!(
             self.kind,
@@ -667,19 +545,15 @@ impl Block {
         )
     }
 
-    /// Attach a tool call's result magnitude (`text.lines().count()`),
-    /// dropping the memo so the collapsed header re-renders with its
-    /// size-bar.  A no-op set on a non-tool-call block would never light
-    /// a bar, but callers gate on [`Self::is_tool_call`].
+    /// Drops the memo, so the collapsed header re-renders with its size-bar.
     pub(super) fn set_result_size(&mut self, n: u32) {
         self.result_size = Some(n);
         self.cache = None;
     }
 
-    /// The lowest rung this block reduces to.  A coalesced `|>` run (anchored
-    /// on a tool call) bottoms out at [`Reveal::Census`] — its tallied effects;
-    /// every other dialable kind floors one rung higher, at [`Reveal::Summary`],
-    /// since a census of a lone diff or subagent is meaningless.
+    /// The lowest rung this block reduces to: a `|>` run, anchored on a tool
+    /// call, bottoms out at its census; every other kind floors a rung higher,
+    /// a census of a lone diff or subagent being meaningless.
     fn floor(&self) -> Reveal {
         match self.kind {
             BlockKind::DiallableTool { .. } => Reveal::Census,
@@ -687,8 +561,7 @@ impl Block {
         }
     }
 
-    /// Dial the rung by one wheel notch — up reveals, down reduces — saturating
-    /// at the band's edges.  A no-op on a non-dialable block.
+    /// One wheel notch — up reveals, down reduces — saturating at the band's edges.
     pub(super) fn dial(&mut self, delta: i8) {
         if self.dialable() {
             let next = if delta >= 0 {
@@ -700,9 +573,8 @@ impl Block {
         }
     }
 
-    /// Cycle the rung — the click affordance: one rung up, wrapping the ceiling
-    /// back to the floor, so a click steps through every reachable rung rather
-    /// than toggling the extremes.
+    /// One click: a rung up, the ceiling wrapping to the floor, so clicking
+    /// walks every reachable rung rather than toggling the extremes.
     pub(super) fn cycle(&mut self) {
         if self.dialable() {
             let next = if self.level == Reveal::Full {
@@ -714,8 +586,7 @@ impl Block {
         }
     }
 
-    /// Move to `next`, dropping the memo so the body re-renders — the one seam
-    /// both [`Self::dial`] and [`Self::cycle`] commit through.
+    /// The one seam [`Self::dial`] and [`Self::cycle`] commit through.
     fn set_level(&mut self, next: Reveal) {
         if next != self.level {
             self.level = next;
@@ -723,11 +594,10 @@ impl Block {
         }
     }
 
-    /// The block's lines at `width`, rebuilding the memo when it is cold
-    /// or was filled at another width.  `lead` says whether this block opens
-    /// its rail-run (wears its glyph) or continues a prior prose paragraph's
-    /// (blank gutter); it is fixed per block by arrival order — like
-    /// `agent` — so it stays out of the width-keyed memo.
+    /// The block's lines at `width`, rebuilding the memo when it is cold or was
+    /// filled at another width.  `lead` says whether this block opens its
+    /// rail-run or continues a prior paragraph's; like `agent`, arrival order
+    /// fixes it, so it stays out of the width-keyed memo.
     pub(super) fn lines(&mut self, width: u16, agent: AgentSlot, lead: bool) -> &[Line<'static>] {
         if self.cache.is_none() || self.cache_w != width {
             self.cache = Some(self.render(width, agent, lead));
@@ -736,13 +606,9 @@ impl Block {
         self.cache.as_deref().expect("just filled")
     }
 
-    /// The block as it belongs in the session log: full content,
-    /// width-independent — every dialable block rendered at L3 regardless
-    /// of its live level, so the script / diff / prose is on the record
-    /// even while reduced on screen.  Routes through the same rendering
-    /// path as [`Self::render`] (rail included) with the level forced full.
-    /// `lead` matches the on-screen projection so the log marks a
-    /// multi-paragraph response with one `·`, not one per paragraph.
+    /// The block as it belongs in the session log: width-independent and forced
+    /// to L3, so the script / diff / prose is on the record even while reduced
+    /// on screen.  `lead` matches the screen, so one response keeps one `·`.
     pub(super) fn log_lines(&self, agent: AgentSlot, lead: bool) -> Vec<Line<'static>> {
         self.render_with(READ_W, true, agent, lead)
     }
@@ -751,20 +617,13 @@ impl Block {
         self.render_with(width, false, agent, lead)
     }
 
-    /// The rung at which to render: the live [`Self::level`], or [`Reveal::Full`]
-    /// when `force_full` — the log path, which records the complete block.
     fn render_level(&self, force_full: bool) -> Reveal {
         if force_full { Reveal::Full } else { self.level }
     }
 
-    /// Build the block's body lines (rail-less) then prepend the
-    /// data-encoding rail span to the first content row.  `force_full`
-    /// renders every dialable block at L3 regardless of its live level —
-    /// used only by [`Self::log_lines`] so the on-disk transcript is
-    /// complete.  `lead` is false for a prose paragraph that continues a
-    /// prior one's response: it keeps the gutter (so the text stays in the
-    /// same body column) but drops the `·`, so a multi-paragraph answer
-    /// wears one rail mark, not one per paragraph.
+    /// Build the rail-less body, then seat the rail span on its first content
+    /// row.  `lead` is false for a paragraph continuing a prior one: it keeps
+    /// the gutter but drops the glyph, so one answer wears one rail mark.
     fn render_with(
         &self,
         width: u16,
@@ -774,33 +633,24 @@ impl Block {
     ) -> Vec<Line<'static>> {
         let level = self.render_level(force_full);
         let mut lines = self.body(width, level);
-        // Markdown is the one body that omits the opening blank every other
-        // kind wears, so a lead prose answer would abut the tool call above it.
-        // Restore that blank on the response head; continuation paragraphs
-        // (lead = false) stay tight, and reflow folds it against any trailing
-        // blank so the gap never doubles.
+        // Markdown is the one body that opens flush, so a lead answer would abut
+        // the call above it; the flatten folds this blank against any trailing
+        // one, so the gap never doubles.
         if lead && self.markdown_src().is_some() && !lines.first().is_some_and(is_blank) {
             lines.insert(0, Line::default());
         }
         if let Some(kind) = self.rail_kind(level) {
-            // A continuation prose paragraph keeps the gutter but blanks its
-            // glyph — one response, one `·`, on its head row.
             let rail = if lead {
                 rail::span(kind, agent, self.magnitude())
             } else {
                 Span::raw(" ".repeat(RAIL_W))
             };
-            // The common rail-seating path for every kind, so a body can never
-            // hang inverted beneath the glyph again. Carve the rail's `RAIL_W`
-            // gutter from the opening row — invisible where the row already
-            // insets its content (markdown's `MD_INDENT`, a diff's two-column
-            // gutter), a rightward push where it is flush — then hang every
-            // continuation under that content by padding any row shy of the
-            // gutter up to it. A diff's rows are already inset, so the hang is a
-            // no-op for them; a flush surfaced card is the case it rescues.
+            // Carve the rail's gutter out of the opening row — invisible where
+            // the row already insets (markdown's `MD_INDENT`, a diff's gutter),
+            // a rightward push where it is flush — then hang every shorter row
+            // under that content. A flush surfaced card is what this rescues.
             let idx = lines.iter().position(|l| !is_blank(l)).unwrap_or(0);
-            // A block that renders no row at all — an invisible query
-            // placeholder on the log tee — seats no rail.
+            // A block that renders no row at all seats no rail.
             if idx < lines.len() {
                 shrink_leading_ws(&mut lines[idx], RAIL_W);
                 for (i, line) in lines.iter_mut().enumerate() {
@@ -815,12 +665,9 @@ impl Block {
         lines
     }
 
-    /// The rail-less body at `width`, graded by `level`: [`Reveal::Summary`]
-    /// the one-line summary; [`Reveal::Context`] the summary plus [`N`] lines;
-    /// [`Reveal::Full`] the full source.  (A tool call's [`Reveal::Census`] is
-    /// rendered by [`super::group`], never here — a standalone call folds onto
-    /// its summary.) Plain prose and chrome ignore the level — they are always
-    /// full; thinking grades from header to partial trace to full trace.
+    /// The rail-less body at `width`, graded by `level`.  A run's census is
+    /// rendered by [`super::group`], never here, so a standalone call folds onto
+    /// its summary; prose and chrome ignore the level altogether.
     fn body(&self, width: u16, level: Reveal) -> Vec<Line<'static>> {
         match &self.kind {
             BlockKind::DiallableTool {
@@ -828,17 +675,12 @@ impl Block {
             } => match level {
                 Reveal::Full => line::tool_call_body(summary, details, None, width),
                 Reveal::Context => line::tool_call_body(summary, details, Some(N), width),
-                // A standalone tool call never renders below its summary: the
-                // log tee forces full, and on screen a call is the head of a
-                // coalesced run, whose Census is rendered by `group`, not here.
                 Reveal::Summary | Reveal::Census => {
                     line::tool_call_collapsed(summary, self.result_size, width)
                 }
             },
-            // An act has exactly two readings: its payload cut to the column
-            // (L1) or laid out whole (L3), with L2 the same layout capped at
-            // [`N`] rows.  There is no third thing to grade — the row *is*
-            // the act.
+            // The row *is* the act, so there are only two readings: the payload
+            // cut to its column, or laid out whole. L2 is that layout capped.
             BlockKind::Act {
                 verb,
                 subject,
@@ -889,10 +731,8 @@ impl Block {
                 )]
                 let size = text.lines().count() as u32;
                 let mut ls = line::subagent_header(name, size, error.as_deref(), *elapsed);
-                // L1 is the header alone; L2/L3 extend it with the rendered
-                // body. Build the header first so the markdown rows append
-                // after it intact — the header is row 0 and the markdown's own
-                // first-rows/leading-blank logic never touches it.
+                // The header is built first so it stays row 0, out of reach of
+                // the markdown's own leading-blank and first-rows handling.
                 match level {
                     Reveal::Full => ls.extend(md::render_md(text, width, MD_INDENT, self.fidelity)),
                     Reveal::Context => ls.extend(first_rows(
@@ -903,15 +743,13 @@ impl Block {
                 }
                 ls
             }
-            // A surfaced general card (no diff) is the model's deliberate
-            // artifact — framed as a bounded object. Diff cards keep their
-            // own rich rendering; folded observation/write cards stay plain.
+            // A surfaced general card is the model's deliberate artifact, framed
+            // as a bounded object; diff and effect cards render plain.
             BlockKind::Card { card, origin } => {
                 if !card.has_diff() && *origin == CardOrigin::Surfaced {
                     line::render_card_framed(card, width)
                 } else {
-                    // A diff honours L1/L2/L3; Census never reaches a card, so
-                    // it folds onto the summary.
+                    // Census never reaches a card, so it folds onto the summary.
                     let diff_level = match level {
                         Reveal::Context => 2,
                         Reveal::Full => 3,
@@ -920,10 +758,8 @@ impl Block {
                     line::render_card(card, diff_level)
                 }
             }
-            // The per-block log tee renders a query alone as `tool  query`,
-            // matching a standalone tool call's header.  On screen the
-            // flatten coalesces a run of these into one `tool : …` line
-            // instead ([`super::viewport`]).
+            // Only the log tee renders a query alone; on screen the flatten
+            // coalesces a run of these into one `tool : …` line instead.
             BlockKind::PlainTool { details, .. } => match details {
                 Some(q) => line::tool_call_static(q),
                 None => Vec::new(),
@@ -931,39 +767,27 @@ impl Block {
             BlockKind::Chrome { lines, .. } => lines.clone(),
         }
     }
-    /// The rail shape this block wears, or `None` for a block that seats no
-    /// rail.  Chrome maps its coarse [`RailShape`] into the matching
-    /// [`RailKind`] (a `Plain` shape becomes the `▪` note).  A tool call's
-    /// disclosure triangle tracks the level: `▽` once it reveals context
-    /// (L2+), `▸` while reduced.
+    /// The rail shape this block wears, `None` for one that seats no rail.  A
+    /// tool call's triangle tracks the rung: open once it reveals context.
     fn rail_kind(&self, level: Reveal) -> Option<RailKind> {
         match &self.kind {
             BlockKind::DiallableTool { .. } => Some(RailKind::ToolCall(level >= Reveal::Context)),
-            // A summary-less query is a tool call still — the shut triangle
-            // `▸`, inert (nothing to dial open).  Only the per-block log tee
-            // renders a query alone and reaches this; on screen the coalesced
-            // run prepends its own rail.
+            // A summary-less query is a tool call still, shut; only the log tee
+            // renders one alone and so reaches this.
             BlockKind::PlainTool { .. } => Some(RailKind::ToolCall(false)),
-            // An act's shape says when its effect lands: `◷` on a clock,
-            // `↗` now and outbound.  It holds that shape across every rung —
-            // an act is one thing disclosed, not two states like a call's
-            // triangle.
+            // The shape says when the act lands — `◷` on a clock, `↗` now —
+            // and holds across every rung: an act is one thing disclosed.
             BlockKind::Act { verb, .. } => Some(match *verb {
                 "schedule" | "unschedule" => RailKind::TimeAct,
                 _ => RailKind::FleetAct,
             }),
             BlockKind::Markdown { .. } => Some(RailKind::Markdown),
             BlockKind::Thinking(_) => Some(RailKind::Thinking),
-            // The `↘` keeps the delegated-result identity even on error; the
-            // failure reads in the header suffix, not a swapped glyph.
+            // The `↘` holds even on error; the failure reads in the header.
             BlockKind::Subagent { .. } => Some(RailKind::Subagent),
-            // A diff and a write are both file mutations, so both wear the
-            // change-bar (`▎`); the body distinguishes located hunks from a
-            // whole-file write summary. A surfaced general card is framed, and
-            // the frame is its mark, so it wears no rail glyph (like the
-            // prompt's band). An observation card folds into its ral group on
-            // screen and so earns no rail glyph; only the per-block `user.log`
-            // tee ever renders one alone, where an effect has no kind-mark.
+            // A diff and a write are both file mutations, so both wear `▎` and
+            // the body says which. A framed card's frame is its own mark, and an
+            // observation folds into its group, so neither seats a glyph.
             BlockKind::Card { card, origin } => {
                 if card.has_diff() || *origin == CardOrigin::Write {
                     Some(RailKind::Patch)
@@ -975,31 +799,25 @@ impl Block {
                 RailShape::Step => Some(RailKind::Step),
                 RailShape::Error => Some(RailKind::Error),
                 RailShape::Plain => Some(RailKind::Note),
-                // The PROMPT_INK body tint is the prompt's body mark; the `❖`
-                // fence is its margin mark — a rare landmark, on both axes.
                 RailShape::Prompt => Some(RailKind::Prompt),
             },
         }
     }
 }
 
-/// The first `k` rendered rows of `lines`, preserving leading blanks but
-/// keeping at least one row so the rail always has somewhere to land.
-/// Used for the subagent result's L2 context view: `render_md` lays out the
-/// whole result, and truncating its rows keeps a code fence's opening
-/// rows intact rather than re-parsing a prefix of the source.
+/// The first `k` rendered rows of `lines`, always at least one so the rail has
+/// somewhere to land.  Truncating rendered rows rather than source keeps a code
+/// fence's opening intact.
 fn first_rows(mut lines: Vec<Line<'static>>, k: usize) -> Vec<Line<'static>> {
-    // Skip the leading blank `render_md` does not emit (markdown opens
-    // flush), so `k` counts content rows; a blank-only block keeps one row.
+    // Leading blanks are free, so `k` counts content rows.
     let lead = lines.iter().take_while(|l| is_blank(l)).count();
     lines.truncate((lead + k).max(1));
     lines
 }
 
-/// The width of a line's leading run of all-space spans — the indent the
-/// rail's gutter is carved from or hung under. Counted span-wise to match
-/// [`shrink_leading_ws`], which only trims leading spans the builders emit
-/// as their own span (markdown's inset, a wrapped continuation's hang).
+/// The width of a line's leading run of all-space spans — counted span-wise to
+/// match [`shrink_leading_ws`], which trims only the spans the builders emit as
+/// their own (markdown's inset, a wrapped row's hang).
 fn leading_ws(line: &Line<'static>) -> usize {
     let mut w = 0;
     for span in &line.spans {
@@ -1015,10 +833,8 @@ fn leading_ws(line: &Line<'static>) -> usize {
     w
 }
 
-/// Shrink the leading whitespace of `line` by `n` cells, trimming the
-/// first whitespace-only span(s) in place.  Used to reclaim the columns
-/// the rail occupies on a markdown block's opening row so its prose stays
-/// flush with the body inset.
+/// Reclaim `n` cells of `line`'s leading whitespace for the rail, so an inset
+/// body's opening row keeps its own column.
 fn shrink_leading_ws(line: &mut Line<'static>, n: usize) {
     let mut remaining = n;
     for span in &mut line.spans {
@@ -1067,9 +883,7 @@ mod tests {
         )
     }
 
-    /// Model prose is not dialable: it has no summary to collapse to, so the
-    /// dial and click gestures are inert and it renders identically whatever
-    /// level is asked of it.
+    /// Prose has no summary to collapse to: every rung renders the same.
     #[test]
     fn markdown_is_inert_prose() {
         let mut block = Block::markdown(
@@ -1096,9 +910,8 @@ mod tests {
         assert_eq!(block.level(), before, "gestures are inert on prose");
     }
 
-    /// A coalesced run's anchor (a tool call) floors at L0, the census; every
-    /// other dialable kind — a diff, a subagent — floors one rung higher, at
-    /// the summary.  The wheel saturates at each kind's floor.
+    /// A run's anchor floors at the census, every other dialable kind at the
+    /// summary.  The wheel saturates there; the click wraps to it.
     #[test]
     fn the_floor_is_census_for_a_run_summary_otherwise() {
         let cases = [
@@ -1111,28 +924,22 @@ mod tests {
         ];
         for (mut block, floor) in cases {
             assert!(block.dialable());
-            // Each notch is one rung; dialing past the floor pins there.
             for _ in 0..4 {
                 block.dial(-1);
             }
             assert_eq!(block.level(), floor);
-            // Dialing up past the ceiling pins at Full.
             for _ in 0..4 {
                 block.dial(1);
             }
             assert_eq!(block.level(), Reveal::Full);
-            // From the ceiling, one click wraps straight to that same floor.
             block.cycle();
             assert_eq!(block.level(), floor);
         }
     }
 
-    /// An act's three columns are pinned, so verbs align down the page and
-    /// every payload starts in the same column whatever the verb's length:
-    /// the verb cell is 11 columns, the subject cell 9, and the payload
-    /// begins at their sum.  This is
-    /// the alignment `render_field_rows` cannot supply, since each act is a
-    /// single row and would only ever align with itself.
+    /// An act's first two columns are pinned, so verbs align down the page and
+    /// every payload opens in the same column — the alignment `render_field_rows`
+    /// cannot supply, since each act is a row that would only align with itself.
     #[test]
     fn act_columns_are_pinned_across_blocks() {
         let rendered = |verb, subject: Option<&str>, payload: &str| {
@@ -1164,11 +971,8 @@ mod tests {
         );
     }
 
-    /// An act changes the world outside the turn; it does not measure it. So
-    /// it reports no magnitude — the rail sits at the base agent hue — and
-    /// its row carries neither the header size-bar nor a sparkline slot: it
-    /// opens no `call_view`, so the coalescing projection has nothing to
-    /// fold.
+    /// An act changes the world; it does not measure it.  So: no magnitude, no
+    /// size-bar, and no `call_view` for the projection to fold.
     #[test]
     fn an_act_carries_no_magnitude_and_no_bar() {
         let block = Block::act(
@@ -1189,10 +993,8 @@ mod tests {
         }
     }
 
-    /// A refused act says so on the row that names the attempt, in the error
-    /// tier — hot ink on the outcome, which for a payload-less verb is the
-    /// whole payload column.  The long form is the raise, and the raise is
-    /// the model's.
+    /// A refusal reads hot on the very row that names the attempt; the long
+    /// form is the raise, and the raise is the model's.
     #[test]
     fn a_refused_act_tiers_its_outcome_hot() {
         let block = Block::act(
@@ -1232,9 +1034,8 @@ mod tests {
         );
     }
 
-    /// The payload is cut to its column while the act is reduced, and the
-    /// dial is what gets the rest back: L3 wraps the whole payload under the
-    /// payload column, hanging at the same offset the head row uses.
+    /// Reduced, the payload is cut to its column; the dial is what gets the rest
+    /// back, wrapped and hanging at the head row's own offset.
     #[test]
     fn a_long_payload_truncates_reduced_and_returns_whole_on_the_dial() {
         let payload = "audit every unwrap() in exarch/src and report the ones that can \
@@ -1274,10 +1075,8 @@ mod tests {
             );
         }
 
-        // The column is the point, so it is measured on the seated rows, rail
-        // span included — the rail lands on the head alone, and every wrapped
-        // row must carry that width itself or it hangs left of the payload it
-        // continues.
+        // Measured on the seated rows, rail span included: the rail lands on
+        // the head alone, so every wrapped row must carry that width itself.
         let payload_col = RAIL_W + line::ACT_VERB_W + line::ACT_SUBJECT_W;
         let rows: Vec<String> = block
             .render(READ_W, AgentSlot::default(), true)
@@ -1301,8 +1100,7 @@ mod tests {
         }
     }
 
-    /// An act is a barrier, not an observation: the shape it wears says
-    /// *when* its effect lands, and it never joins a run of reads.
+    /// An act never joins a run of reads, and its shape says when it lands.
     #[test]
     fn acts_are_barriers_wearing_their_own_shapes() {
         for (verb, shape) in [
@@ -1315,7 +1113,6 @@ mod tests {
         ] {
             let block = Block::act(verb, Some("subject".into()), "payload".into(), false);
             assert!(!block.observation(), "`{verb}` must not coalesce");
-            // The shape is level-invariant: an act is one thing disclosed.
             for level in [Reveal::Summary, Reveal::Context, Reveal::Full] {
                 assert_eq!(block.rail_kind(level), Some(shape), "`{verb}` at {level:?}");
             }

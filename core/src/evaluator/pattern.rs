@@ -1,24 +1,15 @@
-//! Pattern matching and destructuring bind.
-//!
-//! `assign_pattern` destructs a runtime `Value` against a compiled
-//! [`IrPattern`], installing bindings into `shell`.  A `Name` pattern
-//! installs the bind's scheme next to the value; destructured
-//! components install scheme-less.  Mismatches raise a runtime error
-//! with a located `expected … got …` message and a hint about the
-//! required shape.  Map-pattern defaults are already elaborated IR
-//! ([`Arc<Comp>`]); the evaluator simply runs them when a key is
-//! absent — no parser syntax is touched at runtime.
+//! Destructuring bind: match a runtime `Value` against a compiled
+//! `IrPattern` and install the names it binds.  Only a whole-value `Name`
+//! pattern carries the bind's scheme; destructured components bind scheme-less.
 
 use super::comp::eval_comp;
 use crate::ir::IrPattern;
 use crate::typecheck::Scheme;
 use crate::types::{Binding, Mooring, Raw, Shell, Tail, Value};
 
-/// Refuse each name a `let` pattern binds that would shadow a PATH command.
-/// Driven from `eval_bind` only: lambda parameters bind through
-/// [`assign_pattern`] in the trampoline and are deliberately never checked —
-/// a parameter is a local lexical name, not an entry in the command
-/// namespace the user types into.
+/// Refuse every name a `let` pattern binds that would shadow a PATH command.
+/// `eval_bind` alone calls this: a lambda parameter is a local lexical name,
+/// not a command name, so the trampoline binds one unchecked.
 pub(crate) fn check_pattern_shadow(pattern: &IrPattern, shell: &Shell) -> Raw<()> {
     match pattern {
         IrPattern::Wildcard => Ok(()),
@@ -41,10 +32,9 @@ pub(crate) fn check_pattern_shadow(pattern: &IrPattern, shell: &Shell) -> Raw<()
     }
 }
 
-/// Refuse a session-scope binding that would shadow a command reachable on
-/// `PATH`: ral keeps the value and command namespaces disjoint.  Bindings
-/// below the session scope (block/lambda bodies, the prelude) never enter
-/// the command namespace and are exempt ([`Env::at_session_scope`]).
+/// Refuse a session-scope binding that shadows a command on `PATH`: ral keeps
+/// the value and command namespaces disjoint.  Block, lambda and prelude
+/// bindings never enter the command namespace, so they go unchecked.
 pub(crate) fn check_path_shadow(name: &str, shell: &Shell) -> Raw<()> {
     if shell.mobile.scope.at_session_scope()
         && let Some(path) = shell.locate_command(name)
@@ -63,15 +53,11 @@ pub(crate) fn check_path_shadow(name: &str, shell: &Shell) -> Raw<()> {
     Ok(())
 }
 
-/// Destructure `value` against `pattern`, installing bindings into `shell`.
+/// Destructure `value` against `pattern`, installing the bindings into `shell`.
 ///
-/// Destructuring is transactional: every binding the pattern would
-/// install is staged in a scratch buffer by [`stage_pattern`] and only
-/// installed here, once the whole pattern has matched. A pattern that
-/// fails partway through — `let [[p],[q,r]] = [[1],[2]]` binds `p` then
-/// finds `[2]` too short for `[q,r]` — therefore leaves no partial
-/// bindings visible, whether the caller is a REPL run (which installs
-/// its mobile on every outcome) or a nested destructure.
+/// All-or-nothing: [`stage_pattern`] collects every binding first, so a pattern
+/// that fails partway — `let [[p],[q,r]] = [[1],[2]]` — leaves no half-bound
+/// scope behind, even for a top-level run, which keeps its mobile on error.
 pub(crate) fn assign_pattern(
     pattern: &IrPattern,
     value: &Value,
@@ -87,12 +73,9 @@ pub(crate) fn assign_pattern(
     Ok(())
 }
 
-/// Recursive worker for [`assign_pattern`]: matches `pattern` against
-/// `value`, pushing each binding it would make onto `staged` rather than
-/// installing it immediately. Only evaluates map-pattern defaults (which
-/// may themselves have effects) — never installs a binding — so a
-/// caller can discard `staged` on error without having touched `shell`'s
-/// scope.
+/// Recursive worker for [`assign_pattern`]: pushes each binding onto `staged`
+/// rather than installing it, leaving `shell`'s scope untouched so an error can
+/// discard the lot.  Map-pattern defaults are the one thing it does evaluate.
 fn stage_pattern(
     pattern: &IrPattern,
     value: &Value,
@@ -127,10 +110,8 @@ fn stage_pattern(
                     )
                     .into());
             };
-            // Every element pattern must bind; only the `rest` tail may
-            // be empty.  `Ty::List` carries no length, so a list shorter
-            // than `elems` typechecks — guard at runtime rather than
-            // silently skip element patterns past `items.len()`.
+            // `Ty::List` carries no length, so a too-short list typechecks;
+            // catch it here rather than silently skip element patterns.
             if elems.len() > items.len() {
                 let hint = if rest.is_none() {
                     "use [..., ...rest] to capture remaining elements"
@@ -145,9 +126,7 @@ fn stage_pattern(
                     )
                     .into());
             }
-            // Without a `...rest` tail the pattern must cover the list
-            // exactly: a longer list would silently drop its extra
-            // elements, so reject it rather than bind partially.
+            // Without a `...rest` tail, a longer list would lose its extras in silence.
             if rest.is_none() && items.len() > elems.len() {
                 return Err(shell
                     .err_hint(
@@ -161,8 +140,7 @@ fn stage_pattern(
                 stage_pattern(pat, &items[i], None, mooring, shell, staged)?;
             }
             if let Some(name) = rest {
-                // `List::split_off` returns a tail that structurally shares
-                // with the source — O(log n), no element clones.
+                // `imbl::Vector` splits in O(log n) by sharing structure: no element clones.
                 let mut whole = items.clone();
                 let tail = whole.split_off(elems.len());
                 staged.push((
@@ -189,10 +167,8 @@ fn stage_pattern(
                 let key_label = entry.key.row_label();
                 let val = match (m.get(&key_label), &entry.default) {
                     (Some(v), _) => v.clone(),
-                    // A pattern default fills in a missing field; its
-                    // value is bound, never the enclosing body's result,
-                    // so it runs under a non-trivial continuation
-                    // ([`Tail::No`]) by construction.
+                    // A default's value is bound, never returned, so it is
+                    // never in tail position.
                     (None, Some(default_comp)) => {
                         eval_comp(default_comp, mooring, shell, Tail::No)?
                     }
@@ -229,9 +205,7 @@ mod tests {
         }
     }
 
-    /// `Ty::List` carries no length, so `[a, b, ...rest] = [x]` typechecks.
-    /// At runtime the list is too short to bind every element pattern: the
-    /// evaluator must error rather than silently skip `b`.
+    /// The typechecker cannot catch this: `Ty::List` carries no length.
     #[test]
     fn rest_pattern_errors_when_list_shorter_than_elems() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -252,8 +226,6 @@ mod tests {
         assert!(shell.mobile.scope.get("b").is_none());
     }
 
-    /// Without a `...rest` tail the pattern must cover the list exactly:
-    /// `[a, b] = [x, y, z]` would otherwise drop `z` silently, so it errors.
     #[test]
     fn list_pattern_errors_when_list_longer_than_elems() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -278,7 +250,6 @@ mod tests {
         assert!(shell.mobile.scope.get("b").is_none());
     }
 
-    /// When the list covers every element pattern, the tail binds to `rest`.
     #[test]
     fn rest_pattern_binds_tail_when_list_long_enough() {
         let mut shell = Shell::new(crate::io::TerminalState::default());

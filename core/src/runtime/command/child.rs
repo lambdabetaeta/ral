@@ -1,32 +1,20 @@
-//! In-flight child handles: [`RunningChild`] (after spawn), [`WaitedChild`]
-//! (after `wait_handling_stop`), and [`ExternalPlumbing`] (the per-call
-//! pump plan handed in by the caller).  The typestate from running → waited
-//! → drained makes "drain before wait" and "wait twice" unwritable.
+//! In-flight child handles: [`RunningChild`] after spawn, [`WaitedChild`] after
+//! the wait, and [`ExternalPlumbing`], the pump plan the caller hands in.  The
+//! running → waited → drained typestate makes "drain before wait" and "wait
+//! twice" unwritable.
 
 use crate::io::Sink;
 #[cfg(unix)]
 use crate::types::Escape;
 use crate::types::{Break, Error, Settled};
 
-/// Who owns the platform process-group bookkeeping on Windows.
-///
-/// On Unix the kernel manages pgid lifetime: a member exiting is enough
-/// to update the pgroup, and there's nothing to release.  On Windows
-/// every "leader" registers a `GroupState` in `signal::win_groups` that
-/// must be explicitly released; the question is *who* releases it.
-///
-///   * `Standalone`: this `RunningChild` is the only owner.  Aborting
-///     calls `TerminateJobObject` on the group; success calls
-///     `release_win_group` once `wait` returns.
-///   * `BorrowedByPipeline`: a [`super::super::pipeline::group::PipelineGroup`]
-///     owns the group; this child only borrows membership and must not
-///     release the group on its own (a `RunningChild::Drop` racing
-///     `PipelineGroup::Drop` would otherwise double-close).
-///   * `None`: no group bookkeeping (child spawned with
-///     `PgidPolicy::Inherit`).
-///
-/// The variants compile to no code on Unix; the field still exists so
-/// the cross-platform shape stays uniform.
+/// Who releases the Windows group registered in `win_groups`
+/// (`process::signal::windows`), which unlike a Unix pgid does not vanish when
+/// its members exit.  `Standalone` releases its own once `wait` returns;
+/// `BorrowedByPipeline` leaves it to `PipelineGroup` in `runtime::pipeline`, so
+/// a `RunningChild::Drop` racing that owner's `Drop` cannot double-close;
+/// `None` is a child spawned with `PgidPolicy::Inherit` and has no group at all.
+/// Inert on Unix, but kept so the cross-platform shape stays uniform.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum GroupOwner {
     None,
@@ -35,92 +23,55 @@ pub(crate) enum GroupOwner {
     BorrowedByPipeline,
 }
 
-/// A spawned external child plus the threads draining its piped
-/// stdout/stderr.  The shared core of standalone exec and pipeline
-/// external stages.
+/// A spawned external child plus the threads draining its piped stdout/stderr;
+/// the shared core of standalone exec and pipeline external stages.
 ///
-/// Lifecycle is a small typestate:
+/// There is no `RunningChild::drain`, so "join the pumps while the pipe is
+/// still open" has no spelling; `wait` consumes self, so neither does "wait
+/// twice".  The `Option` around `child` is `Drop`'s disarm latch: `wait` takes
+/// it and never puts it back, so the abort path short-circuits once `wait` ran.
+/// Holding the pgid rather than the pid means that abort-path SIGKILL reaches
+/// descendants — `/bin/sh -c 'sleep 999'` leaves no orphan behind.
 ///
-/// ```text
-///     RunningChild ──wait──► WaitedChild ──drain──► ()
-///         │  Drop                │  Drop
-///         ▼                      ▼
-///     SIGKILL+reap           join+drop
-/// ```
-///
-/// `wait` consumes `RunningChild` and yields a `WaitedChild` that
-/// carries the `WaitOutcome`.  `drain` can only be invoked on `WaitedChild`,
-/// so the bug class "join pumps before wait" (which would let drainers
-/// block on a still-open pipe) is unwritable: there's no
-/// `RunningChild::drain`.
-/// Likewise "wait twice" is unwritable: `wait` consumes self, so a
-/// second call has nothing to consume.
-///
-/// Holding the pgid (not just the pid) means abort-path SIGKILL takes
-/// out descendants too — `/bin/sh -c 'sleep 999'` doesn't leave the
-/// `sleep` alive when its parent goes away.  The Option around `child`
-/// is the disarm latch for `Drop`: `wait` takes the child to call
-/// `wait_handling_stop` and never puts it back, so the abort path's
-/// kill/reap logic short-circuits if `wait` already ran.
-///
-/// Audit-agnostic.  Per-command byte capture is the *caller's* concern:
-/// pipeline stages own their `tee_with_buffer` arcs on `ProcessHandle`;
-/// standalone externals are captured at dispatch level by
-/// `evaluator::with_audit_capture` (which tees `shell.io.stdout/stderr`).
-/// `RunningChild` carries no audit fields.
+/// Audit-agnostic: byte capture belongs to the caller.  A standalone external
+/// is teed at dispatch level by `evaluator::with_audit_capture`; a direct-spawn
+/// pipeline stage writes into the next stage's pipe and gets a synthesised node
+/// with empty stdout from `runtime::pipeline::collect`.
 pub(crate) struct RunningChild {
     pub child: Option<crate::process::ChildHandle>,
     pub pgid: Option<crate::process::Pgid>,
-    /// The transient guest-jail cgroup this child was placed in, if any —
-    /// `None` on every platform but a real Linux guest.  `kill_group` and
-    /// `wait`/`Drop`'s cleanup prefer this over the pgid once it is `Some`:
-    /// a grandchild that `setsid()`'d away escapes `kill(-pgid, …)` but
-    /// cannot leave its cgroup.
+    /// Transient guest-jail cgroup, `None` outside a real Linux guest.  Teardown
+    /// prefers it over the pgid: a grandchild that `setsid()`'d away escapes
+    /// `kill(-pgid, …)` but cannot leave its cgroup.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub jail: Option<crate::process::jail::JailCgroup>,
     pub pump: Option<std::thread::JoinHandle<()>>,
-    /// Pump thread draining piped stderr into the caller-supplied sink.
-    /// `None` when stderr was inherited / file / `2>&1`.
+    /// `None` when stderr was inherited, redirected to a file, or dup'd onto
+    /// stdout by `2>&1` — nothing to pump in any of those cases.
     pub stderr_pump: Option<std::thread::JoinHandle<()>>,
-    /// Display name used in wait-error messages.
     pub name: String,
-    /// On `WIFSTOPPED`, surface `Escape::Stopped` so the REPL can
-    /// register the pgid as a job.  `false` falls back to the
-    /// kill-and-reap path: standalone foreground externals opt in;
-    /// pipeline stages opt out (until the anchor process can be parked
-    /// alongside).
+    /// On `WIFSTOPPED`, surface `Escape::Stopped` so the REPL can register the
+    /// pgid as a job; `false` kills and reaps instead.  Set for a foreground
+    /// child of an interactive REPL, and for a pipeline that owns the tty.
     pub park_on_stop: bool,
-    /// Windows: who owns the platform group registered for `pgid`.
-    /// Unused on Unix (kernel manages pgroup lifetime).
     #[allow(dead_code)]
     pub group_owner: GroupOwner,
-    /// Cooperative cancel handle.  Polled in `wait` so an upstream
-    /// scope cancel — exarch's tool-timeout watchdog, or a signal the
-    /// platform handler translated into a cause — actually preempts a
-    /// blocked child: a blocking `wait_handling_stop` would otherwise
-    /// sit in `waitpid` / `WaitForSingleObject` until the child exited
-    /// on its own, no matter how long ago the flag was set.
+    /// Polled by `wait`, because a blocking `waitpid` / `WaitForSingleObject`
+    /// consults nothing: without the poll an upstream cancel (exarch's tool
+    /// timeout, a signal the platform handler translated into a cause) could
+    /// not preempt a child that never exits on its own.
     pub cancel: crate::process::CancelScope,
 }
 
-/// A `RunningChild` whose `wait_handling_stop` returned successfully.
-/// Holds the `WaitOutcome` plus the still-running drainer threads (which
-/// see EOF as soon as the child's write ends close at termination, but
-/// haven't necessarily been joined yet).
-///
-/// Construction is gated by [`RunningChild::wait`]; there is no other
-/// path.  Atomic-redirect commit and status interpretation therefore
-/// have a borrow-check proof of "child has been observed dead" before
-/// they run.
+/// A child observed dead, holding its outcome and its not-yet-joined drainers.
+/// [`RunningChild::wait`] is the only constructor, so atomic-redirect commit and
+/// status interpretation carry a borrow-check proof that the child has exited.
 pub(crate) struct WaitedChild {
     pub outcome: crate::process::WaitOutcome,
     pump: Option<std::thread::JoinHandle<()>>,
     stderr_pump: Option<std::thread::JoinHandle<()>>,
-    /// Trace context carried over from the originating `RunningChild`
-    /// so `drain`'s pump-join timings can be attributed to the same
-    /// command instance.  Debug-only; release builds compile the
-    /// `dbg_trace` calls away but the fields are cheap enough to keep
-    /// unconditional.
+    /// Trace context carried from the `RunningChild` so `drain`'s pump-join
+    /// timings attribute to the same command instance.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     name: String,
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
@@ -129,31 +80,18 @@ pub(crate) struct WaitedChild {
     t_enter: std::time::Instant,
 }
 
-/// Post-spawn plumbing for an external child: where to pump stdout / stderr
-/// when piped.  Both fields are `None` when the corresponding fd was
-/// inherited or routed through a direct OS pipe (next pipeline stage's
-/// stdin).  Both standalone exec and pipeline external stages compute one
-/// of these and hand it to [`RunningChild::assemble_with_owner`], so
-/// the `Drop` / wait rules of `RunningChild` cannot be re-derived at
-/// each call site.
+/// Where to pump a child's stdout / stderr.  Either field is `None` when that
+/// fd was inherited or wired straight to an OS pipe (the next stage's stdin).
 pub(crate) struct ExternalPlumbing {
     pub stdout_pump: Option<Sink>,
     pub stderr_pump: Option<Sink>,
 }
 
 impl RunningChild {
-    /// Assemble a `RunningChild` from a freshly-spawned child plus a
-    /// per-call plumbing plan.  Single source of truth for the
-    /// stderr-reader / stderr-pump / stdout-pump / audit-tee triple, used
-    /// by both [`super::run`] and the pipeline external stage launcher.
-    /// `group_owner` declares who owns the
-    /// platform group registered for `pgid`: standalone foreground
-    /// externals on Windows pass `Standalone` so the abort path uses
-    /// `TerminateJobObject` and the success path releases the group;
-    /// pipeline stages pass `BorrowedByPipeline`; the
-    /// [`super::super::pipeline::group::PipelineGroup`] owns the
-    /// release.  Children with no group at all (Unix `Inherit`,
-    /// builtins-via-spawn) pass `None`.
+    /// The one place a `RunningChild` is built: [`super::run`] and the stage
+    /// launcher in `runtime::pipeline::launch` both come here, so the wait and
+    /// `Drop` rules are never re-derived per call site.  See [`GroupOwner`] for
+    /// what `group_owner` obliges each of them to.
     #[allow(
         clippy::too_many_arguments,
         reason = "the single assembly point for every field RunningChild carries; splitting it would just scatter the same parameters across a builder"
@@ -188,24 +126,15 @@ impl RunningChild {
         }
     }
 
-    /// SIGKILL the process group, falling back to a direct child kill
-    /// when no group is tracked.  Idempotent: on Windows the underlying
-    /// `TerminateJobObject` is safe against an already-terminated group;
-    /// on Unix re-sending SIGKILL to a dead pgid is a no-op.  Shared by
-    /// the cancel branch in [`Self::wait`] (preempt mid-flight, then
-    /// fall through to `wait_handling_stop`) and by [`Drop`] (abort-path
-    /// cleanup before reaping).
+    /// SIGKILL the process group, or the child alone when none is tracked.
+    /// Idempotent on both platforms, so [`Self::wait`]'s cancel branch and
+    /// [`Drop`] may each call it without coordinating.  It does not release the
+    /// Windows group bookkeeping: `wait` does that after `wait_leader_blocking`,
+    /// `Drop` inline.
     ///
-    /// Note: does *not* release the Windows group bookkeeping for
-    /// `GroupOwner::Standalone`.  On the success path `wait` calls
-    /// `release_win_group` after `wait_leader_blocking`; on the abort
-    /// path `Drop` makes the equivalent call inline.
-    ///
-    /// On a Linux guest with a jail cgroup tracked, `cgroup.kill` is used
-    /// instead of the pgid signal: it reaches a grandchild that
-    /// `setsid()`'d out of the tracked pgid, which `kill(-pgid, …)`
-    /// cannot — moving cgroups needs write permission on `cgroup.procs`,
-    /// which the jail's unprivileged uid does not have.
+    /// A tracked jail cgroup wins over the pgid, because `cgroup.kill` reaches a
+    /// grandchild that `setsid()`'d out of the group and the jail's
+    /// unprivileged uid cannot write `cgroup.procs` to escape.
     fn kill_group(&self, child: &mut crate::process::ChildHandle) {
         #[cfg(target_os = "linux")]
         if let Some(cgroup) = &self.jail {
@@ -237,9 +166,8 @@ impl RunningChild {
         let _ = child.kill();
     }
 
-    /// Poll for the leader to reap within `deadline`, handling a stop the
-    /// same way `wait` does.  `Some(outcome)` if it exited (or the wait
-    /// errored) inside the window, `None` on timeout.
+    /// Poll for the leader until `deadline`, classifying a stop as `wait` does.
+    /// `None` on timeout.
     #[cfg(unix)]
     fn grace_poll(
         &self,
@@ -257,26 +185,19 @@ impl RunningChild {
         None
     }
 
-    /// Cancel-path teardown: terminate the process group by the cancel
-    /// cause, give the tree a short grace to exit on the signal it expects,
-    /// then SIGKILL whatever is left.  Used when the cancel scope fires
-    /// mid-wait (exarch's tool timeout, a Ctrl-C).  An interrupt goes
-    /// SIGINT-first, an explicit cancel / deadline / termination request
-    /// SIGTERM-first, and a root abort straight to SIGKILL with no grace.
-    /// Signalling the *group* (not just the leader pid) takes out forked
-    /// grandchildren too, closing the stdout pipe so the pump drain can
-    /// complete.
+    /// Cancel-path teardown: signal the group by cause — SIGINT for an
+    /// interrupt, SIGTERM for a cancel, deadline, or termination request,
+    /// straight SIGKILL for a root abort — grace briefly, then kill regardless.
+    /// Signalling the group rather than the leader also takes out forked
+    /// grandchildren, closing the stdout pipe the pumps are waiting on.
     ///
-    /// Returns `Some(outcome)` when the leader was reaped inside the grace
-    /// peek (the caller must not `wait` again), `None` otherwise (the
-    /// caller's follow-up blocking `wait_handling_stop` reaps it).  Falls
-    /// back to a direct child kill when no group is tracked.
+    /// `Some(outcome)` means the grace peek already reaped the leader and the
+    /// caller must not wait again; `None` leaves the reaping to the caller's
+    /// blocking `wait_handling_stop`.
     ///
-    /// The grace phase stays pgid-addressed: it delivers the signal a
-    /// well-behaved tree expects, and a jailed grandchild that `setsid()`'d
-    /// away would miss it either way. Every unconditional final kill goes
-    /// through [`Self::kill_group`], so a tracked jail's `cgroup.kill`
-    /// substitutes there.
+    /// The grace signal stays pgid-addressed even under a jail — a grandchild
+    /// that `setsid()`'d away would miss it either way — but the final kill goes
+    /// through [`Self::kill_group`], where `cgroup.kill` does catch it.
     fn terminate_group(
         &self,
         child: &mut crate::process::ChildHandle,
@@ -285,11 +206,9 @@ impl RunningChild {
         #[cfg(unix)]
         {
             let Some(pgid) = self.pgid else {
-                // No pgid tracked (an `Inherit`-placed child): the same
-                // TERM/INT-first grace ladder applies regardless of whether
-                // a group is tracked — degrading straight to SIGKILL here
-                // would deny this lone child the escalation every other
-                // path documents.
+                // An `Inherit`-placed child gets the same escalation ladder,
+                // addressed to its pid: dropping straight to SIGKILL would deny
+                // this one child the grace every other path grants.
                 if cause == crate::process::CancelCause::RootAbort {
                     self.kill_group(child);
                     return None;
@@ -322,15 +241,12 @@ impl RunningChild {
                 _ => libc::SIGTERM,
             };
             pgid.signal_group(crate::process::Signal::new(signal));
-            // Poll for the leader to drain on the chosen signal; the
-            // grace is short — a timed-out tool call is already over
-            // budget — but long enough for a test runner to print its
-            // summary and exit.
+            // Short — a timed-out call is already over budget — but enough for
+            // a test runner to print its summary and exit.
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
             let reaped = self.grace_poll(child, deadline);
-            // Unconditional final kill: harmless on a tree that already
-            // exited cleanly, decisive against a grandchild that trapped
-            // the chosen signal and is still holding the pipe open.
+            // Harmless on a tree that already left, decisive against a
+            // grandchild that trapped the signal and still holds the pipe.
             self.kill_group(child);
             reaped
         }
@@ -344,20 +260,14 @@ impl RunningChild {
 }
 
 impl RunningChild {
-    /// Wait for the child to terminate via `wait_handling_stop`.
-    /// Consumes `self`: a second call has nothing to consume, and the
-    /// returned `WaitedChild` is the only handle to the drainer threads
-    /// from this point on.  On error the `RunningChild` is dropped and
-    /// `Drop` runs the SIGKILL+reap+join sequence.
+    /// Wait for the child to terminate, consuming `self`; the returned
+    /// `WaitedChild` is from here on the only handle on the drainer threads.
     ///
-    /// A stop on a tracked pgid short-circuits to
-    /// [`Escape::Stopped`]: the OS process stays alive in stopped
-    /// state, the pump threads stay attached to its pipes, and the REPL
-    /// catches the signal to register the pgid as a job.  The pgid-kill
-    /// in `Drop` is disarmed because `self.child.take()` already ran.
+    /// A stop on a tracked pgid short-circuits to `Escape::Stopped`: the process
+    /// stays alive in stopped state with the pumps still on its pipes, for the
+    /// REPL to register as a job.  `Drop`'s kill is already disarmed by then.
     pub fn wait(mut self) -> Settled<WaitedChild> {
-        // Take the child out so Drop's kill/reap sequence is disarmed
-        // on the success path.  Construction always sets `Some(_)`.
+        // Taking the child disarms `Drop` for the success path.
         let mut child = self.child.take().expect("RunningChild has no child");
         let pid = child.id();
         let t_enter = std::time::Instant::now();
@@ -372,26 +282,19 @@ impl RunningChild {
             self.pump.is_some(),
             self.stderr_pump.is_some(),
         );
-        // Cancel-aware wait poll.  `wait_handling_stop` blocks in a
-        // syscall that does not consult the cancel scope, so a blocking
-        // wait could not be preempted — not by a watchdog-driven
-        // `cancel()` (exarch's tool timeout on a `find` chewing through
-        // node_modules), not by a signal the platform handler translated
-        // into a cause (a batch SIGINT, a systemd-style SIGTERM).  Every
-        // external wait therefore goes through this one poll loop.
+        // Every external wait polls, because `wait_handling_stop` blocks in a
+        // syscall that consults nothing: a blocking wait could be preempted
+        // neither by a watchdog cancel (exarch's tool timeout on a `find`
+        // chewing through node_modules) nor by a signal the platform handler
+        // translated into a cause.
         //
-        // Uses `try_wait_handling_stop` rather than `Child::try_wait`
-        // so a SIGSTOP'd child is observed (WUNTRACED) and classified:
-        // parked as a resumable job when `park_on_stop` (the interactive
-        // REPL's Ctrl-Z), killed and reaped inside the peek otherwise.
-        // A plain `try_wait` returns `Ok(None)` on stop and the loop
-        // would spin forever.  When the peek returns `Some(outcome)` the
-        // child has already been fully consumed (reaped on the exit
-        // branch, parked or killed-and-reaped on the stop branch), so we
-        // do not call `wait_handling_stop` again.
+        // `try_wait_handling_stop`, not `Child::try_wait`, so a SIGSTOP'd child
+        // is seen (WUNTRACED) and classified — parked when `park_on_stop`,
+        // killed and reaped otherwise; plain `try_wait` reports `Ok(None)` on a
+        // stop and the loop would spin forever.  `Some(outcome)` therefore means
+        // the child is already consumed, and must not be waited on again.
         let early_outcome: Option<crate::process::WaitOutcome> = {
-            // Exponential backoff: snappy for short-lived children,
-            // gentle on CPU for long ones.
+            // Snappy for short-lived children, gentle on CPU for long ones.
             let mut interval = std::time::Duration::from_millis(5);
             let cap = std::time::Duration::from_millis(100);
             let mut polls: u32 = 0;
@@ -420,9 +323,8 @@ impl RunningChild {
                             polls,
                             t_enter.elapsed(),
                         );
-                        // Re-arm `Drop`'s kill/reap by handing the child
-                        // back: an unwaited child whose handle just dropped
-                        // would otherwise leak the process and its pumps.
+                        // Hand the child back to re-arm `Drop`; an unwaited
+                        // child would otherwise leak with its pumps.
                         self.child = Some(child);
                         return Err(Break::Error(Error::new(format!("{}: {e}", self.name), 1)));
                     }
@@ -436,14 +338,10 @@ impl RunningChild {
                         polls,
                         t_enter.elapsed(),
                     );
-                    // Teardown by cause: SIGINT-first for an interrupt,
-                    // SIGTERM-first for an explicit cancel, a deadline,
-                    // or a termination request, an immediate SIGKILL for
-                    // a root abort — minus the Windows group-release,
-                    // which the post-wait Standalone branch below still
-                    // does once `wait_handling_stop` returns.  If the
-                    // leader was reaped inside the grace peek, carry that
-                    // outcome out directly so we don't `wait` a dead pid.
+                    // A reaped leader carries its outcome straight out, so we
+                    // never wait on a dead pid.  The Windows group release is
+                    // not part of teardown; the `Standalone` branch below still
+                    // performs it on the way out.
                     break self.terminate_group(&mut child, cause);
                 }
                 std::thread::sleep(interval);
@@ -453,11 +351,10 @@ impl RunningChild {
         let outcome = if let Some(o) = early_outcome {
             o
         } else {
-            // Blocking fallthrough, reached only when the poll loop broke
-            // via cancel and `terminate_group` did not reap the leader
-            // inside its grace peek: the group kill is already in flight,
-            // so this reaps a dying child promptly.  Trace before/after
-            // so a hang in waitpid / WaitForSingleObject is visible.
+            // Reached only when the poll broke via cancel without the grace
+            // peek reaping: the group kill is already in flight, so this blocks
+            // only as long as a dying child takes.  Traced on both sides so a
+            // hang in waitpid / WaitForSingleObject is visible.
             crate::dbg_trace!(
                 "wait",
                 "blocking-wait name={} pid={} park_on_stop={} elapsed={:?}",
@@ -469,8 +366,7 @@ impl RunningChild {
             let out = match child.wait_handling_stop(self.pgid, self.park_on_stop) {
                 Ok(out) => out,
                 Err(e) => {
-                    // Re-arm `Drop`'s kill/reap by handing the child back;
-                    // see the poll-loop error arm above.
+                    // Re-arm `Drop`, as in the poll loop's error arm.
                     self.child = Some(child);
                     return Err(Break::Error(Error::new(format!("{}: {e}", self.name), 1)));
                 }
@@ -489,8 +385,8 @@ impl RunningChild {
             let pgid = self
                 .pgid
                 .expect("wait_handling_stop only returns Stopped when pgid is Some");
-            // Detach pump threads: they remain blocked on the child's
-            // open pipes until the child eventually exits or is killed.
+            // Detach the pumps rather than join them: the stopped child still
+            // holds its pipes open, so a join here would never return.
             let _ = self.pump.take();
             let _ = self.stderr_pump.take();
             return Err(Break::Escape(Escape::Stopped {
@@ -499,10 +395,9 @@ impl RunningChild {
                 cmd: self.name.clone(),
             }));
         }
-        // Standalone Windows group: drain any descendants via the Job
-        // Object's whole-job completion before releasing the handle.
-        // Pipeline stages don't take this path — `PipelineGroup::Drop`
-        // owns the release for them.
+        // Let the Job Object's whole-job completion drain any descendants before
+        // the handle goes.  A pipeline stage never lands here: its release
+        // belongs to `PipelineGroup::Drop`.
         #[cfg(windows)]
         if matches!(self.group_owner, GroupOwner::Standalone)
             && let Some(group) = self.pgid
@@ -525,11 +420,9 @@ impl RunningChild {
                 t_enter.elapsed(),
             );
         }
-        // The leader is confirmed dead (the `Stopped` branch above already
-        // returned): `cgroup.kill` on settle — a straggler the leader left
-        // behind must not outlive the command — then remove the transient
-        // cgroup, the same structural point Windows releases its own group
-        // bookkeeping.
+        // The leader is dead here — the `Stopped` branch already returned — so
+        // kill the cgroup lest a straggler outlive the command, then remove it.
+        // Windows releases its own group bookkeeping at this same point.
         #[cfg(target_os = "linux")]
         if let Some(jail) = &self.jail {
             crate::process::jail::linux::kill(jail);
@@ -555,15 +448,11 @@ impl RunningChild {
 }
 
 impl RunningChild {
-    /// Wait for the child, classify its outcome, and join the drainers.
-    /// Returns the user-visible exit code paired with the failure (if any)
-    /// the outcome maps to — `is_pipeline_non_final` forgives a non-final
-    /// stage's SIGPIPE as success.  An [`Escape::Stopped`] or a wait
-    /// error propagates as the `Break` from [`Self::wait`].
-    ///
-    /// The wait → outcome → failure → drain sequence is lockstep: both the
-    /// pipeline collector and the helper-stage observer reduce a child the
-    /// same way, so it lives here once.
+    /// Wait, classify, and join the drainers: the user-visible exit code paired
+    /// with whatever failure the outcome maps to.  `is_pipeline_non_final`
+    /// forgives a SIGPIPE as success.  The pipeline collector and the helper
+    /// stage in `runtime::pipeline` both reduce a child this way, so it lives
+    /// here once.
     pub(crate) fn observe(
         self,
         is_pipeline_non_final: bool,
@@ -576,31 +465,22 @@ impl RunningChild {
         Ok((code, failure))
     }
 
-    /// Release ownership of the OS child without killing or reaping it.
-    /// Used when a sibling stage has parked the pipeline pgid: the
-    /// kernel keeps every stage alive in stopped state, the pump
-    /// threads detach and exit when the eventual `fg` resumes the
-    /// pipeline to completion.  Disarms `Drop`'s SIGKILL+reap path.
+    /// Release the OS child without killing or reaping it, for when a sibling
+    /// stage has parked the pipeline pgid: the kernel holds every stage stopped,
+    /// and the pumps exit when a later `fg` runs the pipeline out.  Disarms
+    /// `Drop`, group release included — that stays with `PipelineGroup`.
     #[cfg(unix)]
     pub(crate) fn abandon(mut self) {
         let _ = self.child.take();
         let _ = self.pump.take();
         let _ = self.stderr_pump.take();
-        // Don't release the group: `abandon` is invoked when a sibling
-        // stage parked the pipeline pgid.  The owner's Drop is what
-        // releases.
     }
 }
 
 impl WaitedChild {
-    /// Join the drainer threads.  Consumes `self`: drainers can be
-    /// joined exactly once.  Safe by construction: a `WaitedChild`
-    /// only exists once the child has been observed dead, so drainers
-    /// see pipe-EOF promptly.
-    ///
-    /// Captured bytes (when any) live in caller-owned `tee_with_buffer`
-    /// arcs; the caller drains them after this returns to ensure all
-    /// pump writes have settled.
+    /// Join the drainer threads.  Consumes `self`, since they join exactly
+    /// once; a `WaitedChild` only exists past the child's death, so the joins
+    /// meet a pipe already at EOF.
     pub fn drain(mut self) {
         crate::dbg_trace!(
             "wait",
@@ -642,16 +522,11 @@ impl WaitedChild {
 }
 
 impl Drop for RunningChild {
-    /// Abort-path cleanup: SIGKILL the pgid (or fall back to the
-    /// direct PID), join the drainers, reap.  No-op when `wait`
-    /// already took the child — that's the success path's disarm.
-    ///
-    /// Windows `GroupOwner::Standalone` additionally releases its
-    /// `win_groups` bookkeeping; on the success path this is done by
-    /// `wait` after `wait_leader_blocking`, but here we never call
-    /// `wait`, so the release happens inline.  `kill_pipeline_group`
-    /// (and the Unix `kill(-pgid)`) is idempotent, so a `BorrowedByPipeline`
-    /// stage racing the pipeline owner's `Drop` is safe.
+    /// Abort path: SIGKILL the group, join the drainers, reap.  A no-op once
+    /// `wait` has taken the child — that is the success path's disarm.  A
+    /// Windows `Standalone` releases its `win_groups` entry inline here, the
+    /// job `wait` does after `wait_leader_blocking`; the kill is idempotent, so
+    /// a `BorrowedByPipeline` stage racing the group owner's `Drop` is safe.
     fn drop(&mut self) {
         let Some(mut child) = self.child.take() else {
             return;
@@ -685,43 +560,20 @@ mod tests {
     use super::*;
     use crate::process::*;
 
-    /// The `Interrupt` branch of [`RunningChild::wait`]'s cancel-aware
-    /// poll loop tears down an external child's whole process group
-    /// decisively, even though it begins with the gentler SIGINT.
+    /// An interrupt opens with the gentler SIGINT, to keep job-control
+    /// semantics, and must still bound the whole tree.  Two properties, both
+    /// asserted against a real subprocess: the 500 ms SIGINT grace in
+    /// `terminate_group` must not become a wait on the child's own 30 s sleep,
+    /// and the follow-up group SIGKILL must reap a grandchild that the SIGINT
+    /// never reached.
     ///
-    /// An [`CancelCause::Interrupt`] is delivered SIGINT-first to
-    /// preserve job-control semantics: a well-behaved foreground tree
-    /// reacts to SIGINT as it would to a terminal Ctrl-C.  That gentler
-    /// first signal must not weaken the guarantee that teardown bounds
-    /// the whole tree.  Two properties are at stake, and this test
-    /// asserts both end-to-end against a real subprocess:
-    ///
-    ///   * The SIGINT grace does not deadlock.  [`terminate_group`] sends
-    ///     SIGINT, then polls for the leader to drain over a bounded
-    ///     500 ms window before escalating.  The `wait` call must return
-    ///     within a few seconds rather than blocking until the child's
-    ///     own 30 s sleep elapses.
-    ///   * The follow-up group SIGKILL reaps a grandchild the SIGINT did
-    ///     not.  The fixture forks a `sleep` grandchild that ignores the
-    ///     foreground SIGINT (it is not in the terminal foreground group
-    ///     and `&` detaches it from the leader's signal handling), so
-    ///     only the unconditional group SIGKILL at the end of
-    ///     [`terminate_group`] can reap it.  Its death is observable: the
-    ///     `/bin/sh` leader blocks in `wait`, holding the call open until
-    ///     the grandchild dies.
-    ///
-    /// The fixture mirrors `exarch`'s `timeout_kills_external_subprocess_tree`:
-    /// `/bin/sh -c 'sleep 30 & echo $!; wait'` prints the grandchild's
-    /// pid on stdout, then the leader blocks in `wait`.  Spawning under a
-    /// fresh process group ([`PgidPolicy::NewLeader`]) makes the group
-    /// teardown meaningful — the cancel path addresses the whole group by
-    /// pgid, not just the leader by pid.
+    /// `/bin/sh -c 'sleep 30 & echo $!; wait'` gives both: `&` detaches the
+    /// grandchild from the leader's signal handling, and the leader then blocks
+    /// in `wait`, so the call stays open until the grandchild dies.  Spawning
+    /// under `PgidPolicy::NewLeader` is what makes the group real — teardown
+    /// addresses a pgid, not a pid.
     #[test]
     fn interrupt_tears_down_external_subprocess_tree() {
-        // The grandchild prints its pid so the test can prove it was
-        // reaped, then sleeps far past any reasonable test duration; the
-        // `/bin/sh` leader blocks in `wait`, holding the call open until
-        // the grandchild exits unless the cancel tears the group down.
         let mut cmd = std::process::Command::new("/bin/sh");
         cmd.args(["-c", "sleep 30 & echo $!; wait"])
             .stdout(std::process::Stdio::piped());
@@ -730,11 +582,9 @@ mod tests {
             spawn_with_pgid(&mut cmd, PgidPolicy::NewLeader).expect("spawn /bin/sh under new pgid");
         assert!(pgid.is_some(), "NewLeader yields a tracked pgid");
 
-        // Take stdout before assembling the `RunningChild`: with no
-        // `stdout_pump` Sink the `ChildHandle` would otherwise keep
-        // stdout attached.  Read the single line (the grandchild pid) on
-        // a reader thread; the `echo $!` is flushed at startup, so the
-        // read returns long before teardown.
+        // Take stdout before assembling: with no `stdout_pump` sink the
+        // `ChildHandle` would keep it attached.  `echo $!` flushes at startup,
+        // so the reader thread returns long before teardown.
         let stdout = child.stdout.take().expect("piped stdout");
         let reader = std::thread::spawn(move || {
             use std::io::BufRead;
@@ -752,17 +602,16 @@ mod tests {
                 stdout_pump: None,
                 stderr_pump: None,
             },
-            // park_on_stop = false: the cancel poll loop is only entered
-            // on this branch.
+            // No parking: a stop here would be killed and reaped, not
+            // turned into a job.
             false,
             GroupOwner::None,
             scope.clone(),
             None,
         );
 
-        // Fire the interrupt from another thread once `wait` has had time
-        // to enter its poll loop (the backoff starts at 5 ms, so the
-        // cause is observed promptly after this).
+        // Fire once `wait` is inside its poll loop; the backoff starts at 5 ms,
+        // so the cause is observed promptly after.
         let canceller = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(200));
             scope.cancel(CancelCause::Interrupt);
@@ -774,18 +623,15 @@ mod tests {
         waited.drain();
         canceller.join().expect("canceller thread");
 
-        // Property 1: SIGINT-first does not deadlock.  SIGINT grace is
-        // 500 ms then group SIGKILL, so real time is well under a second;
-        // 10 s is a generous ceiling far below the 30 s sleep.
+        // Property 1: grace is 500 ms then group SIGKILL, so real time is well
+        // under a second; 10 s is a ceiling far below the 30 s sleep.
         assert!(
             elapsed.as_secs() < 10,
             "interrupt teardown must not block on the child's own sleep: returned after {elapsed:?}"
         );
 
-        // Property 2: the forked grandchild — which ignored the SIGINT —
-        // is reaped by the follow-up group SIGKILL.  `kill(pid, 0)`
-        // returns ESRCH once it is gone; poll briefly to absorb the
-        // window between the group SIGKILL and the kernel reaping it.
+        // Property 2: `kill(pid, 0)` returns ESRCH once the grandchild is gone;
+        // poll to absorb the window between the SIGKILL and the kernel reaping.
         let line = reader.join().expect("reader thread");
         let gc_pid: i32 = line
             .trim()

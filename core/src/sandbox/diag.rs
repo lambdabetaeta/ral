@@ -1,35 +1,16 @@
-//! Sandbox diagnostics: harvest kernel-reported sandbox denials and
-//! turn them into an actionable hint on the failing command's [`Error`].
+//! Turns a kernel-reported sandbox denial into an actionable hint on the
+//! failing command's [`Error`], which `crate::diagnostic` renders for whichever
+//! host is driving.
 //!
-//! Kernel sandbox enforcement (Seatbelt on macOS, the seccomp BPF
-//! filter inside the bwrap envelope on Linux) reports denied syscalls
-//! into a system log keyed by `(comm, pid)`, while the caller sees only
-//! an opaque `EPERM` / non-zero exit.  When an external command run
-//! under an active OS-sandbox grant fails, this module reads that log
-//! over the call's wall window, keeps only lines whose PID was in the
-//! call's descendant tree, and appends the denial — the kernel line,
-//! the exact path to grant, and the symlink caveat — to the error's
-//! `hint`.  Both the `ral-sh` REPL and `exarch` render that hint, so a
-//! single augmentation surfaces in both hosts.
+//! Seatbelt and the seccomp filter inside the bwrap envelope report denials into
+//! a system log keyed by `(comm, pid)`, while the caller sees only an opaque
+//! `EPERM` or nonzero exit.  So [`augment_failure`] reads that log over the
+//! call's wall window and keeps the lines whose PID lay in the call's descendant
+//! tree.  `diag/macos.rs` and `diag/linux.rs` each supply the reader plus a
+//! parser triple; everywhere else a stub `platform` reports no denials.
 //!
-//! Each platform's [`platform`] submodule supplies a reader for the
-//! kernel-log window plus a small parser triple: recognise a denial
-//! line, extract its attributed PID, and split it into `(operation,
-//! path)`.  Platforms without a denial source (everything except macOS,
-//! Linux, and Windows) get a stub `platform` module that reports no denials.
-//! macOS logs the fully-resolved path of the denied access, so the
-//! path the user must grant is exactly the path in the line; Linux's
-//! `type=1326` audit record carries no path, so the hint there names the
-//! blocked syscall operation with no path or symlink note.
-//!
-//! Windows is different in kind: an `AppContainer` denial surfaces only as
-//! `ERROR_ACCESS_DENIED` on the confined child, with no kernel audit log
-//! naming the path.  There is nothing to scrape, so the hint is gated on the
-//! exit code instead of a log line — only a plausibly access-denied exit
-//! (`ERROR_ACCESS_DENIED` / `STATUS_ACCESS_DENIED`) gets the fixed, pathless
-//! note that names the grant surfaces; any other nonzero exit under an
-//! active sandbox gets no sandbox speculation at all. It never fabricates a
-//! path it does not have.
+//! Windows differs in kind: an `AppContainer` denial carries no audit record at
+//! all, so there the hint is gated on the exit code and never names a path.
 
 use crate::types::{Error, Shell};
 use std::collections::{HashMap, HashSet};
@@ -60,27 +41,18 @@ mod platform {
     }
 }
 
-/// Cap on how many denial lines the hint reproduces verbatim.  A failed
-/// command typically trips one or two distinct denials; reproducing more
-/// would bury the actionable guidance under kernel noise.
+/// Denial lines the hint reproduces verbatim before it starts counting; more
+/// would bury the guidance under kernel noise.
 #[cfg(not(windows))]
 const MAX_DENIAL_LINES: usize = 3;
 
-/// Attach a kernel-denial diagnostic to `err` when an external command
-/// failed under an active OS sandbox.
+/// Append a kernel-denial diagnostic to `err`, below any hint it already
+/// carries, when an external command failed under an active OS sandbox.
 ///
-/// No-op — returns `err` unchanged — when the process did not run under
-/// the OS sandbox (`shell.sandbox_projection().is_none()`), when `pids`
-/// is empty, when the platform has no denial source, or when no denial
-/// line in the window is attributable to a PID in `pids`.  Only the
-/// failure arms of the command runners call this, and its gate
-/// short-circuits before the expensive kernel-log read on every
-/// non-sandboxed failure.
-///
-/// When a denial is found, the kernel line(s), the path to grant, and
-/// the symlink caveat are appended to any existing `err.hint` (an
-/// exit-code hint, say) below a blank line; an absent hint is set
-/// outright.
+/// Called only from the failure arms of the command runners, and returns `err`
+/// untouched unless a denial in the window is attributable to a PID in `pids` —
+/// the sandbox gate comes first so an ordinary failure never pays for the
+/// kernel-log read.
 pub(crate) fn augment_failure(
     mut err: Error,
     shell: &Shell,
@@ -100,8 +72,7 @@ pub(crate) fn augment_failure(
     err.with_hint(hint)
 }
 
-/// The platform's denial hint for a command that failed under an active
-/// sandbox, or `None` when there is nothing to say.
+/// The platform's denial hint, or `None` when there is nothing to say.
 #[cfg(not(windows))]
 fn collect_denial_hint(pids: &HashSet<u32>, since: Instant, _exit_code: i32) -> Option<String> {
     if pids.is_empty() {
@@ -119,19 +90,12 @@ fn collect_denial_hint(pids: &HashSet<u32>, since: Instant, _exit_code: i32) -> 
     Some(build_hint(&denials))
 }
 
-/// Exit codes that plausibly indicate the `AppContainer` denied an access,
-/// gating the Windows hint the way the Unix hints are gated on an actual
-/// kernel denial line — without this, a confined child that simply exits
-/// nonzero for an unrelated reason (`diff` reporting a difference, a normal
-/// `grep` miss) would have the sandbox speculatively blamed.
-///
-/// `ERROR_ACCESS_DENIED` (5) is the raw Win32 code a well-behaved child
-/// surfaces verbatim when it does not translate its own Win32 failures
-/// (common for small native tools and `cmd`-style wrappers).
-/// `STATUS_ACCESS_DENIED` (`0xC0000022`, an NTSTATUS) surfaces as the exit
-/// code when the OS itself terminates the process during initialization —
-/// e.g. a denied read while loading a dependency — before the program's own
-/// code ever runs.
+/// Exit codes an `AppContainer` denial plausibly produces: the raw Win32
+/// `ERROR_ACCESS_DENIED`, which a child that does not translate its own Win32
+/// failures surfaces verbatim, and the NTSTATUS `STATUS_ACCESS_DENIED`, which
+/// the loader exits with when a denied read kills the process before its own
+/// code runs.  The gate stands in for the denial line Unix gets: without it, a
+/// `diff` reporting a difference would have the sandbox blamed.
 #[cfg(windows)]
 fn plausible_access_denied_exit(code: i32) -> bool {
     const ERROR_ACCESS_DENIED: i32 = 5;
@@ -139,12 +103,8 @@ fn plausible_access_denied_exit(code: i32) -> bool {
     code == ERROR_ACCESS_DENIED || code == STATUS_ACCESS_DENIED
 }
 
-/// Windows has no kernel denial log to scrape and no per-PID attribution, so
-/// the hint is gated on the exit code alone: only when it plausibly denotes
-/// an access-denied failure ([`plausible_access_denied_exit`]) does a
-/// failure under an active sandbox get the fixed, pathless hint (never a
-/// fabricated path) — an unrelated nonzero exit under the same sandbox gets
-/// no hint at all.
+/// With no denial log and no per-PID attribution, the exit code alone decides,
+/// and the hint is fixed text: there is no path here to name.
 #[cfg(windows)]
 fn collect_denial_hint(_pids: &HashSet<u32>, _since: Instant, exit_code: i32) -> Option<String> {
     if !plausible_access_denied_exit(exit_code) {
@@ -162,12 +122,9 @@ fn collect_denial_hint(_pids: &HashSet<u32>, _since: Instant, exit_code: i32) ->
     )
 }
 
-/// Compose the denial hint from the attributed kernel lines.
-///
-/// Pure: takes the already-filtered denial lines and returns the hint
-/// text, so the parsing and wording are unit-testable without shelling
-/// out to the kernel log.  No ANSI codes — the diagnostic formatter
-/// colorises the `hint:` line as a whole.
+/// Compose the hint from the already-attributed kernel lines — pure, so the
+/// wording is testable without a kernel log.  No ANSI: `crate::diagnostic`
+/// colours the `hint:` line as a whole.
 #[cfg(not(windows))]
 fn build_hint(denials: &[&str]) -> String {
     let mut out = String::from(
@@ -181,8 +138,9 @@ fn build_hint(denials: &[&str]) -> String {
         let _ = write!(out, "\n  ({} more)", denials.len() - MAX_DENIAL_LINES);
     }
 
-    // Prefer a concrete path from the first parseable denial; macOS
-    // logs the fully-resolved path, Linux carries none.
+    // Not the first denial but the first that yields a path: a benign `ipc-*`
+    // or `mach-*` startup denial often comes first, and its operand is a
+    // service name that `parse_denial` rightly withholds.
     let path = denials
         .iter()
         .find_map(|l| platform::parse_denial(l).and_then(|(_, p)| p));
@@ -217,14 +175,11 @@ fn build_hint(denials: &[&str]) -> String {
     out
 }
 
-/// One sample of the descendant set: shell out to `/bin/ps` for every
-/// live `(pid, ppid)` pair, then BFS from `root` through the inverted
-/// parent map.  Returns descendants only — `root` itself is excluded.
+/// The live descendants of `root`, `root` itself excluded: one `/bin/ps` sample
+/// of every `(pid, ppid)` pair, inverted and walked transitively.
 ///
-/// Kernel denial records carry only `(comm, pid)`, so a PID set is the
-/// only way to attribute a denial to "our" subprocess tree rather than
-/// to a concurrent system service that happened to run during the same
-/// wall second.
+/// Denial records carry only `(comm, pid)`, so a PID set is the only way to tell
+/// our subprocess tree from a system service that ran in the same wall second.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:ps-sample] sandbox diagnostics: shells out to `/bin/ps` to sample the live process tree for denial attribution; a diagnostic probe, not turn-time model data I/O, raises no surface card."
@@ -274,8 +229,8 @@ pub(crate) fn sample_descendants(root: u32) -> HashSet<u32> {
 mod tests {
     use super::*;
 
-    /// The hint names the denied path verbatim and carries the symlink
-    /// caveat and the grant guidance for both surfaces.
+    /// The hint names the denied path verbatim, the symlink caveat, and both
+    /// grant surfaces.
     #[cfg(target_os = "macos")]
     #[test]
     fn hint_names_path_and_symlink_caveat() {
@@ -297,13 +252,8 @@ mod tests {
         assert!(hint.contains("deny(1)"), "hint must show the kernel line");
     }
 
-    /// A benign non-filesystem denial logged before the real
-    /// `file-read*` denial must not hijack the "path to grant" slot.
-    /// This is the regression from the field: a `git status` under the
-    /// sandbox logged an `ipc-posix-shm-read-data` startup denial first,
-    /// and the hint offered `apple.shm.notification_center` as a path —
-    /// nonsense — instead of the resolved config path the read actually
-    /// hit through a dotfiles symlink.
+    /// A benign non-filesystem denial logged first must not hijack the
+    /// path-to-grant slot with its service name.
     #[cfg(target_os = "macos")]
     #[test]
     fn hint_selects_filesystem_path_over_ipc_operand() {
@@ -320,15 +270,13 @@ mod tests {
             !hint.contains("the path `apple.shm.notification_center`"),
             "hint must not offer the IPC service operand as a path to grant; got {hint:?}"
         );
-        // Both kernel lines stay reproduced verbatim for transparency.
         assert!(
             hint.contains("ipc-posix-shm-read-data") && hint.contains("file-read-data"),
             "hint must reproduce every attributed denial line; got {hint:?}"
         );
     }
 
-    /// When the only denial in the window is a non-filesystem one, the
-    /// hint degrades to the no-grantable-path wording rather than
+    /// A lone non-filesystem denial degrades to the pathless wording rather than
     /// inventing a path from a service name.
     #[cfg(target_os = "macos")]
     #[test]
@@ -346,8 +294,7 @@ mod tests {
         );
     }
 
-    /// More than [`MAX_DENIAL_LINES`] denials reproduce the cap plus an
-    /// "(N more)" tail rather than the whole stream.
+    /// Denials past the cap collapse into an `(N more)` tail.
     #[cfg(target_os = "macos")]
     #[test]
     fn hint_caps_reproduced_lines() {
@@ -365,8 +312,6 @@ mod tests {
         );
     }
 
-    /// A descendant sample of our own process never reports our own PID
-    /// and parses the `ps` tree without panicking.
     #[test]
     fn sample_descendants_excludes_root() {
         let me = std::process::id();
@@ -374,10 +319,6 @@ mod tests {
         assert!(!kids.contains(&me), "root pid must be excluded");
     }
 
-    /// The Windows hint gate recognises both plausible access-denied exit
-    /// codes and rejects an ordinary nonzero exit (`diff` reporting a
-    /// difference, a failed `grep`), so a ran-fine-but-exited-1 command
-    /// under an active sandbox gets no fabricated sandbox speculation.
     #[cfg(windows)]
     #[test]
     fn plausible_access_denied_exit_recognises_both_codes_and_rejects_ordinary_exits() {

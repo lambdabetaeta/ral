@@ -1,52 +1,23 @@
-//! Outbound HTTPS: trust policy and transport liveness.
-//!
-//! Two concerns for the clients exarch builds. First, trust: every client
-//! validates the peer against the bundled Mozilla webpki root store rather
-//! than the operating system's trust store ([`config`]). This keeps exarch
-//! self-contained: it runs unchanged on container images that ship no
-//! `ca-certificates` bundle — where reqwest's default
-//! `rustls-platform-verifier` path loads zero roots and aborts the client
-//! build — and it sidesteps platform-verifier quirks such as macOS rejecting
-//! an otherwise-valid certificate with `OSStatus -26276`.
-//!
-//! Second, liveness: the transport [`client`] arms a per-read idle timeout
-//! ([`STREAM_IDLE_TIMEOUT`]) and keep-alive probes so a silent or black-holed
-//! connection becomes a retryable transport error rather than a forever-hung
-//! stream.
+//! Outbound HTTPS for every client exarch builds: trust anchored in a bundled
+//! root store rather than the host's, and the liveness bounds that turn a
+//! silent or black-holed connection into a retryable error.
 
 use std::time::Duration;
 
-/// Idle bound for the transport: the longest the socket may go *without
-/// reading a single byte* before the connection is judged dead.  reqwest's
-/// [`read_timeout`](reqwest::ClientBuilder::read_timeout) arms it per read
-/// and resets it on every byte received, so liveness is measured at the
-/// byte/SSE-frame level — an SSE keepalive, a `ping` event, or a partial
-/// frame that genai consumes without emitting a decoded `ChatStreamEvent`
-/// all keep the stream alive.  It is *not* a total cap on the response: a
-/// legitimately slow completion that keeps dribbling bytes runs as long as
-/// it likes.  Without it a connection that goes silent (TCP open, bytes
-/// stopped) blocks the stream forever — `next()` never wakes.  The timeout
-/// turns that dead silence into a retryable transport error instead; 180s is
-/// generous enough not to trip on a slow high-effort time-to-first-token, and the total
-/// idle budget stays bounded across the transient retry budget (~3 attempts,
-/// see [`MAX_ATTEMPTS`]).
-///
-/// [`MAX_ATTEMPTS`]: crate::provider::MAX_ATTEMPTS
+/// Longest the socket may go without reading a byte before the connection is
+/// judged dead. Armed per read and reset by every byte, so an SSE keepalive
+/// counts as life and a slow completion runs as long as it likes; only true
+/// silence — TCP open, bytes stopped, `next()` never waking — trips it, into a
+/// retryable transport error. `retry::idle_timeout` reuses the value as attempt
+/// one's bound on *opening* a stream, where three minutes is the room a slow
+/// high-effort time-to-first-token needs.
 pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_mins(3);
 
-/// rustls config validating against the bundled Mozilla webpki roots.
-///
-/// This choice is **deliberately the inverse of `guest_net::upstream::client`**,
-/// which validates against *this computer's own* trust store instead. The
-/// two must never be swapped. This client speaks for exarch itself — to
-/// model providers exarch's own operator chose — on a process that may run
-/// on a container image with no OS trust store to consult, so a bundled set
-/// it always carries with it is the only trust source that is guaranteed to
-/// be there. `guest_net::upstream::client` speaks for a *guest*, on the
-/// strength of *this machine's* judgement about what is safe to
-/// `pip install` or `apt install` — the guest has no store of its own to
-/// consult, so the one store that can stand behind that judgement is this
-/// computer's.
+/// rustls config validating against the bundled Mozilla webpki roots, never the
+/// host's trust store: exarch must run unchanged on container images that ship
+/// no `ca-certificates` bundle, where reqwest's default platform verifier finds
+/// zero roots and the client build aborts. It also sidesteps verifier quirks
+/// like macOS rejecting a valid certificate with `OSStatus -26276`.
 pub(crate) fn config() -> rustls::ClientConfig {
     let mut roots = rustls::RootCertStore::empty();
     roots
@@ -61,26 +32,20 @@ pub(crate) fn config() -> rustls::ClientConfig {
     .with_no_client_auth()
 }
 
-/// How often to probe an HTTP/2 connection with a PING frame, and how long
-/// to wait for the PONG before judging the connection dead.  Without these,
-/// a black-holed connection (TCP open, bytes silently dropped by a NAT or
-/// LB) sits in reqwest's pool looking healthy, and every retry of a stalled
-/// request is dealt onto the *same* dead connection — observed in production
-/// as a run burning its whole provider retry budget on back-to-back
-/// `STREAM_IDLE_TIMEOUT` stalls while a fresh process succeeded at once.
-/// PINGs turn that silence into a transport error in ~45s and evict the
-/// connection, so the next attempt dials fresh.
+/// PING interval and PONG deadline for HTTP/2. Without them a black-holed
+/// connection — TCP open, bytes silently dropped by a NAT or LB — sits in
+/// reqwest's pool looking healthy, and every retry is dealt onto that same dead
+/// socket, spending the whole budget on back-to-back idle stalls. The probes
+/// evict it in ~45s, so the next attempt dials fresh.
 const H2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 const H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(15);
-/// TCP-level keepalive: the same dead-peer detection for HTTP/1.1
-/// connections, which h2 PINGs do not cover.
+/// The same dead-peer detection for HTTP/1.1, which h2 PINGs do not reach.
 const TCP_KEEP_ALIVE: Duration = Duration::from_secs(30);
 
-/// A `reqwest::Client` bound to [`config`], for the genai transport and model
-/// listing — which would otherwise let genai build a client against the system
-/// trust store. It sets no *total* request timeout (a legitimately slow
-/// completion stays alive) and layers on the liveness bounds documented at
-/// [`STREAM_IDLE_TIMEOUT`], [`H2_KEEP_ALIVE_INTERVAL`], and [`TCP_KEEP_ALIVE`].
+/// A `reqwest::Client` bound to [`config`], handed to the genai transport and
+/// the model listing so neither builds its own against the host trust store.
+/// It sets no *total* request timeout: [`STREAM_IDLE_TIMEOUT`] and the
+/// keep-alives are what bound a hung request, so a slow one is never cut off.
 pub(crate) fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .use_preconfigured_tls(config())

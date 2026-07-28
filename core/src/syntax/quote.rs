@@ -1,39 +1,25 @@
-//! Source-level quoting: turn an arbitrary string into ral source that
-//! re-lexes back to the same string as a single token.
+//! Turn a string into ral source that re-lexes back to that same string
+//! as a single token.
 //!
-//! Ral's single-quoted strings have no escape syntax — a `'` in the body
-//! cannot be encoded as `\'` (POSIX-style) or by closing-and-reopening
-//! (`'foo'\''bar'`).  Instead the lexer accepts a _hash-bumped_ form:
-//! `n` `#`s followed by `'` opens a string that closes only on `'`
-//! followed by `n` `#`s.  These helpers pick the smallest hash level
-//! that does not collide with the body, so the result is always the
-//! shortest correct quoting.
-//!
-//! These are _ral source_ rules, not POSIX shell rules.  The
-//! `shell-quote` builtin in `core/src/builtins/strings.rs` keeps its
-//! POSIX semantics so it can round-trip with `shell-split`.
+//! Ral's single-quoted strings have no escapes, so a body containing `'`
+//! is written hash-bumped: `n` `#`s then `'`, closing only on `'` then
+//! `n` `#`s.  These are ral's rules, not POSIX's — the `shell-quote`
+//! builtin in `core/src/builtins/strings.rs` keeps POSIX semantics so it
+//! round-trips with `shell-split`.
 
 use std::borrow::Cow;
 
 use crate::syntax::ast::Word;
 use crate::syntax::lexer::{Token, lex};
 
-/// True when `s` can appear in ral source as one bare token whose lexed
-/// value is exactly `s`.
+/// True when `s` lexes as one bare word whose value is exactly `s`.
 ///
-/// Bareness is a *positional* property of the lexer, not a per-character
-/// one: a `#` opens a comment only at token start, `...` is a spread, a
-/// `:` splits when whitespace or `]` follows it, `?`/`&` are their own
-/// tokens.  A per-char `is_bare_char` scan cannot see any of that and
-/// mis-classifies `#foo`, `...`, `foo:` as bare.  Rather than re-derive
-/// (and drift from) those rules, the predicate is grounded directly in
-/// the lexer: `s` is bare exactly when lexing it yields one
-/// `Word::Plain` / `Word::Slash` token whose body is `s`.
-///
-/// `,` is the one carve-out the lexer can't decide context-free: it
-/// stays inside a word at the top level but punctuates inside `[…]`.
-/// A completion result may be inserted in either position, so a comma
-/// forces quoting regardless of where the standalone lex landed.
+/// Bareness is positional — `#` opens a comment only at token start, `:`
+/// splits only before whitespace or `]` — so it is settled by lexing
+/// rather than by a per-character scan like the lexer's `is_bare_char`,
+/// which would call `#foo`, `...` and `foo:` bare.  `,` is the case
+/// lexing cannot settle: it stays inside a word at top level and
+/// punctuates inside `[…]`, so it always forces quoting.
 pub fn is_bare_word(s: &str) -> bool {
     if s.is_empty() || s.contains(',') {
         return false;
@@ -48,14 +34,8 @@ pub fn is_bare_word(s: &str) -> bool {
     )
 }
 
-/// Return ral source for `s` such that lexing the source yields one
-/// token whose payload equals `s`.  The strategy in order:
-///
-/// 1. Bare word if [`is_bare_word`].
-/// 2. Plain single-quoted `'…'` if `s` contains no `'`.
-/// 3. Hash-bumped single-quoted `#'…'#` (or with more `#`s) at the
-///    smallest level whose closing run `'######` does not occur inside
-///    `s`.
+/// Ral source for `s`: bare where it can be, else single-quoted, else
+/// hash-bumped to the smallest level the body leaves free.
 pub fn quote_word(s: &str) -> String {
     if is_bare_word(s) {
         return s.to_string();
@@ -68,8 +48,7 @@ pub fn quote_word(s: &str) -> String {
     format!("{hashes}'{s}'{hashes}")
 }
 
-/// `Cow`-returning variant: bare words pass through borrowed, so the
-/// hot path in completion never allocates.
+/// [`quote_word`] returning a `Cow`, so bare words pass through borrowed.
 pub fn quote_word_if_needed(s: &str) -> Cow<'_, str> {
     if is_bare_word(s) {
         Cow::Borrowed(s)
@@ -78,9 +57,8 @@ pub fn quote_word_if_needed(s: &str) -> Cow<'_, str> {
     }
 }
 
-/// Smallest `n ≥ 1` such that the closing sequence `'` + `n` `#`s does
-/// not appear inside `s`.  Picking the level by direct search keeps the
-/// quoting minimal without resorting to escape trickery.
+/// Smallest `n ≥ 1` whose closer, `'` followed by `n` `#`s, is absent
+/// from `s`.
 fn min_bump_level(s: &str) -> usize {
     let mut level = 1;
     loop {
@@ -97,8 +75,6 @@ mod tests {
     use super::*;
     use crate::syntax::lexer::{Token, lex};
 
-    /// Re-lex `src` and assert it yields exactly one token whose
-    /// payload (string body or bare word) equals `expected`.
     fn lex_round_trip(src: &str, expected: &str) {
         let toks = lex(src).expect("lex");
         let payloads: Vec<&Token> = toks
@@ -153,7 +129,7 @@ mod tests {
         }
     }
 
-    // ── quote_word: choose minimal form ─────────────────────────────
+    // ── quote_word ───────────────────────────────────────────────────
 
     #[test]
     fn quote_word_bare_passes_through() {
@@ -177,7 +153,7 @@ mod tests {
 
     #[test]
     fn quote_word_tilde_uses_single_quotes() {
-        // Bare `~foo` would tilde-expand; quoting prevents that.
+        // Bare `~foo` would tilde-expand.
         assert_eq!(quote_word("~foo"), "'~foo'");
     }
 
@@ -195,7 +171,7 @@ mod tests {
 
     #[test]
     fn quote_word_close_run_in_body_bumps_further() {
-        // Body contains `'#`, so #'…'# would mis-close.  Level 2 (##'…'##) suffices.
+        // The body holds `'#`, which would close a level-1 quote early.
         assert_eq!(quote_word("a'#b"), "##'a'#b'##");
     }
 
@@ -206,7 +182,7 @@ mod tests {
 
     #[test]
     fn quote_word_unicode_is_bare() {
-        // Non-ASCII letters are not metacharacters, so they stay bare.
+        // Non-ASCII letters are not metacharacters.
         assert_eq!(quote_word("日本語"), "日本語");
     }
 
@@ -215,7 +191,7 @@ mod tests {
         assert_eq!(quote_word("a 日 b"), "'a 日 b'");
     }
 
-    // ── quote_word_if_needed borrows bare words ─────────────────────
+    // ── quote_word_if_needed ─────────────────────────────────────────
 
     #[test]
     fn quote_word_if_needed_borrows_bare() {
@@ -232,7 +208,7 @@ mod tests {
         assert_eq!(cow.as_ref(), "'a b'");
     }
 
-    // ── round-trips through the actual lexer ─────────────────────────
+    // ── lexer round-trips ────────────────────────────────────────────
 
     #[test]
     fn lex_round_trips_for_assorted_inputs() {
@@ -248,7 +224,7 @@ mod tests {
             "a'#b",
             "日本語",
             "",
-            // F10: positional metacharacters that a per-char scan missed.
+            // Positional metacharacters, invisible to a per-char scan.
             "#foo",    // leading `#` opens a comment
             "#f.txt#", // emacs backup name
             "foo:",    // trailing `:` splits off a Colon
@@ -262,8 +238,6 @@ mod tests {
         }
     }
 
-    /// F10: the positional metacharacter shapes are *not* bare words —
-    /// quoting them is mandatory for a faithful round-trip.
     #[test]
     fn bare_word_rejects_positional_metacharacters() {
         for s in ["#foo", "#f.txt#", "foo:", "...", ":", "?x", "&x"] {
@@ -271,8 +245,6 @@ mod tests {
         }
     }
 
-    /// An embedded `:` not followed by whitespace stays in one word, so
-    /// `host:5432` is still bare (the lexer does not split there).
     #[test]
     fn bare_word_keeps_embedded_colon() {
         assert!(is_bare_word("host:5432"));

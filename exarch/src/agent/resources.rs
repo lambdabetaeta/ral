@@ -1,27 +1,12 @@
-//! The `/resources` probe fold: one row per session-lived accumulator,
-//! rendered as one card.
-//!
-//! The probe convention: every session-lived accumulator registers a
-//! [`ProbeRow`] — its name, current size, cap, and pressure policy — and
-//! `/resources` is a *fold over the registered probes*, never a bespoke
-//! report. The fold is deliberately the inspector built before any enforcer:
-//! an accumulator whose cap lands later states its *decided*
-//! policy with `cap: None` and a note saying so, because a budget that
-//! cannot be inspected will be debugged by restarting the process.
-//!
-//! Probing never mutates and never renews a lease — enumeration is not
-//! observation, the same ledger law the `workers` listing obeys. Residents
-//! (workers, agents, schedules — things a capability reaches) and mere
-//! accumulators (a viewport, the bus, an inbox) are both probed; only
-//! residents are listed, cancelled, and leased.
+//! The `/resources` probe fold: one [`ProbeRow`] per session-lived
+//! accumulator — name, size, cap, pressure policy — rendered as one card.
 //!
 //! The fold has two halves, split by who may legally read what: the agent
-//! assembles its own rows on its attend thread (the shell's registry and
-//! bindings, its inbox, log, and disk — [`Agent::resource_rows`]), and the
-//! frontend appends the rows for the accumulators *it* owns (viewports,
-//! views, the bus — [`frontend_rows`]) once [`Agent::emit_resources`] has
-//! folded the agent's rows into the card and put both on the bus. Neither
-//! half reaches across a thread for the other's figures.
+//! assembles its own rows on its attend thread ([`Agent::resource_rows`]),
+//! and the TUI's `Kind::Resources` arm appends the rows for the accumulators
+//! *it* owns ([`frontend_rows`]). Neither half reaches across a thread for
+//! the other's figures. Probing mutates nothing and renews no lease, so
+//! `/resources` cannot immortalise the zombies it exists to reveal.
 
 use crate::agent::Agent;
 use crate::agent::digest::COMPACT_THRESHOLD;
@@ -34,37 +19,25 @@ use serde::Serialize;
 use std::path::Path;
 use std::time::Duration;
 
-/// One probed accumulator: the row the `/resources` fold renders and
-/// `transcript.jsonl` records.
-///
-/// `policy` is the accumulator's *pressure policy* from the ADR's closed
-/// vocabulary — `"coalesce"` (idempotent entries merge), `"reject"`
-/// (admission refused at the cap), `"evict"` (old entries dropped),
-/// `"reap"` (a lease expires it), `"warn"` (reported, never acted on), or
-/// `"none (unbounded)"` — stated even where the enforcement lands later:
-/// the row then carries `cap: None` and a note saying the cap is pending,
-/// so the inspector precedes the enforcer honestly.
+/// One probed accumulator, one row per figure: what the fold renders and
+/// `transcript.jsonl` records. `policy` comes from a closed vocabulary —
+/// `"coalesce"`, `"reject"`, `"evict"`, `"reap"`, `"warn"`, `"none
+/// (unbounded)"` — and is stated even where the enforcement lands later,
+/// the row then carrying `cap: None` and a note saying so.
 #[derive(Clone, Debug, Serialize)]
 pub struct ProbeRow {
-    /// The accumulator's name, one row per figure of a multi-figure
-    /// accumulator (`viewport.blocks`, `inbox[user]`, …).
     pub name: String,
-    /// Its size now, in the unit the name implies (a count, bytes,
-    /// seconds).
+    /// Its size now, in the unit the name implies (a count, bytes, seconds).
     pub current: u64,
     /// The enforced bound, when one is armed; `None` for a decided-but-
-    /// unenforced cap (see the note) or a genuinely unbounded figure.
+    /// unenforced cap and for a genuinely unbounded figure alike.
     pub cap: Option<u64>,
-    /// The pressure policy, from the closed vocabulary above.
     pub policy: &'static str,
-    /// A free clause: the nearest time-to-reap, the pending-enforcement
-    /// disclaimer, the probed path.
+    /// A free clause: the nearest time-to-reap, the probed path.
     pub note: Option<String>,
 }
 
 impl ProbeRow {
-    /// Build a row; the one constructor, so every call site reads the same
-    /// field order the struct declares.
     pub fn new(
         name: impl Into<String>,
         current: u64,
@@ -82,9 +55,8 @@ impl ProbeRow {
     }
 }
 
-/// Render `rows` as one aligned [`Mark::Fields`] matrix: per row, the
-/// current figure (with `/cap` when one is armed), then the policy and
-/// note as muted ink — data first, discipline second.
+/// Render `rows` as one aligned [`Mark::Fields`] matrix: the figure (with
+/// `/cap` when one is armed), then policy and note as muted ink.
 pub fn rows_mark(rows: &[ProbeRow]) -> Mark {
     let fields = rows
         .iter()
@@ -117,8 +89,7 @@ pub fn rows_mark(rows: &[ProbeRow]) -> Mark {
     Mark::Fields { rows: fields }
 }
 
-/// A strong one-line section heading, for the frontend to title the rows it
-/// appends beneath the agent's.
+/// A strong one-line section heading, titling a run of rows.
 pub fn section_mark(title: &str) -> Mark {
     Mark::Text {
         spans: vec![Span {
@@ -128,59 +99,44 @@ pub fn section_mark(title: &str) -> Mark {
     }
 }
 
-/// Compose the agent's probe rows into the `/resources` card: a `resources`
-/// heading over one [`rows_mark`] matrix.
-///
-/// The frontend appends its own
-/// section to this card at render time; the raw rows ride beside it on the
-/// bus for `transcript.jsonl`.
+/// Compose the agent's rows into the `/resources` card: a heading over one
+/// [`rows_mark`] matrix. The frontend appends its own section at render
+/// time; the raw rows ride beside the card on the bus.
 pub fn resources_card(rows: &[ProbeRow]) -> Card {
     Card(vec![section_mark("resources"), rows_mark(rows)])
 }
 
-/// The probed agent's viewport window, figures beside the caps that bound
-/// them — one accumulator, one struct, so a figure can never drift apart
-/// from the cap it is measured against.
+/// The probed agent's viewport window: figures beside the caps that bound
+/// them, in one struct so a figure cannot drift from its cap.
 #[derive(Clone, Copy)]
 pub struct ViewportFigures {
-    /// Scrollback blocks currently retained in heap.
     pub blocks: u64,
     /// Rendered rows in the memoised flatten, as of the last paint.
     pub rows: u64,
-    /// Those rows' summed text bytes. No cap of its own — bounded
-    /// indirectly by the blocks/rows caps.
+    /// Those rows' summed text bytes; no cap of its own, bounded indirectly
+    /// by the blocks/rows caps.
     pub bytes: u64,
-    /// The enforced block-count window cap (`tui::viewport::VIEWPORT_MAX_BLOCKS`).
+    /// `tui::viewport::VIEWPORT_MAX_BLOCKS`.
     pub blocks_cap: u64,
-    /// The enforced rendered-row window cap (`tui::viewport::VIEWPORT_MAX_ROWS`).
+    /// `tui::viewport::VIEWPORT_MAX_ROWS`.
     pub rows_cap: u64,
 }
 
-/// The fleet's view counts: how many per-agent views the frontend holds,
-/// split live/dead, plus the live-agent tab count.
-///
-/// The tab count is a distinct row
-/// (`fleet.agents`) even when its figure coincides with `live`, because
-/// the registry, not the tab bar, is the authority on agents.
+/// The fleet's view counts: per-agent views the frontend holds, split
+/// live/dead, plus the live-agent tab count.
 #[derive(Clone, Copy)]
 pub struct ViewFigures {
-    /// Views whose agent still runs — one per live agent, unbounded.
     pub live: u64,
-    /// Views whose agent has died — lingering, or already tombstoned down
-    /// to (id, status, log path) once past `LINGER`.
+    /// Views whose agent has died — lingering, or already tombstoned down to
+    /// (id, status, log path) once past `tui::LINGER`.
     pub dead: u64,
-    /// The frontend's live-agent tab count.
     pub agents: u64,
 }
 
-/// The presentation bus's two probe figures.
-///
-/// Neither carries a `cap`: the
-/// bounded transport's one enforced number is a *per-entry* text cap
-/// (`bus::MERGE_TEXT_CAP`), a different axis from either figure's
-/// aggregate, so cramming it into `cap` would read as a false ceiling on a
-/// count or a sum it does not bound — the cap is named in `bus.bytes`'s
-/// note instead, honest cap-less rows over a silently mismatched pair.
+/// The presentation bus's two probe figures. Neither carries a cap: the
+/// transport's one enforced number is a *per-entry* text cap
+/// (`bus::MERGE_TEXT_CAP`), a different axis from either aggregate, so it is
+/// named in `bus.bytes`'s note rather than faked into `cap`.
 #[derive(Clone, Copy)]
 pub struct BusFigures {
     /// Queue entries — a merged run and a reserved kind each count as one.
@@ -189,13 +145,9 @@ pub struct BusFigures {
     pub bytes: u64,
 }
 
-/// The rows for the accumulators the frontend owns — the probed agent's
-/// viewport window, the fleet's view counts, and the bus.
-///
-/// Pure in its
-/// figures so the row shapes are unit-testable without a terminal: the
-/// caller (the TUI's `Kind::Resources` arm) reads the figures off the
-/// tabs/viewport/bus structures it holds.
+/// The rows for the accumulators the frontend owns. Pure in its figures so
+/// the row shapes are unit-testable without a terminal: the TUI's
+/// `Kind::Resources` arm reads them off the tabs/viewport/bus it holds.
 pub fn frontend_rows(
     viewport: ViewportFigures,
     views: ViewFigures,
@@ -264,9 +216,9 @@ pub fn frontend_rows(
     ]
 }
 
-/// The shared 3-tier `h/m/s` duration formatter — `2h05m` / `41m09s` /
-/// `12s` — with `sep` between the two units of the multi-unit forms:
-/// `terse_duration` passes `""`, the rate-limit readout `" "`.
+/// The shared 3-tier `h/m/s` formatter — `2h05m` / `41m09s` / `12s` — with
+/// `sep` between the two units of the multi-unit forms: `terse_duration`
+/// passes `""`, the TUI's rate-limit readout `" "`.
 pub fn hms(secs: u64, sep: &str) -> String {
     if secs >= 3600 {
         format!("{}h{sep}{:02}m", secs / 3600, (secs % 3600) / 60)
@@ -277,25 +229,17 @@ pub fn hms(secs: u64, sep: &str) -> String {
     }
 }
 
-/// A duration as terse probe ink — `2h05m`, `41m09s`, `12s` — for the
-/// nearest-reap notes.
+/// A duration as terse probe ink, for the nearest-reap notes.
 pub fn terse_duration(d: Duration) -> String {
     hms(d.as_secs(), "")
 }
 
-/// Total size in bytes of every regular file under `root`, recursively —
-/// the disk probe's figure, walked at invocation and never periodically,
-/// so the probe's cost is paid exactly when the operator asks.
-///
-/// Symlinks
-/// are not followed (their target may leave the probed tree); unreadable
-/// entries count zero rather than fail the fold.
-///
-/// Sizes are read per-path (`symlink_metadata`, which stats by handle)
-/// rather than from the `DirEntry` — on Windows the enumeration figure
-/// is the directory's *cached* size, which NTFS only refreshes when the
-/// last writer closes, so a live, still-open log file would probe as 0.
-/// `symlink_metadata` (not `metadata`) keeps the don't-follow rule.
+/// Total bytes of every regular file under `root`, recursively; symlinks are
+/// not followed (their target may leave the probed tree) and an unreadable
+/// entry counts zero rather than failing the fold. Sizes come per-path from
+/// `symlink_metadata`, not the `DirEntry`: on Windows the enumeration figure
+/// is the directory's *cached* size, which NTFS refreshes only when the last
+/// writer closes, so a live, still-open log file would probe as 0.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:resources-disk-probe] the /resources disk figure: a read-only metadata walk of the session's own log/scratch dirs, priced at invocation; operator diagnostics, not turn-time model I/O"
@@ -323,23 +267,14 @@ pub fn dir_size(root: &Path) -> u64 {
 }
 
 impl Agent {
-    /// Assemble this agent's half of the `/resources` probe fold — one
-    /// [`ProbeRow`] per session-lived accumulator this attend thread may
-    /// legally read: the shell's worker registry (running and settled
-    /// counts by class, with the nearest time-to-reap), the inbox's depth
-    /// per source, the event log's mirror length and history bytes, the
-    /// shell's binding count, the log-dir and scratch disk footprint
-    /// (walked at invocation, never periodically), and the sub-agent idle
-    /// lease's two rows.  A pure survey: nothing is mutated and no lease is
-    /// renewed — enumeration is not observation — so `/resources` can never
-    /// immortalise the zombies it exists to reveal.  The frontend appends
-    /// the rows for the accumulators *it* owns (viewports, views, the bus)
-    /// at render time; neither half reaches across a thread for the
-    /// other's figures.
+    /// Assemble this agent's half of the fold — one [`ProbeRow`] per
+    /// accumulator this attend thread may legally read: the shell's worker
+    /// registry and bindings, the inbox, the event log, the log-dir and
+    /// scratch footprint (walked here at invocation, not on a timer), and
+    /// the sub-agent idle lease. Nothing mutated, no lease renewed.
     fn resource_rows(&self) -> Vec<ProbeRow> {
         let mut rows = Vec::new();
 
-        // ── the worker registry: running and settled, by class ──────────
         let entries = self.probe_workers();
         let mut running_worker = 0u64;
         let mut running_durable = 0u64;
@@ -351,10 +286,9 @@ impl Agent {
                 match entry.class {
                     ral_core::types::LeaseClass::Worker => {
                         running_worker += 1;
-                        // The nearer of the entry's two lease margins: idle
-                        // remaining off the shared last-observed cell, and
-                        // backstop remaining off its (display-only, close
-                        // enough for a probe) wall-clock start.
+                        // The nearer of the entry's two margins: idle off the
+                        // shared last-observed cell, backstop off its
+                        // (display-only, close enough here) wall-clock start.
                         let idle_left = shell_eval::DETACHED_WORKER_CEILING
                             .saturating_sub(std::time::Duration::from_secs(entry.idle_secs));
                         let age = std::time::Duration::from_secs(entry.up_secs);
@@ -367,8 +301,8 @@ impl Agent {
                 }
             } else {
                 settled += 1;
-                // Retention remaining in ral calls; an unstamped entry has
-                // its whole retention ahead — the sweep stamps it next call.
+                // An unstamped entry has its whole retention ahead — the
+                // sweep stamps it next call.
                 let left = match entry.settled_epoch {
                     Some(s) => shell_eval::SETTLED_WORKER_RETENTION
                         .saturating_sub(self.ral_epoch.saturating_sub(s)),
@@ -406,12 +340,10 @@ impl Agent {
             nearest_expiry.map(|n| format!("nearest expiry in {n} ral calls")),
         ));
 
-        // ── the inbox, one row per source ────────────────────────────────
         for (source, depth) in self.inbox.source_depths() {
-            // The ADR's split: idempotent sources coalesce (merge/dedupe)
-            // and never reject, so no cap is enforced against their depth;
-            // non-idempotent sources are accepted or rejected at
-            // `INBOX_SOURCE_CAP` — never silently dropped.
+            // Idempotent sources merge or dedupe and never reject, so no cap
+            // is enforced against their depth; the rest are admitted or
+            // rejected at `INBOX_SOURCE_CAP`, never silently dropped.
             let (policy, cap, note) = match source {
                 "user" | "schedule" | "nudge" => (
                     "coalesce",
@@ -436,7 +368,6 @@ impl Agent {
             ));
         }
 
-        // ── the event log ────────────────────────────────────────────────
         rows.push(ProbeRow::new(
             "log.events",
             self.log.lock().event_count() as u64,
@@ -452,7 +383,6 @@ impl Agent {
             Some("auto-compaction threshold".to_string()),
         ));
 
-        // ── the lexical scope ────────────────────────────────────────────
         let probe_count = |label: &str| match self.seat.transport().probe(FOValue::Variant {
             label: label.into(),
             payload: None,
@@ -492,7 +422,6 @@ impl Agent {
             Some("shallow estimate; a closure's captures are never chased".to_string()),
         ));
 
-        // ── disk, walked at invocation ───────────────────────────────────
         let log_dir = self.log.lock().dir().to_path_buf();
         rows.push(ProbeRow::new(
             "disk.log_dir",
@@ -511,7 +440,6 @@ impl Agent {
             ));
         }
 
-        // ── the sub-agent idle lease, as two rows ────────────────────────
         rows.push(ProbeRow::new(
             "agents.lease",
             self.agents
@@ -533,10 +461,10 @@ impl Agent {
         rows
     }
 
-    /// Emit the `/resources` fold as one [`Kind::Resources`] bus event: the
-    /// agent rows beside the card rendering them.  Called from the TUI's
-    /// `Control` at the exchange boundary the command drains at, exactly where
-    /// `/clear` runs; transcript and TUI only, never model-facing.
+    /// Emit the fold as one [`Kind::Resources`] event: the agent rows beside
+    /// the card rendering them.  Called from `ReplControl` in
+    /// `tui/tui_loop.rs`, at the exchange boundary where `/clear` runs;
+    /// transcript and TUI only, never model-facing.
     pub(crate) fn emit_resources(&self, emit: &Emitter) {
         let rows = self.resource_rows();
         let card = resources_card(&rows);
@@ -554,11 +482,9 @@ mod tests {
     use crate::agent::testkit::*;
     use crate::bus::Post;
 
-    /// The frontend half of the fold: every row wears its decided policy;
-    /// the viewport window's two enforced caps (blocks, rows) show up as
-    /// real `cap`s, while the accumulators with no enforced number of their
-    /// own (bytes, views, the bus) still say so honestly rather than faking
-    /// one.
+    /// Every frontend row wears its policy, but only the viewport window's
+    /// two enforced caps become real `cap`s; the rest stay `None` rather
+    /// than fake a ceiling.
     #[test]
     fn frontend_rows_state_decided_policies_and_the_viewport_window_caps() {
         let rows = frontend_rows(
@@ -626,8 +552,8 @@ mod tests {
         );
     }
 
-    /// The card is a heading plus one aligned matrix, one field per row,
-    /// with the cap rendered into the figure only when armed.
+    /// The card is a heading plus one matrix, one field per row, the cap
+    /// rendered into the figure only when armed.
     #[test]
     fn resources_card_renders_one_field_per_row() {
         let rows = vec![
@@ -657,8 +583,7 @@ mod tests {
         assert_eq!(terse_duration(Duration::from_mins(125)), "2h05m");
     }
 
-    /// The disk probe sums regular files recursively and returns zero for
-    /// a missing directory rather than failing the fold.
+    /// A missing directory reads zero rather than failing the fold.
     #[test]
     fn dir_size_sums_files_recursively() {
         let root = std::env::temp_dir().join(format!("exarch-dirsize-{}", std::process::id()));
@@ -671,20 +596,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    // ── `/resources`: the probe fold's agent half ─────────────────────────
-
-    /// The row for `name`, or a panic naming what is missing.
     fn row<'a>(rows: &'a [ProbeRow], name: &str) -> &'a ProbeRow {
         rows.iter()
             .find(|r| r.name == name)
             .unwrap_or_else(|| panic!("the fold must emit a `{name}` row"))
     }
 
-    /// The agent half of the probe fold surveys what this thread owns: the
-    /// worker registry's running/settled split with time-to-reap notes, the
-    /// binding count (which a `let` increments by exactly one), the inbox's
-    /// per-source depths (counted, never drained), and the sub-agent idle
-    /// lease's fallback when nothing has forked.
+    /// The agent half surveys what this thread owns: the worker registry's
+    /// running/settled split with its time-to-reap notes, the binding count,
+    /// the inbox depths (counted, never drained), and the idle lease's
+    /// fallback when nothing has forked.
     #[test]
     fn resource_rows_survey_the_agents_accumulators() {
         let dir = tmp("resource-rows");
@@ -697,7 +618,6 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
 
-        // One running worker, one settled-unclaimed worker.
         session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
         session.run_shell("c2".into(), "spawn { return 7 }", 30, &emit);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
@@ -709,7 +629,6 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
 
-        // A binding is one more row in the count — measured across a `let`.
         let before = row(&session.resource_rows(), "bindings.count").current;
         session.run_shell("c3".into(), "let probe_marker = 1", 30, &emit);
         let rows = session.resource_rows();
@@ -719,8 +638,6 @@ mod tests {
             "a `let` adds exactly one binding to the probe figure"
         );
 
-        // The registry chapter: one running worker under the admission cap,
-        // with the nearest-reap note; one settled entry under retention.
         let running = row(&rows, "workers.running");
         assert_eq!(running.current, 1);
         assert_eq!(
@@ -747,27 +664,21 @@ mod tests {
             "a settled entry carries its retention remaining in ral calls"
         );
 
-        // The log and disk chapters.
         assert!(row(&rows, "log.events").current > 0);
         assert!(
             row(&rows, "disk.log_dir").current > 0,
             "a session dir with a written events.json probes nonzero"
         );
 
-        // The lease chapter: with no live sub-agents, the row falls back to
-        // the full idle window rather than reporting zero.
         assert_eq!(
             row(&rows, "agents.lease").current,
             AGENT_LEASE_IDLE.as_secs(),
             "no live children — the lease row reports the full idle window"
         );
 
-        // The inbox chapter counts without draining: two queued messages
-        // are visible in the rows, and the whole queue reads identically
-        // after the probe.  (The settled spawn's deferred `Surface` batch
-        // may also sit queued — a legitimate arrival, not the probe's
-        // doing — so the stability check compares snapshots rather than
-        // pinning the full vector.)
+        // The settled spawn's deferred `Surface` batch may also sit queued —
+        // a legitimate arrival, not the probe's doing — so stability
+        // compares snapshots rather than pinning the whole vector.
         session
             .inbox
             .push(Post::UserSteering("hold".into()))
@@ -798,10 +709,8 @@ mod tests {
         }
     }
 
-    /// Probing renews nothing: assembling the rows reads a running
-    /// worker's `last_observed` cell without touching it — enumeration is
-    /// not observation, so `/resources` cannot immortalise the zombies it
-    /// reveals.
+    /// Probing renews nothing: assembling the rows reads a running worker's
+    /// `last_observed` cell without touching it.
     #[test]
     fn resource_rows_renew_no_lease() {
         let dir = tmp("resource-rows-no-renew");

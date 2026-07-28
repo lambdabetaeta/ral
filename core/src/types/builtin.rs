@@ -1,8 +1,7 @@
-//! Builtin command bindings.
+//! Builtin command bindings: command names implemented by host Rust code.
 //!
-//! A [`BuiltinEntry`] is a command name implemented by host Rust code;
-//! the per-shell [`BuiltinTable`] holds the installed sets.  Builtin
-//! bindings live separately from the user handler stack.
+//! The per-shell [`BuiltinTable`] is disjoint from the user handler stack in
+//! `handler.rs`, whose `HandlerEntry::vet` refuses any name a builtin owns.
 
 use super::flow::Settled;
 use super::value::Value;
@@ -12,7 +11,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
-/// Runtime closure backing a captured builtin body, carrying host state.
+/// Runtime closure backing a captured builtin body.
 pub type CapturedBuiltinFn = Arc<
     dyn Fn(&[Value], &crate::types::Mooring, &mut crate::types::Shell) -> Settled<Value>
         + Send
@@ -21,23 +20,19 @@ pub type CapturedBuiltinFn = Arc<
 
 /// Host implementation of a builtin command binding.
 ///
-/// The [`Mooring`](crate::types::Mooring) sits between the arguments and the
-/// shell in every spelling: it is the run's fixed conditions (where events
-/// go, who answers, what stops it), borrowed rather than owned, and so
-/// disjoint from the `&mut Shell` the body mutates.
+/// The [`Mooring`](crate::types::Mooring) is borrowed, not owned: the run's
+/// fixed frame stays disjoint from the `&mut Shell` a body mutates.
 #[derive(Clone)]
 pub enum BuiltinBody {
-    /// Process-static function pointer.
     Static(fn(&[Value], &crate::types::Mooring, &mut crate::types::Shell) -> Settled<Value>),
-    /// Runtime closure with host state captured by the frontend.
     Captured(CapturedBuiltinFn),
 }
 
 impl BuiltinBody {
-    /// Call the body with the given arguments, mooring, and shell.
+    /// Invoke the body.
     ///
     /// # Errors
-    /// Returns `Err` if the invoked body raises a runtime `Break`.
+    /// Propagates a `Break` raised by the body.
     pub fn call(
         &self,
         args: &[Value],
@@ -60,7 +55,7 @@ impl fmt::Debug for BuiltinBody {
     }
 }
 
-/// A builtin command binding: a name implemented by host Rust code.
+/// A builtin command binding; `doc` is the line `help` and `explain` print.
 #[derive(Clone)]
 pub struct BuiltinEntry {
     pub name: Cow<'static, str>,
@@ -70,8 +65,8 @@ pub struct BuiltinEntry {
 }
 
 impl BuiltinEntry {
-    /// Fixed value-arg count for `$name` η-expansion and typecheck.
-    /// `None` for entries without a fixed argv.
+    /// Value-arg count `synthesize_builtin_value` η-expands `$name` to;
+    /// `None` when the argv is not fixed.
     pub fn fixed_arity(&self) -> Option<usize> {
         match &self.type_rule {
             BuiltinTypeRule::Scheme(arity, _) => *arity,
@@ -89,7 +84,8 @@ impl fmt::Debug for BuiltinEntry {
     }
 }
 
-/// Per-shell builtin command bindings.
+/// Per-shell builtin command bindings.  Names are disjoint across installed
+/// sets — a collision panics at install — so lookup order never shadows.
 #[derive(Debug, Clone, Default)]
 pub struct BuiltinTable {
     sets: imbl::Vector<Arc<[BuiltinEntry]>>,
@@ -99,22 +95,19 @@ impl BuiltinTable {
     /// Install a group of builtin entries for this shell.
     ///
     /// # Panics
-    /// Panics if a name in `entries` collides with an already-installed
-    /// builtin, or if a name appears twice within `entries`.
+    /// If a name collides with an installed builtin or repeats in `entries`.
     pub fn install_static(&mut self, entries: &'static [BuiltinEntry]) {
         self.install_arc(Arc::from(entries));
     }
 
     /// Install runtime-owned builtin entries for this shell.
     ///
-    /// Idempotent: re-installing a set already installed here — by `Arc`
-    /// pointer identity, or by carrying the same names as a set already
-    /// installed — is a no-op. Name collisions against a *different*
-    /// installed set panic: host crates must own disjoint surfaces.
+    /// Idempotent: a set already here — by `Arc` identity, or by carrying the
+    /// same names — reinstalls as a no-op.
     ///
     /// # Panics
-    /// Panics if a name in `entries` collides with an already-installed
-    /// builtin, or if a name appears twice within `entries`.
+    /// If a name collides with a *different* installed set — host crates must
+    /// own disjoint surfaces — or repeats in `entries`.
     pub fn install_arc(&mut self, entries: Arc<[BuiltinEntry]>) {
         if self
             .sets
@@ -129,7 +122,7 @@ impl BuiltinTable {
         self.sets.push_back(entries);
     }
 
-    /// Look up a builtin, newest installed set first.
+    /// Look up a builtin by name.
     pub fn get(&self, name: &str) -> Option<BuiltinEntry> {
         self.sets
             .iter()

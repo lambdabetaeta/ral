@@ -1,74 +1,46 @@
-//! The data-encoding marginal rail.
+//! The marginal rail: the left two columns of every block, one cell carrying
+//! three variables at once — shape for the block's kind ([`RailKind`]), hue for
+//! the producing agent ([`AGENT_HUES`]), lightness for magnitude ([`value_step`]
+//! then [`lighten`]).
 //!
-//! The left two columns of every block are re-projected as a scannable
-//! thumbnail of the session: one cell carries three of Bertin's visual
-//! variables at once —
-//!
-//! - **shape** (associative) → block *kind*, via [`RailKind`];
-//! - **hue** (associative) → the *producing agent*, via [`AGENT_HUES`];
-//! - **value** (the ordered lightness ramp) → *magnitude*, via
-//!   [`value_step`] + [`lighten`].
-//!
-//! Hue is a per-*view* tint, not a per-block variable: within one transcript
-//! every block shares the tab's agent, so the whole rail glows that agent's
-//! hue — constant here by design, and read on a tab-switch as "whose
-//! transcript is this". The human's prompt fence is the exception, wearing a
-//! neutral [`super::palette::PROMPT_INK`] so it never reads as an agent.
-//!
-//! The rail is the keystone of the "transcript as graphic" re-encoding: the
-//! variables live per-`Block` rather than woven into prose, so the session's
-//! shape reads at a glance and every later projection (matrix, codebase map)
-//! composes on the same substrate.
+//! Hue is constant down a tab, since every block of one transcript shares its
+//! agent; it is read on a tab-switch, not block to block. The human's prompt
+//! fence is the exception, wearing a neutral [`PROMPT_INK`] so it never reads
+//! as an agent.
 
 use super::block::AgentSlot;
 use super::palette::{AGENT_HUES, PROMPT_INK};
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 
-/// The rail glyph a block wears, derived from its [`super::block::BlockKind`].
-/// Each variant maps to one shape cell, and every kind has its own — the
-/// shape names the kind, with no two kinds sharing a glyph. Chrome's coarse
-/// [`RailShape`] (`Step` / `Error` / `ToolCall`) is lifted into this set by
-/// the block.
+/// The shape a block wears, one glyph per kind and no two kinds sharing one.
+/// Derived from [`super::block::BlockKind`]; chrome's coarser
+/// [`super::block::RailShape`] is lifted into this set by `Block::rail_kind`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum RailKind {
-    /// A file mutation — the change-bar `▎`. Both an `edit`'s located diff
-    /// (dialable to its hunks) and a whole-file write (atomic, a one-line
-    /// summary) wear it; the body, not the shape, says which.
+    /// A file mutation, diff or whole-file write alike; the body says which.
     Patch,
-    /// A tool call, open or shut — the disclosure triangle *is* the
-    /// tool-call shape, so no separate `◆`. A summary-less call (`fff`, an
-    /// invalid-input header) is the shut triangle, inert: there is nothing
-    /// to dial, but a tool call is a tool call.
+    /// A tool call, `true` once dialled open to its context.
     ToolCall(bool),
     Markdown,
-    /// A model thinking trace — the `∴` therefore shape, dialable as its own
-    /// block. The answer it produced remains a separate plain prose `·`
-    /// block, so deliberation and conclusion stay distinct in the rail.
+    /// A thinking trace. The answer it reached is a separate `Markdown` block,
+    /// so deliberation and conclusion stay distinct in the rail.
     Thinking,
-    /// An async subagent's landed result — the `↘` delegated-result shape.
     Subagent,
-    /// An outbound fleet act — `spawn`, `cancel`, `message`, `reply`: the
-    /// `↗` shape, the outbound twin of the `↘` a subagent's result lands
-    /// under. An act changes the world outside the turn, so it wears its own
-    /// shape rather than a tool call's triangle.
+    /// `spawn`, `cancel`, `message`, `reply` — an act on the fleet, landing now.
     FleetAct,
-    /// A time act — `schedule`, `unschedule`: the `◷` clock-face shape. Its
-    /// effect lands not now but on a clock, which is the one thing that
-    /// separates it from a fleet act.
+    /// `schedule`, `unschedule` — an act that lands on a clock instead.
     TimeAct,
     Step,
     Error,
-    /// The human turn's fence — a `❖` in the human's [`PROMPT_INK`], beside
-    /// the full-width rule, so the rail thumbnail still shows where each turn
-    /// opens. The sole wearer of `❖`, so the glyph reads as "the human".
+    /// The human's turn — the one kind not tinted by an agent's hue.
     Prompt,
-    /// A system note — operational metadata (model switch, stream stall, compaction). The `▪` square.
+    /// Any other chrome notice: a model switch, a stall, a compaction.
     Note,
 }
 impl RailKind {
-    /// The single-cell shape glyph. Every glyph is one display column so
-    /// the rail stays a fixed 2-col width (glyph + space) across kinds.
+    /// The shape glyph. Every one is a single display column, so the rail keeps
+    /// its fixed 2-column width (glyph plus space) across kinds.
     fn glyph(self) -> &'static str {
         match self {
             Self::Patch => "▎",
@@ -87,11 +59,9 @@ impl RailKind {
     }
 }
 
-/// The shape vocabulary, each variant paired with the block kind it names —
-/// the row source the `/legend` panel draws its shape samples from (via
-/// [`span`]), so the legend enumerates the same set the rail dispatches on
-/// and can never list a glyph the rail does not draw. A shut / open tool
-/// call is one shape under disclosure, so both triangles appear.
+/// The shape vocabulary with its glosses: both the rows `/legend` draws (in
+/// `super::banner`) and the set [`is_rail_prefix`] recognises. A kind left out
+/// here is one the rail draws but copy will not strip.
 pub(super) const RAIL_SHAPES: &[(RailKind, &str)] = &[
     (RailKind::Patch, "file change — diff or write"),
     (RailKind::ToolCall(false), "tool call, shut"),
@@ -110,10 +80,9 @@ pub(super) const RAIL_SHAPES: &[(RailKind, &str)] = &[
     (RailKind::Note, "system note"),
 ];
 
-/// Bucket a magnitude into a `0..=3` lightness step: `None` and tiny
-/// changes read at the base hue (step 0); larger events step toward
-/// white so brighter rail = larger event, comparable across the whole
-/// buffer at rest. The thresholds roughly track `log2` of line count.
+/// Bucket a magnitude onto a `0..=3` lightness step, thresholds tracking `log2`
+/// of a line count. Absent and tiny both sit at the base hue, so a rail with no
+/// magnitude to report reads as the quietest event rather than a missing one.
 pub(super) fn value_step(magnitude: Option<u32>) -> u8 {
     match magnitude {
         None => 0,
@@ -124,12 +93,11 @@ pub(super) fn value_step(magnitude: Option<u32>) -> u8 {
     }
 }
 
-/// Linearly interpolate `from` toward `to` by `t` (clamped to
-/// `0.0..=1.0`), channel by channel. The value ramp ([`lighten`]) and the
-/// fidelity modulations ([`super::md`]) both express themselves in terms
-/// of it, so colour interpolation has one definition. A non-RGB `from`
-/// passes through unchanged (the palette is RGB, so this only matters for
-/// themed fallbacks).
+/// Channel-wise lerp of `from` toward `to` by `t`, clamped to `0.0..=1.0` — the
+/// one definition of colour interpolation, which the value ramp, the fidelity
+/// drain in `super::md`, and the picker's effort ramp all route through. A
+/// non-RGB `from` passes through unchanged; the palette is RGB, so only themed
+/// fallbacks take that path.
 pub(super) fn mix(from: Color, to: Color, t: f32) -> Color {
     let (Color::Rgb(fr, fg, fb), Color::Rgb(tr, tg, tb)) = (from, to) else {
         return from;
@@ -152,21 +120,16 @@ pub(super) fn mix(from: Color, to: Color, t: f32) -> Color {
     Color::Rgb(lerp(fr, tr), lerp(fg, tg), lerp(fb, tb))
 }
 
-/// Interpolate an RGB colour toward white (255) by `step / 3` of the
-/// remaining distance, so step 3 is white. Non-RGB colours pass through
-/// unchanged. Brighter = larger magnitude; hue is preserved on the way,
-/// so agent identity never collides with the value ramp.
+/// Carry `c` toward white by `step / 3` of the remaining distance, so step 3 is
+/// white. Hue survives the ramp, so agent identity never collides with value.
 pub(super) fn lighten(c: Color, step: u8) -> Color {
     mix(c, Color::Rgb(255, 255, 255), f32::from(step) / 3.0)
 }
 
-/// Drain an RGB colour's saturation toward grey by `t` (clamped to
-/// `0.0..=1.0`), holding its luminance: mix toward the grey of the
-/// colour's own Rec. 601 luma, so the result keeps its lightness but loses
-/// its hue. This is the fidelity drain ([`super::md`]) — distrust reads as
-/// "the colour has gone out of it" without touching the value (lightness)
-/// channel magnitude rides, so a degraded passage stays as legible as a
-/// sound one. Non-RGB colours pass through unchanged.
+/// Drain `c` toward the grey of its own Rec. 601 luma by `t`: hue goes, and
+/// lightness stays. Holding luminance is the point — this is the fidelity drain
+/// `super::md` applies, and it must not disturb the lightness channel magnitude
+/// rides, so a degraded passage stays as legible as a sound one.
 pub(super) fn desaturate(c: Color, t: f32) -> Color {
     let Color::Rgb(r, g, b) = c else {
         return c;
@@ -184,20 +147,17 @@ pub(super) fn desaturate(c: Color, t: f32) -> Color {
     mix(c, Color::Rgb(luma, luma, luma), t)
 }
 
-/// True when `s` is exactly one shape glyph plus its trailing space — the
-/// marginal 2-column rail chrome [`super::line::plain`] strips on copy and
-/// [`super::line::wrap_line`] detects to indent a rail-led line's
-/// continuations. Checked against [`RAIL_SHAPES`], the one enumeration of
-/// every kind, so a new `RailKind` cannot be added there and missed here.
+/// True when `s` is one shape glyph and its trailing space — the chrome
+/// [`super::line::plain`] strips on copy and [`super::line::wrap_line`] hangs a
+/// wrapped line's continuations under.
 pub(super) fn is_rail_prefix(s: &str) -> bool {
     s.strip_suffix(' ')
         .is_some_and(|glyph| RAIL_SHAPES.iter().any(|(k, _)| k.glyph() == glyph))
 }
 
-/// Build the 2-column rail span — one shape glyph in the producing agent's
-/// hue, lightened by its magnitude's value-step, then a space. The human's
-/// prompt fence wears its own [`PROMPT_INK`] so it never reads as an agent.
-/// One cell, three variables: shape, hue, and value.
+/// The 2-column rail cell: the kind's glyph in the agent's hue, lightened by
+/// magnitude, then a space. A slot past the end of [`AGENT_HUES`] — callers
+/// take the modulus, so it should not arise — falls back to the root's hue.
 pub(super) fn span(kind: RailKind, agent: AgentSlot, magnitude: Option<u32>) -> Span<'static> {
     let base = match kind {
         RailKind::Prompt => PROMPT_INK,
@@ -225,10 +185,8 @@ mod tests {
         0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)
     }
 
-    /// The drain holds luminance — the property that keeps the fidelity
-    /// signal off the value (lightness) channel magnitude rides. A fully
-    /// drained colour collapses to its own grey; a partially drained one
-    /// stays within a rounding step of its original luma.
+    /// The drain holds luminance, keeping the fidelity signal off the lightness
+    /// channel magnitude rides — within a rounding step, at any `t`.
     #[test]
     fn desaturate_holds_luminance() {
         for &c in &AGENT_HUES {
@@ -249,7 +207,6 @@ mod tests {
         }
     }
 
-    /// `t == 0` is a no-op: a sound passage's ink is untouched.
     #[test]
     fn desaturate_zero_is_identity() {
         assert_eq!(desaturate(AGENT_HUES[0], 0.0), AGENT_HUES[0]);

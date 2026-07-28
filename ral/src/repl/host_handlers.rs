@@ -44,8 +44,8 @@ fn plugin_name_arg(args: &[Value]) -> Option<String> {
 }
 
 /// Resolve the job id a `fg`/`bg`/`disown` invocation targets: the explicit
-/// Int argument when given, otherwise the most recent job (SPEC §18's
-/// "current job" default).  `None` means there is no job to act on.
+/// Int argument when given, otherwise the most recent job — the "current job"
+/// default.  `None` means there is no job to act on.
 fn job_id_arg(args: &[Value], jobs: &crate::jobs::JobTable) -> Option<usize> {
     match args.first().and_then(ral_core::Value::as_int) {
         Some(n) => Some(usize::try_from(n).unwrap_or(usize::MAX)),
@@ -63,10 +63,10 @@ const NOT_A_PGID_JOB: &str = "no such job — fg/bg/disown are pgid-only; a work
 // ── jobs ─────────────────────────────────────────────────────────────────────
 
 /// Render the `jobs` listing as one fold over both populations the session
-/// backgrounds work into: `jt`'s pgid groups exactly as before, then this
-/// shell's registered worker handles (`spawn`/`watch`/`&`), marked `[wN]` —
-/// a designator namespace of its own so it can never collide with a pgid's
-/// `[n]`. A worker renders `running (worker)` while its handle is live and
+/// backgrounds work into: `jt`'s pgid groups, then this shell's registered
+/// worker handles (`spawn`/`watch`/`&`), marked `[wN]` — a designator
+/// namespace of its own so it can never collide with a pgid's `[n]`.
+/// A worker renders `running (worker)` while its handle is live and
 /// `done (worker)` once settled but unclaimed — the POSIX-`Done` analogue —
 /// until an eliminator observes it away, at which point it is simply no
 /// longer in the registry and this fold never sees it again: no separate
@@ -102,14 +102,11 @@ fn render_jobs(jt: &crate::jobs::JobTable, workers: &[WorkerEntry]) -> Vec<Strin
 }
 
 /// Compose the shell-exit survivor warning: one compact line naming every
-/// worker handle still `Running` when the REPL tears down, or `None` when
-/// none are — the deferred survivor warning
-/// (`decisions/260616_unify-turn-evaluation`) finally landing as a fold
-/// over the ledger, POSIX's "you have stopped jobs" register for the
-/// population that dies with the process rather than surviving an exit
-/// sweep. Called before [`crate::jobs::JobTable::cleanup`] so a worker is
-/// named first, swept (with the pgid groups) second; never gates or delays
-/// exit.
+/// worker handle still `Running` when the REPL tears down, or `None` when none
+/// are — POSIX's "you have stopped jobs" register for the population that dies
+/// with the process rather than surviving an exit sweep. Called before
+/// [`crate::jobs::JobTable::cleanup`] so a worker is named first, swept (with
+/// the pgid groups) second; never gates or delays exit.
 pub(crate) fn survivor_warning(workers: &[WorkerEntry]) -> Option<String> {
     let running: Vec<String> = workers
         .iter()
@@ -310,10 +307,9 @@ mod tests {
     /// A minimal registered-worker fixture, `running` toggling
     /// [`HandleState::Running`] vs [`HandleState::Completed`] — enough to
     /// exercise [`render_jobs`] and [`survivor_warning`] without a real
-    /// `spawn`.  Every `HandleInner` field is legitimately public
-    /// (`decisions/260615_no-core-repr-leak-into-exarch` draws that line at
-    /// exarch, not at a sibling crate reading core's own types), the same
-    /// construction core's own concurrency tests use.
+    /// `spawn`.  Building `HandleInner` field by field is legitimate here:
+    /// core's representation is sealed against exarch, not against a sibling
+    /// crate, and core's own concurrency tests construct it the same way.
     fn fake_worker(id: u64, cmd: &str, running: bool) -> WorkerEntry {
         let state = if running {
             HandleState::Running

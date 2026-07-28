@@ -1,17 +1,11 @@
-//! Type-checker side of the builtin registry: per-entry typing
-//! rules, the scheme factories they pick from, and shared helpers
-//! for record-shaped builtins (audit, try-error, await, fs).
+//! Type-checker side of the builtin registry: the typing rule each
+//! `builtin_registry!` entry in `core/src/builtins.rs` selects through its
+//! `ty:` field, the scheme factories it picks from, and the record shapes the
+//! record-valued builtins share.
 //!
-//! Each registry entry in `core/src/builtins.rs` carries a `ty:`
-//! field that selects either a first-class [`Scheme`] factory or an
-//! explicit command [`BuiltinSig`].  Scheme factories allocate fresh
-//! unifier vars directly, so the returned scheme can be stored in the
-//! env or used at a call site without any post-processing renaming
-//! step.  Command signatures are interpreted by the inferencer as
-//! data: argument policy, computation result, and optional diagnostic
-//! probe.
-//!
-//! [`Scheme`]: BuiltinTypeRule::Scheme
+//! A scheme factory allocates its unifier vars fresh, so the scheme it returns
+//! needs no renaming pass; a [`BuiltinSig`] is inert data, interpreted by the
+//! `Inferencer` impl at the bottom of this file.
 
 use super::error::{Reason, TypeErrorKind};
 use super::fmt::{fmt_scheme, fmt_ty};
@@ -21,23 +15,15 @@ use super::ty::{CompTy, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar};
 use super::unify::Unifier;
 use crate::types::BuiltinTable;
 
-/// How the type checker handles a call to a registered builtin.
-///
-/// `Scheme` entries are ordinary first-class bindings: the scheme is
-/// applied in command position and can be reified in value position.
-/// `Sig` entries are command signatures: they describe argv shape and
-/// the resulting computation directly, without falling through to
-/// command-name classification or running per-builtin inference code.
+/// How the type checker handles a call to a registered builtin: an ordinary
+/// first-class polytype, or a command signature that describes argv shape and
+/// result directly, short-circuiting command-name classification.
 #[derive(Clone, Copy)]
 pub enum BuiltinTypeRule {
-    /// Standard polytype.  The function allocates fresh unifier vars
-    /// each call. `arity` caches the number of value arguments for
-    /// `$name` synthesis — the registry entry's declared `arity:` field,
-    /// cross-checked against the scheme's `Fun` nesting only by a
-    /// debug assertion; `None` for entries without a fixed argv.
+    /// Standard polytype.  `arity` is the registry entry's declared `arity:`,
+    /// cached for `$name` synthesis; `None` for entries with no fixed argv.
     Scheme(Option<usize>, fn(&mut Unifier) -> Scheme),
-    /// Command-position signature.  `value` decides whether `$name`
-    /// has a first-class form; `None` means command-only.
+    /// Command-position signature; its `value` decides whether `$name` exists.
     Sig(BuiltinSig),
 }
 
@@ -51,8 +37,7 @@ pub struct BuiltinSig {
 }
 
 impl BuiltinSig {
-    /// Fixed value-arg count implied by the argument signature;
-    /// `None` for optional / open argument policies.
+    /// `None` for optional or open argument policies.
     pub const fn fixed_arity(&self) -> Option<usize> {
         match self.args {
             ArgSig::Exact(t) | ArgSig::DataLast(t) => Some(t.len()),
@@ -79,7 +64,7 @@ pub enum ArgTemplate {
     OneOf(&'static [Self]),
 }
 
-/// Small type-template vocabulary used by command signatures.
+/// The whole type vocabulary a command signature may name.
 #[derive(Clone, Copy)]
 pub enum TyTemplate {
     String,
@@ -120,13 +105,12 @@ pub enum BuiltinDiagnostic {
     None,
     FailStatusNonzero,
     TypeProbe,
-    /// A `from-*` decoder: an argument is not an arity slip but a
-    /// misunderstanding of where the bytes come from.
+    /// A `from-*` decoder: an argument is not an arity slip but a misreading
+    /// of where the bytes come from.
     Decoder,
 }
 
-/// Project a [`ModeTemplate`] onto a concrete [`PipeMode`], minting a
-/// fresh variable for `Fresh` from the checker's unifier.
+/// Project a [`ModeTemplate`] onto a [`PipeMode`], minting `Fresh` from `u`.
 pub fn mode_of_template(template: ModeTemplate, u: &mut Unifier) -> PipeMode {
     match template {
         ModeTemplate::None => PipeMode::None,
@@ -135,9 +119,8 @@ pub fn mode_of_template(template: ModeTemplate, u: &mut Unifier) -> PipeMode {
     }
 }
 
-/// The boundary [`PipeSpec`] of a command signature: the modal projection
-/// of its result template — the single source of a `Sig` builtin's modes,
-/// from which the checker builds its `CompTy`.
+/// The boundary [`PipeSpec`] of a command signature — the sole source of a
+/// `Sig` builtin's modes.
 pub fn sig_pipe_spec(result: &CompTemplate, u: &mut Unifier) -> PipeSpec {
     match result {
         CompTemplate::Pure(_) => PipeSpec::none(),
@@ -153,11 +136,8 @@ pub fn sig_pipe_spec(result: &CompTemplate, u: &mut Unifier) -> PipeSpec {
     }
 }
 
-/// The boundary [`PipeSpec`] of a streaming reducer (`fold-lines`): bytes
-/// in, output following the callback's output mode.
-///
-/// The checker supplies
-/// `callback_output` from the callback's quantified mode variable.
+/// The boundary [`PipeSpec`] of a streaming reducer (`fold-lines`): bytes in,
+/// output following the callback's own quantified output mode.
 pub fn reducer_spec(callback_output: PipeMode) -> PipeSpec {
     PipeSpec {
         input: PipeMode::Bytes,
@@ -165,9 +145,8 @@ pub fn reducer_spec(callback_output: PipeMode) -> PipeSpec {
     }
 }
 
-/// Construct a [`Scheme`] from its quantified vars and body.  Exposed
-/// so host crates can build their scheme arms without depending on
-/// `Scheme`'s private internals.
+/// Build a [`Scheme`] from its quantified vars and body.  Public so host crates
+/// can write their own scheme arms without touching `Scheme`'s internals.
 pub fn mk_scheme(ty_vars: &[TyVar], mode_vars: &[ModeVar], row_vars: &[RowVar], ty: Ty) -> Scheme {
     Scheme {
         ty_vars: ty_vars.to_vec(),
@@ -193,55 +172,49 @@ pub fn pure(ty: Ty) -> CompTy {
 
 // ── Scheme DSL ──────────────────────────────────────────────────────
 //
-// The [`scheme!`] macro writes a builtin's type scheme in a compact
-// declarative form, e.g.:
+// `scheme!` writes a builtin's polytype declaratively: `<tv>` declares fresh
+// type vars, `[...]` params curry left-to-right, `pure` means a thunked
+// constant, `pipe` means fresh pipe-mode vars.  Each arm is labelled with the
+// spelling it accepts.
 //
-//   scheme!(str_to_str: [Ty::String] -> Ty::String);
-//   scheme!(length<av>: [Ty::Var(av)] -> Ty::Int);
-//   scheme!(compare<av,bv>: [Ty::Var(av), Ty::Var(bv)] -> Ty::Bool);
-//   scheme!(temp_path: pure Ty::String);
-//   scheme!(ask: pipe [Ty::String] -> Ty::String);
-//
-// Parameters in `[...]` are curried left-to-right; `->` separates the
-// last parameter from the return type.  `<tv>` declares fresh unifier
-// type variables.  `pure` denotes a thunked constant; `pipe` generates
-// fresh pipe-mode variables via [`fm`].
+// It expands only inside `mod scheme` below, whose imports — and `fm`, which
+// `pipe` calls — are what the expansion resolves against.
 
 macro_rules! scheme {
-    // Pure value: scheme!(temp_path: pure Ty::String);
+    // scheme!(temp_path: pure Ty::String);
     ($name:ident: pure $ret:expr) => {
         pub fn $name(_u: &mut Unifier) -> Scheme {
             mk_scheme(&[], &[], &[], thunk(pure($ret)))
         }
     };
-    // N params, 0 type vars: scheme!(str_to_str: [Ty::String] -> Ty::String);
+    // scheme!(str_to_str: [Ty::String] -> Ty::String);
     ($name:ident: [$($p:expr),*] -> $ret:expr) => {
         pub fn $name(_u: &mut Unifier) -> Scheme {
             mk_scheme(&[], &[], &[], thunk(curry!($($p),* => $ret)))
         }
     };
-    // N params, 1 type var: scheme!(length<av>: [Ty::Var(av)] -> Ty::Int);
+    // scheme!(length<av>: [Ty::Var(av)] -> Ty::Int);
     ($name:ident<$tv:ident>: [$($p:expr),*] -> $ret:expr) => {
         pub fn $name(u: &mut Unifier) -> Scheme {
             let $tv = u.fresh_tyvar();
             mk_scheme(&[$tv], &[], &[], thunk(curry!($($p),* => $ret)))
         }
     };
-    // N params, 2 type vars: scheme!(compare<av,bv>: [Ty::Var(av), Ty::Var(bv)] -> Ty::Bool);
+    // scheme!(compare<av,bv>: [Ty::Var(av), Ty::Var(bv)] -> Ty::Bool);
     ($name:ident<$a:ident,$b:ident>: [$($p:expr),*] -> $ret:expr) => {
         pub fn $name(u: &mut Unifier) -> Scheme {
             let ($a,$b) = (u.fresh_tyvar(), u.fresh_tyvar());
             mk_scheme(&[$a,$b], &[], &[], thunk(curry!($($p),* => $ret)))
         }
     };
-    // Pipe modes, 0 type vars: scheme!(ask: pipe [Ty::String] -> Ty::String);
+    // scheme!(ask: pipe [Ty::String] -> Ty::String);
     ($name:ident: pipe [$($p:expr),*] -> $ret:expr) => {
         pub fn $name(u: &mut Unifier) -> Scheme {
             let (m0,m1,ct) = fm(u, $ret);
             mk_scheme(&[], &[m0,m1], &[], thunk(curry_pipe!($($p),* => ct)))
         }
     };
-    // Pipe modes, 1 type var
+    // scheme!(source_op<av>: pipe [Ty::String] -> Ty::Var(av));
     ($name:ident<$tv:ident>: pipe [$($p:expr),*] -> $ret:expr) => {
         pub fn $name(u: &mut Unifier) -> Scheme {
             let $tv = u.fresh_tyvar();
@@ -257,16 +230,15 @@ macro_rules! curry {
     ($p:expr, $($rest:expr),+ => $ret:expr) => { fun($p, curry!($($rest),+ => $ret)) };
 }
 
-/// Like [`curry!`] but the result already carries a [`CompTy`] (from
-/// [`fm`]), so we omit the `pure` wrapper.  Pipe modes take one parameter.
+/// Like `curry!`, but the result already carries a `CompTy`, so no `pure`
+/// wrapper.  One parameter only: a piped builtin takes exactly one.
 macro_rules! curry_pipe {
     ($p:expr => $ret:expr) => {
         fun($p, $ret)
     };
 }
 
-/// Reusable command signatures for builtins whose surface is not a
-/// first-class curried value.
+/// Command signatures for builtins whose surface is not a curried value.
 pub mod sig {
     use super::{
         ArgSig, ArgTemplate, BuiltinDiagnostic, BuiltinSig, CompTemplate, ModeTemplate, TyTemplate,
@@ -405,9 +377,8 @@ pub mod sig {
         pure(TyTemplate::String),
         Some(scheme::any_to_string),
     );
-    /// `round <x> <places>` — a Float and an Int dial, yielding a Float.
     pub const ROUND: BuiltinSig = command(ArgSig::Exact(FLOAT_INT), pure(TyTemplate::Float), None);
-    /// `floor` / `ceil` / `trunc` — one Float in, the Int in that direction.
+    /// Shared by `floor`, `ceil`, and `trunc`.
     pub const FLOAT_TO_INT: BuiltinSig =
         command(ArgSig::Exact(ONE_FLOAT), pure(TyTemplate::Int), None);
 
@@ -426,21 +397,18 @@ pub mod sig {
         Some(scheme::explain_op),
     );
 
-    /// `detach`: any argv shape, any result.
-    ///
-    /// The receipt is `{id, pid, desc, stdout, stderr, receipt}`, which the
-    /// checker leaves as a fresh variable rather than a closed record — the
-    /// template vocabulary has no record former, and one builtin does not
-    /// earn it.  Command-only: `$detach` must not exist, since birthing a
-    /// process that outlives the session is not something a partially
-    /// applied value should be able to promise.
+    /// `detach`: any argv, and a `{pid, desc}` receipt the checker leaves as a
+    /// fresh variable — the template vocabulary has no record former, and one
+    /// builtin does not earn it.  Command-only, because a partially applied
+    /// value must not promise a process that outlives the session.
     pub const DETACH: BuiltinSig = command(ArgSig::Any, pure(TyTemplate::Any), None);
 
     pub const INT_TO_UNIT: BuiltinSig =
         command(ArgSig::Exact(ONE_INT), pure(TyTemplate::Unit), None);
 
-    /// `fg`/`bg`/`disown`: zero or one Int.  A bare invocation defaults the
-    /// job id to the most recent job (SPEC §18).
+    /// `fg`/`bg`/`disown`, registered by the REPL host in
+    /// `ral/src/repl/host_handlers.rs`: zero or one Int, a bare call meaning
+    /// the most recent job.
     pub const OPTIONAL_INT_TO_UNIT: BuiltinSig = command(
         ArgSig::Optional(ArgTemplate::Ty(TyTemplate::Int)),
         pure(TyTemplate::Unit),
@@ -465,7 +433,7 @@ pub mod sig {
     };
 }
 
-/// Build a closed record type from a list of (label, type) pairs.
+/// A record type over a closed row: the tail is `Empty`, so no extension.
 pub fn closed_record(fields: &[(&str, Ty)]) -> Ty {
     let mut row = Row::Empty;
     for (l, t) in fields.iter().rev() {
@@ -474,11 +442,10 @@ pub fn closed_record(fields: &[(&str, Ty)]) -> Ty {
     Ty::Record(row)
 }
 
-/// The error record `try` hands to its on-failure handler.  `message`
-/// carries the failure text — the runtime error's message or the failing
-/// external command's stderr decoded as UTF-8.  Per-command bytes are
-/// not attached here (§10.1); use `audit` if forensic capture is wanted,
-/// or `await`'s `stderr: Bytes` field for a captured concurrent block.
+/// The error record `try` hands its handler, mirrored at runtime by
+/// `error_record` in `core/src/evaluator/scope.rs`.  `message` is synthetic
+/// status text, never the failing command's fd 2 bytes: those streamed live,
+/// and `audit` is the forensic path.
 pub(super) fn try_error_record() -> Ty {
     closed_record(&[
         ("status", Ty::Int),
@@ -489,10 +456,9 @@ pub(super) fn try_error_record() -> Ty {
     ])
 }
 
-/// The audit-node record produced by `audit { … }`.  Mirrors the value
-/// shape `ExecNode::to_value` materialises at runtime: every audit
-/// frame's metadata plus the body's return value (typed `α`) and a list
-/// of child nodes (each typed as a fresh map for forward compatibility).
+/// The audit-node record `audit { … }` produces, field for field the value shape
+/// `ExecNode::to_value` materialises in `core/src/types/audit.rs`.  Children are
+/// a fresh map type, so a node's shape can grow without breaking this.
 pub(super) fn audit_record(value_ty: Ty, child_ty: Ty) -> Ty {
     closed_record(&[
         ("kind", Ty::String),
@@ -512,11 +478,9 @@ pub(super) fn audit_record(value_ty: Ty, child_ty: Ty) -> Ty {
     ])
 }
 
-/// The `{ value, stdout, stderr }` record returned by `await`/`race`.  The
-/// block's return type α flows into `value`; stdout and stderr are the raw
-/// byte buffers.  Failure is signalled by raising, not by a flag — wrap in
-/// `try` to recover.  The block's exit status is not a field here; it lives
-/// inside `poll`'s `` `err `` outcome when the block fails.
+/// The `{value, stdout, stderr}` record `await` and `race` return.  Failure
+/// raises rather than setting a flag, so there is no status field here; a
+/// failed block's status lives inside `poll`'s `` `err `` outcome.
 fn await_record(value_ty: Ty) -> Ty {
     closed_record(&[
         ("value", value_ty),
@@ -525,12 +489,9 @@ fn await_record(value_ty: Ty) -> Ty {
     ])
 }
 
-/// The `Settle α` record `poll` carries in its `` `settled `` arm:
-/// `{stdout, stderr, outcome}`.  `stdout`/`stderr` are the bytes the block
-/// wrote; `outcome` is the closed variant `` <ok: α | err: ErrRecord> ``,
-/// where the `` `ok `` payload is the block's return value and the
-/// `` `err `` payload is the same error record `try` hands its handler
-/// ([`try_error_record`]) — the block's status lives inside it.
+/// The `{stdout, stderr, outcome}` record `poll` carries in its `` `settled ``
+/// arm.  The `` `err `` payload is the very record `try` hands its handler
+/// ([`try_error_record`]), so the block's status lives inside it.
 fn settle_record(value_ty: Ty) -> Ty {
     use crate::syntax::tag::tag_row_label;
     let outcome = Ty::Variant(Row::Extend(
@@ -549,22 +510,17 @@ fn settle_record(value_ty: Ty) -> Ty {
     ])
 }
 
-/// The `{stdout, stderr}` record `poll` carries in its `` `pending `` arm:
-/// the bytes a still-running block has written *so far*, sampled
-/// non-destructively (a cumulative snapshot).  Distinct from
-/// [`settle_record`] — a pending poll has no outcome to report yet, only the
-/// partial output accumulated to this point.
+/// The `{stdout, stderr}` record `poll` carries in its `` `pending `` arm: a
+/// cumulative, non-destructive snapshot of what the running block has written
+/// so far, and no outcome, because there is none yet.
 fn pending_record() -> Ty {
     closed_record(&[("stdout", Ty::Bytes), ("stderr", Ty::Bytes)])
 }
 
-/// The variant returned by `poll`, total over a finished block:
-/// `` `settled `` carries the `Settle α` record ([`settle_record`]) for a
-/// block that finished — returning, raising, or panicking — and
-/// `` `pending `` carries the partial `{stdout, stderr}` record
-/// ([`pending_record`]) — the bytes written so far — while it runs.  `poll`
-/// is the non-blocking dual of `await`: rather than re-raising a failed
-/// block, it reports it inside the `` `settled `` outcome's `` `err `` arm.
+/// The variant `poll` returns: [`settle_record`] once the block has finished —
+/// by returning, raising, or panicking — and [`pending_record`] while it runs.
+/// Being `await`'s non-blocking dual, `poll` reports a failure inside the
+/// settled outcome rather than re-raising it.
 fn poll_variant(value_ty: Ty) -> Ty {
     use crate::syntax::tag::tag_row_label;
     Ty::Variant(Row::Extend(
@@ -588,12 +544,9 @@ pub fn fs_list_entry_ty() -> Ty {
     ])
 }
 
-/// The record type returned by `file-info`.
-///
-/// Superset of
-/// `fs_list_entry_ty` — same `name/type/size/mtime` plus access /
-/// birth times, the readonly bit, and the symlink `target` (empty
-/// string for non-symlinks).
+/// The record type returned by `file-info`: [`fs_list_entry_ty`]'s fields plus
+/// access and birth times, the readonly bit, and the symlink `target` (the
+/// empty string for non-symlinks).
 pub fn fs_file_info_ty() -> Ty {
     closed_record(&[
         ("name", Ty::String),
@@ -607,25 +560,17 @@ pub fn fs_file_info_ty() -> Ty {
     ])
 }
 
-/// Per-builtin scheme factories, one function per registered shape.
-///
-/// Each function allocates fresh unifier vars from `u` and returns a
-/// fully-realised [`Scheme`] suitable for direct storage in the type
-/// env or use at a call site.  Multiple registry entries that share a
-/// shape (e.g. `upper` / `lower` / `dedent` / `shell-quote`) reuse the
-/// same function from this module rather than duplicating the body.
-///
-/// Referenced from `builtin_registry!` entries via the `ty:` facet —
-/// see [`BuiltinTypeRule::Scheme`].
+/// Per-builtin scheme factories, one function per registered *shape*: entries
+/// that share one (`upper`, `lower`, `dedent`, `shell-quote`) reuse a single
+/// function here rather than duplicating the body.
 pub mod scheme {
     use super::{
         CompTy, PipeMode, PipeSpec, Row, Scheme, Ty, Unifier, await_record, fs_file_info_ty,
         fs_list_entry_ty, fun, mk_scheme, poll_variant, pure, reducer_spec, thunk,
     };
 
-    /// F[μ₀,μ₁] τ — for first-class builtins whose pipeline modes flow
-    /// from the caller (e.g. `$ask`, `$source`).  The modes are fresh
-    /// per-call vars so they can be pinned at each use site.
+    /// `F[μ₀,μ₁] τ` with fresh per-call mode vars, so a first-class builtin
+    /// like `$ask` or `$source` takes its pipeline modes from each use site.
     fn fm(u: &mut Unifier, ty: Ty) -> (super::ModeVar, super::ModeVar, CompTy) {
         let (m0, m1) = (u.fresh_modevar(), u.fresh_modevar());
         let cty = CompTy::Return(
@@ -655,12 +600,8 @@ pub mod scheme {
         )
     }
 
-    /// `surface :: ∀ρ. Variant ρ → F ()` — forward a tagged event to the
-    /// host's structured-event sink.
-    ///
-    /// The row is open and otherwise
-    /// unconstrained: any variant is accepted, and the host decides which
-    /// tags it understands.
+    /// `surface :: ∀ρ. Variant ρ → F ()` — forward a tagged event to the host's
+    /// event sink.  The row stays open: the host decides which tags it knows.
     pub fn surface_op(u: &mut Unifier) -> Scheme {
         let row = u.fresh_row_var();
         mk_scheme(
@@ -701,15 +642,10 @@ pub mod scheme {
 
     scheme!(compare<av,bv>: [Ty::Var(av), Ty::Var(bv)] -> Ty::Bool);
 
-    /// Result computation type of a higher-order callback:
-    /// `F[μ₀,μ₁] τ` with fresh, per-scheme-quantified pipeline modes.
-    ///
-    /// A callback body may itself read or write bytes — `map { echo $x }`
-    /// is ordinary ral, where `echo` flushes to the visible stream while
-    /// the list operation still returns a value.  The modes are therefore
-    /// universally quantified, not pinned to `none`; mode unification is
-    /// equality-strict (`docs/SPEC.md` §4.2.1), so a callback fixed to
-    /// `F[none,none] τ` would reject any byte-output body.
+    /// Result type of a higher-order callback: `F[μ₀,μ₁] τ` with fresh,
+    /// scheme-quantified modes.  `map { echo $x }` is ordinary ral, and mode
+    /// unification is equality-strict rather than subsumptive, so pinning the
+    /// callback to `F[none,none] τ` would reject every byte-writing body.
     fn callback_result(u: &mut Unifier, ty: Ty) -> ([super::ModeVar; 2], CompTy) {
         let (m0, m1, cty) = fm(u, ty);
         ([m0, m1], cty)
@@ -877,14 +813,10 @@ pub mod scheme {
 
     /// `fold-lines :: ∀α μ. U(α → Str → F[∅,μ] α) → α → F[Bytes,μ] α`
     ///
-    /// The reducer reads its byte input line-by-line and threads the
-    /// accumulator through the callback; whatever bytes the callback
-    /// writes to stdout become the reducer's own byte output.  So the
-    /// callback's output mode `μ` is the reducer's output mode: a pure
-    /// callback (`return $acc`) keeps `μ = ∅`, leaving a value-producing
-    /// decode `F[Bytes,∅] α`, while a callback that emits bytes (the
-    /// `map-lines`/`filter-lines`/`each-line` wrappers `echo` per line)
-    /// lifts the whole stage to `F[Bytes,Bytes] α`.
+    /// The callback's output mode is the reducer's: `return $acc` keeps `μ = ∅`
+    /// and the stage stays a decode, while a callback that echoes per line — as
+    /// `map-lines`, `filter-lines`, and `each-line` in `prelude.ral` do — lifts
+    /// the whole stage to `F[Bytes,Bytes] α`.
     pub fn fold_lines(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
@@ -941,12 +873,9 @@ pub mod scheme {
         )
     }
 
-    /// `service :: ∀α μ₀ μ₁. String → U(F[μ₀,μ₁] α) → F (Handle α)` —
-    /// `watch`'s scheme, with the leading `String` now the mandatory birth
-    /// description.
-    ///
-    /// The durable lease class is a runtime fact, invisible
-    /// to the types.
+    /// `service :: ∀α μ₀ μ₁. String → U(F[μ₀,μ₁] α) → F (Handle α)` — `watch`'s
+    /// scheme, the leading `String` being the mandatory birth description.  The
+    /// durable lease class is a runtime fact, invisible to the types.
     pub fn service(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
@@ -1001,7 +930,7 @@ pub mod scheme {
         )
     }
 
-    /// `cancel` :: `∀α. Handle α → F Unit`
+    /// `cancel :: ∀α. Handle α → F Unit`
     pub fn cancel_op(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         mk_scheme(
@@ -1016,18 +945,12 @@ pub mod scheme {
 
     scheme!(exit_op: [Ty::Int] -> Ty::Unit);
 
-    /// `fail :: ∀α ρ. [status: Int | ρ] → F α`.
-    ///
-    /// Always diverges; the
-    /// result type is unconstrained.  Argument is an open record
-    /// requiring at least `status: Int`; the row tail accepts arbitrary
-    /// further fields (`message`, …) so a caught error record can be
-    /// re-raised verbatim.  This record shape is enforced only by the
-    /// value form `$fail` (this scheme); in command position `fail` takes
-    /// a single `Any` argument (`sig::FAIL`), so only the literal
-    /// `fail [status: 0]` is caught — by [`super::fail_status_is_zero_literal`]
-    /// — and any other single argument (e.g. `fail 0`) is deferred to the
-    /// runtime.
+    /// `fail :: ∀α ρ. [status: Int | ρ] → F α` — always diverges, so the result
+    /// is unconstrained, and the open row lets a caught error record be
+    /// re-raised verbatim.  Only the value form `$fail` enforces this shape: in
+    /// command position `sig::FAIL` takes one `Any`, so `fail 0` defers to the
+    /// runtime and only the literal `fail [status: 0]` is caught here, by
+    /// [`super::fail_status_is_zero_literal`].
     pub fn fail_op(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let rho = u.fresh_row_var();
@@ -1036,11 +959,11 @@ pub mod scheme {
             Box::new(Ty::Int),
             Box::new(Row::Var(rho)),
         ));
-        // `fail` diverges, so it constrains no pipeline channels: fresh,
-        // quantified modes, matching the `CompTemplate::Never` projection in
-        // `sig_pipe_spec`. `pure` would pin *no-channel* modes, which clash in a
-        // branch-mode union — `if … { fail } else { <byte pipeline> }` would then
-        // discard the live branch's byte mode (this is what broke `view`).
+        // `fail` diverges, so it pins no channel: fresh quantified modes, as
+        // `sig_pipe_spec` projects `CompTemplate::Never`.  `pure` would pin
+        // *no-channel* modes, and the branch-mode union of
+        // `if … { fail } else { <byte pipeline> }` would discard the live
+        // branch's byte mode.
         let in_mode = u.fresh_modevar();
         let out_mode = u.fresh_modevar();
         let result = CompTy::Return(
@@ -1077,16 +1000,9 @@ pub mod scheme {
     scheme!(use_op<av>: pipe [Ty::String] -> Ty::Map(Box::new(Ty::Var(av))));
 }
 
-/// Return a polymorphic type scheme for a builtin executable by name.
-///
-/// Consults `table`, the checked session's own builtin surface, so a name
-/// resolves exactly against what that session can evaluate.  Returns `None`
-/// when the name is unknown to `table` or its signature has no first-class
-/// value form.
-///
-/// Fresh type/mode/row variables are allocated directly from `u`, so the
-/// returned scheme can be stored in the environment or used at a call site
-/// without any post-processing renaming step.
+/// A builtin's first-class polytype, or `None` when `table` does not know the
+/// name or the entry has no value form.  Resolution runs against `table`, the
+/// checked session's own surface, so a name means what that session evaluates.
 pub fn builtin_scheme(table: &BuiltinTable, name: &str, u: &mut Unifier) -> Option<Scheme> {
     match table.get(name)?.type_rule {
         BuiltinTypeRule::Scheme(_, factory) => Some(factory(u)),
@@ -1101,15 +1017,12 @@ pub fn builtin_type_hint(table: &BuiltinTable, name: &str) -> Option<String> {
     Some(fmt_scheme(&scheme))
 }
 
-/// The entry's own [`crate::types::BuiltinEntry::fixed_arity`], off `table`,
-/// guarded in debug builds by [`check_arity_consistency`].
-///
-/// The guard is the point: `builtin_registry!` const-asserts declared
-/// `arity:` against a `Sig`'s structural arity at build time, but it cannot
-/// see through a `Scheme` entry's factory, which needs a `Unifier` to
-/// instantiate.  Calling this for every name — as `registry_and_scheme_arity_agree`
-/// does — closes that gap.  Production η-expansion of `$name` reads
-/// `fixed_arity` directly.
+/// The entry's own [`crate::types::BuiltinEntry::fixed_arity`], guarded in debug
+/// builds by [`check_arity_consistency`] — `builtin_registry!` const-asserts a
+/// declared `arity:` against a `Sig`'s structural arity at build time, but
+/// cannot see through a `Scheme` factory, which needs a `Unifier` to
+/// instantiate.  The `registry_and_scheme_arity_agree` test calls this for every
+/// name to close that gap.
 pub fn builtin_arity(table: &BuiltinTable, name: &str) -> Option<usize> {
     let arity = table.get(name).and_then(|e| e.fixed_arity());
     debug_assert!(
@@ -1119,10 +1032,8 @@ pub fn builtin_arity(table: &BuiltinTable, name: &str) -> Option<usize> {
     arity
 }
 
-/// Cross-check `table`'s declared `arity:` against the `Fun`-nesting depth
-/// derived from the entry's scheme factory (when there is one).  Returns
-/// `true` when consistent — including command-only signatures where there
-/// is no first-class scheme to check.
+/// Cross-check `table`'s declared `arity:` against the `Fun`-nesting depth of
+/// the entry's scheme factory.  `true` when there is no scheme to check.
 #[doc(hidden)]
 pub fn check_arity_consistency(
     table: &BuiltinTable,
@@ -1149,11 +1060,9 @@ pub fn check_arity_consistency(
     scheme_arity == table_arity
 }
 
-/// A per-key type schema — `fn(key, unifier) -> Option<Ty>`.
-///
-/// Drives [`super::infer::Inferencer::check_map_entry_fields`].  Returning
-/// `None` for a key leaves that entry runtime-dispatched (still inferred
-/// for side-effects, but not unified against anything).
+/// A per-key type schema, driving `check_map_entry_fields` in `super::infer`.
+/// `None` for a key leaves that entry runtime-dispatched: still inferred for its
+/// side-effects, but unified against nothing.
 pub type FieldSchema = fn(&str, &mut Unifier) -> Option<Ty>;
 
 /// Schema for rc plugin entries `[plugin: Str, options: Map]`.
@@ -1165,14 +1074,9 @@ pub fn plugin_entry_field_ty(key: &str, u: &mut Unifier) -> Option<Ty> {
     }
 }
 
-/// Detect the literal `fail [status: 0, ...]` shape.
-///
-/// `fail` requires a nonzero exit status (the runtime rejects status 0
-/// at the builtin entry, see `builtins::misc::builtin_fail`).  When the
-/// argument is a literal map whose `status` is the literal `0`, the
-/// caller can produce a typecheck-time diagnostic without waiting for
-/// the runtime check.  Dynamic shapes (computed status, spread args)
-/// still defer to the runtime.
+/// Detect the literal `fail [status: 0, …]` shape, so the nonzero-status rule
+/// `builtins::misc::builtin_fail` enforces at runtime can be diagnosed at
+/// typecheck time.  Computed statuses and spreads still defer to the runtime.
 pub fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
     let Some(positional) = crate::ir::args::positional(args) else {
         return false;
@@ -1189,8 +1093,8 @@ pub fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
     )
 }
 
-/// The builtin-signature interpreter: turns a data-only [`BuiltinSig`] into
-/// an inferred [`CompTy`], colocated with the templates it consumes.
+/// The signature interpreter: a data-only [`BuiltinSig`] becomes an inferred
+/// [`CompTy`].  It lives here, beside the templates it reads.
 impl Inferencer<'_> {
     fn ty_from_template(&mut self, template: TyTemplate) -> Ty {
         match template {
@@ -1292,7 +1196,7 @@ impl Inferencer<'_> {
                     let missing_data_last = matches!(sig.args, ArgSig::DataLast(_))
                         && positional.len() + 1 == expected.len();
                     if positional.len() != expected.len() && !missing_data_last {
-                        // A decoder's `expected` is empty, so reaching here
+                        // A decoder's `expected` is empty, so arriving here
                         // means an argument was written.
                         self.ctx.diagnose(match sig.diagnostic {
                             BuiltinDiagnostic::Decoder => {
@@ -1338,9 +1242,8 @@ impl Inferencer<'_> {
         if sig.diagnostic == BuiltinDiagnostic::TypeProbe
             && let Some(arg_ty) = type_probe_arg
         {
-            // `_type` is `α → F α`: thread the argument's type through to
-            // the result so the probe is transparent to downstream
-            // inference, then print the resolved α.
+            // `_type` is `α → F α`: threading the argument's type through to
+            // the result keeps the probe transparent to downstream inference.
             if let CompTy::Return(_, value_ty) = &result {
                 self.ctx.unify_ty(value_ty, &arg_ty, Reason::TypeProbe);
             }

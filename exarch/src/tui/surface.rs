@@ -1,14 +1,10 @@
-//! Grouping accumulator for surfaced content that would otherwise land as
+//! Two grouping accumulators for surfaced content that would otherwise land as
 //! many one-off blocks: [`PatchBuf`] coalesces consecutive same-`(id, path)`
-//! diff hunks into one `▎ diff` block, [`ObservationBuf`] buckets consecutive
-//! read/exec/grep events by kind.  Both are session-keyed, so a session
-//! change flushes the live buffer and opens a fresh one rather than merging
-//! across sessions.  Kept as two independent buffers, not one, since they
-//! group on different keys and flush in a fixed relative order
-//! ([`SurfaceBuffer::flush_surfaces`]).  Every other content path funnels
-//! through `with_viewport` (`app.rs`), which commits both before handing the
-//! caller a live [`Viewport`] — so a pending group always lands before
-//! whatever follows it on the rail.
+//! diff hunks into one `▎ diff`, [`ObservationBuf`] buckets read/exec/grep
+//! events by kind.  Both are session-keyed, so a session change flushes and
+//! reopens rather than merging two sessions into one block.  `with_viewport`
+//! in `app.rs` flushes both before handing out a live [`Viewport`], so a
+//! pending group always lands before whatever follows it on the rail.
 
 use std::collections::HashMap;
 
@@ -21,27 +17,19 @@ pub(super) struct SurfaceBuffer {
     observation_buf: Option<ObservationBuf>,
 }
 
-/// Accumulator backing [`SurfaceBuffer::patch_buf`].
 struct PatchBuf {
     id: AgentId,
     path: String,
     hunks: Vec<Hunk>,
 }
 
-/// Accumulator backing [`SurfaceBuffer::observation_buf`].  Buckets consecutive observation
-/// surfaces (read / exec / grep) by kind, deduped and order-independent (the
-/// user does not care about interleave order); flushed as one block per
-/// non-empty bucket.  The exec/grep buckets keep the typed [`IoEvent`] rather
-/// than pre-rendered spans so flush-time rendering can reuse the exact
-/// `io_card` span idioms via [`crate::bus::card`]'s per-kind group helpers.  Writes
-/// are not buffered — a write is a barrier landed standalone as its own card.
+/// Buckets are deduped and order-independent — the user does not care in what
+/// order a burst interleaved.  Holding the typed [`IoEvent`] rather than
+/// rendered spans lets flush reuse [`crate::bus::card`]'s group helpers.
 struct ObservationBuf {
     id: AgentId,
-    /// Read paths, first-seen order, deduped.
     reads: Vec<String>,
-    /// `Exec` events, deduped by `argv`.
     execs: Vec<IoEvent>,
-    /// `Grep` events, deduped by `(scope, pattern)`.
     greps: Vec<IoEvent>,
 }
 
@@ -52,12 +40,8 @@ impl SurfaceBuffer {
             observation_buf: None,
         }
     }
-    /// Absorb a single-`diff` card's hunks into [`SurfaceBuffer::patch_buf`], or
-    /// flush + open a fresh buffer when the path or session changes.
-    /// Consecutive same-`(id, path)` diff cards append their hunks into one
-    /// buffer so they later render as a single `▎ diff <path>` block of
-    /// located hunks — the way a unified diff presents several changes to
-    /// one file.
+    /// Extend the open buffer on a matching `(id, path)`, else flush and reopen,
+    /// so consecutive edits to one file render as one `▎ diff <path>` block.
     pub(super) fn absorb_patch(
         &mut self,
         viewports: &mut HashMap<AgentId, Viewport>,
@@ -78,10 +62,6 @@ impl SurfaceBuffer {
         }
     }
 
-    /// Commit any pending [`PatchBuf`] as one `▎ diff` block.  Called at
-    /// every commit boundary that isn't another single-`diff` card
-    /// targeting the same `(id, path)`: the `push_chrome`-like paths,
-    /// the streaming token / boundary paths, session death, and `/clear`.
     fn flush_patch_buf(&mut self, viewports: &mut HashMap<AgentId, Viewport>) {
         let Some(buf) = self.patch_buf.take() else {
             return;
@@ -91,15 +71,8 @@ impl SurfaceBuffer {
         }
     }
 
-    /// Bucket an observation `event` (read / exec / grep) into [`SurfaceBuffer::observation_buf`]
-    /// by kind, deduped and order-independent (the user does not care about
-    /// interleave order).  A session change flushes the in-flight buffer and
-    /// opens a fresh one, so a cross-session burst never merges two sessions'
-    /// surfaces into one block.  Unlike the `with_viewport` path, this
-    /// accumulates directly: the shared [`SurfaceBuffer::flush_surfaces`] boundary is
-    /// what would flush the very buffer being filled, so routing through it
-    /// would defeat the grouping.  Writes never arrive here — the [`Kind::Io`]
-    /// arm lands a write standalone as its own card, never buffered.
+    /// Bucket a read/exec/grep, flushing first on a session change.  Not routed
+    /// through `with_viewport`, whose flush would empty the buffer this fills.
     pub(super) fn absorb_observation(
         &mut self,
         viewports: &mut HashMap<AgentId, Viewport>,
@@ -149,11 +122,6 @@ impl SurfaceBuffer {
         }
     }
 
-    /// Commit any pending [`ObservationBuf`] as one block *per non-empty kind*, in a
-    /// fixed Read → Exec → Grep order, reusing the exact `io_card` span idioms
-    /// via [`crate::bus::card`]'s per-kind group helpers.  No-op when the buffer is
-    /// empty.  Called at every commit boundary that isn't another io surface in
-    /// the same session, through the shared [`SurfaceBuffer::flush_surfaces`].
     #[allow(
         clippy::cast_possible_truncation,
         reason = "buffered-observation count for the run census"
@@ -176,16 +144,14 @@ impl SurfaceBuffer {
         }
     }
 
-    /// The shared external commit boundary: flush both grouping buffers, io
-    /// first so an io group lands before any diff that the same boundary
-    /// commits.  Every non-io, non-diff surface funnels here (the
-    /// `with_viewport` chokepoint, plus session death, the streaming
-    /// token, and the turn boundary), so the two separate buffers — keyed
-    /// differently, never generalised into one — share only this boundary.
+    /// The shared commit boundary: io first, so an io group lands ahead of a
+    /// diff buffered before it.  A group whose viewport is gone is dropped.
     pub(super) fn flush_surfaces(&mut self, viewports: &mut HashMap<AgentId, Viewport>) {
         self.flush_observations(viewports);
         self.flush_patch_buf(viewports);
     }
+    /// Discard both buffers unrendered — `/clear` wipes the scrollback they
+    /// would have landed in.
     pub(super) fn clear(&mut self) {
         self.patch_buf = None;
         self.observation_buf = None;

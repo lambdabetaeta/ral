@@ -1,47 +1,23 @@
-//! The confused-deputy verdict: a pure predicate over a folded
-//! [`Capabilities`] frame.
+//! The confused-deputy verdict: a prefix that is both `exec`-admitted
+//! and `fs`-writable is an escape hatch — drop a binary there and the
+//! next call admits it.
 //!
-//! `design/grant.md`'s third concession names the shape in prose: a
-//! prefix that is both `exec`-admitted and `fs`-writable is an escape
-//! hatch — drop a binary there, the next call admits it.
-//! [`deputy_prefixes`] turns that into a theorem, judged with
-//! [`covers`](crate::path::covers) — the same resolved-form predicate
-//! [`meet_prefixes`](crate::path::meet_prefixes) folds over — so
-//! overlap survives a symlinked write region and never fires across
-//! namespaces.
-//!
-//! **It reports; it does not deny.** Write-`cwd:` plus exec under
-//! `cwd:` is the compile-and-run workflow every agent profile needs
-//! (`cargo build && ./target/debug/app` *is* this shape), so a finding
-//! marks a property worth surfacing, not a policy to reject.
-//!
-//! **Judged on the folded frame, not a layer.** A base grants exec
-//! under `/usr/bin`, an overlay grants write under `/usr/bin`, and
-//! neither layer alone is a deputy — only their meet is. So this takes
-//! a single already-folded `Capabilities`, not the stack.
-//!
-//! **The residue is stated, not hidden.** The predicate can only fire
-//! where **both** dimensions are restricted: a frame with `fs: None`
-//! leaves every exec-admitted prefix writable and undetectable, so
-//! `None` on either `exec` or `fs` yields no finding, deliberately. A
-//! symlink created *after* the fold, pointing into an exec-admitted
-//! tree, stays open under the same stability hypothesis as TOCTOU
-//! (`design/grant.md`'s second concession).
+//! It reports; it does not deny — `cargo build && ./target/debug/app`
+//! *is* this shape, so a finding names a property worth surfacing, not
+//! a policy to reject.  Callers must fold first: an exec-granting base
+//! and a write-granting overlay are each innocent alone, and only their
+//! meet is a deputy.
 
 use crate::path::{NormalizedPrefix, covers};
 use crate::types::Capabilities;
 
 /// The exec-admitted directory prefixes that are also writable under the
-/// folded `caps` — the confused-deputy escape hatch.
+/// folded `caps`.
 ///
-/// Empty whenever `caps` carries no finding, including whenever `exec`
-/// or `fs` is `None` (see the module doc's static residue).
-///
-/// Two directory prefixes never partially overlap: one contains the
-/// other, or they are disjoint. So containment in either direction is
-/// the escape-hatch condition, and the contained (narrower) prefix — the
-/// region that is simultaneously writable and exec-admitted — is what's
-/// reported.
+/// `None` on either dimension means unrestricted, not "everything
+/// writable", so it yields no finding.  Directory prefixes never partly
+/// overlap, so containment either way fires, and the narrower prefix —
+/// the region that is both — is what's reported.
 pub fn deputy_prefixes(caps: &Capabilities) -> Vec<NormalizedPrefix> {
     let (Some(exec), Some(fs)) = (&caps.exec, &caps.fs) else {
         return Vec::new();
@@ -90,8 +66,7 @@ mod tests {
 
     #[test]
     fn symlinked_write_region_is_reported_via_resolved_form() {
-        // /data lexically diverges from /usr/bin, but resolves inside it —
-        // the drop-a-binary escape the module doc names.
+        // `/data` is a symlink: lexically disjoint from `/usr/bin`, resolved inside it.
         let caps = Capabilities {
             exec: Some(ExecMap {
                 allow_dirs: BTreeSet::from([NormalizedPrefix::for_test(
@@ -189,9 +164,6 @@ mod tests {
 
     #[test]
     fn compile_and_run_shape_fires_benignly() {
-        // `write: cwd:` plus exec under `cwd:` — the workflow every
-        // agent profile needs, and exactly the shape the concession
-        // warns about. The verdict fires; nothing here denies it.
         let caps = Capabilities {
             exec: Some(exec_dir("/work/target/debug")),
             fs: Some(fs_write("/work")),

@@ -56,8 +56,8 @@ pub(crate) fn load_plugin(
     )]
     let source = std::fs::read_to_string(&path).map_err(|e| load_err(format!("{path}: {e}")))?;
     let source = ral_core::source::normalize_source_text(source);
-    // Core's module loader owns cycle detection, the recursion guard, and
-    // the script-context swap; the plugin policy adds only the fresh frame —
+    // Core's module loader owns cycle detection, the recursion guard, and the
+    // source registration; the plugin policy adds only the fresh frame —
     // top-level helper bindings are discarded, since the manifest is the
     // file's *return value*, not its bindings.
     let value = shell.in_fresh_scope(|shell| {

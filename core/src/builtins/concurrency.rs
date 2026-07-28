@@ -1,28 +1,13 @@
-//! Concurrency primitives: `spawn`, `watch`, `service`, `await`, `race`,
-//! `cancel`.
+//! Concurrency: the births `spawn`, `watch`, `service`, `detach`, and the
+//! eliminators `await`, `poll`, `race`, `cancel`.
 //!
-//! The handle is the evidence of detachment.  `spawn` (with its
-//! host-installed siblings — the REPL's `watch`, the agent host's durable
-//! `service`) reifies a [`Value::Handle`] and parks its worker under the
-//! durable session root, so it outlives the run that launched it; a
-//! foreground cancel — a run deadline or interrupt — cannot reach a
-//! worker that is not a child of the foreground scope.  `await`, `race`,
-//! and `poll` are the eliminators that observe a handle from the
-//! foreground, and `cancel` the explicit reaper.
-//!
-//! Each spawned concurrent block runs on its own OS thread with a
-//! cloned environment snapshot.  IO is either buffered (returned as a
-//! record by `await`) or line-framed (streamed live with a label
-//! prefix for `watch`).
-//!
-//! Every finished block has one observable outcome — a [`CompletedHandle`]
-//! carrying the bytes it wrote (drained once into the handle's cache) and
-//! its raw result.  The eliminators project that one outcome: `await` and
-//! `race` to the record `{ value: Value, stdout: Bytes, stderr: Bytes }`
-//! (re-raising a failed block), `poll` to a `` `settled `` / `` `pending ``
-//! variant (reporting a failed block as data rather than re-raising).  The
-//! block's stdout and stderr are not auto-replayed to the caller's
-//! terminal; they sit in the projected record.
+//! A spawned block runs on its own OS thread with a cloned environment, parked
+//! under the durable session root rather than the foreground scope, so a run
+//! deadline or interrupt cannot reach it.  Its bytes are buffered per handle
+//! (line-framed live, for `watch`) and projected out of one cached
+//! [`CompletedHandle`]; its `surface` events are buffered too — the spawning
+//! run may be over — and reach a sink exactly once, by an eliminator's replay
+//! or by the completion delivery, whichever wins the `joined` latch.
 
 use crate::evaluator::absorb_tail;
 use crate::evaluator::comp::{eval_comp, with_scope};
@@ -40,25 +25,20 @@ use std::sync::{Arc, Mutex};
 use super::util::{check_arity, expect_handle, expect_thunk};
 use crate::types::as_list;
 
-/// How a child concurrent block's stdout/stderr are wired.
+/// How a child block's stdout/stderr are wired.
 pub(super) enum ChildIoMode {
     Buffered,
     Watch { label: String },
 }
 
-/// Cap on a detached worker's deferred surface buffer.  Past it, one overflow
-/// marker is recorded and further events drop, so a runaway detached emitter (a
-/// `meter` in a server loop) cannot grow memory without bound.  The marker is
-/// itself a surface event; a host that does not know its tag drops it.
+/// Cap on a detached worker's deferred surface: past it one `surface-overflow`
+/// marker is recorded and further events drop.
 const DEFERRED_SURFACE_CAP: usize = 4096;
 
-/// The surface a *deferred* worker installs.  Unlike a same-thread thunk body,
-/// a deferred worker may outlive the run that spawned it, so it must not hold
-/// the run's live sink: it buffers structured events into a bounded
-/// [`SurfaceBuffer`].  The buffer has two ways out — `await`/`race` replay it
-/// through the awaiting run's surface (the live-frame pull), and at completion
-/// the worker delivers a clone to its [`DeferredSink`] (the un-awaited
-/// fallback) — gated to deliver exactly once by the handle's `joined` latch.
+/// A detached worker's surface: it may outlive the run that spawned it, so it
+/// buffers into a bounded [`SurfaceBuffer`] rather than hold that run's live
+/// sink.  The buffer leaves by `await`/`race` replay or by [`Self::flush`] to
+/// the [`DeferredSink`], whichever wins the handle's `joined` latch.
 struct DeferredSurface {
     buf: SurfaceBuffer,
     deferred: Option<Arc<dyn DeferredSink>>,
@@ -75,20 +55,15 @@ impl EventSink for DeferredSurface {
                 payload: None,
             });
         }
-        // Past the cap (marker already recorded): drop.
     }
 }
 
-/// The final surface event a detached worker appends to its buffer at
-/// completion: a `` `done `` record carrying the handle's `cmd` and the
-/// worker's `outcome` — `` `ok ``, `` `err `` (the [`break_record`]), or
-/// `` `panic `` (the message).  Core names the event; exarch names its
-/// appearance.  It carries no return value — the model `await`s for that.
+/// The event a detached worker appends at completion: a `` `done `` record
+/// carrying the handle's `cmd` and an `` `ok ``, `` `err `` (a [`break_record`])
+/// or `` `panic `` outcome.  No return value — the model `await`s for that.
 fn done_event(cmd: &str, outcome: &Value) -> FOValue {
-    // `outcome` is always one of the three statically-built variants below
-    // (`` `ok `` over `Unit`, `` `err `` over `break_record`'s all-scalar
-    // map, `` `panic `` over a `String`) — never the block's actual return
-    // value, so it is provably first-order.
+    // Callers pass only the three statically-built tags, never the block's own
+    // return value, so the conversion is provably total.
     let outcome = FOValue::try_from(outcome).expect("spawn outcome tag is statically first-order");
     FOValue::Variant {
         label: "done".into(),
@@ -102,21 +77,14 @@ fn done_event(cmd: &str, outcome: &Value) -> FOValue {
 }
 
 impl DeferredSurface {
-    /// Flush this worker's deferred surface — the buffer plus a final
-    /// [`done_event`] — to its [`DeferredSink`] as one batch, gated to
-    /// deliver once by the shared `joined` latch.  The test-and-set lives
-    /// here, at the sink's sole call site, not in the sink itself: an
-    /// implementation only says where the batch goes and cannot forget the
-    /// deliver-once discipline.  A no-op when no sink is installed (a bare
-    /// REPL): then the deferred surface reaches a sink only via
-    /// `await`/`race`.  The batch is a fresh clone so it is independent of
-    /// whatever an eliminator later drains from the same buffer
-    /// (`complete_handle`'s `mem::take`).
+    /// Deliver the buffer plus a final [`done_event`] as one batch, at most once
+    /// — the test-and-set lives here, at the sink's sole call site, so no
+    /// implementation can forget the discipline.  The batch is a fresh clone,
+    /// independent of `complete_handle`'s later `mem::take` of the same buffer.
     fn flush(&self, joined: &Arc<Mutex<bool>>, cmd: &str, outcome: &Value) {
         let Some(deferred) = self.deferred.as_ref() else {
             return;
         };
-        // Test-and-set: only the first of delivery and replay wins the latch.
         let already = std::mem::replace(&mut *joined.lock().unwrap(), true);
         if already {
             return;
@@ -127,15 +95,10 @@ impl DeferredSurface {
     }
 }
 
-/// Drop-guard that flushes the worker's deferred surface to its boundary on
-/// *every* exit path.  The clean path arms it with the body's `` `ok ``/`` `err ``
-/// outcome and disarms it explicitly (the clone is taken before the result is
-/// sent on the handle channel, so the boundary's copy is independent of the
-/// eliminators' later drain); an unwinding panic leaves it armed, so `drop`
-/// fires with a `` `panic `` outcome and the unwind then continues — the worker
-/// still drops its `Sender` without sending, so the receiver reports
-/// `Disconnected` and `try_settle` settles the handle as a panic exactly as
-/// before.
+/// Flushes the worker's deferred surface on *every* exit path.  The clean path
+/// disarms it through [`Self::settle`]; an unwinding panic leaves it armed, so
+/// `drop` flushes a `` `panic `` outcome and the unwind carries on — dropping
+/// `tx` unsent, which [`try_settle`] still settles as a panic.
 struct FlushGuard {
     surface: Arc<DeferredSurface>,
     joined: Arc<Mutex<bool>>,
@@ -144,9 +107,8 @@ struct FlushGuard {
 }
 
 impl FlushGuard {
-    /// Disarm and flush with `outcome` on a non-panicking exit.  Taking the
-    /// clone here, before the clean path sends the result, keeps the boundary's
-    /// copy independent of the eliminators' later `mem::take`.
+    /// Disarm and flush `outcome`.  The call site runs this before sending the
+    /// result, so the boundary's clone predates the eliminators' drain.
     fn settle(mut self, outcome: &Value) {
         self.armed = false;
         self.surface.flush(&self.joined, &self.cmd, outcome);
@@ -165,35 +127,18 @@ impl Drop for FlushGuard {
     }
 }
 
-/// Spawn a child concurrent block on a new OS thread.
+/// Spawn a child concurrent block on a new OS thread and return its handle.
 ///
-/// The child receives a cloned environment with IO wired according to
-/// `io_mode`.  The returned `HandleInner` can be awaited or cancelled.
+/// `work` returns [`Raw<Value>`] so a terminal tail call surfaces at the
+/// worker's trampoline and is absorbed there: a tail call cannot cross a thread
+/// boundary, and only a [`Settled`] value may enter the channel.
 ///
-/// `work` is the worker's body, returning [`Raw<Value>`] so the body's
-/// terminal tail call (if any) is absorbed here at the worker's
-/// trampoline before the result enters the handle channel.  Settled
-/// is the wire shape for `HandleInner.result` — a tail call cannot
-/// cross between threads.
-///
-/// Before returning, the handle is filed on `shell.local.workers` — every
-/// spawn registers, unconditionally and with no policy attached (see
-/// `types::shell::workers`).  `await`, `race`, and a settled `poll` remove
-/// the entry on the shell that observes it; an explicit `cancel` does too.
-/// For a [`LeaseClass::Worker`] birth under a frame that supplies a
-/// [`WorkerLease`], registration is followed by arming the idle-observation
-/// lease chain ([`lease_fire`]) on the fresh entry's id; a
-/// [`LeaseClass::Durable`] birth registers and arms nothing — the absent
-/// chain *is* the durable policy, not an exemption the chain checks.
-///
-/// Under a frame that supplies a `worker_cap`, admission is reserved
-/// first: a birth of any class is refused while `cap` workers are already
-/// running or reserved, with an error naming the remedies (`await`,
-/// `cancel`). The reservation is held across the thread spawn
-/// and handle construction below and only released — into the registered
-/// entry it was reserved for — at the `register` call, so a sibling birth
-/// racing this one on another thread can never observe the seat this one
-/// is still filling as free.
+/// Under a frame with a `worker_cap` the seat is reserved before any thread or
+/// entry exists and released only into the `register` below, so a sibling birth
+/// racing on another thread never sees a seat mid-fill as free.  A
+/// [`LeaseClass::Worker`] birth under a frame supplying a [`WorkerLease`] then
+/// arms the idle-observation chain ([`lease_fire`]); a [`LeaseClass::Durable`]
+/// one arms nothing — the absent chain *is* the durable policy.
 pub(super) fn spawn_child<F>(
     snap: Arc<Env>,
     mooring: &Mooring,
@@ -206,18 +151,6 @@ pub(super) fn spawn_child<F>(
 where
     F: FnOnce(&Mooring, &mut Shell) -> Raw<Value> + Send + 'static,
 {
-    // Admission: under a frame that caps live workers, the birth reserves
-    // its seat at the door — before any thread exists or any entry
-    // registers, so a rejected spawn leaves no trace, and a granted
-    // reservation counts toward the cap the instant it is granted, closing
-    // the gap a plain check-then-register would leave for a sibling spawn
-    // racing this one on another thread.  Only still-running entries (and
-    // other reservations in flight) count, durable services included (live
-    // work is live work); settled entries lingering under retention never
-    // block admission.  The reservation travels with this call from here
-    // to the `register` call near the end; every early return in between —
-    // the `Watch` arm's clone failure included — releases it through
-    // `Reservation`'s own drop.
     let reservation = match shell.local.workers.reserve(mooring.worker_cap) {
         Ok(reservation) => reservation,
         Err(CapReached(cap)) => {
@@ -230,21 +163,11 @@ where
 
     let (tx, rx) = std::sync::mpsc::channel();
 
-    // Allocate buffers and build the child's sinks.  Buffered mode writes
-    // into the shared byte buffers; watch mode wraps clones of the parent
-    // stdout in `Sink::LineFramed` with a per-handle prefix.
     let (stdout_sink, stdout_buf) = new_buffer();
     let (stderr_sink, stderr_buf) = new_buffer();
-    // The deferred worker buffers `surface` calls here rather than holding the
-    // spawning run's live sink; `await`/`race` replay it once and the worker
-    // delivers a clone to the deferred sink at completion.
     let surface_buf: SurfaceBuffer = Arc::new(Mutex::new(Vec::new()));
-    // The session-lived deferred sink the worker delivers to at completion,
-    // taken from the spawning run's mooring so it survives that run's
-    // teardown; the worker's own mooring keeps it, so a nested `spawn` inside
-    // the worker inherits it.  The worker's `DeferredSurface` holds both the
-    // buffer and this destination; the `joined` latch is shared with the
-    // eliminators so whichever renders first wins the deliver-once test.
+    // Taken from the spawning run's mooring, so the destination outlives that
+    // run's teardown; the `joined` latch is shared with the eliminators.
     let worker_surface = Arc::new(DeferredSurface {
         buf: surface_buf.clone(),
         deferred: mooring.deferred.clone(),
@@ -277,9 +200,8 @@ where
     let cmd = cmd.to_string();
     let worker_cmd = cmd.clone();
 
-    // Minted before the thread so the worker can hold a clone: at exit it
-    // marks itself `Completed`, the fact the lease chain reads to end
-    // silently on a finished worker instead of reaping it.
+    // Minted before the thread so the worker can hold a clone: its exit mark is
+    // what ends the lease chain silently on a finished worker.
     let state = Arc::new(Mutex::new(HandleState::Running));
     let worker_state = state.clone();
 
@@ -291,19 +213,11 @@ where
             child_env.io.capture_outer = None;
             child_env.io.stdout = stdout;
             child_env.io.stderr = stderr;
-            // A detached worker is a background computation with no terminal: its
-            // stdout/stderr are buffers, and its stdin must not fall through to
-            // fd 0.  `spawn_thread` builds the worker from a defaulted `Io`
-            // (`Source::Terminal`), so without this an external in the body — a
-            // `cargo test` exercising signal code, say — would inherit the real
-            // terminal and could `tcgetpgrp(stdin)` / `kill(-fg, …)` whoever owns
-            // it.  `Empty` wires fd 0 to `/dev/null`.
+            // `spawn_thread` builds the worker from a defaulted `Io`, whose stdin
+            // is `Source::Terminal`: without this an external in the body could
+            // `tcgetpgrp(stdin)` / `kill(-fg, …)` whoever owns the real terminal.
             child_env.io.stdin = crate::io::Source::Empty;
 
-            // Arm the flush guard before the body runs: a panicking body unwinds
-            // through it (a `` `panic `` batch, then the unwind continues to drop
-            // `tx` unsent), while the clean path disarms it with the body's
-            // outcome.  When no boundary is installed it is inert on every path.
             let guard = FlushGuard {
                 surface: worker_surface,
                 joined: worker_joined,
@@ -311,17 +225,11 @@ where
                 armed: true,
             };
 
-            // Worker absorption point: a tail call cannot cross the thread
-            // boundary, so the worker root settles it into the channel
-            // result.  `work` returns `Raw<Value>` precisely so a terminal
-            // tail call surfaces here rather than collapsing inside.
             let result = absorb_tail(work(mooring, child_env), mooring, child_env);
             if flush_pending {
                 let _ = child_env.io.stdout.flush_pending();
                 let _ = child_env.io.stderr.flush_pending();
             }
-            // Flush the boundary's clone before sending the result, so its copy is
-            // independent of `complete_handle`'s later `mem::take` of the buffer.
             let outcome = match &result {
                 Ok(_) => Value::Variant {
                     label: "ok".into(),
@@ -334,14 +242,9 @@ where
             };
             guard.settle(&outcome);
             let _ = tx.send(result);
-            // The worker's own settle mark, strictly *after* the send so
-            // `Completed` always implies an observable outcome in the channel
-            // — an eliminator that reads the state mid-transition can still
-            // settle.  Guarded: an eliminator's `complete_handle` may have won
-            // the transition already, and a `cancel`'s `Cancelled` must never
-            // be overwritten.  A panicking body never reaches here; its state
-            // stays `Running` until an observer settles the disconnect as a
-            // panic, or the lease chain reaps the dead thread's scope.
+            // Strictly *after* the send, so `Completed` always implies an
+            // outcome already in the channel.  Guarded: an eliminator may have
+            // won the transition, and a `cancel`'s `Cancelled` must not be undone.
             let mut settled_state = worker_state.lock().unwrap();
             if *settled_state == HandleState::Running {
                 *settled_state = HandleState::Completed;
@@ -361,11 +264,6 @@ where
         cmd: cmd.clone(),
         cancel,
     };
-    // Every admitted spawn registers, unconditionally — the mechanism is
-    // universal and attaches no further policy; affordances (listing,
-    // reaping) are the host's and the lease layer's concern, not this
-    // door's.  Consuming `reservation` here is what turns the seat
-    // `reserve` held into the entry it was held for.
     let id = WorkerId::mint();
     shell.local.workers.register(
         reservation,
@@ -379,15 +277,8 @@ where
         },
     );
 
-    // For an ordinary worker under a frame that grants a lease (exarch),
-    // arm the idle-observation chain on the freshly registered entry.  The
-    // chain is fire-and-forget (`keep()`-ed): the worker outlives this
-    // `spawn` call, and every firing either ends the chain or re-arms
-    // exactly one successor.  Registered-then-armed, so the id the chain
-    // reaps always names an entry that existed.  The interactive frame
-    // (the REPL) supplies no lease and never reaps; a durable birth arms
-    // no chain at all — no reaper entry ever exists for it, which is the
-    // whole durable policy.
+    // Armed after `register`, so the id the chain reaps always names an entry
+    // that existed.  `keep()`-ed: the worker outlives this call.
     if class == LeaseClass::Worker
         && let Some(lease) = mooring.deferred_lease
     {
@@ -405,45 +296,30 @@ where
     Ok(handle)
 }
 
-/// Everything one firing of the idle-observation lease chain needs, cloned
-/// forward into each re-arm.  Deliberately a bundle of shared cells and
-/// `Copy` facts — never a `Shell` — so the chain stays cheap to clone and
-/// cheap to run on the reaper daemon thread.
+/// Everything one firing of a worker's lease chain needs, cloned forward into
+/// each re-arm.  Shared cells and `Copy` facts, never a `Shell`: cheap to clone
+/// and cheap to run on the reaper daemon thread.
 #[derive(Clone)]
 struct LeaseChain {
-    /// The worker's own cancel scope: what a reap fires.
     scope: crate::process::CancelScope,
-    /// The handle's lifecycle cell: a non-`Running` worker ends the chain.
     state: Arc<Mutex<HandleState>>,
-    /// The shared last-observation cell the eliminators renew.
     last_observed: Arc<Mutex<std::time::Instant>>,
-    /// The worker's spawn instant — the backstop's clock.  The registry
-    /// entry's `SystemTime` field stays display-only.
+    /// The backstop's clock; the registry entry's `SystemTime` is display-only.
     started: std::time::Instant,
     lease: WorkerLease,
-    /// The owning shell's registry, for the reap bookkeeping.
     registry: WorkerRegistry,
     id: WorkerId,
 }
 
 /// One firing of a worker's lease chain, on the reaper daemon thread.
 ///
-/// A worker no longer `Running` ends the chain silently — a settled entry
-/// lingers in the registry as an unclaimed result, a cancelled one is
-/// already gone; no cancel, no notice, no re-arm.  A running worker is
-/// reaped at the backstop (age from spawn) first, then at the idle bound
-/// (time since an eliminator last named the handle); otherwise the chain
-/// re-arms itself for exactly the sooner of the two remaining margins.
-///
-/// A reap does the registry bookkeeping *before* firing the scope — the
-/// cancel of an already-settled scope is a harmless monotone `fetch_max`,
-/// so ordering the ledger first keeps the entry-and-notice state ahead of
-/// any observable cancellation.  It deliberately does not detach the
-/// handle: the body unwinds with status 130 and settles as an error, so a
-/// later `poll`/`await` still observes the partial output and the failure
-/// — only the registry entry (plus its notice) records the reap.  Cheap
-/// and non-blocking per the reaper's contract: it takes only the handle
-/// cells and, briefly, the registry lock.
+/// A worker no longer `Running` ends the chain silently.  A running one is
+/// reaped at the backstop (age from spawn), then at the idle bound (since an
+/// eliminator last named it), else the chain re-arms for the sooner of the two
+/// remaining margins.  A reap does the bookkeeping *before* firing the scope,
+/// so the ledger never lags an observable cancellation, and deliberately leaves
+/// the handle attached: the body settles as an error, so a later `poll`/`await`
+/// still observes the partial output and the failure.
 fn lease_fire(chain: &LeaseChain) {
     if *chain.state.lock().unwrap() != HandleState::Running {
         return;
@@ -468,10 +344,8 @@ fn lease_fire(chain: &LeaseChain) {
 
 // ── spawn ────────────────────────────────────────────────────────────────
 
-/// The worker body handed to [`spawn_child`]: the sole computation of a
-/// fresh thread, under the trivial continuation the thread's join provides.
-/// `spawn_child` absorbs any terminal tail call on that thread, so the body
-/// runs at [`Tail::Yes`].
+/// The worker body handed to [`spawn_child`]: the whole computation of a fresh
+/// thread, so it runs at [`Tail::Yes`] and `spawn_child` absorbs its tail call.
 fn worker_body(
     body: Arc<crate::ir::Comp>,
 ) -> impl FnOnce(&Mooring, &mut Shell) -> Raw<Value> + Send + 'static {
@@ -485,19 +359,10 @@ pub(crate) fn builtin_spawn(args: &[Value], mooring: &Mooring, shell: &Shell) ->
     spawn_buffered(body, captured, mooring, shell)
 }
 
-/// Buffered spawn (§13.3 replay rule).  The child's stdout/stderr accumulate
-/// in per-handle buffers and are drained to the caller's sinks on `await`.
-///
-/// A concurrent block is a thunk evaluated on a worker thread.  The
-/// worker inherits the parent's mobile state via [`Shell::spawn_thread`]
-/// (called inside [`spawn_child`]) — including the captured environment
-/// installed as the worker's `env` — and runs the body via
-/// `with_scope(eval_comp(body))` directly.  No top-level/block boundary
-/// ceremony: the worker's `Shell` is the only shell the body interacts
-/// with, so "blocks discard their mobile" is satisfied automatically by
-/// the thread's natural lifecycle; and the OS sandbox (if any) wraps
-/// the worker by virtue of wrapping the parent process, so no confined
-/// re-exec is attempted from a worker thread.
+/// Buffered spawn: stdout/stderr accumulate in per-handle
+/// buffers and drain to the caller's sinks on `await`.  The worker's own
+/// `Shell` is the only one the body touches, so "blocks discard their mobile"
+/// falls out of the thread's lifecycle with no boundary ceremony.
 fn spawn_buffered(
     body: Arc<crate::ir::Comp>,
     captured: Arc<Env>,
@@ -517,17 +382,12 @@ fn spawn_buffered(
 
 // ── watch ────────────────────────────────────────────────────────────────
 
-/// `watch <label> <thunk>` -- spawn a concurrent block whose output
-/// streams live to the caller's stdout, line-framed with the given
-/// label.
+/// `watch <label> <thunk>` -- spawn a concurrent block whose output streams
+/// live to the caller's stdout, line-framed with the given label.
 ///
-/// The watched worker is detached at the root and keeps writing as it
-/// runs, so its sink must outlive the run.  Availability is therefore the
-/// host's: a host with a durable stdout sink (the ral REPL, batch scripts)
-/// installs it via [`crate::builtins::WATCH_BUILTIN`]; a host whose active
-/// streams are per-call capture buffers (exarch) leaves it uninstalled, so
-/// naming `watch` there is an unknown-name diagnostic rather than a runtime
-/// refusal.
+/// A watched worker writes on past the run that spawned it, so only a host with
+/// a durable stdout installs [`crate::builtins::WATCH_BUILTIN`]; naming `watch`
+/// elsewhere is an unknown-name diagnostic, not a runtime refusal.
 pub(super) fn builtin_watch(
     args: &[Value],
     mooring: &Mooring,
@@ -547,16 +407,10 @@ pub(super) fn builtin_watch(
     spawn_labelled(body, captured, label, mooring, shell)
 }
 
-/// Line-framed spawn.  The child writes to a `Sink::LineFramed` wrapping a
-/// clone of the caller's stdout (resp. stderr), so every complete line arrives
-/// on the caller's stream prefixed `[label] ` (resp. `[label:err] `) without
-/// any global multiplexer.  Sibling watchers serialise through the OS stdout
-/// lock or through the `Sink::External` adapter's internal mutex, so each
-/// line is emitted atomically.  The `await` replay drain is a no-op because
-/// the stdout/stderr buffers stay empty.
-///
-/// Body dispatch matches [`spawn_buffered`]: the body runs via
-/// `with_scope(eval_comp(body))` directly on the worker thread.
+/// Line-framed spawn: the child writes through `Sink::LineFramed` over a clone
+/// of the caller's stdout, so lines arrive prefixed with no global multiplexer —
+/// siblings serialise on the OS stdout lock or the `Sink::External` adapter's
+/// mutex.  The byte buffers stay empty, so `await`'s replay drain is a no-op.
 fn spawn_labelled(
     body: Arc<crate::ir::Comp>,
     captured: Arc<Env>,
@@ -577,11 +431,9 @@ fn spawn_labelled(
 
 // ── service ──────────────────────────────────────────────────────────────
 
-/// The legibility bound both births that escape the lease chain must carry:
-/// a `String`, non-empty after trimming, on one line.  `service` is tracked
-/// by it in the host's ledger; `detach` has nothing else at all — no handle,
-/// no eliminator, and after compaction no binding — so the description is
-/// the only thing that later says what a surviving pid was for.
+/// The legibility bound the two births that escape the lease chain carry: a
+/// non-empty, single-line description.  For `detach` it is the only thing that
+/// later says what a surviving pid was for — there is no handle left to ask.
 fn one_line_desc(arg: &Value, verb: &str) -> Settled<String> {
     let Value::String(s) = arg else {
         return Err(sig(format!(
@@ -602,18 +454,13 @@ fn one_line_desc(arg: &Value, verb: &str) -> Settled<String> {
 }
 
 /// `service <desc> <thunk>` -- birth a durable worker: an ordinary buffered
-/// spawn except for its [`LeaseClass::Durable`] registration — no idle reap,
-/// no backstop.  Its bound is legibility, not time: `desc` is mandatory,
-/// becomes the worker's `cmd` in the registry, and is what a host's own
-/// ledger shows for as long as the service lives.  Cancellable through its
-/// handle, dead with `/clear` or the process (`decisions/260705_leases-and-budgets`).
+/// spawn but for its [`LeaseClass::Durable`] registration — no idle reap, no
+/// backstop, and `desc` (the registry `cmd`) as the bound standing in for time.
 ///
-/// Availability is the host's, the mirror image of `watch`: an agent host
-/// (exarch), whose lease frame would otherwise reap long work, installs it
-/// via [`crate::builtins::SERVICE_BUILTIN`]; the interactive/batch ral
-/// hosts leave it uninstalled — they grant no lease, so every one of their
-/// spawns already lives until cancel or exit and a durable class would
-/// distinguish nothing.
+/// Host-wise the mirror image of `watch`: only an agent host, whose lease frame
+/// would otherwise reap long work, installs
+/// [`crate::builtins::SERVICE_BUILTIN`] — grant no lease and a durable class
+/// would distinguish nothing.
 pub(super) fn builtin_service(
     args: &[Value],
     mooring: &Mooring,
@@ -635,24 +482,16 @@ pub(super) fn builtin_service(
 
 // ── detach ───────────────────────────────────────────────────────────────
 
-/// `detach <desc> <cmd> <args…>` -- birth a process this session stops
-/// owning, and return a receipt rather than a handle.
+/// `detach <desc> <cmd> <args…>` -- birth a process this session stops owning,
+/// returning a receipt rather than a handle.
 ///
-/// The only one of the concurrency verbs where the axis is *ownership*:
-/// `spawn`, `watch`, and `service` all reify a [`Value::Handle`] over work
-/// that dies with this process, while a detached program is double-forked
-/// away (`runtime::command::detach`) and reparented to init, so no
-/// eliminator applies to it and no teardown here can reach it.  This door
-/// is the surface discipline only — a mandatory one-line description,
-/// then the head and its argv — and the effect proper, from head
-/// resolution through vetting to the receipt, lives at the exec boundary
-/// where the rest of the external-command machinery is.
-///
-/// Availability is the host's, as for `watch` and `service`: only a host
-/// that arms a detach policy ([`Shell::arm_detach`]) installs
-/// [`crate::builtins::DETACH_BUILTIN`], so naming `detach` anywhere else
-/// is an unknown-name diagnostic rather than a builtin that resolves and
-/// refuses.
+/// The one concurrency verb whose axis is *ownership*: the others reify a
+/// [`Value::Handle`] over work that dies with this process, while a detached
+/// program is double-forked away and reparented to init, so no eliminator
+/// applies and no teardown here can reach it.  This door is the surface
+/// discipline only; resolution, vetting, and the receipt live at the exec
+/// boundary (`runtime::command::detach`).  Installed only by a host that arms a
+/// detach policy ([`Shell::arm_detach`]).
 #[cfg(unix)]
 pub(super) fn builtin_detach(
     args: &[Value],
@@ -664,11 +503,9 @@ pub(super) fn builtin_detach(
     crate::runtime::command::detach(&desc, &args[1], &args[2..], mooring, shell)
 }
 
-/// Stop a handle: the one policy shared by `cancel` and `race`'s loser
-/// cleanup. A still-running handle is cancelled and detached; a handle that
-/// already completed keeps its cached outcome untouched, so a finished
-/// worker's value is never destroyed by the loser side of a `race` or by a
-/// `cancel` that lost the toss against completion.
+/// Stop a handle: the policy `cancel` and `race`'s loser cleanup share.  An
+/// already-completed handle keeps its cached outcome, so a finished worker's
+/// value is never destroyed by a losing `race` or a `cancel` that lost the toss.
 fn stop_handle(handle: &HandleInner) {
     if *handle.state.lock().unwrap() != HandleState::Completed {
         handle.cancel.cancel(crate::process::CancelCause::Explicit);
@@ -686,9 +523,8 @@ pub(super) fn builtin_cancel(args: &[Value], shell: &mut Shell) -> Settled<Value
     Ok(Value::Unit)
 }
 
-/// Error if `handle` was cancelled; otherwise pass.  The
-/// pre-check shared by `await` and `poll`: a detached handle has no
-/// result to wait for or sample, so observing one is an error (status 1).
+/// The pre-check `await` and `poll` share: a cancelled handle has no result to
+/// wait for or sample, so observing one is an error.
 fn ensure_live(handle: &HandleInner, shell: &mut Shell) -> Settled<()> {
     if *handle.state.lock().unwrap() == HandleState::Cancelled {
         shell.mobile.control.last_status = 1;
@@ -700,16 +536,11 @@ fn ensure_live(handle: &HandleInner, shell: &mut Shell) -> Settled<()> {
     Ok(())
 }
 
-/// Non-blocking settle: `Some(completed)` if the handle has an outcome to
-/// observe now (the cached [`CompletedHandle`], or a just-arrived channel
-/// message drained into one), `None` if the worker is still running.  The
-/// sampling step shared by `await`'s fast path, `poll`, and `race`.
-///
-/// A `Disconnected` receiver means the worker dropped its `Sender`
-/// without sending — i.e. it panicked before producing a result.  That
-/// settles the handle with the same panic error `await`'s blocking path
-/// reports, so `poll` and `race` observe a finished (failed) block rather
-/// than spinning on a `None` they would read as still-running.
+/// Non-blocking settle: `Some` if the handle has an outcome to observe now (the
+/// cache, or a just-arrived channel message drained into it), `None` while the
+/// worker runs.  A `Disconnected` receiver means the worker dropped its `Sender`
+/// unsent — it panicked — so it settles as a failure rather than a `None` that
+/// `poll` and `race` would read as still-running.
 #[allow(
     clippy::significant_drop_tightening,
     reason = "the result guard must span the cached re-check, try_recv, and cache write; releasing early lets a second awaiter observe a bare Disconnected"
@@ -720,11 +551,9 @@ fn try_settle(handle: &HandleInner, shell: &mut Shell) -> Option<CompletedHandle
         set_status_from_outcome(&completed.outcome, shell);
         return Some(completed);
     }
-    // Settling is a once-only transition: hold `result` across the
-    // re-check, the receive, and the cache write, so a second awaiter
-    // racing in through this same lock either observes the first
-    // awaiter's cached outcome or blocks until it exists -- it can never
-    // see a bare `Disconnected` left behind by someone else's `recv`.
+    // Settling is once-only: hold `result` across the re-check, the receive,
+    // and the cache write, so a second awaiter either sees the first's cached
+    // outcome or blocks — never a bare `Disconnected` left by someone's `recv`.
     let mut rx_guard = handle.result.lock().unwrap();
     let cached = handle.cached.lock().unwrap().clone();
     if let Some(completed) = cached {
@@ -741,13 +570,10 @@ fn try_settle(handle: &HandleInner, shell: &mut Shell) -> Option<CompletedHandle
     Some(complete_handle(handle, result, shell))
 }
 
-/// Replay a finished detached worker's deferred surface events through the
-/// awaiting run's *current* surface — once.  Only the foreground eliminators
-/// `await`/`race` call this: a `poll`ed-but-not-awaited handle and a handle no
-/// run ever awaits emit no cards, and repeated `await` does not duplicate
-/// them.  A detached worker's `surface` calls are buffered (never on the
-/// possibly-ended spawning run's sink), so this is where they finally surface
-/// — on whichever run observes the handle.
+/// Replay a finished detached worker's buffered surface events through the
+/// awaiting run's *current* surface, once.  Only `await`/`race` call this, so a
+/// polled-but-never-awaited handle emits nothing and a repeat `await` does not
+/// duplicate.
 fn replay_deferred_surface(handle: &HandleInner, completed: &CompletedHandle, mooring: &Mooring) {
     {
         let mut joined = handle.joined.lock().unwrap();
@@ -763,9 +589,8 @@ fn replay_deferred_surface(handle: &HandleInner, completed: &CompletedHandle, mo
     }
 }
 
-/// Project a finished block's outcome to the `await`/`race` record:
-/// `Ok(value)` → `{value, stdout, stderr}`, re-raising `Err(e)` verbatim.
-/// `$status` already reflects the block (set when the outcome was cached).
+/// Project a finished block's outcome to the `await`/`race` record, re-raising
+/// an `Err` verbatim.  `$status` was already set when the outcome was cached.
 fn project_completed(completed: CompletedHandle) -> Settled<Value> {
     let value = completed.outcome?;
     Ok(Value::map(vec![
@@ -775,13 +600,10 @@ fn project_completed(completed: CompletedHandle) -> Settled<Value> {
     ]))
 }
 
-/// One cancel-aware foreground wait, shared by `await` and `race`.  Sweep
-/// `handles` repeatedly, returning the first that has settled together
-/// with the handle it settled — skipping any already cancelled, erroring
-/// if none remain live.  Between sweeps it polls `process::check`, so a
-/// foreground-scope cancel (a deadline or interrupt) unwinds the wait;
-/// but the workers hang at the durable root, not the foreground, so a
-/// cut-short wait leaves them alive to be observed on a later run.
+/// One cancel-aware foreground wait, shared by `await` and `race`: sweep until
+/// a handle settles, erroring when none remain live.  Between sweeps it polls
+/// `process::check`, so a foreground cancel unwinds the wait — but the workers
+/// hang at the durable root, so a cut-short wait leaves them observable later.
 fn wait_first_settled<'a>(
     handles: &[&'a HandleInner],
     mooring: &Mooring,
@@ -790,9 +612,8 @@ fn wait_first_settled<'a>(
     loop {
         let mut saw_running = false;
         for &handle in handles {
-            // A blocked `await`/`race` is continuous observation: each
-            // sweep renews every named handle's idle lease, so a worker
-            // being waited on is never idle-reaped mid-wait.
+            // A blocked wait is continuous observation: each sweep renews
+            // every named handle's idle lease, so none is reaped mid-wait.
             *handle.last_observed.lock().unwrap() = std::time::Instant::now();
             let state = *handle.state.lock().unwrap();
             match state {
@@ -813,10 +634,7 @@ fn wait_first_settled<'a>(
 }
 
 /// Block in the foreground until `handle` completes, replay its buffered
-/// output, and return its result record.  Errors if the handle was
-/// cancelled, and re-raises a failed block.  The wait shares `race`'s
-/// cancel-aware loop rather than a bare `recv`: a foreground deadline or
-/// interrupt unwinds it, but the root-scoped worker survives the run.
+/// surface, and return its result record, re-raising a failed block.
 pub(super) fn await_handle(
     handle: &HandleInner,
     mooring: &Mooring,
@@ -840,33 +658,24 @@ pub(super) fn builtin_await(
     await_handle(handle, mooring, shell)
 }
 
-/// `poll <handle>` -- non-blocking, total sample of a concurrent block.
-/// Yields a two-arm variant and never re-raises a finished block:
+/// `poll <handle>` -- non-blocking, total sample of a concurrent block:
+/// `` `settled `` `{stdout, stderr, outcome}` once it has finished (returned,
+/// raised, or panicked), `` `pending `` `{stdout, stderr}` while it runs.
 ///
-/// - `` `settled `` carrying `{stdout, stderr, outcome}`, where `outcome`
-///   is `` `ok `` with the block's value or `` `err `` with the error
-///   record, when the block finished (returned, raised, or panicked).
-/// - `` `pending `` carrying `{stdout, stderr}` — the bytes the block has
-///   written *so far* — while it is still running.  These are a cumulative,
-///   non-destructive snapshot ([`peek_buffer`], not [`take_buffer`]): the
-///   buffers are left intact for the one-shot completion drain, so a partial
-///   poll never steals bytes a later `await`/`poll` must still see.  A watched
-///   handle's buffers stay empty (bytes flow live through `Sink::LineFramed`),
-///   so a pending `poll` on one reports empty.  Because the snapshot grows as
-///   the worker writes, repeated pending polls are non-idempotent — see
-///   `decisions/260702_partial-poll-pending-output`.
+/// The pending bytes are a cumulative, non-destructive snapshot
+/// ([`peek_buffer`], not [`take_buffer`]), so a partial poll never steals bytes
+/// the one-shot completion drain must still see — and repeated pending polls
+/// are therefore non-idempotent.  A watched handle's
+/// buffers stay empty, so a pending poll on one reports nothing.
 ///
-/// Errors only on a cancelled handle (via [`ensure_live`]):
-/// a detached handle has no outcome to sample.  Unlike `await`/`race`, a
-/// raised or panicked block is reported as data, not re-raised — so a
-/// successful `poll` leaves `$status` at 0 regardless of the block's own
-/// status, which is data inside `outcome.err.status`.
+/// Errors only on a cancelled handle ([`ensure_live`]).  A failed block is
+/// reported as data, not re-raised, so a successful `poll` leaves `$status` at
+/// 0 whatever the block's own status — that lives in `outcome.err.status`.
 pub(super) fn builtin_poll(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "poll")?;
     let handle = expect_handle(&args[0], "poll")?;
     ensure_live(handle, shell)?;
-    // Both samples are observations — a pending poll and a settled one
-    // each name the handle — so the touch lands once at entry, before the
+    // Both arms are observations, so the touch lands once at entry, before the
     // settle attempt decides which arm it is.
     *handle.last_observed.lock().unwrap() = std::time::Instant::now();
     let variant = |label: &str, payload| Value::Variant {
@@ -874,8 +683,7 @@ pub(super) fn builtin_poll(args: &[Value], shell: &mut Shell) -> Settled<Value> 
         payload,
     };
     let result = if let Some(completed) = try_settle(handle, shell) {
-        // A settled poll is an observation like `await`'s, so it
-        // removes the entry too; a `pending` sample below must not.
+        // A settled poll observes as `await` does, so it removes the entry too.
         shell.local.workers.remove(handle);
         let outcome = match completed.outcome {
             Ok(value) => variant("ok", Some(Box::new(value))),
@@ -888,9 +696,6 @@ pub(super) fn builtin_poll(args: &[Value], shell: &mut Shell) -> Settled<Value> 
         ]);
         variant("settled", Some(Box::new(settled)))
     } else {
-        // A cumulative, non-destructive snapshot of what the running
-        // worker has written so far: `peek_buffer` clones, leaving the
-        // buffers for `complete_handle`'s one-shot `take_buffer` drain.
         let pending = Value::map(vec![
             (
                 "stdout".into(),
@@ -903,15 +708,12 @@ pub(super) fn builtin_poll(args: &[Value], shell: &mut Shell) -> Settled<Value> 
         ]);
         variant("pending", Some(Box::new(pending)))
     };
-    // `poll` itself succeeded: the block's status (if any) is data inside
-    // `outcome.err.status`, never a failure of `poll`.
     shell.mobile.control.last_status = 0;
     Ok(result)
 }
 
-/// `race <handles>` -- wait for the first of several tasks to finish.
-/// Cancels remaining handles once a winner is found, then projects the
-/// winner's outcome to the `await` record (re-raising a failed winner).
+/// `race <handles>` -- wait for the first of several blocks to finish, stopping
+/// the rest, then project the winner's outcome as `await` does.
 pub(super) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     if args.is_empty() {
         return Err(sig("race requires 1 argument (list of handles)"));
@@ -934,11 +736,8 @@ pub(super) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &mut Shell)
     project_completed(completed)
 }
 
-/// The exit code carried by a settled error: the runtime error's own code
-/// for `Break::Error`, or the escape's own code for `Break::Escape` (an
-/// `exit 42` carries `42`, not a flattened `1`).  The one `Break` → status
-/// mapping shared by `$status` propagation ([`set_status_from_outcome`]) and
-/// `poll`'s error record ([`break_record`]), so the two never disagree.
+/// The exit code a settled error carries — an `exit 42` carries 42, not a
+/// flattened 1.  Shared by [`set_status_from_outcome`] and [`break_record`].
 fn error_exit_code(e: &Break) -> i32 {
     match e {
         Break::Error(e) => e.exit_code(),
@@ -946,8 +745,7 @@ fn error_exit_code(e: &Break) -> i32 {
     }
 }
 
-/// The exit code carried by an `Escape`: `exit code`'s own code, or 1 for a
-/// job-control stop.
+/// An `Escape`'s exit code: `exit code`'s own, or 1 for a job-control stop.
 fn escape_exit_code(esc: &Escape) -> i32 {
     match esc {
         Escape::Exit(code) => *code,
@@ -956,13 +754,10 @@ fn escape_exit_code(esc: &Escape) -> i32 {
     }
 }
 
-/// `poll`'s `` `err `` payload — the same `{cmd, status, message, line,
-/// col}` record `try` hands its handler thunk, built from the block's
-/// `Break` via the shared [`error_record`] constructor.  The position is
-/// the error's span resolved against `shell`'s source registry, zero when
-/// it has none or its file is unregistered.  An `Escape` (a block that
-/// `exit`ed or stopped) carries no located message, so it reports the
-/// escape's exit code with a `<runtime>` source position.
+/// `poll`'s `` `err `` payload — the same `{cmd, status, message, line, col}`
+/// record `try` hands its handler thunk, via [`error_record`].  The position
+/// resolves the error's span against `shell`'s registry, and is zero when there
+/// is none or when an `Escape` carries no located message.
 fn break_record(e: &Break, shell: &Shell) -> Value {
     match e {
         Break::Error(err) => {
@@ -986,8 +781,6 @@ fn break_record(e: &Break, shell: &Shell) -> Value {
     }
 }
 
-/// Set `shell.mobile.control.last_status` from a finished block's outcome:
-/// 0 on success, the error's exit code on failure.
 fn set_status_from_outcome(outcome: &Settled<Value>, shell: &mut Shell) {
     shell.mobile.control.last_status = match outcome {
         Ok(_) => 0,
@@ -995,11 +788,9 @@ fn set_status_from_outcome(outcome: &Settled<Value>, shell: &mut Shell) {
     };
 }
 
-/// Transition a handle to `Completed`, drain both byte buffers exactly
-/// once into a cached [`CompletedHandle`], set `$status` from the
-/// outcome, and return the completed outcome.  Draining on both the ok and
-/// err paths captures a failed block's bytes; the cache stays valid for
-/// any repeat observation.
+/// Transition a handle to `Completed`, drain both byte buffers exactly once
+/// into a cached [`CompletedHandle`], and set `$status`.  Draining on the error
+/// path too captures a failed block's bytes; the cache serves every repeat.
 fn complete_handle(
     handle: &HandleInner,
     result: Settled<Value>,
@@ -1044,10 +835,8 @@ mod tests {
         }
     }
 
-    /// A handle whose worker never sent a result and dropped its `Sender`,
-    /// modelling a panicked worker.  The stdout/stderr buffers are
-    /// pre-seeded so a `` `settled `` outcome can be checked for the bytes a
-    /// real block would have buffered before panicking.
+    /// A handle whose worker dropped its `Sender` unsent, modelling a panic.
+    /// The buffers are pre-seeded so a settled outcome can be checked for them.
     fn handle_with_disconnected_worker(stdout: &[u8], stderr: &[u8]) -> HandleInner {
         let (tx, rx) = mpsc::channel::<Settled<Value>>();
         drop(tx);
@@ -1069,7 +858,6 @@ mod tests {
         }
     }
 
-    /// Destructure a `` `label payload `` variant, asserting the label.
     fn expect_variant<'a>(v: &'a Value, label: &str) -> &'a Value {
         match v {
             Value::Variant {
@@ -1080,7 +868,6 @@ mod tests {
         }
     }
 
-    /// Destructure a `Value::Map`, panicking on any other shape.
     fn expect_map(v: &Value) -> &Map {
         match v {
             Value::Map(m) => m,
@@ -1088,9 +875,7 @@ mod tests {
         }
     }
 
-    /// Destructure an `` `label payload `` [`FOValue`] variant, asserting the
-    /// label — the [`FOValue`] dual of [`expect_variant`], for the boundary's
-    /// deferred-surface batches.
+    /// The [`FOValue`] dual of [`expect_variant`].
     fn fo_expect_variant<'a>(v: &'a FOValue, label: &str) -> &'a FOValue {
         match v {
             FOValue::Variant {
@@ -1101,7 +886,6 @@ mod tests {
         }
     }
 
-    /// Destructure an [`FOValue::Map`]'s entries and look one up by key.
     fn fo_map_get<'a>(v: &'a FOValue, key: &str) -> Option<&'a FOValue> {
         match v {
             FOValue::Map { entries } => entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
@@ -1109,11 +893,8 @@ mod tests {
         }
     }
 
-    /// A panicked worker drops its `Sender`, so the receiver reports
-    /// `Disconnected`.  `try_settle` must report a settled (failed)
-    /// outcome rather than `None` — otherwise `poll` reads `pending`
-    /// forever and `race` spins.  The error matches `await`'s
-    /// blocking-path panic text.
+    /// A panicked worker's `Disconnected` receiver must settle as a failure,
+    /// not `None` — else `poll` reads `pending` forever and `race` spins.
     #[test]
     fn try_settle_reports_disconnected_worker_as_failed() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -1130,10 +911,8 @@ mod tests {
         }
     }
 
-    /// `poll` over a panicked worker yields `` `settled `` (never
-    /// `` `pending ``, never re-raising), carrying the bytes the worker
-    /// buffered before panicking and an `` `err `` outcome with the error's
-    /// exit code.  A successful `poll` leaves `$status` at 0.
+    /// `poll` over a panicked worker yields `` `settled `` with the bytes it
+    /// buffered before panicking and an `` `err `` outcome, never re-raising.
     #[test]
     fn poll_reports_disconnected_worker_as_settled_err() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -1150,20 +929,13 @@ mod tests {
         let err_fields = expect_map(err);
         assert_eq!(err_fields.get("status"), Some(&Value::Int(1)));
 
-        // A second poll reads the cached outcome and the same bytes —
-        // repeated polls stay consistent.
         let poll2 = builtin_poll(&args, &mut shell).expect("repeat poll must not re-raise");
         assert_eq!(poll1, poll2);
     }
 
-    /// A worker spawned by `spawn_thread` polls `process::check` against
-    /// its own scope.  `ready` confirms the worker is alive before the
-    /// cancel, so the test pins propagation rather than a worker that
-    /// happened to never start; the worker then reports the status its
-    /// poll observed once `cancel` fires the scope it stored.  The
-    /// returned [`CancelScope`](crate::process::CancelScope) is the
-    /// worker's own scope, so a caller can assert cancellation at the
-    /// scope level rather than through the conflated 130 status.
+    /// A worker polling `process::check` against its own scope, reporting the
+    /// status it saw once `cancel_via` fires.  `ready` confirms it is alive
+    /// first, so a test pins propagation, not a worker that never ran.
     fn spawn_polling_worker(
         shell: &Shell,
         cancel_via: impl FnOnce(&crate::process::CancelScope),
@@ -1191,14 +963,9 @@ mod tests {
         (done_rx.recv().unwrap(), worker_cancel)
     }
 
-    /// Cancelling the worker's own scope (what `cancel` / `race`-of-losers
-    /// fire) stops the worker.  The proof is at the scope level: the
-    /// worker's scope observes `is_cancelled()`, while an uncancelled
-    /// sibling spawned from the same shell does not.  These are direct
-    /// `CancelScope` reads on scopes no other test can reach — so the
-    /// test pins scope propagation rather than passing on a cancellation
-    /// another test published.  The worker's reported 130 confirms it
-    /// actually unwound.
+    /// Cancelling a worker's own scope stops it and leaves a sibling from the
+    /// same shell alone — read off scopes no other test can reach, so no stray
+    /// cancellation can satisfy it.
     #[test]
     fn worker_scope_cancel_stops_the_worker() {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -1222,10 +989,8 @@ mod tests {
         assert_eq!(observed, 130);
     }
 
-    /// A [`RootAbort`](crate::process::CancelCause::RootAbort) on the
-    /// durable root reaches the worker: the worker's scope is a
-    /// descendant of the root, so the root flag is visible at the
-    /// worker's next poll.
+    /// A [`RootAbort`](crate::process::CancelCause::RootAbort) reaches the
+    /// worker: its scope descends from the root, so its next poll sees the flag.
     #[test]
     fn root_cancel_reaches_the_worker() {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -1240,12 +1005,8 @@ mod tests {
         assert_eq!(observed, 130);
     }
 
-    /// A foreground cancel spares a detached worker: the worker parents
-    /// under the durable root, not the swappable foreground scope, so
-    /// cancelling the mooring's `cancel` does not reach it.  This is the
-    /// collateral-kill fix made executable — a run timeout on the
-    /// foreground must not reap a `spawn`/`watch` worker meant to outlive
-    /// the run.
+    /// A foreground cancel spares a detached worker: it parents under the
+    /// durable root, so a run timeout cannot reap work meant to outlive the run.
     #[test]
     fn foreground_cancel_spares_detached_worker() {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -1259,20 +1020,14 @@ mod tests {
         );
     }
 
-    /// A blocked `await` unwinds when the foreground scope is cancelled (a
-    /// run deadline or interrupt) instead of sleeping forever on a bare
-    /// `recv`, yet the worker it was awaiting — root-parented, not
-    /// foreground — is left alive to be awaited again on a later run.
-    /// One test for the two failure modes the old bare-`recv` path
-    /// produced: the past-the-wall hang and the collateral kill, both gone.
+    /// A blocked `await` unwinds on a foreground cancel instead of sleeping on a
+    /// bare `recv`, yet the root-parented worker it awaited stays awaitable.
     #[test]
     fn await_unwinds_on_foreground_cancel_sparing_the_worker() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
 
-        // A still-running worker: its result channel never receives, and
-        // its cancel scope is a child of the durable root, exactly as a
-        // real `spawn` worker's is.  The `Sender` stays alive so the
-        // receiver reports `Empty` (pending), not `Disconnected` (panicked).
+        // A still-running worker, root-parented as a real `spawn`'s is.  Its
+        // `Sender` stays alive, so the receiver reports `Empty`, not `Disconnected`.
         let (_tx, rx) = mpsc::channel::<Settled<Value>>();
         let (_sink, stdout_buf) = new_buffer();
         let (_sink2, stderr_buf) = new_buffer();
@@ -1303,7 +1058,6 @@ mod tests {
         );
     }
 
-    /// A millisecond-scale [`WorkerLease`] for the timing tests.
     fn lease_ms(idle: u64, backstop: u64) -> WorkerLease {
         WorkerLease {
             idle: std::time::Duration::from_millis(idle),
@@ -1311,9 +1065,8 @@ mod tests {
         }
     }
 
-    /// A worker body that stays `Running` until cancelled: it polls
-    /// `process::check` so a lease reap genuinely unwinds the thread (with
-    /// the cancel's 130), not merely flags a scope nobody reads.
+    /// A body that stays `Running` until cancelled, polling `process::check` so
+    /// a reap genuinely unwinds the thread rather than flag a scope nobody reads.
     fn check_loop(mooring: &Mooring, _child: &mut Shell) -> Raw<Value> {
         loop {
             crate::process::check(mooring)?;
@@ -1321,9 +1074,7 @@ mod tests {
         }
     }
 
-    /// Block until `handle`'s worker has marked itself `Completed` at exit
-    /// — the precondition a retention test needs before an epoch sweep can
-    /// observe the entry settled.
+    /// Block until `handle`'s worker has marked itself `Completed` at exit.
     fn wait_settled(handle: &HandleInner) {
         for _ in 0..500 {
             if *handle.state.lock().unwrap() == HandleState::Completed {
@@ -1334,12 +1085,8 @@ mod tests {
         panic!("worker never marked itself Completed");
     }
 
-    /// A `spawn` under an agent frame's lease is reaped once *unobserved*
-    /// for the idle bound: the blocked, never-polled worker's own scope is
-    /// force-cancelled with `Deadline`, its registry entry is removed, and
-    /// exactly one `Idle` notice — carrying the entry's id, cmd, and class
-    /// — awaits the host's drain, which empties the ledger.  The body is a
-    /// `process::check` loop, so the reap actually unwinds the thread.
+    /// A `spawn` unobserved for its idle bound: the scope is force-cancelled
+    /// with `Deadline`, the entry removed, one `Idle` notice left to drain.
     #[test]
     fn unobserved_worker_is_reaped_at_its_idle_lease() {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -1386,10 +1133,8 @@ mod tests {
         );
     }
 
-    /// A `spawn` under the interactive frame arms no lease and admits
-    /// freely: the worker's scope is never reaped on a timer, its settled
-    /// registry entry lingers unstamped (the REPL never calls the epoch
-    /// sweep), and no notice of any cause is ever recorded.
+    /// A `spawn` under the interactive frame arms no lease: never reaped on a
+    /// timer, its settled entry unstamped (the REPL never sweeps), no notices.
     #[test]
     fn spawn_under_interactive_frame_arms_no_lease() {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -1428,8 +1173,6 @@ mod tests {
         );
     }
 
-    /// A stub desk that always answers `Ok` with its request unchanged —
-    /// enough to prove a worker either reaches it or does not.
     struct EchoDesk;
     impl crate::types::EnquiryDesk for EchoDesk {
         fn enquire(
@@ -1441,11 +1184,8 @@ mod tests {
         }
     }
 
-    /// Containment (§3 of the enquiry-channel ADR): a detached worker never
-    /// receives the spawning run's enquiry desk, even though one is
-    /// installed on the spawning run. The worker's own `enquire` call must
-    /// answer the honest absence error, never reach `EchoDesk`, and never
-    /// park.
+    /// Containment: a detached worker's own `enquire` answers the absence
+    /// error rather than reach the run's desk.
     #[test]
     fn spawned_worker_never_receives_the_enquiry_desk() {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -1477,12 +1217,8 @@ mod tests {
         }
     }
 
-    /// Containment (§3 of the enquiry-channel ADR), the nursery's twin of
-    /// `spawned_worker_never_receives_the_enquiry_desk`: a detached worker
-    /// never receives the spawning run's nursery, even though one is
-    /// installed on the spawning run. The worker's own `fork_into_nursery`
-    /// call must answer the honest absence error, never reach the parent's
-    /// `Nursery`, and never park.
+    /// The nursery's twin of `spawned_worker_never_receives_the_enquiry_desk`:
+    /// `fork_into_nursery` answers the absence error rather than reach one.
     #[test]
     fn spawned_worker_never_receives_the_nursery() {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -1515,10 +1251,8 @@ mod tests {
         }
     }
 
-    /// Observation renews the idle lease: a worker polled every ~20 ms
-    /// under a 200 ms idle bound survives to ~3× that bound — each `poll`
-    /// touches `last_observed`, so the chain keeps re-arming instead of
-    /// reaping — and is then gated to completion and awaited normally.
+    /// Observation renews the idle lease: a worker polled every ~20 ms under a
+    /// 200 ms bound survives to ~3× it, then finishes and awaits normally.
     #[test]
     fn polled_worker_survives_past_its_idle_lease() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -1558,9 +1292,7 @@ mod tests {
     }
 
     /// The backstop is absolute: ritual polling renews the idle bound but
-    /// cannot extend a worker past `backstop`, so a worker polled every
-    /// ~20 ms under idle 150 ms / backstop 400 ms is reaped anyway — with
-    /// the `Backstop` cause — once its age crosses the line.
+    /// cannot carry a worker past `backstop`, and the cause says so.
     #[test]
     fn backstop_reaps_a_ritually_polled_worker() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -1585,9 +1317,8 @@ mod tests {
                 std::time::Instant::now() < budget,
                 "the backstop must fire within the budget"
             );
-            // A poll may race the reap and observe the cancelled body
-            // settling as an error; the sample's outcome is irrelevant
-            // here — only the touch is the point.
+            // A poll may race the reap and see the cancelled body settle as
+            // an error; only the touch matters here.
             let _ = builtin_poll(&[Value::Handle(handle.clone())], &mut shell);
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
@@ -1598,10 +1329,8 @@ mod tests {
         assert_eq!(notices[0].cause, ReapCause::Backstop);
     }
 
-    /// A worker that completed but was never observed is not reaped: its
-    /// exit mark ends the chain at the state check, so its scope is never
-    /// cancelled, its entry lingers in the registry as an unclaimed
-    /// result, and no notice is recorded.
+    /// A worker that completed but was never observed is not reaped: its exit
+    /// mark ends the chain, so its entry lingers as an unclaimed result.
     #[test]
     fn completed_unobserved_worker_is_not_reaped() {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -1620,9 +1349,8 @@ mod tests {
         .expect("spawn must succeed");
         let scope = handle.cancel.clone();
 
-        // The instantly-returning body marks itself `Completed` at exit;
-        // wait for that mark (it rides the worker thread), then let ~3
-        // idle bounds elapse so the chain has demonstrably fired and ended.
+        // Wait for the exit mark (it rides the worker thread), then let ~3 idle
+        // bounds elapse so the chain has demonstrably fired and ended.
         let mut completed = false;
         for _ in 0..200 {
             if *handle.state.lock().unwrap() == HandleState::Completed {
@@ -1645,9 +1373,8 @@ mod tests {
         );
     }
 
-    /// Enumeration is not observation: a worker listed every ~10 ms under
-    /// a 40 ms idle bound is reaped anyway — `workers()` / `worker_count()`
-    /// touch nothing — so the lease is renewed only by the eliminators.
+    /// Enumeration is not observation: `workers()` and `worker_count()` touch
+    /// nothing, so a listed-but-unpolled worker is reaped anyway.
     #[test]
     fn listing_does_not_renew_the_lease() {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -1684,12 +1411,8 @@ mod tests {
         );
     }
 
-    /// The durable class is the whole difference: under one
-    /// millisecond-scale lease frame, a `Durable` birth arms no chain and
-    /// outlives both bounds — unpolled past the idle bound, older than the
-    /// backstop — while its ordinary-class sibling, spawned under the very
-    /// same frame, is reaped.  Exactly one notice results, and it names the
-    /// sibling, never the durable worker.
+    /// The durable class is the whole difference: under one lease frame a
+    /// `Durable` birth outlives both bounds while its sibling is reaped.
     #[test]
     fn durable_worker_outlives_both_lease_bounds_while_its_sibling_reaps() {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -1729,7 +1452,6 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        // Let the durable worker age well past both bounds, unobserved.
         let past_both = born + std::time::Duration::from_millis(400);
         while std::time::Instant::now() < past_both {
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1747,14 +1469,12 @@ mod tests {
         assert_eq!(notices.len(), 1, "one notice: the sibling's reap alone");
         assert_eq!(notices[0].cmd, "<sibling>");
 
-        // End the blocked worker so the test does not leak a live thread.
+        // End the blocked worker so the test leaks no live thread.
         durable.cancel.cancel(crate::process::CancelCause::Explicit);
     }
 
-    /// Explicit destruction still reaches a durable worker: `cancel`
-    /// through the handle fires its scope and removes its registry entry,
-    /// exactly as for an ordinary worker — durability exempts the lease
-    /// chain, never the eliminators.
+    /// `cancel` still fires a durable worker's scope and removes its entry:
+    /// durability exempts the lease chain, not the eliminators.
     #[test]
     fn cancel_through_the_handle_ends_a_durable_worker() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -1796,10 +1516,8 @@ mod tests {
 
     // ── `service`'s mandatory description ────────────────────────────────
 
-    /// Run `src` as one capturing top-level run on `shell`, whose host
-    /// surface the caller has already dressed, returning the runtime
-    /// result. Panics on a parse/type failure — every source these tests
-    /// run is expected to compile.
+    /// Run `src` as one capturing top-level run on a shell the caller dressed.
+    /// Panics on a static failure — every source here is expected to compile.
     fn run_source(shell: &mut Shell, src: &str) -> Settled<Value> {
         use crate::transport::{Program, Run};
         use crate::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
@@ -1835,9 +1553,8 @@ mod tests {
         shell
     }
 
-    /// An empty (or whitespace-only, after trim) description is refused:
-    /// it is the whole legibility bound a durable birth declares, so it
-    /// cannot be absent.
+    /// An empty (or whitespace-only) description is refused: it is the whole
+    /// legibility bound a durable birth declares, so it cannot be absent.
     #[test]
     fn service_rejects_an_empty_description() {
         let mut shell = service_test_shell();
@@ -1846,8 +1563,7 @@ mod tests {
         assert_eq!(status(err), 1);
     }
 
-    /// A multi-line description is refused: it is a one-line ledger label,
-    /// not a paragraph.
+    /// A multi-line description is refused: a ledger label, not a paragraph.
     #[test]
     fn service_rejects_a_multiline_description() {
         let mut shell = service_test_shell();
@@ -1856,8 +1572,7 @@ mod tests {
         assert_eq!(status(err), 1);
     }
 
-    /// A valid description lands verbatim (trimmed) as the registry
-    /// entry's `cmd` — what a host's own ledger shows for the service.
+    /// A valid description lands trimmed as the registry entry's `cmd`.
     #[test]
     fn service_description_lands_in_the_registry_entry() {
         let mut shell = service_test_shell();
@@ -1874,8 +1589,6 @@ mod tests {
 
     // ── `detach` ─────────────────────────────────────────────────────────
 
-    /// A shell dressed as a host that has armed a detach policy: the
-    /// builtin installed, with `budget` births available.
     #[cfg(unix)]
     fn detach_test_shell(budget: u64) -> Shell {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -1884,8 +1597,8 @@ mod tests {
         shell
     }
 
-    /// The description is not optional and neither is the program: a call
-    /// with fewer than two arguments never reaches the exec boundary.
+    /// Neither description nor program is optional: a shorter call never
+    /// reaches the exec boundary.
     #[cfg(unix)]
     #[test]
     fn detach_requires_a_description_and_a_command() {
@@ -1895,9 +1608,7 @@ mod tests {
         assert_eq!(status(err), 1);
     }
 
-    /// The same legibility bound `service` carries, and more load-bearing
-    /// here: an empty or multi-line description is refused before anything
-    /// is born.
+    /// The same legibility bound `service` carries, refused before a birth.
     #[cfg(unix)]
     #[test]
     fn detach_rejects_an_illegible_description() {
@@ -1910,11 +1621,9 @@ mod tests {
         assert_eq!(status(multiline), 1);
     }
 
-    /// A head a handler in scope intercepts runs its handler, per name and
-    /// by catch-all alike, and the handler's value is the `detach`'s: the
-    /// resolution order holds under this verb as under any call.  The
-    /// budget is zero, so the test also says that an intercepted call
-    /// spends no birth — there is no process for one to have paid for.
+    /// A head a handler intercepts runs that handler, per name and by catch-all
+    /// alike, and its value is the `detach`'s.  The zero budget adds that an
+    /// intercepted call spends no birth.
     #[cfg(unix)]
     #[test]
     fn detach_runs_a_handler_that_intercepts_its_head() {
@@ -1951,8 +1660,7 @@ mod tests {
         assert!(format!("{err:?}").contains("builtin"));
     }
 
-    /// Vetting is reused wholesale, so an unresolvable head surfaces the
-    /// ordinary 127 rather than a detach-specific diagnostic.
+    /// Vetting is reused wholesale, so an unresolvable head gives the usual 127.
     #[cfg(unix)]
     #[test]
     fn detach_reports_an_unknown_command_as_127() {
@@ -1965,8 +1673,7 @@ mod tests {
         assert_eq!(status(err), 127);
     }
 
-    /// The budget is a hard bound, and its refusal says so without
-    /// pretending there is a remedy inside ral.
+    /// The budget is a hard bound, and its refusal claims no remedy inside ral.
     #[cfg(unix)]
     #[test]
     fn detach_refuses_past_its_budget() {
@@ -1976,10 +1683,8 @@ mod tests {
         assert!(format!("{err:?}").contains("budget"));
     }
 
-    /// The whole of what a birth hands back: the description the caller
-    /// gave and the pid the kernel gave.  There is nothing else to name —
-    /// the survivor's three streams are `/dev/null` and no file is written
-    /// anywhere.
+    /// The whole of what a birth hands back: the caller's description and the
+    /// kernel's pid.  Nothing else — three `/dev/null` streams, no file anywhere.
     #[cfg(unix)]
     #[test]
     fn detach_returns_a_receipt_of_a_pid_and_a_desc() {
@@ -2000,10 +1705,8 @@ mod tests {
         assert_eq!(shell.mobile.control.last_status, 0);
     }
 
-    /// A detached worker's `surface` events are buffered, not emitted live,
-    /// and replay through the *awaiting* run's surface exactly once: `poll`
-    /// never replays, the first `await` replays, and a second `await` does
-    /// not duplicate.  Models `spawn { surface … }` then observing the handle.
+    /// A detached worker's `surface` events replay through the *awaiting* run
+    /// exactly once: `poll` never, the first `await` yes, a second no.
     #[test]
     fn deferred_surface_replays_once_on_await_not_poll() {
         struct Rec(Arc<Mutex<Vec<FOValue>>>);
@@ -2018,9 +1721,8 @@ mod tests {
         let mut m = Mooring::adrift();
         m.surface = Some(Arc::new(Rec(log.clone())));
 
-        // A settled handle carrying one buffered surface event, modelling a
-        // detached worker that called `surface` once and returned.  The
-        // sender stays alive so the receiver sees the value, not a disconnect.
+        // A settled handle carrying one buffered event; the sender stays alive,
+        // so the receiver sees a value rather than a disconnect.
         let (tx, rx) = mpsc::channel::<Settled<Value>>();
         tx.send(Ok(Value::Unit)).unwrap();
         let (_s, stdout_buf) = new_buffer();
@@ -2042,12 +1744,9 @@ mod tests {
             cancel: crate::process::CancelScope::default(),
         };
 
-        // `poll` settles the handle (draining the buffer into the cache) but
-        // never replays: no cards yet.
         builtin_poll(&[Value::Handle(handle.clone())], &mut shell).expect("poll ok");
         assert_eq!(log.lock().unwrap().len(), 0, "poll must not replay surface");
 
-        // The first `await` replays the buffered card exactly once.
         await_handle(&handle, &m, &mut shell).expect("await ok");
         assert_eq!(
             log.lock().unwrap().len(),
@@ -2055,7 +1754,6 @@ mod tests {
             "await replays the deferred card"
         );
 
-        // A second `await` reads the cache and must not duplicate it.
         await_handle(&handle, &m, &mut shell).expect("await ok");
         assert_eq!(
             log.lock().unwrap().len(),
@@ -2064,10 +1762,8 @@ mod tests {
         );
     }
 
-    /// A deferred-sink test double standing in for the agent host: it records
-    /// every delivered batch.  The deliver-once test-and-set now lives at
-    /// `DeferredSurface::flush`'s call site, so the sink itself just records
-    /// whatever it is handed.
+    /// A deferred-sink double for the agent host.  The deliver-once test-and-set
+    /// lives at `DeferredSurface::flush`, so this just records what it is handed.
     struct RecDeferred(Arc<Mutex<Vec<Vec<FOValue>>>>);
 
     impl DeferredSink for RecDeferred {
@@ -2076,10 +1772,8 @@ mod tests {
         }
     }
 
-    /// Spin until the deferred sink has recorded a batch (the worker flushed) or
-    /// the budget elapses, returning the recorded batches.  A `spawn_child`
-    /// worker runs on its own thread, so its completion flush is observed by
-    /// waiting on the destination rather than on the result channel.
+    /// Spin until the deferred sink records a batch: a worker flushes on its own
+    /// thread, so completion is observed there, not on the result channel.
     fn wait_for_batch(batches: &Arc<Mutex<Vec<Vec<FOValue>>>>) -> Vec<Vec<FOValue>> {
         for _ in 0..500 {
             {
@@ -2093,10 +1787,8 @@ mod tests {
         panic!("worker never flushed its batch to the deferred sink");
     }
 
-    /// The `outcome` label inside a batch's trailing `` `done `` event.  Pins
-    /// the structural shape the exarch decoder matches: `` `done `` carries a
-    /// `{cmd, outcome}` map, and `outcome` is a closed `` `ok ``/`` `err ``/
-    /// `` `panic `` variant.
+    /// The `outcome` label inside a batch's trailing `` `done ``.  Pins the shape
+    /// the exarch decoder matches: a `{cmd, outcome}` map over a closed variant.
     fn done_outcome_label(done: &FOValue) -> String {
         let done = fo_expect_variant(done, "done");
         match fo_map_get(done, "outcome").expect("outcome field") {
@@ -2105,11 +1797,9 @@ mod tests {
         }
     }
 
-    /// Install a deferred sink and `spawn_child` a worker; on completion the
-    /// worker flushes its buffer plus a trailing `` `done `` event to the sink
-    /// as one batch.  This is the un-awaited delivery the ADR adds: a fire-and-forget
-    /// worker reaches a sink with no eliminator at all.  Each outcome — clean
-    /// return, raised `Err`, panic — stamps the matching `done` label.
+    /// With a deferred sink installed, a completed worker flushes its buffer plus
+    /// a trailing `` `done `` as one batch — a sink reached with no eliminator at
+    /// all — and each of the three outcomes stamps its own label.
     #[test]
     fn detached_worker_flushes_done_to_deferred_sink() {
         fn run(
@@ -2120,9 +1810,8 @@ mod tests {
             let mut m = Mooring::adrift();
             m.deferred = Some(Arc::new(RecDeferred(batches.clone())));
             let snap = Arc::new(shell.mobile().scope);
-            // Hold the handle (and its receiver) so the channel stays connected
-            // until the worker has flushed; never observed, so no eliminator
-            // competes for the `joined` latch.
+            // Hold the handle so the channel stays connected until the flush;
+            // never observed, so no eliminator competes for the `joined` latch.
             let _handle = spawn_child(
                 snap,
                 &m,
@@ -2138,8 +1827,6 @@ mod tests {
             got.pop().unwrap()
         }
 
-        // Clean return: a `` `done `` whose outcome is `` `ok ``, carrying the
-        // handle's cmd.
         let ok = run(|_, _child| Ok(Value::Unit));
         assert_eq!(ok.len(), 1, "an empty body's batch is just the `done event");
         let done = &ok[0];
@@ -2152,20 +1839,15 @@ mod tests {
             })
         );
 
-        // Raised `Err`: a `` `done `` whose outcome is `` `err ``.
         let err = run(|_, _child| Err(sig("boom").into()));
         assert_eq!(done_outcome_label(&err[0]), "err");
 
-        // Panic: the guard fires on the unwind with a `` `panic `` outcome.
         let panicked = run(|_, _child| panic!("worker exploded"));
         assert_eq!(done_outcome_label(&panicked[0]), "panic");
     }
 
-    /// The body's own `surface`/`io` values appear in the batch *before* the
-    /// trailing `` `done ``: the deferred batch carries the full deferred
-    /// surface, not only the completion notice.  Also pins that a panicking
-    /// worker still settles its handle as a panic through the existing
-    /// `Disconnected` path — the flush guard preserves that semantics.
+    /// The body's own events precede the trailing `` `done ``: the batch carries
+    /// the whole surface.  A panicking worker still settles through `Disconnected`.
     #[test]
     fn deferred_batch_carries_body_surface_before_done() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -2174,9 +1856,6 @@ mod tests {
         m.deferred = Some(Arc::new(RecDeferred(batches.clone())));
         let snap = Arc::new(shell.mobile().scope);
 
-        // A worker that surfaces one card, then panics: the buffered card must
-        // precede the `` `panic `` `done`, and the handle must still settle as a
-        // panic when observed.
         let handle = spawn_child(
             snap,
             &m,
@@ -2208,9 +1887,6 @@ mod tests {
         );
         assert_eq!(done_outcome_label(&batch[1]), "panic");
 
-        // The panicked worker dropped its `Sender` without sending, so the
-        // handle settles as a failed (panic) outcome through `try_settle`'s
-        // `Disconnected` arm — unchanged by the flush guard.
         match try_settle(&handle, &mut shell) {
             Some(CompletedHandle {
                 outcome: Err(Break::Error(_)),
@@ -2220,9 +1896,8 @@ mod tests {
         }
     }
 
-    /// With no deferred sink installed (the bare REPL), a completed worker
-    /// flushes nothing: REPL behaviour is byte-for-byte unchanged, and the
-    /// deferred surface reaches a sink only via `await`/`race`.
+    /// With no deferred sink installed (the bare REPL) a completed worker
+    /// flushes nothing, and its surface reaches a sink only via `await`/`race`.
     #[test]
     fn no_deferred_sink_means_no_delivery() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -2248,10 +1923,8 @@ mod tests {
         )
         .unwrap();
 
-        // Join through `await`: the worker has run and (with no deferred sink)
-        // flushed nothing.  The `joined` latch was never set by a delivery, so
-        // the replay still surfaces the body's card through the awaiting run
-        // — the existing pull-forward path.
+        // Nothing was delivered, so the `joined` latch is unset and the `await`
+        // replay still surfaces the body's card.
         let log = Arc::new(Mutex::new(Vec::new()));
         struct Rec(Arc<Mutex<Vec<FOValue>>>);
         impl EventSink for Rec {
@@ -2272,10 +1945,8 @@ mod tests {
         );
     }
 
-    /// Deliver-once across the two regimes: once the deferred sink has
-    /// delivered a batch (winning the `joined` test-and-set), a later `await`
-    /// replays nothing — the shared latch suppresses the duplicate render —
-    /// yet `await` still returns its cached result record.
+    /// Deliver-once across the two regimes: once the deferred sink has won the
+    /// `joined` latch, a later `await` replays nothing yet still returns its record.
     #[test]
     fn deferred_delivery_suppresses_a_later_await_replay() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -2309,8 +1980,7 @@ mod tests {
             "the deferred flush set `joined"
         );
 
-        // A later `await` reads the result but finds the latch set, so it
-        // replays no card into the live run.
+        // A later `await` finds the latch set, so it replays nothing.
         let log = Arc::new(Mutex::new(Vec::new()));
         struct Rec(Arc<Mutex<Vec<FOValue>>>);
         impl EventSink for Rec {
@@ -2329,10 +1999,8 @@ mod tests {
 
     // ── worker registry (pure bookkeeping, no policy) ────────────────────
 
-    /// `spawn_child` files exactly one entry, carrying the spawn's own `cmd`
-    /// and the (only) `Worker` lease class, and the registered handle is
-    /// the same handle the call returns — `HandleInner`'s own `PartialEq`
-    /// (`Arc::ptr_eq` on `result`) proves it, not a field-by-field copy.
+    /// `spawn_child` files exactly one entry with the spawn's own `cmd` and class,
+    /// and the registered handle is the returned one — by `Arc::ptr_eq`.
     #[test]
     fn spawn_child_registers_one_entry_with_matching_handle() {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -2364,10 +2032,8 @@ mod tests {
         );
     }
 
-    /// The mechanism attaches no policy and is host-independent: a bare
-    /// `Shell::new(crate::io::TerminalState::default())` with no `deferred_lease` granted
-    /// (the REPL/interactive shape) registers exactly as the agent-framed
-    /// case above does.
+    /// The mechanism attaches no policy: a shell granted no `deferred_lease`
+    /// (the interactive shape) registers exactly as the agent-framed case above.
     #[test]
     fn spawn_child_registers_with_no_deferred_lease_granted() {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -2388,11 +2054,8 @@ mod tests {
         assert_eq!(shell.local.workers.snapshot()[0].handle, handle);
     }
 
-    /// Every foreground eliminator that observes a settled worker removes
-    /// its registry entry — `await`, `cancel`, and a `` `settled `` `poll` —
-    /// while a `` `pending `` `poll` leaves the entry alone: listing and
-    /// sampling must never mutate the registry, only an actual observation
-    /// of a finished (or explicitly cancelled) worker may.
+    /// Every eliminator that observes a settled worker removes its entry, while a
+    /// `` `pending `` `poll` leaves it: only observation may mutate the registry.
     #[test]
     fn eliminators_remove_the_entry_except_a_pending_poll() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -2454,9 +2117,8 @@ mod tests {
             "a settled poll removes its entry"
         );
 
-        // A pending `poll` does not touch the registry: block the worker on
-        // its own channel so the sample is deterministically `` `pending ``,
-        // no timing guess needed.
+        // Block the worker on its own channel so the sample is deterministically
+        // `` `pending ``, with no timing guess.
         let (unblock_tx, unblock_rx) = mpsc::channel::<()>();
         let snap = Arc::new(shell.mobile().scope);
         let h4 = spawn_child(
@@ -2487,10 +2149,8 @@ mod tests {
         await_handle(&h4, &m, &mut shell).expect("await ok");
     }
 
-    /// `race` removes both the winner (a settled observation) and every
-    /// cancelled loser (the same cancel-and-detach the loop already
-    /// performs for each) — nothing lingers in the registry once `race`
-    /// returns.
+    /// `race` removes the winner and every cancelled loser: nothing lingers in
+    /// the registry once it returns.
     #[test]
     fn race_removes_winner_and_cancelled_losers() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -2507,8 +2167,8 @@ mod tests {
         )
         .unwrap();
 
-        // The losers block on their own channels, so `race` always finds
-        // the winner settled first and cancels these two.
+        // The losers block on their own channels, so the winner always settles
+        // first and these two are cancelled.
         let (l1_tx, l1_rx) = mpsc::channel::<()>();
         let snap = Arc::new(shell.mobile().scope);
         let loser1 = spawn_child(
@@ -2553,25 +2213,16 @@ mod tests {
             "race removes the winner and both cancelled losers"
         );
 
-        // Let the cancelled-but-still-blocked loser threads finish so the
-        // test doesn't leave them parked past its own end.
+        // Release the cancelled-but-blocked losers so nothing stays parked.
         let _ = l1_tx.send(());
         let _ = l2_tx.send(());
     }
 
-    /// The flow rule: the registry `Arc` flows into a spawned worker's own
-    /// shell (`Shell::spawn_thread`), so a `spawn` nested inside a worker's
-    /// body registers into the *same* registry the outer, owning shell
-    /// reads — not a fresh, private one of its own.
-    ///
-    /// The worker gates on `go_rx` before doing anything: `spawn_child`
-    /// starts the thread *before* it files the outer entry on the spawning
-    /// shell, so an ungated body could sample the registry ahead of that
-    /// registration and observe one entry instead of two.  The parent
-    /// opens the gate only after its `spawn_child` call has returned —
-    /// the outer entry is then guaranteed filed — making the worker's
-    /// sample deterministic.  Production order needs no such promise:
-    /// parent and nested registrations are deliberately unordered.
+    /// The flow rule: the registry `Arc` flows into a worker's own shell, so a
+    /// `spawn` nested in a worker's body registers into the *same* registry the
+    /// owning shell reads.  The `go_rx` gate buys determinism only — a thread
+    /// starts before its outer entry is filed, so an ungated body could sample
+    /// ahead of it; production order is deliberately unordered.
     #[test]
     fn nested_spawn_registers_into_the_owning_shells_registry() {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -2599,16 +2250,14 @@ mod tests {
                     |_, _c| Ok(Value::Unit),
                 )
                 .unwrap();
-                // Sent right after the nested spawn registers, with the
-                // outer entry already filed (the gate above), so the count
-                // sampled on the worker's own (child) shell is exact.
+                // The outer entry is filed (the gate above), so this count is
+                // exact.
                 ready_tx.send(child_shell.local.workers.count()).unwrap();
                 Ok(Value::Unit)
             },
         )
         .unwrap();
-        // The outer `spawn_child` has returned, so its entry is filed;
-        // release the worker to spawn its nested child and sample.
+        // The outer entry is filed; release the worker to spawn and sample.
         go_tx.send(()).unwrap();
 
         let observed_from_worker = ready_rx.recv().unwrap();
@@ -2632,10 +2281,9 @@ mod tests {
         }
     }
 
-    /// The retention ledger in integers: a settled, unclaimed entry is
-    /// stamped at the first sweep that observes it settled, kept while
-    /// `epoch − stamp < retention`, and expired — one `Retention` notice
-    /// carrying its facts — at the sweep the bound is met.
+    /// The retention ledger in integers: an unclaimed settled entry is stamped at
+    /// the first sweep that sees it settled, kept while `epoch − stamp <
+    /// retention`, expired with one `Retention` notice at the bound.
     #[test]
     fn retention_stamps_then_expires_an_unclaimed_settled_entry() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -2683,9 +2331,8 @@ mod tests {
         assert_eq!(notices[0].cause, ReapCause::Retention);
     }
 
-    /// A session's workers die with the session's shell: dropping the
-    /// shell cancels every registered worker's scope through
-    /// `LocalState`'s teardown — no host call site required.
+    /// A session's workers die with its shell: the drop cancels every registered
+    /// worker's scope through `LocalState`'s teardown, unaided.
     #[test]
     fn dropping_a_shell_cancels_its_workers() {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -2719,12 +2366,12 @@ mod tests {
             "the dropped shell must cancel its registered workers"
         );
 
-        // Release the gated thread so the test leaves nothing parked.
+        // Release the gated thread so nothing stays parked.
         gate_tx.send(()).unwrap();
     }
 
-    /// An unarmed registry's sweep is a no-op: nothing is stamped, nothing
-    /// expires — the REPL's "retain indefinitely" behavior, structural.
+    /// An unarmed sweep stamps nothing and expires nothing — the REPL's
+    /// "retain indefinitely", structural.
     #[test]
     fn unarmed_sweep_retains_settled_entries_indefinitely() {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -2751,9 +2398,8 @@ mod tests {
         );
     }
 
-    /// Observation beats retention: an entry the sweep has stamped is
-    /// removed the moment a settled `poll` claims it, so a later sweep past
-    /// the bound finds nothing to expire and records no notice.
+    /// Observation beats retention: a stamped entry is removed the moment a
+    /// settled `poll` claims it, so a later sweep finds nothing to expire.
     #[test]
     fn observation_beats_retention() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -2790,10 +2436,8 @@ mod tests {
         );
     }
 
-    /// A still-running entry is never stamped or expired: the sweep leaves
-    /// live work alone even at retention 0 and any epoch distance —
-    /// retention is a settled entry's lease, not a second bound on running
-    /// workers.
+    /// Retention is a settled entry's lease, not a second bound on live work: a
+    /// running entry is never stamped or expired, at retention 0 or any epoch.
     #[test]
     fn running_entries_are_never_stamped_or_expired() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -2832,11 +2476,8 @@ mod tests {
 
     // ── the admission cap ────────────────────────────────────────────────
 
-    /// The cap refuses the (cap+1)th birth at the door: with two gated
-    /// workers running under `worker_cap: Some(2)`, a third spawn errors —
-    /// naming `await` and `cancel` as the remedies — and registers
-    /// nothing; cancelling one frees a seat, and the next birth is
-    /// admitted.
+    /// The cap refuses the (cap+1)th birth at the door, naming `await` and
+    /// `cancel` as remedies and registering nothing; cancelling one frees a seat.
     #[test]
     fn worker_cap_rejects_at_the_door_and_frees_on_cancel() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -2903,15 +2544,14 @@ mod tests {
         )
         .expect("cancelling one frees a seat");
 
-        // Unblock the parked workers so no thread outlives the test.
+        // Unblock the parked workers so none outlives the test.
         for gate in gates {
             let _ = gate.send(());
         }
     }
 
-    /// A durable service is live work too: one `Durable` and one `Worker`
-    /// running under cap 2 refuse a third birth — the cap counts running
-    /// entries of every class.
+    /// A durable service is live work too: the cap counts running entries of
+    /// every class, so one `Durable` and one `Worker` fill a cap of 2.
     #[test]
     fn durable_birth_counts_toward_the_cap() {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -2959,9 +2599,8 @@ mod tests {
         }
     }
 
-    /// A settled entry lingering under retention holds no seat: with cap 1
-    /// and one finished-but-unclaimed worker still listed, the next birth
-    /// is admitted — the cap counts running workers, not registry entries.
+    /// A settled entry lingering under retention holds no seat: the cap counts
+    /// running workers, not registry entries.
     #[test]
     fn settled_entries_do_not_block_admission() {
         let shell = Shell::new(crate::io::TerminalState::default());

@@ -1,24 +1,11 @@
-//! Audit recording — the single lexical scope helper plus the command
-//! lifecycle.
+//! Audit recording: `with_scope` wraps a structural scope arm (`grant`,
+//! `within`, `guard`) so its body's nodes become the wrapper's children, and
+//! `frame_call` brackets every other node — builtins, externals, stages — in
+//! the `start` / `finish_command` lifecycle.
 //!
-//! Two public surfaces:
-//!
-//! - [`with_scope`] wraps a structural scope arm (`grant`, `within`,
-//!   `guard`) so its body's audit children become the wrapping node's
-//!   children.  [`record_scope`] is the lower-level form that returns
-//!   the constructed node so `try` and `audit` can override fields
-//!   before pushing.
-//! - [`start`] / `finish_command` is the command lifecycle for every
-//!   non-scope node (builtins, externals, uutils stages); [`frame_call`]
-//!   wraps a body in that lifecycle in one call.  Capability checks go
-//!   through [`record_capability`].
-//!
-//! [`scope_node`] is the shared node-assembly the scope recorder and the
-//! `builtins::collections` combinator recorder both build through, so the
-//! two cannot drift on the stderr cap or node shape.
-//!
-//! All functions are no-ops when `shell.local.audit.active()` is `false`, so
-//! the dispatcher path can call them unconditionally.
+//! With `shell.local.audit.active()` false the recorders are no-ops, so the
+//! dispatcher can call them unconditionally; `record_scope` is the exception,
+//! since `try` and `audit` force a subtree whether or not audit is on.
 
 use crate::source::Span;
 use crate::types::{
@@ -26,23 +13,18 @@ use crate::types::{
     Raw, STDERR_CAP_BYTES, Settled, Shell, Value, epoch_us,
 };
 
-/// Stamp captured at the start of a command, paired with
-/// [`finish_command`] which reads it back as the node's `start` plus
-/// the source position the node should name.  Carrying both in one
-/// value keeps the dispatch site's bookkeeping to a single local.
+/// Where a command was called from and when it began — the two halves of a
+/// node's stamp, paired so the dispatch site carries one local.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AuditStart {
     pub site: CallSite,
     pub time: i64,
 }
 
-/// Snapshot the call site and wall clock to start one command's audit
-/// record.  When audit is inactive the dispatcher's matching
-/// [`finish_command`] is a no-op, so we skip the `script` clone and the
-/// `epoch_us` syscall — the empty `AuditStart` we return is never
-/// inspected.  Audit state cannot flip from inactive to active mid-
-/// command (every scope that turns it on also restores on exit), so the
-/// short-circuit is sound.
+/// Open one command's audit record.  An inactive audit gets an empty stamp
+/// and pays for neither the `script` clone nor the `epoch_us` syscall: the
+/// matching `finish_command` will not read it, and audit cannot switch on
+/// mid-command, since every scope that enables it also restores on exit.
 pub(crate) fn start(shell: &Shell) -> AuditStart {
     if !shell.local.audit.active() {
         return AuditStart::default();
@@ -53,37 +35,25 @@ pub(crate) fn start(shell: &Shell) -> AuditStart {
     }
 }
 
-/// Cap stderr at `STDERR_CAP_BYTES` in place.  Applied by the common
-/// node-finalisation path whenever bytes are being captured (§10.3).
 fn cap_stderr(buf: &mut Vec<u8>) {
     if buf.len() > STDERR_CAP_BYTES {
         buf.truncate(STDERR_CAP_BYTES);
     }
 }
 
-/// Record one command node.  Pushes a single node into the active
-/// audit trail.  No-op when audit is inactive.  Internal builtins
-/// (names starting with `_`) are skipped — their wrapping scope (when
-/// any) already names the user-visible event.
-///
-/// `result` carries the command's outcome: on `Ok`, `value` becomes
-/// the node's `value`; on `Break::Error`, the error's message is
-/// used as `stderr` when the caller didn't capture stderr.  Exit /
-/// Stopped propagate without recording.
-/// The already-derived outcome a scope/combinator node records: the exit
-/// status, the value to record (a partial accumulation or `Unit`, the
-/// caller's error-value policy), and any captured stderr.
+/// What a scope or combinator node records, already derived by its caller:
+/// the exit status, the value (a partial accumulation, or `Unit` for a scope
+/// whose body failed), and any captured stderr.
 pub(crate) struct NodeOutcome {
     pub status: i32,
     pub value: Value,
     pub stderr: Vec<u8>,
 }
 
-/// Assemble one recorded scope/combinator node from its already-derived
-/// `outcome`, capping the stderr under the active byte-capture policy
-/// before the node is built.  Shared by [`record_scope`] and the
-/// combinator recorder in `builtins::collections` so the two cannot drift
-/// on the cap or the node shape.
+/// Assemble one scope or combinator node.  Shared by [`record_scope`] and
+/// `iterate_audited` in `builtins::collections`, so the two cannot drift on
+/// the stderr cap or the node shape.  Such a node carries no `args`: the
+/// structural IR is already the record of what the scope received.
 pub(crate) fn scope_node(
     shell: &Shell,
     cmd: &str,
@@ -131,6 +101,8 @@ fn finish_command(
     if !shell.local.audit.active() {
         return;
     }
+    // Internal builtins go unrecorded: the prelude wrapper that called one is
+    // the user-visible event, and it holds the dispatch register meanwhile.
     if cmd.starts_with('_') {
         return;
     }
@@ -170,11 +142,8 @@ fn finish_command(
     shell.local.audit.push(node);
 }
 
-/// Wrap a command body in the audit lifecycle: stamp the start, route
-/// captured stdout/stderr through the audit tee, finalize the node
-/// from the body's outcome.  No-op overhead when audit is inactive —
-/// [`start`] returns an empty stamp and [`finish_command`] short-
-/// circuits, so the framing is free in the common case.
+/// Wrap a command body in the audit lifecycle: stamp the start, tee its
+/// stdout and stderr through the capture, finalize the node.
 pub(crate) fn frame_call<F>(cmd: &str, args: &[Value], shell: &mut Shell, body: F) -> Raw<Value>
 where
     F: FnOnce(&mut Shell) -> Raw<Value>,
@@ -196,9 +165,7 @@ where
     result
 }
 
-/// `Tail` calls don't survive a command boundary — record them as a
-/// `Value::Unit` outcome.  `Break::Error` carries through verbatim;
-/// `Break::Escape` (Exit / Stopped) propagates without an audit node.
+/// A tail call does not survive a command boundary, so it records as `Unit`.
 fn outcome_for_audit(raw: &Raw<Value>) -> Settled<Value> {
     match raw {
         Ok(v) => Ok(v.clone()),
@@ -207,9 +174,9 @@ fn outcome_for_audit(raw: &Raw<Value>) -> Settled<Value> {
     }
 }
 
-/// Record one capability-check node.  No-op when capability auditing
-/// is not currently requested (§11.4).  `fields` is spliced into the
-/// node's `value` map next to `resource` and `decision`.
+/// Record one capability-check node — only when a trail is collecting *and*
+/// some enclosing grants layer asked for `audit: true`.  `fields` joins
+/// `resource` and `decision` in the node's value map.
 pub(crate) fn record_capability(shell: &mut Shell, resource: &str, decision: &str, fields: Map) {
     if !shell.should_audit_capabilities() {
         return;
@@ -225,37 +192,23 @@ pub(crate) fn record_capability(shell: &mut Shell, resource: &str, decision: &st
     shell.local.audit.push(node);
 }
 
-/// What [`record_scope`] returns to its caller on the non-escape path.
-///
-/// `record_scope` returns `Err(Escape)` directly for `Exit` / `Stopped`,
-/// so a constructed `ScopeRecord` always has both a body and a node —
-/// there is no "node missing because the body escaped" state to handle.
+/// [`record_scope`]'s non-escape result.  `Exit` and `Stopped` leave as
+/// `Err(Escape)` instead, so a `ScopeRecord` always has both halves — there is
+/// no "node missing because the body escaped" state for callers to handle.
 pub(crate) struct ScopeRecord {
-    /// The body's non-escape outcome: either a value or a recoverable
-    /// runtime error.  Caller chooses how to surface it.
     pub body: BodyResult,
-    /// The wrapping scope node, always constructed.
     pub node: ExecNode,
 }
 
-/// Run `body` in a forced audit subtree and build the wrapping scope
-/// node.  Used directly by `try` (to override `value` with the
-/// `ok | err` variant) and `audit` (to return the node as a value),
-/// and indirectly by [`with_scope`] for `grant` / `within` / `guard`.
+/// Run `body` in a forced audit subtree and build the wrapping scope node,
+/// handing it back unpushed: `try` overwrites its `value` with the
+/// `ok | err` variant and `audit` returns it as a value.  [`with_scope`] is
+/// the plain form for `grant` / `within` / `guard`.
 ///
-/// `capture` is the byte-capture policy installed while the body
-/// runs; the previous policy is restored on return.  Bytes captured
-/// at the dispatcher level by `with_audit_capture` flow into the
-/// children, so this policy is what they observe.
-///
-/// `span` is the scope node's own source position — its enclosing
-/// `Comp`'s span, resolved via [`Shell::site_of`] — rather than the
-/// dispatch register a command node reads: a scope node names where it
-/// sits, not whatever command preceded it.
-///
-/// The node's `last_status` comes from `shell.mobile.control.last_status`
-/// for a [`BodyResult::Value`] and from `e.exit_code()` for a
-/// [`BodyResult::Error`].
+/// `capture` is installed for the body and restored on return; it is the
+/// policy the children observe as they are recorded.  `span` is the scope's
+/// own position, not the dispatch register a command node reads — a scope
+/// names where it sits, not whatever command preceded it.
 pub(crate) fn record_scope(
     shell: &mut Shell,
     cmd: &str,
@@ -274,15 +227,7 @@ pub(crate) fn record_scope(
     let principal = shell.mobile.context.principal();
     let (fragment, settled) =
         with_capture_policy(shell, capture, |shell| shell.audit_forced_child(body));
-    // Split escape paths off into `Err(Escape)`.  `split` is total: a
-    // `Settled<Value>` cannot encode a tail call by construction (the
-    // private `Tail` lives only in `Control`, absorbed by the
-    // trampoline before any `Settled` is built), so every arm of the
-    // match is reachable.
     let body_result = crate::types::split(settled)?;
-    // Scope nodes record `Unit` for a failed body and carry no serialised
-    // `args`: the structural IR node *is* the record of what the scope
-    // received.
     let (status, value, stderr) = match &body_result {
         BodyResult::Value(v) => (shell.mobile.control.last_status, v.clone(), Vec::new()),
         BodyResult::Error(e) => (e.exit_code(), Value::Unit, e.message.clone().into_bytes()),
@@ -305,11 +250,9 @@ pub(crate) fn record_scope(
     })
 }
 
-/// The lexical scope helper used by `grant`, `within`, and `guard`.
-/// Records one wrapping node into the parent audit trail when audit
-/// is active; otherwise runs `body` unchanged.  The body's result
-/// (including `Break::Error`, `Exit`, `Stopped`) propagates
-/// upward; only the scope node is the difference from a bare call.
+/// Push one wrapping node for `grant`, `within`, or `guard`.  The body's
+/// result propagates untouched, errors and escapes included; the node is the
+/// only difference from calling `body` directly.
 pub(crate) fn with_scope(
     shell: &mut Shell,
     cmd: &str,
@@ -328,10 +271,9 @@ pub(crate) fn with_scope(
     }
 }
 
-/// Run `f` with `policy` installed as the audit byte-capture policy.
-/// Bytes capture is monotonic: an inner `try` with
-/// `CapturePolicy::Off` does not override an outer `audit`'s
-/// `Bytes`.  The previous policy is restored after `f` returns.
+/// Install `policy` for `f`, restoring the previous one after.  Capture is
+/// monotonic: an inner `try`'s `Off` must not silence an outer `audit`'s
+/// `Bytes`, hence the merge rather than a plain swap.
 fn with_capture_policy<R>(
     shell: &mut Shell,
     policy: CapturePolicy,

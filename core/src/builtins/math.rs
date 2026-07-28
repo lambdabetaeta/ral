@@ -1,27 +1,18 @@
 //! Numeric rounding builtins.
 //!
-//! `round <x> <places>` rounds a Float to `places` decimal places (halves
-//! away from zero) and always returns a Float — `round 3.7 0` is `4.0`, not
-//! `4`; reach for `int` when you want the whole number.  `floor`, `ceil`, and
-//! `trunc` take one Float and return the Int in their direction.
-//!
-//! All four accept a Float only — an Int is rejected at the type level, since
-//! an integer is already rounded.  A non-finite value (NaN, ±∞) is refused,
-//! and an `Int`-producing result that leaves the `i64` range is refused
-//! rather than silently corrupted: `NaN as i64` is `0` and an out-of-range
-//! cast saturates, both of which would misreport the input.
+//! All four take a Float only, since an integer is already rounded.  `round`
+//! stays in Float even at zero places: `round 3.7 0` is `4.0`.
 
 use crate::types::{Settled, Value, sig, sig_hint};
 
 use super::util::{check_arity, f64_to_i64};
 
-/// The most decimal places `f64` can carry before `10^places` overflows to
-/// infinity; beyond ~15 significant digits the extra places are noise.
+/// The largest `places` for which `10^places` is still finite in `f64`.
 const MAX_PLACES: i64 = 308;
 
-/// Read a finite Float argument.  The type checker already constrains the
-/// argument to `Float`, so the non-Float arm is defensive; the finiteness
-/// check is the real gate — NaN and ±∞ have no meaningful rounding.
+/// NaN and ±∞ have no rounding, so finiteness is the real gate; the non-Float
+/// arm is defensive, as `sig::ROUND` and `sig::FLOAT_TO_INT` in the typechecker
+/// admit a Float only.
 fn finite_float(name: &str, val: &Value) -> Settled<f64> {
     match val {
         Value::Float(f) if f.is_finite() => Ok(*f),

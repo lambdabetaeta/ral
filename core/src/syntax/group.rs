@@ -1,77 +1,19 @@
-//! Pre-pass: partition statement sequences into elaboration groups.
+//! Pre-pass: partition a statement sequence into elaboration groups, telling
+//! the elaborator which `let` bindings form a recursive knot.
 //!
-//! The elaborator needs to know which `let` bindings are mutually recursive so
-//! it can emit `Comp::LetRec` for them.  This module does that analysis over
-//! the full statement sequence before elaboration begins.
+//! Only a thunk-shaped RHS — lambda or block — may join a knot.  `eval_letrec`
+//! in `core/src/evaluator/comp.rs` installs every member as a thunk before any
+//! body is evaluated, so members may name each other in any source order; a
+//! plain value binding like `let n = f 5` would have to call `f` at binding
+//! time, and stays out.
 //!
-//! # Why only lambdas?
-//!
-//! A `LetRec` establishes all bindings simultaneously before any of them is
-//! evaluated.  A lambda is a thunk: its body is not evaluated at binding time,
-//! so it can safely refer to any group member before the group has settled.
-//! A plain value binding like `n = f 5` would need to call `f` at definition
-//! time, creating a genuine cycle.  So only lambda/block RHS expressions may
-//! participate in a `LetRec` group.
-//!
-//! # SCCs, not WCCs
-//!
-//! `LetRec` is the recursion knot, and within a knot every member is
-//! monomorphic relative to the others until the whole group is generalised.
-//! Grouping by *strongly connected components* of the call graph is what HM
-//! lets-rec wants: each SCC of mutually recursive (or self-recursive)
-//! lambdas becomes one `LetRec`, while bindings that merely *forward-
-//! reference* a later helper get to use the helper polymorphically because
-//! the helper is generalised first.
-//!
-//! Concretely, `g = { … f … }; f = { |x| f x }` forms two SCCs:
-//! `{f}` (self-recursive — emitted as a one-binding `LetRec`) and `{g}`
-//! (acyclic — emitted as a normal `let` so `g` gets ordinary
-//! let-polymorphism over `f`'s scheme).
-//!
-//! # Forward and backward references
-//!
-//! A `LetRec` member may reference any other member regardless of source
-//! order.  This is safe because the evaluator (see `eval_letrec`) installs a
-//! placeholder thunk for every binding name before evaluating any body, so a
-//! reference resolves to the real lambda at call time.
-//!
-//! # Shadow handling
-//!
-//! When a name is defined more than once, each later definition shadows the
-//! earlier one.  A reference to that name resolves to the nearest preceding
-//! definition; if all definitions come after the reference site, the first one
-//! is used.
-//!
-//! ```text
-//! f = { |x| 1 }   # definition A
-//! f = { |x| 2 }   # definition B (shadows A)
-//! g = { f }       # g depends on B — the nearest preceding f
-//! ```
-//!
-//! # Algorithm
-//!
-//! 1. Collect all named lambda `let` bindings across the full statement list,
-//!    recording each one's statement index.
-//! 2. Build a directed dependency graph: edge i→j when binding i's RHS
-//!    contains a free reference to binding j's name, shadow-resolved to the
-//!    nearest preceding definition of that name.
-//! 3. Compute strongly connected components (Tarjan).
-//! 4. Topologically sort the SCC condensation: dependencies first, dependents
-//!    after.
-//! 5. Walk statements in source order.  For each Let stmt, if it's the source-
-//!    earliest member of an SCC and that SCC is not yet emitted, emit every
-//!    SCC up to and including this one (in topo order — dependencies first).
-//!    A non-trivial SCC (size >1, or size 1 with a self-edge) emits as
-//!    `LetRec`; an acyclic singleton SCC emits as `Single`.
-//!
-//! Mutual recursion and forward references work across arbitrary intervening
-//! statements:
-//!
-//! ```text
-//! f = { |x| g x }
-//! /bin/blah           # any non-let statement
-//! g = { |x| f x }    # same LetRec group as f
-//! ```
+//! Knots are *strongly* connected components, not merely connected ones: an
+//! SCC generalises as a unit and is monomorphic within, so a binding that only
+//! forward-references a helper is left a `Single` and gets the helper's scheme
+//! polymorphically.  A reference resolves to the nearest preceding definition
+//! of the name, or to the first if every definition follows it.  Groups are
+//! emitted dependencies-first, which can lift a `let` ahead of its source
+//! position.
 
 use crate::source::Span;
 use crate::syntax::ast::{Ast, Stmt};
@@ -79,28 +21,19 @@ use std::collections::{HashMap, HashSet};
 
 /// A statement group produced by the pre-pass.
 pub enum StmtGroup {
-    /// A single statement.  This covers every non-recursive `let` and
-    /// every non-binding statement (commands, pipelines, …).  The
-    /// underlying [`Stmt`] carries the source span the elaborator will
-    /// stamp onto emitted IR.
+    /// Every non-recursive `let`, and every non-binding statement.
     Single(Stmt),
-    /// A set of mutually recursive or forward-referencing lambda bindings to
-    /// be emitted as `Comp::LetRec`.  All members are lambda or block
-    /// expressions.  Each member carries its own RHS span, so the
-    /// elaborator stamps every recursive binding's IR with its own source
-    /// position rather than falling back to the group's.
+    /// A recursive knot, emitted as `CompKind::LetRec`.  Each member carries
+    /// its own RHS span so the elaborator stamps them individually.
     LetRec(Vec<(String, Box<Ast>, Option<Span>)>),
 }
 
-/// Partition `stmts` into [`StmtGroup`]s.  Strongly-connected groups of
-/// lambda bindings become `LetRec`; acyclic singletons stay as `Single` and
-/// receive ordinary let-polymorphism.  Dependencies are emitted before their
-/// dependents regardless of source order.
+/// Partition `stmts` into [`StmtGroup`]s, dependencies before their dependents
+/// regardless of source order.
 pub fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
-    // Collect all named lambda let-bindings with their statement indices.
-    // def_list[i] = (stmt_idx, name, value_ast, rhs_span)
+    // def_list[i] = (stmt_idx, name, rhs, rhs_span); defs[name] = the def_list
+    // indices defining it, in stmt_idx order.
     let mut def_list: Vec<(usize, &str, &Ast, Option<Span>)> = Vec::new();
-    // defs[name] = list of def_list indices in stmt_idx order
     let mut defs: HashMap<&str, Vec<usize>> = HashMap::new();
 
     for (stmt_idx, stmt) in stmts.iter().enumerate() {
@@ -120,11 +53,9 @@ pub fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
     let candidate_names: HashSet<String> =
         defs.keys().map(std::string::ToString::to_string).collect();
 
-    // Build a directed dependency graph over def_list indices.
-    // Edge i→j: binding i's RHS has a free reference to binding j's name.
-    // We do not filter to forward edges only — the SCC algorithm treats
-    // backward references as ordinary edges, and a backward reference into
-    // a self-recursive binding still belongs in the same SCC.
+    // Edge i→j: binding i's RHS freely references binding j's name.  Backward
+    // edges are kept, not filtered: a backward reference into a self-recursive
+    // binding still belongs in the same SCC.
     let n = def_list.len();
     let mut adj: Vec<Vec<usize>> = vec![vec![]; n];
     for (i, &(stmt_i, _, value, _)) in def_list.iter().enumerate() {
@@ -138,11 +69,10 @@ pub fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
         }
     }
 
-    // Compute SCCs.
     let scc_id = find_sccs(n, &adj);
     let num_sccs = scc_id.iter().copied().max().map_or(0, |x| x + 1);
 
-    // Group def_list indices by SCC id, sorted within each by source order.
+    // Members are sorted by source order, so `members[0]` is the SCC's head.
     let mut scc_members: Vec<Vec<usize>> = vec![Vec::new(); num_sccs];
     for (di, &cid) in scc_id.iter().enumerate() {
         scc_members[cid].push(di);
@@ -151,8 +81,7 @@ pub fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
         members.sort_by_key(|&di| def_list[di].0);
     }
 
-    // Build SCC condensation graph: edge from SCC A to SCC B when some node
-    // in A references a node in B and A != B.
+    // The condensation: edge A→B when some node of A references one of B.
     let mut scc_deps: Vec<HashSet<usize>> = vec![HashSet::new(); num_sccs];
     for (di, edges) in adj.iter().enumerate() {
         let from = scc_id[di];
@@ -164,8 +93,8 @@ pub fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
         }
     }
 
-    // Topo-sort the condensation: dependencies come before dependents.
-    // DFS post-order over SCCs in source order produces a topo order.
+    // Entering the DFS in source order keeps the topo order as close to the
+    // written order as the dependencies allow.
     let mut topo: Vec<usize> = Vec::with_capacity(num_sccs);
     let mut topo_visited: Vec<bool> = vec![false; num_sccs];
     let mut scc_first_stmt: Vec<usize> = vec![0; num_sccs];
@@ -178,8 +107,8 @@ pub fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
         topo_dfs(cid, &scc_deps, &mut topo_visited, &mut topo);
     }
 
-    // Mark non-head members as consumed (they don't emit at their own source
-    // position; their SCC emits at the head's position).
+    // A non-head member never emits at its own source position; its SCC has
+    // already emitted it at the head's.
     let mut consumed: HashSet<usize> = HashSet::new();
     for members in &scc_members {
         for &di in &members[1..] {
@@ -187,14 +116,13 @@ pub fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
         }
     }
 
-    // Map source stmt_idx → SCC id when that stmt is the head of its SCC.
     let mut head_at: HashMap<usize, usize> = HashMap::new();
     for (cid, members) in scc_members.iter().enumerate() {
         head_at.insert(def_list[members[0]].0, cid);
     }
 
-    // Walk source.  When we reach a head stmt, emit its SCC plus every
-    // un-emitted dependency in topo order so deps land before dependents.
+    // At a head statement, flush the topo order up to and including its SCC,
+    // so every dependency lands before it.
     let mut emitted: Vec<bool> = vec![false; num_sccs];
     let mut out: Vec<StmtGroup> = Vec::new();
     for (stmt_idx, stmt) in stmts.iter().enumerate() {
@@ -204,8 +132,7 @@ pub fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
         match head_at.get(&stmt_idx).copied() {
             None => out.push(StmtGroup::Single(stmt.clone())),
             Some(this_scc) if emitted[this_scc] => {
-                // Emitted out-of-order as a dep of an earlier head.  Drop the
-                // source-position visit; the SCC has already been placed.
+                // Already placed as a dependency of an earlier head.
             }
             Some(this_scc) => {
                 for &cid in &topo {
@@ -227,15 +154,9 @@ pub fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
 
 // ── Internal helpers ─────────────────────────────────────────────────────
 
-/// DFS post-order: visit `scc`'s dependencies first, then push `scc`.  This
-/// produces a topological order where dependencies precede dependents.
-///
-/// Iterative (explicit work stack) rather than recursive: a long
-/// dependency chain — `let f_i = { f_{i+1} }` repeated tens of thousands
-/// of times — would otherwise recurse as deep as the chain and overflow
-/// the host stack.  Each frame carries the node and an iterator over its
-/// remaining dependencies; a node is pushed to `topo` only once all its
-/// dependencies have been emitted (true post-order).
+/// Push `start`'s dependencies onto `topo` before `start` itself.  Iterative,
+/// because a dependency chain of tens of thousands of bindings would recurse
+/// as deep as the chain and overflow the host stack.
 fn topo_dfs(
     start: usize,
     scc_deps: &[HashSet<usize>],
@@ -263,9 +184,7 @@ fn topo_dfs(
     }
 }
 
-/// Emit one SCC as either a `LetRec` (multi-member, or self-recursive
-/// singleton) or a `Single` (acyclic singleton — gets ordinary
-/// let-polymorphism through `Comp::Bind`).
+/// Emit one SCC: a `LetRec` if it has several members or a self-edge.
 fn emit_scc(
     cid: usize,
     scc_members: &[Vec<usize>],
@@ -286,26 +205,21 @@ fn emit_scc(
             .collect();
         out.push(StmtGroup::LetRec(bindings));
     } else {
-        // Acyclic singleton — emit the original Let stmt unchanged so it
-        // flows through `Comp::Bind` and generalises in the normal way.
+        // The original stmt, unchanged, so it lowers to `CompKind::Bind` and
+        // generalises in the normal way.
         let stmt_idx = def_list[members[0]].0;
         out.push(StmtGroup::Single(stmts[stmt_idx].clone()));
     }
 }
 
-/// Given a reference to a name from a definition at `use_stmt_idx`, and a
-/// list of `def_list` indices for all definitions of that name (in `stmt_idx`
-/// order), return the `def_list` index that is "visible" from `use_stmt_idx`.
-///
-/// The visible definition is the last one whose statement index is ≤
-/// `use_stmt_idx` (nearest preceding).  If all definitions come after
-/// `use_stmt_idx`, the first definition is returned (forward reference).
+/// Which of a name's definitions a use at `use_stmt_idx` sees: the nearest
+/// preceding one, or the first if every definition follows the use.
 fn resolve_ref(
     use_stmt_idx: usize,
     def_indices: &[usize],
     def_list: &[(usize, &str, &Ast, Option<Span>)],
 ) -> usize {
-    // def_indices is in stmt_idx order (built by iterating stmts in order).
+    // `def_indices` ascends by stmt_idx, so the last match is the nearest.
     let mut best = def_indices[0];
     for &di in def_indices {
         if def_list[di].0 <= use_stmt_idx {
@@ -315,12 +229,8 @@ fn resolve_ref(
     best
 }
 
-/// Tarjan's strongly-connected-components algorithm.
-///
-/// Returns `scc_id[i]` = the SCC index of node `i`.  Nodes in the same SCC
-/// share an id; SCC ids are dense in `0..num_sccs`.  Order of ids is
-/// reverse topological — deeper SCCs (leaves) get lower ids — but the
-/// caller does its own topo sort and does not rely on this.
+/// Tarjan's algorithm: `scc_id[i]` is node `i`'s component, dense in
+/// `0..num_sccs`.  The ids carry no order the caller relies on.
 fn find_sccs(n: usize, adj: &[Vec<usize>]) -> Vec<usize> {
     let mut state = TarjanState {
         idx_counter: 0,
@@ -349,15 +259,11 @@ struct TarjanState {
     next_scc_id: usize,
 }
 
-/// Iterative Tarjan rooted at `v`.  A work stack of `(node, next-neighbour
-/// index)` replaces the recursion so a dependency chain of tens of
-/// thousands of bindings (`let f_i = { f_{i+1} }`) cannot overflow the
-/// host stack.  Descending into an unvisited neighbour pushes a frame;
-/// when that frame finishes it propagates its lowlink to its parent — the
-/// one place the recursive form did its work on return.
+/// Iterative Tarjan rooted at `v`, so a chain of tens of thousands of bindings
+/// cannot overflow the host stack.  Popping a frame folds its lowlink into its
+/// parent's — the work the recursive form does on return.
 fn strongconnect(v: usize, adj: &[Vec<usize>], st: &mut TarjanState) {
-    // Each work frame: the node and the index of the next neighbour to
-    // examine in `adj[node]`.
+    // Frame: a node, and where in `adj[node]` to resume.
     let mut work: Vec<(usize, usize)> = vec![(v, 0)];
     st.indices[v] = Some(st.idx_counter);
     st.lowlinks[v] = st.idx_counter;
@@ -370,8 +276,6 @@ fn strongconnect(v: usize, adj: &[Vec<usize>], st: &mut TarjanState) {
             work.last_mut().unwrap().1 += 1;
             let w = adj[node][next];
             if st.indices[w].is_none() {
-                // Descend into `w`; its lowlink is folded back into
-                // `node` when the `w` frame pops (the `None` arm below).
                 st.indices[w] = Some(st.idx_counter);
                 st.lowlinks[w] = st.idx_counter;
                 st.idx_counter += 1;
@@ -384,8 +288,8 @@ fn strongconnect(v: usize, adj: &[Vec<usize>], st: &mut TarjanState) {
             continue;
         }
 
-        // All neighbours examined.  If `node` is an SCC root, pop its
-        // component; then propagate its lowlink up to its parent frame.
+        // A node whose lowlink never fell below its own index is the root of
+        // its component: everything above it on the stack belongs to it.
         if st.lowlinks[node] == st.indices[node].unwrap() {
             let cid = st.next_scc_id;
             st.next_scc_id += 1;
@@ -412,10 +316,8 @@ mod tests {
     use crate::syntax::parser::parse;
     use std::fmt::Write;
 
-    /// Summarise the grouping of `src` as a list of group descriptors: a
-    /// `Single` carries its statement's shape via a one-char tag, a
-    /// `LetRec` lists its member names sorted.  This gives the SCC/topo
-    /// logic a compact behavioural oracle.
+    /// One descriptor per group, in emission order: `let NAME`, `stmt`, or
+    /// `rec [a, b]` with the knot's members sorted.
     fn groups_of(src: &str) -> Vec<String> {
         let stmts = parse(src).expect("parse");
         group_stmts(&stmts)
@@ -459,30 +361,19 @@ mod tests {
         );
     }
 
-    /// A forward reference that is *not* part of a cycle gets its own
-    /// `Single` group and is emitted after the helper it forward-refers
-    /// to — dependencies before dependents.
     #[test]
     fn acyclic_forward_reference_splits_into_singles_in_dependency_order() {
-        // `g` forward-references self-recursive `f`; `g`'s own SCC is
-        // acyclic so it stays a Single, emitted after `f`'s LetRec.
         let groups = groups_of("let g = { f }\nlet f = { |x| f $x }\nreturn unit");
         assert_eq!(groups, vec!["rec [f]", "let g", "stmt"]);
     }
 
-    /// A non-thunk RHS that references a candidate is never knotted — only
-    /// thunk-shaped RHS participate in a `LetRec`.
     #[test]
     fn non_thunk_rhs_never_joins_a_letrec() {
-        // `f` is a self-recursive lambda; `n = f 5` calls it but is a
-        // plain value binding, so it stays a Single after `f`.
         let groups = groups_of("let f = { |x| f $x }\nlet n = f 5\nreturn $n");
         assert_eq!(groups, vec!["rec [f]", "let n", "stmt"]);
     }
 
-    /// Shadowing: a reference resolves to the nearest preceding definition.
-    /// `g` depends on the second `f` (definition B), which is acyclic, so
-    /// both `f`s and `g` are singles.
+    /// `g` sees the second `f`, which is acyclic, so nothing knots.
     #[test]
     fn shadowed_definitions_stay_separate() {
         let groups =
@@ -490,10 +381,7 @@ mod tests {
         assert_eq!(groups, vec!["let f", "let f", "let g", "stmt"]);
     }
 
-    /// The host-stack regression: a long chain of thunk bindings each
-    /// referencing the next must group without overflowing — the SCC and
-    /// topo passes are iterative.  Each link is acyclic, so every binding
-    /// is its own `Single`.
+    /// The host-stack regression that makes both graph passes iterative.
     #[test]
     fn long_dependency_chain_does_not_overflow() {
         const N: usize = 50_000;
@@ -504,8 +392,7 @@ mod tests {
         let _ = write!(src, "let f{N} = {{ return 0 }}\nreturn 0\n");
         let stmts = parse(&src).expect("parse");
         let groups = group_stmts(&stmts);
-        // N+1 thunk bindings (all acyclic singletons) + the trailing
-        // `return 0` statement.
+        // Every link is acyclic: N+1 singletons plus the trailing `return 0`.
         assert_eq!(groups.len(), N + 2);
     }
 }

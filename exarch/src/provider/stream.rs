@@ -14,21 +14,17 @@ use genai::chat::{ChatMessage, ChatOptions, ChatStreamEvent, StopReason, StreamE
 pub struct StepOut {
     pub assistant_message: ChatMessage,
     pub tool_calls: Vec<ToolCall>,
-    /// Reasoning captured for display and transcript round-tripping.
     pub reasoning: Option<String>,
     pub usage: Usage,
-    /// The provider-normalised stop reason, if one arrived.
     pub stop_reason: Option<StopReason>,
-    /// Why a partial assistant turn was committed.
     pub cut_short: Option<CutShort>,
 }
 
 /// Why an assistant turn ended before the model chose to stop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CutShort {
-    /// The output-token cap truncated the turn.
     OutputCap,
-    /// The stream broke after visible text or reasoning had arrived.
+    /// The stream broke after text or reasoning had already reached the caller.
     Stalled(String),
 }
 
@@ -71,12 +67,8 @@ impl Engine {
                 let mut streamed = String::new();
                 let mut streamed_reasoning = String::new();
                 let attempt_result: Result<StreamEnd, ProviderError> = async {
-                    // `idle_timeout` bounds only opening the stream (time to
-                    // first response); once `response.stream` exists below, a
-                    // connection gone silent is instead caught by the
-                    // transport's own per-read timeout
-                    // (`tls::STREAM_IDLE_TIMEOUT`), surfacing as an `Err`
-                    // from `stream.next()`.
+                    // Bounds only the stream's opening; later silence trips the
+                    // transport's own per-read `tls::STREAM_IDLE_TIMEOUT` instead.
                     let mut response = tokio::select! {
                         biased;
                         () = wait_for_cancel(cancel) => {
@@ -121,9 +113,8 @@ impl Engine {
                                 streamed_reasoning.push_str(&chunk.content);
                                 on_think(&chunk.content);
                             }
-                            // Signatures and tool calls are captured whole in
-                            // `End`. Keep this exhaustive so a new event cannot
-                            // disappear silently.
+                            // Signatures and tool calls arrive whole in `End`; named
+                            // rather than wildcarded so a new event cannot slip past.
                             ChatStreamEvent::Start
                             | ChatStreamEvent::ThoughtSignatureChunk(_)
                             | ChatStreamEvent::ToolCallChunk(_) => {}
@@ -137,15 +128,9 @@ impl Engine {
                 }
                 .await;
 
-                // Once content has reached `on_text`/`on_think` there is no
-                // clean retry: re-issuing would resend the whole prompt and
-                // duplicate output already delivered live. A failure past
-                // that point is committed here as a `Stalled` step
-                // (`Attempt::Done`, ending the retry loop) instead of being
-                // retried — except a cancellation, which always propagates
-                // as failure regardless of streamed content: the caller
-                // discards the whole `StepOut` on `Cancelled` rather than
-                // committing a partial turn.
+                // Text already streamed live cannot be unsent, so a failure past
+                // the first chunk commits as `Stalled` instead of retrying.
+                // Cancellation is exempt: `deliberate` discards the turn whole.
                 match attempt_result {
                     Ok(end) => {
                         Attempt::Done(step_out_from_end(model, end, transport.metered(), adapter))
@@ -194,11 +179,8 @@ impl Engine {
             cancel,
             async |attempt| {
                 let request = request_template.clone();
-                // Unlike `complete`'s streaming path, `exec_chat` only
-                // returns once the whole reply is in, so this timeout bounds
-                // the entire call rather than just its opening — there is no
-                // later per-byte read to fall back on for a stalled
-                // compaction request.
+                // `exec_chat` returns only when the whole reply is in, so this
+                // bounds the whole call; no per-read timeout backs it up.
                 let result = tokio::select! {
                     biased;
                     () = wait_for_cancel(cancel) => {

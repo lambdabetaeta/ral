@@ -1,37 +1,27 @@
-//! List and collection combinators: `each`, `map`, `filter`, `sort-list`,
-//! `sort-list-by`, `fold`, and `fold-lines`, plus the `range` list
-//! constructor.
+//! List combinators — `each`, `map`, `filter`, `sort-list`, `sort-list-by`,
+//! `fold`, `fold-lines` — and the `range` constructor.
 //!
-//! These builtins provide the standard higher-order iteration primitives
-//! over ral lists, together with `range`, which builds a list of integers.
-//! `each` and `map` participate in the audit tree when auditing is active,
-//! recording their execution as interior nodes; the other combinators run
-//! their per-element applications directly, so those children land in the
-//! enclosing trail without a wrapping combinator node.
+//! Only `each` and `map` wrap their per-element applications in an audit
+//! node; under the others those applications land in the enclosing trail
+//! unwrapped.
 
 use crate::types::{Break, Mooring, Settled, Shell, Value, as_list, sig};
 
 use super::apply;
 use super::util::{check_arity, value_ordering};
 
-/// How many `range` steps run between cancellation polls.  The
-/// higher-order combinators poll once per element — negligible beside the
-/// `apply` they already perform — but `range`'s per-step work is a single
-/// push, so an unconditional poll would dominate it; checking every
-/// `INTERRUPT_POLL_CHUNK` steps keeps a tight numeric loop responsive
-/// while a range shorter than the chunk pays nothing.
+/// Steps `range` runs between cancellation polls: its per-step work is a
+/// single push, which an unconditional poll would dominate.  The combinators
+/// poll every element, since each already pays for an `apply`.
 const INTERRUPT_POLL_CHUNK: usize = 1024;
 
-/// The most `range` will pre-size its output `Vec` to, regardless of the
-/// requested span.  A huge span (`range 0 1000000000000`) must not attempt a
-/// multi-terabyte `Vec::with_capacity` — that aborts the process rather than
-/// erroring — so the allocation is capped and the vector grows normally
-/// (amortized, and subject to the same cancellable, interrupt-polled loop)
-/// past this point.
+/// Ceiling on `range`'s pre-sized `Vec` — a huge span must not ask
+/// `with_capacity` for terabytes, which aborts the process rather than
+/// erroring.  Past it the vector just grows.
 const RANGE_INITIAL_CAP: usize = 1 << 16;
 
-/// `each <fn> <list>` -- call `fn` on each element for side effects.
-/// Returns the result of the last application, or `Unit` for an empty list.
+/// Audit-records itself as `for`, the prelude spelling (`let for = { |list
+/// fn| each $fn $list }`) a loop is normally written in.
 pub(super) fn builtin_each(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 2, "each")?;
     let func = &args[0];
@@ -51,7 +41,6 @@ pub(super) fn builtin_each(args: &[Value], mooring: &Mooring, shell: &mut Shell)
     })
 }
 
-/// `map <fn> <list>` -- apply `fn` to each element, return a new list.
 pub(super) fn builtin_map(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 2, "map")?;
     let func = &args[0];
@@ -71,11 +60,10 @@ pub(super) fn builtin_map(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
     })
 }
 
-/// Run an iteration combinator, optionally inside an audit scope.
-///
-/// `body` returns its (possibly partial) value and an optional error: this
-/// keeps the recorded audit-tree node faithful to whatever was accumulated
-/// at the point of failure while propagating the error upwards.
+/// Wrap a combinator's loop in an audit node.  `body` hands back its partial
+/// value alongside any error, so a failed combinator records what it had
+/// accumulated where a scope node ([`crate::evaluator::audit::record_scope`])
+/// would record `Unit`.
 fn iterate_audited(
     cmd: &str,
     shell: &mut Shell,
@@ -85,9 +73,6 @@ fn iterate_audited(
         let start = crate::evaluator::audit::start(shell);
         let principal = shell.mobile.context.principal();
         let (fragment, (value, err)) = shell.audit_child(body);
-        // A failed combinator records the partial value it accumulated up
-        // to the failure, unlike a scope node's `Unit` — the caller's
-        // error-value policy, passed through to the shared assembly.
         let (status, stderr) = match &err {
             Some(Break::Error(e)) => (e.exit_code(), e.message.clone().into_bytes()),
             _ => (shell.mobile.control.last_status, Vec::new()),
@@ -115,7 +100,6 @@ fn iterate_audited(
     }
 }
 
-/// `filter <fn> <list>` -- keep elements where `fn` returns `true`.
 pub(super) fn builtin_filter(
     args: &[Value],
     mooring: &Mooring,
@@ -145,11 +129,9 @@ pub(super) fn builtin_filter(
     Ok(Value::list(results))
 }
 
-/// Sort `keyed` by the total `value_ordering` over each pair's first
-/// component, surfacing the first uncomparable pairing as an error and
-/// returning the second components in sorted order.  `sort_by` demands an
-/// infallible comparator, so a failure is parked in `err` and the first
-/// one is returned once the sort settles.
+/// Sort `keyed` by its keys and return the values.  `sort_by` demands an
+/// infallible comparator, so the first uncomparable pairing is parked in
+/// `err` and surfaces once the sort has settled.
 fn ordered_sort(mut keyed: Vec<(Value, Value)>, name: &str) -> Settled<Value> {
     let mut err: Option<Break> = None;
     keyed.sort_by(|(ka, _), (kb, _)| {
@@ -164,7 +146,6 @@ fn ordered_sort(mut keyed: Vec<(Value, Value)>, name: &str) -> Settled<Value> {
     }
 }
 
-/// `sort-list <list>` -- sort a list into ascending order.
 pub(super) fn builtin_sort(args: &[Value]) -> Settled<Value> {
     check_arity(args, 1, "sort-list")?;
     let items = as_list(&args[0], "sort-list")?;
@@ -174,9 +155,6 @@ pub(super) fn builtin_sort(args: &[Value]) -> Settled<Value> {
     )
 }
 
-/// `sort-list-by <fn> <list>` -- sort by a key function.
-/// Applies `fn` to each element to obtain a sort key, then sorts into
-/// ascending order of those keys.
 pub(super) fn builtin_sort_by(
     args: &[Value],
     mooring: &Mooring,
@@ -196,7 +174,6 @@ pub(super) fn builtin_sort_by(
     ordered_sort(keyed, "sort-list-by")
 }
 
-/// `range <start> <end>` -- generate a list of integers from start (inclusive) to end (exclusive).
 pub(super) fn builtin_range(args: &[Value], mooring: &Mooring) -> Settled<Value> {
     check_arity(args, 2, "range")?;
     let start = match &args[0] {
@@ -243,7 +220,6 @@ pub(super) fn builtin_range(args: &[Value], mooring: &Mooring) -> Settled<Value>
     Ok(Value::list(out))
 }
 
-/// `fold <fn> <init> <list>` — left fold, data-last.
 pub(super) fn builtin_fold(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 3, "fold")?;
     let func = &args[0];
@@ -256,9 +232,7 @@ pub(super) fn builtin_fold(args: &[Value], mooring: &Mooring, shell: &mut Shell)
     Ok(acc)
 }
 
-/// `fold-lines <fn> <init>` — left fold over stdin lines, the channel-fed
-/// sibling of `fold`: the data comes one line at a time from the byte
-/// channel rather than an in-hand list.
+/// `fold` fed by the byte channel: one line at a time, no list in hand.
 pub(super) fn builtin_fold_lines(
     args: &[Value],
     mooring: &Mooring,
@@ -280,10 +254,9 @@ mod tests {
     use std::sync::Arc;
 
     /// Force a lambda literal to a `Value` so a combinator can be driven
-    /// directly.  The bodies here (`$x`, a `$[…]` Bool) are bare values,
-    /// so *applying* the lambda reaches no statement-level poll point —
-    /// the only checkpoint a combinator can hit is the one it now performs
-    /// itself, which is exactly what these tests pin.
+    /// directly.  The bodies below are bare values, so applying one reaches
+    /// no statement-level poll point: the only cancellation checkpoint left
+    /// is the combinator's own, which is what these tests pin.
     fn lambda(mooring: &Mooring, shell: &mut Shell, src: &str) -> Value {
         let comp = Arc::new(crate::compile(src).expect("compile lambda"));
         crate::evaluator::eval_top_level(&comp, mooring, shell).expect("lambda value")
@@ -300,10 +273,6 @@ mod tests {
         }
     }
 
-    /// A cancelled scope aborts `map` from inside its own loop — before
-    /// the per-element `apply`, whose value-bodied callback would never
-    /// poll on its own.  The list (500) is under `INTERRUPT_POLL_CHUNK`,
-    /// so it is built without `range`'s poll masking the combinator's.
     #[test]
     fn map_polls_cancellation_within_its_loop() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -348,8 +317,6 @@ mod tests {
         assert_eq!(status(err), 130);
     }
 
-    /// `range` polls only every `INTERRUPT_POLL_CHUNK` steps, so a span
-    /// longer than the chunk observes the cancel and aborts.
     #[test]
     fn long_range_polls_past_the_chunk() {
         let m = Mooring::adrift();
@@ -359,9 +326,8 @@ mod tests {
         assert_eq!(status(err), 130);
     }
 
-    /// A span shorter than the chunk pays no poll at all — it completes
-    /// even under a cancelled scope, the "small ranges pay nothing"
-    /// guarantee that keeps the common case free.
+    /// The other half of the chunk contract: a short range is cheap because
+    /// it never polls, so a cancelled scope does not stop it.
     #[test]
     fn short_range_pays_no_poll() {
         let m = Mooring::adrift();

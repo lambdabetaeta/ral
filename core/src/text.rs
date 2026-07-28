@@ -1,16 +1,8 @@
-//! UTF-8 boundary snapping.
-//!
-//! A byte offset can land inside a multi-byte sequence — synthesised or
-//! inherited from a different source, computed from a width budget, or
-//! taken from a span anchored in another file.  Slicing there panics, so
-//! every such offset is first snapped to a char boundary.  The std
-//! `str::floor_char_boundary` / `ceil_char_boundary` that would do this
-//! are still unstable, so these are the stable equivalents the workspace
-//! shares (diagnostics, the REPL editor's byte↔char map, exarch's
-//! output digest).
+//! Snapping byte offsets to UTF-8 char boundaries, and byte↔char conversion.
+//! std's `str::floor_char_boundary` / `ceil_char_boundary` are still unstable,
+//! hence these.
 
-/// Snap `offset` to the nearest char boundary at or before it (clamped
-/// into `s`).  Returns `0` when no earlier boundary exists.
+/// Snap `offset` to the nearest char boundary at or before it, clamped into `s`.
 pub fn floor_char_boundary(s: &str, offset: usize) -> usize {
     let clamped = offset.min(s.len());
     (0..=clamped)
@@ -19,8 +11,7 @@ pub fn floor_char_boundary(s: &str, offset: usize) -> usize {
         .unwrap_or(0)
 }
 
-/// Snap `offset` to the nearest char boundary at or after it (clamped to
-/// `s.len()`).
+/// Snap `offset` to the nearest char boundary at or after it, clamped to `s.len()`.
 pub fn ceil_char_boundary(s: &str, offset: usize) -> usize {
     let mut i = offset.min(s.len());
     while i < s.len() && !s.is_char_boundary(i) {
@@ -29,20 +20,15 @@ pub fn ceil_char_boundary(s: &str, offset: usize) -> usize {
     i
 }
 
-/// Convert a byte offset to a character offset.  Ariadne uses character
-/// offsets, so every byte offset must pass through this before being handed
-/// to the rendering layer.
+/// Byte offset to character offset — ariadne and the REPL frontends index by char.
 pub fn byte_to_char(source: &str, byte_offset: usize) -> usize {
     source[..floor_char_boundary(source, byte_offset)]
         .chars()
         .count()
 }
 
-/// Convert a character offset to a byte offset — the inverse of
-/// [`byte_to_char`].
-///
-/// A `cursor` value at or past the character count returns `text.len()`, so
-/// the result is always a valid slice boundary.
+/// Inverse of [`byte_to_char`]; a `cursor` at or past the character count yields
+/// `text.len()`, so the result is always a valid slice boundary.
 pub fn char_to_byte(text: &str, cursor: usize) -> usize {
     text.char_indices()
         .nth(cursor)

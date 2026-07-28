@@ -1,14 +1,8 @@
-//! Source positions and loaded source text.
+//! Source positions and the loaded text they index.
 //!
-//! A [`Span`] is a half-open byte range `[start, end)` tagged with a
-//! [`FileId`] — the opaque per-file handle carried on every span.
-//! "No narrower position available" is `Option<Span>` = `None`, used
-//! uniformly across AST, IR, and typechecker; there is no sentinel span.
-//!
-//! [`Source`] bundles a loaded text with a precomputed line-start index for
-//! O(log lines) `byte → (line, col)` recovery, and [`SourceDb`] is the
-//! append-only, per-session registry that resolves a [`FileId`] back to its
-//! [`Source`] at render time.
+//! A [`Span`] is a half-open byte range tagged with a [`FileId`]; "no narrower
+//! position known" is `Option<Span>` = `None` throughout the AST, IR, and
+//! typechecker, and there is no sentinel span.
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -17,24 +11,17 @@ use crate::text::floor_char_boundary;
 
 /// A half-open byte range `[start, end)` within a single source file.
 ///
-/// Spans are the primary source-location currency throughout the compiler.
-/// They carry only byte offsets and a [`FileId`]; line/column recovery is
-/// deferred to render time by handing the source text directly to `ariadne`.
-///
-/// `u32` offsets are ample: script inputs comfortably fit.
+/// Carries only offsets and a [`FileId`]; line/column recovery waits until a
+/// diagnostic renders and can be handed the source text itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Span {
-    /// Byte offset of the first character in the span.
     pub start: u32,
-    /// Byte offset one past the last character in the span.
     pub end: u32,
-    /// Source file this span belongs to.
     pub file: FileId,
 }
 
 impl Span {
     /// Construct a span covering `[start, end)` in `file`.
-    /// Panics (debug) if `start > end`.
     pub fn new(file: FileId, start: u32, end: u32) -> Self {
         debug_assert!(start <= end, "span start {start} > end {end}");
         Self { start, end, file }
@@ -49,12 +36,9 @@ impl Span {
         }
     }
 
-    /// The origin span for source a host synthesises rather than reads from a
-    /// file: [`FileId::DUMMY`] at offset `0..0`.  Used to stamp hook
-    /// registrations and other boot-time bindings that have no user-authored
-    /// byte range.  The file must be the unmintable placeholder: the registry
-    /// only grows, so any real id would claim that source's first bytes
-    /// forever.
+    /// Origin for host-synthesised bindings such as hook registrations.  The
+    /// file must be [`FileId::DUMMY`]: the registry only grows, so a real id
+    /// would claim that source's first bytes forever.
     pub fn synthetic() -> Self {
         Self {
             start: 0,
@@ -73,25 +57,19 @@ impl Span {
         }
     }
 
-    /// Convert to a `usize` range suitable for slicing source text.
+    /// As a `usize` range, for slicing source text.
     pub fn range(self) -> std::ops::Range<usize> {
         self.start as usize..self.end as usize
     }
 }
 
-/// Opaque handle into a [`SourceDb`].
-///
-/// Each
-/// registered source text gets a unique `FileId`; spans and runtime
-/// locations carry these so diagnostics can recover the originating file at
-/// render time.
+/// Opaque handle into a [`SourceDb`].  Spans and runtime locations carry one
+/// so a diagnostic can recover the originating file at render time.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FileId(pub u32);
 
 impl FileId {
-    /// A non-registered placeholder. Spans tagged `DUMMY` are tolerated but
-    /// render without source context. Prefer a real `FileId` wherever we
-    /// actually know the source.
+    /// Never registered: spans tagged `DUMMY` render without source context.
     pub const DUMMY: Self = Self(u32::MAX);
 }
 
@@ -101,26 +79,15 @@ impl Default for FileId {
     }
 }
 
-/// A value paired with its optional source span — the uniform wrapper
-/// used at every sub-position where a downstream pass may know a
-/// narrower byte range than the enclosing node.
+/// A value paired with its optional source span.
 ///
-/// Shared by the lexer,
-/// AST, IR, and typechecker: each per-position narrowing site
-/// (`If.cond`, `Case.scrutinee`/`table`, per-arg and per-key positions,
-/// `Force` operand, interpolation segments, …) is a [`Spanned<_>`]
-/// wrapper rather than an ad-hoc `*_span` parallel field on the parent,
-/// so one helper (the crate-local [`WithSpan`] trait shared by the
-/// elaborator and typechecker) can drive narrowing uniformly downstream.
+/// Every narrowing site (`If.cond`, `Case.scrutinee`, per-argument positions,
+/// interpolation segments, …) wraps in `Spanned` rather than growing a
+/// parallel `*_span` field on its parent, so the one `WithSpan` helper narrows
+/// them all alike.
 ///
-/// "No narrower position available" is `span: None`; the same encoding
-/// used by [`Comp::span`](crate::ir::Comp) in the IR — there is no
-/// sentinel `Span` and no bridging conversion.
-///
-/// `PartialEq` is structural: both `span` and `item` participate.
-/// Parser test fixtures normalise every `Spanned`'s span to `None`
-/// via `parser::tests::strip_one` (recurses through all
-/// `Spanned`-bearing variants).
+/// `PartialEq` is structural — spans participate, which is why parser fixtures
+/// strip them to `None` before comparing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Spanned<T> {
     pub span: Option<Span>,
@@ -136,39 +103,33 @@ impl<T> Spanned<T> {
         }
     }
 
-    /// Construct with no span — used in test fixtures and for
-    /// elaborator-internal positions (hoisted applications, synthetic
-    /// list/map elements) that have no source range to attribute.
+    /// Construct with no span, for elaborator-internal positions (hoisted
+    /// applications, synthetic list/map elements) and test fixtures.
     pub fn synthetic(item: T) -> Self {
         Self { span: None, item }
     }
 
-    /// Construct with an already-optional span — used when threading
-    /// a span from another `Spanned` or from elaborator state without
-    /// repeated wrap/unwrap noise.
+    /// Construct from an already-optional span.
     pub fn with_span(span: Option<Span>, item: T) -> Self {
         Self { span, item }
     }
 }
 
 impl<T> Spanned<Box<T>> {
-    /// Box `inner` and pair with the real span — the canonical shape of
-    /// every AST sub-position that holds a `Spanned<Box<Ast>>` (`Force`,
-    /// `Return`, `If.cond`, `Case.scrutinee`, …).  Saves the
-    /// `Spanned::new(span, Box::new(inner))` boilerplate.
+    /// Box `inner` and pair it with `span`.
     pub fn boxed(span: Span, inner: T) -> Self {
         Self::new(span, Box::new(inner))
     }
 
-    /// Synthetic-span counterpart of [`Self::boxed`] for test fixtures.
+    /// Span-less counterpart of [`Self::boxed`].
     pub fn synthetic_boxed(inner: T) -> Self {
         Self::synthetic(Box::new(inner))
     }
 }
 
-/// Normalise source text loaded from disk so Windows CRLF files parse the
-/// same as LF files.  Source text is the shell language's input; lone
-/// carriage returns are not meaningful there.
+/// Fold CRLF and lone CR to LF, so a Windows-authored script parses like any
+/// other; a carriage return means nothing in the shell language.  Every load
+/// of source from disk or wire passes through here.
 pub fn normalize_source_text(source: String) -> String {
     if source.contains('\r') {
         source.replace("\r\n", "\n").replace('\r', "\n")
@@ -177,11 +138,8 @@ pub fn normalize_source_text(source: String) -> String {
     }
 }
 
-// ── WithSpan ─────────────────────────────────────────────────────────
-
-/// Save/restore a [`Span`] slot around a closure.  Both the
-/// elaborator and the typechecker narrow their diagnostic position
-/// this way — the trait avoids duplicating the same 6-line method.
+/// Save and restore a [`Span`] slot around a closure — how both the
+/// elaborator and the typechecker narrow their diagnostic position.
 pub(crate) trait WithSpan {
     fn span_slot(&mut self) -> &mut Option<Span>;
 
@@ -198,31 +156,22 @@ pub(crate) trait WithSpan {
 
 // ── Loaded source text ───────────────────────────────────────────────
 
-/// Source text bundled with a precomputed line-start index.
-///
-/// Binary search
-/// over the index resolves a `(byte_offset → line, col)` lookup in
-/// O(log lines), independent of file size.
-///
-/// Built once when the source is loaded; the `Arc`s make a clone a
-/// refcount bump rather than a copy of the text.
+/// Source text with a line-start index built once at load, so `byte → (line,
+/// col)` costs O(log lines) at any file size.  Cloning bumps refcounts rather
+/// than copying the text.
 #[derive(Clone, Debug)]
 pub struct Source {
-    /// Display name of the source — a script path, `<stdin>`, or a loaded
-    /// module's virtual path.  Carried so a runtime error rendered from a
-    /// [`SourceDb`] names the file the caret points into.
+    /// A script path, `<stdin>`, or a module's virtual path — what a rendered
+    /// error names as the file its caret points into.
     name: Arc<str>,
     text: Arc<str>,
-    /// Sorted byte offsets where each line starts.  `line_starts[0] == 0`;
-    /// thereafter, `line_starts[i]` is the byte index immediately after the
-    /// `i`-th newline.  Length is therefore one greater than the newline
-    /// count in `text`.
+    /// Ascending; `[0]` is always 0 and each later entry is the byte just past
+    /// a newline, so the length is one more than the newline count.
     line_starts: Arc<[u32]>,
 }
 
 impl Source {
-    /// Wrap `text` under display `name`, building the line-start index in
-    /// one pass.
+    /// Wrap `text` under display `name`, indexing the lines in one pass.
     pub fn new(name: Arc<str>, text: Arc<str>) -> Self {
         let mut starts: Vec<u32> =
             Vec::with_capacity(text.bytes().filter(|&b| b == b'\n').count() + 1);
@@ -243,25 +192,23 @@ impl Source {
         }
     }
 
-    /// Convenience: wrap `text` under `name` by allocating and indexing.
+    /// Allocating counterpart of [`Self::new`].
     pub fn from_text(name: &str, text: &str) -> Self {
         Self::new(Arc::from(name), Arc::from(text))
     }
 
-    /// Borrow the source's display name.
+    /// The display name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Borrow the underlying source text.
+    /// The source text.
     pub fn as_str(&self) -> &str {
         &self.text
     }
 
-    /// Convert a byte offset into a 1-indexed (line, col) pair using the
-    /// precomputed index.  O(log lines) for the line lookup, plus one
-    /// `chars().count()` over the (typically short) current line for the
-    /// column.
+    /// A byte offset as a 1-indexed (line, col) pair: binary search for the
+    /// line, then one `chars()` walk of that line for the column.
     pub fn byte_to_line_col(&self, byte_offset: usize) -> (usize, usize) {
         let safe = floor_char_boundary(&self.text, byte_offset);
         #[allow(
@@ -269,8 +216,8 @@ impl Source {
             reason = "byte offset into a source that fits the u32 span system (< 4 GiB, compiler-standard)"
         )]
         let target = safe as u32;
-        // Largest i such that line_starts[i] <= target.  partition_point
-        // returns the first i where the predicate is false; subtract one.
+        // partition_point yields the first line starting past `target`; the
+        // line containing it is the one before.
         let line_idx = self
             .line_starts
             .partition_point(|&start| start <= target)
@@ -282,24 +229,15 @@ impl Source {
     }
 }
 
-/// Registry of every source text the current run has loaded, keyed by
-/// [`FileId`].
+/// Every source text the session has loaded, keyed by [`FileId`].  The
+/// renderer resolves a span's id here, so a `source`d module's error draws its
+/// caret into the module's own bytes rather than the top-level script's.
 ///
-/// Every [`Span`] carries the `FileId` of the source its byte range indexes,
-/// and the runtime renderer resolves that id here so a `source`d module's
-/// error draws its caret into the module's own bytes rather than the
-/// top-level script's.
-///
-/// Slots are `Option` so [`register_at`](Self::register_at) can place a
-/// source under an id another registry minted, leaving the ids below it
-/// unresolvable rather than aliased to unrelated text.
-///
-/// Append-only for the whole session: a run's top-level source and each
-/// module it loads register once, and nothing ever reclaims a slot — a
-/// nested run ([`Shell::run_nested`](crate::Shell::run_nested)) shares the
-/// registry with the run it nests in, so reclaiming mid-run would re-mint an
-/// outer run's still-live [`FileId`]s out from under it. The cost is
-/// monotonic growth, and a session's sources are small.
+/// Append-only for the session's whole life: a nested run
+/// ([`Shell::run_nested`](crate::Shell::run_nested)) shares the registry with
+/// the run it nests in, so reclaiming a slot would re-mint a [`FileId`] the
+/// outer run's live spans still carry.  Slots are `Option` because
+/// `register_at` may land a source above ids this registry never minted.
 #[derive(Clone, Debug, Default)]
 pub struct SourceDb {
     sources: Arc<Vec<Option<Source>>>,
@@ -313,10 +251,9 @@ impl SourceDb {
         id
     }
 
-    /// Place `source` under `id` — an id minted by *another* registry, which
-    /// only a process that received both across the wire may do (the
-    /// pipeline-stage helper, resolving spans its parent compiled).  Slots
-    /// below `id` this registry never filled stay unresolvable.
+    /// Place `source` under an id another registry minted — sound only for a
+    /// process handed both across the wire, i.e. a re-exec'd pipeline-stage
+    /// child resolving spans its parent compiled.
     pub(crate) fn register_at(&mut self, id: FileId, source: Source) {
         if id == FileId::DUMMY {
             return;
@@ -329,9 +266,8 @@ impl SourceDb {
         sources[idx] = Some(source);
     }
 
-    /// Resolve `id` to its registered [`Source`], or `None` when the id is
-    /// the placeholder [`FileId::DUMMY`] or names a source this registry
-    /// does not hold.
+    /// The [`Source`] `id` resolves to, or `None` for [`FileId::DUMMY`] and
+    /// for ids this registry does not hold.
     pub fn get(&self, id: FileId) -> Option<&Source> {
         if id == FileId::DUMMY {
             return None;
@@ -339,11 +275,9 @@ impl SourceDb {
         self.sources.get(id.0 as usize)?.as_ref()
     }
 
-    /// Peek the [`FileId`] the next [`register`](Self::register) call will
-    /// mint, without registering anything. Lets a caller stamp the id onto
-    /// a program's spans *before* the source it names is itself registered
-    /// — sound exactly when nothing else registers a source into this
-    /// registry between the peek and that later registration.
+    /// The [`FileId`] the next [`register`](Self::register) will mint, so a
+    /// caller can stamp it onto spans before registering the source it names —
+    /// sound exactly when nothing else registers in between.
     pub fn next_id(&self) -> FileId {
         #[allow(
             clippy::cast_possible_truncation,
@@ -353,12 +287,9 @@ impl SourceDb {
     }
 }
 
-/// Convert a byte offset within `source` into a 1-indexed (line, col) pair.
-///
-/// Linear-scan version retained for the one-off caller that recovers a
-/// position from source text without a cached [`Source`] to hand; hot paths
-/// should build a [`Source`] once and call [`Source::byte_to_line_col`]
-/// instead.
+/// 1-indexed (line, col) by linear scan, for a caller holding source text but
+/// no [`Source`]; anything repeated should build one and use
+/// [`Source::byte_to_line_col`].
 pub fn byte_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
     let safe = floor_char_boundary(source, byte_offset);
     let prefix = &source[..safe];

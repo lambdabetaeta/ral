@@ -1,37 +1,33 @@
-//! Structured process outcomes and user-facing command failures.
+//! What the OS reported when a child ended, and the user-facing failure it
+//! becomes: a `CommandFailure` travels on as `Status::Process` in `types/error.rs`.
 
-/// `STATUS_PIPE_CLOSING` (NTSTATUS): a Windows process died writing to a
-/// pipe whose read end has closed — the moral equivalent of SIGPIPE.  The
-/// kernel surfaces it both as a native exit code and, through
-/// `ExitStatus::code()`, as an ordinary `Exited` code.
+/// The NTSTATUS for Windows' SIGPIPE analogue, which reaches us through
+/// `ExitStatus::code()` as an ordinary `Exited` code rather than as a signal.
 #[cfg(windows)]
 const STATUS_PIPE_CLOSING: u32 = 0xC000_00B1;
 
-/// Format the "command not found" message used by both
-/// [`CommandFailure::Spawn(SpawnFailure::NotFound)`] rendering and the
-/// resolver's pre-spawn check for an unresolvable external.
+/// One wording for "command not found", shared with `check_existence` in
+/// `runtime/command/vet.rs` so the pre-spawn probe and the spawn failure agree.
 pub(crate) fn not_found_hint(cmd: &str) -> String {
     format!("{cmd}: command not found")
 }
 
-/// OS signal number with local formatting helpers.
+/// An OS signal number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Signal {
     number: i32,
 }
 
 impl Signal {
-    /// Construct a signal wrapper from its numeric value.
     pub const fn new(number: i32) -> Self {
         Self { number }
     }
 
-    /// Return the raw signal number.
     pub const fn number(self) -> i32 {
         self.number
     }
 
-    /// Return the conventional signal name when known on this platform.
+    /// The conventional name, for the standard signals only.
     #[cfg(unix)]
     pub fn name(self) -> Option<&'static str> {
         let n = self.number;
@@ -69,7 +65,6 @@ impl Signal {
             .find_map(|(sig, name)| (*sig == n).then_some(*name))
     }
 
-    /// Return no conventional name on platforms without Unix signals.
     #[cfg(not(unix))]
     pub fn name(self) -> Option<&'static str> {
         let _ = self;
@@ -84,7 +79,6 @@ impl Signal {
         }
     }
 
-    /// True when the signal is SIGPIPE.
     pub fn is_sigpipe(self) -> bool {
         #[cfg(unix)]
         {
@@ -96,8 +90,7 @@ impl Signal {
         }
     }
 
-    /// True when a background process tried to read from its controlling
-    /// terminal (SIGTTIN).
+    /// SIGTTIN: a background process tried to read the controlling terminal.
     pub fn is_background_tty_input(self) -> bool {
         #[cfg(unix)]
         {
@@ -109,8 +102,7 @@ impl Signal {
         }
     }
 
-    /// True when a background process tried to configure its controlling
-    /// terminal (SIGTTOU).
+    /// SIGTTOU: a background process tried to reconfigure the controlling terminal.
     pub fn is_background_tty_config(self) -> bool {
         #[cfg(unix)]
         {
@@ -122,7 +114,6 @@ impl Signal {
         }
     }
 
-    /// True for SIGKILL.
     pub fn is_sigkill(self) -> bool {
         #[cfg(unix)]
         {
@@ -134,7 +125,6 @@ impl Signal {
         }
     }
 
-    /// True for SIGSEGV.
     pub fn is_sigsegv(self) -> bool {
         #[cfg(unix)]
         {
@@ -146,7 +136,7 @@ impl Signal {
         }
     }
 
-    /// Conventional shell exit code for a signal death.
+    /// The shell convention for a signal death, 128 + N.
     pub fn user_exit_code(self) -> i32 {
         128 + self.number
     }
@@ -154,12 +144,10 @@ impl Signal {
 
 /// What the OS reported when a process stopped or exited.
 ///
-/// `Stopped` is the parked-job outcome: the child was suspended (SIGTSTP /
-/// SIGSTOP / SIGTTIN / SIGTTOU) and the kernel still holds its slot.  The
-/// caller is expected to register the pgid in the job table and resume it
-/// later via SIGCONT — not to reap it.  `StoppedThenKilled` is the legacy
-/// path used when no pgid is available to register (the child is killed
-/// instead).
+/// `Stopped` is a live suspended child: park its pgid as a job and resume it
+/// with SIGCONT rather than reap it.  It arises only for an interactive
+/// foreground wait — `handle_stopped` in `process/signal/unix.rs` otherwise
+/// kills the stopped child and reports `StoppedThenKilled`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaitOutcome {
     Exited(i32),
@@ -173,7 +161,7 @@ pub enum WaitOutcome {
 }
 
 impl WaitOutcome {
-    /// Convert a platform `ExitStatus` without losing signal information.
+    /// Classify a platform `ExitStatus` without collapsing signal death into a code.
     pub fn from_exit_status(status: std::process::ExitStatus) -> Self {
         #[cfg(unix)]
         {
@@ -195,7 +183,6 @@ impl WaitOutcome {
         }
     }
 
-    /// Reduce the outcome to the user-visible numeric exit status.
     pub fn to_user_exit_code(self) -> i32 {
         match self {
             Self::Exited(code) | Self::NativeCode(code) => code,
@@ -204,12 +191,11 @@ impl WaitOutcome {
         }
     }
 
-    /// True when the process exited successfully.
     pub fn is_success(self) -> bool {
         matches!(self, Self::Exited(0) | Self::NativeCode(0))
     }
 
-    /// True when the outcome represents a broken pipe.
+    /// SIGPIPE, or the Windows exit code that stands in for it.
     pub fn is_broken_pipe(self) -> bool {
         match self {
             Self::Signaled(sig) => sig.is_sigpipe(),
@@ -222,7 +208,7 @@ impl WaitOutcome {
     }
 }
 
-/// Structured spawn failures for external commands.
+/// Why a spawn failed before there was a process.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SpawnFailure {
     NotFound,
@@ -230,7 +216,7 @@ pub enum SpawnFailure {
     Io(String),
 }
 
-/// User-facing failure shape for an external command.
+/// What a `WaitOutcome` amounts to for the user.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandFailure {
     ExitCode(i32),
@@ -243,8 +229,8 @@ pub enum CommandFailure {
 }
 
 impl CommandFailure {
-    /// Convert a process outcome into a user-facing failure, forgiving
-    /// non-final SIGPIPE as pipeline success.
+    /// The failure an outcome amounts to, or `None` for success — a non-final
+    /// pipeline stage is forgiven a broken pipe, since its reader simply left.
     pub fn from_outcome(outcome: WaitOutcome, is_pipeline_non_final: bool) -> Option<Self> {
         match outcome {
             WaitOutcome::Exited(0) => None,
@@ -275,7 +261,6 @@ impl CommandFailure {
         }
     }
 
-    /// Render the primary command failure message.
     pub fn message(&self, cmd: &str) -> String {
         match self {
             Self::ExitCode(code) => format!("{cmd}: exited with status {code}"),
@@ -306,7 +291,8 @@ impl CommandFailure {
         }
     }
 
-    /// Return a default hint when one is useful.
+    /// The follow-up line under the message.  `None` for a plain exit code, where
+    /// `Error::from_command_failure` falls back to the user's exit-hints table.
     pub fn default_hint(&self, cmd: &str) -> Option<String> {
         match self {
             Self::ExitCode(_) | Self::Spawn(_) => None,
@@ -335,7 +321,7 @@ impl CommandFailure {
         }
     }
 
-    /// Reduce the failure to the conventional numeric exit code.
+    /// The conventional numeric code — POSIX's 127 for not found, 126 for cannot-run.
     pub fn to_user_exit_code(&self) -> i32 {
         match self {
             Self::ExitCode(code) => *code,
@@ -395,9 +381,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn non_final_pipe_closing_is_success() {
-        // STATUS_PIPE_CLOSING reaches us as an ordinary `Exited` code on
-        // Windows; a non-final pipeline stage that died this way is the
-        // SIGPIPE analogue and must be forgiven.
         let outcome = WaitOutcome::Exited(STATUS_PIPE_CLOSING.cast_signed());
         assert!(outcome.is_broken_pipe());
         assert_eq!(CommandFailure::from_outcome(outcome, true), None);

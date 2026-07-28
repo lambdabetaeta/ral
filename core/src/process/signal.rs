@@ -1,25 +1,13 @@
-//! Signal handling and process-group placement — facade.
+//! Signal handling and process-group placement.
 //!
-//! Two concerns sit behind the same module name:
-//!
-//!   * **Signal translation.**  SIGINT / SIGTERM / SIGHUP are translated
-//!     by the platform handlers into a [`CancelCause`](crate::process::CancelCause)
-//!     on the published cancel slots — SIGINT interrupts the foreground run,
-//!     SIGTERM / SIGHUP terminate the durable root.  A separate escalation
-//!     ladder counts deliveries and forces `_exit` on the third — the last
-//!     resort when cooperative delivery is wedged, never the delivery
-//!     mechanism itself.  The cancel primitives themselves live in
-//!     [`cancel`](crate::process::cancel).
-//!   * **Process-group placement.**  [`PgidPolicy`] is the type-level
-//!     spelling of "stay in the parent's group / become a leader of a
-//!     fresh group / join an existing group as a non-leader" applied via
-//!     `pre_exec` before `execve` at spawn time.
-//!
-//! Platform-specific machinery lives in `unix` and `windows` — each a module
-//! that exists only on its own platform, so neither can be linked from a page
-//! the other one builds; this
-//! file re-exports the items each platform provides and keeps the
-//! portable data types and the unwind-poll path here.
+//! The platform handlers translate SIGINT / SIGTERM / SIGHUP into a
+//! [`CancelCause`](crate::process::CancelCause) on the scopes of
+//! [`cancel`](crate::process::cancel) — SIGINT on the foreground run,
+//! SIGTERM / SIGHUP on the durable root — while a separate ladder counts
+//! deliveries and forces `_exit` on the third.  The portable remainder,
+//! [`PgidPolicy`] and the poll point [`check`], lives here; `unix` and
+//! `windows` exist only on their own platform, so neither can be linked
+//! from this page.
 
 use std::num::NonZeroI32;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -53,20 +41,12 @@ pub(crate) use windows::{
 
 // ── Child handle ───────────────────────────────────────────────────────────
 //
-// Bare `std::process::Child::wait` / `try_wait` call `waitpid` without
-// stop notifications: a SIGSTOP'd child is invisible to `try_wait` (it
-// reports "still running"), and `wait` blocks indefinitely. Every external
-// child ral tracks therefore goes through `ChildHandle`, whose wait methods
-// request stopped statuses on Unix and classify the result. Direct
-// `Child::wait` / `try_wait` calls outside this file are blocked by
-// `clippy::disallowed_methods` (see `clippy.toml`); the few legitimate
-// exceptions are tagged with `#[allow]` at the call site.
+// Bare `Child::wait` / `try_wait` omit `WUNTRACED`: a SIGSTOP'd child reads as
+// "still running" and `wait` blocks forever.  `clippy.toml` disallows the raw
+// pair outside `ChildHandle`; the few exceptions carry an `#[allow]`.
 
-/// Wrapper around a spawned child that hides the raw `wait` / `try_wait`
-///
-/// and only exposes [`Self::wait_handling_stop`] /
-/// [`Self::try_wait_handling_stop`] — the stop-aware peers that can't
-/// misclassify a stopped child as "still running".
+/// A spawned child, waitable only through the stop-aware
+/// [`Self::wait_handling_stop`] / [`Self::try_wait_handling_stop`].
 pub struct ChildHandle(ChildRepr);
 
 enum ChildRepr {
@@ -76,9 +56,6 @@ enum ChildRepr {
 }
 
 impl ChildHandle {
-    /// Wrap a freshly-spawned child.  After this point the std handle
-    /// is no longer reachable by name; the only paths to wait are the
-    /// `*_handling_stop` methods.
     pub fn from_std(child: std::process::Child) -> Self {
         Self(ChildRepr::Std(child))
     }
@@ -96,10 +73,9 @@ impl ChildHandle {
         }
     }
 
-    /// Kill the child (SIGKILL on Unix, `TerminateProcess` on Windows).
-    ///
     /// # Errors
-    /// Returns `Err` if the underlying platform kill fails.
+    /// Returns `Err` if the platform kill — SIGKILL on Unix,
+    /// `TerminateProcess` on Windows — fails.
     pub fn kill(&mut self) -> std::io::Result<()> {
         match &mut self.0 {
             ChildRepr::Std(child) => child.kill(),
@@ -141,12 +117,11 @@ impl ChildHandle {
         }
     }
 
-    /// Blocking wait that observes stopped statuses on Unix. See the platform
-    /// `wait_handling_stop` for the park / kill-and-reap dispatch on stop.
+    /// Blocking wait that returns on a stop too, which the platform
+    /// `wait_handling_stop` then parks or kills and reaps.
     ///
     /// # Errors
-    /// Returns `Err` if the underlying `waitpid` (Windows: the wait, or the
-    /// kill-and-reap on a stop) fails.
+    /// Returns `Err` if the wait, or the kill-and-reap on a stop, fails.
     pub fn wait_handling_stop(
         &mut self,
         pgid: Option<Pgid>,
@@ -166,14 +141,11 @@ impl ChildHandle {
         }
     }
 
-    /// Non-blocking peek matching the contract of
-    /// [`Self::wait_handling_stop`]: returns `Ok(None)` when nothing is
-    /// pending, otherwise classifies and (on no-park stop) kills and
-    /// reaps inline.
+    /// Non-blocking peer of [`Self::wait_handling_stop`]; `Ok(None)` when
+    /// nothing is pending.
     ///
     /// # Errors
-    /// Returns `Err` if the underlying `waitpid` (Windows: the poll, or the
-    /// kill-and-reap on a stop) fails.
+    /// Returns `Err` if the poll, or the kill-and-reap on a stop, fails.
     pub fn try_wait_handling_stop(
         &mut self,
         pgid: Option<Pgid>,
@@ -193,14 +165,11 @@ impl ChildHandle {
         }
     }
 
-    /// Blocking reap used only after a confirmed SIGKILL on the abort
-    /// path: SIGKILL terminates even stopped processes, so the full
-    /// stop-aware ceremony of `wait_handling_stop` is pure overhead
-    /// here.  This is the one place inside `ChildHandle` that calls
-    /// the raw `Child::wait`.
+    /// Blocking reap after a confirmed SIGKILL, which terminates even a stopped
+    /// process — so the one raw `Child::wait` inside `ChildHandle` lives here.
     ///
     /// # Errors
-    /// Returns `Err` if the underlying `wait` fails.
+    /// Returns `Err` if the wait fails.
     #[allow(clippy::disallowed_methods)]
     pub fn reap(&mut self) -> std::io::Result<std::process::ExitStatus> {
         match &mut self.0 {
@@ -213,38 +182,27 @@ impl ChildHandle {
 
 // ── Escalation ladder ──────────────────────────────────────────────────────
 
-/// Count of termination signals delivered since the last [`clear`]
-/// boundary.  The third delivery forces `_exit` in the platform handler.
+/// Termination signals delivered since the last [`clear`]; the third forces
+/// `_exit` in the platform handler.
 ///
-/// This is *not* a delivery mechanism: the handlers deliver by
-/// translating each signal into a [`CancelCause`](crate::process::CancelCause)
-/// on the published cancel slots, and [`check`] reads only the scope tree.
-/// The ladder is
-/// the last resort for a process whose cooperative delivery is wedged —
-/// it must stay independent of the thing it backstops.
+/// Not a delivery mechanism — the handlers deliver through the cancel scopes,
+/// which is all [`check`] reads.  A backstop for wedged cooperative delivery
+/// must not depend on what it backstops.
 pub(crate) static ESCALATION: AtomicU8 = AtomicU8::new(0);
 
 /// Check whether the current evaluation should unwind.
 ///
-/// Fires when the mooring's [`CancelScope`](crate::process::CancelScope) (or any
-/// of its ancestors) has been cancelled: a signal translated by the platform
-/// handler (SIGINT → foreground `Interrupt`, SIGTERM / SIGHUP → root
-/// `Terminate`), a run deadline ([`reaper`](crate::process::reaper)), an
-/// explicit `cancel <handle>`, or a Ctrl-\ root abort.  The error carries the
-/// strongest cause's message and exit code.
-///
-/// Cancellations are interrupts: they surface as either a recoverable
-/// error (`Break::Error`) or a non-catchable escape (`Break::Escape`).
-/// They never carry a tail call, hence the `Break` return type rather
-/// than the richer `Control`.
-///
-/// The error is minted unspanned: the break path stamps the span of the
-/// innermost node the cancel unwinds through.
+/// Fires when the mooring's foreground scope, or any ancestor, is cancelled:
+/// a translated signal (SIGINT → foreground `Interrupt`, SIGTERM / SIGHUP →
+/// root `Terminate`), a deadline ([`reaper`](crate::process::reaper)), an
+/// explicit `cancel <handle>`, or a Ctrl-\ root abort.  The return is `Break`
+/// rather than the richer `Control` because a cancellation never carries a
+/// tail call, and the error is unspanned: the break path stamps the innermost
+/// node it unwinds through.
 ///
 /// # Errors
-/// Returns `Err` if the mooring's cancel scope (or any ancestor) is
-/// cancelled, carrying the strongest cause's message and exit code; `Ok(())`
-/// while the chain is uncancelled.
+/// Returns `Err` carrying the strongest cause's message and exit code when the
+/// chain is cancelled.
 pub fn check(mooring: &crate::types::Mooring) -> Result<(), crate::types::Break> {
     if let Some(cause) = mooring.cancel.cause() {
         return Err(crate::types::Break::Error(crate::types::Error::new(
@@ -255,29 +213,24 @@ pub fn check(mooring: &crate::types::Mooring) -> Result<(), crate::types::Break>
     Ok(())
 }
 
-/// Reset the escalation ladder at an acknowledgment boundary — a fresh
-/// prompt, a run compile, a session reboot —
-///
-/// so signals already handled
-/// cooperatively don't creep toward the third-delivery force-exit.
+/// Reset the escalation ladder at an acknowledgment boundary — the REPL
+/// prompt, a Ctrl-C the line editor absorbed — so a signal already handled
+/// cooperatively does not creep the next one toward the force-exit.
 pub fn clear() {
     ESCALATION.store(0, Ordering::Relaxed);
 }
 
-/// True once a termination signal has been delivered since the last
-/// [`clear`] — the escalation ladder has at least one tick.
+/// True once a termination signal has landed since the last [`clear`].
 ///
-/// Observability
-/// only: nothing gates delivery on this (hosts and tests use it to prove a
-/// cancel path did, or deliberately did not, engage the ladder).
+/// Observability only — nothing gates delivery on it; the tests assert that a
+/// cancel path did, or deliberately did not, engage the ladder.
 pub fn escalation_pending() -> bool {
     ESCALATION.load(Ordering::Relaxed) >= 1
 }
 
 // ── Fallback platform stubs ────────────────────────────────────────────────
 //
-// `cfg(not(any(unix, windows)))` (wasm, etc.) — keep the compile path open
-// without trying to emulate process-group semantics.
+// Keep wasm and friends compiling without pretending to have process groups.
 
 #[cfg(not(any(unix, windows)))]
 pub fn install_handlers() {}
@@ -337,32 +290,25 @@ impl ForegroundGuard {
 
 // ── Process-group placement (data) ─────────────────────────────────────────
 
-/// Newtype wrapping a process-group identifier.
+/// A process-group identifier.
 ///
-/// On Unix: a POSIX pgid (== leader's pid).  Addressable via
-/// `kill(-pgid, sig)` to fan a signal out across every member.
+/// On Unix a POSIX pgid — the leader's pid, addressable as `kill(-pgid, sig)`
+/// to reach every member.  Windows console groups cannot be joined post-spawn,
+/// so every external stage leads its own and this carries the *first* stage's
+/// pid: the key under which the `windows` module registers the member list and
+/// the Job Object that `TerminateJobObject` takes down as one.
 ///
-/// On Windows: the leader's pid.  Windows console process groups can't
-/// be joined post-spawn — every external pipeline stage is its own
-/// group leader (spawned with `CREATE_NEW_PROCESS_GROUP`).  The `Pgid`
-/// here is the *first* stage's pid; the `PipelineGroup` keeps the full
-/// member list and a Job Object that ties them together for abort-time
-/// `TerminateJobObject`.
-///
-/// Constructed only from a positive pid; no integer sentinel encodes "no
-/// pgid" — the `Option<Pgid>` does.
+/// Positive by construction; "no pgid" is `Option<Pgid>`, never a sentinel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pgid(NonZeroI32);
 
 impl Pgid {
-    /// Construct a process-group id from its positive kernel spelling.
     pub fn from_raw(raw: i32) -> Option<Self> {
         NonZeroI32::new(raw)
             .filter(|raw| raw.is_positive())
             .map(Self)
     }
 
-    /// Return the positive kernel spelling of this process-group id.
     pub const fn as_raw(self) -> i32 {
         self.0.get()
     }
@@ -372,10 +318,9 @@ impl Pgid {
         Self(pid.as_raw_nonzero())
     }
 
-    /// View this group identifier as the positive pid rustix uses for pgids.
     #[cfg(unix)]
     pub const fn as_pid(self) -> rustix::process::Pid {
-        // SAFETY: `Pgid::from_raw` admits only positive integers.
+        // SAFETY: every `Pgid` constructor admits only positive integers.
         unsafe { rustix::process::Pid::from_raw_unchecked(self.as_raw()) }
     }
 }
@@ -390,11 +335,9 @@ impl std::fmt::Display for Pgid {
 impl Pgid {
     /// Send `signal` to every process in this group via `kill(-pgid, sig)`.
     ///
-    /// Async-signal-safe: no allocation, no locking, just one libc call.
-    /// Failures (e.g. `ESRCH` on a group whose last member has already
-    /// exited) are silently ignored — pipeline abort and Ctrl-Z paths
-    /// don't have a meaningful recovery for those, and the kernel has
-    /// already done the right thing if the group is gone.
+    /// Async-signal-safe: one libc call, no allocation, no locking.  Failure is
+    /// ignored — the pipeline-abort and Ctrl-Z callers have no recovery, and
+    /// `ESRCH` on an already-empty group is the outcome they wanted anyway.
     pub fn signal_group(self, signal: Signal) {
         unsafe {
             libc::kill(-self.as_raw(), signal.number());
@@ -402,27 +345,23 @@ impl Pgid {
     }
 }
 
-/// Process-group placement decision applied via `pre_exec` before `execve`.
+/// Where a spawned child's process group comes from.
 ///
-/// Foreground job leaders and pipeline first stages use `NewLeader`;
-/// subsequent pipeline stages use `Join(leader_pgid)`; an interactive
-/// background child that must share the terminal's signal reach uses
-/// `Inherit`; a *detached* background worker (a `spawn`/non-interactive
-/// top-level child that never takes the foreground) uses `NewSession`.
+/// Foreground job leaders and pipeline first stages take `NewLeader`, later
+/// stages `Join`, an interactive background child `Inherit`, a detached worker
+/// `NewSession`.  Unix applies the choice in `pre_exec` before `execve`;
+/// Windows maps it onto a Job Object at the launch boundary.
 #[derive(Clone, Copy, Debug)]
 pub enum PgidPolicy {
     /// Inherit the parent's pgid — no `setpgid` call.
     Inherit,
-    /// Become the leader of a fresh process group (`setpgid(0, 0)`),
-    /// keeping the parent's session and controlling terminal.
+    /// Lead a fresh group (`setpgid(0, 0)`), keeping the parent's session and
+    /// controlling terminal.
     NewLeader,
-    /// Become the leader of a fresh *session* (`setsid`): a new process
-    /// group with **no controlling terminal**.  A detached background
-    /// worker has no business holding the terminal, and severing the
-    /// session is what stops it from signalling — via the shared tty or
-    /// `tcgetpgrp` — whatever owns the controlling terminal (the REPL, or
-    /// a supervising frontend).  The new session's pgid equals the child's
-    /// pid, so the watchdog's `kill(-pgid, …)` still reaps the subtree.
+    /// Lead a fresh *session* (`setsid`): with no controlling terminal, the
+    /// child cannot signal — through the shared tty or `tcgetpgrp` — whatever
+    /// owns one.  Its pgid still equals its pid, so `kill(-pgid, …)` still
+    /// reaches the subtree.
     NewSession,
     /// Join an existing pgid as a non-leader (`setpgid(0, leader)`).
     Join(Pgid),

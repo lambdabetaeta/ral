@@ -1,10 +1,9 @@
-//! The `fff` fuzzy-file-name index: process-global infrastructure behind the
-//! thin [`builtin_fff`](super::builtin_fff) body.
+//! Process-global `fff` fuzzy-file-name index, behind the `fff` builtin in
+//! `exarch/src/shell_eval/builtins.rs`.
 //!
-//! One [`Index`] per canonical base path is built on first use and leaked into
-//! `&'static`, so its scan thread and filesystem watcher outlive any lock guard
-//! handed back to a caller.  The registry hands out those borrows; each search
-//! runs a fuzzy pass against the live picker.
+//! One [`Index`] per canonical base, leaked into `&'static` so a caller's borrow
+//! outlives the registry lock guard; nothing is dropped, so the scan threads and
+//! watchers run for the life of the process.
 
 use fff_search::file_picker::FilePicker;
 use fff_search::{
@@ -17,34 +16,26 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-/// How long to wait for the initial filesystem scan before serving
-/// (possibly partial) results.  Big trees on slow disks can exceed
-/// this; the index keeps populating in the background regardless.
+/// Initial-scan budget; overrunning it serves partial results rather than failing.
 const SCAN_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// One indexed tree, kept alive for the process lifetime.  The
-/// [`SharedFilePicker`] owns the scan thread and the filesystem watcher;
-/// dropping it would tear them down, but we never drop — the registry
-/// hands out `&'static` borrows.
+/// One indexed tree; its [`SharedFilePicker`] owns the scan thread and the watcher.
 pub(super) struct Index {
     picker: SharedFilePicker,
 }
 
-/// Process-global registry: one `Index` per canonical base path.
-/// Entries are leaked into `&'static` so the picker outlives any
-/// lock guard returned to a caller.
 fn registry() -> &'static Mutex<HashMap<PathBuf, &'static Index>> {
     static R: OnceLock<Mutex<HashMap<PathBuf, &'static Index>>> = OnceLock::new();
     R.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Sound only because `base` is already absolute: `shell_less` carries no `HOME`
+/// to expand `~` against and no cwd to anchor to.
 fn resolve_base(base: &Path) -> ral_core::path::ResolvedPath {
     ral_core::path::Resolver::shell_less().resolve(&base.to_string_lossy())
 }
 
-/// Get-or-create the index for `base`.  Blocks the caller while the
-/// initial scan runs the first time `base` is seen; cheap on every
-/// subsequent call.
+/// Get-or-create the index for `base`; the first call blocks on the initial scan.
 pub(super) fn index_for(base: &Path) -> Result<&'static Index, String> {
     let canonical = resolve_base(base)
         .canonicalise_strict()
@@ -59,6 +50,7 @@ pub(super) fn index_for(base: &Path) -> Result<&'static Index, String> {
     Ok(idx)
 }
 
+/// The db path carries the pid, so concurrent exarchs never share a frecency store.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:fff-db-dir] creates the fff index's temp db dir; cache infra, not turn-time data I/O"
@@ -97,7 +89,8 @@ fn path_hash(p: &Path) -> u64 {
     h.finish()
 }
 
-/// Run one search against `idx` and return matching paths.
+/// Fuzzy-search `idx`; paths come back relative to its base, which is the form
+/// the caller's per-entry grant check expects.
 #[allow(
     clippy::significant_drop_tightening,
     reason = "the picker read guard must span both fuzzy_search and the result projection, which reads paths back through the picker"

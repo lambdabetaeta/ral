@@ -1,11 +1,9 @@
-//! Line builders and their internal helpers.  Every function returns
-//! `Vec<Line<'static>>` ready for the scrollback buffer.  The colour and
-//! layout constants they draw from live in [`super::palette`].
+//! Line builders: each returns `Vec<Line<'static>>` ready for the scrollback,
+//! drawing colour and width from [`super::palette`].  [`super::App::handle`]
+//! calls in here to turn a typed [`crate::bus::Event`] into rows.
 //!
-//! These builders are the rendering arm of the typed [`crate::bus::Event`]
-//! dispatch — producers send semantic events through the channel and
-//! the consumer ([`super::App::handle`]) calls into here to turn them
-//! into `Line`s.
+//! No builder here draws a rail glyph: `Block::render_with` in `block.rs` seats
+//! it on the first content row, so a selection through a block copies clean.
 
 use super::highlight::highlight_ral;
 use super::palette::{
@@ -26,24 +24,20 @@ use std::borrow::Cow;
 use std::time::Duration;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// True when every span in `l` is empty or whitespace-only — i.e. the
-/// line carries no glyphs and reads as a vertical separator rather
-/// than a row of content.  Shared with `md` (trailing-blank collapse)
-/// and `viewport` (chrome-boundary dedup) so the predicate has one
-/// definition across the TUI.
+/// True when `l` carries no glyphs, so it reads as a vertical gap — the one
+/// "this row is a separator" test `md`, `viewport`, `block` and `group` share.
 pub(super) fn is_blank(l: &Line<'_>) -> bool {
     l.spans.iter().all(|s| s.content.trim().is_empty())
 }
 
-/// `1` when `l`'s first span is a marginal rail glyph (the 2-col shape the
-/// rail prepends), else `0` — the leading-span count the copy contract and
-/// the line wrappers skip so the rail chrome never lands in extracted text.
+/// `1` when `l` opens with the rail's 2-column glyph span, else `0` — the
+/// leading spans the copy contract and [`wrap_line`] step over.
 pub(super) fn rail_skip(l: &Line<'_>) -> usize {
     usize::from(l.spans.first().is_some_and(|s| is_rail_prefix(&s.content)))
 }
 
-/// One scrollback line as the plain text a reader would copy: span
-/// contents joined, with a leading rail glyph dropped.
+/// One scrollback line as the text a reader would copy: spans joined, rail
+/// glyph dropped.
 pub(super) fn plain(line: &Line<'_>) -> String {
     let skip = rail_skip(line);
     line.spans[skip..]
@@ -52,17 +46,13 @@ pub(super) fn plain(line: &Line<'_>) -> String {
         .collect()
 }
 
-/// Width in cells of the header size-bar — the second ordered variable
-/// (size) after the rail's value (lightness).  A bar of [`SIZE_BAR_W`]
-/// cells, filled `█` / empty `░`, encodes `log2(magnitude)` so a
-/// 500-line event fills it and a 2-line event barely shows.
+/// Width in cells of the header size-bar — the size channel, ordered beside
+/// the rail's lightness.
 const SIZE_BAR_W: usize = 8;
 
-/// Bucket `magnitude` onto a `log2` scale, clamped to `0..=cap`: `0` reads
-/// as step `0`, and the step climbs by one each time `magnitude` doubles,
-/// pinning at `cap` once it would run past it.  Shared by [`size_cells`]
-/// and [`spark_glyph`], and tracks the rail's own value-step
-/// ([`super::rail::value_step`]), which buckets `log2` of the same count.
+/// Bucket `magnitude` onto a `log2` scale clamped to `0..=cap`: step `0` at
+/// zero, one step per doubling.  The same scale [`super::rail::value_step`]
+/// tracks, at coarser resolution.
 fn log2_step(magnitude: u32, cap: usize) -> usize {
     #[allow(
         clippy::cast_precision_loss,
@@ -74,23 +64,20 @@ fn log2_step(magnitude: u32, cap: usize) -> usize {
     step
 }
 
-/// Map `magnitude` to a filled-cell count on a `log2` scale, clamped to
-/// `0..=SIZE_BAR_W`: `0` reads empty, a 2-line event lights a cell or
-/// two, a ~500-line event fills the bar.
+/// Filled cells for `magnitude`: a 2-line event lights one, a ~500-line event
+/// fills the bar.
 fn size_cells(magnitude: u32) -> usize {
     log2_step(magnitude, SIZE_BAR_W)
 }
 
-/// The header size-bar span: [`SIZE_BAR_W`] cells, `█` for the filled
-/// run and `░` for the remainder, styled [`SLATE`] so it reads as
-/// decorative ink beside the path / summary rather than content.  A zero
-/// magnitude renders an all-empty bar.
+/// The header size-bar: [`SIZE_BAR_W`] cells, `█` filled and `░` empty, in
+/// [`SLATE`] so it reads as chrome beside the path or summary, not as content.
 pub(super) fn size_bar(magnitude: u32) -> Span<'static> {
     Span::styled(size_bar_text(magnitude), Style::default().fg(SLATE))
 }
 
-/// The bar's glyph run alone, unstyled — for a caller that paints it in its
-/// own hue rather than [`SLATE`] (the metadata matrix's per-agent bar).
+/// The bar's glyphs alone, for a caller that paints them in its own hue — the
+/// metadata matrix's per-agent bar.
 pub(super) fn size_bar_text(magnitude: u32) -> String {
     let filled = size_cells(magnitude);
     "█"
@@ -100,38 +87,24 @@ pub(super) fn size_bar_text(magnitude: u32) -> String {
         .collect()
 }
 
-/// The eight partial-height block glyphs of a vertical sparkline, lowest
-/// to highest.  One per call in a coalesced ral block: the glyph's fill
-/// height encodes that call's result magnitude, so a run of calls reads as
-/// a bar chart of how much each one moved.
+/// Vertical-sparkline glyphs, lowest to highest — one per call in a coalesced
+/// run, so the run reads as a bar chart of what each call moved.
 const SPARK_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-/// The sparkline glyph for one call's `magnitude`, on the same `log2` scale
-/// as [`size_cells`] but bucketed across the eight bar heights: `None` and a
-/// zero-line result read as the shortest bar (a call still ran), a ~500-line
-/// result as the tallest.  The eight steps give the sparkline finer
-/// resolution than the rail's four [`super::rail::value_step`] buckets while
-/// tracking the same scale.
+/// One call's sparkline glyph, on [`size_cells`]'s scale at eight steps.  A
+/// `None` or empty result still lights the shortest bar, because a call ran.
 pub(super) fn spark_glyph(magnitude: Option<u32>) -> char {
     SPARK_GLYPHS[log2_step(magnitude.unwrap_or(0), SPARK_GLYPHS.len() - 1)]
 }
 
-/// Width in cells of the header grain run — the patch's diff density
-/// (Bertin's grain), reading *what kind* of change beside the size-bar's
-/// *how much*.
+/// Width in cells of the header grain run — the grain channel, reading *what
+/// kind* of change beside the size-bar's *how much*.
 const GRAIN_W: usize = 4;
 
-/// The header grain span: a run of [`GRAIN_W`] braille cells whose density
-/// encodes the ratio `a / (a + b)` on the ramp `⣿⣶⣤⣀` — `⣿` (full) is all
-/// `a`, `⣀` (sparse) is all `b`. The ratio is bucketed into quartiles so
-/// "mostly `a` / balanced / mostly `b`" reads pre-attentively: `≥0.75 →
-/// ⣿`, `≥0.50 → ⣶`, `≥0.25 → ⣤`, else `⣀`. Styled [`SLATE`] to match the
-/// size-bar — it is decorative ink, not a data colour that would collide
-/// with a data hue (the `+`/`-` line colours, say). `a + b == 0` has no
-/// balance to show and renders blank. Two call sites read this ramp: the
-/// patch header's addition ratio `add / (add + del)`, and the thinking
-/// header's deliberation ratio `think / (think + say)` — how dearly an
-/// answer was bought.
+/// Grain: [`GRAIN_W`] braille cells whose density reads `a / (a + b)` on the
+/// ramp `⣿⣶⣤⣀`, in [`SLATE`] so it never collides with a data hue like the
+/// `+`/`-` line colours.  Read by the patch header (added over changed) and the
+/// thinking header (thought over said — how dearly the answer was bought).
 pub(super) fn grain_run(a: u32, b: u32) -> Span<'static> {
     let total = a + b;
     #[allow(
@@ -146,9 +119,6 @@ pub(super) fn grain_run(a: u32, b: u32) -> Span<'static> {
     Span::styled(cell.to_string().repeat(GRAIN_W), Style::default().fg(SLATE))
 }
 
-/// One braille cell for a `0.0..=1.0` ratio on the `⣿⣶⣤⣀` density ramp,
-/// bucketed into quartiles so the run reads pre-attentively: `≥0.75 → ⣿`,
-/// `≥0.50 → ⣶`, `≥0.25 → ⣤`, else `⣀`.
 fn grain_cell(ratio: f32) -> char {
     #[allow(
         clippy::cast_precision_loss,
@@ -165,15 +135,10 @@ fn grain_cell(ratio: f32) -> char {
     }
 }
 
-/// The collapsed header for a thinking block: a blank separator then the
-/// deliberation grain (think-vs-say ratio) beside a [`size_bar`] of the
-/// reasoning's own magnitude — "how dearly bought" and "how much thinking".
-/// The reasoning prose itself stays folded until the block is dialed.
-///
-/// The one renderer for this header: both the committed block
-/// ([`super::block::Block::body`]) and the live, still-streaming seat
-/// ([`super::viewport::Viewport::thinking_seat`]) call through here, so the
-/// provisional header can never drift from the one the block commits to.
+/// A thinking block's collapsed header: the deliberation grain beside a
+/// [`size_bar`] of the reasoning's own bulk.  Both the committed block and the
+/// still-streaming `Viewport::thinking_seat` render through here, so the
+/// provisional header cannot drift from the one the block commits to.
 pub(super) fn thinking_header(
     think_chars: u32,
     think_lines: u32,
@@ -191,24 +156,16 @@ pub(super) fn thinking_header(
 
 // ── Public line builders ─────────────────────────────────────────────────────
 
-/// Step separator: one blank line.  The step number itself is recorded
-/// in `events.json` / `user.log` for greppability; in the live TUI the
-/// boundary is conveyed by vertical whitespace alone.
+/// Step separator: one blank line.  The number itself reaches only
+/// `events.json` / `user.log`; on screen the boundary is whitespace alone.
 pub(super) fn step(_n: usize) -> Vec<Line<'static>> {
     vec![Line::default()]
 }
 
-/// Scrollback echo of the user's submitted prompt — the human's turn, the
-/// one party that is not an agent.  Its body is tinted the human's neutral
-/// [`PROMPT_INK`] (cooler and dimmer than the machine's white prose), so the
-/// turn reads as a quiet, cool island in the bright, chromatic machine
-/// stream: agents own the matrix hues, the human owns the neutral tone.  The
-/// flatten adds the full-width rule fence ([`prompt_fence`]) just above the
-/// first row as the turn's opening seam, and the `❖` rides the rail there.
-/// No background band — background is the machine's ([`CODE_BG`]); reverse
-/// video stays reserved for an active selection alone
-/// ([`super::App::paint_selection`]).  Flush-left at regular weight, every
-/// line tinted alike.
+/// Scrollback echo of the human's turn, tinted [`PROMPT_INK`] — a quiet island
+/// in the machine's chromatic stream, since the agents own the matrix hues.  No
+/// background band: background is the machine's ([`CODE_BG`]) and reverse video
+/// is the selection's.  `block.rs` lays a [`prompt_fence`] above the first row.
 pub(super) fn user_prompt(s: &str) -> Vec<Line<'static>> {
     let ink = Style::default().fg(PROMPT_INK);
     let mut ls: Vec<Line<'static>> = vec![Line::default()];
@@ -219,10 +176,9 @@ pub(super) fn user_prompt(s: &str) -> Vec<Line<'static>> {
     ls
 }
 
-/// The human turn's fence: a full-width rule in [`PROMPT_INK`], painted by the
-/// flatten just above a prompt's text.  A *boundary* drawn as a line (its
-/// native implantation), not a region — so background stays free to mean
-/// "machine".  Scales to any prompt length, since the rule is its own row.
+/// The human turn's opening seam: a full-width rule in [`PROMPT_INK`].  A
+/// boundary drawn as a line rather than a region, so background stays free to
+/// mean "machine".
 pub(super) fn prompt_fence(width: u16) -> Line<'static> {
     Line::from(Span::styled(
         "─".repeat(width as usize),
@@ -230,20 +186,15 @@ pub(super) fn prompt_fence(width: u16) -> Line<'static> {
     ))
 }
 
-/// Tool-call header rows: the slate one-line `label`, wrapped under its own
-/// first column.  This builder is rail-less, the disclosure triangle
-/// (`▸`/`▽`) living in the lifted rail, prepended by
-/// [`super::block::Block::render`].
-/// `size` is the call's result magnitude (`text.lines().count()`),
-/// rendered as a [`size_bar`] trailing the label's first row — the
-/// collapsed header *is* the call's summary, so the bar is its readout.
-/// `None` (no result yet, or the expanded / static headers) omits it.
+/// Tool-call header rows: the slate `label`, continuations wrapped under its
+/// own column, and `size` as a trailing [`size_bar`] — the collapsed header
+/// *is* the call's summary, so the bar is its readout.  `None` for the expanded
+/// and static headers, which have a body to speak for them.
 fn tool_call_header(label: &str, size: Option<u32>, width: u16) -> Vec<Line<'static>> {
     let prefix_w = RAIL_W;
-    // Reserve the size-bar's gutter (`  ` gap + the bar) so the label wraps
-    // *before* it. The bar is the row's one quantitative readout (length =
-    // magnitude); pinning it to a fixed right column is what makes magnitudes
-    // comparable down the page, so it must never spill onto a wrapped row.
+    // Reserve the bar's gutter so the label wraps before it: pinning the bar to
+    // a fixed right column is what makes magnitudes comparable down the page,
+    // so it must never spill onto a wrapped row.
     let bar_w = if size.is_some() {
         UnicodeWidthStr::width("  ") + SIZE_BAR_W
     } else {
@@ -268,8 +219,8 @@ fn tool_call_header(label: &str, size: Option<u32>, width: u16) -> Vec<Line<'sta
     });
     out
 }
-/// Clicking the row swaps this for [`tool_call_body`] (L2/L3).  `size` is
-/// the call's result magnitude, rendered as the header size-bar.
+/// A tool call at L1: the header alone.  Dialing the row open swaps in
+/// [`tool_call_body`].
 pub(super) fn tool_call_collapsed(
     label: &str,
     size: Option<u32>,
@@ -280,11 +231,8 @@ pub(super) fn tool_call_collapsed(
     ls
 }
 
-/// The revealed tool-call views (L2/L3): the header, a blank, then `cmd`'s
-/// source rows — all of them when `cap` is `None` (L3), or the first `cap`
-/// source lines (L2).  Both the header and source body wrap before the
-/// viewport edge: header continuations align under the label, and source
-/// continuations align under the line's own opening indentation.
+/// The revealed tool call (L2/L3): the header, a blank, then `cmd`'s
+/// highlighted source — the first `cap` lines, or all of them when `None`.
 pub(super) fn tool_call_body(
     label: &str,
     cmd: &str,
@@ -301,11 +249,9 @@ pub(super) fn tool_call_body(
     ls
 }
 
-/// Wash `row` with the background `bg`, preserving every span's foreground
-/// and modifiers — the single place a background stratum is painted: the
-/// recessed code panel, queued-prompt plane, and `/legend` swatches.
-/// `fill_to` pads the row to that display width so the wash reads edge-to-edge
-/// (a panel); `None` lets it hug the spans (a swatch).
+/// Repaint `row` on background `bg`, keeping every foreground and modifier —
+/// the one place a background stratum is laid down.  `fill_to` pads it
+/// edge-to-edge as a panel; `None` hugs the spans, for a swatch.
 pub(super) fn wash(row: Line<'static>, bg: Color, fill_to: Option<usize>) -> Line<'static> {
     let used: usize = row
         .spans
@@ -325,13 +271,10 @@ pub(super) fn wash(row: Line<'static>, bg: Color, fill_to: Option<usize>) -> Lin
     Line::from(spans)
 }
 
-/// Append one highlighted source row to an expanded tool call.  The visible
-/// code block has a fixed two-column inset; the row composes that inset ahead
-/// of the line's already-highlighted spans, folds to `width` — continuation
-/// rows hang beneath the inset plus the source line's own leading whitespace,
-/// so a long expression folds where its content began, not at column zero —
-/// and washes each resulting row into the recessed [`CODE_BG`] panel, padded
-/// uniform to `width` so the machine region reads as a clean rectangle.
+/// Append one highlighted source row, inset two columns and washed into the
+/// [`CODE_BG`] panel padded to `width`.  Continuations hang under the inset
+/// plus the line's own leading whitespace, so a long expression folds where its
+/// content began.
 fn push_code_row(ls: &mut Vec<Line<'static>>, line: Line<'static>, width: u16) {
     const CODE_INDENT: &str = "  ";
     let mut spans = vec![Span::raw(CODE_INDENT)];
@@ -342,9 +285,8 @@ fn push_code_row(ls: &mut Vec<Line<'static>>, line: Line<'static>, width: u16) {
 }
 
 /// A summary-less tool call rendered standalone — the per-block `user.log` tee
-/// of a [`super::block::BlockKind::PlainTool`].
-/// `cmd`'s first line is the label, any remainder follows 2-space indented;
-/// the block wears the shut triangle `▸`.
+/// of a `BlockKind::PlainTool`, which on screen coalesces into a run instead.
+/// `cmd`'s first line is the label, any remainder follows indented.
 pub(super) fn tool_call_static(cmd: &str) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
     ls.extend(tool_call_header(
@@ -361,28 +303,20 @@ pub(super) fn tool_call_static(cmd: &str) -> Vec<Line<'static>> {
     ls
 }
 
-/// The verb column of an act row, pinned to the longest verb
-/// (`unschedule`) plus its separating space, so verbs align down the page
-/// across separate blocks.  [`render_field_rows`] cannot supply this: it
-/// derives its column from the row set it is handed, and an act block is a
-/// single row.
+/// The verb column of an act row, pinned to the longest verb (`unschedule`)
+/// plus a space so verbs align across blocks.  [`render_field_rows`] cannot
+/// supply it: it sizes from the rows it is handed, and an act block is one row.
 pub(super) const ACT_VERB_W: usize = 11;
-/// The subject column of an act row — an agent name or a schedule label,
-/// truncated into the cell rather than allowed to shift the payload column,
-/// since the alignment *is* the point.  Wide enough that a name never has to
-/// be cut: a subject is an identity, and a cut identity names nothing.
+/// The subject column of an act row, truncated into rather than allowed to
+/// shift the payload column.  Wide enough that a name never has to be cut: a
+/// subject is an identity, and a cut identity names nothing.
 pub(super) const ACT_SUBJECT_W: usize = 20;
 
-/// A harness act's row: `verb`, `subject`, `payload`, in three columns whose
-/// first two are pinned ([`ACT_VERB_W`], [`ACT_SUBJECT_W`]).  An act changes
-/// the world outside the turn, so it carries no magnitude and wears no
-/// size-bar — the three fields are the whole of what it has.  A `failed` act
-/// tiers its payload — the short refusal — hot, on the row that names the
-/// attempt; the long form is the raise, and the raise is the model's.  `full`
-/// (L2/L3) wraps the payload under its own column; reduced (L1), it
-/// truncates into it with an `…`.  The `↗` / `◷` shape arrives via the
-/// lifted rail ([`super::block::Block::render_with`]), so this builder is
-/// rail-less.
+/// A harness act: `verb`, `subject`, `payload` in three columns, the first two
+/// pinned.  An act changes the world outside the turn, so it carries no
+/// magnitude and wears no size-bar.  A `failed` act tiers the short refusal hot
+/// on the row that names the attempt; the long form is the model's raise.
+/// `full` wraps the payload under its column; reduced truncates into it.
 pub(super) fn act_row(
     verb: &str,
     subject: Option<&str>,
@@ -403,9 +337,8 @@ pub(super) fn act_row(
         format!("{verb:<ACT_VERB_W$}"),
         Style::default().fg(SLATE).add_modifier(Modifier::BOLD),
     )];
-    // The subject cell is padded only when a payload follows it, so a
-    // landed `cancel` copies as `cancel     hunter`, with no trailing run
-    // of column padding.
+    // Pad the subject cell only when a payload follows, so a landed `cancel`
+    // copies as `cancel     hunter` with no trailing run of column padding.
     if let Some(subject) = subject.filter(|s| !s.is_empty()) {
         let mut cell = truncate_spans(&[bold(subject.to_string(), LIME)], ACT_SUBJECT_W - 1);
         if !payload.is_empty() {
@@ -441,13 +374,9 @@ pub(super) fn act_row(
     out
 }
 
-/// The one-line header for an async subagent's landed result: a leading
-/// blank (like [`tool_call_collapsed`]), then the bold `name` (LIME, or
-/// the error hue when `error` is set), a [`SLATE`]-dim ` {elapsed}s `
-/// readout, a [`size_bar`] for the result `size` (lines of `text`), and an
-/// error suffix when one applies.  The `↘` shape arrives via the lifted
-/// rail ([`super::block::Block::render`], `Subagent` shape), so this
-/// builder is rail-less.
+/// An async subagent's landed result, in one line: the bold `name` ([`ORANGE`]
+/// when `error` is set), the elapsed seconds, a [`size_bar`] of `size`, and an
+/// error or empty-output suffix.
 pub(super) fn subagent_header(
     name: &str,
     size: u32,
@@ -464,7 +393,6 @@ pub(super) fn subagent_header(
         ),
         size_bar(size),
     ];
-    // The error / empty-output suffix beside the header.
     let suffix = match error {
         None if size == 0 => Some("[done, no output]".to_string()),
         None => None,
@@ -484,8 +412,6 @@ pub(super) fn subagent_header(
     vec![Line::default(), Line::from(spans)]
 }
 
-/// Error line: the `╳` shape lives in the lifted rail (Error shape); the
-/// content is a bold red `error <msg>`.
 pub(super) fn error(msg: &str) -> Vec<Line<'static>> {
     vec![
         Line::default(),
@@ -499,31 +425,21 @@ pub(super) fn error(msg: &str) -> Vec<Line<'static>> {
     ]
 }
 
-/// The body of a [`Mark::Diff`], graded by disclosure `level` and carrying
-/// *no* leading blank — [`render_card`] owns the one blank that opens the
-/// whole card.  L1 is the `▎ <path>` header alone; L2 adds the first hunk;
-/// L3 unrolls every hunk.  Each hunk is a unified row list — context rows
-/// (no sign), removed lines (red `-`), added lines (lime `+`) interleaved —
-/// indented two columns and prefixed with a right-aligned [`SLATE`] line
-/// number — removed rows keep their pre-edit numbers, added and context
-/// rows take their post-edit ones; several hunks are elision-separated.
-/// No rail glyph on the body, so a selection through the block copies as
-/// plain text.  This is the densest Bertin object: size (the header
-/// `size_bar`), grain (the addition-ratio `grain_run`), value (the rail
-/// lightness), shape (`▎`).
+/// A [`Mark::Diff`]'s body, graded by disclosure `level`: L1 the header alone,
+/// L2 the header plus the first hunk, L3 every hunk.  No leading blank —
+/// [`render_card`] owns the one blank that opens the card.  The densest object
+/// on screen: size in the header bar, grain in the addition ratio, value in the
+/// rail's lightness, shape in its `▎` glyph.
 fn diff_body(path: &str, hunks: &[Hunk], level: u8) -> Vec<Line<'static>> {
     match level {
-        // L1, the floor: header only.
         1 => vec![patch_header(path, hunks)],
-        // L2: header + the first hunk's located context and changes.
         2 => diff_capped(path, hunks, Some(1)),
-        // L3: the full diff.
         _ => diff_capped(path, hunks, None),
     }
 }
 
-/// Count the rows across every hunk that satisfy `pred` — the addition /
-/// deletion tallies the header's grain run reads.
+/// Rows across every hunk satisfying `pred` — the tallies the header's grain
+/// run reads.
 #[allow(clippy::cast_possible_truncation, reason = "diff row count")]
 fn count_rows(hunks: &[Hunk], pred: impl Fn(&Row) -> bool) -> u32 {
     hunks
@@ -533,9 +449,8 @@ fn count_rows(hunks: &[Hunk], pred: impl Fn(&Row) -> bool) -> u32 {
         .count() as u32
 }
 
-/// The `▎ <path>` diff header row: slate label, white path, the
-/// `log2`-scaled [`size_bar`] and the addition-ratio [`grain_run`].
-/// Shared by every disclosure level so the L1/L2/L3 headers never drift.
+/// The `diff  <path>` header row, with its [`size_bar`] and addition-ratio
+/// [`grain_run`].  Shared by every level, so L1/L2/L3 headers never drift.
 fn patch_header(path: &str, hunks: &[Hunk]) -> Line<'static> {
     Line::from(vec![
         Span::styled("diff", Style::default().fg(SLATE)),
@@ -551,10 +466,9 @@ fn patch_header(path: &str, hunks: &[Hunk]) -> Line<'static> {
     ])
 }
 
-/// Shared diff body: the header, then `cap` hunks (all when `None`),
-/// elision-separated, numbered against one gutter sized for the whole
-/// block so every row's text column lines up under the header.  No leading
-/// blank — see [`diff_body`].
+/// The header, then `cap` hunks (all when `None`), elision-separated and
+/// numbered against one gutter sized for the whole block, so every row's text
+/// starts in the same column.
 fn diff_capped(path: &str, hunks: &[Hunk], cap: Option<usize>) -> Vec<Line<'static>> {
     let mut ls: Vec<Line<'static>> = vec![patch_header(path, hunks)];
     let shown = cap.unwrap_or(hunks.len()).min(hunks.len());
@@ -575,10 +489,9 @@ fn diff_capped(path: &str, hunks: &[Hunk], cap: Option<usize>) -> Vec<Line<'stat
     ls
 }
 
-/// The trailing "there is more" gutter row: a bare `⋮` right-aligned to
-/// `gutter` — the elision glyph both [`diff_capped`]'s inter-hunk separator
-/// and [`render_listing`]'s cap marker share, so a write and a diff speak
-/// one vocabulary for "there is more below".
+/// The "there is more below" row: a bare `⋮` right-aligned in `gutter`, shared
+/// by [`diff_capped`]'s inter-hunk separator and [`render_listing`]'s cap
+/// marker, so a write and a diff speak one vocabulary.
 fn elision_row(gutter: usize) -> Line<'static> {
     Line::from(vec![
         Span::raw("  "),
@@ -586,10 +499,8 @@ fn elision_row(gutter: usize) -> Line<'static> {
     ])
 }
 
-/// The largest line number [`patch`] will render for `h`, used to size the
-/// gutter: walk the unified rows from `h.start`, advancing an old- and a
-/// new-side counter the way [`push_hunk`] does, and take the largest number
-/// any row is stamped with.
+/// The largest number [`push_hunk`] will stamp on `h`, which sizes the gutter.
+/// Walks the same two counters, so the two must move together.
 fn hunk_max_lineno(h: &Hunk) -> u32 {
     let (mut old, mut new) = (h.start, h.start);
     let mut max = h.start;
@@ -613,13 +524,9 @@ fn hunk_max_lineno(h: &Hunk) -> u32 {
     max
 }
 
-/// Render one hunk's unified rows into `ls`, walking an old- and a new-side
-/// counter from `h.start`: a context row carries the new-side number (it
-/// exists in both files), a deletion keeps its pre-edit (old) number, an
-/// insertion takes its post-edit (new) number.  This is the numbering
-/// invariant the diff shows — removed rows in red `-`, added rows in lime
-/// `+`, context in slate, each row's *changed* words lifted brighter (see
-/// [`push_gutter_row`]).
+/// Render `h`'s unified rows, walking an old- and a new-side counter from
+/// `h.start`: a deletion keeps its pre-edit number, an insertion and a context
+/// row take their post-edit one.
 fn push_hunk(ls: &mut Vec<Line<'static>>, h: &Hunk, gutter: usize) {
     let (mut old, mut new) = (h.start, h.start);
     for row in &h.rows {
@@ -641,18 +548,11 @@ fn push_hunk(ls: &mut Vec<Line<'static>>, h: &Hunk, gutter: usize) {
     }
 }
 
-/// Append one diff row — a two-column indent, a right-aligned line number in
-/// [`SLATE`], the `<sign> ` marker in the row's `base` hue, then the row's
-/// segmented body — wrapping the body to [`READ_W`] so long source lines fold
-/// onto continuation rows instead of clipping.  The number and sign sit on the
-/// first wrapped row only; continuations blank both and align under the body
-/// column.  An empty body still emits a bare marker row so the diff stays
-/// faithful to the input.
-///
-/// `hot` is the inline-emphasis colour for a del/add (`None` for context): an
-/// emphasised segment — the bit `similar` flagged as actually changed — is
-/// painted bold in `hot`, the unchanged remainder dimmed in `base`, so the eye
-/// lands on the edit within the line.
+/// Append one diff row, its body wrapped to [`READ_W`] with the number and sign
+/// on the first row only.  An empty body still emits a bare marker row, so the
+/// diff stays faithful to its input.  `hot` is the inline-emphasis colour for a
+/// del/add (`None` on context): the segments `similar` flagged as actually
+/// changed go bold in `hot`, the rest dim in `base`.
 fn push_gutter_row(
     ls: &mut Vec<Line<'static>>,
     gutter: usize,
@@ -662,12 +562,9 @@ fn push_gutter_row(
     base: Color,
     hot: Option<Color>,
 ) {
-    // Body width: readable width minus the 2-col indent, the gutter, its
-    // trailing space, and the 2-col "<sign> " marker, floored so
-    // pathological widths wrap.
+    // READ_W less the indent, the gutter and its space, and "<sign> ", floored
+    // so a pathological width still wraps.
     let body_w = (READ_W as usize).saturating_sub(2 + gutter + 1 + 2).max(8);
-    // Each segment painted by its emphasis: a changed run bold in `hot`, the
-    // rest dimmed in `base`; a context row (no `hot`) reads flat in `base`.
     let body: Vec<Span<'static>> = segs
         .iter()
         .filter(|s| !s.text.is_empty())
@@ -680,8 +577,6 @@ fn push_gutter_row(
             Span::styled(s.text.clone(), style)
         })
         .collect();
-    // Word-wrap the styled body, then prepend the gutter to each wrapped row:
-    // the real number + sign on the first, blanks on continuations.
     for (i, wrapped) in wrap_line(&Line::from(body), body_w).into_iter().enumerate() {
         let (num, marker) = if i == 0 {
             (format!("{lineno:>gutter$}"), format!("{sign} "))
@@ -700,11 +595,9 @@ fn push_gutter_row(
 
 // ── Card rendering ───────────────────────────────────────────────────────────
 
-/// The one binding table: each nominal [`Role`] to the Bertin retinal
-/// variable that carries identity — hue, plus a weight/texture shift for
-/// `Strong`/`Code`.  This is the single place hue lives for kit *content*,
-/// so the kit can name a role but never a colour, and magnitude can never
-/// land on hue.  Themeable here, once.
+/// The one binding of a nominal [`Role`] to the retinal variable that carries
+/// it: hue, plus a weight shift where emphasis is part of the role.  Content
+/// hue lives here alone, so the kit names a role but never a colour.
 fn role_style(role: Role) -> Style {
     match role {
         Role::Path => Style::default().fg(CYAN),
@@ -719,18 +612,14 @@ fn role_style(role: Role) -> Style {
     }
 }
 
-/// The style of a span by its (optional) role: a roled span binds through
-/// [`role_style`]; a roleless one — and the degradation target of an
-/// unknown role — renders as plain content ink (white).
+/// Roled spans bind through [`role_style`]; roleless ones take plain white ink.
 fn span_style(role: Option<Role>) -> Style {
     role.map_or_else(|| Style::default().fg(Color::White), role_style)
 }
 
-/// Render one mark at disclosure `level` — the one dispatch every `Mark`
-/// variant routes through, shared by [`render_card`] (every mark, `diff`
-/// included) and [`render_framed`] (every mark but `diff`, which it filters
-/// before dispatch) so a new variant cannot be wired into one interpreter
-/// and forgotten in the other.
+/// The one dispatch every [`Mark`] variant routes through, shared by
+/// [`render_card`] and [`render_framed`] (which filters `diff` out first), so a
+/// new variant cannot be wired into one interpreter and forgotten in the other.
 fn render_mark(mark: &Mark, level: u8) -> Vec<Line<'static>> {
     match mark {
         Mark::Text { spans } => render_text(spans),
@@ -742,12 +631,9 @@ fn render_mark(mark: &Mark, level: u8) -> Vec<Line<'static>> {
     }
 }
 
-/// Render a [`Card`] — the one generic interpreter the `surface` builtin
-/// feeds.  Opens with the single leading blank every block wears, then
-/// renders each mark top-to-bottom; the `diff` mark alone honours the
-/// disclosure `level` (the other marks are chrome-level and always render
-/// full).  The data-encoding rail span is prepended later by
-/// [`super::block::Block`] to the first content row.
+/// Render a [`Card`]: the leading blank every block wears, then each mark in
+/// order.  Only the `diff` mark honours `level`; the rest are chrome and always
+/// render full.
 pub(super) fn render_card(card: &Card, level: u8) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
     for mark in card.marks() {
@@ -760,12 +646,9 @@ pub(super) fn render_card(card: &Card, level: u8) -> Vec<Line<'static>> {
 /// transcript so the card reads as a composed object, set apart from the flow.
 const CARD_INDENT: usize = 4;
 
-/// Render a surfaced general card (no `diff` mark) as a framed, indented
-/// object: a neutral box, its heading set into the top rule, the remaining
-/// marks padded inside.  A surfaced card is the model's deliberate "look at
-/// this" — rare enough to earn the chrome, and so distinct from the calm human
-/// band and the rail-glyph trace of incremental work.  `width` bounds the box;
-/// the frame wears the neutral rail ink, since identity lives in the matrix.
+/// A surfaced general card (no `diff` mark) as a framed, indented object: the
+/// model's deliberate "look at this", rare enough to earn the chrome.  The
+/// frame wears neutral ink, since identity lives in the matrix.
 pub(super) fn render_card_framed(card: &Card, width: u16) -> Vec<Line<'static>> {
     render_framed(
         card,
@@ -776,14 +659,11 @@ pub(super) fn render_card_framed(card: &Card, width: u16) -> Vec<Line<'static>> 
     )
 }
 
-/// Register-card side margin, in columns.  The register owns the whole area
-/// right of the transcript; the card itself breathes inside it.
 const REGISTER_CARD_MARGIN: usize = 2;
 
-/// Render a pinned register card: framed in its producing agent's `hue`, inset
-/// inside the register column and filling that inset width.
-/// The hue is the register's only departure from a surfaced card — identity
-/// that the transcript reads from the matrix, a side column must carry itself.
+/// A pinned register card, framed in its producing agent's `hue` and filling
+/// the inset width.  The hue is the pin's one departure from a surfaced card:
+/// identity the transcript reads off the matrix, a side column must carry.
 pub(super) fn render_pin(card: &Card, width: u16, hue: Color) -> Vec<Line<'static>> {
     #[allow(
         clippy::cast_possible_truncation,
@@ -799,10 +679,9 @@ pub(super) fn render_pin(card: &Card, width: u16, hue: Color) -> Vec<Line<'stati
     )
 }
 
-/// Core framed-card renderer shared by the transcript's surfaced cards and the
-/// register's pins: a bordered box `indent_w` columns in, drawn in `border`
-/// ink, content wrapped to a budget derived from `width` (the caller caps it —
-/// the transcript at [`READ_W`], the register at its column width).
+/// The framed-card renderer behind both [`render_card_framed`] and
+/// [`render_pin`]: a box `indent_w` columns in, drawn in `border`, content
+/// wrapped to a budget from `width` — which the caller has already capped.
 fn render_framed(
     card: &Card,
     indent_w: usize,
@@ -811,14 +690,12 @@ fn render_framed(
     fill: bool,
 ) -> Vec<Line<'static>> {
     let indent = " ".repeat(indent_w);
-    // Inner content budget: the content column less the indent and the four
-    // frame columns (`│ ` … ` │`).
+    // Less the indent and the four frame columns (`│ ` … ` │`).
     let max_inner = (width as usize).saturating_sub(indent_w + 4).max(8);
 
-    // Lift a single-line leading heading into the top rule; everything else
-    // renders inside.  A multi-line or non-text first mark leaves no title.
-    // A title wider than the inner budget is truncated so the top rule can
-    // never grow past the body rows on a narrow terminal.
+    // A single-line leading text mark lifts into the top rule; anything else
+    // leaves no title.  Truncated to the budget, or the rule would outgrow the
+    // body rows on a narrow terminal.
     let marks = card.marks();
     let (title, body_marks): (Option<Vec<Span<'static>>>, &[Mark]) = match marks.first() {
         Some(Mark::Text { spans }) => {
@@ -835,9 +712,8 @@ fn render_framed(
         _ => (None, marks),
     };
 
-    // Body marks → logical lines → wrapped to the inner budget.  A diff mark
-    // is filtered out — diff-bearing cards take the diff path — so the
-    // shared dispatch's level argument is never read here.
+    // A diff mark is filtered out — diff-bearing cards never reach here — so
+    // the shared dispatch's level argument goes unread.
     let mut body: Vec<Line<'static>> = Vec::new();
     for mark in body_marks
         .iter()
@@ -847,8 +723,8 @@ fn render_framed(
     }
     let wrapped: Vec<Line<'static>> = body.iter().flat_map(|l| wrap_line(l, max_inner)).collect();
 
-    // Inner width: the widest row, and at least one column past the title so
-    // the top rule's `╭─ title ─╮` always closes.  Capped at the budget.
+    // The widest row, but at least one column past the title so `╭─ title ─╮`
+    // always closes.
     let title_w = title.as_deref().map_or(0, span_run_width);
     let title_min = if title.is_some() { title_w + 1 } else { 0 };
     let natural_inner = wrapped
@@ -863,7 +739,6 @@ fn render_framed(
 
     let mut out: Vec<Line<'static>> = vec![Line::default()];
 
-    // Top rule, with the heading set into it.
     let mut top = vec![Span::raw(indent.clone())];
     if let Some(spans) = &title {
         top.push(Span::styled("╭─ ", border));
@@ -877,7 +752,6 @@ fn render_framed(
     top.push(Span::styled("╮", border));
     out.push(Line::from(top));
 
-    // Content rows, each padded out to the inner width inside the borders.
     for row in &wrapped {
         let pad = inner_w.saturating_sub(span_run_width(&row.spans));
         let mut spans = vec![Span::raw(indent.clone()), Span::styled("│ ", border)];
@@ -896,10 +770,9 @@ fn render_framed(
     out
 }
 
-/// Assemble the register column: each pin's card framed in `hue`, stacked
-/// top-down.  Each framed card leads with a blank row, so the stack carries its
-/// own inter-card gutter; the slot keys are identity, not shown — a pinned card
-/// carries its own label.
+/// The register column: each pin framed in `hue` and stacked.  Every framed
+/// card leads with a blank, so the stack carries its own gutter; slot keys are
+/// identity, never shown — a pinned card carries its own label.
 pub(super) fn render_register(
     pins: &[(String, Card)],
     width: u16,
@@ -915,9 +788,8 @@ fn span_run_width(spans: &[Span<'static>]) -> usize {
     spans.iter().map(ratatui::prelude::Span::width).sum()
 }
 
-/// Truncate a styled span run to at most `max_w` display columns, appending
-/// an `…` in the last column when content is dropped.  Keeps a lifted card
-/// heading from overrunning the frame's top rule on a narrow terminal.
+/// Truncate a styled span run to `max_w` columns, appending an `…` when
+/// anything is dropped.
 fn truncate_spans(spans: &[Span<'static>], max_w: usize) -> Vec<Span<'static>> {
     if span_run_width(spans) <= max_w {
         return spans.to_vec();
@@ -946,10 +818,8 @@ fn truncate_spans(spans: &[Span<'static>], max_w: usize) -> Vec<Span<'static>> {
     out
 }
 
-/// Render a `text` mark — a run of optionally-roled spans into one or more
-/// `Line`s, breaking on embedded newlines so a multi-line span stays
-/// faithful.  Width-folding happens later in [`wrap_line`], which
-/// preserves each span's style.
+/// A `text` mark's roled spans as `Line`s, broken on embedded newlines.
+/// Width-folding happens later, in [`wrap_line`].
 fn render_text(spans: &[CardSpan]) -> Vec<Line<'static>> {
     fold_styled_lines(
         spans
@@ -959,15 +829,10 @@ fn render_text(spans: &[CardSpan]) -> Vec<Line<'static>> {
     )
 }
 
-/// Fold a stream of `(text, style)` fragments into `Line`s, splitting on
-/// embedded `\n` — the one fold both [`render_text`] and
-/// [`super::highlight::into_lines`] perform over their own fragment source (a
-/// `text` mark's roled spans; a lexer's styled token stream).
-/// `keep_trailing_blank` is their one semantic difference: set, a stream
-/// that ends mid-line (or is empty) still closes with the line in progress
-/// — [`render_text`]'s contract, so a `text` mark's trailing blank line
-/// survives; cleared, it mirrors [`str::lines`] and drops that trailing
-/// empty line — [`super::highlight::into_lines`]'s contract.
+/// Fold `(text, style)` fragments into `Line`s, splitting on `\n` — shared by
+/// [`render_text`] and `into_lines` in `highlight.rs`, whose one difference is
+/// `keep_trailing_blank`: set, a stream ending mid-line still closes with the
+/// line in progress; cleared, it mirrors [`str::lines`] and drops it.
 pub(super) fn fold_styled_lines(
     fragments: impl Iterator<Item = (String, Style)>,
     keep_trailing_blank: bool,
@@ -994,8 +859,7 @@ pub(super) fn fold_styled_lines(
     lines
 }
 
-/// Render a `measure` mark as one line: the slate label, then the
-/// quantitative readout + bar ([`measure_value_spans`]).
+/// A `measure` mark as one line: slate label, then the readout and its bar.
 fn render_measure(m: &Measure) -> Line<'static> {
     let mut spans = vec![
         Span::styled(m.label.clone(), Style::default().fg(SLATE)),
@@ -1005,11 +869,9 @@ fn render_measure(m: &Measure) -> Line<'static> {
     Line::from(spans)
 }
 
-/// The quantitative value of a [`Measure`] — the readout then the bar,
-/// without the measure's own label (a fields row supplies its own label
-/// column).  A bounded measure (`max` present) reads as `value/max` with a
-/// proportional fill bar; an unbounded one reads as `value[unit]` with a
-/// `log2` [`size_bar`].
+/// A [`Measure`]'s value without its label, since a fields row supplies its
+/// own: bounded (`max` present) reads `value/max` with a proportional
+/// [`progress_bar`], unbounded reads `value[unit]` with a `log2` [`size_bar`].
 fn measure_value_spans(m: &Measure) -> Vec<Span<'static>> {
     let white = Style::default().fg(Color::White);
     if let Some(max) = m.max {
@@ -1032,10 +894,8 @@ fn measure_value_spans(m: &Measure) -> Vec<Span<'static>> {
     }
 }
 
-/// A proportional fill bar `██████░░░░` of `done/total` — 10 cells, lime
-/// for the filled run and dim slate for the empty.  `total == 0` reads as
-/// no progress (all empty) rather than a divide-by-zero.  The bounded
-/// branch of [`measure_value_spans`].
+/// A proportional `██████░░░░` fill of `done/total`.  `total == 0` reads as no
+/// progress rather than a divide by zero.
 fn progress_bar(done: u32, total: u32) -> Vec<Span<'static>> {
     const W: u32 = 10;
     #[allow(
@@ -1056,10 +916,9 @@ fn progress_bar(done: u32, total: u32) -> Vec<Span<'static>> {
     ]
 }
 
-/// Render a `fields` mark — Bertin's selective alignment: every value
-/// lands in one shared label column.  Each row's value is either inline
-/// roled text or a nested [`Measure`].  A single-span text value wraps
-/// under the value column; a multi-span value or a measure renders inline.
+/// A `fields` mark — selective alignment: every value lands in one shared
+/// column.  A single-span text value wraps under it; a multi-span value or a
+/// [`Measure`] renders inline on one row.
 fn render_fields(rows: &[CardField]) -> Vec<Line<'static>> {
     let field_rows: Vec<FieldRow> = rows
         .iter()
@@ -1084,9 +943,8 @@ fn render_fields(rows: &[CardField]) -> Vec<Line<'static>> {
     render_field_rows(&field_rows, READ_W as usize)
 }
 
-/// Render a `raw` mark — un-encoded ink appended verbatim, decoded lossily
-/// as UTF-8 and split into rows.  Honest about being outside Bertin's
-/// variables: it is an image, not an encoding, so it wears no role styling.
+/// A `raw` mark — bytes appended verbatim as lossy UTF-8, unstyled: it is an
+/// image, not an encoding, so no role applies.
 fn render_raw(bytes: &[u8]) -> Vec<Line<'static>> {
     String::from_utf8_lossy(bytes)
         .lines()
@@ -1094,21 +952,16 @@ fn render_raw(bytes: &[u8]) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Render a [`Mark::Listing`] — the head of a freshly-written file as a numbered
-/// source listing: each line ral-highlighted, fronted by a right-aligned
-/// [`SLATE`] line-number gutter counting from 1, long lines folded to [`READ_W`]
-/// with continuations hanging under the body column (the gutter blanked on
-/// them).  When `more`, a trailing `⋮` gutter row marks content elided past the
-/// preview cap — the same elision glyph [`diff_capped`] sets between hunks, so a
-/// write and a diff share one vocabulary for "there is more below".  This is the
-/// write card's body, kin to [`push_hunk`] minus the two-sided sign column: a
-/// write is not a diff but a listing of what now stands in the file.
+/// A [`Mark::Listing`] — the head of a freshly-written file as a numbered,
+/// ral-highlighted listing folded to [`READ_W`]; `more` appends the
+/// [`elision_row`].  Kin to [`push_hunk`] without the sign column: a write is
+/// not a diff, it is a listing of what now stands in the file.
 fn render_listing(bytes: &[u8], more: bool) -> Vec<Line<'static>> {
     let text = String::from_utf8_lossy(bytes);
     let rows = highlight_ral(&text);
     let gutter = rows.len().to_string().len().max(3);
-    // Body width: readable width less the 2-col indent, the gutter, and its
-    // trailing space; floored so pathological widths still wrap.
+    // READ_W less the indent, the gutter and its space, floored so a
+    // pathological width still wraps.
     let body_w = (READ_W as usize).saturating_sub(2 + gutter + 1).max(8);
     let mut ls: Vec<Line<'static>> = Vec::new();
     for (i, line) in rows.into_iter().enumerate() {
@@ -1132,7 +985,7 @@ fn render_listing(bytes: &[u8], more: bool) -> Vec<Line<'static>> {
     ls
 }
 
-/// Slate text for system notes — operational metadata (model switches, stream stalls, compaction).
+/// Slate text for system notes — model switches, stream stalls, compaction.
 pub(super) fn note(s: &str) -> Vec<Line<'static>> {
     vec![Line::from(Span::styled(
         s.to_string(),
@@ -1140,17 +993,14 @@ pub(super) fn note(s: &str) -> Vec<Line<'static>> {
     ))]
 }
 
-/// Bracketed stop-reason notice (e.g. `[stop: content_filter]`) around the
-/// provider's own un-normalised reason string (`StopReason::raw`), styled
-/// like [`note`].
+/// Bracketed notice around the provider's own un-normalised reason string.
 pub(super) fn stop_reason(raw: &str) -> Vec<Line<'static>> {
     note(&format!("[stop: {raw}]"))
 }
 
-/// Spans for the permanent usage status bar
-/// (`[46.6k in/459 out] · $0.1466`, or `[46.6k in/459 out/1.2k wr/3.4k rd] · $0.1466`
-/// with cache).  Styles the pieces [`provider::Usage::parts`] yields.
-/// (the plain [`provider::Usage`] `Display` uses a long-form log format).
+/// The permanent usage status bar, styling the pieces
+/// [`provider::Usage::parts`] yields.  `Usage`'s own `Display` is the
+/// long-form log spelling instead.
 pub(super) fn usage_text(usage: &provider::Usage) -> Vec<Span<'static>> {
     let p = usage.parts();
     let s = |b: &str| Span::styled(b.to_string(), Style::default().fg(SLATE));
@@ -1173,17 +1023,13 @@ pub(super) fn usage_text(usage: &provider::Usage) -> Vec<Span<'static>> {
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
-/// Bold coloured span.
 pub(super) fn bold(c: String, col: Color) -> Span<'static> {
     Span::styled(c, Style::default().fg(col).add_modifier(Modifier::BOLD))
 }
 
-/// Wrap `text` to `body_w` columns and push one [`Line`] per chunk into
-/// `out`, building each from `row(chunk, first)` where `first` marks the
-/// opening chunk.  [`textwrap::wrap`] always yields at least one chunk —
-/// an empty input wraps to a single empty chunk — so a blank value still
-/// renders its marker faithfully via `row("", true)`.  This is the one
-/// wrap-and-emit discipline every chrome builder in this module shares.
+/// Wrap `text` to `body_w` and push `row(chunk, first)` per chunk.
+/// [`textwrap::wrap`] always yields at least one chunk, empty input included,
+/// so a blank value still renders its marker via `row("", true)`.
 pub(super) fn push_wrapped(
     out: &mut Vec<Line<'static>>,
     text: &str,
@@ -1199,23 +1045,20 @@ pub(super) fn push_wrapped(
 
 // ── Aligned-field rendering (the `fields` mark + provider errors) ────────────
 
-/// A field value ahead of layout: text to wrap under the shared label
-/// column, or a row of pre-styled spans rendered inline on the value row
-/// (a measure's bar, a duration plus its `size_bar`).
+/// Text to wrap under the shared label column, or pre-styled spans to render
+/// inline on the value row.
 enum FieldValue {
     Wrapped { text: String, style: Style },
     Inline(Vec<Span<'static>>),
 }
 
-/// One `(label, value)` row ahead of layout — the unit both the `fields`
-/// mark and [`provider_error`] feed into [`render_field_rows`].
+/// One `(label, value)` row ahead of layout — what the `fields` mark and
+/// [`provider_error`] both feed into [`render_field_rows`].
 struct FieldRow {
     label: String,
     value: FieldValue,
 }
 
-/// A wrapped plain-text field row — the common case (a label and an
-/// unstyled value), used pervasively by [`provider_error`].
 fn text_field(label: impl Into<String>, value: impl Into<String>) -> FieldRow {
     FieldRow {
         label: label.into(),
@@ -1226,9 +1069,7 @@ fn text_field(label: impl Into<String>, value: impl Into<String>) -> FieldRow {
     }
 }
 
-/// The slate-bold label lead for an aligned field row, left-padded into
-/// the shared `label_w` column.  One definition so the `fields` mark and
-/// `provider_error` size and colour their label column identically.
+/// The slate-bold label lead, padded into the shared `label_w` column.
 fn field_label(label: &str, label_w: usize) -> Span<'static> {
     Span::styled(
         format!("{label:<label_w$}"),
@@ -1236,12 +1077,9 @@ fn field_label(label: &str, label_w: usize) -> Span<'static> {
     )
 }
 
-/// Render aligned `(label, value)` rows into one shared label column —
-/// Bertin's selective alignment, the matrix primitive both the `fields`
-/// mark ([`render_fields`]) and [`provider_error`] feed.  The column width
-/// is the longest label plus its two-space gap, measured once so every
-/// value starts in the same column.  `Wrapped` values fold under that
-/// column; `Inline` values render their pre-styled spans on one row.
+/// Aligned `(label, value)` rows in one shared column — the primitive
+/// [`render_fields`], [`provider_error`] and [`legend_rows`] all feed.  The
+/// column is measured once from the longest label, so every value starts alike.
 fn render_field_rows(rows: &[FieldRow], width: usize) -> Vec<Line<'static>> {
     let Some(label_w) = rows.iter().map(|r| r.label.chars().count()).max() else {
         return Vec::new();
@@ -1263,14 +1101,10 @@ fn render_field_rows(rows: &[FieldRow], width: usize) -> Vec<Line<'static>> {
     ls
 }
 
-/// Align pre-styled `(label, sample)` rows into one shared label column —
-/// the `/legend` panel's primitive.  The legend's samples are not data the
-/// renderer styles (a [`FieldRow`] names a role and lets the kit stay
-/// colour-blind); they are the literal styled output of the rail / bar /
-/// grain builders, exhibited so the reader can decode the rail.  So this
-/// takes already-styled spans straight through the shared alignment
-/// ([`render_field_rows`]) rather than a [`Role`], the one place the TUI
-/// shows appearance because appearance *is* the subject.
+/// Align pre-styled `(label, sample)` rows — the `/legend` panel.  Its samples
+/// are the literal output of the rail / bar / grain builders, not data a
+/// [`Role`] could name, so they arrive styled: the one place the TUI shows
+/// appearance, because appearance *is* the subject.
 pub(super) fn legend_rows(rows: Vec<(&str, Vec<Span<'static>>)>) -> Vec<Line<'static>> {
     let rows: Vec<FieldRow> = rows
         .into_iter()
@@ -1285,25 +1119,17 @@ pub(super) fn legend_rows(rows: Vec<(&str, Vec<Span<'static>>)>) -> Vec<Line<'st
 // ── Provider-error rendering ────────────────────────────────────────────────
 
 /// Body keys carrying the retry-after wait as a second count, in precedence
-/// order — the readers [`wait_from_body`] consults, and (with the absolute
-/// `resets_at` twin) the keys the rendered wait field then suppresses from
-/// the body dump.
+/// order — read by [`wait_from_body`], then suppressed from the body dump
+/// (along with the absolute `resets_at` twin) once the wait field renders them.
 const RETRY_SECS_KEYS: &[&str] = &["resets_in_seconds", "retry_after_seconds", "retry_after"];
 
-/// Render a [`ProviderErrorRecord`] as a structured multi-line block.
-///
-/// Header: blank line + bold-red `error: <kind>` (the `╳` shape lives in
-/// the lifted rail, Error shape).  Body: an ordered field list rendered
-/// into one shared, slate-bold label column with a single aligned value
-/// column — JSON syntax stripped, null fields dropped.  When a parsed
-/// `body` is present the fields come from it ([`body_fields`]); otherwise
-/// the renderer falls back to the free-text `cause`/`message`, honestly
-/// rendered rather than dressed as structure.  The rate-limit wait is the
-/// one quantitative field, rendered as a human duration plus a [`size_bar`].
+/// A [`ProviderErrorRecord`] as a block: the `error: <kind>` headline, then an
+/// ordered field list in one shared column.  A parsed `body` supplies the
+/// fields ([`body_fields`]); without one the free-text `cause`/`message` is
+/// shown honestly rather than dressed as structure.
 pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
     let mut ls: Vec<Line<'static>> = vec![Line::default()];
-    // Cancellation folds its site into the headline and carries no body —
-    // there is nothing to align, so it returns after the header alone.
+    // Cancellation folds its site into the headline and carries no body.
     if let ProviderErrorRecord::Cancelled { where_ } = e {
         ls.push(headline(&format!("cancelled ({where_})")));
         return ls;
@@ -1323,8 +1149,7 @@ pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
                 fs.push(wait_field(secs));
             }
             match body {
-                // Suppress the raw retry-after keys the wait field subsumes:
-                // the second-count readers plus the absolute `resets_at` twin.
+                // Suppress the raw keys the wait field already subsumes.
                 Some(b) => {
                     let consumed: Vec<&str> = RETRY_SECS_KEYS
                         .iter()
@@ -1385,8 +1210,7 @@ pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
 }
 
 /// The rate-limit wait as an aligned field: a human duration plus a
-/// `size_bar` of the seconds — the one quantitative provider-error field,
-/// so it earns the size channel the text fields don't.
+/// [`size_bar`] of the seconds.
 fn wait_field(secs: u64) -> FieldRow {
     FieldRow {
         label: "retry-after".into(),
@@ -1397,9 +1221,8 @@ fn wait_field(secs: u64) -> FieldRow {
     }
 }
 
-/// The `error: <kind>` headline row: a bold-red `error: ` lead-in then
-/// the bold-red kind.  Shared by every block so the chrome never drifts —
-/// the only variation is the kind string the caller folds in.
+/// The `error: <kind>` headline row, shared by every kind so the chrome never
+/// drifts; the kind string is the only variation.
 fn headline(kind: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(
@@ -1410,7 +1233,7 @@ fn headline(kind: &str) -> Line<'static> {
     ])
 }
 
-/// Short human label for the error header line.
+/// Short human label for the error headline.
 fn error_kind(e: &ProviderErrorRecord) -> &'static str {
     match e {
         ProviderErrorRecord::Cancelled { .. } => "cancelled",
@@ -1422,17 +1245,9 @@ fn error_kind(e: &ProviderErrorRecord) -> &'static str {
     }
 }
 
-/// Append one labelled text field as one-or-more flush-left Lines, its
-/// value left-padded into the shared `label_w` column and styled with
-/// `value_style`.
-///
-/// The first wrapped row carries the slate-bold [`field_label`] then the
-/// value; continuation rows blank the label so the value column lines up
-/// under itself.  `label_w` is the block-wide column width (the longest
-/// label plus its two-space gap), passed in so every field aligns to the
-/// same column rather than each measuring its own.  `value` is wrapped to
-/// `width` columns via [`textwrap::wrap`] so long URLs and stack-like
-/// strings fold instead of clipping.
+/// Append one labelled text field, wrapped to `width` so long URLs fold rather
+/// than clip.  Continuations blank the label; `label_w` is the block-wide
+/// width, passed in rather than measured here, so every field shares a column.
 fn push_field(
     ls: &mut Vec<Line<'static>>,
     label: &str,
@@ -1452,16 +1267,14 @@ fn push_field(
     });
 }
 
-/// Convenience over [`prettify_embedded_json`] that hands back an owned
-/// `String`, for the few field-build sites that feed free-text `cause`
-/// values into the structured field list.
+/// Owned-`String` form of [`prettify_embedded_json`].
 fn prettify(s: &str) -> String {
     prettify_embedded_json(s).into_owned()
 }
 
-/// The retry-after wait carried by a parsed `body`, if any: the first of
-/// the recognised second-count keys whose value reads as a number.  Used
-/// only when the response header didn't already supply the wait.
+/// The retry-after wait carried by a parsed `body`: the first
+/// [`RETRY_SECS_KEYS`] entry reading as a number.  Consulted only when the
+/// response header did not already supply the wait.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -1475,10 +1288,8 @@ fn wait_from_body(body: &Value) -> Option<u64> {
     })
 }
 
-/// One JSON value as the plain text a field row should show, with JSON
-/// syntax stripped: strings unquoted, scalars stringified, and the rare
-/// nested array/object compacted as a last resort.  `Null` carries no
-/// action, so it renders as nothing and the field is dropped.
+/// One JSON value as the text a field row shows, syntax stripped.  `Null`
+/// carries no action, so it renders as nothing and the field is dropped.
 fn value_display(v: &Value) -> Option<String> {
     match v {
         Value::Null => None,
@@ -1488,14 +1299,10 @@ fn value_display(v: &Value) -> Option<String> {
     }
 }
 
-/// Flatten a parsed error `body` into ordered fields, JSON syntax stripped.
-///
-/// The error object's `type`/`code` leads (the machine-readable class),
-/// then its remaining keys in the `Map`'s deterministic (sorted) order —
-/// skipping the framed `type`/`code`/`message`, any key already `consumed`
-/// by a dedicated field (e.g. the rate-limit wait), and null values — and
-/// `message` trails last because it is the one field that wraps.  A body
-/// with no error object yields no fields.
+/// Flatten a parsed error `body` into ordered fields: `type`/`code` leads as
+/// the machine-readable class, then the rest in the `Map`'s sorted order,
+/// skipping nulls and anything already `consumed` by a dedicated field, with
+/// `message` last because it is the one that wraps.
 fn body_fields(body: &Value, consumed: &[&str]) -> Vec<FieldRow> {
     let Some(obj) = provider::error_object(body) else {
         return vec![];
@@ -1522,13 +1329,10 @@ fn body_fields(body: &Value, consumed: &[&str]) -> Vec<FieldRow> {
     fs
 }
 
-/// Reformat the first embedded JSON object/array in `s` with two-space
-/// indentation, leaving the surrounding text intact.  Provider errors
-/// often splice a raw, single-line JSON body into a free-text `cause`
-/// (`… Body: {"error":{…}}`); pretty-printing it turns an unreadable wall
-/// into a nested block whose newlines the wrapper honours as hard breaks.
-/// Returns the input unchanged (borrowed) when no parseable JSON value is
-/// found, so non-JSON fields pay only a scan for the first `{`/`[`.
+/// Re-indent the first embedded JSON object or array in `s`, leaving the
+/// surrounding text intact: providers splice a single-line body into a
+/// free-text `cause`, and pretty-printing turns that wall into a nested block
+/// whose newlines the wrapper honours as hard breaks.
 fn prettify_embedded_json(s: &str) -> Cow<'_, str> {
     let Some(start) = s.find(['{', '[']) else {
         return Cow::Borrowed(s);
@@ -1545,31 +1349,22 @@ fn prettify_embedded_json(s: &str) -> Cow<'_, str> {
     Cow::Owned(format!("{}{}{}", &s[..start], pretty, &s[end..]))
 }
 
-/// Fold one logical line into visual rows no wider than `width`,
-/// word-aware and preserving each span's style.  The line builders already
-/// lay content out within [`READ_W`], so on a terminal at least that wide
-/// this hands the line straight back; it only folds on a narrower one.
+/// Fold one logical line into visual rows no wider than `width`, word-aware and
+/// style-preserving.  The builders already lay out within [`READ_W`], so a
+/// terminal at least that wide gets the line straight back.
 ///
-/// Continuations re-indent to the line's leading indentation — an optional
-/// rail glyph ([`is_rail_prefix`], prepended by [`super::block::Block::render_with`])
-/// plus any leading whitespace the builders inset content with — so a wrapped
-/// prompt echo, code row, or io effect folds under its own indent rather than
-/// sliding back to column zero.  A line with no leading indent wraps flush at
-/// `0`.  The greedy placement breaks between words, dropping the inter-word
-/// gap at the break; a single word wider than the body column is hard-broken
-/// char-by-char.
+/// Continuations re-indent to the line's own leading indentation — a rail glyph
+/// ([`is_rail_prefix`]) plus whatever whitespace the builder inset with — so a
+/// wrapped prompt echo or code row folds under its content rather than sliding
+/// to column zero.  A word wider than the column is hard-broken char by char.
 pub(super) fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
     if width == 0 || line.width() <= width {
         return vec![line.clone()];
     }
-    // The hang column is the line's leading indentation: an optional rail
-    // glyph (the first span, when it is one the rail prepends) followed by any
-    // whitespace-only spans the builders inset with.  Carrying the indent into
-    // the head — rather than leaving it in the body — is what keeps it on a
-    // wrapped row 0: the body's leading whitespace would otherwise be dropped
-    // as a row-leading gap.  The head spans ride row 0 verbatim (so the copy
-    // contract still strips a leading rail glyph), and continuations re-indent
-    // to their summed width.
+    // The hang column: the rail glyph, then any whitespace-only spans.  It goes
+    // in the head, not the body, or row 0 would lose it — leading body
+    // whitespace is dropped as a row-leading gap — and row 0 keeps the head
+    // verbatim, so `plain` can still strip the glyph off a copy.
     let spans = line.spans.as_slice();
     let mut head_len = rail_skip(line);
     while spans
@@ -1587,30 +1382,23 @@ pub(super) fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>
         .sum();
 
     let mut rows: Vec<Line<'static>> = Vec::new();
-    // Row 0 opens carrying the head spans verbatim (the rail glyph and indent,
-    // occupying columns `0..indent`); continuation rows are seeded with the
-    // indent.
     let mut row: Vec<Span<'static>> = head.to_vec();
     let mut col = indent;
-    // Whether a word has landed on the current row's body.  A pending gap
-    // before the first body word of a row is leading whitespace and is
-    // dropped; once a word lands the row may break and gaps become
-    // inter-word separators.
+    // Whether a word has landed on this row's body: a gap before the first is
+    // leading whitespace and is dropped; after it, gaps separate words.
     let mut started = false;
-    // The whitespace pending between the last word and the next: carried as
-    // style-runs so a styled gap survives, or dropped at a break / row start.
+    // Whitespace held between words, as style-runs so a styled gap survives.
     let mut gap: Vec<(String, Style)> = Vec::new();
     let mut gap_w = 0;
 
     for (word, ww) in words(body) {
-        // A whitespace run is held as the pending gap, never placed eagerly.
+        // A whitespace run is held pending, never placed eagerly.
         if word.iter().all(|(s, _)| s.chars().all(char::is_whitespace)) {
             gap = word;
             gap_w = ww;
             continue;
         }
-        // Break before a word that overflows once this row carries one; the
-        // pending gap is dropped at the break.
+        // Break before a word that overflows, once this row carries one.
         if started && col + gap_w + ww > width {
             rows.push(Line::from(std::mem::take(&mut row)));
             row = seed(indent);
@@ -1619,8 +1407,6 @@ pub(super) fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>
             gap.clear();
             gap_w = 0;
         }
-        // Place the pending gap only between words on a started row; drop it
-        // when it would lead the row.
         if started {
             for (s, style) in std::mem::take(&mut gap) {
                 row.push(Span::styled(s, style));
@@ -1630,8 +1416,6 @@ pub(super) fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>
             gap.clear();
         }
         gap_w = 0;
-        // Place the word, hard-breaking it char-by-char when it alone is
-        // wider than the body column.
         for (s, style) in word {
             for ch in s.chars() {
                 let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
@@ -1652,8 +1436,7 @@ pub(super) fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>
     rows
 }
 
-/// A fresh continuation row seeded with `indent` spaces, or empty when the
-/// line wraps flush — the body column every wrapped row re-indents to.
+/// A continuation row seeded with `indent`, or empty when the line wraps flush.
 fn seed(indent: usize) -> Vec<Span<'static>> {
     if indent == 0 {
         Vec::new()
@@ -1662,8 +1445,8 @@ fn seed(indent: usize) -> Vec<Span<'static>> {
     }
 }
 
-/// Append `ch` to `row`, extending the trailing span when it shares `ch`'s
-/// style so a word does not fragment into one span per character.
+/// Append `ch`, extending the trailing span when styles match so a word does
+/// not fragment into one span per character.
 fn push_char(row: &mut Vec<Span<'static>>, ch: char, style: Style) {
     match row.last_mut() {
         Some(last) if last.style == style => last.content.to_mut().push(ch),
@@ -1671,16 +1454,14 @@ fn push_char(row: &mut Vec<Span<'static>>, ch: char, style: Style) {
     }
 }
 
-/// Tokenise a span stream into maximal whitespace / non-whitespace runs,
-/// paired with each run's display width.  A run carries its style-fragments
-/// so a word that crosses a span seam (a style change mid-word) keeps each
-/// fragment's [`Style`].  Mirrors `md`'s word/space split, but span-aware.
+/// Tokenise a span stream into maximal whitespace / non-whitespace runs with
+/// their widths.  A run carries its style fragments, so a word crossing a span
+/// seam keeps each fragment's [`Style`].  Span-aware twin of `md`'s split.
 fn words(spans: &[Span<'static>]) -> Vec<(Vec<(String, Style)>, usize)> {
     let mut out: Vec<(Vec<(String, Style)>, usize)> = Vec::new();
     let mut run: Vec<(String, Style)> = Vec::new();
     let mut run_w = 0;
-    // Whether the run accumulated so far is whitespace — `None` until the
-    // first char fixes its kind.
+    // `None` until the first char fixes the run's kind.
     let mut ws: Option<bool> = None;
     let mut flush = |run: &mut Vec<(String, Style)>, run_w: &mut usize, ws: &mut Option<bool>| {
         if !run.is_empty() {
@@ -1741,9 +1522,8 @@ mod tests {
         l.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    /// A surfaced general card frames as a closed box: a `╭…╮` top rule with
-    /// the heading lifted into it, `│`-flanked content, a `╰…╯` bottom, and
-    /// every framed line the same display width so the right edge is flush.
+    /// A surfaced card frames as a closed box: the heading lifted into the
+    /// `╭…╮` rule, `│`-flanked content, and every line the same width.
     #[test]
     fn framed_card_is_a_closed_box() {
         let lines = render_card_framed(&vibes_card(), 80);
@@ -1798,9 +1578,8 @@ mod tests {
         s.len() - s.trim_start().len()
     }
 
-    /// A wrapped, indented, rail-less line (a source or io-effect row) keeps
-    /// its indent on row 0 and hangs every continuation under it — the leading
-    /// whitespace is the hang column, not a row-leading gap to drop.
+    /// A wrapped indented line keeps its indent on row 0 and hangs every
+    /// continuation under it — the whitespace is the hang column, not a gap.
     #[test]
     fn wrap_hangs_indented_line_under_its_indent() {
         let line = Line::from(vec![
@@ -1819,9 +1598,8 @@ mod tests {
         }
     }
 
-    /// A rail-led line still hangs continuations two columns under the glyph,
-    /// and the colour-styled glyph rides row 0 as its own span — what the copy
-    /// contract ([`plain`]) keys off to strip the chrome.
+    /// A rail-led line hangs continuations under the glyph, which rides row 0
+    /// as its own span — what [`plain`] keys off to strip the chrome on copy.
     #[test]
     fn wrap_hangs_rail_led_line_under_the_glyph() {
         let rail = Span::styled("▸ ", Style::default().fg(ratatui::style::Color::Cyan));

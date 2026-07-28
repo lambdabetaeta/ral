@@ -1,46 +1,26 @@
-//! Coherent degradation: the epistemic signal a block carries.
+//! Coherent degradation: how far to trust a block, as two ordered signals.
 //!
-//! Move 7 of the "transcript as graphic" re-encoding extends the per-`Block`
-//! variables past Bertin's planar set into the *epistemic* register: the
-//! medium should carry *how much to trust* a passage, not just what it
-//! says.  Two signals drive a per-block [`Fidelity`]:
-//!
-//! - **context pressure** (turn-level): `last_input` against the model's
-//!   `context_window`, a floor every paragraph of a stressed turn inherits
-//!   ([`context_floor`]);
-//! - **echo similarity** (per-block): how closely the committing prose
-//!   restates the `ral` script the model just ran — verbatim restatement
-//!   is rubber-stamping, not synthesis ([`echo_delta`]).
-//!
-//! The renderer ([`super::md`]) turns these into a foreground saturation
-//! drain (context) and a flat background wash (echo), so a degraded answer
-//! no longer borrows the visual authority of a sound one — and neither
-//! treatment touches the value (lightness) channel that carries magnitude.
+//! Context pressure is turn-level and every paragraph of a stressed turn
+//! inherits it; echo similarity is per-block, catching prose that merely
+//! restates the `ral` script just run.  [`super::md`] spends the two on
+//! disjoint colour axes — a foreground saturation drain, a flat background
+//! wash — never on value, which carries magnitude on the rail.
 
 use std::collections::HashSet;
 
-/// The two epistemic signals a [`super::block::Block`] carries, each a
-/// small ordered level.  Default is *sound* — `context` and `echo` both
-/// `0`, no modulation.  The two are kept separate rather than summed
-/// because they drive two disjoint colour axes (foreground drain vs
-/// background wash), so a single combined level could not reconstruct
-/// which treatment to apply.
+/// The two signals a [`super::block::Block`] carries.  `Default` is sound
+/// prose — both `0`, no modulation — which is what chrome and cards get.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub(super) struct Fidelity {
-    /// Turn-level context-pressure floor, `0..=3`: drains the foreground's
-    /// saturation toward grey at held luminance.  `0` when the provider
-    /// exposes no context window.
+    /// Turn-level context-pressure floor, `0..=3`.
     pub(super) context: u8,
-    /// Per-block echo delta, `0..=2`: trigram overlap of the committing
-    /// prose with the most-recent `ral` script.  Shades the field behind
-    /// the prose with a flat wash.
+    /// Per-block echo delta, `0..=2`.
     pub(super) echo: u8,
 }
 
-/// Bucket the turn's context pressure into a `0..=3` floor: `last_input`
-/// against the model's `context_window`.  A `None` window (native
-/// providers with no fetched catalog) yields a sound floor of `0` — no
-/// signal, the renderer leaves the prose untouched.
+/// Bucket `last_input` against the model's context window into a `0..=3`
+/// floor.  A `None` window — an unlisted model, or a turn before the
+/// catalog loads — reads as sound rather than as pressure.
 pub(super) fn context_floor(last_input: u64, context_window: Option<u64>) -> u8 {
     match context_window {
         Some(cap) if cap > 0 => {
@@ -60,10 +40,8 @@ pub(super) fn context_floor(last_input: u64, context_window: Option<u64>) -> u8 
     }
 }
 
-/// Bucket the echo similarity of `prose` against the `script` it followed
-/// into a `0..=2` delta.  High verbatim overlap reads as the model
-/// restating its own just-run script rather than synthesising, so it
-/// degrades; a paraphrase lowers the trigram overlap and stays sound.
+/// Bucket the trigram overlap of `prose` with the `script` it followed into a
+/// `0..=2` delta: verbatim restatement is rubber-stamping, paraphrase is not.
 pub(super) fn echo_delta(prose: &str, script: &str) -> u8 {
     match jaccard(cap(prose), cap(script)) {
         j if j < 0.20 => 0,
@@ -72,11 +50,8 @@ pub(super) fn echo_delta(prose: &str, script: &str) -> u8 {
     }
 }
 
-/// Word-trigram Jaccard similarity of two texts: `|a∩b| / |a∪b|` over
-/// their lowercased 3-gram shingle sets.  Cheap, dependency-free, and
-/// bounded by the caller's [`cap`].  Two empty shingle sets (texts under
-/// three words) are taken as dissimilar — `0.0` — so a terse call never
-/// reads as an echo.
+/// Word-trigram Jaccard similarity, `|a∩b| / |a∪b|`.  A text under three words
+/// shingles to nothing; that counts as dissimilar, so a terse block never echoes.
 fn jaccard(a: &str, b: &str) -> f32 {
     let wa: Vec<String> = a.split_whitespace().map(str::to_lowercase).collect();
     let wb: Vec<String> = b.split_whitespace().map(str::to_lowercase).collect();
@@ -95,8 +70,7 @@ fn jaccard(a: &str, b: &str) -> f32 {
     }
 }
 
-/// The word-trigram shingles of `words` (already lowercased) as borrowed
-/// `(word, word, word)` triples — no per-window string splice.
+/// The word-trigram shingles of `words`, which the caller has lowercased.
 fn shingles(words: &[String]) -> HashSet<(&str, &str, &str)> {
     words
         .windows(3)
@@ -104,9 +78,7 @@ fn shingles(words: &[String]) -> HashSet<(&str, &str, &str)> {
         .collect()
 }
 
-/// First 4 KB of `s`, truncated at a char boundary so a giant script
-/// can't stall the commit — the comparison only needs a representative
-/// prefix.
+/// A representative 4 KB prefix of `s`, so a giant script can't stall a commit.
 fn cap(s: &str) -> &str {
     const CAP: usize = 4096;
     if s.len() <= CAP {

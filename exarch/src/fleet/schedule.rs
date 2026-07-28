@@ -1,20 +1,11 @@
-//! Scheduled-wakeup triggers: a five-field cron grammar parsed in-tree and
-//! evaluated against the host-local timezone with `jiff`, plus a relative
-//! `after <dur>` one-shot.
+//! Scheduled wakeups: a five-field cron grammar, parsed here rather than
+//! taken from a `chrono`-based crate that would drag a second datetime tree
+//! in beside `jiff`, plus a one-shot relative `after <dur>`.
 //!
-//! Cron is *calendar* scheduling — "every weekday at 09:00", "nightly at
-//! 03:00" — the dominant shape for a resident agent and the lingua franca
-//! models emit reliably.  `after` covers "in two hours", which cron cannot
-//! express.  The grammar is small and fully specified, so it is parsed here
-//! rather than pulling a `chrono`-based cron crate that would drag a second
-//! datetime tree in beside the `jiff` already compiled in; evaluation
-//! (next-occurrence, timezone, DST) reuses `jiff`.
-//!
-//! Cron is wall-clock; the reaper is monotonic.  [`Trigger::next_delay`]
-//! bridges them: `jiff` computes the next absolute occurrence in the host
-//! tz, and the caller arms the reaper with the monotonic delta to it,
-//! recomputing on each fire so DST shifts, clock steps, and suspends are
-//! absorbed.
+//! Cron is wall-clock, the reaper monotonic.  Every fire recomputes the next
+//! absolute occurrence in the host timezone and arms the reaper with the
+//! delta to it, so DST shifts, clock steps, and suspends are absorbed rather
+//! than accumulated.
 
 use crate::bus::{Mailbox, Post};
 use crate::sync::LockExt;
@@ -26,7 +17,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-/// Three-letter month names, lowercased, 1-indexed (Jan = 1).
 const MONTHS: &[(&str, u8)] = &[
     ("jan", 1),
     ("feb", 2),
@@ -42,7 +32,7 @@ const MONTHS: &[(&str, u8)] = &[
     ("dec", 12),
 ];
 
-/// Three-letter weekday names, lowercased, cron-numbered (Sun = 0).
+/// Cron numbering, which `date_matches` meets with `to_sunday_zero_offset`.
 const WEEKDAYS: &[(&str, u8)] = &[
     ("sun", 0),
     ("mon", 1),
@@ -53,17 +43,13 @@ const WEEKDAYS: &[(&str, u8)] = &[
     ("sat", 6),
 ];
 
-/// A safety cap on the next-occurrence search.  With the whole-day skip
-/// below, a valid cron reaches its next fire in at most (days to the first
-/// matching date) + one day of minutes, so a century of headroom covers
-/// even the rarest legitimate expression (a leap-day-on-a-weekday cron)
-/// while bounding a parseable-but-impossible one (e.g. Feb 30) to a quick
-/// `None`.
+/// Cap on the next-occurrence search: a century of whole-day skips plus one
+/// day of minutes.  Every valid cron fires well inside that, and a
+/// parseable-but-impossible one (Feb 30) reaches `None` quickly.
 const MAX_STEPS: usize = 366 * 100 + 1_440;
 
-/// A parsed five-field cron expression: one allowed-value bitmask per
-/// field, plus whether the day-of-month and day-of-week fields were `*`
-/// (which selects the day-matching rule).
+/// A parsed five-field cron: one allowed-value bitmask per field, plus
+/// whether each day field was `*`, which selects the day-matching rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CronSchedule {
     minute: u64, // 0..=59
@@ -76,14 +62,13 @@ pub struct CronSchedule {
 }
 
 impl CronSchedule {
-    /// Parse a standard five-field expression: `minute hour dom month dow`.
-    /// Each field is a comma list of `*`, `N`, `a-b`, `*/step`, `a-b/step`,
-    /// or `N/step` (N to the field max).  Month and day-of-week also accept
-    /// three-letter names; day-of-week accepts `7` for Sunday.
+    /// Parse `minute hour dom month dow`, each field a comma list of `*`,
+    /// `N`, `a-b`, `*/step`, `a-b/step`, or `N/step` (N to the field max).
+    /// Month and day-of-week also accept three-letter names; day-of-week
+    /// accepts `7` for Sunday.
     ///
     /// # Errors
-    /// Returns `Err` if the expression does not have exactly five fields, or
-    /// if any field is malformed.
+    /// Wrong field count, or a malformed field.
     pub fn parse(expr: &str) -> Result<Self, String> {
         let fields: Vec<&str> = expr.split_whitespace().collect();
         if fields.len() != 5 {
@@ -96,8 +81,8 @@ impl CronSchedule {
         let hour = parse_field(fields[1], 0, 23, &[])?;
         let dom = parse_field(fields[2], 1, 31, &[])?;
         let month = parse_field(fields[3], 1, 12, MONTHS)?;
-        // Day-of-week is parsed over 0..=7 to admit 7 as Sunday, then 7 is
-        // folded onto 0 so the matcher reads a single Sunday bit.
+        // 7 is a second spelling of Sunday: admit it, then fold its bit onto
+        // 0 so the matcher reads one.
         let mut dow = parse_field(fields[4], 0, 7, WEEKDAYS)?;
         if dow & (1 << 7) != 0 {
             dow = (dow & !(1 << 7)) | 1;
@@ -117,8 +102,7 @@ impl CronSchedule {
     /// or `None` if the expression never fires within the search horizon.
     pub fn next_after(&self, from: &Zoned) -> Option<Zoned> {
         let tz = from.time_zone().clone();
-        // Start at the next whole minute strictly after `from`: cron fires on
-        // minute boundaries, and a partial current minute is already past.
+        // Cron fires on minute boundaries; the current partial minute is past.
         let mut cand = from
             .datetime()
             .with()
@@ -130,8 +114,8 @@ impl CronSchedule {
             .ok()?;
         for _ in 0..MAX_STEPS {
             if !self.date_matches(&cand) {
-                // No time on a non-matching date can fire: skip the whole
-                // day to its successor's 00:00 rather than stepping minutes.
+                // No time on a non-matching date can fire, so skip the day
+                // rather than its 1,440 minutes — the skip `MAX_STEPS` counts on.
                 cand = cand
                     .with()
                     .hour(0)
@@ -165,9 +149,8 @@ impl CronSchedule {
         }
         let dom_ok = bit(self.dom, dt.day());
         let dow_ok = bit(self.dow, dt.weekday().to_sunday_zero_offset());
-        // Vixie-cron OR semantics: when both day fields are restricted, a day
-        // matches if *either* does; when only one is, only that one; when
-        // neither, every day.
+        // Vixie-cron OR semantics: with both day fields restricted, either
+        // one matching is enough.
         match (self.dom_star, self.dow_star) {
             (true, true) => true,
             (false, true) => dom_ok,
@@ -177,7 +160,7 @@ impl CronSchedule {
     }
 }
 
-/// Whether bit `v` is set in `mask`, with `v` from `jiff`'s `i8` fields.
+/// Whether bit `v` is set in `mask`; `v` is a `jiff` field, hence the guard.
 fn bit(mask: u64, v: i8) -> bool {
     (0i8..64).contains(&v) && (mask >> v) & 1 == 1
 }
@@ -226,8 +209,7 @@ fn parse_field(spec: &str, min: u8, max: u8, names: &[(&str, u8)]) -> Result<u64
     Ok(mask)
 }
 
-/// Resolve one cron atom — a number or a three-letter name — into a value,
-/// validating it lies in `[min, max]`.
+/// Resolve one cron atom — a number or a name — to a value in `[min, max]`.
 fn resolve(tok: &str, min: u8, max: u8, names: &[(&str, u8)]) -> Result<u8, String> {
     let tok = tok.trim();
     let v = if let Ok(n) = tok.parse::<u8>() {
@@ -246,30 +228,25 @@ fn resolve(tok: &str, min: u8, max: u8, names: &[(&str, u8)]) -> Result<u8, Stri
     Ok(v)
 }
 
-/// What makes a wakeup fire: a recurring calendar cron, or a one-shot
-/// relative delay.
+/// What makes a wakeup fire: a recurring cron, or a one-shot delay from
+/// arming time.  `expr` is the cron source text, kept for display.
 #[derive(Debug, Clone)]
 pub enum Trigger {
-    /// A recurring cron, with the source expression kept for display and the
-    /// marked render.
     Cron {
         schedule: CronSchedule,
         expr: String,
     },
-    /// A one-shot relative delay from arming time.
     After(Duration),
 }
 
 impl Trigger {
-    /// Whether the trigger re-arms after firing.  Cron recurs; `after` is
-    /// one-shot.
+    /// Whether the trigger re-arms after firing.
     pub fn is_recurring(&self) -> bool {
         matches!(self, Self::Cron { .. })
     }
 
-    /// The monotonic delay from now to the next fire, computed fresh each
-    /// call (cron recomputes against the host tz; `after` is fixed).  `None`
-    /// for a cron whose next occurrence is beyond the search horizon.
+    /// The delay from now to the next fire, recomputed against the host
+    /// timezone on every call.  `None` past a cron's search horizon.
     pub fn next_delay(&self) -> Option<Duration> {
         match self {
             Self::After(d) => Some(*d),
@@ -287,8 +264,7 @@ impl Trigger {
         }
     }
 
-    /// The trigger as text, for the `schedules` listing and the marked
-    /// wakeup render.
+    /// The trigger as text, for the `schedules` listing and the wakeup.
     pub fn describe(&self) -> String {
         match self {
             Self::Cron { expr, .. } => expr.clone(),
@@ -297,12 +273,11 @@ impl Trigger {
     }
 }
 
-/// Parse a relative-delay string for `after`: an integer followed by one of
-/// `s`, `m`, `h`, `d` (e.g. `30m`, `2h`).
+/// Parse a relative delay for `after`: an integer and one of `s`, `m`, `h`,
+/// `d` (e.g. `30m`, `2h`).
 ///
 /// # Errors
-/// Returns `Err` if the string lacks a unit, its count is not a number, the
-/// unit is not one of `s`/`m`/`h`/`d`, or the duration is zero.
+/// A missing or unknown unit, a non-numeric count, or a zero duration.
 pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let s = s.trim();
     let (num, unit) = s.split_at(
@@ -325,7 +300,7 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
     Ok(Duration::from_secs(secs))
 }
 
-/// Render a `Duration` back to the compact `after` form for listings.
+/// The inverse of [`parse_duration`], in the coarsest unit that divides.
 fn fmt_duration(d: Duration) -> String {
     let s = d.as_secs();
     if s.is_multiple_of(86_400) {
@@ -339,58 +314,47 @@ fn fmt_duration(d: Duration) -> String {
     }
 }
 
-/// The id of a live schedule, unique for the session's lifetime (monotonic,
-/// never reused across `/clear`).
+/// A schedule's id: monotonic, and never reused, not even across `/clear`.
 pub type ScheduleId = u64;
 
 /// A snapshot row for the `schedules` listing.
 pub struct ScheduleInfo {
     pub label: String,
     pub trigger: String,
-    /// Seconds until the next fire, or `None` for a cron with no further
-    /// occurrence.
+    /// `None` for a cron with no further occurrence.
     pub next_in: Option<Duration>,
-    /// How many times this schedule has fired.
     pub fires: u64,
 }
 
-/// The receipt [`ScheduleRegistry::schedule`] answers.
-///
-/// Carries the resolved label — the caller's own choice, or the minted
-/// `sched-{id}` default — and the delay to its first fire. Model-facing, a
-/// schedule is known only by its label; this is what the desk needs to
-/// answer the `schedule` builtin's own receipt.
+/// What [`ScheduleRegistry::schedule`] answers: the resolved label — the
+/// caller's own, or the minted default — and the delay to the first fire.
+/// Model-facing, a schedule is known by its label and nothing else.
 #[derive(Debug)]
 pub struct ScheduleReceipt {
     pub label: String,
     pub next_in: Duration,
 }
 
-/// Whether `label` has the reserved `sched-<digits>` shape minted defaults
-/// use: the literal string `sched-` followed by one or more ASCII digits
-/// and nothing else. [`ScheduleRegistry::schedule`] refuses a user-supplied
-/// label of this shape up front, which is what makes every minted default
-/// collision-free by construction — a user label can never coincide with
-/// one.
+/// Whether `label` has the `sched-<digits>` shape minted defaults use.
+/// [`ScheduleRegistry::schedule`] refuses a user label of this shape, which
+/// is what makes every minted default collision-free by construction.
 fn is_reserved_label(label: &str) -> bool {
     label
         .strip_prefix("sched-")
         .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// A session's live scheduled wakeups.
-///
-/// Cheap to clone — the inner `Arc`
-/// shares the map, so the reaper closure that fires a schedule holds a
-/// handle it re-arms and posts through after the arming run has ended.
+/// A session's live scheduled wakeups.  Cheap to clone, and the clone shares
+/// the map: the reaper closure holds one, and re-arms and posts through it
+/// long after the run that armed it has ended.
 #[derive(Clone)]
 pub struct ScheduleRegistry {
     inner: Arc<Mutex<Inner>>,
 }
 
 struct Inner {
-    /// Monotonic id source; never reset, so a stale fire can never reach a
-    /// schedule created after a `/clear`.
+    /// Never reset, so a fire armed before a `/clear` cannot reach a
+    /// schedule created after it.
     next_id: ScheduleId,
     entries: HashMap<ScheduleId, Entry>,
 }
@@ -399,12 +363,11 @@ struct Entry {
     trigger: Trigger,
     prompt: String,
     label: String,
-    /// Shared with the in-flight wakeup message: set on post, cleared on
-    /// drain, read for the overlap-skip rule.
+    /// Shared with the in-flight wakeup: set on post, cleared when the inbox
+    /// drains it, read for the overlap-skip.
     pending: Arc<AtomicBool>,
     fires: u64,
-    /// Holds the next occurrence armed on the reaper; replaced on each fire,
-    /// dropped (disarming) when the schedule is removed.
+    /// The next occurrence, armed on the reaper; dropping it disarms.
     deadline: Deadline,
 }
 
@@ -425,18 +388,13 @@ impl ScheduleRegistry {
     }
 
     /// Add a schedule and arm its first occurrence on the reaper.  `label`
-    /// defaults to `sched-{id}` when absent; when given, it is refused if
-    /// it is already borne by a live schedule, or if it has the reserved
-    /// `sched-<digits>` shape ([`is_reserved_label`]) minted defaults use —
-    /// the two rules that make every minted default collision-free by
-    /// construction.  `mailbox` is the *owning session's* mailbox the fired
-    /// wakeup is posted to — a session schedules only itself.  Returns the
-    /// resolved label and the delay to its first fire.
+    /// defaults to `sched-{id}`; a supplied one is refused if a live schedule
+    /// already bears it, or if it has the reserved shape [`is_reserved_label`]
+    /// names.  `mailbox` is the owning session's — a session schedules only
+    /// itself.
     ///
     /// # Errors
-    /// Returns `Err` if `trigger` has no next occurrence (e.g. a cron
-    /// expression that never fires), if `label` is already borne by a live
-    /// schedule, or if `label` has the reserved `sched-<digits>` shape.
+    /// A trigger with no next occurrence, or a taken or reserved `label`.
     pub fn schedule(
         &self,
         trigger: Trigger,
@@ -484,12 +442,10 @@ impl ScheduleRegistry {
         })
     }
 
-    /// Remove one schedule by its label; `true` if a live schedule bore it.
-    /// Dropping its entry disarms its reaper deadline.  A no-op (`false`) is
-    /// not evidence of a caller mistake: a one-shot schedule may have just
-    /// fired and removed itself between the model reading its label and
-    /// issuing this call, so callers treat it as a successful no-op rather
-    /// than an error.
+    /// Remove one schedule by label; `true` if a live one bore it, and
+    /// dropping its entry disarms its deadline.  `false` is no evidence of a
+    /// caller mistake — a one-shot may have fired and removed itself since
+    /// the label was read — so callers treat it as a successful no-op.
     pub fn unschedule(&self, label: &str) -> bool {
         let mut g = self.lock();
         let Some(id) = g
@@ -502,9 +458,8 @@ impl ScheduleRegistry {
         g.entries.remove(&id).is_some()
     }
 
-    /// Whether any schedule is live — the attend loop's park-or-terminate
-    /// input at quiescence: a peer with a live self-schedule parks for its
-    /// next wakeup rather than terminating.
+    /// Whether any schedule is live.  At quiescence the attend loop parks for
+    /// the next wakeup rather than terminating when this holds.
     pub fn armed(&self) -> bool {
         !self.lock().entries.is_empty()
     }
@@ -532,44 +487,34 @@ impl ScheduleRegistry {
         rows.into_iter().map(|(_, info)| info).collect()
     }
 
-    /// `/clear`: drop every schedule (disarming each reaper deadline).  The
-    /// monotonic id source is untouched, so a wakeup armed before the clear
-    /// can never fire into a schedule created after it.
+    /// `/clear`: drop every schedule, disarming each deadline.  The id source
+    /// is left alone, for the reason `Inner::next_id` gives.
     pub fn clear(&self) {
         self.lock().entries.clear();
     }
 
-    /// Arm one occurrence on the reaper: a `Run` deadline whose closure
-    /// fires this schedule.  Does not touch the registry lock, so it is safe
-    /// to call while holding it.
+    /// Arm one occurrence on the reaper.  Takes no registry lock, so `fire`
+    /// may call it under one.
     fn arm_deadline(&self, id: ScheduleId, mailbox: &Mailbox, delay: Duration) -> Deadline {
         let reg = self.clone();
         let mailbox = mailbox.clone();
         arm_callback(delay, move || reg.fire(id, &mailbox))
     }
 
-    /// The reaper fired this schedule's deadline.  Posts a wakeup (unless a
-    /// previous one is still pending — the overlap-skip), then re-arms the
-    /// next occurrence (cron) or removes the schedule (one-shot `after`).
-    /// Runs on the reaper thread, outside its heap lock, so re-arming here
-    /// is safe.  The wakeup is posted only after this registry's guard
-    /// drops: a park verdict reads `armed()` under the consumer's inbox
-    /// mutex, so the process-wide lock order is inbox → registry (see
-    /// [`crate::bus`]'s module docs) and a push must never run under this
-    /// lock.
-    ///
-    /// Composing the message and posting it are two separate steps astride
-    /// that drop, so a `/clear` can fall between them; the message is
-    /// stamped with [`Mailbox::epoch`] here, at composition, so the inbox's
-    /// own pop-time admission check can tell whether this fire lands before
-    /// or after the clear that may have run in between.
+    /// The reaper fired this schedule: post a wakeup unless a previous one is
+    /// still pending (the overlap-skip), then re-arm, or drop a spent
+    /// one-shot.  Runs on the reaper thread outside its heap lock, so
+    /// re-arming here is safe; the push waits for this guard to drop, since a
+    /// park verdict reads `armed()` under the inbox mutex and the lock order
+    /// is inbox → registry.  Composing and pushing straddle that drop, so a
+    /// `/clear` can fall between them: the message carries the epoch read at
+    /// composition and the inbox's pop-time check settles the two orderings.
     fn fire(&self, id: ScheduleId, mailbox: &Mailbox) {
         let mut g = self.lock();
         let Some(entry) = g.entries.get_mut(&id) else {
             return; // unscheduled or cleared between arming and firing
         };
         let recurring = entry.trigger.is_recurring();
-        // Overlap-skip: post only when no previous wakeup is still unconsumed.
         let msg = if entry.pending.swap(true, Ordering::AcqRel) {
             None
         } else {
@@ -600,6 +545,8 @@ impl ScheduleRegistry {
         }
     }
 
+    /// Poison-recovering: every operation under it is total, so a panicked
+    /// holder leaves the map usable.
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock_ignore_poison()
     }
@@ -623,19 +570,14 @@ mod tests {
 
     #[test]
     fn parses_stars_lists_ranges_steps_and_names() {
-        // Every minute.
         let s = sched("* * * * *");
         assert!(s.dom_star && s.dow_star);
-        // Weekdays at 09:00, names and numbers agree.
         assert_eq!(sched("0 9 * * 1-5"), sched("0 9 * * mon-fri"));
-        // Step and list.
         let half = sched("*/30 * * * *");
         assert!(bit(half.minute, 0) && bit(half.minute, 30) && !bit(half.minute, 15));
         let list = sched("0 0,12 * * *");
         assert!(bit(list.hour, 0) && bit(list.hour, 12) && !bit(list.hour, 6));
-        // Month names.
         assert_eq!(sched("0 0 1 jan *"), sched("0 0 1 1 *"));
-        // 7 folds onto Sunday.
         assert_eq!(sched("0 0 * * 7"), sched("0 0 * * 0"));
     }
 
@@ -651,23 +593,20 @@ mod tests {
 
     #[test]
     fn oversized_step_does_not_overflow() {
-        // A step wider than the field range must not overflow the u8
-        // increment: `N/step` sets only N, then the walk stops.
+        // A step wider than the field must not overflow the u8 increment:
+        // the walk sets the low bound, then stops.
         let s = sched("59/200 * * * *");
         assert!(bit(s.minute, 59) && !bit(s.minute, 0));
-        // A `*/step` with an oversized step sets only the low bound.
         let s = sched("*/200 * * * *");
         assert!(bit(s.minute, 0) && !bit(s.minute, 59));
     }
 
     #[test]
     fn next_after_finds_the_following_daily_occurrence() {
-        // 2026-06-20 is a Saturday, 10:00 local (UTC for the test tz).
         let from = date(2026, 6, 20)
             .at(10, 0, 0, 0)
             .to_zoned(jiff::tz::TimeZone::UTC)
             .unwrap();
-        // Nightly at 03:00 → next is 2026-06-21 03:00.
         let next = sched("0 3 * * *").next_after(&from).unwrap();
         assert_eq!(next.year(), 2026);
         assert_eq!(next.month(), 6);
@@ -678,7 +617,7 @@ mod tests {
 
     #[test]
     fn next_after_respects_weekday_restriction() {
-        // From Saturday 2026-06-20 10:00, weekdays-at-09:00 fires Monday.
+        // 2026-06-20 is a Saturday, so weekdays-at-09:00 waits for Monday.
         let from = date(2026, 6, 20)
             .at(10, 0, 0, 0)
             .to_zoned(jiff::tz::TimeZone::UTC)
@@ -701,7 +640,7 @@ mod tests {
 
     #[test]
     fn impossible_cron_returns_none() {
-        // Feb 30 never exists.
+        // Feb 30 parses, but no date bears it.
         let from = date(2026, 1, 1)
             .at(0, 0, 0, 0)
             .to_zoned(jiff::tz::TimeZone::UTC)
@@ -755,8 +694,6 @@ mod tests {
         assert!(!reg.unschedule("nightly"), "a removed schedule is gone");
     }
 
-    /// A label already borne by a live schedule is refused, naming both the
-    /// label and the rule, and registers nothing.
     #[test]
     fn schedule_rejects_a_label_already_borne_by_a_live_schedule() {
         let reg = ScheduleRegistry::new();
@@ -791,9 +728,6 @@ mod tests {
         );
     }
 
-    /// A user-supplied label shaped like a minted default (`sched-<digits>`)
-    /// is refused up front — the rule that makes minted defaults
-    /// collision-free by construction.
     #[test]
     fn schedule_rejects_a_user_label_shaped_like_a_default() {
         let reg = ScheduleRegistry::new();
@@ -817,8 +751,6 @@ mod tests {
         );
     }
 
-    /// `unschedule` resolves by label; a label no live schedule bears is a
-    /// no-op, not an error — the same race a one-shot's self-removal creates.
     #[test]
     fn unschedule_by_label_removes_the_match_and_is_a_noop_otherwise() {
         let reg = ScheduleRegistry::new();

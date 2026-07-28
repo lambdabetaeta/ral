@@ -1,19 +1,11 @@
-//! Host environment snapshot — gathered once at startup and stitched
-//! into the system prompt so the model knows what kind of machine it
-//! is on, where it stands on disk, and when "now" is.
-//!
-//! Each probe is
-//! best-effort: missing values silently drop their line rather than
-//! erroring, so the prompt stays well-formed on bare or exotic hosts.
-//!
-//! The probes themselves live in [`ral_core::host`]; this module only
-//! formats them into the markdown snapshot, except for [`os_line`],
-//! which uses `os_info` for a richer version/codename string than the
-//! std target constants can provide.
+//! Format [`ral_core::host`]'s probes into the markdown snapshot opening
+//! exarch's `Host` section — host truths, which is why synod, whose agent
+//! lives in a guest VM where none hold, composes its own section instead.
 
-/// Multi-line markdown list — `os`, `now`, `cwd`, `user`, `home`,
-/// `git` (when cwd is inside a repo), then `exarch logs`.  Stable for
-/// the process lifetime, so safe inside the cached system prefix.
+/// Markdown list: `os`, `now`, `cwd`, `user`, `home`, `git`, `exarch logs`.
+/// An empty probe drops its line rather than erroring, so bare and exotic
+/// hosts still yield a well-formed prompt; baked once at boot with the rest
+/// of the prompt, so `now` names boot time.
 pub fn snapshot(exarch_state: &std::path::Path) -> String {
     use std::fmt::Write;
     let mut out = String::new();
@@ -39,9 +31,8 @@ pub fn snapshot(exarch_state: &std::path::Path) -> String {
     out
 }
 
-/// `Mac OS 14.6.1 [64-bit] (arm64)` or `Ubuntu 24.04 [64-bit] (jammy,
-/// x86_64)` — `os_info`'s `Display` plus the codename and architecture
-/// fields it omits.
+/// `Ubuntu 24.04 [64-bit] (jammy, x86_64)` — `os_info`'s `Display`, which
+/// knows a version std's target constants cannot, plus the fields it omits.
 fn os_line() -> String {
     let info = os_info::get();
     let mut extras = Vec::new();
@@ -58,9 +49,7 @@ fn os_line() -> String {
     }
 }
 
-/// `branch (clean)` or `branch (dirty)` when cwd is inside a git
-/// working tree; `None` otherwise.  Formats [`ral_core::host::git`]'s
-/// structured probe.
+/// `branch (clean)` or `branch (dirty)`; `None` outside a git working tree.
 fn git_line() -> Option<String> {
     ral_core::host::git()
         .map(|g| format!("{} ({})", g.branch, if g.dirty { "dirty" } else { "clean" }))

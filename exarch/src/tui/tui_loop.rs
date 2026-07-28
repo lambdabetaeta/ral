@@ -1,6 +1,5 @@
-//! REPL / UI loop orchestration — the main entry-point, the terminal guard
-//! wrapper, the worker thread spawn, the merged render+input loop, and the
-//! key-classification helpers.
+//! The REPL: the terminal guard, the agent worker thread, and the merged
+//! render+input loop the UI thread runs beside it.
 
 use std::{
     io::{self},
@@ -35,10 +34,8 @@ use super::{
     terminal::{self, TerminalGuard},
 };
 
-/// Pairs the terminal lifetime with the app so the worker thread and the UI
-/// loop can split the two: the worker borrows the session through
-/// [`App::handle`]'s bus, the UI loop borrows `guard.term()` alongside
-/// `&mut self.app` via direct field syntax for disjoint-borrow splitting.
+/// Terminal and app, kept as two fields so the loop can borrow `guard.term()`
+/// and `&mut app` at once.
 pub(super) struct Tui {
     pub(super) guard: TerminalGuard,
     pub(super) app: App,
@@ -59,16 +56,12 @@ impl Tui {
     }
 }
 
-/// The agent-affecting slash command hook the worker's [`Agent::attend`]
-/// calls at the exchange boundary, where the attend thread owns the agent the
-/// command mutates.  `/clear` rebuilds the agent's context (its viewport was
-/// already cleared UI-side), `/compact` summarizes the history, `/resources`
-/// surveys the agent's accumulators into one probe card, and `/quit` ends the
-/// attend loop — which sets `done`, so the UI loop's next drain returns `Stop`
-/// and exits.  Every other command is handled UI-side and never reaches here.
-/// Only the trunk attends with this `Control` (a sub-agent uses
-/// [`NoControl`](crate::agent::NoControl)), so a slash command always targets
-/// the trunk's own context and provider.
+/// The session-mutating slash commands, run by [`Agent::attend`] at the
+/// exchange boundary where the attend thread owns the agent; every other
+/// command is served UI-side and never arrives here.  Only the trunk attends
+/// with this `Control` — sub-agents run under
+/// [`NoControl`](crate::agent::NoControl) — so a command always lands on the
+/// trunk's own context.
 pub struct ReplControl;
 
 impl Control for ReplControl {
@@ -97,10 +90,8 @@ impl Control for ReplControl {
                 session.compact(&p, emit, true, &token);
                 Verdict::Continue
             }
-            // The probe fold: assembled here, on the attend thread that owns
-            // the shell the rows survey, and emitted as one bus event the
-            // frontend renders (appending its own rows) — never a model
-            // turn.
+            // Surveyed on the thread that owns the shell the rows describe,
+            // and emitted as one bus event — never a model turn.
             "/resources" => {
                 session.emit_resources(emit);
                 Verdict::Continue
@@ -111,8 +102,8 @@ impl Control for ReplControl {
     }
 }
 
-/// Build the [`Tui`], banner, run the worker + UI loop, flush logs, print log
-/// paths + usage on the restored shell.
+/// Build the [`Tui`], run the worker beside the UI loop, then flush logs and
+/// print the paths and usage on the restored shell.
 ///
 /// # Errors
 /// Returns `Err` if terminal setup fails, if drawing the banner fails, or if
@@ -143,10 +134,8 @@ pub fn run(
     )
     .map_err(|e| format!("ratatui init: {e}"))?;
     tui.app.update_live_model(provider);
-    // The fleet: a session-lived bus over the trunk's inbox, plus the shared
-    // registry and transport engine.  Input, the queued-user strip, async-agent
-    // results, and the worker's attend loop all read and write this one inbox,
-    // already threaded into `tui.app` above.
+    // A *session*-lived bus, not per-exchange: a detached async child keeps
+    // streaming to its tab after the exchange that spawned it ends.
     let fleet = Fleet {
         agents: session.agents.clone(),
         bus: FleetBus::session(&session.inbox()),
@@ -159,35 +148,21 @@ pub fn run(
         .banner(tui.guard.term(), info)
         .map_err(|e| e.to_string())?;
 
-    // The worker thread runs the trunk via `Agent::attend`, parking on an empty
-    // inbox (the conversing trunk) until a `/quit` command tells its `Control`
-    // to quit; it then sets `done`, and the UI loop's next drain returns
-    // `Stop`. The UI loop renders the bus and routes input in one continuous
-    // loop alongside it.  The trunk attends on its own provider handle.
+    // The worker parks on an empty inbox until `/quit`; latching `done` on the
+    // way out is the only thing that lets the UI loop's next drain say `Stop`.
     let done = AtomicBool::new(false);
     let done_ref = &done;
     let mut control = ReplControl;
-    // The worker captures the trunk's emitter, not `&fleet.bus`: `FleetBus` is
-    // not `Sync` (its `Receiver` is single-consumer), so the receiver stays on
-    // the UI thread. The emitter is `Send` and is all the worker needs.  It
-    // carries the trunk's `Transcript`, so the TUI records `transcript.jsonl`
-    // too — the operational view beside `user.log`'s rendered one.
+    // The worker crosses the thread boundary with an emitter, not the bus:
+    // `FleetBus` holds a single-consumer `Receiver` and so is not `Sync`, while
+    // an `Emitter` is `Send` and is all the worker needs.
     let worker_emit = fleet.bus.emitter(session.id, session.transcript());
-    // A recording emitter for the UI thread, minted from the bus *before* the
-    // worker takes the trunk: it carries the trunk's `transcript()`, so a
-    // UI-caused operational event — a `/model` switch — records in the trace
-    // and draws through the normal bus path, exactly as a worker-raised note
-    // does.  The worker takes `worker_emit`; this clone stays on the UI thread.
+    // The UI thread's own emitter, carrying the same transcript, so a UI-caused
+    // event (a `/model` switch) is recorded and drawn like any worker note.
     let ui_emit = fleet.bus.emitter(session.id, session.transcript());
-    // A `Mailbox` onto the trunk inbox, so a UI-loop failure can wake the
-    // parked worker with a `/quit` before joining — without it the conversing
-    // trunk parks forever and `join` would deadlock.
+    // Without a way to wake the parked worker with a `/quit`, the `join` below
+    // would deadlock whenever the UI loop dies first.
     let quit_mailbox = session.inbox().mailbox();
-    // The UI thread's command context: the handles `route_submit` and the
-    // `/model` path service a submitted line against, threaded as one.  The
-    // registry is the same shared map the worker mutates, so an agent it
-    // registers is visible to the UI at once — for steering and a `/model`
-    // swap on the focused agent's handle.
     let mut cmd_ctx = CommandCtx {
         agents: &fleet.agents,
         store,
@@ -208,11 +183,8 @@ pub fn run(
 
         let r = ui_loop(&mut tui, &fleet.bus, done_ref, &mut cmd_ctx);
         if r.is_err() {
-            // Best-effort unstick on the UI loop's own fatal error: the
-            // process is already unwinding to report `r`'s error, so a
-            // rejected `/quit` here (the inbox somehow at quota) has nowhere
-            // more specific left to report to than the fatal error already
-            // in flight; worst case the join below waits on a parked worker.
+            // A rejected push (the inbox at quota) has nowhere to be reported:
+            // `r`'s error is already the one in flight.
             let _ = quit_mailbox.push(Post::Command("/quit".into()));
         }
         let _ = worker.join();
@@ -224,8 +196,8 @@ pub fn run(
         .flush_logs()
         .map_err(|e| format!("session logs: {e}"));
     let usage = tui.app.total_usage();
-    // Restore the terminal before printing so log paths land on the
-    // user's normal shell rather than the alt screen.
+    // Restore the terminal first, so the paths below land on the user's shell
+    // rather than the alt screen.
     drop(tui);
     if let Ok(paths) = &logs {
         for p in paths {
@@ -241,15 +213,10 @@ pub fn run(
     Ok(())
 }
 
-/// The long-lived handles the UI thread services a submitted line against: the
-/// fleet registry (for steering and the focused agent's provider handle a
-/// `/model` swap targets), the credential store and model catalog the
-/// `/model` picker reads (and `/login` writes into, admitting a freshly
-/// signed-in account), the static session info, and the recording emitter a
-/// UI-caused operational event (a model switch, a sign-in) rides.  Bundled so
-/// the command path — `ui_loop` → `route_submit` → `pick_model` /
-/// `login` → `apply_model_switch` / `apply_login` — threads one context
-/// rather than a fistful of handles.
+/// The handles a submitted line is serviced against, bundled so the command
+/// path — `route_submit` into `pick_model` / `login` — threads one context.
+/// `agents` is the same shared map the worker mutates, so an agent it registers
+/// is steerable at once.
 pub struct CommandCtx<'a> {
     pub(super) agents: &'a AgentRegistry,
     pub(super) store: &'a mut CredentialStore,
@@ -259,18 +226,9 @@ pub struct CommandCtx<'a> {
     pub(super) engine: &'a Arc<provider::Engine>,
 }
 
-/// The merged render + input loop, running on the UI thread alongside the
-/// worker's [`Agent::attend`].  It drains the session-lived bus into the App
-/// (the same `App::handle` the old per-exchange attend loop used), ticks and
-/// redraws at ~60 FPS, and routes the user's keystrokes: scrollback / picker
-/// keys edit the App, a submitted line is routed by [`route_submit`] (view
-/// commands run here; agent commands and plain prompts go onto the focused
-/// agent's inbox), and Esc / Ctrl-C interrupt the focused tab's current
-/// exchange (never a cascade, never a kill).  A `TAB` that moves focus
-/// updates the live-model chrome to the newly focused agent's provider; no
-/// agent-side lifecycle depends on focus, so nothing else needs to be woken
-/// by the move.  Returns when the worker
-/// finishes (a `/quit`), draining its final events for one last frame.
+/// The merged render + input loop, on the UI thread beside the worker's
+/// [`Agent::attend`].  Returns once the worker is done, after one last frame
+/// that includes everything it emitted.
 fn ui_loop(
     tui: &mut Tui,
     bus: &FleetBus,
@@ -279,52 +237,32 @@ fn ui_loop(
 ) -> io::Result<()> {
     const BATCH: usize = 64;
     let frame = Duration::from_millis(16); // ~60 FPS max
-    // The session inbox, so a routed line (a plain prompt, a session command)
-    // reaches the worker's attend loop through the App's own queue.
     let mailbox = tui.app.inbox.mailbox();
     let rx = bus.rx();
-    // The frame clock: the instant the last frame was painted, seeded a frame
-    // in the past so the first iteration paints at once.  Draws are gated on it
-    // so the redraw rate is bounded by the frame interval independently of how
-    // fast events drain — a token/tool flood coalesces into one coherent frame
-    // per interval instead of a full-screen rewrite per 64-event batch (the
-    // jitter that churn caused).
+    // Seeded a frame in the past so the first iteration paints at once.  Gating
+    // draws on it decouples the redraw rate from the drain rate: a token flood
+    // coalesces into one frame per interval, not a rewrite per batch.
     let mut last_draw = Instant::now().checked_sub(frame).unwrap();
-    // Whether the next due frame must actually repaint. Set below by
-    // anything the frame can show that isn't already covered by `animating`:
-    // a drained bus event, a consumed keystroke, a focus change, or a probe
-    // flip. Seeded true so the first frame always paints.
+    // Set by anything visible that `animating` does not already cover.
     let mut dirty = true;
-    // Sampled once per iteration, purely for the dirty-flip below: whether the
-    // focused tab's attend loop parks or unparks repaints the tab title and
-    // prompt chrome even with no bus event of its own, but `App` derives the
-    // bit itself (via [`App::focused_waiting`]) whenever it actually needs it.
+    // A park or unpark repaints the tab title and prompt chrome with no bus
+    // event of its own, so the transition has to be watched for here.
     let mut prev_waiting = tui.app.focused_waiting();
     loop {
-        // Focus as of the start of this iteration; compared at the end so a
-        // `TAB`, or a focused agent ending mid-drain, updates the live-model
-        // chrome to whatever is now focused.
         let prev_focus = tui.app.tabs.focused();
-        // The explicit-done completion contract (shared with the headless
-        // `Sink::drive`): drain a batch, then stop only when the worker is
-        // *done* — never when the channel empties or disconnects, so a detached
-        // worker (a live background `agent`) flooding the bus cannot end the
-        // loop early. The batch cap bounds how long a token flood can starve the
-        // input poll below; `More` means events are still queued, so the frame
-        // does not wait for one.
+        // The explicit-done contract, shared with the headless `Sink::drive`:
+        // stop only when the worker is *done*, never when the channel empties,
+        // so a detached background agent flooding the bus cannot end the loop
+        // early.  The cap bounds how long that flood starves the input poll.
         let mut handled_any = false;
         let more = match drain_pass(rx, done, Some(BATCH), |ev| {
             handled_any = true;
             tui.app.handle(ev, rx);
         }) {
             Pass::Stop => {
-                // The capped pass can report `Stop` with events still buffered
-                // (the batch cap binds even a `done` drain); there is no
-                // drainer after this loop returns, so empty the channel with
-                // one uncapped pass before painting the frame the user sees
-                // last — it must include everything the worker emitted.
-                // `done` is already latched, so this pass drains to empty and
-                // reports `Stop` again; its verdict is not needed.
+                // The cap binds even a `done` drain, so `Stop` can arrive with
+                // events still buffered; nothing drains after this returns, so
+                // empty the channel uncapped before the final frame.
                 drain_pass(rx, done, None, |ev| tui.app.handle(ev, rx));
                 tui.app.busy_off();
                 draw(&mut tui.app, tui.guard.term())?;
@@ -337,10 +275,8 @@ fn ui_loop(
         let now_waiting = tui.app.focused_waiting();
         dirty |= now_waiting != prev_waiting;
         prev_waiting = now_waiting;
-        // Paint only when a frame is due, so a multi-batch backlog still drains
-        // at full throughput but redraws at most once per interval.  `tick`
-        // always runs on the due frame, painted or not: it ages dying tabs out
-        // on its own clock, independent of anything that gates the redraw.
+        // `tick` runs on every due frame, painted or not: it ages dying tabs
+        // out on its own clock, independent of what gates the redraw.
         if last_draw.elapsed() >= frame {
             let ticked = tui.app.tabs.tick();
             let animating = tui.app.animating(frame);
@@ -348,16 +284,12 @@ fn ui_loop(
                 draw(&mut tui.app, tui.guard.term())?;
                 dirty = false;
             }
-            // A skipped frame still advances the clock: the poll timeout below
-            // is `frame - last_draw.elapsed()`, so a stale `last_draw` would
-            // floor that at zero and spin the input poll on every iteration.
+            // A skipped frame still advances the clock, or the poll timeout
+            // below floors at zero and the loop spins.
             last_draw = Instant::now();
         }
-        // Poll for input every iteration, even with events still queued: a
-        // backlog of streamed tokens must never starve Esc/Ctrl-C. While the
-        // drain is incomplete the poll is non-blocking so draining stays prompt;
-        // once the channel is empty it waits only until the next frame is due,
-        // which both paces the idle loop and keeps Esc/Ctrl-C responsive.
+        // Polled every iteration, even mid-backlog, so a token flood can never
+        // starve Esc/Ctrl-C; the wait stays zero until the channel empties.
         let timeout = if more {
             Duration::ZERO
         } else {
@@ -370,19 +302,13 @@ fn ui_loop(
                     let focused = tui.app.tabs.focused();
                     let steerable = tui.app.is_steerable();
                     match key_action(&k, steerable) {
-                        // Esc / Ctrl-C interrupt the *focused* tab's current
-                        // exchange — never a cascade, never a kill.  On the trunk
-                        // `raise_interrupt()` unwinds the trunk's own exchange via
-                        // the published slot and the ral foreground.  On any
-                        // other focused tab `interrupt(id)` unwinds that
-                        // agent's exchange alone by cancelling its registered
-                        // token and whatever `ForegroundScope` its run-scope
-                        // cell currently holds, never `eval_root`; a sub-agent
-                        // never publishes the slots, so the slot/foreground
-                        // path would target the trunk by mistake.  Neither
-                        // reaches descendants, and neither ends the agent —
-                        // lifecycle death stays with `/quit`, `/clear`, the
-                        // ceiling, and `agent-cancel`.
+                        // Two paths because only the trunk publishes the
+                        // process-wide slot `raise_interrupt` raises; taking
+                        // that path for a sub-agent would unwind the trunk.
+                        // `AgentRegistry::interrupt` cancels the entry's token
+                        // and its current run scope, never the durable root —
+                        // so the exchange dies, its descendants do not, and the
+                        // agent lives to take a next run.
                         KeyAction::Cancel => {
                             if focused == tui.app.tabs.root() {
                                 cancel::raise_interrupt();
@@ -392,10 +318,9 @@ fn ui_loop(
                         }
                         KeyAction::Submit => {
                             if let Some(text) = tui.app.prompt_state.submit() {
-                                // Every tab funnels through the one submit path;
-                                // it owns the parse-once decision and targets the
-                                // focused tab, so there is no root/non-root fork
-                                // here that could mail a slash line to the model.
+                                // Every tab funnels through the one path, which
+                                // parses before it forks on the focused tab —
+                                // so no slash line can be mailed to the model.
                                 commands::route_submit(text, tui, &mailbox, ctx)?;
                             }
                         }
@@ -421,11 +346,9 @@ fn ui_loop(
                 _ => {}
             }
         }
-        // A focus change this iteration (a `TAB`, or a focused agent ending)
-        // updates the live model chrome to reflect the newly focused agent's
-        // provider — the banner, status bar, and ctx% gauge must follow
-        // focus.  Purely presentational: no agent-side lifecycle reads focus
-        // any more, so there is nothing else to wake here.
+        // A `TAB`, or a focused agent ending mid-drain, moves the banner and
+        // ctx% gauge onto the newly focused provider.  Purely presentational:
+        // nothing agent-side reads focus, so there is nothing else to wake.
         let now_focus = tui.app.tabs.focused();
         if now_focus != prev_focus {
             dirty = true;
@@ -441,19 +364,14 @@ pub fn ctrl_key(k: &KeyEvent, c: char) -> bool {
     k.code == KeyCode::Char(c) && k.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-/// What one overlay poll tick resolved to. Both `/model` (`model_picker.rs`'s
-/// `drive_picker`) and `/login` (`login.rs`'s `drive_login`) drive their modal
-/// on this one tick — draw, poll 100ms, read, filter to a live press — keeping
-/// only their own channel pumping and action match.
+/// What one overlay poll tick resolved to.  `model_picker`'s `drive_picker`
+/// and `login`'s `drive_login` both run their modal on this tick, so their
+/// cancel chord and release filtering stay identical.
 pub(super) enum OverlayTick {
-    /// Nothing arrived within the poll window; loop again.
     Idle,
-    /// A live key, neither the shared cancel chord nor a release event — hand
-    /// it to the overlay's own `key()`.
     Key(KeyCode),
     /// Ctrl-C, Ctrl-D, or Esc: every overlay's one cancel chord.
     Cancel,
-    /// The terminal draw failed; the driver should give up and close.
     TerminalLost,
 }
 
@@ -484,12 +402,10 @@ pub enum KeyAction {
     Cancel,
 }
 
-/// Classify one key press in the running UI loop: Ctrl-C and Esc always
-/// cancel; otherwise a bare Enter submits when `enter_submits` (the focused
-/// tab's steerability), and everything else edits. The worker's attend loop
-/// owns the whole session, so the prompt is never an idle read — there is no
-/// separate mode to classify against here. The modal overlays (`/model`,
-/// `/login`) resolve their own cancel chord through [`overlay_tick`] instead.
+/// Classify one key press in the running UI loop: Ctrl-C and Esc cancel, a
+/// bare Enter submits when the focused tab is steerable, everything else
+/// edits.  The modal overlays bypass this and read their chord from
+/// [`overlay_tick`].
 pub fn key_action(k: &KeyEvent, enter_submits: bool) -> KeyAction {
     if ctrl_key(k, 'c') {
         return KeyAction::Cancel;
@@ -517,13 +433,9 @@ mod tests {
     use super::*;
     use crate::bus::Kind;
 
-    /// `/resources` routes exactly as `/clear` does: posted to the inbox as
-    /// a `Post::Command`, drained at the exchange boundary, and handled by
-    /// [`ReplControl`] against the agent the attend loop owns — which
-    /// assembles its probe rows and emits exactly one [`Kind::Resources`],
-    /// recorded by the transcript as a `resources` line, with no
-    /// model-facing side effect (the attend loop quiesces without a provider
-    /// round-trip).
+    /// `/resources` travels the `/clear` route — inbox, exchange boundary,
+    /// [`ReplControl`] — and folds into exactly one event with no provider
+    /// round-trip.
     #[test]
     fn resources_command_routes_through_attend_and_emits_once() {
         let dir =
@@ -552,8 +464,6 @@ mod tests {
                     "the registry chapter is surveyed"
                 );
                 assert_eq!(card.marks().len(), 2, "a heading and one matrix");
-                // The transcript records the rows as a `resources` line —
-                // the raw-fact half of the raw/rendering pairing.
                 let rec = crate::agent::transcript::event_record(0, session.id, &event.kind)
                     .expect("a resources event must reach the transcript");
                 assert_eq!(rec["kind"], "resources");

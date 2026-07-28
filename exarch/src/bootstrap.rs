@@ -1,10 +1,6 @@
-//! Session boot: shell construction, environment and scratch seeding, the
-//! run-log and XDG directory layout, plus the shared time/slug helpers.
-//!
-//! One-shot bootstrap pieces that live for the lifetime of the process
-//! (or, for [`Scratch`], for the lifetime of one root session).
-//! Nothing here participates in the per-exchange loop.  Per-session disk
-//! state (the canonical event log) lives in [`crate::agent::event::AgentLog`].
+//! Session boot: the shell every exarch seat starts from, the scratch and XDG
+//! directories around it, and the time/slug helpers those share.  Nothing here
+//! runs per exchange — per-session disk state is [`crate::agent::event::AgentLog`].
 
 use crate::agent::cancel;
 use crate::shell_eval;
@@ -15,21 +11,16 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-/// Probe the terminal in the same mode `boot_shell` and every agent's
-/// transport endpoint (`Agent::assemble`) both want — honours
-/// `RAL_INTERACTIVE_MODE` if set.
+/// The one terminal probe both boot sites take: [`boot_shell`] here, and the
+/// `TerminalEndpoint` the identity seat attaches with in `agent::seat`.
 pub fn probe_terminal() -> TerminalState {
     let (_mode, terminal, _warn) = TerminalState::probe_from_env();
     terminal
 }
 
-/// Build a shell ready for an exarch session.
-///
-/// This is the one constructor that may boot a session shell: it resets
-/// ral's signal-escalation ladder before embedded library evaluation,
-/// installs ral's handlers, then immediately layers exarch's cancel chain
-/// over them.  Callers should seed per-session variables, not repeat
-/// signal ceremony.
+/// Build a shell ready for an exarch session, and the one site of the signal
+/// ceremony: exarch's cancel chain layers over ral's handlers here, so callers
+/// seed per-session variables and nothing more.
 ///
 /// # Panics
 /// Panics if the embedded agent library fails to load.
@@ -43,9 +34,8 @@ pub fn boot_shell() -> Shell {
     exarch_shell(terminal)
 }
 
-/// A shell dressed as exarch — the dressing every exarch boot shares:
-/// prelude + host surface, the embedded agent library, colour seeding,
-/// exit hints.
+/// The dressing both seats share: [`boot_shell`] and [`engine_boot_shell`]
+/// differ only in what they wrap around this.
 ///
 /// # Panics
 /// Panics if the embedded agent library fails to load.
@@ -61,18 +51,13 @@ pub(crate) fn exarch_shell(terminal: TerminalState) -> Shell {
     shell
 }
 
-/// The wire engine's boot recipe (`EngineInstaller::boot`).
-///
-/// Run engine-side at Attach — including the fresh process `/clear` boots
-/// after killing the old one — the full identity-seat parity:
-/// [`exarch_shell`] plus an engine-local [`Scratch`] and the same ledger
-/// arming the identity ceremony performs. No signal ceremony (a cancel
-/// reaches the engine as a `Control` frame, not a signal) and no terminal
-/// probe (the engine has no terminal; its state is conveyed at Attach).
+/// The wire engine's `EngineInstaller::boot`, run in the engine process at
+/// Attach: [`exarch_shell`] plus an engine-local [`Scratch`] and the identity
+/// ceremony's ledgers, but no signal ceremony (a cancel arrives as a `Control`
+/// frame) and no terminal probe (that state is conveyed at Attach).
 ///
 /// # Panics
-/// Panics if the agent library or the engine-local scratch cannot be set
-/// up — a shell missing either would fail mysteriously later.
+/// Panics if the agent library or the engine-local scratch cannot be set up.
 pub fn engine_boot_shell() -> Shell {
     let mut shell = exarch_shell(TerminalState::default());
     Scratch::new(EXARCH)
@@ -82,10 +67,8 @@ pub fn engine_boot_shell() -> Shell {
     shell
 }
 
-/// The ledger half of exarch's session policy.
-///
-/// Applied by [`engine_boot_shell`] and by the identity seat's own
-/// ceremony — one policy site for both seats.
+/// The ledger half of exarch's session policy — one site for both seats,
+/// reached from [`engine_boot_shell`] and from the identity seat's ceremony.
 pub fn arm_session_ledgers(shell: &mut Shell) {
     shell.arm_binding_lease(ral_core::types::BindingLease {
         idle_calls: shell_eval::BINDING_IDLE_CALLS,
@@ -94,47 +77,25 @@ pub fn arm_session_ledgers(shell: &mut Shell) {
     shell.arm_worker_retention(shell_eval::SETTLED_WORKER_RETENTION);
 }
 
-/// Suppress ANSI colour in spawned commands at the source.  Every tool
-/// call runs with stdout/stderr captured on a pipe — never a TTY — so
-/// conforming tools already emit no colour; these override user config
-/// and an inherited `CLICOLOR_FORCE` that *force* it.  That keeps a
-/// captured value byte-identical to the text [`crate::agent::digest`] shows
-/// the model; its ANSI strip remains the boundary guarantee for tools
-/// that ignore the convention.  Env-only, no ral scope binding: the
-/// agent has no reason to read these back.
+/// Suppress ANSI colour at the source.  A tool call's stdout is a pipe, never a
+/// TTY, so these only have to beat config that *forces* colour;
+/// [`crate::agent::digest`]'s strip covers the tools that honour neither.
 pub(crate) fn seed_no_color(shell: &mut Shell) {
     shell.set_env_var("NO_COLOR", "1");
     shell.set_env_var("CLICOLOR_FORCE", "0");
 }
 
-/// Per-session scratch directory, exposed to the agent under its own
-/// [`App`]'s name — `$EXARCH_SCRATCH`, `$SYNOD_SCRATCH`.
-///
-/// Caches the agent might want to scribble to (build artefacts, package
-/// manager state, anything ephemeral) live here instead of in the user's
-/// real cache dirs (`~/.cargo/registry`, `~/.npm`, …) — those are denied
-/// for write by `reasonable`, so a direct write there fails loudly.
-///
-/// To make this transparent to the agent, [`Scratch::install_into`]
-/// redirects a small fixed list of legacy tool env vars (`CARGO_HOME`,
-/// `npm_config_cache`, `GRADLE_USER_HOME`, `GOPATH`, `GOMODCACHE`,
-/// `RUSTUP_HOME`) to subdirs of the scratch.  Modern tools that
-/// respect `$XDG_CACHE_HOME` need no per-tool redirection — the
-/// `xdg:cache` write admit in reasonable handles them.
-///
-/// Intentionally left on disk when the session ends; scratch lives
-/// under OS-managed temp space and can be swept by the platform.
+/// Per-session scratch directory, named to the agent under its own [`App`] —
+/// `$EXARCH_SCRATCH`, `$SYNOD_SCRATCH`.  Everything ephemeral the agent
+/// scribbles belongs here, because `reasonable` denies writes to the user's real
+/// cache dirs.  Left on disk at session end: this is OS-managed temp space.
 pub struct Scratch {
     app: App,
     dir: PathBuf,
 }
 
-/// Legacy build-tool home env vars that pre-date or ignore XDG.  Each
-/// gets a dedicated subdir under the session scratch so the toolchains
-/// can do their own bookkeeping without colliding.  This list is
-/// deliberately stable and short — modern tools added since ~2018
-/// (uv, pnpm, bun, mise, hatch, ruff, …) respect `$XDG_CACHE_HOME`
-/// and don't need an entry here.
+/// Build-tool homes that pre-date or ignore XDG, each given its own scratch
+/// subdir.  Anything that respects `$XDG_CACHE_HOME` needs no entry here.
 const LEGACY_TOOL_HOMES: &[(&str, &str)] = &[
     ("CARGO_HOME", "cargo"),
     ("npm_config_cache", "npm-cache"),
@@ -145,12 +106,11 @@ const LEGACY_TOOL_HOMES: &[(&str, &str)] = &[
 ];
 
 impl Scratch {
-    /// Create the process's disposable scratch directory, wiping any stale
-    /// dir left by a prior run with the same pid.
+    /// Create the process's disposable scratch, wiping a stale dir an earlier
+    /// run with the same pid left behind.
     ///
     /// # Errors
-    /// Returns `Err` if removing a stale scratch directory or creating the
-    /// fresh one fails.
+    /// Returns `Err` if the removal or the creation fails.
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:silent:scratch-bootstrap] disposable scratch-dir setup; not turn-time data I/O"
@@ -169,33 +129,23 @@ impl Scratch {
         &self.dir
     }
 
-    /// Which product this scratch belongs to.
     pub fn app(&self) -> App {
         self.app
     }
 
-    /// The environment variable naming this scratch to the agent —
-    /// `EXARCH_SCRATCH` under exarch, `SYNOD_SCRATCH` under synod.
-    ///
-    /// Public because the prompt must name the same variable the shell was
-    /// seeded with: [`prompt::host_section`](crate::prompt::host_section)
-    /// asks the scratch for its own name rather than spelling one product's
-    /// into text both products read.
+    /// The environment variable naming this scratch to the agent.  Public so
+    /// [`crate::prompt::host_section`] can ask the scratch for its own name
+    /// rather than spell one product's into text both products read.
     pub fn var(&self) -> String {
         format!("{}_SCRATCH", self.app.name().to_uppercase())
     }
 
-    /// A uniquely-named scratch for tests: [`Self::new`]'s dir is keyed by
-    /// pid alone, so two tests constructing scratches concurrently would
-    /// contend on one path — the `tag` keeps each test's dir its own.
-    ///
-    /// Public, and hidden from the docs, because synod's tests need the
-    /// same scaffolding: a second copy of it in a second crate would be a
-    /// second thing to keep true.  A live run always takes [`Self::new`].
+    /// A uniquely-named scratch for tests: [`Self::new`] keys on pid alone, so
+    /// concurrent tests would contend on one path.  Public and hidden because
+    /// synod's tests need the same scaffolding.
     ///
     /// # Errors
-    /// Returns `Err` if removing a stale directory or creating the fresh
-    /// one fails.
+    /// Returns `Err` if the removal or the creation fails.
     #[doc(hidden)]
     #[allow(
         clippy::disallowed_methods,
@@ -214,14 +164,10 @@ impl Scratch {
         Ok(Self { app, dir })
     }
 
-    /// Seed the scratch variable ([`Scratch::var`]) and the
-    /// legacy-tool env vars into
-    /// `shell` — both the env-var map (so child processes inherit
-    /// them) and the ral-side bindings (so the same names resolve
-    /// inside ral source).  Always overrides: a user pre-set
-    /// `CARGO_HOME` pointing into `~/.cargo` would land outside
-    /// reasonable's write set and fail mysteriously, so the sandbox
-    /// is the trust boundary, not the inherited environment.
+    /// Seed [`Scratch::var`] and the legacy-tool homes into `shell`, overriding
+    /// whatever was inherited: a `CARGO_HOME` under `~/.cargo` lands outside
+    /// reasonable's write set, so the sandbox is the trust boundary, not the
+    /// environment exarch was launched in.
     pub fn install_into(&self, shell: &mut Shell) {
         let scratch = self.dir.to_string_lossy().into_owned();
         seed_var(shell, &self.var(), &scratch);
@@ -232,17 +178,14 @@ impl Scratch {
     }
 }
 
-/// Which product's directories these are.
-///
-/// Exarch and synod are two applications over one engine, and each owns
-/// its own XDG subtree and its own scratch: a synod session must never
-/// write into an exarch run's logs or read its persisted model
-/// selection.  The name is the only thing that varies, so it is the
-/// whole type — every directory below is `<app>` plus a convention.
+/// Which product's directories these are.  Exarch and synod are two
+/// applications over one engine, and neither may reach into the other's logs or
+/// persisted model selection; the name is the only thing that varies, so it is
+/// the whole type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct App(&'static str);
 
-/// Exarch's own directories.  Synod names its own [`App`].
+/// Exarch's own directories; synod names its own [`App`].
 pub const EXARCH: App = App::new("exarch");
 
 impl App {
@@ -256,39 +199,31 @@ impl App {
         self.0
     }
 
-    /// This app's directory under an XDG base: `$XDG_<kind>_HOME/<app>/`.
-    ///
-    /// The one spelling of the app-subdir convention — [`App::project_dir`]
-    /// (state home) and the model cache (`models::cache_path`, cache home)
-    /// both build on it.
+    /// This app's directory under an XDG base: `$XDG_<kind>_HOME/<app>/`.  The
+    /// one spelling of that convention — [`App::project_dir`] and
+    /// `provider::models`'s cache path both build on it.
     #[must_use]
     pub fn xdg_dir(self, kind: ral_core::path::basedir::XdgKind) -> PathBuf {
         ral_core::path::basedir::resolve_xdg(kind, &ral_core::path::home_from_env()).join(self.0)
     }
 
-    /// The per-project directory `$XDG_STATE_HOME/<app>/<project>/`, where
-    /// `<project>` is the slugified absolute `cwd` (see [`project_slug`]).
-    ///
-    /// Both the persisted model selection (`state.json`) and the per-run
-    /// session logs live under it, so a project's state is one findable
-    /// directory keyed by where it was launched — never scattered into cwd.
+    /// `$XDG_STATE_HOME/<app>/<project>/`, `<project>` being the slugified
+    /// absolute `cwd`.  Holds `provider::state`'s model selection and the
+    /// per-run logs, so a project's state is one directory keyed by where it was
+    /// launched, never scattered into cwd.
     #[must_use]
     pub fn project_dir(self, cwd: &str) -> PathBuf {
         self.xdg_dir(ral_core::path::basedir::XdgKind::State)
             .join(project_slug(cwd))
     }
 
-    /// The per-run log directory:
-    /// `$XDG_STATE_HOME/<app>/<project>/<run>/`, where `<run>` is
-    /// `<YYYY-MM-DD-HHMMSS>-<pid>`, unique per launch so successive runs in
-    /// the same project never overwrite one another.  Holds `stderr.log`
-    /// and `sessions/<id>/{events.json,transcript.jsonl,user.log}`.  Unlike
-    /// the disposable [`Scratch`] this is durable state under the user's
-    /// XDG state home, so it survives an abnormal exit and stays findable
-    /// without a symlink.
+    /// The per-run log directory, `<project>/<YYYY-MM-DD-HHMMSS>-<pid>/` — the
+    /// pid keeps two runs launched in the same second and project apart.  Holds
+    /// `stderr.log` and `sessions/<id>/{events.json,transcript.jsonl,user.log}`,
+    /// durably, unlike the disposable [`Scratch`].
     ///
     /// # Errors
-    /// Returns `Err` if creating the per-run log directory fails.
+    /// Returns `Err` if creating the directory fails.
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:silent:log-run-dir] per-run log dir under XDG state; infra, not turn-time data I/O"
@@ -301,18 +236,17 @@ impl App {
     }
 }
 
-/// The current time in whole unix seconds, or 0 if the clock is before the
-/// epoch. The one spelling shared by the run-dir stamp, the model cache's
-/// freshness check ([`crate::provider::models`]), and the OAuth token expiry
-/// ([`crate::provider::oauth`]).
+/// The current time in whole unix seconds, 0 if the clock predates the epoch.
+/// One spelling for the run-dir stamp, `provider::models`'s cache freshness
+/// check, and `provider::oauth`'s token expiry.
 pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
 }
 
-/// Format a Unix timestamp as `YYYY-MM-DD-HHMMSS` (UTC) via `jiff`.
-/// Falls back to the raw seconds string if the timestamp is out of range.
+/// Format a unix timestamp as `YYYY-MM-DD-HHMMSS` (UTC), or the raw seconds if
+/// it falls outside the representable range.
 fn stamp_from_secs(secs: u64) -> String {
     #[allow(
         clippy::cast_possible_wrap,
@@ -325,14 +259,11 @@ fn stamp_from_secs(secs: u64) -> String {
     )
 }
 
-/// Slugify an absolute path into one directory-name component by joining
-/// its components with `-`, a leading `-` standing in for the root:
-/// `/Users/x/proj` becomes `-Users-x-proj`.  Built on
-/// [`std::path::Path::components`] so it is correct across `/`, `\`, and
-/// Windows drive prefixes without a slugifier dependency.
-// `Path::components` is the correct cross-platform decomposition for a
-// slug; this is not a path-resolution site, so it is exempt from the
-// crate::path discipline.
+/// Slugify an absolute path into one directory-name component: `/Users/x/proj`
+/// becomes `-Users-x-proj`, the leading `-` standing in for the root.  Built on
+/// [`std::path::Path::components`], so `\` and drive prefixes come out right too.
+// The `Path` here is only decomposed, never resolved, so this is not one of the
+// construction sites `ral_core::path` exists to own.
 #[allow(clippy::disallowed_methods)]
 fn project_slug(cwd: &str) -> String {
     use std::path::Component;
@@ -361,10 +292,8 @@ fn project_slug(cwd: &str) -> String {
     if slug.is_empty() { "_".into() } else { slug }
 }
 
-/// Seed `name` into `shell` as both an environment variable (so spawned
-/// child processes inherit it) and a ral-side scope binding (so `$name`
-/// resolves in ral source).  Shared by [`Scratch::install_into`] and the
-/// per-agent `EXARCH_SESSION_DIR` seeding in [`crate::agent`].
+/// Seed `name` into `shell` twice over: an environment variable, so spawned
+/// children inherit it, and a scope binding, so `$name` resolves in ral source.
 pub(crate) fn seed_var(shell: &mut Shell, name: &str, value: &str) {
     shell.set_env_var(name, value);
     shell.set_var(name.into(), ral_core::types::Value::String(value.into()));

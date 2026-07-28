@@ -1,49 +1,25 @@
 //! Union-find unifier over four variable kinds: type, computation type, mode, row.
 //!
-//! A single `Store<T>` handles the union-find plumbing for any payload type T.
-//! Kind-specific unify methods on `Unifier` encode structural rules (including
-//! the one coercion preserved by design: Record↔Map).
-//! Pipeline modes are *not* coerced: [`Unifier::unify_mode`] is
-//! equality-strict so a value edge cannot silently meet a byte edge
-//! (`docs/SPEC.md` §4.2.1, §20.4).
+//! Record↔Map is the one coercion the language keeps; pipeline modes get none,
+//! so a value edge cannot silently meet a byte edge.
 //!
-//! Both value types and computation types are *equi-recursive*: a binding such
-//! as `comp_ty_slots[N] = Bound(Fun(Int, Var(N)))` or `ty_slots[N] = Bound(
-//! Variant {`more {head: T, tail: Thunk(Return(Var(N)))}, `done | ρ})` is
-//! allowed and represents a self-referential type.  Every traversal that
-//! descends through `Thunk` / `Fun` / `Return` / `List` / `Variant` / … carries
-//! a `Visited` of {ty, comp}-var roots in the current expansion so a cycle
-//! returns a back-edge instead of recursing forever.  Unification carries a
-//! co-inductive `Pairs` of equality obligations already in progress —
-//! symmetric {ty, comp}-var *root pairs*, plus *one-sided* obligations
-//! pairing a var root with a finite structural key of the other side — so
-//! unifying two cyclic types reaches a fixed-point instead of looping, even
-//! when the same equi-recursive type is anchored at a ty-var on one side and
-//! a comp-var on the other.  No occurs check is needed in either kind.
+//! Value and computation types are both *equi-recursive* — a slot may be bound
+//! to a structure containing its own variable — so neither needs an occurs
+//! check.  Instead every traversal carries a [`Visited`] of the roots it is
+//! expanding, turning a cycle into a back-edge, and unification carries a
+//! co-inductive [`Pairs`], so two cyclic types reach a fixed point.
 
 use super::error::{CompDiff, TypeErrorKind};
 use super::ty::{CompTy, CompTyVar, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar};
 use crate::syntax::tag::is_tag_label;
 use std::collections::HashSet;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Cycle-tracking bundles
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Cycle-tracking state threaded through `apply_*` and `free_*`.
-///
-/// `tys` and `comps` hold roots currently on the active recursion path —
-/// `apply_*` treats them as a stack (push on entry, pop on exit unless
-/// the root proved cyclic), while `free_*` treats them as a set (insert
-/// once, never remove) since free-var collection is idempotent.
-///
-/// `cyclic_tys` and `cyclic_comps` are populated by `apply_*` when a
-/// back-edge is discovered: the root then becomes "permanently visited"
-/// for the rest of the call so sibling references to a shared cyclic
-/// subtree continue to yield `Var(root)` back-edges instead of unrolling
-/// the binding at every position.  Non-cyclic roots leave these sets
-/// alone, so a sibling reference to a `τ → Int` root re-resolves to
-/// `Int` instead of being mistaken for a cycle.
+/// Cycle-tracking state, threaded through `apply_*` here and `free_*` in
+/// `generalize.rs`.  `tys`/`comps` are a stack for `apply_*` and a set for
+/// `free_*`, whose collection is idempotent.  A root that proves cyclic goes
+/// into `cyclic_*` and stays visited for the rest of the call, so siblings
+/// sharing that subtree keep getting back-edges — while a non-cyclic root stays
+/// out, letting a sibling `τ → Int` root re-resolve to `Int`.
 #[derive(Default)]
 pub(super) struct Visited {
     pub tys: HashSet<u32>,
@@ -52,17 +28,12 @@ pub(super) struct Visited {
     cyclic_comps: HashSet<u32>,
 }
 
-/// Co-inductive guard for unification: equality obligations already in
-/// progress.  Re-entering the same obligation is an immediate success —
-/// that is what makes unifying two cyclic types terminate at a fixed-point.
-///
-/// Two anchorings of the *same* equi-recursive type need not present as a
-/// `Var`/`Var` pair: a value-var-anchored stream (`T = Step(F T)`) meets a
-/// comp-var-anchored one (`C = F Step(C)`) as `Var`-vs-concrete-structure
-/// (`T ~= Step(C)`, `F T ~= C`).  So alongside the symmetric root pairs we
-/// memoize *one-sided* obligations: a variable root against a finite
-/// structural key of the other side ([`TyKey`] / [`CompTyKey`], which
-/// canonicalize nested vars through `find` but never expand bindings).
+/// Equality obligations already in progress; re-entering one is an immediate
+/// success, which is what makes two cyclic types terminate.  Alongside the
+/// symmetric root pairs are *one-sided* obligations — a root against a
+/// [`TyKey`] / [`CompTyKey`] of the other side — because a value-anchored
+/// stream (`T = Step(F T)`) meets its comp-anchored twin (`C = F Step(C)`) as
+/// `Var`-vs-structure, never as a `Var`/`Var` pair.
 #[derive(Default)]
 struct Pairs {
     tys: HashSet<(u32, u32)>,
@@ -71,32 +42,18 @@ struct Pairs {
     comp_expansions: HashSet<(u32, CompTyKey)>,
 }
 
-/// Defensive ceiling on *true nesting depth* — the number of times a
-/// structural traversal descends into a genuinely deeper subterm
-/// (a list/map/handle element, a thunk body, a function argument or
-/// result, a record/variant field type).  Iterating across the sibling
-/// fields of one row spine is width, not depth, so it never charges
-/// against this budget: a wide-but-shallow record unifies freely.
-///
-/// The co-inductive `Pairs` guard terminates every *cyclic* obligation;
-/// this bound is the secondary, structural stop for a variable-free type
-/// nested past any plausible source program, turning a would-be stack
-/// overflow into a graceful [`TypeErrorKind::TypeTooDeep`].  The budget is
-/// shared by every structural-recursion path reachable during unification
-/// — the unify arms, the key fingerprints of the one-sided obligations
-/// ([`Unifier::ty_key`] / [`Unifier::comp_key`] / [`Unifier::row_key`]),
-/// and the row occurs check ([`Unifier::row_occurs`]) — so no descent can
-/// escape the bound by crossing from one cluster into another.  No
-/// reproducing program is known; the limit sits far above realistic
-/// nesting (programs nest a handful of levels) yet comfortably under the
-/// ~900-frame depth at which the descent exhausts even a conservatively
-/// small (~2 MiB) runtime stack in a debug build.
+/// Ceiling on *true nesting depth*: descents into a strictly deeper subterm.
+/// Walking a row spine sideways is width and costs nothing, so a wide-but-
+/// shallow record unifies freely.  [`Pairs`] terminates every *cyclic*
+/// obligation; this is the structural stop for a variable-free type, turning a
+/// stack overflow into a graceful [`TypeErrorKind::TypeTooDeep`].  The unify
+/// arms, the key fingerprints and the row occurs check spend the one budget, so
+/// no descent escapes by crossing between them.  The value sits far above real
+/// nesting yet under the ~900 frames that exhaust a 2 MiB stack.
 const MAX_UNIFY_DEPTH: u32 = 512;
 
-/// Charge one level of genuine descent against [`MAX_UNIFY_DEPTH`],
-/// yielding the deeper count or a graceful [`TypeErrorKind::TypeTooDeep`]
-/// when the budget is spent.  Called only when stepping into a strictly
-/// deeper subterm — never when walking sideways along a row spine.
+/// Charge one level against [`MAX_UNIFY_DEPTH`].  Called only on a step into a
+/// strictly deeper subterm, which is why `depth` is threaded by hand below.
 fn deeper(depth: u32) -> Result<u32, TypeErrorKind> {
     if depth >= MAX_UNIFY_DEPTH {
         return Err(TypeErrorKind::TypeTooDeep);
@@ -104,10 +61,9 @@ fn deeper(depth: u32) -> Result<u32, TypeErrorKind> {
     Ok(depth + 1)
 }
 
-/// Finite structural fingerprint of a value type, used as the non-variable
-/// half of a one-sided unification obligation.  Variables canonicalize to
-/// their union-find root via `find`; bindings are *not* expanded, so the
-/// key stays finite even when the root is bound to a cyclic structure.
+/// Fingerprint of a value type: the non-variable half of a one-sided obligation.
+/// A variable collapses to its root and the walk stops, so the key stays finite
+/// even over a root bound to a cyclic structure.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum TyKey {
     Unit,
@@ -125,7 +81,7 @@ enum TyKey {
     Var(u32),
 }
 
-/// Finite structural fingerprint of a computation type.  See [`TyKey`].
+/// Fingerprint of a computation type.  See [`TyKey`].
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum CompTyKey {
     Return(PipeMode, PipeMode, Box<TyKey>),
@@ -133,17 +89,13 @@ enum CompTyKey {
     Var(u32),
 }
 
-/// Finite structural fingerprint of a row spine.  See [`TyKey`].
+/// Fingerprint of a row spine.  See [`TyKey`].
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum RowKey {
     Empty,
     Var(u32),
     Extend(String, Box<TyKey>, Box<Self>),
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Generic union-find store
-// ─────────────────────────────────────────────────────────────────────────────
 
 enum Slot<T> {
     Free,
@@ -156,9 +108,8 @@ struct Store<T> {
     next: u32,
 }
 
-/// A sort whose terms include variables drawn from a union-find store:
-/// `as_var` projects out the variable id when a term is a bare variable,
-/// and `from_root` rebuilds a variable term at a canonical root id.
+/// A sort with variables in a union-find store: `as_var` projects the id out of
+/// a bare variable, `from_root` rebuilds one at a canonical root.
 trait Unifiable: Clone {
     fn as_var(&self) -> Option<u32>;
     fn from_root(root: u32) -> Self;
@@ -228,8 +179,8 @@ impl<T: Clone> Store<T> {
     }
 
     fn find(&mut self, i: u32) -> u32 {
-        // Out-of-range IDs belong to a foreign unifier (e.g. cached prelude
-        // schemes loaded into a fresh InferCtx).  Treat them as free.
+        // Out-of-range ids belong to a foreign unifier — cached prelude schemes
+        // loaded into a fresh `InferCtx`.  Treat them as free.
         if i as usize >= self.slots.len() {
             return i;
         }
@@ -243,7 +194,6 @@ impl<T: Clone> Store<T> {
         }
     }
 
-    /// Follow a variable to its root and clone the bound value, if any.
     fn get(&mut self, i: u32) -> Option<T> {
         if i as usize >= self.slots.len() {
             return None;
@@ -255,9 +205,7 @@ impl<T: Clone> Store<T> {
         }
     }
 
-    /// Auto-expand for out-of-range IDs — cached prelude vars sometimes
-    /// arrive at a fresh unifier above its `next`.  Newly inserted slots
-    /// are Free.
+    /// Grow to cover `i`: cached prelude vars can arrive above a fresh `next`.
     fn ensure(&mut self, i: u32) {
         let needed = (i as usize) + 1;
         if needed > self.slots.len() {
@@ -282,8 +230,6 @@ impl<T: Clone> Store<T> {
         self.slots[a as usize] = Slot::Parent(b);
     }
 
-    /// Var/var union-find prelude shared by every kind: same id is a noop;
-    /// otherwise union the roots.
     fn unite(&mut self, a: u32, b: u32) {
         if a == b {
             return;
@@ -297,13 +243,9 @@ impl<T: Clone> Store<T> {
 }
 
 impl<T: Unifiable> Store<T> {
-    /// Follow a variable chain to canonical form: a bound variable expands
-    /// to its (recursively resolved) binding; an unbound variable becomes a
-    /// variable at its union-find root; a non-variable term is returned as
-    /// is.  A `Var → Var` chain only arises from `unite`, which writes
-    /// `Slot::Parent`, so `find` collapses it before any binding is reached.
-    /// The walk stops at the first non-variable head, leaving structurally
-    /// nested variables (the back-edges of a cyclic binding) untouched.
+    /// Follow a variable chain to canonical form.  The walk stops at the first
+    /// non-variable head, so variables nested inside it — a cyclic binding's
+    /// back-edges — survive untouched.
     fn resolve(&mut self, x: &T) -> T {
         match x.as_var() {
             Some(i) => match self.get(i) {
@@ -314,10 +256,6 @@ impl<T: Unifiable> Store<T> {
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Unifier
-// ─────────────────────────────────────────────────────────────────────────────
 
 pub struct Unifier {
     tys: Store<Ty>,
@@ -349,9 +287,7 @@ impl Unifier {
     pub fn fresh_mode(&mut self) -> PipeMode {
         PipeMode::Var(self.fresh_modevar())
     }
-    /// A `PipeSpec` whose input and output modes are both fresh variables —
-    /// the unconstrained `F[μ, ν]` shape used wherever a head's pipeline
-    /// modes are unknown.
+    /// The unconstrained `F[μ, ν]`, for a head whose modes are not yet known.
     pub fn fresh_spec(&mut self) -> PipeSpec {
         PipeSpec {
             input: self.fresh_mode(),
@@ -369,54 +305,43 @@ impl Unifier {
         Row::Var(self.fresh_row_var())
     }
 
-    /// Canonical comp-var root id under union-find — used by cycle-aware
-    /// traversals in sibling modules (env.rs, generalize.rs).
+    /// Canonical comp-var root under union-find, for the cycle-aware traversals
+    /// in `generalize.rs`.
     pub fn comp_root(&mut self, i: u32) -> u32 {
         self.ctys.find(i)
     }
 
-    /// Canonical ty-var root id under union-find — used by cycle-aware
-    /// traversals in sibling modules (env.rs, generalize.rs).
+    /// Canonical ty-var root under union-find.  Mirror of `comp_root`.
     pub fn ty_root(&mut self, i: u32) -> u32 {
         self.tys.find(i)
     }
 
-    /// Allocate a fresh comp-var slot and return its root id.  Used by
-    /// scheme instantiation to mint independent slots for each cyclic
-    /// comp-var in a polymorphic recursive scheme.
+    /// A fresh comp-var slot, as a root id.  Instantiation mints one per cyclic
+    /// comp-var so each use of a recursive scheme gets independent slots.
     pub fn fresh_comp_root(&mut self) -> u32 {
         self.ctys.fresh()
     }
 
-    /// Allocate a fresh ty-var slot and return its root id.  Mirror of
-    /// `fresh_comp_root` for cyclic ty bindings.
+    /// Mirror of `fresh_comp_root` for cyclic ty bindings.
     pub fn fresh_ty_root(&mut self) -> u32 {
         self.tys.fresh()
     }
 
-    /// Bind a freshly-minted comp-var root to a `CompTy` value.  Pairs
-    /// with `fresh_comp_root` for instantiation: the binding is the
-    /// scheme's snapshot rewritten through the substitution map.
+    /// Pairs with `fresh_comp_root`: the scheme's snapshot, substituted.
     pub fn bind_comp_root(&mut self, root: u32, value: CompTy) {
         self.ctys.bind(root, value);
     }
 
-    /// Bind a freshly-minted ty-var root to a `Ty` value.  Mirror of
-    /// `bind_comp_root` for cyclic ty bindings.
+    /// Mirror of `bind_comp_root` for cyclic ty bindings.
     pub fn bind_ty_root(&mut self, root: u32, value: Ty) {
         self.tys.bind(root, value);
     }
 
-    /// If the comp-var root has a non-Var binding, return its current
-    /// (resolved, applied) value; otherwise `None`.  Used by
-    /// `generalize` to snapshot cyclic comp-var bindings for storage
-    /// in the scheme.
-    ///
-    /// Quote *from the root* (`apply` of `Var(root)`), not from the
-    /// stored body — applying the raw binding starts the walk one
-    /// level below the anchor and would unroll the cycle once before
-    /// the back-edge fires, leaving the snapshot off by a level and
-    /// leaking the original union-find slot at the leaked level.
+    /// The root's binding with substitutions applied, or `None` if unbound or a
+    /// bare `Var`; `generalize` snapshots cyclic bindings this way.  Quote *from
+    /// the root*, never the stored body: one level below the anchor unrolls the
+    /// cycle before the back-edge fires, so the snapshot comes out off by a
+    /// level and leaks the original union-find slot there.
     pub fn resolved_comp_root_binding(&mut self, root: u32) -> Option<CompTy> {
         match self.ctys.get(root) {
             Some(CompTy::Var(_)) | None => None,
@@ -424,8 +349,7 @@ impl Unifier {
         }
     }
 
-    /// Mirror of `resolved_comp_root_binding` for cyclic ty bindings.
-    /// Same anchor-quoting requirement applies.
+    /// Mirror of `resolved_comp_root_binding`; the same anchor-quoting applies.
     pub fn resolved_ty_root_binding(&mut self, root: u32) -> Option<Ty> {
         match self.tys.get(root) {
             Some(Ty::Var(_)) | None => None,
@@ -433,11 +357,9 @@ impl Unifier {
         }
     }
 
-    /// Collect comp-var roots that appear in any cycle reachable from `ty`.
-    /// Walks via `apply_ty_inner` so that mid-cycle roots — pushed onto
-    /// the recursion stack but not yet returned as back-edges in the
-    /// applied output — are still captured (`apply_*_inner` tags them
-    /// on cycle detection).
+    /// Comp-var roots on some cycle reachable from `ty`.  Reads the traversal's
+    /// tags, not its output: a mid-cycle root is tagged on detection but need
+    /// not surface as a back-edge.
     pub fn cyclic_comp_roots_in_ty(&mut self, ty: &Ty) -> Vec<u32> {
         let mut visited = Visited::default();
         let _applied = self.apply_ty_inner(ty, &mut visited);
@@ -446,7 +368,7 @@ impl Unifier {
         out
     }
 
-    /// Mirror of `cyclic_comp_roots_in_ty` for cyclic value-type bindings.
+    /// Mirror of `cyclic_comp_roots_in_ty` for ty-var roots.
     pub fn cyclic_ty_roots_in_ty(&mut self, ty: &Ty) -> Vec<u32> {
         let mut visited = Visited::default();
         let _applied = self.apply_ty_inner(ty, &mut visited);
@@ -454,8 +376,6 @@ impl Unifier {
         out.sort_unstable();
         out
     }
-
-    // ── Resolve: follow variable chains to canonical form ────────────────────
 
     pub fn resolve_ty(&mut self, ty: &Ty) -> Ty {
         self.tys.resolve(ty)
@@ -469,18 +389,14 @@ impl Unifier {
         self.modes.resolve(mode)
     }
 
-    /// Follow row variable bindings to canonical form.
-    /// The returned row may still contain nested unresolved variables.
+    /// Canonicalize the head; variables nested in the result stay unresolved.
     pub fn resolve_row(&mut self, row: &Row) -> Row {
         self.rows.resolve(row)
     }
 
-    /// Walk a row to its terminal tail, collecting the labels of every
-    /// `Extend` along the spine.  Returns the label multiset (unsorted) and
-    /// the terminal: `Some(root)` for an open row whose tail is a variable,
-    /// `None` for one closed by `Empty`.  Each tail is resolved before the
-    /// step, so binding cycles cannot occur — the occurs check rejects them
-    /// before they are installed.
+    /// Every `Extend` label, unsorted, and the terminal — `Some(v)` for an open
+    /// row, `None` for one closed by `Empty`.  The loop needs no cycle guard:
+    /// the occurs check rejects a cyclic row binding before it is installed.
     fn row_spine(&mut self, row: &Row) -> (Vec<String>, Option<RowVar>) {
         let mut labels = Vec::new();
         let mut cur = self.resolve_row(row);
@@ -495,8 +411,6 @@ impl Unifier {
             }
         }
     }
-
-    // ── Apply: recursively substitute all variables ──────────────────────────
 
     pub fn apply_ty(&mut self, ty: &Ty) -> Ty {
         let mut visited = Visited::default();
@@ -514,23 +428,14 @@ impl Unifier {
     }
 
     pub(super) fn apply_ty_inner(&mut self, ty: &Ty, visited: &mut Visited) -> Ty {
-        // Cycle guard with Thunk-descent at ty-back-edge.  In CBPV ral
-        // every productive recursive value type closes through a `Thunk`
-        // wrapper (μ values are finite; ν computations are where the
-        // recursion lives).  When a ty-back-edge fires and the binding is
-        // `Thunk(Var(c))` with `c` already on the comp stack, redirect
-        // the back-edge to the comp anchor `c` — that's the canonical
-        // place to capture the cycle for the snapshot, so `c` ends up in
-        // `comp_ty_bindings` and gets a fresh id per instantiation
-        // instead of being unrolled and shared.
-        //
-        // The plain `Ty::Var(r)` fallback handles value cycles anchored at
-        // a ty-var (e.g. a stream combinator written to take a `Stream`
-        // *value* rather than a `Thunk`): the binding reached at the
-        // back-edge is a `Variant`, not `Thunk(Var(c))`, so there is no
-        // comp anchor to redirect to and the ty-var is the canonical cycle
-        // point.  Unification handles the same shape co-inductively via the
-        // one-sided obligations in `Pairs`.
+        // In CBPV every productive recursive value type closes through a
+        // `Thunk` — μ values are finite, the recursion lives in the ν
+        // computations — so a ty-back-edge onto `Thunk(Var(c))` with `c` on the
+        // comp stack redirects to the comp anchor `c`, the canonical capture
+        // point: `c` then lands in the scheme's `comp_ty_bindings` and gets a
+        // fresh id per instantiation instead of being unrolled and shared.  A
+        // cycle truly anchored at a ty-var reaches a `Variant`, not a `Thunk`,
+        // and takes the plain fallback.
         let root = match ty {
             Ty::Var(TyVar(i)) => Some(self.tys.find(*i)),
             _ => None,
@@ -540,10 +445,8 @@ impl Unifier {
                 return Ty::Var(TyVar(r));
             }
             if visited.tys.contains(&r) {
-                // Match the raw bound CompTy (no resolve_comp_ty) so that
-                // a stored `Thunk(Var(C))` is recognised even when `C` is
-                // itself bound — the canonical anchor is `C`'s root, not
-                // the structure `C` happens to resolve to right now.
+                // Match the raw binding, not `resolve_comp_ty` of it: the
+                // anchor is `C`'s root, not whatever `C` resolves to now.
                 if let Some(Ty::Thunk(b)) = self.tys.get(r)
                     && let CompTy::Var(CompTyVar(ci)) = *b
                 {
@@ -572,10 +475,8 @@ impl Unifier {
             Ty::Variant(r) => Ty::Variant(self.apply_row_inner(&r, visited)),
             Ty::Thunk(b) => Ty::Thunk(Box::new(self.apply_comp_ty_inner(&b, visited))),
             ground @ (Ty::Unit | Ty::Bytes | Ty::Bool | Ty::Int | Ty::Float | Ty::String) => ground,
-            // `Ty::Var` was stripped above: `resolve_ty` returns a `Var`
-            // only when unbound, and that case early-returned before this
-            // match.  Enumerating every other constructor means a new one
-            // fails the build here instead of falling through unsubstituted.
+            // Enumerated so a new constructor fails the build here rather than
+            // falling through unsubstituted.
             Ty::Var(_) => unreachable!("unbound var early-returned; resolved is non-Var here"),
         };
         if let Some(r) = root
@@ -587,11 +488,9 @@ impl Unifier {
     }
 
     fn apply_comp_ty_inner(&mut self, cty: &CompTy, visited: &mut Visited) -> CompTy {
-        // Hybrid cycle guard with whole-stack cyclic marking on back-edge.
-        // The cycle's anchor may be either side of the ty/comp boundary,
-        // but in CBPV ral the cycle physically traverses BOTH — every
-        // root currently expanding is part of the cycle and must enter
-        // its respective bindings list so instantiation gets fresh ids.
+        // The anchor may sit on either side of the ty/comp boundary, but the
+        // cycle traverses both, so every root currently expanding belongs to it
+        // and must enter its bindings list to be given a fresh id later.
         let root = match cty {
             CompTy::Var(CompTyVar(i)) => Some(self.ctys.find(*i)),
             _ => None,
@@ -645,17 +544,11 @@ impl Unifier {
         }
     }
 
-    // ── Row occurs check ─────────────────────────────────────────────────────
-    //
-    // Rows are inductive: a row variable may appear in the spine *or* nested
-    // inside a field type (e.g. `Record(ρ)` as the payload of an `Extend`), so
-    // the check descends through field types as well as the spine.  A row
-    // binding `ρ = {l: τ}` with `ρ` reachable from `τ` would denote an infinite
-    // record and is rejected as [`TypeErrorKind::RecursiveRow`] rather than
-    // installed.  Value and computation types are themselves equi-recursive,
-    // so the descent through field types carries a [`Visited`] of {ty, comp}-var
-    // roots to fold a legitimate cyclic field type into a back-edge instead of
-    // looping.
+    // Rows, unlike types, are inductive: `ρ = {l: τ}` with `ρ` reachable from
+    // `τ` denotes an infinite record and is rejected as `RecursiveRow`.  A row
+    // variable can hide in a field type as well as along the spine, so the check
+    // descends through both, carrying a `Visited` because a field type may
+    // legitimately be cyclic.
 
     fn row_occurs(&mut self, v: RowVar, row: &Row, depth: u32) -> Result<bool, TypeErrorKind> {
         let mut visited = Visited::default();
@@ -672,9 +565,6 @@ impl Unifier {
         match self.resolve_row(row) {
             Row::Empty => Ok(false),
             Row::Var(u) => Ok(u == v),
-            // Each field type is a strictly deeper subterm (`deeper`); the
-            // walk to the next spine entry is width, so `rest` reuses
-            // `depth` untouched.
             Row::Extend(_, ty, rest) => Ok(self.ty_occurs_row(v, &ty, visited, deeper(depth)?)?
                 || self.row_occurs_inner(v, &rest, visited, depth)?),
         }
@@ -702,11 +592,8 @@ impl Unifier {
             }
             Ty::Record(r) | Ty::Variant(r) => self.row_occurs_inner(v, &r, visited, deeper(depth)?),
             Ty::Thunk(c) => self.comp_occurs_row(v, &c, visited, deeper(depth)?),
-            // Ground leaves carry no row variable.  Enumerated rather than a
-            // catch-all so a future constructor that *does* embed a row (or a
-            // type that could) fails the build here and is consciously routed,
-            // not silently skipped — an under-checked occurs check would let a
-            // cyclic row install undetected.
+            // Enumerated rather than caught: a future row-embedding
+            // constructor skipped here lets a cyclic row install undetected.
             Ty::Var(_) | Ty::Unit | Ty::Bytes | Ty::Bool | Ty::Int | Ty::Float | Ty::String => {
                 Ok(false)
             }
@@ -737,19 +624,10 @@ impl Unifier {
         }
     }
 
-    // ── Structural keys for one-sided obligations ───────────────────────────
-    //
-    // A key fingerprints the *given term* (a finite syntactic type), not its
-    // equi-recursive expansion: a `Var` collapses to its union-find root and
-    // the walk stops there, so the key is finite even when that root is bound
-    // to a cyclic structure.  Equal keys mean the same obligation against the
-    // same anchor, which is the cyclic fixed point the guard discharges.
-    //
-    // The fingerprint is built by structural recursion, so it shares the
-    // [`MAX_UNIFY_DEPTH`] budget threaded from the calling unify arm
-    // (`deeper` on each strictly deeper subterm, width along a row spine left
-    // uncharged) — a variable-free type nested past the ceiling surfaces
-    // [`TypeErrorKind::TypeTooDeep`] here rather than overflowing the stack.
+    // A key fingerprints the *given term*, not its equi-recursive expansion, so
+    // equal keys mean the same obligation against the same anchor — the fixed
+    // point the guard discharges.  Being a structural recursion, it spends the
+    // `MAX_UNIFY_DEPTH` budget threaded in from the calling unify arm.
 
     fn ty_key(&mut self, ty: &Ty, depth: u32) -> Result<TyKey, TypeErrorKind> {
         Ok(match ty {
@@ -788,8 +666,6 @@ impl Unifier {
         Ok(match row {
             Row::Empty => RowKey::Empty,
             Row::Var(RowVar(i)) => RowKey::Var(self.rows.find(*i)),
-            // The field type is a deeper subterm; the spine tail (`rest`) is
-            // width, so it reuses `depth`.
             Row::Extend(l, t, rest) => RowKey::Extend(
                 l.clone(),
                 Box::new(self.ty_key(t, deeper(depth)?)?),
@@ -798,15 +674,12 @@ impl Unifier {
         })
     }
 
-    // ── Unification ──────────────────────────────────────────────────────────
-
     /// Unify value types `a` and `b`, binding variables in place.
     ///
     /// # Errors
-    /// Returns `Err` if the two types have mismatched structure
-    /// ([`TypeErrorKind::TyMismatch`]), if an embedded row unification forms
-    /// a recursive row ([`TypeErrorKind::RecursiveRow`]), or if the terms
-    /// nest past the depth budget ([`TypeErrorKind::TypeTooDeep`]).
+    /// [`TypeErrorKind::TyMismatch`] on mismatched structure,
+    /// [`TypeErrorKind::RecursiveRow`] from an embedded row, or
+    /// [`TypeErrorKind::TypeTooDeep`].
     pub fn unify_ty(&mut self, a: &Ty, b: &Ty) -> Result<(), TypeErrorKind> {
         let mut pairs = Pairs::default();
         self.unify_ty_inner(a, b, &mut pairs, 0)
@@ -819,20 +692,15 @@ impl Unifier {
         pairs: &mut Pairs,
         depth: u32,
     ) -> Result<(), TypeErrorKind> {
-        // Co-inductive guard.  Re-entering the same equality obligation means
-        // the recursion has reached its cyclic fixed point — discharge it.
         match (a, b) {
-            // Symmetric: two ty-var roots already in progress.
             (Ty::Var(TyVar(ai)), Ty::Var(TyVar(bi))) => {
                 let (ar, br) = (self.tys.find(*ai), self.tys.find(*bi));
                 if guard_pair(&mut pairs.tys, ar, br) {
                     return Ok(());
                 }
             }
-            // One-sided: a ty-var root against a structural key of the other
-            // side.  This catches a value-var-anchored cycle meeting the same
-            // type anchored at a comp-var, where the two never present as a
-            // `Var`/`Var` pair.
+            // One-sided, which is how a value-anchored cycle meets its
+            // comp-anchored twin: the two never present as `Var`/`Var`.
             (Ty::Var(TyVar(vi)), other) | (other, Ty::Var(TyVar(vi))) => {
                 let (root, key) = (self.tys.find(*vi), self.ty_key(other, depth)?);
                 if guard_expansion(&mut pairs.ty_expansions, root, key) {
@@ -850,8 +718,7 @@ impl Unifier {
             return Ok(());
         }
         if let Ty::Var(TyVar(vi)) = &a {
-            // No occurs check: value types are equi-recursive.  Cyclic
-            // bindings in the union-find are sound under the cycle-aware
+            // No occurs check: a cyclic binding is sound under the cycle-aware
             // traversals above.
             let r = self.tys.find(*vi);
             self.tys.bind(r, b);
@@ -877,8 +744,7 @@ impl Unifier {
                 self.unify_row_inner(&r1, &r2, pairs, depth)
             }
             (Ty::Thunk(a1), Ty::Thunk(b1)) => self.unify_comp_ty_inner(&a1, &b1, pairs, depth),
-            // Record ↔ Map coercion: a record can be used where a homogeneous map
-            // is expected if all its field types unify to the map's element type.
+            // The one coercion: a record stands in for a homogeneous map.
             (Ty::Map(elem), Ty::Record(row)) | (Ty::Record(row), Ty::Map(elem)) => {
                 self.unify_map_record(&elem, &row, pairs, depth)
             }
@@ -892,25 +758,20 @@ impl Unifier {
     /// Row unification using the Rémy rewrite rule.
     ///
     /// # Errors
-    /// Returns `Err` if a closed row is missing or carries an extra label the
-    /// other requires ([`TypeErrorKind::RowMissingField`] /
-    /// [`RowExtraField`](TypeErrorKind::RowExtraField)), if a shared label's
-    /// field types clash or a tag/bare label alphabet is mixed
-    /// ([`TypeErrorKind::TyMismatch`]), if the rewrite forms a recursive row
-    /// ([`TypeErrorKind::RecursiveRow`]), or if the row nests past the depth
-    /// budget ([`TypeErrorKind::TypeTooDeep`]).
+    /// [`TypeErrorKind::RowMissingField`] /
+    /// [`RowExtraField`](TypeErrorKind::RowExtraField) when a closed row lacks
+    /// or carries a label, [`TypeErrorKind::TyMismatch`] on a clashing shared
+    /// label or mixed alphabets, [`TypeErrorKind::RecursiveRow`] when there is
+    /// no solution, or [`TypeErrorKind::TypeTooDeep`].
     pub fn unify_row(&mut self, a: &Row, b: &Row) -> Result<(), TypeErrorKind> {
         let mut pairs = Pairs::default();
         self.unify_row_inner(a, b, &mut pairs, 0)
     }
 
-    /// `depth` is the genuine nesting depth at which this row sits — set by
-    /// the record/variant arm that descended into it.  Walking the row's own
-    /// spine is *width*, not depth: the matched-label common case iterates
-    /// down the spine in this `loop` (so a wide record never grows the call
-    /// stack one frame per field), and the Rémy re-entries below thread
-    /// `depth` unchanged.  Only stepping into a field *type* (`unify_ty_inner`
-    /// on `t1`/`t2`) charges a level via `deeper`.
+    /// `depth` is where this row sits, set by the record/variant arm that
+    /// descended into it.  The spine is width — the matched-label case iterates
+    /// in this `loop` and the Rémy re-entries pass `depth` through — so only
+    /// stepping into a field *type* charges a level.
     fn unify_row_inner(
         &mut self,
         a: &Row,
@@ -944,9 +805,6 @@ impl Unifier {
                 return Ok(());
             }
 
-            // The three Row::Var early-return blocks above strip the Var
-            // case from both sides, so the match below ranges over {Empty,
-            // Extend} × {Empty, Extend} — four combinations, all explicit.
             match (a, b) {
                 (Row::Empty, Row::Empty) => return Ok(()),
                 (Row::Empty, Row::Extend(l, _, _)) => {
@@ -959,35 +817,26 @@ impl Unifier {
                     if l1 == l2 {
                         let (t1, t2) = (*t1, *t2);
                         self.unify_ty_inner(&t1, &t2, pairs, deeper(depth)?)?;
-                        // Step down the shared spine in place — width, not a
-                        // deeper frame — so a wide row stays O(1) in stack.
+                        // In place, not a deeper frame: a wide row is O(1) stack.
                         a = self.resolve_row(&r1);
                         b = self.resolve_row(&r2);
                         continue;
                     }
-                    // Reject mixed-alphabet rows: tag labels (`` `l ``) and
-                    // bare labels (`l`) are disjoint by design — a record literal
-                    // with both shapes never typechecks against either pure
-                    // form, and a variant row must be all-tag.
+                    // Tag and bare labels are disjoint alphabets: a row mixing
+                    // them typechecks against neither pure form.
                     if is_tag_label(&l1) != is_tag_label(&l2) {
                         return Err(TypeErrorKind::TyMismatch {
                             expected: Ty::Record(Row::Extend(l1, t1.clone(), Box::new(Row::Empty))),
                             actual: Ty::Record(Row::Extend(l2, t2.clone(), Box::new(Row::Empty))),
                         });
                     }
-                    // Scoped-labels side condition (Gaster–Jones, Leijen):
-                    // when both rows terminate in the *same* tail variable but
-                    // carry different label multisets, the Rémy rewrite would
-                    // bind that tail to a row over a fresh tail and re-enter
-                    // with the mismatch intact — recursing forever, minting a
-                    // new tail each turn.  No finite or rational row satisfies
-                    // the equation, so it is reported as
-                    // [`TypeErrorKind::RecursiveRow`].  Resolving only the two
-                    // immediate rests misses this when the disagreement sits
-                    // deeper than the head (`{x,a|ρ} ≐ {y,b|ρ}`), so the whole
-                    // spine of each side is walked.  A permutation — same tail,
-                    // same multiset (`{a,b|ρ} ≐ {b,a|ρ}`) — does have a
-                    // solution and must still take the rewrite below.
+                    // Scoped-labels side condition (Gaster–Jones, Leijen): two
+                    // rows on the *same* tail with different label multisets
+                    // have no finite or rational solution — the rewrite would
+                    // re-enter with the mismatch intact, minting a fresh tail
+                    // each turn.  The disagreement can sit below the head, so
+                    // compare whole spines; a permutation does have a solution
+                    // and must still take it.
                     let (mut left, left_tail) = self.row_spine(&r1);
                     let (mut right, right_tail) = self.row_spine(&r2);
                     left.push(l1.clone());
@@ -1015,10 +864,8 @@ impl Unifier {
     /// Unify computation types `a` and `b`, binding variables in place.
     ///
     /// # Errors
-    /// Returns `Err` if the two computation types have mismatched structure or
-    /// their pipeline modes or return types disagree
-    /// ([`TypeErrorKind::CompTyMismatch`]), or if a component value type nests
-    /// past the depth budget ([`TypeErrorKind::TypeTooDeep`]).
+    /// [`TypeErrorKind::CompTyMismatch`] on mismatched structure or disagreeing
+    /// modes or return types, [`TypeErrorKind::TypeTooDeep`] past the budget.
     pub fn unify_comp_ty(&mut self, a: &CompTy, b: &CompTy) -> Result<(), TypeErrorKind> {
         let mut pairs = Pairs::default();
         self.unify_comp_ty_inner(a, b, &mut pairs, 0)
@@ -1031,19 +878,14 @@ impl Unifier {
         pairs: &mut Pairs,
         depth: u32,
     ) -> Result<(), TypeErrorKind> {
-        // Co-inductive guard.  Re-entering the same equality obligation means
-        // the recursion has reached its cyclic fixed point — discharge it.
         match (a, b) {
-            // Symmetric: two comp-var roots already in progress.
             (CompTy::Var(CompTyVar(ai)), CompTy::Var(CompTyVar(bi))) => {
                 let (ar, br) = (self.ctys.find(*ai), self.ctys.find(*bi));
                 if guard_pair(&mut pairs.comps, ar, br) {
                     return Ok(());
                 }
             }
-            // One-sided: a comp-var root against a structural key of the
-            // other side — the comp-level half of the value-var/comp-var
-            // anchoring mismatch (`F T ~= C`).
+            // One-sided: the comp half of the anchoring mismatch, `F T ~= C`.
             (CompTy::Var(CompTyVar(vi)), other) | (other, CompTy::Var(CompTyVar(vi))) => {
                 let (root, key) = (self.ctys.find(*vi), self.comp_key(other, depth)?);
                 if guard_expansion(&mut pairs.comp_expansions, root, key) {
@@ -1061,9 +903,7 @@ impl Unifier {
             return Ok(());
         }
         if let CompTy::Var(CompTyVar(vi)) = &a {
-            // No occurs check: comp types are equi-recursive.  Cyclic
-            // bindings in the union-find are sound under the cycle-aware
-            // traversals above.
+            // No occurs check, for the same reason as `unify_ty_inner`.
             let r = self.ctys.find(*vi);
             self.ctys.bind(r, b);
             return Ok(());
@@ -1089,9 +929,9 @@ impl Unifier {
                         actual: self.resolve_mode(&sb.output),
                     });
                 }
-                // A return-type disagreement folds into the rich `Return`
-                // diff; exhausting the depth budget is resource exhaustion,
-                // not a type disagreement, so it propagates verbatim.
+                // A return-type disagreement folds into the rich `Return` diff,
+                // but a spent depth budget is exhaustion rather than
+                // disagreement, so it propagates verbatim.
                 match self.unify_ty_inner(&ta, &tb, pairs, depth) {
                     Ok(()) => {}
                     Err(TypeErrorKind::TypeTooDeep) => return Err(TypeErrorKind::TypeTooDeep),
@@ -1122,8 +962,6 @@ impl Unifier {
         }
     }
 
-    /// Resolve both channel modes of a `PipeSpec` against the current
-    /// substitution.
     fn resolve_spec(&mut self, spec: &PipeSpec) -> PipeSpec {
         PipeSpec {
             input: self.resolve_mode(&spec.input),
@@ -1131,22 +969,20 @@ impl Unifier {
         }
     }
 
-    /// Reconstruct a `CompTy::Return` after substitutions have been applied
-    /// — used to render the post-resolution form for mismatch diagnostics.
+    /// Rebuild a `CompTy::Return` post-substitution, for mismatch diagnostics.
     fn apply_return(&mut self, spec: &PipeSpec, ty: &Ty) -> CompTy {
         CompTy::Return(self.resolve_spec(spec), Box::new(self.apply_ty(ty)))
     }
 
-    /// Unify two pipeline modes under the equality rule of `docs/SPEC.md`
-    /// §20.4: two variables unite, a variable and a ground mode bind, and
-    /// two ground modes must be *equal*.  `None` and `Bytes` do not unify
-    /// — a value edge cannot silently meet a byte edge (§4.2.1) — so a
-    /// clash surfaces as a [`crate::mode::ModeMismatch`], which each caller
-    /// maps onto its own diagnostic.
+    /// Unify two pipeline modes by *equality*: two variables unite, a variable
+    /// and a ground mode bind, two ground modes must agree.  Stages connect
+    /// only when the left's output mode equals the right's input mode, so
+    /// `None` and `Bytes` never unify — a value edge cannot silently meet a
+    /// byte edge.
     ///
     /// # Errors
-    /// Returns `Err` if the two modes are distinct ground modes — `None`
-    /// against `Bytes`.
+    /// [`crate::mode::ModeMismatch`] for distinct ground modes, which each
+    /// caller maps onto its own diagnostic.
     pub fn unify_mode(
         &mut self,
         a: &PipeMode,
@@ -1169,9 +1005,7 @@ impl Unifier {
         }
     }
 
-    /// Like [`Unifier::unify_row_inner`], walking the record spine is width:
-    /// each field carries `depth`, and only matching a field *type* against
-    /// the map element steps a level deeper.
+    /// The spine is width; only a field *type* against the element goes deeper.
     fn unify_map_record(
         &mut self,
         elem: &Ty,
@@ -1202,27 +1036,17 @@ impl Default for Unifier {
     }
 }
 
-/// Normalise a var-root pair into ascending order so that
-/// `(a, b)` and `(b, a)` are stored under the same key in the
-/// co-inductive guard set.
+/// Order a root pair so `(a, b)` and `(b, a)` key the same guard entry.
 fn ordered_pair(a: u32, b: u32) -> (u32, u32) {
     if a <= b { (a, b) } else { (b, a) }
 }
 
-/// Symmetric co-inductive obligation: two var roots of the same kind.
-/// Returns `true` when the obligation is already in progress (or the
-/// roots already coincide) — the caller discharges it as an immediate
-/// success.  Shared by [`Unifier::unify_ty_inner`] and
-/// [`Unifier::unify_comp_ty_inner`], which differ only in store and
-/// variant kind.
+/// Symmetric obligation: two var roots.  `true` when in progress or coincident.
 fn guard_pair(seen: &mut HashSet<(u32, u32)>, a: u32, b: u32) -> bool {
     a == b || !seen.insert(ordered_pair(a, b))
 }
 
-/// One-sided co-inductive obligation: a var root against a finite
-/// structural key of the other side.  Returns `true` when the obligation
-/// is already in progress.  Generic over the key kind ([`TyKey`] /
-/// [`CompTyKey`]) so the two unify methods share one set discipline.
+/// One-sided obligation: a var root against a key.  `true` when in progress.
 fn guard_expansion<K: Eq + std::hash::Hash>(
     seen: &mut HashSet<(u32, K)>,
     root: u32,
@@ -1236,8 +1060,7 @@ mod tests {
     use super::*;
     use crate::stream::{HEAD_FIELD, TAIL_FIELD, done_tag, more_tag};
 
-    /// The `Step` value shape `Variant{`more: {head: String, tail:
-    /// Thunk(tail)} | `done: Unit}`, whose tail thunk wraps `tail`.
+    /// ``Variant{`more: {head: String, tail: Thunk(tail)}, `done: Unit}``.
     fn step(tail: CompTy) -> Ty {
         let payload = Ty::Record(Row::Extend(
             HEAD_FIELD.into(),
@@ -1259,23 +1082,18 @@ mod tests {
         ))
     }
 
-    /// A value-var-anchored stream `T = Step(F T)` and a comp-var-anchored
-    /// one `C = F Step(C)` are the *same* equi-recursive type under
-    /// different anchors.  Unifying `T` with `Step(C)` must succeed and
-    /// terminate: it used to recurse until the stack overflowed, because the
-    /// co-inductive guard fired only on `Var`/`Var` pairs and here the
-    /// recursion always re-enters as `Var`-vs-concrete-structure.
+    /// `T = Step(F T)` and `C = F Step(C)` are one equi-recursive type under two
+    /// anchors, so `T ≐ Step(C)` must terminate.  It re-enters as
+    /// `Var`-vs-structure throughout, which a `Var`/`Var`-only guard misses.
     #[test]
     fn unifies_value_anchored_and_comp_anchored_stream() {
         let mut u = Unifier::new();
 
-        // T := Step(F T), with F T = Return(pure, T).
         let t = u.fresh_tyvar();
         let t_root = u.ty_root(t.0);
         let t_body = step(CompTy::pure(Ty::Var(t)));
         u.bind_ty_root(t_root, t_body);
 
-        // C := F Step(C) = Return(pure, Step(C)).
         let CompTy::Var(CompTyVar(c_root)) = u.fresh_comp_ty() else {
             unreachable!("fresh_comp_ty yields a Var")
         };
@@ -1286,9 +1104,7 @@ mod tests {
             .expect("equi-recursive stream types unify regardless of anchor");
     }
 
-    /// A `List(List(… Int …))` spine nested past [`MAX_UNIFY_DEPTH`].  With
-    /// no var root for the co-inductive guard to memoize, every structural
-    /// path descends to a depth bounded only by term size.
+    /// A `List(List(… Int …))` spine: no variable, so nothing to memoize.
     fn deep_list(n: u32) -> Ty {
         let mut ty = Ty::Int;
         for _ in 0..n {
@@ -1297,14 +1113,9 @@ mod tests {
         ty
     }
 
-    /// Run a deep-type assertion on a thread with a generous stack.  A
-    /// `Box`-chained `Ty` deep enough to *trip the bound under test* is also
-    /// deep enough that merely constructing and recursively `Drop`ping it —
-    /// an inherent property of the nested `Box<Ty>`, independent of the
-    /// unifier — sits near the default 2 MiB test-thread ceiling.  The
-    /// larger stack keeps construction and teardown clear of that ceiling so
-    /// the only thing on trial is whether the unifier returns
-    /// [`TypeErrorKind::TypeTooDeep`] instead of overflowing.
+    /// A `Ty` deep enough to trip the bound is also deep enough that building
+    /// and recursively `Drop`ping the `Box` chain — nothing to do with the
+    /// unifier — nears the default 2 MiB test-thread ceiling.
     fn on_deep_stack(body: impl FnOnce() + Send + 'static) {
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
@@ -1314,10 +1125,7 @@ mod tests {
             .expect("deep-stack assertion");
     }
 
-    /// A structurally deep, *variable-free* type unified against its twin
-    /// drives the [`Unifier::unify_ty_inner`] `List` arm past the ceiling;
-    /// the defensive bound must turn that would-be stack overflow into a
-    /// graceful [`TypeErrorKind::TypeTooDeep`] rather than aborting.
+    /// A deep variable-free type against its twin drives the `List` arm over.
     #[test]
     fn deeply_nested_type_is_too_deep_not_a_stack_overflow() {
         on_deep_stack(|| {
@@ -1334,11 +1142,8 @@ mod tests {
         });
     }
 
-    /// The one-sided obligation builds a [`TyKey`] of the concrete side: a
-    /// ty-var unified against a deep concrete type fingerprints it through
-    /// [`Unifier::ty_key`], a structural recursion *outside* the unify arms.
-    /// That path is bounded too, so it reports [`TypeErrorKind::TypeTooDeep`]
-    /// rather than overflowing.
+    /// A ty-var against a deep concrete type fingerprints it through `ty_key`,
+    /// a recursion *outside* the unify arms that shares the same budget.
     #[test]
     fn deeply_nested_ty_key_is_too_deep_not_a_stack_overflow() {
         on_deep_stack(|| {
@@ -1355,11 +1160,8 @@ mod tests {
         });
     }
 
-    /// Binding a row variable runs the occurs check ([`Unifier::row_occurs`])
-    /// over the candidate row, descending through each field *type* — another
-    /// structural recursion outside the unify arms.  A field whose type nests
-    /// past the ceiling must surface [`TypeErrorKind::TypeTooDeep`] there, not
-    /// overflow the stack.
+    /// Binding a row variable runs the occurs check over each field *type* —
+    /// the third structural recursion outside the unify arms, bounded alike.
     #[test]
     fn deeply_nested_field_type_in_occurs_is_too_deep() {
         on_deep_stack(|| {
@@ -1380,21 +1182,18 @@ mod tests {
         });
     }
 
-    /// Build a closed record row from `(label, ty)` pairs in order.
     fn record_row(fields: &[(&str, Ty)]) -> Row {
         fields.iter().rev().fold(Row::Empty, |rest, (l, t)| {
             Row::Extend((*l).into(), Box::new(t.clone()), Box::new(rest))
         })
     }
 
-    /// Open a row at `tail` after the given fields.
     fn open_row(fields: &[(&str, Ty)], tail: RowVar) -> Row {
         fields.iter().rev().fold(Row::Var(tail), |rest, (l, t)| {
             Row::Extend((*l).into(), Box::new(t.clone()), Box::new(rest))
         })
     }
 
-    /// Resolve a row to a label→type map for assertions.
     fn resolved_fields(u: &mut Unifier, row: &Row) -> std::collections::HashMap<String, Ty> {
         let mut out = std::collections::HashMap::new();
         let mut cur = u.apply_row(row);
@@ -1409,12 +1208,8 @@ mod tests {
         }
     }
 
-    /// A *wide* record — many sibling fields, each shallow — must unify
-    /// freely: iterating across the row spine is width, not nesting depth,
-    /// so a field count far past [`MAX_UNIFY_DEPTH`] never charges against
-    /// the defensive ceiling.  This pins the no-false-positive property: a
-    /// per-field-recursion bound would reject this valid record as
-    /// [`TypeErrorKind::TypeTooDeep`].
+    /// The no-false-positive half of the bound: a record far wider than
+    /// [`MAX_UNIFY_DEPTH`] but shallow must still unify.
     #[test]
     fn wide_record_unifies_without_being_too_deep() {
         let width = (MAX_UNIFY_DEPTH as usize) * 4;
@@ -1427,9 +1222,7 @@ mod tests {
             .expect("a wide-but-shallow record must unify, not be rejected as too deep");
     }
 
-    /// The same width property for a variant row: a tag union with far more
-    /// than [`MAX_UNIFY_DEPTH`] alternatives unifies, since the alternatives
-    /// are siblings (width), not a nesting chain (depth).
+    /// The same width property for a variant row: alternatives are siblings.
     #[test]
     fn wide_variant_unifies_without_being_too_deep() {
         let width = (MAX_UNIFY_DEPTH as usize) * 4;
@@ -1442,9 +1235,7 @@ mod tests {
             .expect("a wide-but-shallow variant must unify, not be rejected as too deep");
     }
 
-    /// The Rémy rewrite unifies records whose fields appear in a different
-    /// order: each label is matched to its same-label partner regardless of
-    /// spine position, and the per-field types are unified.
+    /// The rewrite pairs labels regardless of spine position: order is free.
     #[test]
     fn remy_rewrite_under_permutation() {
         let mut u = Unifier::new();
@@ -1465,9 +1256,7 @@ mod tests {
         );
     }
 
-    /// The Rémy rewrite under an open tail (the shadowing case): unifying an
-    /// open row `{a: Int | ρ}` against a closed `{a: Int, b: String}` binds the
-    /// tail ρ to carry the extra field `b`.
+    /// An open row against a closed one binds the tail to carry the surplus.
     #[test]
     fn remy_rewrite_binds_open_tail() {
         let mut u = Unifier::new();
@@ -1484,10 +1273,7 @@ mod tests {
         );
     }
 
-    /// Two rows that disagree at the head while sharing the *same* tail
-    /// variable (`{x: Int | ρ} ≐ {y: Int | ρ}`) have no finite or rational
-    /// solution.  The scoped-labels side condition reports it instead of
-    /// diverging through the Rémy rewrite.
+    /// `{x: Int | ρ} ≐ {y: Int | ρ}` has no solution; report, do not diverge.
     #[test]
     fn shared_tail_mismatched_heads_is_recursive_row() {
         let mut u = Unifier::new();
@@ -1503,10 +1289,8 @@ mod tests {
         );
     }
 
-    /// The same shared-tail divergence with the disagreement *below* the head
-    /// (`{x, a | ρ} ≐ {y, b | ρ}`): the immediate rests are `Extend` nodes, not
-    /// the shared variable, so a depth-1 guard misses it and the Rémy rewrite
-    /// recurses until the stack overflows.  Walking the whole spine catches it.
+    /// The same divergence *below* the head: the immediate rests are `Extend`
+    /// nodes, not the shared variable, so only a whole-spine comparison sees it.
     #[test]
     fn shared_tail_mismatched_heads_deep_is_recursive_row() {
         let mut u = Unifier::new();
@@ -1522,9 +1306,8 @@ mod tests {
         );
     }
 
-    /// A shared tail with the *same* label multiset in a different order
-    /// (`{a, b | ρ} ≐ {b, a | ρ}`) is a permutation, not a divergence: it has a
-    /// solution and the spine guard must let the Rémy rewrite proceed.
+    /// A shared tail with the *same* multiset reordered is a permutation, not a
+    /// divergence: it has a solution, and the guard must let the rewrite run.
     #[test]
     fn shared_tail_permutation_still_unifies() {
         let mut u = Unifier::new();
@@ -1547,9 +1330,8 @@ mod tests {
         );
     }
 
-    /// A row cycle that passes through a *field type* (`ρ ≐ {x: {n: Int | ρ}}`)
-    /// denotes an infinite record.  The occurs check descends into field types
-    /// and rejects it rather than installing the cyclic binding.
+    /// `ρ ≐ {x: {n: Int | ρ}}` denotes an infinite record, so the occurs check
+    /// must reach it by descending into the field type.
     #[test]
     fn cycle_through_field_type_is_recursive_row() {
         let mut u = Unifier::new();
@@ -1565,12 +1347,9 @@ mod tests {
         );
     }
 
-    /// The pure unifier matches a probe `{x: α | ρ}` against the *head*
-    /// occurrence of a duplicated-label spine `{x: Int, x: String}`: row
-    /// unification walks the spine head-first.  Duplicate explicit keys are
-    /// resolved last-wins upstream in `infer_map_val` (which dedups before
-    /// building the row), so the unifier never receives a duplicated-label
-    /// record literal in practice; this records the spine-walk behaviour.
+    /// A probe against a duplicated-label spine binds to the *head* occurrence,
+    /// since row unification walks head-first.  `infer_map_val` dedups last-wins
+    /// upstream, so the shape only reaches the unifier here.
     #[test]
     fn duplicate_label_spine_matches_head() {
         let mut u = Unifier::new();

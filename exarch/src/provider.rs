@@ -1,9 +1,7 @@
-//! The LLM boundary: provider selection over credential-bound transports.
-//!
-//! [`Provider::complete`] sends an already-rendered transcript and streams one
-//! assistant reply. The transcript owns history; this facade owns selection
-//! normalisation and delegates transport, request, retry, stream, and usage
-//! invariants to their focused modules.
+//! The LLM boundary: one resolved model selection over a credential-bound
+//! transport. History lives in the transcript the caller renders, not here;
+//! transport, request shaping, retry, streaming, and usage each keep their
+//! own sibling module.
 
 pub mod credential;
 mod error;
@@ -43,9 +41,8 @@ use genai::chat::ChatMessage;
 use std::sync::Arc;
 use transport::Transport;
 
-/// One resolved provider selection: the model, tuning, and routing chosen
-/// for a session, paired with where its requests actually run — see
-/// [`Backend`].
+/// A session's chosen model, tuning, and routing, plus the backend its
+/// requests run on.
 pub struct Provider {
     backend: Backend,
     id: ProviderId,
@@ -55,9 +52,8 @@ pub struct Provider {
     route: Option<String>,
 }
 
-/// Where a `Provider`'s requests execute: a live transport over a shared
-/// [`Engine`], or a deterministic [`scripted::Script`] replay so agent-loop
-/// tests never touch the network.
+/// A live transport over the shared [`Engine`], or a scripted replay so
+/// agent-loop tests never touch the network.
 enum Backend {
     Live {
         engine: Arc<Engine>,
@@ -88,7 +84,7 @@ impl Provider {
         }
     }
 
-    /// Build a deterministic provider that replays scripted outcomes.
+    /// Build a provider that replays scripted outcomes instead of dialling out.
     pub fn scripted(model: &str, kind: ProviderKind, script: scripted::Script) -> Self {
         Self {
             backend: Backend::Scripted(script),
@@ -133,13 +129,10 @@ impl Provider {
         }
     }
 
-    /// Stream one assistant turn: `on_text`/`on_think` fire per chunk as
-    /// content and reasoning arrive, and the in-flight request is raced
-    /// against `cancel` so a mid-stream interrupt returns
-    /// [`ProviderError::Cancelled`] rather than waiting on the next network
-    /// chunk. `tool_enabled` gates whether tool definitions ride the request
-    /// at all; `search` gates whether the provider's own built-in web-search
-    /// tool joins them.
+    /// Stream one assistant turn; `on_text`/`on_think` fire per chunk. Raced
+    /// against `cancel`, so an interrupt need not wait on the next network
+    /// chunk. `tool_enabled` gates our tool definitions, `search` the
+    /// provider's own built-in web search.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn complete<F: FnMut(&str), G: FnMut(&str)>(
         &self,
@@ -170,7 +163,6 @@ impl Provider {
         }
     }
 
-    /// Admit provider routing only for an `OpenRouter` selection.
     fn openrouter_route(&self) -> Option<&str> {
         match self.id.famous() {
             Some(ProviderKind::Openrouter) => self.route.as_deref(),
@@ -181,7 +173,7 @@ impl Provider {
     /// Summarise an already-rendered transcript.
     ///
     /// # Errors
-    /// Returns an error after the bounded provider retry policy is exhausted.
+    /// Returns an error once the bounded retry policy is exhausted.
     pub fn summarize(
         &self,
         system: &str,

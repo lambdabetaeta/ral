@@ -1,27 +1,8 @@
-//! Scope-guard combinators: every `with_*` and the alias-frame
-//! lifecycle, plus the audit-subtree combinators.
+//! The `with_*` scope guards, the alias-frame lifecycle, and the
+//! audit-subtree combinators.
 //!
-//! ral evaluation does not rely on Rust unwinding for control flow, so
-//! each guard here is an inline save-modify-restore around the body
-//! rather than an RAII type.  Two groups:
-//!
-//! - **Attenuation guards** (paired with `within` / `grant`):
-//!   [`Shell::with_capabilities`], [`Shell::with_env`],
-//!   [`Shell::with_cwd`], [`Shell::with_handlers`].  Each pushes onto
-//!   (or substitutes into) the dynamic context, runs `f`, then
-//!   restores.
-//!
-//! - **Alias management** ([`Shell::install_alias`],
-//!   [`Shell::remove_alias`], [`Shell::has_alias`]): aliases share the
-//!   handler stack with `within` but a different lifetime discipline
-//!   — installed permanently, removed only by an explicit call.  Each
-//!   alias is a one-entry frame with no catch-all, pushed via the
-//!   shared [`HandlerStack::push`] + removed via
-//!   [`HandlerStack::remove_alias`].
-//!
-//! [`Shell::audit_child`] and [`Shell::audit_forced_child`] are the
-//! audit-tree counterpart: run `f` in a fresh subtree and return the
-//! nodes it produced as an [`AuditFragment`].
+//! ral evaluation never unwinds for control flow, so each guard here is an
+//! inline save-modify-restore around the body rather than an RAII type.
 
 use super::Shell;
 use crate::types::{
@@ -29,12 +10,11 @@ use crate::types::{
 };
 
 impl Shell {
-    /// Run `f` with `capabilities` pushed for its dynamic extent.
-    /// The single gate for every entry into capability-checked code:
-    /// user `grant { … }` blocks and plugin hook / keybinding / alias
-    /// dispatch all funnel through here, so no one forgets to
-    /// push/pop.  Pushed on top of the caller's stack, so effective
-    /// authority is always caller ∩ this layer.
+    /// Run `f` with `capabilities` pushed for its dynamic extent.  The single
+    /// gate into capability-checked code — `grant { … }` blocks and plugin
+    /// hook / keybinding / alias dispatch all funnel through here.  The push
+    /// sits on top of the caller's stack, so effective authority is always
+    /// caller ∩ this layer.
     pub fn with_capabilities<R>(
         &mut self,
         capabilities: Capabilities,
@@ -47,23 +27,19 @@ impl Shell {
         r
     }
 
-    /// Push a capability frame at session start — no paired pop, the
-    /// frame survives until process exit.  The session-wide ceiling
-    /// applied by `ral --capabilities <file.ral>` lives here, sitting
-    /// above the [`Capabilities::root`] frame [`Shell::new`] installs.
-    /// Use [`Self::with_capabilities`] for scoped attenuation
-    /// (`grant {}`) instead — its push/pop pair is the right shape
-    /// when the frame's lifetime is lexical.
+    /// Push a capability frame with no paired pop: it survives to process
+    /// exit.  Where `ral --capabilities <file.ral>`'s session-wide ceiling
+    /// lands, above the [`Capabilities::root`] frame [`Shell::new`] installs.
+    /// Lexical attenuation (`grant {}`) wants [`Self::with_capabilities`].
     pub fn push_session_capabilities(&mut self, capabilities: Capabilities) {
         self.mobile.context.grants.push(capabilities);
         self.audit_deputy_prefixes();
     }
 
-    /// Emit a `deputy` audit node when the stack just formed by the push
-    /// above, meet-folded, is a confused deputy — see
-    /// [`crate::capability::deputy_prefixes`], whose contract (folded
-    /// frame, report-only) this implements at the grant-push site.
-    /// No-op when audit is inactive or no layer opts in (SPEC §11.4–11.5).
+    /// Emit a `deputy` audit node when the stack just pushed, meet-folded, is
+    /// a confused deputy.  [`crate::capability::deputy_prefixes`] demands the
+    /// fold and only reports, never denies; this is its one call site.  No-op
+    /// unless audit is live and some layer opted into capability auditing.
     fn audit_deputy_prefixes(&mut self) {
         if !self
             .mobile
@@ -108,11 +84,8 @@ impl Shell {
         self.mobile.context.grants.is_restrictive()
     }
 
-    /// Run `f` with `overrides` merged into the ambient environment.
-    /// Pair of the `within [env: …]` keyword.  Restored on normal
-    /// return; ral evaluation does not rely on Rust unwinding for
-    /// control flow, so an inline save/restore is sufficient
-    /// (cf. [`Self::run_with_mobile`]).
+    /// Run `f` with `overrides` merged into the ambient environment — the
+    /// `within [env: …]` pair.
     pub fn with_env<R>(
         &mut self,
         overrides: std::collections::HashMap<String, String>,
@@ -125,8 +98,8 @@ impl Shell {
         result
     }
 
-    /// Run `f` with `cwd` set as the ambient working directory.  Pair
-    /// of the `within [dir: …]` keyword.
+    /// Run `f` with `cwd` as the ambient working directory — the
+    /// `within [dir: …]` pair.
     pub fn with_cwd<R>(&mut self, cwd: std::path::PathBuf, f: impl FnOnce(&mut Self) -> R) -> R {
         let saved = self.mobile.context.dir.replace(cwd);
         let result = f(self);
@@ -134,10 +107,9 @@ impl Shell {
         result
     }
 
-    /// Run `f` with a handler frame pushed onto the handler stack for
-    /// its dynamic extent.  Pair of the `within [handlers: …, handler:
-    /// …]` keywords.  Allocates a [`crate::types::FrameHandle`] internally and uses it
-    /// for the paired remove — callers do not need to track handles.
+    /// Run `f` with a handler frame pushed for its dynamic extent — the
+    /// `within [handlers: …, handler: …]` pair.  The frame's handle is minted
+    /// and spent here, so callers never track one.
     pub fn with_handlers<R>(
         &mut self,
         entries: Vec<HandlerEntry>,
@@ -150,24 +122,16 @@ impl Shell {
         result
     }
 
-    /// Install `thunk` as the alias for `name`.  Replaces any existing
-    /// alias for the same name.  Sibling of [`Self::with_handlers`]:
-    /// same handler stack, different lifetime discipline — aliases are
-    /// not popped at scope exit, only by [`Self::remove_alias`] (or
-    /// `unalias NAME`).
-    ///
-    /// An alias is cross-run dynamic rebinding, so the arm's scheme is
-    /// computed and stored on the frame at install — by the same static
-    /// inference a run's check uses (one engine), seeded from the live
-    /// scope and closed against its own unifier.  This covers all three
-    /// install paths uniformly (the `alias` statement, rc `aliases:`
-    /// maps, plugin loads).
+    /// Install `thunk` as the alias for `name`, replacing any existing one.
+    /// Sibling of [`Self::with_handlers`]: same handler stack, but an alias
+    /// frame is never popped at scope exit, only by [`Self::remove_alias`].
+    /// Since it outlives its installing run, [`HandlerEntry::vet`] closes the
+    /// arm's scheme against the live session and stores it on the frame to
+    /// seed the next run's check.
     ///
     /// # Errors
-    /// Propagates the [`HandlerEntry::vet`](crate::types::HandlerEntry::vet)
-    /// failure: `Err` if `name` is already a lexical binding or a builtin,
-    /// if `thunk` is not a unary lambda, or if its body changes the head's
-    /// pipeline mode.
+    /// `name` already a lexical binding or a builtin, `thunk` not a unary
+    /// lambda, or its body changing the head's pipeline mode.
     pub fn install_alias(&mut self, name: String, thunk: Value) -> Settled<()> {
         let entry = HandlerEntry::vet(name, thunk, self.session_schemes(), HandlerRole::Alias)?;
         self.mobile.context.handlers.remove_alias(&entry.name);
@@ -175,13 +139,12 @@ impl Shell {
         Ok(())
     }
 
-    /// Install `value` as a lexical scope binding for `name` (the rc
-    /// `bindings:` path).  Where [`Self::install_alias`] pushes a handler
-    /// frame, this writes a scope entry: for a function value the closed
-    /// session scheme is inferred under the value/function-application
-    /// convention and stored alongside the value, so the next run's
-    /// check sees its type and the binding is applyable by function
-    /// application at the prompt.  A non-function value carries no scheme.
+    /// Install `value` as a lexical scope binding for `name` — the rc
+    /// `bindings:` path.  Where [`Self::install_alias`] pushes a handler
+    /// frame, this writes a scope entry: a function value gets its closed
+    /// session scheme inferred and stored alongside, so the next run's check
+    /// sees a type and the name is applyable at the prompt.  Other values
+    /// carry no scheme.
     pub fn bind_value(&mut self, name: String, value: Value) {
         let arm = match &value {
             Value::Lambda { param, body, .. } => Some((Some(param), body)),
@@ -196,41 +159,31 @@ impl Shell {
             .set_binding(name, Binding { value, scheme });
     }
 
-    /// Bind `name` → `value` as a plain scope variable, inferring no
-    /// scheme.  The scheme-less sibling of [`Self::bind_value`]: where
-    /// `bind_value` types a definition so it is applyable by function
-    /// application at the prompt, this installs data (an env mirror like
-    /// `USER` / `CWD`, the `RAL_PROMPT` thunk read by the renderer, a host
-    /// seed var) that is *resolved* but never reinterpreted as a value
-    /// applyable at the prompt.  Keeping the two verbs distinct preserves the
-    /// boundary an rc draws between its `bindings:` (typed) and its
-    /// `env:` / `prompt:` (untyped) keys.
+    /// Bind `name` → `value` as a plain scope variable, inferring no scheme.
+    /// The scheme-less sibling of [`Self::bind_value`], for data that is
+    /// *resolved* but never applied — env mirrors like `USER` / `CWD`, the
+    /// `RAL_PROMPT` thunk the renderer reads, host seed vars.  The two verbs
+    /// stay distinct to hold the line an rc draws between its typed
+    /// `bindings:` and its untyped `env:` / `prompt:` keys.
     pub fn set_var(&mut self, name: String, value: Value) {
         self.mobile.scope.set(name, value);
     }
 
-    /// The evaluator's single install point for a scope entry
-    /// (`decisions/260629_agent-binding-reaping`). A session-scope install
-    /// (`Env::at_session_scope`) additionally stamps this shell's
-    /// binding-lease ledger: a fresh non-baseline name starts its lease, a
-    /// rebind renews it — writing a name is itself interest in it. Deeper
-    /// installs (block/lambda/letrec frames, a `use` body) are recorded
-    /// nowhere: the predicate is the classifier, not a caller obligation, so
-    /// a pushed fixpoint frame needs no special case here. Every persistent
-    /// top-level write routes through this verb — `assign_pattern`'s `Name`
-    /// and `...rest` arms, and `eval_letrec`'s two installs — so "write a
-    /// scope entry" and "stamp the ledger" can never be pulled apart at a
-    /// call site. Host verbs ([`Self::bind_value`], [`Self::set_var`]) stay
-    /// on the raw `Env` primitive: every host call to them precedes arming,
-    /// so the boot baseline covers them without a special case.
+    /// The evaluator's single install point for a scope entry, so writing a
+    /// name and stamping the binding-lease ledger can never be pulled apart
+    /// at a call site: `assign_pattern` and `eval_letrec` both route here.  A
+    /// session-scope write starts a fresh non-baseline name's lease and
+    /// renews an existing one — writing a name is itself interest in it.
+    /// Deeper frames (block, lambda, letrec, a `use` body) are recorded
+    /// nowhere, since `Env::at_session_scope` classifies rather than any
+    /// caller.  The host verbs [`Self::bind_value`] and [`Self::set_var`]
+    /// stay on the raw `Env` primitive: every host call to them precedes
+    /// arming, so the boot baseline already covers them.
     ///
-    /// When armed and at session scope, also runs the large-binding check:
-    /// if `binding.value`'s [`Value::shallow_size`] meets
-    /// [`large_binding_bytes`](super::bindings::BindingLease::large_binding_bytes),
-    /// queues a `LargeBindingNotice` — a residency nudge independent of
-    /// baseline status and of the idle-lease check above, since a
-    /// boot-seeded name can be just as large as a model-scratch one. A
-    /// rebind that still meets the threshold queues another notice.
+    /// An armed session-scope write whose [`Value::shallow_size`] meets the
+    /// lease's `large_binding_bytes` also queues a residency notice —
+    /// orthogonal to the idle lease and to baseline status, and requeued by
+    /// each rebind still over the threshold.
     pub(crate) fn install_scope_binding(&mut self, name: String, binding: Binding) {
         let session = self.mobile.scope.at_session_scope();
         if session {
@@ -248,43 +201,38 @@ impl Shell {
     }
 
     /// Look `name` up in the lexical scope chain alone — *not* the
-    /// pseudo-variable or builtin namespaces that [`Self::lookup_value_name`]
-    /// also consults.  The read dual of [`Self::set_var`] /
-    /// [`Self::bind_value`]: a host asking "is this name a lexical binding,
-    /// and what does it hold" (prompt lookup, alias-conflict checks,
-    /// worksheet projections) wants exactly this, so that a name shadowed by
-    /// a builtin still reads as unbound in scope.
+    /// pseudo-variable or builtin namespaces [`Self::lookup_value_name`] also
+    /// consults, so a name shadowed by a builtin still reads as unbound here.
+    /// The read dual of [`Self::set_var`] / [`Self::bind_value`].
     pub fn scope_lookup(&self, name: &str) -> Option<&Value> {
         self.mobile.scope.get(name)
     }
 
-    /// Every lexical binding's `(name, value)` across the whole scope
-    /// chain, innermost shadowing outermost.  The enumeration a host
-    /// drives tab-completion and the worksheet from; the read-many dual of
-    /// [`Self::set_var`].
+    /// Every lexical binding across the whole scope chain, innermost
+    /// shadowing outermost — what a host drives tab-completion and the
+    /// worksheet from.
     pub fn bindings(&self) -> Vec<(String, Value)> {
         self.mobile.scope.all_bindings()
     }
 
     /// The largest single lexical binding's shallow byte estimate — the
-    /// `` `largest-binding-bytes `` probe's reading
-    /// ([`answer_probe`](crate::transport::answer_probe)), measured by
-    /// reference: a probe that cloned the whole scope to size it would be
-    /// its own cautionary tale.
+    /// `` `largest-binding-bytes `` probe's reading, taken by reference: a
+    /// probe that cloned the scope to size it would be its own cautionary
+    /// tale.
     pub fn largest_binding_shallow_size(&self) -> usize {
         self.mobile.scope.largest_shallow_size()
     }
 
-    /// Every bound name with its installed scheme, innermost binding
-    /// wins — the scope half of [`Self::session_schemes`], surfaced on its
-    /// own for the worksheet's type column.
+    /// Every bound name with its installed scheme, innermost binding wins —
+    /// the scope half of [`Self::session_schemes`], surfaced on its own for
+    /// the worksheet's type column.
     pub fn binding_schemes(&self) -> Vec<(String, Option<crate::typecheck::Scheme>)> {
         self.mobile.scope.binding_schemes()
     }
 
-    /// The names of every installed handler entry — `within` arms and
-    /// aliases alike — for tab completion.  The handler-stack counterpart
-    /// of [`Self::builtin_names`](Self::builtin_names).
+    /// The names of every installed handler entry — `within` arms and aliases
+    /// alike — for tab completion.  The handler-stack counterpart of
+    /// [`Self::builtin_names`].
     pub fn handler_names(&self) -> impl Iterator<Item = &str> {
         self.mobile
             .context
@@ -293,13 +241,12 @@ impl Shell {
             .map(|e| e.name.as_ref())
     }
 
-    /// Run `f` under a fresh innermost lexical scope, popped on return.
-    /// The isolation primitive `use` and the REPL plugin loader share:
-    /// a loaded file's top-level helper bindings live in this frame and
-    /// are discarded when it pops, so they never leak into the caller's
-    /// scope.  Pairs with [`crate::builtins::modules::evaluate_source`],
-    /// which owns the cycle/depth guards and script-context swap; this
-    /// owns only the scope frame.
+    /// Run `f` under a fresh innermost lexical scope, popped on return — the
+    /// isolation `use` and the REPL plugin loader share, so a loaded file's
+    /// top-level helpers die with the frame instead of leaking into the
+    /// caller's scope.  [`crate::builtins::modules::evaluate_source`] owns the
+    /// cycle and depth guards and the source registration; this owns only the
+    /// scope frame.
     pub fn in_fresh_scope<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
         self.mobile.scope.push_scope();
         let r = f(self);
@@ -307,9 +254,9 @@ impl Shell {
         r
     }
 
-    /// The next run's check seed, read off the live session: every
-    /// scope binding with its installed scheme, plus the alias arms'
-    /// schemes off the persistent handler frames.
+    /// The next run's check seed, read off the live session: every scope
+    /// binding with its installed scheme, plus the alias arms' schemes off the
+    /// persistent handler frames.
     pub fn session_schemes(&self) -> crate::typecheck::SessionSchemes {
         crate::typecheck::SessionSchemes {
             bindings: self.mobile.scope.binding_schemes(),
@@ -318,15 +265,13 @@ impl Shell {
         }
     }
 
-    /// Remove the alias for `name` if one is installed.  Returns
-    /// whether anything was removed.
+    /// Remove the alias for `name`, returning whether anything was removed.
     pub fn remove_alias(&mut self, name: &str) -> bool {
         self.mobile.context.handlers.remove_alias(name).is_some()
     }
 
-    /// True if a removable alias frame is currently installed for
-    /// `name`. Scoped `within` handler frames are not aliases even when
-    /// they have the same one-entry shape.
+    /// True if an alias frame is installed for `name`.  A scoped `within`
+    /// frame is not an alias even when it has the same one-entry shape.
     pub fn has_alias(&self, name: &str) -> bool {
         self.mobile
             .context
@@ -335,24 +280,17 @@ impl Shell {
             .any(|f| f.is_alias_for(name))
     }
 
-    /// Look up the innermost handler entry for `name` across the
-    /// handler stack.  Thin Shell-side accessor over
-    /// [`HandlerStack::lookup`](crate::types::HandlerStack::lookup).
+    /// The innermost handler entry for `name` and its frame depth.  A named
+    /// entry at any depth outranks every catch-all.
     pub fn lookup_handler(&self, name: &str) -> Option<(HandlerEntry, usize)> {
         self.mobile.context.handlers.lookup(name)
     }
 
-    /// Run `f` inside a fresh audit subtree, returning the body's
-    /// result alongside the nodes it produced.  The shell's audit
-    /// state is restored on return; the parent's trail is set aside
-    /// and reinstalled, so children flow into a dedicated
-    /// [`AuditFragment`] rather than landing directly in the parent's
-    /// tree.
-    ///
-    /// When audit is inactive the body runs unchanged and the
-    /// returned fragment is empty.  `try` and `audit` need to collect
-    /// children even outside a surrounding `audit { … }` scope; they
-    /// use [`Self::audit_forced_child`] instead.
+    /// Run `f` in a fresh audit subtree: the parent's trail is set aside and
+    /// reinstalled on return, so children land in an [`AuditFragment`] rather
+    /// than the parent's tree.  With audit inactive the body runs unchanged
+    /// and the fragment is empty — `try` and `audit` want children even
+    /// outside an `audit { … }` scope, and use [`Self::audit_forced_child`].
     pub fn audit_child<F, R>(&mut self, f: F) -> (AuditFragment, R)
     where
         F: FnOnce(&mut Self) -> R,
@@ -367,11 +305,9 @@ impl Shell {
         (fragment, result)
     }
 
-    /// Forced variant of [`Self::audit_child`]: install a fresh
-    /// subtree for `f` regardless of parent state.  Used by `try` (to
-    /// find the failing child) and `audit` (to return the full
-    /// subtree), both of which collect children even when no outer
-    /// audit is active.
+    /// [`Self::audit_child`] with the subtree installed regardless of parent
+    /// state, for `try` (to find the failing child) and `audit` (to return
+    /// the whole subtree).
     pub fn audit_forced_child<F, R>(&mut self, f: F) -> (AuditFragment, R)
     where
         F: FnOnce(&mut Self) -> R,

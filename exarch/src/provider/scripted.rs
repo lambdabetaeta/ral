@@ -1,4 +1,4 @@
-//! Scripted provider backend for deterministic agent tests.
+//! Canned replies for the `Backend::Scripted` arm, so tests never dial out.
 
 use super::{CutShort, ProviderError, StepOut, SummaryOut, Usage};
 use genai::chat::{ChatMessage, StopReason, ToolCall};
@@ -12,7 +12,6 @@ pub struct Reply {
 }
 
 impl Reply {
-    /// A plain assistant turn with no tool calls.
     pub fn text(text: &str) -> Self {
         Self {
             text: text.to_string(),
@@ -27,8 +26,8 @@ impl Reply {
         }
     }
 
-    /// A turn whose stream stalled after `text` rendered, with a cause
-    /// string shaped like a real genai stream-timeout error.
+    /// A turn whose stream broke after `text` reached the caller; the cause
+    /// mimics genai's timeout wording, which the driver surfaces verbatim.
     pub fn stalled(text: &str) -> Self {
         Self {
             text: text.to_string(),
@@ -45,7 +44,6 @@ impl Reply {
         }
     }
 
-    /// An assistant turn that requests tool calls.
     pub fn tool_calls(calls: Vec<ToolCall>) -> Self {
         let parts = calls
             .iter()
@@ -65,7 +63,7 @@ impl Reply {
         }
     }
 
-    /// A token-capped turn carrying tool calls the model was mid-emitting.
+    /// An output-capped turn carrying tool calls, which the driver still runs.
     pub fn truncated_with_tool_calls(calls: Vec<ToolCall>) -> Self {
         let parts = calls
             .iter()
@@ -85,9 +83,8 @@ impl Reply {
         }
     }
 
-    /// A reply with zero content parts — distinct from `text("")`, whose
-    /// `ChatMessage` still carries one empty text part.  For exercising the
-    /// driver's stub-substitution path on a truly empty assistant turn.
+    /// A reply with no content parts, unlike `text("")` and its one empty part:
+    /// the turn `admit_assistant` in `agent/deliberate.rs` must fill with a stub.
     pub fn empty() -> Self {
         Self {
             text: String::new(),
@@ -102,7 +99,6 @@ impl Reply {
         }
     }
 
-    /// A reply that surfaces `error`.
     pub fn error(error: ProviderError) -> Self {
         Self {
             text: String::new(),
@@ -132,15 +128,9 @@ impl Script {
         self
     }
 
-    /// The `Backend::Scripted` counterpart to `Engine::complete`: there is
-    /// no real stream, so the whole reply fires through `on_text` once and
-    /// the queued outcome returns synchronously.  `on_think` is never
-    /// driven — a scripted `reasoning` rides directly on the outcome
-    /// instead of streaming incrementally.
-    ///
-    /// # Panics
-    /// Panics if the script is empty (a test drove more turns than it
-    /// scripted) or the mutex is poisoned.
+    /// The scripted counterpart to `Engine::complete`: no stream, so the whole
+    /// reply fires through `on_text` at once and `on_think` never runs. Panics
+    /// once the queue runs dry — a test drove more turns than it scripted.
     pub(super) fn complete<F: FnMut(&str), G: FnMut(&str)>(
         &self,
         _model: &str,

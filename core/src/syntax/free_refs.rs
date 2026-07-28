@@ -1,30 +1,14 @@
-//! Free-variable analysis over the AST.
+//! Free-variable analysis over the AST: which of a set of candidate names does
+//! an expression reference without binding them itself?
 //!
-//! [`Ast::free_refs`] returns the set of names in `candidates` that the AST
-//! references freely — that is, references that are not bound by an enclosing
-//! lambda parameter on the path from the reference site to the root.
-//! Used by [`crate::syntax::group`] to decide which `let` RHS expressions can
-//! participate in a `LetRec` group, and to build the dependency graph
-//! between mutually-recursive lambda bindings.
-//!
-//! The traversal is split across one `collect_free_refs` method per node
-//! type that can hold a sub-Ast (`Ast`, `Expr`, `Head`, `Redirect`,
-//! `ScopeAst`), plus `Pattern::collect_default_free_refs` for the defaults
-//! carried on map patterns.  This is mechanical recursion over the AST
-//! shape; the only interesting logic is the `note_free` helper that gates
-//! name recording on the enclosing binding scopes, and
-//! `collect_stmts_free_refs`, which walks a block or lambda body while
-//! bringing each `let`'s names into scope for the statements that follow
-//! (the `Ast::Lambda` arm first pushes the parameter names).
+//! `group` builds its dependency graph over `let`-bound lambdas from this, and
+//! the strongly connected components of that graph become the `LetRec` knots.
 
 use crate::syntax::ast::{
     Ast, Expr, Head, ListElem, MapEntry, Pattern, Redirect, RedirectTarget, ScopeAst, Stmt, Word,
 };
 use std::collections::HashSet;
 
-/// Record `n` in `out` if it is a candidate and not shadowed by an enclosing
-/// lambda scope.  The same predicate fires from three traversals (Ast, Expr,
-/// Head); factoring keeps shadowing logic in one place.
 fn note_free(
     n: &str,
     candidates: &HashSet<String>,
@@ -36,10 +20,9 @@ fn note_free(
     }
 }
 
-/// Walk a statement sequence (a block or a lambda body), collecting free
-/// references and bringing each `let`'s bound names into scope for the
-/// statements that follow it.  Names pushed here are popped before
-/// returning, so `scopes` is restored to its entry state.
+/// Walk a block or lambda body.  Each `let`'s own RHS is visited before its
+/// names are pushed, so a `let` never binds itself, only the statements after
+/// it; `scopes` is restored on return.
 fn collect_stmts_free_refs(
     stmts: &[Stmt],
     candidates: &HashSet<String>,
@@ -62,7 +45,7 @@ fn collect_stmts_free_refs(
 }
 
 impl Ast {
-    /// Collect free references to names in `candidates`, respecting lambda scopes.
+    /// The names in `candidates` this AST references without binding.
     pub fn free_refs(&self, candidates: &HashSet<String>) -> HashSet<String> {
         let mut out = HashSet::new();
         let mut scopes: Vec<HashSet<String>> = Vec::new();
@@ -187,11 +170,9 @@ impl Ast {
 }
 
 impl Pattern {
-    /// Collect free references in the map-pattern default expressions this
-    /// pattern carries.  Defaults are evaluated in the scope enclosing the
-    /// pattern — before the pattern's own bound names enter scope — so the
-    /// caller invokes this against the current scope stack, not the scope
-    /// the pattern's [`Pattern::collect_names`] would push.
+    /// Free references in this pattern's map-entry defaults.  A default is
+    /// evaluated before the pattern's own names bind, so it sees only the
+    /// enclosing scopes — hence the unextended `scopes` the caller passes.
     fn collect_default_free_refs(
         &self,
         candidates: &HashSet<String>,
@@ -257,6 +238,8 @@ impl Head {
         out: &mut HashSet<String>,
     ) {
         match self {
+            // A bare head resolves through value lookup before PATH, so `f 1 2`
+            // may well be calling a `let`-bound lambda.
             Self::Bare(n) => note_free(n, candidates, scopes, out),
             Self::Value(ast) => ast.collect_free_refs(candidates, scopes, out),
             Self::ExternalName(_) | Self::Path(_) | Self::TildePath(_) => {}
@@ -300,8 +283,7 @@ mod tests {
         names.iter().map(std::string::ToString::to_string).collect()
     }
 
-    /// Parse `let _ = RHS`, return the free references of `RHS` among
-    /// `cands` as a sorted list for stable assertions.
+    /// Free references of `rhs_src` among `cands`, sorted for stable assertions.
     fn refs_of(rhs_src: &str, cands: &[&str]) -> Vec<String> {
         let src = format!("let _probe = {rhs_src}");
         let stmts = parse(&src).expect("parse");
@@ -324,17 +306,13 @@ mod tests {
 
     #[test]
     fn only_candidates_are_reported() {
-        // `$y` is referenced but not a candidate, so it is not reported.
         assert_eq!(refs_of("$x", &["x"]), vec!["x"]);
         assert!(refs_of("$y", &["x"]).is_empty());
     }
 
     #[test]
     fn lambda_parameter_shadows_a_candidate() {
-        // The inner `$x` is bound by the lambda parameter, so it is not a
-        // free reference to the outer candidate `x`.
         assert!(refs_of("{ |x| $x }", &["x"]).is_empty());
-        // ... but a non-parameter reference still escapes.
         assert_eq!(refs_of("{ |x| $g }", &["g", "x"]), vec!["g"]);
     }
 
@@ -351,18 +329,12 @@ mod tests {
 
     #[test]
     fn let_binding_in_lambda_body_scopes_over_later_statements() {
-        // A `let` inside a lambda body binds `y` for the statements that
-        // follow, so the later `$y` is not a free reference to the outer
-        // candidate `y`.
         assert!(refs_of("{ |x| let y = 1\n $y }", &["y"]).is_empty());
-        // A reference before the local `let`, and one to a genuine outer
-        // name, still escape.
         assert_eq!(refs_of("{ |x| $g\n let y = 1 }", &["g", "y"]), vec!["g"]);
     }
 
     #[test]
     fn nested_lambda_scopes_stack() {
-        // `x` shadowed by outer lambda, `y` by inner; `g` escapes both.
         assert_eq!(
             refs_of("{ |x| { |y| g $x $y } }", &["g", "x", "y"]),
             vec!["g"]
@@ -371,16 +343,13 @@ mod tests {
 
     #[test]
     fn map_pattern_default_in_lambda_param_is_free() {
-        // The default `$g` is evaluated in the enclosing scope, before the
-        // parameter's own names bind, so a reference there escapes the
-        // lambda.  The bound name `d` does not shadow it.
+        // `$g` is evaluated before the parameter's own names bind, so it escapes
+        // the lambda even though the parameter binds a name of its own.
         assert_eq!(refs_of("{ |[k: d = $g]| return $d }", &["g"]), vec!["g"]);
     }
 
     #[test]
     fn map_pattern_default_in_let_binding_is_free() {
-        // A `let` destructure's default reference escapes the binding
-        // alongside the value's own free references.
         let stmts = parse("let [k: d = $g] = $m").expect("parse");
         let mut out: Vec<String> = stmts[0]
             .item
@@ -393,9 +362,6 @@ mod tests {
 
     #[test]
     fn command_head_and_args_are_scanned() {
-        // A bare command head that is a candidate counts as a reference
-        // when in scope (via `$f`-style use); a plain bare word head is an
-        // external command, not a variable reference.
         assert_eq!(refs_of("{ $f 1 2 }", &["f"]), vec!["f"]);
     }
 }

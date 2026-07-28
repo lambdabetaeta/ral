@@ -1,11 +1,6 @@
-//! User-facing prose for type errors.
-//!
-//! This module is the single home of every user-facing sentence the type
-//! checker produces.  The governing rule: detection happens at the
-//! emission site (in `infer.rs`, where the IR and unifier state are at
-//! hand) and is stored as data on the error; explanation happens here, as
-//! a pure function of that data — which makes every message and hint
-//! unit-testable and reviewable in one place.
+//! User-facing prose for type errors.  `infer.rs` and `unify.rs` raise them
+//! as data; every sentence a user reads is a pure function of that data,
+//! written here and nowhere else.
 
 use super::error::{CompDiff, Reason, TypeErrorKind};
 use super::fmt::{FmtCtx, fmt_mode_ctx, fmt_ty_ctx};
@@ -13,14 +8,10 @@ use super::ty::Ty;
 use crate::syntax::ast::BinaryOpKind;
 
 impl TypeErrorKind {
-    /// Render a single-line diagnostic message.
+    /// The headline sentence for this error.
     ///
-    /// Phrasing is intentionally symmetric where the surface mistake
-    /// admits no canonical "expected vs got" reading.  The orientation of
-    /// `expected`/`actual` inside the unifier depends on which call site
-    /// fires the constraint; for a beginner the more honest framing is
-    /// "these two types must agree but don't".  GHC uses the same shape:
-    /// `Couldn't match type ‘Int’ with ‘String’`.
+    /// Symmetric by design: which side of a constraint lands in `expected` is
+    /// an accident of the call site, so no message may claim one side is right.
     pub fn render_message(&self) -> String {
         match self {
             Self::RecursiveRow => {
@@ -130,25 +121,14 @@ impl TypeErrorKind {
         }
     }
 
-    /// Short phrase placed next to the primary label of a rendered
-    /// diagnostic, describing the immediate nature of the mismatch.
-    ///
-    /// The kind's full message (from [`render_message`](Self::render_message))
-    /// goes on the report headline; the label is the bite-size pointer that
-    /// fits next to the underline.
-    ///
-    /// The label is symmetric in `expected`/`actual` — see the note on
-    /// [`render_message`](Self::render_message) for why.  Variables get the
-    /// same Greek letters as the surrounding message (shared [`FmtCtx`]) so a
-    /// reader who sees `α` in the message can find `α` in the label.
+    /// The bite-size pointer beside the source underline, next to the headline
+    /// from [`render_message`](Self::render_message).  Both rebuild [`FmtCtx`]
+    /// from the same types in the same order, so the `α` here is the `α` there.
     pub fn render_label(&self) -> String {
         match self {
             Self::RecursiveRow => "the type loops back into itself here".into(),
             Self::TypeTooDeep => "the type nests too deeply here".into(),
             Self::TyMismatch { expected, actual } => {
-                // Match the orientation of the full message
-                // ("couldn't match type X with type Y") so the underline
-                // label and the headline read in the same direction.
                 let ctx = FmtCtx::for_value_types(&[expected, actual]);
                 format!(
                     "{} doesn't match {}",
@@ -197,21 +177,16 @@ impl TypeErrorKind {
     }
 }
 
-/// Format a `CompTyMismatch` in user-friendly prose, suppressing the
-/// internal `Cmd α → β` shape when the difference reduces to a return
-/// type or a single channel.  When `diffs` is empty the two head shapes
-/// (Return vs Fun, etc.) failed to unify without identifying a specific
-/// component, and this returns a generic note that one computation is a
-/// function and the other is not.
+/// Prose for a `CompTyMismatch`.  `unify.rs` leaves `diffs` empty only when
+/// the two heads differ in shape — `Return` against `Fun` — blaming no
+/// component.
 fn fmt_comp_mismatch(diffs: &[CompDiff]) -> String {
     use CompDiff::{ReturnType, Stdin, Stdout};
     if diffs.is_empty() {
         return "two computations have incompatible shapes — one is a function, the other is not"
             .into();
     }
-    // Build one shared FmtCtx over every type/mode mentioned by any
-    // diff so the same variable prints with the same Greek letter on
-    // both sides of every line.
+    // One context over every diff, so a variable keeps its letter throughout.
     let ty_refs: Vec<&Ty> = diffs
         .iter()
         .flat_map(|d| match d {
@@ -267,9 +242,6 @@ fn fmt_comp_mismatch(diffs: &[CompDiff]) -> String {
     lines.join("\n")
 }
 
-/// Format a `CaseNotExhaustive` set of missing/extra labels.  Singletons
-/// and plurals get separate phrasings — "no handler for `err" reads
-/// better than "missing handlers for `err".
 fn fmt_case_exhaustiveness(missing: &[String], extra: &[String]) -> String {
     let mut parts: Vec<String> = Vec::new();
     match missing {
@@ -288,15 +260,10 @@ fn fmt_case_exhaustiveness(missing: &[String], extra: &[String]) -> String {
     format!("case is not exhaustive: {}", parts.join("; "))
 }
 
-/// Render the optional guidance sentence for a type error, given its
-/// structural kind and constraint provenance.
-///
-/// A kind that is its own complete story (a direct diagnosis) carries its
-/// hint here, keyed on the kind alone.  Everything else is a constraint
-/// failure, whose hint — if any — is keyed on the [`Reason`] the
-/// constraint was raised under.  The `Reason` match has no wildcard: a
-/// new variant must be placed in one of the two groups below or the
-/// build fails here, rather than silently rendering no hint.
+/// The guidance sentence: keyed on the kind where the kind is its own complete
+/// diagnosis, otherwise on the [`Reason`] the failed constraint was raised
+/// under.  That second match is wildcard-free on purpose, so a new `Reason`
+/// must be given prose or listed as hintless.
 pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<String> {
     let from_kind = match kind {
         TypeErrorKind::CommandNotFunction {

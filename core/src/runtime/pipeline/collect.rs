@@ -1,12 +1,8 @@
-//! Pipeline collect phase for process-staged pipelines.
+//! Collect phase: fold a process-staged pipeline's per-stage observations
+//! into one result.
 //!
-//! The collector reduces a sequence of [`StageObservation`]s to a single
-//! pipeline result.  Two algebraic types carry the lifecycle: a
-//! [`StageOutcome`] per stage (Ok / Failure / Control), and a
-//! [`PipelineBreak`] for the *one* break the collector eventually
-//! surfaces (an ordinary failure, or a control-flow signal).  The policy
-//! ("first failure wins, control trumps failure, first control wins") is
-//! one explicit fold.
+//! Stages are observed in launch order; the whole break policy lives in
+//! `PipelineCollector`'s three `note_*` methods.
 
 use super::super::command;
 use super::launch::StageHandle;
@@ -15,13 +11,10 @@ use crate::types::{
     epoch_us,
 };
 
-/// Wait on a direct-spawn external stage and reduce to a [`StageObservation`].
+/// Wait on a direct-spawn external stage and reduce it to a [`StageObservation`].
 ///
-/// Direct-spawn externals bypass the pipeline helper, so they have no
-/// audit-emitting evaluator to lean on.  When audit is active at the
-/// parent we synthesise a single command node here so a direct-spawn
-/// stage appears in the tree on equal footing with helper-routed
-/// stages.
+/// Such a stage has no audit-emitting evaluator behind it, so its one command
+/// node is synthesised here to keep it level with helper-routed stages.
 #[allow(
     clippy::unnecessary_wraps,
     reason = "sibling of `StageHandle::observe` in the collect match; both arms must yield the same `Settled<StageObservation>` so the fold can `unwrap_or_else` uniformly."
@@ -50,8 +43,7 @@ fn observe_external_stage(
     }
 }
 
-/// Synthesise an audit fragment for one direct-spawn external stage.
-/// Empty when audit is inactive at the parent.
+/// The fragment is empty when audit is inactive at the parent.
 fn synth_external_stage_audit(
     shell: &Shell,
     name: &str,
@@ -90,11 +82,8 @@ fn synth_external_stage_audit(
 
 /// Semantic outcome for one stage.
 ///
-/// A stage either succeeded, failed as ordinary command/evaluator
-/// failure, or produced an [`Escape`] that must leave the collector
-/// directly (`exit`, stopped foreground job).  Control carries an
-/// `Escape`, not a `Break`, so an error — semantic or protocol-layer —
-/// can never be read as a control signal.
+/// `Control` carries an [`Escape`], not a [`Break`], so no error — semantic
+/// or protocol-layer — can be read as a control signal.
 pub(super) enum StageOutcome {
     Ok,
     Failure(Error),
@@ -102,12 +91,8 @@ pub(super) enum StageOutcome {
 }
 
 /// One stage's observation, normalized across external children and ral
-/// helpers.  `status` is the effective exit code for `last_status`;
-/// `final_value` is present only for the final value-typed ral stage;
-/// `audit` carries the fragment for the collector to merge in
-/// observation order.  The fragment is opaque to this collector — it
-/// holds whatever audit nodes the stage produced, packed in the order
-/// the stage emitted them.
+/// helpers.  `status` is the effective exit code for `last_status`, and
+/// `final_value` is set only by the final value-typed ral stage.
 pub(super) struct StageObservation {
     pub(super) status: i32,
     pub(super) outcome: StageOutcome,
@@ -116,7 +101,6 @@ pub(super) struct StageObservation {
 }
 
 impl StageObservation {
-    /// A successful stage with its effective exit code.
     pub(super) fn ok(status: i32) -> Self {
         Self {
             status,
@@ -126,7 +110,6 @@ impl StageObservation {
         }
     }
 
-    /// An ordinary failure; `status` is the error's exit code.
     pub(super) fn failure(error: Error) -> Self {
         Self {
             status: error.exit_code(),
@@ -136,8 +119,7 @@ impl StageObservation {
         }
     }
 
-    /// A control-flow escape.  `status` is never read for control
-    /// outcomes — `fold` returns before the status branch.
+    /// The zero `status` is never read: `fold` returns before the status branch.
     pub(super) fn control(escape: Escape) -> Self {
         Self {
             status: 0,
@@ -147,10 +129,8 @@ impl StageObservation {
         }
     }
 
-    /// Classify a [`Break`] observed while waiting on a stage: a
-    /// catchable error — including a protocol-layer one (report pipe,
-    /// frame decode, waitpid) — is an ordinary failure; only an
-    /// [`Escape`] is control flow.
+    /// A protocol-layer break (report pipe, frame decode, waitpid) lands here
+    /// as an ordinary failure; only an escape is control flow.
     pub(super) fn from_break(br: Break) -> Self {
         match br {
             Break::Error(err) => Self::failure(err),
@@ -169,15 +149,7 @@ impl StageObservation {
     }
 }
 
-/// The break the collector surfaces from `finish` once observation is
-/// complete.  Either an ordinary failure (the user sees `Break::Error`
-/// with `last_status` set) or an [`Escape`] that propagates upward as
-/// `Break::Escape` (Stop hands the pipeline to the REPL; Exit bubbles
-/// out of the evaluator).
-///
-/// First failure wins among failures; any control-flow escape supersedes
-/// a prior ordinary failure (a Ctrl-Z on stage 2 should not be hidden
-/// behind stage 1's nonzero exit); first control wins among controls.
+/// The one break `finish` surfaces once every stage has been observed.
 enum PipelineBreak {
     Failure(Error),
     Control(Escape),
@@ -186,9 +158,9 @@ enum PipelineBreak {
 pub(super) struct PipelineCollector {
     break_: Option<PipelineBreak>,
     final_value: Option<Value>,
-    /// Set when a stage parks the pipeline pgid.  Once set, the collect
-    /// loop SIGSTOPs the whole group and abandons remaining handles so
-    /// their `Drop` doesn't SIGKILL the parked pgid out from under us.
+    /// Set when a stage parks the pipeline pgid.  While set, `collect`
+    /// abandons the remaining handles rather than let their `Drop` SIGKILL
+    /// the parked pgid out from under us.
     #[cfg(unix)]
     stopped_pgid: Option<crate::process::Pgid>,
 }
@@ -203,26 +175,21 @@ impl PipelineCollector {
         }
     }
 
-    /// True once a stage has parked the pipeline pgid.  Used from
-    /// `collect` to decide whether the parked-pipeline abandon branch
-    /// needs to fire.
     #[cfg(unix)]
     fn parked(&self) -> bool {
         self.stopped_pgid.is_some()
     }
 
-    /// Note an ordinary failure.  First failure wins; a prior control
-    /// keeps its place because control-flow always supersedes ordinary
-    /// failure in `finish`.
+    /// First failure wins.  A prior control blocks this one too, harmlessly:
+    /// control outranks failure anyway.
     fn note_failure(&mut self, error: Error) {
         if self.break_.is_none() {
             self.break_ = Some(PipelineBreak::Failure(error));
         }
     }
 
-    /// Note a control escape.  First control wins; a control supersedes
-    /// any prior ordinary failure (so a Ctrl-Z reaching collect after a
-    /// nonzero stage exit still reports as Stopped, not as the failure).
+    /// First control wins, but any control displaces a prior failure: a Ctrl-Z
+    /// on stage 2 must not hide behind stage 1's nonzero exit.
     fn note_control(&mut self, sig: Escape) {
         match self.break_ {
             Some(PipelineBreak::Control(_)) => {}
@@ -230,13 +197,10 @@ impl PipelineCollector {
         }
     }
 
-    /// Note that a stage has parked the pipeline as a stopped job.  The
-    /// group-wide SIGSTOP fires only when this stop will actually be the
-    /// surfaced control: not once the pipeline is already parked (the
-    /// first stop wins, keeping the unsafe call out of every later
-    /// observation), and not when an earlier control escape already holds
-    /// the break — that control wins in `finish`, so parking here would
-    /// stop a pipeline that is really exiting.
+    /// Park the whole group, but only when this stop will be the surfaced
+    /// control: not once the pipeline is already parked, and not when an
+    /// earlier escape holds the break — that escape wins in `finish`, so
+    /// parking would stop a pipeline that is really exiting.
     #[cfg(unix)]
     fn note_stop(&mut self, signal: Escape) {
         let already_controlled = matches!(self.break_, Some(PipelineBreak::Control(_)));
@@ -245,18 +209,14 @@ impl PipelineCollector {
             && let Escape::Stopped { pgid, .. } = &signal
         {
             self.stopped_pgid = Some(*pgid);
-            // Park any still-running siblings so the whole pgid is in a
-            // consistent stopped state before we hand it to the REPL.
-            // Idempotent for stages already kernel-stopped via Ctrl-Z.
+            // A no-op for the siblings the Ctrl-Z already stopped.
             pgid.signal_group(crate::process::Signal::new(libc::SIGSTOP));
         }
         self.note_control(signal);
     }
 
-    /// Fold one [`StageObservation`] into the collector's accumulator
-    /// state.  Every stage produces the same shape, so the policy ("first
-    /// failure wins", "control trumps failure", "last value wins") lives
-    /// only here.
+    /// The audit merges before the outcome is classified, so a stage that
+    /// fails or escapes still contributes its nodes.
     fn fold(&mut self, shell: &mut Shell, is_pipeline_final: bool, obs: StageObservation) {
         shell.local.audit.merge(obs.audit);
         match obs.outcome {
@@ -325,10 +285,8 @@ impl RunningPipeline {
         let mut collector = PipelineCollector::new();
         let last_idx = handles.len().saturating_sub(1);
         for (idx, handle) in handles.into_iter().enumerate() {
-            // Once a sibling stage has parked the pipeline, abandon
-            // remaining handles instead of waiting on them — calling
-            // `wait` on a stopped child would block, and the default
-            // `Drop` would SIGKILL the parked pgid out from under us.
+            // `wait` on a stopped child would block, and `Drop` would SIGKILL
+            // the parked pgid, so abandon what is left instead.
             #[cfg(unix)]
             if collector.parked() {
                 match handle {
@@ -346,10 +304,6 @@ impl RunningPipeline {
                 }
                 StageHandle::Helper(h) => h.observe(shell, is_pipeline_final, started),
             };
-            // An `Err` from observing a stage is a protocol-layer
-            // failure (report pipe, frame decode, waitpid): classified
-            // as an ordinary failure, so it can never supersede the
-            // first genuine stage failure or read as control flow.
             let obs = result.unwrap_or_else(StageObservation::from_break);
             collector.fold(shell, is_pipeline_final, obs);
         }
@@ -362,9 +316,8 @@ mod tests {
     use super::*;
     use crate::process::{Pgid, Signal};
 
-    /// A pgid the kernel will reject with ESRCH when we try to SIGSTOP it.
-    /// `note_stop` invokes `kill(-pgid, SIGSTOP)` on the way through, so
-    /// the test pgid must not match any real process group.
+    /// `note_stop` does a real `kill(-pgid, SIGSTOP)` on the way through, so
+    /// this must match no live process group and earn an ESRCH.
     const FAKE_PGID: i32 = 999_999_991;
 
     fn stopped_escape(pgid: i32) -> Escape {
@@ -398,7 +351,6 @@ mod tests {
         let mut c = PipelineCollector::new();
         c.note_stop(stopped_escape(FAKE_PGID));
         c.note_stop(stopped_escape(FAKE_PGID + 1));
-        // First Stopped wins; later calls do not overwrite the recorded pgid.
         assert_eq!(
             c.stopped_pgid,
             Some(Pgid::from_raw(FAKE_PGID).expect("the fake pgid is positive"))
@@ -407,11 +359,6 @@ mod tests {
 
     #[test]
     fn note_stop_skips_park_when_control_already_held() {
-        // An earlier control escape (e.g. Exit) already holds the break, so
-        // a later Stopped must not park the group: that control wins in
-        // `finish`, and parking would stop a pipeline that is really
-        // exiting.  stopped_pgid stays None, so collect's abandon branch
-        // never fires.
         let mut c = PipelineCollector::new();
         c.note_control(Escape::Exit(3));
         c.note_stop(stopped_escape(FAKE_PGID));
@@ -426,9 +373,7 @@ mod tests {
     fn note_stop_ignores_non_stopped_signals() {
         let mut c = PipelineCollector::new();
         c.note_stop(Escape::Exit(0));
-        // The control bookkeeping still runs (records the break) but
-        // stopped_pgid stays None — collect's park-aware branch hinges
-        // on that field.
+        // The control bookkeeping still runs; only the parking is skipped.
         assert!(c.stopped_pgid.is_none());
         assert!(matches!(
             c.break_,
@@ -455,8 +400,6 @@ mod tests {
         let mut c = PipelineCollector::new();
         c.note_failure(make_error(7, "early failure"));
         c.note_control(Escape::Exit(3));
-        // Control trumps failure: a Ctrl-Z / Exit observed after an
-        // ordinary failure should still surface as control flow.
         assert!(matches!(
             c.break_,
             Some(PipelineBreak::Control(Escape::Exit(3)))
@@ -476,10 +419,8 @@ mod tests {
 
     #[test]
     fn helper_semantic_failure_is_failure_not_control() {
-        // A ral helper reporting `WireOutcome::Error` reaches the
-        // collector as `StageOutcome::Failure`, not `Control` — the
-        // user gets the diagnostic with `last_status` set, not an
-        // opaque `Break::Error` bubbling out as control flow.
+        // A helper's `child_eval::WireOutcome::Error` decodes to `Break::Error`,
+        // which must land as a failure the user sees, not as control flow.
         let mut c = PipelineCollector::new();
         let mut shell = Shell::default();
         c.fold(
@@ -514,8 +455,6 @@ mod tests {
                 audit: AuditFragment::empty(),
             },
         );
-        // `is_pipeline_final` post-control branch is skipped, so the
-        // status the stage reported never lands on the shell.
         assert_eq!(shell.mobile.control.last_status, 0);
     }
 
@@ -537,9 +476,6 @@ mod tests {
 
     #[test]
     fn protocol_error_does_not_supersede_earlier_failure() {
-        // A protocol-layer error (report pipe, frame decode, waitpid)
-        // folded after a genuine stage failure is an ordinary failure:
-        // first failure still wins, and the break stays a Failure.
         let mut c = PipelineCollector::new();
         let mut shell = Shell::default();
         c.fold(

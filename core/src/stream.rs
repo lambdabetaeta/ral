@@ -1,25 +1,22 @@
-//! Shared Stream protocol labels and field names.
+//! Stream protocol labels, in one place so runtime and typechecker cannot drift.
 //!
-//! Runtime values use bare variant labels (`more` / `done`), while the
-//! typechecker's row labels include the leading backtick (`` `more `` / `` `done ``).
-//! Keeping these names in one module avoids drift between runtime and type
-//! recognition.
+//! The runtime tags variants bare (`stream_cons` in `builtins/codecs.rs`), the
+//! typechecker's rows with a backtick sigil (`lines_step_ty` in
+//! `typecheck/infer.rs`) — hence the `*_LABEL`/`*_tag` pairing.  Field names are
+//! not tags and need no twin.
 
 use crate::syntax::tag::tag_row_label;
 
-/// Runtime variant label for a non-empty Stream node.
+/// A non-empty Stream node.
 pub const MORE_LABEL: &str = "more";
-/// Runtime variant label for the terminal Stream node.
+/// The terminal Stream node.
 pub const DONE_LABEL: &str = "done";
-/// Type-row label for a non-empty Stream node.
 pub fn more_tag() -> String {
     tag_row_label(MORE_LABEL)
 }
-/// Type-row label for the terminal Stream node.
 pub fn done_tag() -> String {
     tag_row_label(DONE_LABEL)
 }
-/// Record field name for a Stream payload's head element.
 pub const HEAD_FIELD: &str = "head";
-/// Record field name for a Stream payload's tail thunk.
+/// The rest of the stream, thunked rather than forced.
 pub const TAIL_FIELD: &str = "tail";

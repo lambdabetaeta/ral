@@ -1,10 +1,6 @@
-//! Capability profile file loading and path utilities.
-//!
-//! The actual loader (`load_capabilities_from_path`) lives in
-//! `ral_core::capability::load`; this module wraps that surface with the
-//! exarch-specific orchestrator's error format and contributes the
-//! `absolute_in` path helper that `for_invocation` uses to make
-//! user-supplied relative paths absolute against the session cwd.
+//! The loading half of exarch's capability composition: `ral_core`'s profile
+//! loader dressed in exarch's error format, the confused-deputy lint, and the
+//! cwd-relative path helper `super::for_invocation` calls around them.
 
 use ral_core::types::{Break, Capabilities, Escape, Mooring, Shell};
 use std::path::{Path, PathBuf};
@@ -14,15 +10,10 @@ use ral_core::path::NormalizedPrefix;
 
 /// Read a capabilities profile from `path` as a frozen [`Capabilities`].
 ///
-/// `flag` is the CLI flag the path arrived through, used in error messages.
-/// Missing files are an error: composition is explicit, so a path the user
-/// typed must resolve.
-///
-/// The script's sigils are resolved against `ctx` at load, so the
-/// orchestrator composes (`meet` / `join`) already-resolved policies.  An
-/// `xdg:` path escaping `$HOME` is rejected here, at the profile that names
-/// it, before composition can discard it; that rejection surfaces as a
-/// [`Break::Error`], not an [`Break::Escape`].
+/// Sigils freeze against `ctx` here, so a bad `xdg:` fails at the profile that
+/// names it even where a later `meet` would have discarded the grant, and an
+/// `exit` or stopped child inside the profile flattens into the error string:
+/// a profile is configuration, not control flow.
 pub(super) fn load_capabilities_ral(
     mooring: &Mooring,
     shell: &mut Shell,
@@ -49,12 +40,11 @@ pub(super) fn load_capabilities_ral(
     })
 }
 
-/// Warn — never fail — when the fully composed session ceiling is a
-/// confused deputy: see `ral_core::capability::deputy_prefixes` for the
-/// verdict and why it reports rather than denies.  Judged on `caps` as
-/// [`for_invocation`](super::for_invocation) hands it back after every
-/// `join`/`meet` has run, not on a single loaded file — two profiles can
-/// each be innocent and still compose into a deputy.
+/// Warn — never deny — when the composed ceiling admits exec and write on one
+/// prefix, as `ral_core::capability::deputy_prefixes` judges it.
+///
+/// Runs after every `join`/`meet` in [`for_invocation`](super::for_invocation):
+/// two profiles can each be innocent and still meet into a deputy.
 pub(super) fn lint_deputy_prefixes(caps: &Capabilities) {
     let found = ral_core::capability::deputy_prefixes(caps);
     if found.is_empty() {
@@ -71,9 +61,7 @@ pub(super) fn lint_deputy_prefixes(caps: &Capabilities) {
     );
 }
 
-/// Resolve `p` relative to `cwd` if not already absolute.  Delegates
-/// to [`path::resolve_str`] so the join (and `.`/`..` normalisation)
-/// rule lives in the canonical path module, not duplicated here.
+/// Resolve `p` against `cwd` unless it is already absolute.
 pub(super) fn absolute_in(cwd: &str, p: &Path) -> PathBuf {
     path::resolve_str(Some(cwd), &p.to_string_lossy())
 }

@@ -1,26 +1,13 @@
-//! Value-layer evaluator for the CBPV IR.
-//!
-//! Values are side-effect-free: literals, variables, thunk closures,
-//! list and map constructors, and tilde-expansion. [`eval_val`] is
-//! the dispatch entry; collection literals (`eval_list`, `eval_map`)
-//! and string-piece rendering (`interpolate_piece`) live alongside
-//! because they are pure value transformations.
-//!
-//! A [`Val::Thunk`] is the IR producer of a function/handler value:
-//! [`close_lam`] projects it to [`Value::Lambda`] when its body is a
-//! `Lam` computation (a function literal `{ |x| ... }`) and to
-//! [`Value::Block`] otherwise (a nullary block literal `{ ... }`), so
-//! every downstream consumer observes the body shape without
-//! re-introspecting the IR.
+//! Value-layer evaluator for the CBPV IR — literals, variables, thunks,
+//! collection literals, tilde expansion, none of them effectful. A thunk's
+//! body shape is decided at construction, so consumers never re-inspect the IR.
 
 use crate::diagnostic;
 use crate::ir::{Comp, Val, ValListElem, ValMapEntry};
 use crate::path::tilde::expand_tilde_path;
 use crate::types::{Error, List, Shell, Value};
 
-/// Renders one piece of a string interpolation as text. Only scalar
-/// types (`Unit`, `String`, `Int`, `Float`, `Bool`) are interpolable;
-/// structured values produce a diagnostic error.
+/// Renders one interpolation piece for `eval_interpolation` in `comp.rs`.
 pub(crate) fn interpolate_piece(v: &Value, shell: &Shell) -> Result<String, Error> {
     match v {
         Value::Unit => Ok(String::new()),
@@ -38,12 +25,9 @@ pub(crate) fn interpolate_piece(v: &Value, shell: &Shell) -> Result<String, Erro
     }
 }
 
-/// Evaluates a value term of the CBPV IR.
-///
-/// [`Val::Variable`] runs value-name lookup: env → pseudo-vars
-/// (`$ENV`, `$ARGS`, `$SCRIPT`, `$NPROC`) → explicit builtin value
-/// form. A name that misses all three is reported as an undefined
-/// variable — value position has no handler or external command arm.
+/// Evaluates a value term. A `Val::Variable` resolves through
+/// `Shell::lookup_value_name` alone — value position has no
+/// external-command arm, so a miss is an undefined variable.
 pub(crate) fn eval_val(val: &Val, shell: &mut Shell) -> Result<Value, Error> {
     match val {
         Val::Unit => Ok(Value::Unit),
@@ -93,10 +77,9 @@ pub(crate) fn eval_val(val: &Val, shell: &mut Shell) -> Result<Value, Error> {
     }
 }
 
-/// Closes a `CompKind::Lam` computation into a [`Value::Lambda`],
-/// capturing the current environment. Returns `None` when `comp` is not
-/// a lambda literal. Curried lambdas carry their inner `Lam`-chain in
-/// the body field, which the elaborator has already flattened.
+/// Closes a `CompKind::Lam` into a [`Value::Lambda`], `None` otherwise.
+/// The trampoline calls it on a curried lambda's flattened body, bypassing
+/// `eval_comp`'s arm that rejects a bare lambda in computation position.
 pub(crate) fn close_lam(comp: &Comp, shell: &Shell) -> Option<Value> {
     if let crate::ir::CompKind::Lam { param, body } = &comp.item {
         Some(Value::Lambda {
@@ -109,17 +92,12 @@ pub(crate) fn close_lam(comp: &Comp, shell: &Shell) -> Option<Value> {
     }
 }
 
-/// Evaluates a list literal, expanding `...spread` elements inline.
-///
-/// Cons (`[x, ...xs]`) becomes `push_front`, snoc (`[...xs, x]`)
-/// becomes `push_back` — both O(1) amortised on the persistent
-/// `List` spine. Aliasing is safe by construction: mutating a clone
-/// path-copies the affected nodes, leaving any other handle to the
-/// same list unchanged.
+/// Evaluates a list literal, splicing `...spread` elements inline. The
+/// cons and snoc shapes reuse the spread's persistent spine instead of
+/// rebuilding it, and still evaluate left to right.
 fn eval_list(elems: &[ValListElem], shell: &mut Shell) -> Result<Value, Error> {
     use ValListElem::{Single, Spread};
 
-    // Cons: [x, ...xs] — single first (left-to-right), then spread.
     if let [Single(sx), Spread(sxs)] = elems {
         let x = eval_val(sx, shell)?;
         let xs = eval_val(sxs, shell)?;
@@ -130,7 +108,6 @@ fn eval_list(elems: &[ValListElem], shell: &mut Shell) -> Result<Value, Error> {
         return Ok(Value::List(v));
     }
 
-    // Snoc: [...xs, x] — spread first, then single.
     if let [Spread(sxs), Single(sx)] = elems {
         let xs = eval_val(sxs, shell)?;
         let x = eval_val(sx, shell)?;
@@ -141,7 +118,6 @@ fn eval_list(elems: &[ValListElem], shell: &mut Shell) -> Result<Value, Error> {
         return Ok(Value::List(v));
     }
 
-    // General case: any element count, any mix of Single/Spread.
     let mut items: List = List::new();
     for elem in elems {
         match elem {
@@ -155,6 +131,7 @@ fn eval_list(elems: &[ValListElem], shell: &mut Shell) -> Result<Value, Error> {
     Ok(Value::List(items))
 }
 
+/// Shared with argument-spread checking in `call.rs`.
 pub(crate) fn spread_type_err(shell: &Shell, val: &Value) -> Error {
     shell.err_hint(
         format!("spread requires a List, got {}", val.type_name()),
@@ -163,13 +140,12 @@ pub(crate) fn spread_type_err(shell: &Shell, val: &Value) -> Error {
     )
 }
 
-/// Evaluates a map literal. Explicit entries are processed first
-/// and take priority; spread entries fill in keys not already
-/// present. Duplicate explicit keys emit a diagnostic warning.
+/// Evaluates a map literal. Explicit entries win over spreads: `seen`
+/// gates the spread pass, because `Value::map` collects into an ordered
+/// map where a later insert would otherwise overwrite the earlier.
 fn eval_map(entries: &[ValMapEntry], shell: &mut Shell) -> Result<Value, Error> {
     let mut pairs: Vec<(String, Value)> = Vec::new();
     let mut seen = std::collections::HashSet::<String>::new();
-    // Explicit entries first so they win over spreads.
     for entry in entries {
         if let ValMapEntry::Entry(key_val, v) = entry {
             let key_value = eval_val(key_val, shell)?;
@@ -192,7 +168,6 @@ fn eval_map(entries: &[ValMapEntry], shell: &mut Shell) -> Result<Value, Error> 
             pairs.push((key, eval_val(v, shell)?));
         }
     }
-    // Spreads fill in keys not already present.
     for entry in entries {
         if let ValMapEntry::Spread(v) = entry {
             match eval_val(v, shell)? {

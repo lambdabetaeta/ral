@@ -1,9 +1,5 @@
-//! Assemble the system prompt from its parts.
-//!
-//! Each entry is a `(heading, body)` pair; one renderer walks them
-//! uniformly so the shape of the prompt is the shape of the Vec built
-//! in `assemble`.  Headed sections get a `# heading` line; the persona
-//! section is unheaded — it sets the tone, not a topic.
+//! Assemble the system prompt as `(heading, body)` sections; the shape of the
+//! prompt is the shape of the Vec built in `assemble`.
 
 pub mod host;
 
@@ -14,53 +10,18 @@ use ral_core::types::Capabilities;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
-/// The stand-in system prompt for `--chat` mode ([`crate::cli::Cli::chat`]).
-///
-/// Chat obliterates the assembled prompt entirely; this is not a persona but
-/// the minimal non-empty string, present only because some provider backends
-/// (the Codex/Responses adapter) reject an empty system prompt, and Anthropic
-/// rejects a whitespace-only one ("text content blocks must contain
-/// non-whitespace text").  A single period satisfies both, uniform across every
-/// provider — chat does not branch on the adapter.
+/// The stand-in system prompt for `--chat`, which assembles none.  A bare
+/// period: the Codex/Responses adapter rejects an empty system prompt and
+/// Anthropic a whitespace-only one, and chat does not branch on the adapter.
 pub const CHAT_SYSTEM: &str = ".";
 
-/// Build the full system prompt as an ordered list of `(heading, body)`
-/// sections that [`render`] walks uniformly.  The order, and what each
-/// section carries:
-///
-/// 1. **persona** (unheaded) — baked `data/system.md`, or the `--system
-///    FILE...` files when given.  `--system` replaces *only* the persona;
-///    every other section stands.
-/// 2. **Ral** — the language and tool reference (`data/ral.md`).
-/// 3. **Editing** — the file-editing scheme `edit` selects: line-hash
-///    (`data/edit-hash.md`) or string-replace (`data/edit-replace.md`).
-///    Only the prompt text switches; both builtins stay registered.
-/// 4. **Builtins** — every builtin/prelude function's name only, a
-///    progressive-disclosure index (see [`builtin_index`]). This function
-///    bakes in a *placeholder* for the index, not the index itself: the
-///    real, per-agent list — filtered to the verbs that agent actually
-///    holds — is resolved by [`BuiltinIndexes::apply`] once
-///    [`crate::agent::Agent::assemble`] has the agent's own `returns` and
-///    `allow_schedule` bits in reach. Every other section is agent-invariant
-///    and stands as rendered here.
-/// 5. **Tasks** — the task-management kit API (`data/tasks.md`).
-/// 6. **Script style** — the scripting guide (`data/script-style.md`).
-/// 7. **Host** — the environment snapshot ([`host::snapshot`]) and the live
-///    grant, one under the other.
-/// 8. **Workspace** (optional) — the discovered `AGENTS.md` chain (see
-///    [`discover_agents`]): operator config first, then repo root down to
-///    cwd, deepest last.  Instructions, not authority.
-/// 9. **Skills** (optional) — `name: description` per discovered readable
-///    skill, with a note to call `skill <name>` to load and `skill-list` to
-///    refresh mid-session.
-/// 10. **Agent** / **Surfacing** — the closing section, chosen by `headless`:
-///     a headless run gets the `reply` return-channel contract
-///     (`data/agent.md`); an interactive run gets the surfacing guidance
-///     (`data/surface.md`).  Last, where its recency carries.
+/// Build the ordered `(heading, body)` sections [`render`] walks.  Every
+/// section but Builtins is agent-invariant and stands as baked here; Builtins
+/// holds only [`BUILTIN_INDEX_PLACEHOLDER`], the prompt being assembled once
+/// at boot.  The closing Agent/Surfacing section goes last, for its recency.
 ///
 /// # Errors
-/// Returns `Err` if reading a `--system` file or a discovered workspace
-/// `AGENTS.md` fails.
+/// If reading a `--system` file or a discovered `AGENTS.md` fails.
 pub fn assemble(
     files: &[PathBuf],
     caps: &Capabilities,
@@ -111,46 +72,23 @@ pub fn assemble(
     Ok(render(&sections))
 }
 
-/// [`assemble`]'s stand-in for the per-agent builtin index — never sent to a
-/// model, always resolved by [`BuiltinIndexes::apply`] before an [`Agent`
-/// ](crate::agent::Agent) is fully constructed.  A template holds this
-/// placeholder rather than the index itself precisely because the index is
-/// no longer agent-invariant: `assemble` bakes the rest of the prompt once,
-/// at boot, before any agent's own `returns`/`allow_schedule` bits exist to
-/// filter by.
+/// [`assemble`]'s stand-in for the per-agent builtin index, never sent to a
+/// model: the prompt is baked once at boot, before any agent's own
+/// `returns`/`allow_schedule` bits exist to filter by, so
+/// [`BuiltinIndexes::apply`] fills the slot as each agent is constructed.
 pub(crate) const BUILTIN_INDEX_PLACEHOLDER: &str = "@@EXARCH_BUILTIN_INDEX@@";
 
-/// Every command *this* agent can name, as one comma-separated line of
-/// **names**: `shell`'s own installed builtins (core's plus exarch's own
-/// surface — `view-text`, `grep-files`, `edit-hash`, … — everything
-/// [`bootstrap::boot_shell`](crate::bootstrap::boot_shell) dresses the shell
-/// with before any agent is assembled), the documented prelude functions,
-/// and the agent library (`view-text-around` and the task verbs — ral
-/// closures sourced from `agent.ral`, not registered builtins, so
-/// [`agent_library_docs`](crate::shell_eval::builtins::agent_library_docs)
-/// is what makes them as discoverable as the prelude). Sorted and deduped,
-/// with `_`-prefixed internals filtered out —
-/// note [`Shell::builtin_names`] does *not* drop the `_` names itself, only
-/// its callers do, so the filter lives here and covers all three sources.
+/// Every verb *this* agent can name, comma-joined: the shell's installed
+/// builtins, the documented prelude, and the agent library — ral closures
+/// sourced from `agent.ral`, not registered builtins, hence
+/// [`agent_library_docs`](crate::shell_eval::builtins::agent_library_docs).
+/// [`Shell::builtin_names`] keeps the `_`-prefixed internals, so the filter
+/// lives here and covers all three.
 ///
-/// Also filtered here: `reply` when `!returns` (the interactive trunk, every
-/// `/branch` child — the desk refuses it unconditionally for them), and the
-/// self-wakeup family (`schedule`, `schedules`, `unschedule`) when
-/// `!allow_schedule` (no `--allow-schedule` grant). Installation stays
-/// unconditional and the desk's refusal is the only real wall — this list
-/// is prompt-only, so an agent is never shown a verb it cannot call and
-/// never spends a step finding that out.
-///
-/// This is a *progressive-disclosure* index, not a reference: the agent reads
-/// the whole surface at a glance, then `explain <name>`s any one for its
-/// signature and docs on demand — baking every help string into the prompt
-/// proved far too long. Reading `shell.builtin_names()` directly, rather
-/// than naming
-/// [`host_surface`](crate::shell_eval::builtins::host_surface)
-/// here too, means the index is exactly what that agent's shell can
-/// dispatch, true by construction: every resolution site calls this only
-/// on a shell booted with that surface, so there is no ordering to get
-/// wrong.
+/// Names only, since the agent `explain`s any one for its docs on demand.
+/// Dropping `reply` when `!returns` and the self-wakeup family when
+/// `!allow_schedule` is prompt-only — the desk refuses them regardless; this
+/// spares the agent a step finding out.
 fn builtin_index(shell: &Shell, returns: bool, allow_schedule: bool) -> String {
     let prelude = ral_core::builtins::help::prelude_names()
         .into_iter()
@@ -177,13 +115,11 @@ fn builtin_index(shell: &Shell, returns: bool, allow_schedule: bool) -> String {
     )
 }
 
-/// The four renderings of the builtin index (`returns` ×
-/// `allow_schedule`), resolved once at construction from a booted shell's
-/// installed surface — the surface is installer-fixed per product, so no
-/// later prompt resolution ever needs a live `Shell` again, on either side
-/// of the host seam. Shared by every agent in a fleet
-/// (`Arc` on `Build`/`HostServices`); a fork or desk spawn applies its own
-/// bits against the same table its parent resolved from.
+/// The four renderings of the builtin index (`returns` × `allow_schedule`),
+/// resolved once from a booted shell — the installed surface is fixed per
+/// product, so no later prompt resolution needs a live `Shell` again, on
+/// either side of the host seam.  Shared by a whole fleet: a fork or desk
+/// spawn applies its own bits against the table its parent resolved from.
 pub(crate) struct BuiltinIndexes {
     /// Indexed by `returns as usize | (allow_schedule as usize) << 1`.
     by_bits: [String; 4],
@@ -201,38 +137,26 @@ impl BuiltinIndexes {
         })
     }
 
-    /// Substitute [`BUILTIN_INDEX_PLACEHOLDER`] with the index for exactly
-    /// these bits — the one substitution every constructed
-    /// [`Agent`](crate::agent::Agent) performs on its own `system` text,
-    /// keyed on the same construction-fixed bits the desk reads for the
-    /// refusal itself (`returns` for `reply`, `allow_schedule` for the
-    /// self-wakeup family), so a fresh model never sees a verb the desk
-    /// will certainly refuse. A no-op on text that never held the
-    /// placeholder (a `--system` override, a test fixture), so it is safe
-    /// to run unconditionally.
+    /// Fill [`BUILTIN_INDEX_PLACEHOLDER`] for these bits — the same
+    /// construction-fixed bits the desk reads when refusing, so a fresh model
+    /// never sees a verb it is certain to be refused.  A no-op on text that
+    /// never held the placeholder, so callers need not check.
     pub(crate) fn apply(&self, template: &str, returns: bool, allow_schedule: bool) -> String {
         let slot = usize::from(returns) | (usize::from(allow_schedule) << 1);
         template.replace(BUILTIN_INDEX_PLACEHOLDER, &self.by_bits[slot])
     }
 }
 
-/// Discover the `AGENTS.md` instruction files to inject, outermost first so
-/// the most specific file's recency dominates.  The operator's own
-/// `<config>/AGENTS.md` (the trusted XDG config home — the same root
-/// [`crate::config`] loads `config.ral` from, never the working tree) leads;
-/// then, when `cwd` sits inside a git repository, every `AGENTS.md` from the
-/// repo root down to `cwd`; outside a repo, only `cwd/AGENTS.md` (the bare
-/// ancestor chain is not followed up into unrelated parents).
+/// The `AGENTS.md` chain to inject, outermost first so the most specific
+/// file's recency dominates: the operator's `<config>/AGENTS.md` — the trusted
+/// XDG root [`crate::config`] loads `config.ral` from — then every `AGENTS.md`
+/// from the repo root down to `cwd`, the walk stopping at the first ancestor
+/// holding a `.git` entry (file or directory, so worktrees and submodules
+/// count).  Outside a repo, only `cwd/AGENTS.md`.
 ///
-/// The walk stops at the first ancestor holding a `.git` entry — file or
-/// directory, so worktrees and submodules count — which bounds discovery to
-/// the project the agent was launched in.  Existence is the only gate,
-/// checked through [`ral_core::path::exists`]; the reads happen in
-/// [`read_files`], under its door.
-///
-/// These files steer behaviour, not authority: a cwd `AGENTS.md` lives in the
-/// agent's own writable tree, so unlike `config.ral` it is untrusted — but it
-/// only adds prompt text, never capabilities, so it cannot widen the `Grant`.
+/// The repo files sit in the agent's own writable tree, so unlike `config.ral`
+/// they are untrusted — but they add prompt text, never capabilities, and
+/// cannot widen the grant.
 fn discover_agents(cwd: &Path, config_dir: &Path) -> Vec<PathBuf> {
     let repo_root = ral_core::path::find_git_entry(cwd)
         .and_then(|dot_git| dot_git.parent().map(Path::to_path_buf));
@@ -264,9 +188,8 @@ fn discover_agents(cwd: &Path, config_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Concatenate the given files into one section body, blank-line separated and
-/// in order.  Serves both the `--system FILE...` files and the discovered
-/// `AGENTS.md` chain; the caller fixes the order.
+/// Concatenate files into one section body, blank-line separated; the caller
+/// fixes the order.  Serves both `--system FILE...` and [`discover_agents`].
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:system-prompt-files] reads the --system prompt files and the discovered AGENTS.md chain (the repo/cwd ones untrusted, from the agent's own tree) into the system prompt at load time; not a turn-time door"
@@ -284,13 +207,9 @@ fn read_files(files: &[PathBuf]) -> Result<String, String> {
     Ok(buf)
 }
 
-/// Render the section list.  Headed sections get a `# heading` line;
-/// unheaded sections are emitted verbatim.
-///
-/// Bodies are `trim_end`ed before joining so the blank-line gap between
-/// sections is exactly one line regardless of whether a section's source
-/// (a `data/*.md` `include_str!`, or a caller-built `String`) already ends
-/// in blank lines.
+/// Join the sections one blank line apart, headed ones under a `# heading`.
+/// Bodies are `trim_end`ed first so that gap stays exactly one line however
+/// many blank lines a section's own source happened to end with.
 pub fn render(sections: &[(Option<&str>, String)]) -> String {
     sections
         .iter()
@@ -303,16 +222,11 @@ pub fn render(sections: &[(Option<&str>, String)]) -> String {
         + "\n"
 }
 
-/// The `Host` section body: the environment snapshot ([`host::snapshot`]) and
-/// the live grant, one under the other.
-///
-/// Where the agent stands and when "now" is, then the authority it holds —
-/// the facts of its situation, read together.  Every line is a *host*
-/// truth, which is why this composition is exarch's alone: exarch's engine
-/// — identity seat or spawned `--engine` child — lives on the same machine
-/// and filesystem as this process.  Synod's engine lives inside a guest VM
-/// where none of these lines hold, so it composes its own Host section
-/// from guest facts around the shared [`grant_summary`].
+/// The `Host` section: where the agent stands and when "now" is, then the
+/// authority it holds.  Every line is a *host* truth, which is why the
+/// composition is exarch's alone — synod's engine lives in a guest VM where
+/// none of them hold, so it builds its own around the shared
+/// [`grant_summary`].
 pub fn host_section(caps: &Capabilities, scratch: &crate::bootstrap::Scratch) -> String {
     let state = scratch
         .app()
@@ -324,25 +238,17 @@ pub fn host_section(caps: &Capabilities, scratch: &crate::bootstrap::Scratch) ->
         grant_summary(caps, &scratch_line)
     )
 }
-/// Render the live grant: a static legend (`data/grant-legend.md`)
-/// followed by the live bullet list.
+/// The live grant: a static legend teaching the notation and the runtime
+/// denial string, then one effect per line.  `None` is "unrestricted" — no
+/// attenuation at this layer — and an empty container "(none)".
 ///
-/// The legend trains the model to
-/// read the notation and to recognise the runtime denial string; the
-/// bullets carry the actual capabilities.  `None` fields are
-/// "unrestricted" (no attenuation at this layer); empty containers
-/// are "(none)".  One effect per line so the agent can scan its
-/// authority at a glance and avoid burning steps on denied ops.
-///
-/// `scratch_line` is the right-hand side of the `- scratch:` bullet,
-/// rendered by the caller because the two products name different working
-/// areas: exarch its seeded env var and host path, synod the guest's own
-/// tmpfs.  Public for exactly that second caller.
+/// `scratch_line` is the right-hand side of the `- scratch:` bullet, left to
+/// the caller because exarch names a seeded env var and host path where synod
+/// names the guest's tmpfs.  Public for exactly that second caller.
 pub fn grant_summary(caps: &Capabilities, scratch_line: &str) -> String {
-    // Ambient authority (e.g. the `dangerous` profile): nothing is
-    // attenuated, so the denial-notation legend describes a runtime event
-    // that cannot occur here. Collapse the whole section to one line plus
-    // the scratch path the agent still needs.
+    // Nothing attenuated (the `dangerous` profile): the denial legend would
+    // describe a runtime event that cannot occur, so collapse to one line
+    // plus the scratch path the agent still needs.
     let ambient = caps.exec.is_none() && caps.fs.is_none() && caps.net != Some(false);
     if ambient {
         return format!(
@@ -381,11 +287,9 @@ the sandbox is the trust boundary.\n\n- scratch: {scratch_line}\n"
     s
 }
 
-/// Per-command exec policy as `name` or `name[sub1,sub2,...]`,
-/// comma-joined.  `None` (no exec map) is "unrestricted"; empty
-/// literals (or only `Deny` entries) is "(none)".  Directory
-/// admittances are surfaced separately by [`exec_dirs_line`]; `Deny`
-/// literals by [`exec_denies`].
+/// Per-command exec policy as `name` or `name[sub1,sub2,...]`, comma-joined.
+/// Directory admittances are surfaced by [`exec_dirs_line`], `Deny` literals
+/// by [`exec_denies`], so only admitted literals land here.
 fn exec_line(caps: &Capabilities) -> String {
     let Some(m) = &caps.exec else {
         return "unrestricted".into();
@@ -402,9 +306,8 @@ fn exec_line(caps: &Capabilities) -> String {
     }
 }
 
-/// Allowed directory prefixes, comma-joined with a trailing `/` to
-/// read as directories.  Denied dirs are surfaced by [`exec_denies`],
-/// not here.  Empty when no directory admits.
+/// Allowed directory prefixes, each with a trailing `/` so it reads as a
+/// directory.  Empty when nothing admits by directory.
 fn exec_dirs_line(caps: &Capabilities) -> String {
     caps.exec.as_ref().map_or_else(String::new, |m| {
         m.allow_dirs
@@ -415,9 +318,8 @@ fn exec_dirs_line(caps: &Capabilities) -> String {
     })
 }
 
-/// Names and directory prefixes with an explicit `Deny` — vetoed even
-/// when a covering directory admittance would otherwise admit the
-/// resolved path.  Dir denies keep a trailing `/` to read as directories.
+/// Names and directory prefixes carrying an explicit `Deny` — vetoed even
+/// where a covering directory admittance would otherwise admit the path.
 fn exec_denies(caps: &Capabilities) -> Vec<String> {
     caps.exec.as_ref().map_or_else(Vec::new, |m| {
         let literals = m
@@ -438,17 +340,14 @@ fn or_none<S: AsRef<str>>(v: &[S]) -> String {
     }
 }
 
-/// Comma-join any slice whose items borrow as `&str` — the prefix lists
-/// hold [`NormalizedPrefix`](ral_core::path::NormalizedPrefix)es, not
-/// `&str`, so this helper borrows each as `&str` before joining.
+/// Comma-join any slice whose items borrow as `&str` — the prefix lists hold
+/// `NormalizedPrefix`es, not strings.
 fn join_str<S: AsRef<str>>(v: &[S]) -> String {
     v.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(", ")
 }
 
-/// Render the Skills section: one `name: description` line per skill —
-/// the same progressive-disclosure shape as [`builtin_index`], full
-/// instructions loaded on demand rather than baked in — with a note on
-/// how to load one and how to discover skills added mid-session.
+/// The Skills section: `name: description` per skill, the same
+/// progressive-disclosure shape as [`builtin_index`].
 fn skills_section(skills: &[skill::Skill]) -> String {
     let mut body =
         String::from("Available skills (call `skill <name>` to load, `skill-list` to refresh):\n");
@@ -463,16 +362,13 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// The comma-separated name set `builtin_index` actually lists — split
-    /// out of its leading "call `explain <name>`..." preamble so a test can
-    /// assert membership without depending on name order.
+    /// The name set `builtin_index` lists, split out of its preamble so a test
+    /// asserts membership without depending on order.
     fn names(index: &str) -> HashSet<&str> {
         let list = index.split("\n\n").nth(1).expect("index has a name list");
         list.split(", ").collect()
     }
 
-    /// A returning, granted agent's index carries every dead-verb candidate
-    /// — the common, most-privileged case advertises the full surface.
     #[test]
     fn builtin_index_lists_reply_and_schedule_family_when_both_bits_hold() {
         let shell = crate::bootstrap::boot_shell();
@@ -484,9 +380,7 @@ mod tests {
         assert!(n.contains("unschedule"));
     }
 
-    /// A non-returning agent (the interactive trunk, every `/branch` child)
-    /// never sees `reply` named at all — the desk would refuse it
-    /// unconditionally, so the index does not advertise it.
+    /// Non-returning: the interactive trunk and every `/branch` child.
     #[test]
     fn builtin_index_omits_reply_for_a_non_returning_agent() {
         let shell = crate::bootstrap::boot_shell();
@@ -502,9 +396,6 @@ mod tests {
         );
     }
 
-    /// An ungranted agent never sees any of the self-wakeup family named —
-    /// `reply` stands, since a returning agent holds it regardless of the
-    /// grant.
     #[test]
     fn builtin_index_omits_schedule_family_for_an_ungranted_agent() {
         let shell = crate::bootstrap::boot_shell();
@@ -516,8 +407,7 @@ mod tests {
         assert!(n.contains("reply"), "a returning agent still holds `reply`");
     }
 
-    /// A non-returning, ungranted agent — the default interactive trunk —
-    /// sees neither family at all.
+    /// The default interactive trunk.
     #[test]
     fn builtin_index_omits_both_families_when_neither_bit_holds() {
         let shell = crate::bootstrap::boot_shell();
@@ -529,8 +419,6 @@ mod tests {
         assert!(!n.contains("unschedule"));
     }
 
-    /// [`BuiltinIndexes::apply`] substitutes the placeholder with exactly
-    /// [`builtin_index`]'s own output for the given bits.
     #[test]
     fn builtin_indexes_apply_substitutes_the_placeholder() {
         let shell = crate::bootstrap::boot_shell();
@@ -544,9 +432,7 @@ mod tests {
         assert!(!resolved.contains(BUILTIN_INDEX_PLACEHOLDER));
     }
 
-    /// Text that never held the placeholder resolves as a no-op — the
-    /// property [`BuiltinIndexes::apply`]'s doc relies on to run safely on
-    /// a `--system` override or a bare test fixture.
+    /// The no-op property [`BuiltinIndexes::apply`]'s doc lets callers rely on.
     #[test]
     fn builtin_indexes_apply_is_a_noop_without_the_placeholder() {
         let shell = crate::bootstrap::boot_shell();

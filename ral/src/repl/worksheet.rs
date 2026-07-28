@@ -1,18 +1,15 @@
 //! The REPL-side worksheet model: per-binding dependency edges and the
 //! pure/effectful verdict, retained across runs.
 //!
-//! This is substrate extension #2 of the structural-surface design
-//! (`260620_repl-as-structural-surface`, §2 "The Reactive Worksheet").
 //! After evaluation the `Env` stores [`Value`](ral_core::Value)s, not ASTs,
 //! so the free-reference edges between bindings — computed at compile time —
-//! are discarded.  The worksheet projection needs them back.  Rather than
-//! add a field to core's `Binding` (a core type change), this is the
-//! *parallel REPL-side model* the design recommends for the first cut: it
-//! records `(name, free_refs, effectful)` at each successful top-level
-//! `Bind`, owned by the [`Session`](super::session) so it accumulates as the
-//! user defines bindings.  The node's name, type, and value preview still
-//! come from the live env each `read`; this model supplements that live data
-//! with the edges and the effect verdict the env cannot reconstruct.
+//! are discarded.  Rather than add a field to core's `Binding`, this parallel
+//! REPL-side model records `(name, free_refs, effectful)` at each successful
+//! top-level `Bind`, owned by the [`Session`](super::session) so it
+//! accumulates as the user defines bindings.  The node's name, type, and value
+//! preview still come from the live env each `read`; this model supplements
+//! that live data with the edges and the effect verdict the env cannot
+//! reconstruct.
 //!
 //! Neither analysis is reimplemented here.  The edges reuse
 //! [`Ast::free_refs`](ral_core::syntax::ast) — the same free-variable
@@ -23,10 +20,8 @@
 //! (`rhs_output`), is effectful — pure otherwise.  This is the mode-system
 //! verdict the typechecker already records, not a new heuristic.
 //!
-//! The re-flow, node selection/edit-to-rebind, pinning, and fork that the
-//! design also describes are later parcels.  This model is read-only
-//! projection of edges and classification: it records, the frontend renders
-//! a dependency tree, and nothing re-evaluates.
+//! A read-only projection of edges and classification: it records, the
+//! frontend renders a dependency tree, and nothing re-evaluates.
 
 use ral_core::Shell;
 use ral_core::ir::{Comp, CompKind};

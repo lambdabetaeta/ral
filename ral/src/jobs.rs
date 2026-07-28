@@ -1,12 +1,12 @@
-//! Job control for the interactive shell (§18).
+//! Job control for the interactive shell.
 //!
 //! Tracks process groups *parked by the kernel* by their process-group
 //! id: the live REPL path registers a job only when a foreground pipeline
 //! is stopped by SIGTSTP (`Escape::Stopped`).  `Running` is a transient
 //! state a group passes through while `bg`/`fg` resumes a stopped job; a
 //! job leaves the table when its group terminates.  A `&`-backgrounded
-//! pipeline is an in-process `spawn` handle (`CompKind::Background`, see
-//! design/pipelines), not a pgid job, and is not tracked here.
+//! pipeline is an in-process `spawn` handle (`CompKind::Background`), not
+//! a pgid job, and is not tracked here.
 //!
 //! A single-process job places its child in its own pgid (set in the
 //! `pre_exec` hook of every pipeline stage on Unix; via
@@ -64,14 +64,11 @@ pub enum JobState {
     Stopped,
 }
 
-/// The job-table chapter's resident signature
-/// (`decisions/260705_session-ledger`, `core/src/types/resident.rs`): a
-/// bare numeric designator (a fold brackets it uniformly, matching a
-/// worker's `[wN]` at the listing layer without either chapter agreeing on
-/// bracketing itself), a pgid-typed capability, and no lease at all —
-/// a pgid job drifts toward reclamation only by the exit sweep, never an
-/// idle-observation clock, so it is "human-owned" whether running or
-/// stopped.
+/// The job-table chapter's answer to [`Resident`], alongside core's own for
+/// `WorkerEntry`: a bare numeric designator, which the listing fold brackets
+/// just as it brackets a worker's `wN`, so neither chapter brackets for
+/// itself; and no lease, a pgid job drifting toward reclamation only by the
+/// exit sweep and never an idle-observation clock, running or stopped.
 impl Resident for Job {
     fn designator(&self) -> String {
         self.id.to_string()
@@ -193,7 +190,7 @@ impl JobTable {
 
     /// Id of the most recently registered job, or `None` when the table is
     /// empty.  Ids are monotone (see [`Self::add`]), so the maximum is the
-    /// "current job" SPEC §18 makes the default for a bare `fg`/`bg`/`disown`.
+    /// "current job" a bare `fg`/`bg`/`disown` defaults to.
     pub fn most_recent_id(&self) -> Option<usize> {
         self.jobs.keys().max().copied()
     }
@@ -298,7 +295,7 @@ impl JobTable {
     }
 
     /// On shell exit: take every group down gracefully, wait 5s, then
-    /// kill survivors (§13.3).
+    /// kill survivors.
     ///
     /// Unix: `SIGTERM` → grace → `SIGKILL`, reaping along the way to
     /// avoid zombies.  Windows: closing the Job handle with
@@ -606,8 +603,8 @@ mod tests {
         assert_eq!(j.lease_row(), "none — human-owned");
     }
 
-    /// A stopped job's state label and lease row — the ADR's own degenerate
-    /// example, "none; a human owns it (a stopped job)".
+    /// A stopped job still reports no lease: stopping is not idleness, and
+    /// nothing but the human resumes it.
     #[test]
     fn resident_facets_for_a_stopped_job() {
         let j = job(5, 1234, "vim", JobState::Stopped);

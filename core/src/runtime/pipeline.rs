@@ -1,23 +1,8 @@
-//! Pipeline execution engine.
-//!
-//! Orchestrates multi-stage pipelines through three explicit phases:
-//!
-//!   1. **resolve** ([`resolve::resolve_pipeline`]): type-check every stage,
-//!      classify dispatch, eagerly evaluate argv, and freeze the
-//!      pipeline-level invariants (kind, mode, last-output). The
-//!      byte-capturing audit decision is consulted live during launch
-//!      classification rather than stored on the plan.
-//!   2. **launch** ([`launch::launch_pipeline`]): walk stages once,
-//!      placing every process-staged stage in one process group.  A
-//!      redirect-free, byte-only external stage may spawn directly;
-//!      every ral stage, value-carrying stage, redirected stage, and
-//!      byte-captured stage runs through the ral stage helper.
-//!   3. **collect** (`collect::RunningPipeline::collect` +
-//!      `PipelineCollector::finish`): wait for the processes in launch
-//!      order, surface the first error, and recover the final value when
-//!      the last stage is value-typed.
-//!
-//! `run_pipeline` is the few-line orchestrator; nothing more.
+//! Pipeline execution engine.  `resolve` freezes the whole plan — kind,
+//! modes, last-output, and each stage's launch decision; `launch` walks the
+//! stages once, placing every one in a single process group; `collect` waits
+//! in launch order, surfaces the first error, and recovers the final value.
+//! `run_pipeline` is the orchestrator; nothing more.
 
 mod collect;
 mod group;
@@ -37,16 +22,10 @@ use resolve::{PipelineKind, resolve_pipeline};
 
 /// Execute a multi-stage pipeline: resolve, launch, collect.
 ///
-/// `PipelineKind::PureValue` reduces to a sequential fold over
-/// `call::invoke`: `x | f` becomes `f !{x}` in the parent evaluator.
-/// No threads spawn, no byte pipes exist, and no job-control machinery
-/// is entered. `PipelineKind::ProcessStaged` launches every byte-capable
-/// stage as a subprocess in one pipeline group.
-///
-/// `tail` is the pipeline's tail position. It reaches the value fold,
-/// which grants it to the final stage alone; the process-staged path
-/// collects a value over the wire and emits no tail call, so `tail` has
-/// no effect there.
+/// A `PureValue` pipeline has no byte edge, so it folds in the parent
+/// evaluator and enters no job-control machinery at all.  `tail` reaches
+/// only that fold, which grants it to the final stage; the process-staged
+/// path collects its value over the wire and emits no tail call.
 pub(crate) fn run_pipeline(
     stages: &[Arc<Comp>],
     wires: &[crate::mode::Wire],
@@ -54,44 +33,27 @@ pub(crate) fn run_pipeline(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    // A SIGINT delivered before the first signal-checked seam (a
-    // top-level pipeline has no outer Bind/Chain/Seq) would otherwise
-    // be silently consumed: the handler cancels the foreground scope
-    // but RELAY_PGIDS is empty, so the pipeline launches anyway and
-    // collect blocks on a long-running consumer that never received
-    // the signal.  Bail here instead.
+    // The first signal-checked seam, since a top-level pipeline sits under
+    // no Bind/Chain/Seq.  An earlier SIGINT cancelled the foreground scope
+    // but claimed no relay pgid, so without this the pipeline would launch
+    // anyway and collect would block on a child that never saw the signal.
     crate::process::check(mooring)?;
     let plan = resolve_pipeline(stages, wires, mooring, shell)?;
     if plan.kind == PipelineKind::PureValue {
         return run_value_fold(stages, tail, mooring, shell);
     }
 
-    // Wall-window start for the sandbox-denial reader, anchored before
-    // any stage spawns so a kernel deny logged by a stage falls inside
-    // the window a failing stage reads back (see `sandbox::diag`).
-    // Pipeline-stage attribution is best-effort: there is no exact
-    // per-stage PID at the collect layer, so the reader uses a one-shot
-    // descendant sample taken at failure time.
+    // Window start for the sandbox-denial reader, anchored before any stage
+    // spawns so a kernel deny logged by a stage falls inside it.
     let started = std::time::Instant::now();
 
-    // The pipeline group's SIGINT-forwarding relay slot is claimed
-    // inside `PipelineGroup::spawn` once the first real child has
-    // joined the pgid (see `group.rs`'s SIGINT/relay invariant).
-    // Earlier SIGINTs only cancel the run's foreground scope, which
-    // the per-stage `signal::check` inside `launch_pipeline` observes
-    // to abort promptly.
+    // `_group` keeps the anchor, foreground guard, and SIGINT relay alive to
+    // end of scope, so they outlive `finish`.
     let (_group, running) = launch_pipeline(stages, &plan, mooring, shell)?;
 
-    // The last value-typed helper carries its own value back inside
-    // its `ChildEvalResponse` frame; collect recovers the value after waiting
-    // on the helper, never before — a helper blocked on a stopped
-    // upstream would otherwise deadlock the parent here.  `_group`
-    // lives until end-of-scope, tearing the anchor / foreground guard /
-    // SIGINT relay down only after `finish` has returned.
-    //
-    // The process-staged pipeline cannot emit a [`Tail`] — every stage
-    // ran in its own helper subprocess — so `finish`'s `Settled` widens
-    // losslessly into the evaluator's `Raw` carrier via `Into`.
+    // The last value-typed helper carries its value home in its
+    // `ChildEvalResponse` frame; collect reads it only after waiting on the
+    // helper, since one blocked on a stopped upstream would deadlock us.
     running
         .collect(shell, started)
         .finish(shell, plan.last_output)
@@ -100,12 +62,10 @@ pub(crate) fn run_pipeline(
 
 /// Attach a kernel-denial diagnostic to a failed pipeline stage's error.
 ///
-/// Best-effort attribution: unlike the standalone runner, the collect
-/// layer holds no exact per-stage child PID (sibling stages share the
-/// pipeline group and may still be alive at failure time), so the
-/// reader scopes deny lines to a one-shot descendant sample of *this*
-/// process taken now.  `started` is the pipeline-wide window start.
-/// `augment_failure`'s own gate makes this a no-op off the sandbox path.
+/// Attribution is best-effort: sibling stages share the pipeline group and
+/// may still be alive, so collect holds no exact per-stage PID and the reader
+/// scopes deny lines to a descendant sample of this process taken now.
+/// `started` is the pipeline-wide window start.
 fn augment_stage_failure(err: Error, shell: &Shell, started: std::time::Instant) -> Error {
     if shell.sandbox_projection().is_none() {
         return err;
@@ -114,31 +74,14 @@ fn augment_stage_failure(err: Error, shell: &Shell, started: std::time::Instant)
     crate::sandbox::augment_failure(err, shell, &pids, started)
 }
 
-/// Sequential data-last fold for pure-value pipelines.
+/// Sequential data-last fold for pure-value pipelines: each stage takes the
+/// previous stage's value as its final argument, `x | f == f !{x}`.
 ///
-/// Each stage receives the previous stage's value as its final argument
-/// via [`crate::evaluator::call::invoke`]: `x | f == f !{x}`,
-/// unconditionally.
-///
-/// A producer stage that is a bare block (`{ … }` with no upstream to
-/// apply) evaluates to a [`Value::Block`] thunk rather than running its
-/// body — `invoke`'s fall-through arm returns the thunk unforced.  But
-/// the checker models a value-producing stage feeding a value consumer
-/// by piping the producer's *return* type (see `infer_pipeline`'s
-/// `extract_return` at the value edge), i.e. the body's result, not the
-/// thunk.  Mirror that here: force a producer's block result once
-/// before it crosses to the next stage, so `{ fail "x" } | { |v| … }`
-/// runs the producer body (raising) instead of handing the consumer a
-/// phantom `<block>` value.  The single force mirrors the checker's
-/// single thunk deref; whatever the body itself returns is not forced
-/// recursively.  Only producers are forced; the final stage's value is
-/// the pipeline's own result and is returned as evaluated.
-///
-/// Only the final stage inherits the pipeline's tail position. A
-/// non-final stage runs under a non-trivial continuation
-/// ([`Tail::No`]): its value must cross the value edge into the next
-/// stage, so its tail call must not escape as a [`TailCall`] that
-/// discards every downstream stage.
+/// Only producers are forced as their value crosses the edge; the last
+/// stage's value is the pipeline's own result and is returned as evaluated.
+/// Only that stage inherits the pipeline's tail position — an earlier
+/// stage's tail call would escape as a `TailCall` discarding every stage
+/// downstream of it.
 fn run_value_fold(
     stages: &[Arc<Comp>],
     tail: Tail,
@@ -160,25 +103,22 @@ fn run_value_fold(
     Ok(acc.unwrap_or(Value::Unit))
 }
 
-/// The runtime `!{x}` at a pipeline value edge.
+/// The runtime `!{x}` at a pipeline value edge: a suspended
+/// [`Value::Block`] runs and yields its body's value; every other value —
+/// including a lambda, whose force is the identity — passes through.
 ///
-/// `x | f = f !{x}`: when a producer's value crosses a value edge to its
-/// consumer it is forced exactly once.  A suspended block
-/// ([`Value::Block`]) runs and yields its body's value; every other value
-/// — a concrete value, or a lambda, whose force is the identity — passes
-/// through.  This is the sole value-level realisation of the checker's
-/// `deref_forced_producer`: both the pure-value fold above and the
-/// process-staged stage's re-exec child
-/// ([`run_child_eval`](crate::child_eval::run_child_eval)) call it, so the
-/// two cannot drift.
+/// This single force is the value-level twin of the checker's
+/// `deref_forced_producer`, which derefs one thunk level at a value edge.
+/// Both the fold above and the re-exec stage child (`child_eval`) call
+/// here, so the two cannot drift.
 pub(crate) fn force_pipe_value(
     value: Value,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
     match value {
-        // The forced producer's value crosses the value edge into the
-        // next stage — a non-trivial continuation, so [`Tail::No`].
+        // The value still has to cross into the next stage — a non-trivial
+        // continuation, so `Tail::No`.
         Value::Block { body, captured } => {
             crate::evaluator::eval_block(&body, &captured, Tail::No, mooring, shell)
         }

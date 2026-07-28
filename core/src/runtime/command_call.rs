@@ -1,9 +1,9 @@
-//! Composes command resolution with execution of the chosen arm:
-//! lexical value, builtin command binding, handler, or external command.
+//! Command dispatch: resolve a head, then run the arm resolution names.
 //!
-//! [`run_call`] is the runtime entry, and the only thing `call::invoke`
-//! reaches in here.  Resolution is env → builtins → handlers → external;
-//! the `^name` form skips env and builtins; path heads skip all three.
+//! Order is env → builtins → handlers → external; `^name` skips env and
+//! builtins, a path head skips all three.  [`run_call`] is the entry from
+//! `evaluator::call`; pipeline staging and `command::detach` reach
+//! `resolve_command_word` and `run_handler` directly.
 
 use crate::ir::{CommandName, CommandWord};
 use crate::source::Span;
@@ -18,29 +18,22 @@ use crate::evaluator::redirect::with_redirects;
 
 // ── Resolution ─────────────────────────────────────────────────────────
 
-/// The verdict of command-name resolution: one arm per place a name
-/// can live.  Consumed by the dispatcher ([`run_call`]) and by pipeline
-/// staging ([`crate::runtime::pipeline::resolve`]).
+/// One arm per place a command name can live.
 pub(crate) enum Resolution {
-    /// The lexical environment binds this name.
     Env(Value),
-    /// The builtin command table matched this name.
     Builtin(BuiltinEntry),
-    /// The handler stack matched this name.  `depth` is the count of
-    /// frames from the top to (and including) the matched frame.  The
-    /// entry is boxed: its arm scheme makes [`HandlerEntry`] the widest
-    /// payload by far, and indirection keeps the enum's other arms cheap.
+    /// `depth` counts handler frames from the top down to the matched one
+    /// inclusive — what `strip_matched` takes.  Boxed: [`HandlerEntry`] would
+    /// otherwise set the size of every arm.
     Handler {
         entry: Box<HandlerEntry>,
         depth: usize,
     },
-    /// Neither env nor the handler stack matched.  Carries the
-    /// PATH-resolved [`CommandIdentity`] for the external arm.
     External(CommandIdentity),
 }
 
-/// Resolve a bare command name: env → builtins → handlers → external.
-/// Pure: no admission, no audit, no mutation.
+/// Bare-name lookup: env → builtins → handlers → external.  No admission
+/// check and no audit — those belong to [`classify_command`].
 pub(crate) fn resolve(name: &str, shell: &Shell) -> Resolution {
     if let Some(value) = shell.mobile.scope.get(name) {
         return Resolution::Env(value.clone());
@@ -51,12 +44,8 @@ pub(crate) fn resolve(name: &str, shell: &Shell) -> Resolution {
     resolve_handler_then_external(name, shell)
 }
 
-/// Resolve a [`CommandWord`] to its [`Resolution`].
-///
-/// [`CommandWord::Name`] delegates to bare command lookup.  `^name`
-/// skips env and builtins, but still consults handlers before
-/// external commands.  Path-bearing heads skip env, builtins, and
-/// handlers.
+/// Resolve a [`CommandWord`]: `^name` skips env and builtins but still
+/// consults handlers; a path-bearing head skips handlers too.
 pub(crate) fn resolve_command_word(head: &CommandWord, shell: &Shell) -> Resolution {
     let name = head.name();
     match name {
@@ -70,7 +59,6 @@ pub(crate) fn resolve_command_word(head: &CommandWord, shell: &Shell) -> Resolut
     }
 }
 
-/// Walk user handlers, then fall through to external.
 fn resolve_handler_then_external(name: &str, shell: &Shell) -> Resolution {
     if let Some((entry, depth)) = shell.lookup_handler(name) {
         return Resolution::Handler {
@@ -84,17 +72,10 @@ fn resolve_handler_then_external(name: &str, shell: &Shell) -> Resolution {
     ))
 }
 
-/// Resolution composed with head admission.  `Err` is the grant's
-/// "denied" verdict — the head is refused before any arguments
-/// evaluate.  Env, Builtin, and Handler arms pass through
-/// unconditionally; grant admission is an external-command property.
-///
-/// The `Resolution::Env` arm additionally renews the binding-lease ledger
-/// (`decisions/260629_agent-binding-reaping`) for the resolved name — a
-/// dispatch-time touch, not a lookup-time one: command dispatch is already
-/// heavyweight (grant resolution, audit), so this costs nothing on the
-/// pure-lookup path `Env::get` stays on. See [`run_call`] for why an
-/// `Env` arm reaches dispatch at all.
+/// Resolution plus head admission: `Err` is the grant refusing the head before
+/// any argument evaluates.  Grants govern exec alone, so the other arms pass
+/// unconditionally.  An `Env` hit also renews that name's binding lease, a cost
+/// dispatch can carry and the pure `Env::get` lookup cannot.
 pub(crate) fn classify_command(head: &CommandWord, shell: &mut Shell) -> Settled<Resolution> {
     let r = resolve_command_word(head, shell);
     if let Resolution::Env(_) = &r
@@ -110,8 +91,8 @@ pub(crate) fn classify_command(head: &CommandWord, shell: &mut Shell) -> Settled
     Ok(r)
 }
 
-/// Denial error for a head the active grant refuses, plus the
-/// matching `exec/denied` audit event.
+/// Denial for a head the grant refuses.  One absent from PATH is reported as
+/// missing instead, so nobody hunts for a grant entry to fix.
 fn refuse_head(id: &CommandIdentity, shell: &mut Shell) -> Break {
     let (msg, hint) = match shell.locate_command(&id.shown) {
         Some(p) => (
@@ -135,21 +116,13 @@ fn refuse_head(id: &CommandIdentity, shell: &mut Shell) -> Break {
 
 // ── Runners ─────────────────────────────────────────────────────────────
 
-/// Runtime entry: resolve `head` against the active grant, then run
-/// the chosen arm.
+/// Runtime entry: admit `head`, then run the arm.
 ///
-/// `span` is the dispatching node's span, recorded as this run's call
-/// site.  Recording is skipped for `_`-prefixed names — the
-/// host-registered `_ed-*` REPL surface — so audit readers see the
-/// user-visible caller rather than the editor builtin.
-///
-/// The [`Resolution::Env`] arm is defensive: the elaborator already
-/// routes env-bound names through CBPV [`CompKind::App`] via the
-/// `is_bound` check, so a name reaching this point should normally
-/// resolve to [`Resolution::Handler`] or [`Resolution::External`].
-/// When a runtime mechanism nonetheless installs a binding the
-/// elaborator could not see, the value is applied under the
-/// caller's redirects.
+/// `span` becomes the run's call site, but not under `_`-prefixed names (the
+/// host-registered `_ed-*` REPL surface), so the register keeps naming the
+/// user's call rather than the wrapper's.  The [`Resolution::Env`] arm is
+/// defensive: the elaborator lowers heads its `is_bound` check sees to CBPV
+/// application, so only a binding installed later arrives here as a command.
 pub(crate) fn run_call(
     head: &CommandWord,
     args: &[Value],
@@ -176,7 +149,6 @@ pub(crate) fn run_call(
     }
 }
 
-/// Run a builtin command binding under the host-call envelope.
 fn run_builtin(
     entry: &BuiltinEntry,
     args: &[Value],
@@ -190,15 +162,9 @@ fn run_builtin(
     })
 }
 
-/// RAII guard for handler self-masking: lifts the matched frame off the
-/// stack on [`Self::strip`] and re-inserts it at its original position on
-/// `Drop`, panic or otherwise.
-///
-/// The frame is the one piece of dynamic context whose loss is permanent
-/// and user-visible — a stripped alias frame dropped on an unwind is a
-/// silently deleted user alias, with no save elsewhere to rebuild from.
-/// A straight-line restore is skipped when the body unwinds; the guard
-/// restores it at the source instead.
+/// Lifts the matched frame off the handler stack on [`Self::strip`] and puts it
+/// back at its position on `Drop`, unwinds included: the frame is held nowhere
+/// else, so losing it to a panic silently deletes a user's alias.
 struct MaskedHandler<'a> {
     shell: &'a mut Shell,
     frame: Option<HandlerFrame>,
@@ -222,9 +188,8 @@ impl Drop for MaskedHandler<'_> {
     }
 }
 
-/// Run a user handler entry.  The matched frame is lifted from the
-/// stack for the dynamic extent of the body so a same-name call from
-/// inside reaches the next outer match.
+/// Run a user handler.  The matched frame is masked for the body's dynamic
+/// extent, so a same-name call from inside reaches the next outer match.
 pub(crate) fn run_handler(
     entry: &HandlerEntry,
     depth: usize,
@@ -261,7 +226,9 @@ fn run_host_thunk(
     })
 }
 
-/// Runs an external command through the OS layer.
+/// Run an external command.  No `with_redirects` frame, unlike the host arms:
+/// the child's redirects are wired onto its own fds, and a `<file` stdin is
+/// parked in `shell.io.stdin` for the spawn to collect.
 fn run_external(
     id: CommandIdentity,
     args: &[Value],

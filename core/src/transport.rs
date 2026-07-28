@@ -1,22 +1,14 @@
-//! Transport-parametric host seam — the frame algebra that separates a
-//! front-end from the ral engine.
+//! Transport-parametric host seam: the frame algebra between a front-end and
+//! the ral engine.
 //!
-//! A "frame" names one of the rails that cross between front-end and
-//! engine: Attach/Detach/Ping/Pong bracket and keep alive one connection —
-//! the connection *is* the session — while Dispatch carries one whole
-//! run, Event flows engine→front-end, and Control flows front-end→engine.
+//! Attach/Detach/Ping/Pong bracket and keep alive one connection — the
+//! connection *is* the session — while Dispatch carries one whole run, Event
+//! flows engine→front-end, and Control flows front-end→engine.
 //!
-//! Under the **identity transport** (Phase 1) the channel is a direct Rust
-//! call: frames are passed by move, never encoded.  The `Transport` trait
-//! is the front-end handle; its engine-side dual runs the matching door
-//! synchronously on the calling thread.  Surface events are written to a
-//! channel the front-end drains; control frames trip the thread-safe
-//! `CancelScope` directly.
-//!
-//! Phase 2 will encode these same frame types through `subprocess_codec`
-//! across a process boundary.
-//!
-//! See [[decisions/260628_host-seam-transport-parametric]].
+//! Two transports realise the algebra. `IdentityTransport` is a direct call in
+//! one address space: frames move, never encode. `WireTransport` encodes the
+//! same frames as length-prefixed JSON over a socket, answered by the engine
+//! process in `engine.rs`.
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::PathBuf;
@@ -26,9 +18,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-// The same-host engine child is a Unix handoff (a socketpair end inherited on
-// fd 3), so its handle — and only it — stays platform-gated; every other part
-// of the wire transport is the frame protocol, which is not.
+// Only the same-host child handle is platform-gated: its handoff is a
+// socketpair end inherited on fd 3. The frame protocol itself is not.
 #[cfg(unix)]
 use crate::process::ChildHandle;
 use crate::serial::FOValue;
@@ -46,12 +37,9 @@ static CURRENT_CONTROL: OnceLock<ControlSender> = OnceLock::new();
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DispatchId(pub u64);
 
-/// Correlation token for one outstanding enquiry.
-///
-/// Unused under the identity
-/// transport (a direct call, no frames to correlate); minted per enquiry by
-/// the wire engine's desk and carried on both `Event::Enquiry` and its
-/// answering `Frame::Answer`.
+/// Correlation token for one outstanding enquiry, minted by the wire engine's
+/// desk. The identity transport, whose enquiry is a direct call, never needs
+/// one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EnquiryId(pub u64);
 
@@ -60,104 +48,78 @@ pub struct EnquiryId(pub u64);
 /// One frame that crosses the host seam in either direction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Frame {
-    /// Front-end conveys the terminal endpoint, session bootstrap, and protocol version.
+    /// The only legal first frame: an engine speaks no shell until told a
+    /// version and an installer.
     Attach {
-        /// The terminal endpoint for IO setup.
         endpoint: TerminalEndpoint,
-        /// Working directory the engine should start in.
         cwd: PathBuf,
-        /// Home directory for `~` expansion.
         home: PathBuf,
-        /// Optional rc file to load at session start.
         rc_path: Option<PathBuf>,
-        /// Protocol version the front-end speaks (checked against `PROTOCOL_VERSION`).
+        /// Checked against `PROTOCOL_VERSION`; a mismatch refuses the attach.
         proto_version: u32,
-        /// Tag naming the compiled-in builtin installer the engine child
-        /// must apply after booting its shell — e.g. `"exarch-agent"` or
-        /// `"repl"`. Both halves of the single binary map this string to
-        /// their own compiled-in installer table; the tag is the only
-        /// thing that crosses, never the installer function itself.
+        /// Tag naming the boot recipe the engine applies once attached —
+        /// `"repl"`, `"exarch-agent"`. Each front-end binary re-execs *itself*
+        /// with `--engine` and resolves the tag against its own compiled-in
+        /// `EngineInstaller` table, so only the tag crosses, never the
+        /// function.
         installer: String,
     },
     /// Front-end drops: cancel in-flight dispatch, reap foreground
     /// subtree, restore terminal state.
     Detach,
-    /// One whole run.  Boxed so every other `Frame` variant is not sized
-    /// to `Run`'s stack footprint.
+    /// One whole run.  Boxed so no other variant is sized to `Run`.
     Dispatch(DispatchId, Box<Run>),
     /// A pure, boundary-time read of session state — no wall, no sinks, no
-    /// clock, absent by type, which is why it is a `Frame` and not a `Run`
-    /// variant. Answered through the same `Event::Report` rail as a
-    /// dispatch and correlated by the same `DispatchId`; it serialises with
-    /// dispatches on the engine's single worker rendezvous, so a probe sent
-    /// while a run runs gets the same "engine busy" answer a second
-    /// dispatch would. The `FOValue` names the reading class (a
-    /// `Variant` label, decoded by [`answer_probe`]); an unrecognised class
-    /// answers an error naming it, never a silent default.
+    /// clock, absent by type — hence a `Frame` and not a `Run`. It rides the
+    /// engine's worker rendezvous alongside dispatches, so a probe sent mid-run
+    /// gets the same "engine busy" answer a second dispatch would, and is
+    /// answered on the `Event::Report` rail under the same `DispatchId`. The
+    /// `FOValue` is a `Variant` naming the class [`answer_probe`] decodes.
     Probe(DispatchId, FOValue),
     /// Engine → front-end. May arrive while a Dispatch is outstanding.
     Event(DispatchId, Event),
     /// Front-end → engine. Out-of-band: deliverable while a Dispatch is
     /// outstanding.
     Control(Control),
-    /// Front-end → engine, answering one enquiry a running dispatch raised.
-    /// The first answered frame in this direction — the dual of
-    /// `Event::Enquiry`, correlated by both the dispatch and the enquiry.
-    /// The error arm keeps message *and* status so a refused enquiry raises
-    /// the same error under both transports.
+    /// Front-end → engine: the dual of `Event::Enquiry`, correlated by both
+    /// the dispatch and the enquiry.
     Answer(DispatchId, EnquiryId, Result<FOValue, EnquiryError>),
-    /// Front-end → engine heartbeat (`dev/docs/VM/SYNOD.md` §3).  On a
-    /// transport whose failure mode is silence — a virtual-socket stream
-    /// into a guest, where a dead host produces no EOF — liveness must be
-    /// detected, not assumed.  The law: *any* received frame is proof of
-    /// life; heartbeats exist only to manufacture traffic, so that silence
-    /// can mean nothing but death.  Never sent before `Attach`.  The first
-    /// Ping arms the engine's read deadline: a front-end that pings has
-    /// promised to keep pinging, while one that never pings (the same-host
-    /// socketpair front-ends, whose engine death is a kernel-guaranteed
-    /// EOF) leaves the engine's patience infinite.
+    /// Front-end → engine heartbeat, never sent before `Attach`. Where the
+    /// failure mode is silence — a virtual socket into a guest, whose dead host
+    /// produces no EOF — liveness must be manufactured: *any* received frame is
+    /// proof of life, and pings exist only so that silence can mean nothing but
+    /// death. The first Ping arms the engine's read deadline; a front-end that
+    /// never pings leaves its patience infinite.
     Ping(u64),
-    /// Engine → front-end: the echo of one `Ping`, carrying its sequence
-    /// number back.  This is what keeps an *idle* engine visibly alive; a
-    /// busy one already proves itself with `Event` traffic.
+    /// Engine → front-end: the echo of one `Ping`, keeping an *idle* engine
+    /// visibly alive.  A busy one already proves itself with `Event` traffic.
     Pong(u64),
 }
 
 /// One whole run: the program to evaluate and the conditions it runs under.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Run {
-    /// What the run evaluates.
     pub program: Program,
-    /// Label for the root source context (`"<stdin>"` for the REPL,
-    /// `"<tool>"` for exarch).
+    /// Label for the root source context: `"<stdin>"` for the REPL, `"<tool>"`
+    /// for exarch.
     pub script_name: String,
-    /// The capability ceiling pushed for the eval's dynamic extent.
-    /// `Capabilities::root()` is the ⊤ element — the identity on authority
-    /// (the REPL) — while a narrower profile attenuates the session's grant
-    /// (exarch).
+    /// The capability ceiling pushed for the eval's dynamic extent;
+    /// `Capabilities::root()` is ⊤, the identity on authority.
     pub caps: crate::types::Capabilities,
-    /// The run's foreground wall: `Some(d)` arms a `Deadline` cancel on the
-    /// run's foreground scope `d` after it starts (exarch's per-tool wall);
-    /// `None` leaves the run uncapped (the REPL).
+    /// `Some(d)` arms a deadline cancel on the run's foreground scope `d`
+    /// after it starts; `None` leaves the run uncapped.
     pub wall: Option<std::time::Duration>,
-    /// The lease for workers the run defers at the durable root. `None`
-    /// (the interactive ral host) leaves a worker until `cancel`, root
-    /// abort, or session exit; `Some(lease)` (an agent host) reaps a
-    /// still-running worker once unobserved for `lease.idle` — renewed by
-    /// every `poll`/`await`/`race` naming its handle — under the
-    /// `lease.backstop` absolute ceiling.
+    /// For workers deferred at the durable root. `None` keeps one until
+    /// `cancel`, root abort, or session exit; `Some` reaps a still-running one
+    /// unobserved for `lease.idle` — renewed by every `poll`/`await`/`race`
+    /// naming its handle — under `lease.backstop`.
     pub deferred_lease: Option<crate::types::WorkerLease>,
-    /// Admission cap on concurrently running workers, enforced at the spawn
-    /// door: with `Some(cap)` a spawn is refused while `cap` workers of any
-    /// class are still running — settled entries lingering under retention
-    /// never block admission. `None` (the interactive ral host) admits
-    /// freely.
+    /// Enforced at the spawn door: `Some(cap)` refuses a spawn while `cap`
+    /// workers of any class still run. Settled entries lingering under
+    /// retention never block admission.
     pub worker_cap: Option<usize>,
-    /// The byte IO regime.
     pub io: crate::run::RunIo,
-    /// Whether the run may hand the controlling terminal to a child.
     pub terminal: crate::run::RequestedTerminalAccess,
-    /// Stdin source.
     pub stdin: crate::run::RunStdin,
 }
 
@@ -181,20 +143,18 @@ pub enum Event {
     /// A deferred worker's surface batch, delivered when it settles and
     /// rendered by the host at the next run boundary.
     DeferredSurface(Vec<FOValue>),
-    /// One enquiry the running dispatch raised on its host desk, nested
-    /// inside this dispatch and ordered before its Report. Answered by a
-    /// `Frame::Answer` carrying the same `EnquiryId`.
+    /// One enquiry the running dispatch raised on its host desk, ordered
+    /// before this dispatch's Report and answered by a `Frame::Answer`
+    /// carrying the same `EnquiryId`.
     Enquiry(EnquiryId, FOValue),
     /// The dispatch's sole terminal frame.
     Report(Report),
 }
 
-/// What crosses the wire when an enquiry is refused or its handler fails.
-///
-/// Kept as message *and* status (never collapsed into `crate::types::Error`,
-/// which also carries a `loc` core has no business shipping across the
-/// seam) so a refused enquiry raises the same error under both transports;
-/// its location is stamped engine-side, at the enquiring builtin.
+/// What crosses when an enquiry is refused or its handler fails: message *and*
+/// status, so a refusal raises the same error under both transports. Not
+/// `crate::types::Error`, whose `span` resolves against an engine-side
+/// `SourceDb`; the location is stamped at the enquiring builtin instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnquiryError {
     pub message: String,
@@ -204,13 +164,10 @@ pub struct EnquiryError {
 /// Front-end → engine out-of-band control frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Control {
-    /// Cancel the named dispatch.
     Cancel(DispatchId),
-    /// Suspend the engine (SIGTSTP semantics).
+    /// SIGTSTP semantics.
     Suspend,
-    /// Resume after Suspend.
     Resume,
-    /// Terminal size changed.
     Resize(Winsize),
 }
 
@@ -226,17 +183,16 @@ pub struct Winsize {
 /// The terminal endpoint the front-end conveys at attach.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalEndpoint {
-    /// The session lease, if the front-end owns a terminal.
+    /// The session lease, when the front-end owns a terminal. `#[serde(skip)]`:
+    /// no terminal descriptor crosses a wire, so an engine child attaches
+    /// without one and never foregrounds against the host's terminal.
     #[serde(skip)]
     pub lease: Option<crate::process::TerminalLease>,
-    /// The terminal state for IO setup.
     pub state: crate::io::TerminalState,
 }
 
-/// `TerminalLease` is deliberately not `Clone` (its security argument rests
-/// on being unforgeable), so cloning an endpoint cannot duplicate the
-/// capability — only the terminal state comes along; the clone carries no
-/// lease.
+/// `TerminalLease` is deliberately not `Clone` — its security argument rests on
+/// being unforgeable — so a cloned endpoint carries no lease.
 impl Clone for TerminalEndpoint {
     fn clone(&self) -> Self {
         Self {
@@ -256,19 +212,17 @@ pub enum Report {
     /// Parse/type/host failure: the run never reached evaluation. The host
     /// renders the diagnostics and treats the run as status 1.
     Static { diagnostics: Diagnostics },
-    /// The run ran to a settled result. `status` is the transport status
-    /// computed once; `single_command` is whether the source compiled to a
-    /// single command (for runtime-error rendering); `captured` is `Some`
-    /// under [`RunIo::Capture`](crate::run::RunIo); `timed_out` is
-    /// whether the wall fired.
+    /// The run ran to a settled result.
     Ran {
-        /// The run's settled result. `Ok` carries a [`FOValue`] so a
-        /// successful result crosses the wire; a non-transportable result
-        /// (e.g. a live `Handle`) is reported as an error instead.
+        /// `Ok` carries an [`FOValue`]; a result that cannot cross the seam —
+        /// a live `Handle`, say — is reported as an error rather than dropped.
         result: Result<FOValue, Break>,
         status: i32,
+        /// Picks the runtime-error rendering.
         single_command: bool,
+        /// `Some` under [`RunIo::Capture`](crate::run::RunIo).
         captured: Option<crate::run::Captured>,
+        /// Whether the wall fired.
         timed_out: bool,
     },
 }
@@ -286,13 +240,11 @@ pub enum Diagnostics {
 /// [`Break`](crate::types::Break).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Break {
-    /// A caught runtime error, already rendered to its full diagnostic string
-    /// (see [`RunReport::into_report`](crate::run::RunReport::into_report)) —
-    /// the host prints it verbatim.
-    /// `command_exit` carries the one classification a host's own didactics
-    /// need — whether the status was an external command's non-zero exit,
-    /// as opposed to a raised error — as a fact beside the rendering, since
-    /// the structured `Status` it derives from never crosses the seam.
+    /// A caught runtime error, already rendered to the string the host prints
+    /// verbatim. `command_exit` says whether the status was an external
+    /// command's non-zero exit rather than a raised error — the one
+    /// classification a host's didactics need from a `Status` that never
+    /// crosses the seam.
     Error {
         rendered: String,
         command_exit: bool,
@@ -307,9 +259,9 @@ pub enum Break {
 }
 
 /// Project an engine [`Break`](crate::types::Break) onto the transport
-/// [`Break`], rendering a caught runtime error against `sources` into its
-/// full diagnostic string. `compact_root` selects the compact one-liner
-/// over the source-span caret, exactly as the batch host chooses.
+/// [`Break`], rendering a caught runtime error against `sources`.
+/// `compact_root` selects the compact one-liner over the source-span caret,
+/// exactly as the batch host chooses.
 fn render_break(
     break_: crate::types::Break,
     sources: &crate::source::SourceDb,
@@ -340,18 +292,12 @@ fn render_break(
 }
 
 impl crate::run::RunReport {
-    /// Project into the protocol [`Report`]: the live `Value` becomes a
-    /// first-order [`FOValue`] (a non-transportable result — e.g. a live
-    /// `Handle` — is reported as an error rather than dropped silently),
-    /// and rich diagnostics render to strings against `sources`.  The one
-    /// lossy step between the engine and the seam.
-    ///
-    /// A caught runtime error is rendered here — at the seam, while the
-    /// engine's [`SourceDb`](crate::source::SourceDb) is still in hand — into
-    /// the same full diagnostic string the batch host produces
-    /// ([`format_runtime_error_auto`](crate::diagnostic::format_runtime_error_auto)):
-    /// `error:` prefix, exit status, hint, and source-span caret.  The host
-    /// then only has to print it.
+    /// Project into the protocol [`Report`] — the one lossy step between the
+    /// engine and the seam: the live `Value` becomes an [`FOValue`], and rich
+    /// diagnostics render to strings. Rendering belongs here because this is
+    /// the last point at which the engine's
+    /// [`SourceDb`](crate::source::SourceDb) is in hand; the host receives the
+    /// full string — prefix, status, hint, caret — and only has to print it.
     pub fn into_report(self, sources: &crate::source::SourceDb) -> Report {
         use crate::run::StaticDiagnostics;
         match self {
@@ -386,9 +332,8 @@ impl crate::run::RunReport {
                         single_command.then_some(root),
                     )),
                 },
-                // Clamp here, at the single point a raw code becomes a
-                // transport code, so `status` and `Break::Exit` (clamped
-                // just above) always agree on the same fact.
+                // The single point a raw code becomes a transport code, so
+                // `status` and `Break::Exit` (clamped just above) agree.
                 status: status.clamp(0, 255),
                 single_command,
                 captured,
@@ -402,15 +347,11 @@ impl crate::run::RunReport {
 
 /// The front-end side of the host seam.
 pub trait Transport: Send + Sync {
-    /// Run a dispatch synchronously.  The `Report` arrives as the final
-    /// `Event`; `Surface` events are written to the event channel during
-    /// execution and may be drained concurrently.
+    /// Run a dispatch synchronously. The `Report` arrives as the final `Event`,
+    /// after any `Surface` events, which may be drained concurrently.
     fn dispatch(&self, id: DispatchId, run: Run);
 
-    /// Run a pure, boundary-time read of session state synchronously and
-    /// return its answer. Serialises with `dispatch` on the same rendezvous
-    /// (busy → the same "engine busy" error a second dispatch would get);
-    /// an unrecognised reading class answers `Err` naming the class.
+    /// Read session state at a run boundary, synchronously.
     ///
     /// # Errors
     /// Returns `Err` if the engine is busy on the rendezvous (the "engine
@@ -418,8 +359,8 @@ pub trait Transport: Send + Sync {
     fn probe(&self, reading: FOValue) -> Result<FOValue, String>;
 
     /// The out-of-band control sender — writable while a dispatch is in
-    /// flight.  Under the identity transport this writes directly to the
-    /// foreground `CancelScope`.
+    /// flight.  Under the identity transport this raises the ambient
+    /// foreground interrupt directly.
     fn control(&self) -> &ControlSender;
 
     /// The event stream the front-end drains.
@@ -427,10 +368,9 @@ pub trait Transport: Send + Sync {
 
     /// Convey the session terminal endpoint and bootstrap state.
     ///
-    /// `installer` names the compiled-in builtin installer the wire
-    /// engine child must apply once it boots its shell (§ `Frame::Attach`);
-    /// the identity transport ignores it — its shell is already booted and
-    /// dressed with the host's builtins by the caller before `attach`.
+    /// `installer` is the boot-recipe tag of `Frame::Attach`. The identity
+    /// transport ignores it: its shell was booted and dressed with the host's
+    /// builtins by the caller before `attach`.
     fn attach(
         &self,
         endpoint: TerminalEndpoint,
@@ -444,10 +384,9 @@ pub trait Transport: Send + Sync {
     /// restore terminal state.
     fn detach(&self);
 
-    /// Answer one enquiry the engine raised on `Event::Enquiry`, correlated
-    /// by `id` and `eid`. A no-op under the identity transport: an identity
-    /// enquiry is a direct call through the installed `Desk`, never a frame,
-    /// so there is nothing here to write.
+    /// Answer one enquiry the engine raised on `Event::Enquiry`. A no-op under
+    /// the identity transport, whose enquiry is a direct call through the
+    /// installed `Desk` and never a frame.
     fn answer(&self, _id: DispatchId, _eid: EnquiryId, _answer: Result<FOValue, EnquiryError>) {}
 
     /// Returns `self` as an `&dyn Any` for downcast support.
@@ -456,30 +395,19 @@ pub trait Transport: Send + Sync {
 
 // ── Dispatch loop ─────────────────────────────────────────────────────
 
-/// Mint a dispatch id, send `run` down `transport`, and drain the event
-/// stream to the run's terminal [`Report`](Event::Report), handing each
-/// surface regime to its caller-supplied handler.
+/// Mint a dispatch id, send `run` down `transport`, and drain events to the
+/// run's terminal [`Report`](Event::Report).
 ///
-/// The two surface regimes stay distinct on purpose: `on_surface` sees each
-/// live [`Event::Surface`] value in order, while `on_deferred` sees a
-/// deferred worker's [`Event::DeferredSurface`] batch delivered at its
-/// settlement. A host that tracks live pins (exarch) must update its mirror
-/// only from `on_surface` — the deferred batch does not touch the pin map —
-/// so flattening the two into one undistinguished stream would be a
-/// behaviour change, not a fold.
+/// The two surface regimes stay distinct on purpose: a host tracking live pins
+/// (exarch) updates its mirror only from `on_surface`, since a deferred
+/// worker's batch never touches the pin map. Flattening them would be a
+/// behaviour change, not a fold. `on_enquiry` is dead under the identity
+/// transport, whose `Desk` the run calls directly mid-evaluation; under the
+/// wire it is the front-end's side of that rendezvous, answered through
+/// [`Transport::answer`].
 ///
-/// `on_enquiry` answers one [`Event::Enquiry`] this dispatch's run raised on
-/// its host desk; the answer is written back through
-/// [`Transport::answer`]. Under the identity transport `Event::Enquiry` never
-/// arrives here at all — the installed `Desk` is a direct call the run makes
-/// mid-evaluation (§3 of the enquiry-channel ADR), so `on_enquiry` is dead
-/// code on that transport and live only under the wire, where the loop is
-/// the front-end's side of the desk's rendezvous.
-///
-/// Returns the [`Report`], or `None` if the stream closed without a
-/// Report (impossible under the identity transport, which sends the Report
-/// synchronously before `dispatch` returns; each caller keeps its own
-/// no-Report handling).
+/// `None` means the stream closed without a Report — impossible under the
+/// identity transport, which sends it before `dispatch` returns.
 pub fn dispatch_to_report(
     transport: &dyn Transport,
     run: Run,
@@ -508,10 +436,9 @@ pub fn dispatch_to_report(
     None
 }
 
-/// Mint one correlation id for the Dispatch → Report rail. Dispatches and
-/// probes share the mint: both are answered by an [`Event::Report`]
-/// correlated by [`DispatchId`], so two counters would let a probe's Report
-/// be mistaken for a dispatch's.
+/// Dispatches and probes share this mint: both are answered by an
+/// [`Event::Report`] under a [`DispatchId`], so two counters would let a
+/// probe's Report be mistaken for a dispatch's.
 fn mint_dispatch_id() -> DispatchId {
     static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     DispatchId(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
@@ -519,17 +446,9 @@ fn mint_dispatch_id() -> DispatchId {
 
 // ── Probe decoder ─────────────────────────────────────────────────────
 
-/// The one decoder for every probe reading, shared by `IdentityTransport`
-/// and the wire engine (`core/src/engine.rs`) so a new reading class costs
-/// one arm here, never a second copy per transport.
-///
-/// Each class is an
-/// `FOValue::Variant` label, matching the accessor traffic
-/// `exarch/src/agent.rs` used to read straight through `shell_mut()`:
-/// `` `worker-count ``, `` `binding-count ``, `` `leased-binding-count ``,
-/// `` `env-var [name] ``, `` `cwd ``, `` `grant-depth ``,
-/// `` `largest-binding-bytes ``, `` `workers ``. An
-/// unrecognised class answers `Err` naming it, never a silent default.
+/// The one decoder for every probe reading, shared by `IdentityTransport` and
+/// the wire engine in `engine.rs`, so a new class costs one arm here rather
+/// than a copy per transport.
 ///
 /// # Errors
 /// Returns `Err` if `req` is not a variant, if the `` `env-var `` class lacks
@@ -692,13 +611,11 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FO
 /// Out-of-band control sender.
 #[derive(Clone)]
 pub struct ControlSender {
-    /// When `Some`, writes `Control` frames to a `WireChannel`.
-    /// When `None`, acts directly on the in-process foreground scope.
+    /// `Some` writes `Control` frames to a `WireChannel`; `None` acts on the
+    /// in-process foreground scope instead.
     wire: Option<Arc<Mutex<crate::wire::WireChannel>>>,
-    /// The transport's own record of the in-flight dispatch id (`0` = none),
-    /// shared with whichever bookkeeping the transport already keeps for
-    /// event correlation — `cancel_current` names the dispatch it means
-    /// rather than a mintable sentinel.
+    /// Shared with the transport's own event-correlation bookkeeping, so
+    /// `cancel_current` names a real dispatch rather than a sentinel.
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -724,10 +641,8 @@ impl ControlSender {
         let _ = CURRENT_CONTROL.set(self);
     }
 
-    /// Cancel this sender's own in-flight dispatch: read `current_dispatch`
-    /// and send `Control::Cancel(DispatchId(id))` down whichever channel this
-    /// sender writes — the wire, or (under the identity transport) the
-    /// process-global foreground scope directly.
+    /// Cancel this sender's own in-flight dispatch, down whichever channel it
+    /// writes.
     pub fn cancel_in_flight(&self) {
         let id = self
             .current_dispatch
@@ -750,36 +665,32 @@ impl ControlSender {
     pub fn send(&self, ctrl: Control) {
         if let Some(ch) = &self.wire {
             let frame = Frame::Control(ctrl);
-            // Phase 2 Task 8: EPIPE here means the engine died.
-            // A full teardown needs a shared death flag.
+            // A failed write is swallowed: this sender holds no death flag,
+            // and the reader's EOF declares the same death anyway.
             let _ = ch.lock().unwrap().write_frame(&frame);
             return;
         }
         match ctrl {
             Control::Cancel(_id) => {
-                // Raise the ambient interrupt — the same watermark the SIGINT
-                // relay stamps, read by this session's in-flight run rather
-                // than by a transport-side sibling scope.
+                // The same watermark the SIGINT relay stamps, so the in-flight
+                // run observes it at its own poll points — there is no
+                // transport-side sibling scope to trip.
                 crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
             }
             Control::Suspend | Control::Resume | Control::Resize(_) => {
-                // Under the identity transport these are handled by the
-                // process-level signal machinery in-process.
+                // The process-level signal machinery already handles these.
             }
         }
     }
 }
 
-/// Event receiver: one correlated event per item.
-///
-/// The front-end drains this while a dispatch is outstanding; `Surface`
-/// events are ordered before the `Report`.
+/// The front-end drains this while a dispatch is outstanding; `Surface` events
+/// are ordered before the `Report`.
 pub struct EventReceiver {
     rx: std::sync::Mutex<mpsc::Receiver<(DispatchId, Event)>>,
-    /// Events a probe's reply drain read past while waiting for its own
-    /// Report — e.g. a deferred worker's batch settling mid-probe. The
-    /// ordering law (§6.5) forbids dropping them, so they are handed back
-    /// to the next `recv`, in arrival order, ahead of the live channel.
+    /// Events a probe's drain read past on its way to its own Report — a
+    /// deferred worker's batch settling mid-probe, say. Handed back to the
+    /// next `recv` in arrival order rather than dropped.
     stash: std::sync::Mutex<std::collections::VecDeque<(DispatchId, Event)>>,
 }
 
@@ -801,9 +712,8 @@ impl EventReceiver {
         self.rx.lock().unwrap().recv().ok()
     }
 
-    /// Non-blocking drain: a stashed event first (arrival order, per §6.5's
-    /// ordering law), then the channel. `None` when both are empty right now
-    /// — never blocks.
+    /// Non-blocking drain: the stash first, then the channel. `None` when both
+    /// are empty right now.
     ///
     /// # Panics
     /// Panics if the stash or receiver mutex is poisoned.
@@ -825,9 +735,7 @@ mod event_receiver_tests {
         (EventReceiver::new(rx), tx)
     }
 
-    /// A stashed event is returned before whatever the channel holds, and
-    /// without blocking — the same arrival-order precedence `recv` gives the
-    /// stash, proven here on the non-blocking door.
+    /// The stash precedence `recv` gives, proven on the non-blocking door.
     #[test]
     fn try_recv_drains_the_stash_before_the_channel() {
         let (receiver, tx) = receiver();
@@ -840,8 +748,7 @@ mod event_receiver_tests {
         assert_eq!(receiver.try_recv(), Some(channelled));
     }
 
-    /// With neither a stashed event nor a channel send pending, `try_recv`
-    /// returns `None` immediately rather than blocking.
+    /// Empty on both sides returns `None` rather than blocking.
     #[test]
     fn try_recv_returns_none_when_empty() {
         let (receiver, _tx) = receiver();
@@ -851,17 +758,14 @@ mod event_receiver_tests {
 
 // ── Transport sink ────────────────────────────────────────────────────
 
-/// The identity transport's sink for both surface regimes: a live value
+/// The identity transport's sink for both surface regimes — a live value
 /// ([`EventSink`](crate::types::EventSink)) and a deferred worker's settled
-/// batch ([`DeferredSink`]), each forwarded onto the event channel stamped
-/// with the in-flight dispatch id.
+/// batch ([`DeferredSink`]) — forwarded onto the event channel.
 struct TransportSink {
     event_tx: mpsc::Sender<(DispatchId, Event)>,
-    /// The in-flight dispatch id (`0` = none), the one atomic `dispatch`
-    /// sets and both impls read. A live surface value emitted while it reads
-    /// `0` has no dispatch to correlate to and is dropped; a deferred batch
-    /// is stamped with whatever is in flight — `0` when it settles between
-    /// runs.
+    /// `0` = no dispatch in flight. A live value emitted then has nothing to
+    /// correlate to and is dropped; a deferred batch settling between runs is
+    /// stamped `0` and delivered anyway.
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -892,12 +796,10 @@ impl crate::types::DeferredSink for TransportSink {
 
 // ── Identity transport ────────────────────────────────────────────────
 
-/// A session lock that cannot poison-panic.  A run that unwinds drops its
-/// guard mid-mutation, which would otherwise poison the mutex and turn every
-/// later `lock()` into a second panic (`PoisonError`); recovering the guard
-/// instead means a panicking run can never wedge the session.  This is the
-/// only lock over the engine state, so the failure is impossible by
-/// construction — there is no `unwrap()` to forget.
+/// A session lock that cannot poison-panic. A run that unwinds drops its guard
+/// mid-mutation; recovering the poison rather than unwrapping it means such a
+/// run can never wedge the session, and being the only lock over the engine
+/// state there is no stray `unwrap()` elsewhere to forget.
 struct SessionLock(std::sync::Mutex<EngineInner>);
 
 impl SessionLock {
@@ -909,9 +811,8 @@ impl SessionLock {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    /// Consume the lock and recover the engine state, recovering poison the
-    /// same way `lock` does — a run that unwound mid-mutation must not wedge
-    /// the move-out.
+    /// Recovers poison the same way `lock` does: an unwound run must not wedge
+    /// the move-out either.
     fn into_inner(self) -> EngineInner {
         self.0
             .into_inner()
@@ -919,64 +820,47 @@ impl SessionLock {
     }
 }
 
-/// The in-process transport: one kernel, one address space.
-///
-/// `dispatch` runs the matching door synchronously on the calling thread.
-/// Surface events are written to the event channel during execution;
-/// control frames trip the foreground `CancelScope` directly.
+/// The in-process transport: one kernel, one address space. `dispatch` runs the
+/// engine door synchronously on the calling thread, and a control frame raises
+/// the ambient foreground interrupt rather than crossing anything.
 pub struct IdentityTransport {
-    /// The engine-side state, behind a poison-free [`SessionLock`] so
-    /// `dispatch` can take `&self`.
+    /// Behind a poison-free [`SessionLock`] so `dispatch` can take `&self`.
     engine: SessionLock,
-    /// Control sender (wired to the foreground cancel scope).
     control: ControlSender,
-    /// Event receiver for the front-end. `Arc`-wrapped so a later drain-then-
-    /// handle adapter can hold its own clone alongside the transport, rather
-    /// than borrowing one tied to `&self`.
+    /// `Arc`-wrapped so a drain-then-handle adapter can hold its own clone
+    /// alongside the transport rather than a borrow tied to `&self`.
     events_recv: Arc<EventReceiver>,
-    /// Stamped with the dispatching thread's id for the duration of
-    /// `dispatch`, so a desk handler that reenters the session lock
-    /// (`dispatch`/`shell_mut`/`with_shell`) panics instead of deadlocking
-    /// (§3's reentrancy law). A separate short lock, never the session
-    /// lock — checking it must not touch `self.engine`.
+    /// Stamped for the duration of `dispatch`, so a desk handler reentering
+    /// `dispatch`/`shell_mut`/`with_shell` panics instead of deadlocking. A
+    /// separate short lock: checking it must not touch `self.engine`.
     dispatch_thread: std::sync::Mutex<Option<std::thread::ThreadId>>,
-    /// Set by [`Self::observe_foreground`]: a cell this transport writes
-    /// each run's freshly-installed foreground scope into, at the run's
-    /// very start.  Lives outside `engine`'s own lock, so a caller holding
-    /// a clone of the cell can read (and cancel) the *current* run's
-    /// scope from another thread without waiting on a dispatch in flight —
-    /// the extension point a forked-session host uses to interrupt one
-    /// run without touching the session's durable root.
+    /// Set by [`Self::observe_foreground`]. Outside `engine`'s lock, so a
+    /// holder of a clone can cancel the *current* run from another thread
+    /// without waiting on the dispatch in flight — how a forked-session host
+    /// interrupts one run without touching the session's durable root.
     run_scope: Option<Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>>,
 }
 
 pub struct EngineInner {
-    /// The shell that executes runs.
     pub shell: crate::types::Shell,
-    /// Send events to the front-end.
     pub(crate) event_tx: mpsc::Sender<(DispatchId, Event)>,
-    /// The transport sink, serving both surface regimes.
     surface_sink: Arc<TransportSink>,
-    /// The session-lived deferred sink for deferred workers.  Seeded with
-    /// the transport sink; a host may install its own (`set_deferred_sink`).
+    /// Session-lived, seeded with the transport sink; a host may install its
+    /// own through `set_deferred_sink`.
     deferred_sink: Option<Arc<dyn DeferredSink>>,
-    /// The installed enquiry desk, if any host has set one. `None` in
-    /// Phase A: no desk installed by any host, so `enquire` answers its
-    /// honest absence error.
+    /// `None` until a host calls `set_desk`, in which case `enquire` answers
+    /// its honest absence error.
     desk: Option<crate::types::Desk>,
-    /// The installed nursery for engine-side session forks, if any host has
-    /// set one. `None` until a host calls `set_nursery`, so `fork_into_nursery`
-    /// answers its honest absence error.
+    /// `None` until a host calls `set_nursery`, in which case
+    /// `fork_into_nursery` answers its honest absence error.
     nursery: Option<crate::types::Nursery>,
-    /// The session terminal lease (set by Attach).
+    /// Set by Attach.
     terminal_lease: Option<crate::process::TerminalLease>,
-    /// Shared dispatch id for deferred-sink correlation.
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
 }
 
-/// Clears the dispatch-thread stamp on drop, even on unwind — a run that
-/// panics must not leave the stamp set, or the next legitimate
-/// `shell_mut`/`with_shell` call would false-trip the reentrancy panic.
+/// Clears the dispatch-thread stamp on drop, unwind included: a stamp left set
+/// by a panicking run would false-trip the next legitimate `shell_mut`.
 struct DispatchStampGuard<'a> {
     slot: &'a std::sync::Mutex<Option<std::thread::ThreadId>>,
 }
@@ -1022,9 +906,8 @@ impl IdentityTransport {
         }
     }
 
-    /// Return a shared handle to the front-end's event receiver, for a
-    /// caller that wants to drain it alongside the transport rather than
-    /// through a borrow tied to `&self`.
+    /// A shared handle on the event receiver, for a caller that drains it
+    /// alongside the transport rather than through a borrow of `&self`.
     pub fn events_shared(&self) -> Arc<EventReceiver> {
         self.events_recv.clone()
     }
@@ -1034,13 +917,11 @@ impl IdentityTransport {
         self.engine.lock().deferred_sink = Some(deferred);
     }
 
-    /// Arm this transport to publish each run's freshly-installed
-    /// foreground scope into `cell` at the start of every dispatch, before
-    /// evaluation begins.  Call once, right after construction: a forked
-    /// session (exarch's agent fleet) keeps its own clone of `cell`
-    /// alongside the session's durable root, so an interrupt can cancel
-    /// whichever scope the in-flight run actually installed without ever
-    /// touching the root a later run would inherit.
+    /// Arm this transport to publish each run's foreground scope into `cell`
+    /// before evaluation begins. Call once, right after construction: exarch's
+    /// agent fleet keeps its own clone, so an interrupt cancels whichever scope
+    /// the in-flight run installed without touching the durable root a later
+    /// run would inherit.
     pub fn observe_foreground(
         &mut self,
         cell: Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>,
@@ -1048,45 +929,35 @@ impl IdentityTransport {
         self.run_scope = Some(cell);
     }
 
-    /// Install the session's enquiry desk. Per-run hosts (e.g. exarch, once
-    /// the migration lands) call this before each dispatch so whatever the
-    /// desk captures is fresh — the same reasoning `set_deferred_sink`
-    /// follows.
+    /// Install the session's enquiry desk. A per-run host calls this before
+    /// each dispatch, so whatever the desk captures is fresh.
     pub fn set_desk(&self, desk: crate::types::Desk) {
         self.engine.lock().desk = Some(desk);
     }
 
-    /// Install the session's nursery for engine-side session forks. Per-run
-    /// hosts call this before each dispatch so a stale fork from an earlier
-    /// generation is never adoptable, the same reasoning `set_desk` follows.
+    /// Install the session's nursery for engine-side session forks. Called per
+    /// run, so a stale fork from an earlier generation is never adoptable.
     pub fn set_nursery(&self, nursery: crate::types::Nursery) {
         self.engine.lock().nursery = Some(nursery);
     }
 
-    /// Uninstall the session's nursery. `set_desk` has no symmetric
-    /// counterpart because a desk retires to the `AbsentDesk` sentinel
-    /// instead — `Desk` is a trait object, so an "answers no enquiries"
-    /// value is cheap to construct and install in `desk`'s place. A
-    /// `Nursery` has no such sentinel: an empty one would still accept a
-    /// park and answer `fork_into_nursery` successfully, which is not
-    /// absence. `None` is the only honest "no nursery installed" value, so
-    /// this is the door that reaches it between calls.
+    /// Uninstall the session's nursery. `set_desk` needs no counterpart — a
+    /// desk retires by installing one that answers nothing — but an empty
+    /// `Nursery` would still accept a park, so `None` is the only honest
+    /// absence here.
     pub fn clear_nursery(&self) {
         self.engine.lock().nursery = None;
     }
 
-    /// Consume the transport and recover the owned `Shell`.  The inverse of
-    /// [`IdentityTransport::new`]: a caller that handed a shell in to route a
-    /// run through production can move it back out afterward.
+    /// The inverse of [`IdentityTransport::new`], for a caller that lent a
+    /// shell in to route one run through production.
     pub fn into_shell(self) -> crate::types::Shell {
         self.engine.into_inner().shell
     }
 
-    /// Panic loudly if called from the thread currently running a dispatch —
-    /// the reentrancy law (§3): a desk handler that reaches back through
-    /// `dispatch`/`shell_mut`/`with_shell` would deadlock on the session lock
-    /// its own stack already holds. Checked *before* touching `self.engine`,
-    /// so a reentrant call panics instead of hanging.
+    /// A desk handler reaching back through `dispatch`/`shell_mut`/`with_shell`
+    /// would deadlock on the session lock its own stack holds. Checked *before*
+    /// touching `self.engine`, so it panics rather than hangs.
     fn check_not_reentrant(&self) {
         let current = std::thread::current().id();
         if *self
@@ -1103,10 +974,8 @@ impl IdentityTransport {
         }
     }
 
-    /// Access the underlying `Shell` through the mutex guard directly.
-    /// This is needed when the caller must combine shell access with
-    /// other borrows (e.g. the REPL session's frontend, jobs table).
-    /// Prefer `with_shell` for simple operations.
+    /// The guard itself, for a caller that must hold shell access across other
+    /// borrows (the REPL's frontend and jobs table). Prefer `with_shell`.
     pub fn shell_mut(&self) -> std::sync::MutexGuard<'_, EngineInner> {
         self.check_not_reentrant();
         self.engine.lock()
@@ -1122,10 +991,9 @@ impl IdentityTransport {
     }
 }
 
-/// [`IdentityTransport::observe_foreground`]'s engine-side half: writes the
-/// run's freshly-installed foreground scope into the caller's cell in
-/// `pre_exec`, which core's own run door runs after installing that scope
-/// but before evaluation starts.
+/// [`IdentityTransport::observe_foreground`]'s engine-side half: `pre_exec` is
+/// the moment the run door has installed the scope but not yet begun to
+/// evaluate.
 struct ForegroundCapture(Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>);
 
 impl crate::run::RunLifecycle for ForegroundCapture {
@@ -1154,14 +1022,13 @@ impl Transport for IdentityTransport {
             slot: &self.dispatch_thread,
         };
 
-        // Mark the in-flight dispatch: the one atomic both the surface and
-        // deferred sinks read to stamp and gate their frames.
+        // The one atomic both sinks read to stamp and gate their frames.
         engine
             .current_dispatch
             .store(id.0, std::sync::atomic::Ordering::Relaxed);
 
-        // The live handles this dispatch lends the run, joined with the
-        // protocol `Run` in the request the engine door runs.
+        // The live, non-transportable handles this dispatch lends the run,
+        // joined with the protocol `Run` the engine door takes.
         let lifecycle: Box<dyn crate::run::RunLifecycle> = match &self.run_scope {
             Some(cell) => Box::new(ForegroundCapture(cell.clone())),
             None => Box::new(()),
@@ -1214,7 +1081,6 @@ impl Transport for IdentityTransport {
     }
 
     fn detach(&self) {
-        // Cancel any in-flight run via the ambient interrupt.
         crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
         self.engine.lock().terminal_lease = None;
     }
@@ -1225,19 +1091,15 @@ impl Transport for IdentityTransport {
 
 // ── Wire transport ────────────────────────────────────────────────────
 
-/// How aggressively a front-end manufactures traffic to keep an otherwise
-/// idle engine visibly alive, and how much total silence it tolerates
-/// before declaring the peer dead (`dev/docs/VM/SYNOD.md` §3).
+/// How briskly a front-end manufactures traffic to keep an idle engine visibly
+/// alive, and how much silence it tolerates before declaring the peer dead.
 ///
-/// Liveness is *any* received frame (the law on [`Frame::Ping`]), so the
-/// interval must be comfortably shorter than the deadline: several pings
-/// (and their pongs) fall inside one deadline window, and a single dropped
-/// exchange never condemns a live peer.
+/// Since liveness is *any* received frame (the law on [`Frame::Ping`]), the
+/// interval must be comfortably shorter than the deadline: several exchanges
+/// fall inside one window, so a single dropped one never condemns a live peer.
 #[derive(Debug, Clone, Copy)]
 pub struct Liveness {
-    /// The cadence at which the front-end manufactures `Ping` traffic.
     pub interval: Duration,
-    /// The longest total silence tolerated before the peer is declared dead.
     pub deadline: Duration,
 }
 
@@ -1250,67 +1112,52 @@ impl Default for Liveness {
     }
 }
 
-/// The out-of-process transport: the engine runs across a duplex stream,
-/// frames crossing on a `WireChannel` (length-prefixed JSON).
+/// The out-of-process transport: the engine runs across a duplex stream, frames
+/// crossing on a `WireChannel` as length-prefixed JSON.
 ///
 /// Two constructors give it two lives. `WireTransport::new` — Unix only, since
-/// what it does is hand a socketpair end to a child on fd 3 — spawns the engine
-/// as a same-host child, where the child's death is a kernel-guaranteed EOF and
-/// heartbeats would be noise.
-/// [`WireTransport::adopt`] drives the protocol over an *existing* stream —
-/// in production the virtual-socket connection to a guest VM — whose failure
-/// mode is silence rather than EOF, and so runs a heartbeat ticker that
-/// manufactures the traffic silence is measured against.
+/// all it does is hand a socketpair end to a child on fd 3 — spawns a same-host
+/// engine child, whose death is a kernel-guaranteed EOF, so heartbeats would be
+/// noise. [`WireTransport::adopt`] drives an *existing* stream, in production
+/// the virtual socket into a guest VM, whose failure mode is silence rather
+/// than EOF, and so runs a ticker.
 ///
-/// A dedicated reader thread forwards `Event` frames from the wire into the
-/// `EventReceiver` the front-end drains, swallows `Pong` frames (liveness
-/// bookkeeping, never surfaced), and records the instant of every received
-/// frame so the ticker can tell silence from life.  Writes — `Dispatch`,
-/// `Attach`, `Detach`, `Control`, and the ticker's `Ping` — go through a
-/// shared `Mutex<WireChannel>` so they are concurrent-safe with each other.
+/// A reader thread forwards `Event` frames into the `EventReceiver`, swallows
+/// `Pong`s, and timestamps every frame it reads. All writes share one
+/// `Mutex<WireChannel>`, the ticker's `Ping` included.
 pub struct WireTransport {
-    /// Event receiver fed by the reader thread.
     events_recv: EventReceiver,
-    /// Control sender that writes `Control` frames to the wire.
     control: ControlSender,
-    /// Shared write end, behind a mutex for concurrent access.
     write_tx: Arc<Mutex<crate::wire::WireChannel>>,
-    /// The engine child process, when this transport spawned one.
-    /// `Some` under [`WireTransport::new`], whose engine is a same-host
-    /// child to be killed and reaped on drop; `None` under
-    /// [`WireTransport::adopt`], which drives a stream it does not own the
-    /// far end of — and so the only field of this transport that is a
-    /// platform's, rather than the protocol's.
+    /// `Some` under [`WireTransport::new`], whose child is killed and reaped on
+    /// drop; `None` under [`WireTransport::adopt`], which does not own the far
+    /// end. The one field belonging to a platform rather than the protocol.
     #[cfg(unix)]
     child: Option<ChildHandle>,
-    /// Reader thread handle (never joined — the thread exits when the
-    /// channel closes).  Wrapped in a `Mutex<Option<…>>` for `Sync`.
+    /// Never joined: the thread exits when the channel closes. `Mutex` only
+    /// for `Sync`.
     _reader: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Set when the peer dies — a write error, a read EOF, or the ticker's
-    /// deadline elapsing.  The reader and ticker both check it to break
-    /// early, and it is the honest source for [`WireTransport::dead`].
+    /// deadline elapsing. Reader and ticker both check it to break early, and
+    /// it is what [`WireTransport::dead`] reports.
     death: Arc<AtomicBool>,
-    /// The in-flight dispatch id (`0` = none), stamped by `dispatch` and
-    /// shared with the published `ControlSender` so `cancel_current` names
-    /// the dispatch it means.
+    /// Shared with the published `ControlSender` so `cancel_current` names the
+    /// dispatch it means.
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
-    /// The instant of the last frame the reader received — the fact the
-    /// heartbeat ticker measures silence against.
+    /// The instant of the last frame read — what the ticker measures silence
+    /// against.
     last_seen: Arc<Mutex<Instant>>,
-    /// The heartbeat an adopted stream still owes: parked here by
-    /// [`WireTransport::adopt`], taken and spawned by the first
-    /// [`Transport::attach`]. `None` under [`WireTransport::new`], whose
-    /// socketpair never pings at all.
+    /// The heartbeat an adopted stream still owes, parked by
+    /// [`WireTransport::adopt`] and taken by the first [`Transport::attach`].
+    /// `None` under [`WireTransport::new`], which never pings at all.
     pending_heartbeat: Mutex<Option<Liveness>>,
 }
 
-/// The reader loop shared by both constructors: forward `Event` frames onto
-/// `event_tx`, record the instant of *every* successfully read frame in
-/// `last_seen` (the liveness law: any frame is proof of life), swallow
-/// `Pong` frames as bookkeeping the front-end never sees, and — on EOF, a
-/// read error, or an already-set death flag — set `death` before exiting,
-/// so `dead()` is honest under every teardown path and dropping `event_tx`
-/// closes the event channel that fails the in-flight dispatch's `recv`.
+/// The reader loop shared by both constructors. `last_seen` records *every*
+/// frame read, not just `Pong`s — any frame is proof of life. On EOF, a read
+/// error, or an already-set flag it sets `death` before exiting, so `dead()` is
+/// honest under every teardown path and the dropped `event_tx` closes the
+/// channel whose `recv` is what fails the in-flight dispatch.
 fn spawn_wire_reader(
     mut reader_ch: crate::wire::WireChannel,
     event_tx: mpsc::Sender<(DispatchId, Event)>,
@@ -1325,7 +1172,7 @@ fn spawn_wire_reader(
             match reader_ch.read_frame() {
                 Ok(Some(frame)) => {
                     *last_seen.lock().unwrap() = Instant::now();
-                    // A `Pong`'s whole job was the `last_seen` refresh above.
+                    // A `Pong`'s whole job is the refresh above.
                     if let Frame::Event(id, ev) = frame
                         && event_tx.send((id, ev)).is_err()
                     {
@@ -1341,14 +1188,10 @@ fn spawn_wire_reader(
 
 /// The heartbeat ticker of an adopted stream, spawned by the first
 /// [`Transport::attach`] once the `Attach` frame is through the write lock —
-/// never at [`WireTransport::adopt`] — so no `Ping` precedes the handshake
-/// by construction. Every `liveness.interval` it either exits (death already
-/// declared), declares death itself (silence has outrun `liveness.deadline`),
-/// or manufactures one `Ping` with an incrementing sequence. On declaring
-/// death — from silence or a failed write — it sets the flag and shuts the
-/// wire down, so the parked reader wakes, drops its `event_tx`, and closes
-/// the event channel whose `recv` returning `None` is what fails the
-/// in-flight dispatch. Never joined.
+/// never at [`WireTransport::adopt`] — so no `Ping` precedes the handshake by
+/// construction. On declaring death, from silence or a failed write, it shuts
+/// the wire down too, waking the parked reader so the event channel closes.
+/// Never joined.
 fn spawn_heartbeat(
     write_tx: Arc<Mutex<crate::wire::WireChannel>>,
     death: Arc<AtomicBool>,
@@ -1383,15 +1226,11 @@ fn spawn_heartbeat(
 }
 
 impl WireTransport {
-    /// Spawn the engine child and set up the wire channel.
+    /// Spawn the engine child on one end of a fresh socketpair, inherited as
+    /// fd 3, and start the reader on the other.
     ///
-    /// Creates a `WireChannel` socketpair, passes one end to the engine
-    /// child as fd 3, and starts a reader thread that funnels incoming
-    /// `Event` frames into the event receiver.
-    ///
-    /// No heartbeat ticker is started: a same-host child's death is a
-    /// kernel-guaranteed EOF, so heartbeats belong to
-    /// [`WireTransport::adopt`].
+    /// No ticker: a same-host child's death is a kernel-guaranteed EOF, so
+    /// heartbeats belong to [`WireTransport::adopt`].
     ///
     /// # Errors
     /// Returns `Err` if creating the socketpair fails, if duplicating the
@@ -1405,11 +1244,10 @@ impl WireTransport {
     pub fn new() -> io::Result<Self> {
         let (frontend, engine) = crate::wire::WireChannel::pair()?;
 
-        // Duplicate the front-end fd so we can read on one handle
-        // and write on the other concurrently.
+        // A duplicate fd, so the reader can park in `read_frame` while the
+        // front-end writes on the same socket.
         let writer = frontend.try_clone()?;
 
-        // Spawn the engine child with the engine end of the socket on fd 3.
         let engine_fd = engine.as_raw_fd();
         let mut cmd =
             std::process::Command::new(std::env::current_exe().map_err(io::Error::other)?);
@@ -1423,23 +1261,19 @@ impl WireTransport {
                 if libc::dup2(engine_fd, 3) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                // Close the original fd — only fd 3 should remain.
+                // Only fd 3 may remain.
                 libc::close(engine_fd);
                 Ok(())
             });
         }
         let child = cmd.spawn()?;
-        // Engine end no longer needed in the parent.
+        // The parent must not hold the engine end open, or the child's exit
+        // would never read as EOF.
         drop(engine);
 
-        // Death flag: set on EPIPE so the reader knows to tear down.
         let death = Arc::new(AtomicBool::new(false));
-
-        // Event channel: reader thread writes, front-end drains.
         let (event_tx, event_rx) = mpsc::channel();
-
-        // No ticker under `new`; the shared reader records `last_seen`
-        // unconditionally.
+        // No ticker here, but the shared reader keeps `last_seen` anyway.
         let last_seen = Arc::new(Mutex::new(Instant::now()));
         let reader = spawn_wire_reader(frontend, event_tx, death.clone(), last_seen.clone());
 
@@ -1462,17 +1296,13 @@ impl WireTransport {
 
     /// Drive the protocol over an existing duplex `stream` — no child spawn.
     ///
-    /// This is the guest-VM path, and the one constructor both platforms have:
-    /// `stream` is the virtual-socket connection to the engine running in the
-    /// guest — an `AF_VSOCK` descriptor under Virtualization.framework, an
-    /// `AF_HYPERV` socket under Hyper-V — adopted through
-    /// [`crate::wire::WireStream`], whose docs say why std's stream types can
-    /// carry either.  Such a stream can fall silent without ever tearing (a
-    /// dead host produces no EOF), so the first [`Transport::attach`] — not
-    /// this constructor — spawns a heartbeat ticker under `liveness`, whose
-    /// declared death shuts the wire down and closes the event channel: the
-    /// mechanism that fails an in-flight dispatch as cancelled and marks the
-    /// session detached.
+    /// The guest-VM path, and the one constructor both platforms have:
+    /// `stream` is the virtual-socket connection to the engine in the guest —
+    /// an `AF_VSOCK` descriptor under Virtualization.framework, an `AF_HYPERV`
+    /// socket under Hyper-V — adopted through [`crate::wire::WireStream`],
+    /// whose docs say why std's stream types can carry either. Such a stream
+    /// can fall silent without ever tearing, so the first [`Transport::attach`]
+    /// spawns a heartbeat ticker under `liveness`.
     ///
     /// # Errors
     /// Returns `Err` if the stream cannot be duplicated into separate read
@@ -1482,8 +1312,8 @@ impl WireTransport {
         liveness: Liveness,
     ) -> io::Result<Self> {
         let reader_ch = crate::wire::WireChannel::from_stream(stream);
-        // A duplicate fd so the reader can park in `read_frame` while the
-        // ticker and the front-end write concurrently on the same socket.
+        // A duplicate fd, so the reader can park in `read_frame` while the
+        // ticker and the front-end write on the same socket.
         let writer = reader_ch.try_clone()?;
 
         let death = Arc::new(AtomicBool::new(false));
@@ -1509,19 +1339,16 @@ impl WireTransport {
         })
     }
 
-    /// Whether this session's peer has been declared dead — by a write
-    /// error, a read EOF, or the heartbeat deadline elapsing. The front-end's
-    /// way to mark a session *detached* rather than merely failed: a dead
-    /// transport's in-flight dispatch fails as cancelled, and no further
-    /// frame will ever cross.
+    /// Whether the peer has been declared dead — a write error, a read EOF, or
+    /// the heartbeat deadline. This is how a front-end tells *detached* from
+    /// merely failed: no further frame will ever cross.
     pub fn dead(&self) -> bool {
         self.death.load(Ordering::SeqCst)
     }
 
-    /// Write a frame to the wire channel. Any write error is fatal: a
-    /// dropped dispatch (e.g. `ECONNRESET`, not only `BrokenPipe`) means no
-    /// `Report` will ever arrive on this connection, so the host's `recv`
-    /// must be told the transport is dead rather than blocking forever.
+    /// Any write error is fatal, `ECONNRESET` no less than `BrokenPipe`: a
+    /// dropped frame means no `Report` will ever arrive, so the host's `recv`
+    /// must learn of the death rather than block forever.
     fn write(&self, frame: &Frame) {
         let outcome = self.write_tx.lock().unwrap().write_frame(frame);
         if let Err(e) = outcome {
@@ -1533,15 +1360,12 @@ impl WireTransport {
 
 impl Drop for WireTransport {
     fn drop(&mut self) {
-        // Declare death and shut the socket down: this wakes both the reader
-        // and (under `adopt`) the ticker, which share the one underlying
-        // socket, so neither is left parked past the transport's lifetime.
+        // The shutdown wakes the reader and (under `adopt`) the ticker, which
+        // share the one socket: neither may outlive the transport parked.
         self.death.store(true, Ordering::SeqCst);
         self.write_tx.lock().unwrap().shutdown();
-        // A same-host child (`new`) is additionally killed and reaped; an
-        // adopted stream (`adopt`) has no child to own — its far end is a
-        // guest VM the session manager reaps.  Only Unix has the former, so
-        // only Unix has anything to reap here.
+        // An adopted stream owns no child — its far end is a guest VM the
+        // session manager reaps — so only `new`'s child is reaped here.
         #[cfg(unix)]
         if let Some(child) = &mut self.child {
             let _ = child.kill();
@@ -1579,10 +1403,9 @@ impl Transport for WireTransport {
                         }),
                     };
                 }
-                // An event that is not this probe's Report — another
-                // dispatch's, a deferred worker's batch settling mid-probe
-                // — is stashed for the ordinary drain, never dropped
-                // (§6.5's ordering law).
+                // Anything that is not this probe's Report — another
+                // dispatch's, a worker's batch settling mid-probe — is stashed
+                // for the ordinary drain rather than dropped.
                 Some(item) => self.events_recv.stash.lock().unwrap().push_back(item),
                 None => return Err("engine connection closed".into()),
             }
@@ -1597,10 +1420,8 @@ impl Transport for WireTransport {
         &self.events_recv
     }
 
-    /// TODO Phase 2 Task 6: When the endpoint has a lease, pass the
-    /// controlling terminal fds over the socket via `SCM_RIGHTS` (Unix
-    /// ancillary data).  For now the endpoint's lease field is
-    /// `#[serde(skip)]` and the engine stores it as a placeholder.
+    /// The endpoint's lease does not survive encoding, so the engine attaches
+    /// with no terminal of its own.
     fn attach(
         &self,
         endpoint: TerminalEndpoint,
@@ -1617,8 +1438,8 @@ impl Transport for WireTransport {
             proto_version: PROTOCOL_VERSION,
             installer,
         });
-        // Only now, with the Attach frame through the write lock, may an
-        // adopted stream's heartbeat start: no Ping can precede the handshake.
+        // Only now, with the Attach through the write lock, may the heartbeat
+        // start: no Ping may precede the handshake.
         let pending = self.pending_heartbeat.lock().unwrap().take();
         if let Some(liveness) = pending {
             spawn_heartbeat(
@@ -1645,13 +1466,10 @@ impl Transport for WireTransport {
 
 // ── Enquiry desk tests ────────────────────────────────────────────────
 //
-// Phase A installs no desk anywhere in production (§"the exarch installation
-// point" of the enquiry-channel ADR): the rail is exercised only here, by a
-// stub desk. There is no `enquire` builtin yet, so a run's body (parsed ral
-// source) has no way to call `Shell::enquire` itself; the round-trip test
-// below drives it the same way the run door's own lifecycle
-// tests do — a `RunLifecycle` given `&mut Shell` mid-run, exactly the
-// shape the migration's first handler will run under.
+// Core installs no builtin that enquires, so a run's body cannot reach
+// `Shell::enquire` from ral source here. These drive it through a
+// `RunLifecycle` handed `&mut Shell` mid-run instead — the same shape a real
+// enquiring builtin runs under.
 #[cfg(test)]
 mod enquiry_tests {
     use super::*;
@@ -1661,9 +1479,8 @@ mod enquiry_tests {
     use crate::types::{Capabilities, Desk, EnquiryDesk, Error, Mooring, Shell};
     use std::sync::Mutex;
 
-    /// The minimal capturing request under the ⊤ capability ceiling: no
-    /// surface, no deferred sink, no desk — matches `run.rs`'s own
-    /// `capture_req`.
+    /// The minimal capturing request under the ⊤ ceiling, mirroring `run.rs`'s
+    /// own `capture_req`.
     fn capture_req<'a>(src: &str) -> RunRequest<'a> {
         RunRequest {
             run: Run {
@@ -1685,8 +1502,7 @@ mod enquiry_tests {
         }
     }
 
-    /// A `Shell` with no desk installed answers every enquiry with the
-    /// honest absence error, verbatim.
+    /// No desk installed answers the honest absence error, verbatim.
     #[test]
     fn absent_desk_answers_the_honest_error() {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -1711,8 +1527,8 @@ mod enquiry_tests {
         }
     }
 
-    /// A `RunLifecycle` that enquires mid-run (`pre_exec`, which runs with
-    /// the run frame — and its desk — installed) and records the answer.
+    /// Enquires from `pre_exec`, which runs with the run frame — and so its
+    /// desk — already installed.
     #[derive(Clone)]
     struct AskDuringRun {
         req: FOValue,
@@ -1724,9 +1540,7 @@ mod enquiry_tests {
         }
     }
 
-    /// `Shell::enquire` round-trips through a stub desk installed on the
-    /// run: the desk's transform (`Int{41} -> Int{42}`) is visible to the
-    /// caller of `enquire`, not just to the desk.
+    /// The desk's transform reaches `enquire`'s caller, not just the desk.
     #[test]
     fn enquire_round_trips_through_a_stub_desk() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -1756,13 +1570,9 @@ mod enquiry_tests {
         }
     }
 
-    /// A desk whose handler reaches back into `IdentityTransport::shell_mut`
-    /// — the reentrancy law (§3) forbids this: the handler runs on the
-    /// dispatching thread, inside `dispatch`'s session-lock hold, so a
-    /// second lock attempt would deadlock. The stamp `dispatch` sets for its
-    /// duration is simulated here (there is no `enquire` builtin yet to
-    /// drive a live encoded dispatch into calling the desk), exercising the
-    /// exact guard every real dispatch installs.
+    /// A handler reaching back into `shell_mut` would take the session lock its
+    /// own stack already holds. Lacking a core builtin that enquires, the test
+    /// sets `dispatch`'s thread stamp by hand and exercises the same guard.
     struct ReentrantShellMutDesk(std::sync::Arc<IdentityTransport>);
     impl EnquiryDesk for ReentrantShellMutDesk {
         fn enquire(
@@ -1788,9 +1598,7 @@ mod enquiry_tests {
         let _ = shell.enquire(&mooring, FOValue::Unit);
     }
 
-    /// The `dispatch` variant of the same law: a desk handler that reaches
-    /// back into `Transport::dispatch` must panic, never deadlock on the
-    /// session lock its own stack already holds.
+    /// The same guard on the other door.
     struct ReentrantDispatchDesk(std::sync::Arc<IdentityTransport>);
     impl EnquiryDesk for ReentrantDispatchDesk {
         fn enquire(
@@ -1829,9 +1637,8 @@ mod enquiry_tests {
         let _ = shell.enquire(&mooring, FOValue::Unit);
     }
 
-    /// `IdentityTransport::set_desk` installs the desk that `dispatch` hands
-    /// onto the `RunRequest` it builds: the same `Arc` reaches
-    /// `EngineInner.desk`.
+    /// The same `Arc` `set_desk` was given is the one `dispatch` would hand
+    /// onto its `RunRequest`.
     #[test]
     fn set_desk_installs_onto_engine_inner() {
         let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
@@ -1848,13 +1655,8 @@ mod enquiry_tests {
         );
     }
 
-    /// `IdentityTransport::clear_nursery` uninstalls the nursery
-    /// `set_nursery` installed — the symmetric teardown `set_desk`'s
-    /// retire-to-`AbsentDesk` pattern has no direct equivalent for, since a
-    /// `Nursery` has no sentinel "absent" value. `engine.nursery` reverting
-    /// to `None` is what makes a later dispatch's `fork_into_nursery`
-    /// answer the honest absence error rather than finding a stale nursery
-    /// still installed.
+    /// Reverting `engine.nursery` to `None` is what makes a later dispatch's
+    /// `fork_into_nursery` answer absence rather than find a stale nursery.
     #[test]
     fn clear_nursery_uninstalls_from_engine_inner() {
         use crate::types::Nursery;
@@ -1914,10 +1716,9 @@ mod durability_tests {
         }
     }
 
-    /// A panicking run dispatched through the identity seam arrives as an
-    /// ordinary `Report::Static{Host}` event — the run door caught it and
-    /// rolled the shell back — and the session dispatches the next run
-    /// cleanly on the same transport.
+    /// A panicking run arrives as an ordinary `Report::Static{Host}` — the run
+    /// door caught it and rolled the shell back — and the same transport
+    /// dispatches the next run cleanly.
     #[test]
     fn panicking_dispatch_reports_and_the_session_survives() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -1967,16 +1768,14 @@ mod durability_tests {
 
 // ── Probe tests ───────────────────────────────────────────────────────
 //
-// Identity-only: engine-busy serialisation needs a second process racing
-// the wire engine's rendezvous, impractical to exercise as a unit test —
-// skipped, noted rather than faked.
+// Identity-only. Engine-busy serialisation needs a second process racing the
+// wire engine's rendezvous, which no unit test can stage.
 #[cfg(test)]
 mod probe_tests {
     use super::*;
     use crate::types::Shell;
 
-    /// `` `worker-count `` on a freshly-built shell answers `0` — nothing has
-    /// been spawned.
+    /// Nothing spawned yet.
     #[test]
     fn worker_count_answers_zero_on_a_fresh_shell() {
         let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
@@ -1989,9 +1788,7 @@ mod probe_tests {
         assert_eq!(answer, FOValue::Int { value: 0 });
     }
 
-    /// `` `binding-count `` and `` `leased-binding-count `` both answer
-    /// plain integers — a fresh shell has no leased bindings (the ledger is
-    /// unarmed).
+    /// A fresh shell's ledger is unarmed, so nothing is leased.
     #[test]
     fn binding_probes_answer_integers() {
         let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
@@ -2011,8 +1808,8 @@ mod probe_tests {
         assert_eq!(leased, FOValue::Int { value: 0 });
     }
 
-    /// `` `env-var `` answers `` `none `` for a name never set, and
-    /// `` `some [value] `` after `Shell::set_env_var` installs one.
+    /// `` `none `` for a name never set, `` `some [value] `` once
+    /// `Shell::set_env_var` installs one.
     #[test]
     fn env_var_probe_round_trips_the_overlay() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -2052,7 +1849,7 @@ mod probe_tests {
         );
     }
 
-    /// `` `cwd `` answers the shell's logical cwd as a string.
+    /// The shell's *logical* cwd, not the process's.
     #[test]
     fn cwd_probe_answers_a_string() {
         let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
@@ -2065,8 +1862,7 @@ mod probe_tests {
         }
     }
 
-    /// `` `grant-depth `` answers the grant stack's frame count — at least
-    /// the ambient root frame on a fresh shell.
+    /// A fresh shell still carries the ambient root frame.
     #[test]
     fn grant_depth_probe_answers_at_least_one() {
         let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
@@ -2079,8 +1875,7 @@ mod probe_tests {
         }
     }
 
-    /// `` `largest-binding-bytes `` answers `0` on a bare shell and a
-    /// positive shallow estimate once anything is bound.
+    /// `0` on a bare shell, a positive shallow estimate once anything is bound.
     #[test]
     fn largest_binding_bytes_probe_measures_without_bindings_and_with() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -2108,7 +1903,7 @@ mod probe_tests {
         }
     }
 
-    /// `` `workers `` on a fresh shell answers an empty list.
+    /// An empty list, not an error, when there is nothing to report.
     #[test]
     fn workers_probe_answers_an_empty_list_on_a_fresh_shell() {
         let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
@@ -2121,8 +1916,7 @@ mod probe_tests {
         assert_eq!(answer, FOValue::List { items: vec![] });
     }
 
-    /// An unrecognised probe class answers `Err` naming the class, never a
-    /// silent default.
+    /// An unrecognised class names itself in the error, never a silent default.
     #[test]
     fn unknown_probe_class_names_itself_in_the_error() {
         let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
@@ -2138,8 +1932,7 @@ mod probe_tests {
         );
     }
 
-    /// A probe request that is not a `Variant` at all — no class to read —
-    /// answers `Err` rather than panicking.
+    /// No class to read at all is an error, not a panic.
     #[test]
     fn non_variant_probe_request_is_an_honest_error() {
         let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
@@ -2152,9 +1945,8 @@ mod probe_tests {
 
 // ── Runtime-error seam tests ──────────────────────────────────────────
 //
-// A caught runtime error is rendered to its full diagnostic string at the
-// seam, so every front-end (REPL included) regains batch-host parity —
-// `error:` prefix, exit status, hint — and prints the string verbatim.
+// Rendering at the seam is what gives every front-end, the REPL included,
+// batch-host parity: it prints the string verbatim and renders nothing itself.
 #[cfg(test)]
 mod runtime_error_seam_tests {
     use super::*;
@@ -2194,20 +1986,19 @@ mod runtime_error_seam_tests {
 
 // ── Wire liveness tests ───────────────────────────────────────────────
 //
-// These drive `WireTransport::adopt` over a `UnixStream::pair`, with a peer
-// `WireChannel` on the far end standing in for the guest engine. They prove
-// the liveness law of `dev/docs/VM/SYNOD.md` §3: any received frame is proof
-// of life, and only genuine silence past the deadline is death. Timing
-// margins are deliberately loose — the dev fleet includes a jittery Podman
-// VM — so nothing here asserts a tight upper bound, only that death is or is
-// not reached within multi-second slack.
+// These drive `WireTransport::adopt` over a `UnixStream::pair`, a peer
+// `WireChannel` on the far end standing in for the guest engine, to prove the
+// two halves of the liveness law: any received frame is proof of life, and only
+// genuine silence past the deadline is death. Margins are deliberately loose,
+// since the dev fleet includes a jittery VM — nothing here asserts a tight
+// upper bound, only that death is or is not reached within seconds of slack.
 #[cfg(all(test, unix))]
 mod wire_liveness_tests {
     use super::*;
     use std::os::unix::net::UnixStream;
 
-    /// A brisk heartbeat for the tests: several pings fall inside one
-    /// deadline window, and both are far below the slack the assertions wait.
+    /// Several pings fall inside one deadline window, and both are far below
+    /// the slack the assertions wait.
     fn brisk() -> Liveness {
         Liveness {
             interval: Duration::from_millis(25),
@@ -2215,9 +2006,8 @@ mod wire_liveness_tests {
         }
     }
 
-    /// The attach every session opens with — the ticker does not start
-    /// until it is written, so tests that expect heartbeat traffic (or
-    /// deadline death) must attach first, exactly as a real front-end does.
+    /// The ticker does not start until the attach is written, so any test
+    /// expecting heartbeat traffic or deadline death must call this first.
     fn attach(transport: &WireTransport) {
         transport.attach(
             TerminalEndpoint {
@@ -2231,9 +2021,7 @@ mod wire_liveness_tests {
         );
     }
 
-    /// `adopt` followed by `attach` puts an `Attach` frame on the wire
-    /// carrying `PROTOCOL_VERSION` — the version handshake the guest engine
-    /// checks before it will speak (§3).
+    /// The version handshake the guest engine checks before it will speak.
     #[test]
     fn adopt_then_attach_conveys_the_protocol_version() {
         let (front, back) = UnixStream::pair().unwrap();
@@ -2252,11 +2040,8 @@ mod wire_liveness_tests {
         }
     }
 
-    /// No `Ping` precedes the handshake, even with the attach delayed far
-    /// past several ping intervals: the ticker starts inside `attach`, after
-    /// the `Attach` frame is through the write lock, so the first frame on
-    /// the wire is `Attach` by construction — not because the front-end
-    /// usually wins a race.
+    /// The attach is delayed past several ping intervals, so `Attach` arriving
+    /// first proves the ordering is by construction, not by winning a race.
     #[test]
     fn no_ping_precedes_the_attach_handshake() {
         let (front, back) = UnixStream::pair().unwrap();
@@ -2272,11 +2057,8 @@ mod wire_liveness_tests {
         }
     }
 
-    /// A peer that echoes every `Ping(n)` as `Pong(n)` keeps the session
-    /// alive indefinitely: after wall-clock time far past the deadline, the
-    /// transport is still not `dead()`. This is the law's positive half —
-    /// received frames are proof of life, so a pinging front-end and a
-    /// ponging engine never time each other out.
+    /// The law's positive half: a ponging peer is alive well past the
+    /// deadline, since received frames are proof of life.
     #[test]
     fn a_ponging_peer_keeps_the_session_alive_past_the_deadline() {
         let (front, back) = UnixStream::pair().unwrap();
@@ -2308,19 +2090,16 @@ mod wire_liveness_tests {
         let _ = peer.join();
     }
 
-    /// A peer that connects and then stays silent forever is declared dead
-    /// once silence outruns the deadline, and the front-end's event stream
-    /// closes: `events().recv()` returns `None` — the mechanism that fails an
-    /// in-flight dispatch as cancelled. The law's negative half: silence, and
-    /// only silence, means death.
+    /// The law's negative half. A closed event stream is also the mechanism
+    /// that fails an in-flight dispatch as cancelled.
     #[test]
     fn a_silent_peer_is_declared_dead_and_closes_the_event_stream() {
         let (front, back) = UnixStream::pair().unwrap();
         let transport = WireTransport::adopt(front, brisk()).unwrap();
         attach(&transport);
 
-        // `back` is held open but never speaks: no EOF, only silence, so
-        // death can come from nothing but the heartbeat deadline.
+        // `back` is held open but never speaks: no EOF, so death can come from
+        // nothing but the heartbeat deadline.
         assert!(
             transport.events().recv().is_none(),
             "a silent peer past the deadline must close the event stream"
@@ -2330,10 +2109,8 @@ mod wire_liveness_tests {
         drop(back);
     }
 
-    /// A peer that hangs up — the same-EOF teardown a torn stream produces —
-    /// closes the event stream and marks death: `events().recv()` returns
-    /// `None` and `dead()` becomes true. The reader sets the flag before it
-    /// drops its sender, so `dead()` is honest the instant `recv` unblocks.
+    /// The reader sets the flag before dropping its sender, so `dead()` is
+    /// honest the instant `recv` unblocks on a hangup.
     #[test]
     fn a_hangup_closes_the_event_stream_and_marks_death() {
         let (front, back) = UnixStream::pair().unwrap();

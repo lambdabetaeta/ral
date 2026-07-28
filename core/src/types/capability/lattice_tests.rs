@@ -1,16 +1,14 @@
 //! Lattice-algebra tests for the capability types.
 //!
-//! Lives as a sibling of `capability.rs` (via `mod lattice_tests;` there)
-//! because several tests exercise crate-private surfaces — the
-//! `pub(crate)` `decode_capability_map` and the crate-private `FreezeCtx`
-//! scaffolding — that an integration test in `core/tests/` cannot see.
+//! In-crate rather than under `core/tests/` because these reach crate-private
+//! doors: `decode_capability_map`, `NormalizedPrefix::for_test`,
+//! `admits_for_test`.
 
 use super::*;
 use crate::capability::decode_capability_map;
 use crate::types::{PolicyError, Value};
 
-/// Build a `Value::Map` from `(key, value)` pairs — the shape both the
-/// `grant` builtin and the capability-file loader feed `decode_capability_map`.
+/// The `Value::Map` shape `decode_capability_map` receives in production.
 fn map(entries: Vec<(&str, Value)>) -> Value {
     Value::Map(
         entries
@@ -20,30 +18,22 @@ fn map(entries: Vec<(&str, Value)>) -> Value {
     )
 }
 
-/// Build a `Value::List` of strings — a grant path list.
 fn strs(items: &[&str]) -> Value {
     Value::list(items.iter().map(|s| Value::String((*s).into())).collect())
 }
 
-/// The platform normal form of a path literal.  The capability
-/// composition stores dir keys and fs prefixes through
-/// `NormalizedPrefix::from_surface`, whose `fold_dots` kernel
-/// reconstructs each path with the host separator (`/usr/bin` →
-/// `\usr\bin` on Windows).  Test witnesses and expected values pass
-/// through the same kernel so the Unix-shaped literals stay meaningful
-/// on both Unix and Windows.
+/// A path literal in the host's normal form (`/usr/bin` → `\usr\bin` on
+/// Windows), so the Unix-shaped fixtures below still mean something there.
 fn np(s: &str) -> String {
     nprefix(s).into_string()
 }
 
-/// Mint a [`NormalizedPrefix`](crate::path::NormalizedPrefix) witness —
-/// used throughout this file's fixtures, which build `FsPolicy`/`ExecMap`
-/// values directly rather than through `decode_capability_map`.
+/// A prefix witness for the fixtures that build `FsPolicy`/`ExecMap` directly
+/// rather than through `decode_capability_map`.
 fn nprefix(s: &str) -> crate::path::NormalizedPrefix {
     crate::path::NormalizedPrefix::from_surface(s)
 }
 
-/// Unwrap a decode `PolicyError` into its message.
 fn break_msg(e: PolicyError) -> String {
     e.message
 }
@@ -51,12 +41,8 @@ fn break_msg(e: PolicyError) -> String {
 #[cfg(unix)]
 use crate::test_env::{with_var, with_vars_cleared};
 
-/// Run `f` with every `XDG_*_HOME` override removed, restoring them
-/// after, so `xdg:` sigils resolve to the home-joined defaults and the
-/// escape guard sees paths under the synthetic test home.
-///
-/// Unix-only: every consumer below is `#[cfg(unix)]` (Windows path
-/// normalisation defeats the literal Unix-shaped assertions).
+/// Clears the `XDG_*_HOME` overrides so `xdg:` sigils resolve to the
+/// home-joined defaults, under the synthetic home the escape guard admits.
 #[cfg(unix)]
 fn with_xdg_defaults<R>(f: impl FnOnce() -> R) -> R {
     with_vars_cleared(
@@ -70,8 +56,6 @@ fn with_xdg_defaults<R>(f: impl FnOnce() -> R) -> R {
         f,
     )
 }
-
-// ── Capabilities lattice properties ───────────────────────────────
 
 fn witness_a() -> Capabilities {
     Capabilities {
@@ -174,11 +158,8 @@ fn meet_idempotent() {
     assert_eq!(a.clone().meet(a.clone()), a);
 }
 
-/// Idempotence holds on a `Subcommands` verdict whose elements were
-/// declared out of alphabetical order: the sole constructor
-/// `decode_capability_map` canonicalizes (sorts + dedups) the allowlist,
-/// and `meet` preserves that canonical form, so `Eq`, `meet`, and `join`
-/// agree and `a.meet(a) == a` regardless of declaration order.
+/// `decode_capability_map` is the only constructor of a `Subcommands` verdict
+/// and canonicalizes its allowlist, so declaration order never reaches `meet`.
 #[test]
 fn meet_idempotent_subcommands_ignore_order() {
     let v = map(vec![(
@@ -222,9 +203,8 @@ fn meet_bottom_zeroes_authority() {
     assert!(!m.shell.expect("shell retained").chdir);
 }
 
-/// Silence permits, and one `detach: false` anywhere in the stack denies
-/// no matter what sits above it — the axis composes by meet like every
-/// other, so an ordinary `grant fs: […]` says nothing about survivors.
+/// Absence is not denial: the axis composes by meet like every other, so only
+/// an explicit `detach: false` withholds, and no inner frame gives it back.
 #[test]
 fn detach_is_permitted_until_some_layer_withholds_it() {
     let deny = |d: Option<bool>| Capabilities {
@@ -254,9 +234,7 @@ fn detach_is_permitted_until_some_layer_withholds_it() {
 fn meet_exec_intersects_and_meets_policies() {
     let m = witness_a().meet(witness_b());
     let exec = m.exec.unwrap();
-    // Literal half: cargo is shared (Subcommands meet), git/ls are
-    // one-sided so drop.  Dir half: /usr/bin is shared,
-    // /usr/local/bin is one-sided so drops.
+    // A one-sided allow drops under meet; a one-sided `Deny` does not.
     assert!(exec.literals.contains_key("cargo"));
     match exec.literals.get("cargo").unwrap() {
         ExecPolicy::Subcommands(s) => assert_eq!(s, &BTreeSet::from(["build".to_string()])),
@@ -268,11 +246,8 @@ fn meet_exec_intersects_and_meets_policies() {
     assert!(!exec.allow_dirs.contains(&nprefix("/usr/local/bin")));
 }
 
-/// `Deny` is sticky downward: a base ceiling that vetos `bash`
-/// must keep that veto after meet with a restrict file that
-/// does not name `bash` at all.  Without this the `reasonable`
-/// base would lose its shell deny the moment any `[exec]`-bearing
-/// restrict came in.
+/// A one-sided `Deny` survives meet, or a base profile like `minimal` would
+/// lose its shell veto to any restrict file that merely mentions `exec`.
 #[test]
 fn meet_exec_preserves_one_sided_deny() {
     let base = Capabilities {
@@ -300,10 +275,8 @@ fn meet_exec_preserves_one_sided_deny() {
     assert_eq!(exec.literals.get("bash"), Some(&ExecPolicy::Deny));
 }
 
-/// Deny-overrides under join: a veto is a floor that even an explicit
-/// same-key re-grant cannot lift.  An extend-base that names
-/// `bash: 'allow'` against a base `bash: 'deny'` leaves bash denied —
-/// to permit bash you choose a base that allows it, not an overlay.
+/// A veto is a floor: an overlay naming `bash: 'allow'` over a base
+/// `bash: 'deny'` leaves bash denied.  To permit it, change the base.
 #[test]
 fn join_exec_regrant_does_not_lift_deny() {
     let base = Capabilities {
@@ -329,11 +302,8 @@ fn join_exec_regrant_does_not_lift_deny() {
     );
 }
 
-/// The dual of `meet_exec_preserves_one_sided_deny`: a base veto on
-/// `bash` survives `--extend-base` against an extension that opens an
-/// unrelated command and is silent on `bash`.  Without this, any
-/// extension carrying a single exec key would silently re-admit every
-/// shell the base pinned out — the extend-base footgun this fix closes.
+/// The dual of `meet_exec_preserves_one_sided_deny` under join: an extension
+/// opening one command must not re-admit every shell the base pinned out.
 #[test]
 fn join_exec_keeps_one_sided_deny() {
     let base = Capabilities {
@@ -357,9 +327,7 @@ fn join_exec_keeps_one_sided_deny() {
     assert_eq!(exec.literals.get("rg"), Some(&ExecPolicy::Allow));
 }
 
-/// Dir `Deny` is sticky downward, exactly as literal `Deny`: a base
-/// ceiling that vetos a directory tree must keep that veto after meet
-/// with a restrict file that names only an unrelated allow dir.
+/// Dir `Deny` is sticky under meet, exactly as literal `Deny`.
 #[test]
 fn meet_exec_dirs_preserve_one_sided_deny() {
     let base = Capabilities {
@@ -383,9 +351,7 @@ fn meet_exec_dirs_preserve_one_sided_deny() {
     assert!(exec.deny_dirs.contains(&nprefix("/opt/danger")));
 }
 
-/// Security-inversion regression: an exact-key clash between an allow
-/// dir and a deny dir must meet to `Deny` (the lattice bottom), never
-/// re-emit `Allow` and silently grant the denied tree.
+/// An exact-key allow/deny clash meets to the bottom, never back to `Allow`.
 #[test]
 fn meet_exec_dirs_deny_beats_allow() {
     let allow = Capabilities {
@@ -409,9 +375,7 @@ fn meet_exec_dirs_deny_beats_allow() {
     assert!(!exec.allow_dirs.contains(&nprefix("/usr/bin")));
 }
 
-/// Deny-overrides on dirs too: an extend-base that re-grants the exact
-/// denied tree does not lift the veto — the deny wins the exact-key
-/// clash, mirroring `meet`.
+/// Deny-overrides on dirs: re-granting the exact denied tree does not lift it.
 #[test]
 fn join_exec_dirs_regrant_does_not_lift_deny() {
     let base = Capabilities {
@@ -435,8 +399,6 @@ fn join_exec_dirs_regrant_does_not_lift_deny() {
     assert!(!exec.allow_dirs.contains(&nprefix("/x")));
 }
 
-/// Dir veto is sticky under join too: a base that denies a directory
-/// tree keeps that veto when an extension opens only an unrelated tree.
 #[test]
 fn join_exec_dirs_keep_one_sided_deny() {
     let base = Capabilities {
@@ -460,9 +422,7 @@ fn join_exec_dirs_keep_one_sided_deny() {
     assert!(exec.allow_dirs.contains(&nprefix("/usr/bin")));
 }
 
-/// Meet keeps an allow-region intersection AND a covering deny carved
-/// out of it: `{/usr: Allow}` ⊓ `{/usr: Allow, /usr/bin: Deny}` admits
-/// `/usr` except the denied `/usr/bin` subtree.
+/// A deny carved out of a shared allow region survives the intersection.
 #[test]
 fn meet_exec_dirs_intersect_allow_keeps_covering_deny() {
     let broad = Capabilities {
@@ -486,9 +446,8 @@ fn meet_exec_dirs_intersect_allow_keeps_covering_deny() {
     assert!(exec.deny_dirs.contains(&nprefix("/usr/bin")));
 }
 
-/// IPC roundtrip: a `Capabilities` survives a JSON trip through the
-/// wire format unchanged.  The witness is already resolved (concrete
-/// paths, no sigils), as every `Capabilities` is by construction.
+/// A `Capabilities` is sigil-free by construction, so the wire form carries
+/// concrete paths and the peer has nothing to re-resolve.
 #[test]
 fn ipc_roundtrip_preserves_frozen_capabilities() {
     let c = witness_a();
@@ -518,14 +477,9 @@ fn meet_fs_unions_denies_and_intersects_prefixes() {
     );
 }
 
-/// Nesting an inner fs grant inside an outer one narrows authority to the
-/// *intersection*: the inner cannot widen beyond the outer.  Meeting an
-/// outer `/tmp` (read+write) with an inner `/tmp/work` (read+write) — the
-/// shape `capability::sandbox_projection` folds when two `grant [fs:…]`
-/// layers stack — keeps only the deeper `/tmp/work` and drops the wider
-/// `/tmp`, on *both* read and write.  The wider prefix surviving would let
-/// an inner grant escape its parent's bound, so its absence is the load-
-/// bearing assertion.
+/// Stacked `grant [fs:…]` layers — what `capability::sandbox_projection`
+/// meet-folds — narrow to the intersection.  The wider outer prefix must
+/// *not* survive, or an inner grant would escape its parent's bound.
 #[test]
 fn meet_fs_nested_grants_narrow_to_intersection() {
     let m = witness_a().meet(witness_b());
@@ -545,8 +499,6 @@ fn meet_fs_nested_grants_narrow_to_intersection() {
     );
 }
 
-/// A single-prefix fs grant, for folding the prefix universe below through
-/// `FsPolicy::meet`/`join` without a directory tree behind it.
 fn fs_of(p: &crate::path::NormalizedPrefix) -> FsPolicy {
     FsPolicy {
         read_prefixes: vec![p.clone()],
@@ -555,8 +507,6 @@ fn fs_of(p: &crate::path::NormalizedPrefix) -> FsPolicy {
     }
 }
 
-/// A single-prefix exec-dir grant, for the same universe folded through
-/// `ExecMap`.
 fn exec_of(p: &crate::path::NormalizedPrefix) -> ExecMap {
     ExecMap {
         literals: BTreeMap::new(),
@@ -565,9 +515,8 @@ fn exec_of(p: &crate::path::NormalizedPrefix) -> ExecMap {
     }
 }
 
-/// The same single prefix folded through both dimensions of `Capabilities`
-/// at once, so the law checks below also exercise the `Option` lift and
-/// the cross-field composition, not just one policy type in isolation.
+/// Both dimensions at once, so the laws below also exercise the `Option` lift
+/// and the cross-field composition, not one policy type in isolation.
 fn caps_of(p: &crate::path::NormalizedPrefix) -> Capabilities {
     Capabilities {
         exec: Some(exec_of(p)),
@@ -576,12 +525,9 @@ fn caps_of(p: &crate::path::NormalizedPrefix) -> Capabilities {
     }
 }
 
-/// A small universe of `{surface, resolved, namespace}` triples, minted
-/// synthetically with `NormalizedPrefix::for_test`.  Covers a plain
-/// prefix, a genuine nested descendant, aliasing (`/a/alias` resolves to
-/// `/a`), symlink divergence (`/a/link` resolves to `/elsewhere`), and
-/// the same pair in both namespaces, so cross-namespace overlap is in
-/// scope for every law below.
+/// Covers nesting, aliasing (`/a/alias` resolves to `/a`), symlink divergence
+/// (`/a/link` resolves to `/elsewhere`), and both namespaces, so every law
+/// below sees cross-namespace overlap too.
 fn prefix_universe() -> Vec<crate::path::NormalizedPrefix> {
     use crate::path::Namespace;
     vec![
@@ -682,13 +628,9 @@ fn join_idempotent_over_prefix_universe() {
     }
 }
 
-/// Namespace regression: overlap must key on `(namespace, resolved)`, not
-/// `resolved` alone.  A host-namespace prefix and a guest-namespace prefix
-/// that resolve to the identical string must never be judged overlapping —
-/// if they were, a guest grant could be narrowed by a host ceiling (or vice
-/// versa) into something that matches nothing on either side.  This is the
-/// case `synod/src/grant.rs`'s `from_guest` prefixes depend on: a guest
-/// grant must survive composition only against other guest grants.
+/// Overlap keys on `(namespace, resolved)`, not `resolved` alone: a host and
+/// a guest prefix spelling the same string must never overlap, or a host
+/// ceiling could narrow the guest grants `synod`'s `grant.rs` mints.
 #[test]
 fn meet_fs_cross_namespace_prefixes_never_overlap() {
     use crate::path::Namespace;
@@ -703,19 +645,10 @@ fn meet_fs_cross_namespace_prefixes_never_overlap() {
     );
 }
 
-/// Security regression at the composition layer, over frozen data: a
-/// restrict prefix that *lexically* nests under the base ceiling but
-/// resolves elsewhere — the divergent pair a symlink freezes to — must
-/// not survive `Capabilities::meet`.  The layer-level pin is
-/// `PrefixSet::symlinked_grant_cannot_escape_a_shallower_ceiling`;
-/// `meet_fs_nested_grants_narrow_to_intersection` above is the positive
-/// control showing this collapse is the escape being caught.
-///
-/// Premise: a symlink created *after* freeze is invisible to the meet —
-/// the freeze-to-use stability window
-/// (`dev/docs/260727_policy_kernel_purity.md` §5).  The gate and the
-/// sandbox projection still re-resolve at use, which is why the
-/// end-to-end property holds regardless.
+/// A restrict prefix that *lexically* nests under the ceiling but resolves
+/// elsewhere — what a symlink freezes to — must not survive the meet.  A
+/// symlink made *after* the freeze is invisible here; the gate and the
+/// sandbox projection re-resolve at use, so the end-to-end property holds.
 #[test]
 fn meet_fs_symlinked_prefix_cannot_escape_ceiling() {
     use crate::path::Namespace;
@@ -731,10 +664,6 @@ fn meet_fs_symlinked_prefix_cannot_escape_ceiling() {
     );
 }
 
-/// A single-prefix exec-dir *deny*, the counterpart to `exec_of` — the
-/// half of the universe the pre-fix law tests never folded in, which
-/// is exactly why they missed the authority leak this file's
-/// `capability.rs::Meet`/`Join for ExecMap` fix addresses.
 fn exec_deny_of(p: &crate::path::NormalizedPrefix) -> ExecMap {
     ExecMap {
         literals: BTreeMap::new(),
@@ -743,27 +672,18 @@ fn exec_deny_of(p: &crate::path::NormalizedPrefix) -> ExecMap {
     }
 }
 
-/// The authority-leak regression, composed both ways. An allow and a
-/// deny that share a surface but were frozen against different disk
-/// state — `for_test`'s divergent `resolved` pair, what `--extend-base`
-/// produces when a base profile's veto is re-granted later against a
-/// changed symlink — must not both survive into `allow_dirs`: the
-/// derived `Eq`/`Ord` on `NormalizedPrefix` sees them as distinct
-/// records (three fields, not the gate's two), so a naive `retain`
-/// keying on it lets both through and the gate then admits under the
-/// pre-fix tie-break. Checked under both `meet` and `join`, and through
-/// the same `admits_for_test` gate `runtime::command::identity` uses,
-/// not just by inspecting `allow_dirs` — the leak is only real if the
-/// gate itself is fooled.
+/// An allow and a deny sharing a surface but frozen against different disk
+/// state are distinct records to `NormalizedPrefix`'s derived `Eq`/`Ord`
+/// (three fields, where the gate weighs two), so eviction must key on
+/// `same_gate_dir`.  Checked through the gate as well as `allow_dirs` — the
+/// leak is only real if the gate itself is fooled.
 #[test]
 fn exec_meet_and_join_drop_allow_clashing_with_deny_on_divergent_resolved() {
     use crate::capability::admits_for_test;
     use crate::path::Namespace;
 
-    // Spelled for the host: the gate weighs only candidates the
-    // platform calls absolute, and a rooted path with no drive is not
-    // absolute to Windows — so a POSIX fixture would leave the gate
-    // half of this test asserting nothing there.
+    // The gate weighs only candidates the platform calls absolute, and a
+    // rooted path with no drive is not absolute to Windows.
     let (surface, divergent, candidate) = if cfg!(windows) {
         (r"C:\x", r"C:\y", r"C:\x\bin")
     } else {
@@ -796,12 +716,9 @@ fn exec_meet_and_join_drop_allow_clashing_with_deny_on_divergent_resolved() {
     }
 }
 
-/// Same clash, different disguise: the allow and the deny share no
-/// surface bytes at all — `/private/tmp/x` and `/tmp/x` — but name the
-/// same macOS firmlink-aliased directory, which is exactly what
-/// `same_gate_dir` (rather than a byte-equal `gate_key`) is for. Pins
-/// the composition half of the alias-clash fix; the gate half is
-/// `capability::exec::tests::longest_dir_match_firmlink_alias_does_not_outrank_deny`.
+/// The same clash without shared bytes: `/private/tmp/x` and `/tmp/x` name
+/// one macOS firmlink-aliased directory, so eviction keys on `same_gate_dir`
+/// and not byte equality.  `capability/exec.rs` pins the gate half.
 #[cfg(target_os = "macos")]
 #[test]
 fn exec_meet_and_join_drop_allow_clashing_with_deny_on_firmlink_alias() {
@@ -834,12 +751,9 @@ fn exec_meet_and_join_drop_allow_clashing_with_deny_on_firmlink_alias() {
     }
 }
 
-/// The exec lattice laws, folded over a universe that mixes allow-only
-/// and deny-only maps for every prefix. The pre-fix tests
-/// (`meet_commutative_over_prefix_universe` and its siblings) only ever
-/// built allow-only `ExecMap`s via `exec_of`, so deny-overrides — the
-/// dimension the bug lived in — was never exercised by a law check at
-/// all.
+/// The prefix universe folded through an allow-only and a deny-only `ExecMap`
+/// alike, so the laws below reach deny-overrides — the dimension `exec_of` on
+/// its own never enters.
 fn exec_universe() -> Vec<ExecMap> {
     prefix_universe()
         .iter()
@@ -953,10 +867,8 @@ fn join_exec_widens_policies_and_unions_names() {
     }
 }
 
-/// Widening unions read/write prefixes and preserves every deny: a
-/// `deny_path` is a sticky veto, so an extension silent on a base
-/// carve-out cannot erode it.  Mirrors `meet`, which also unions denies
-/// — a deny survives any composition.
+/// A `deny_path` is a sticky veto under join as under meet, so an extension
+/// silent on a base carve-out cannot erode it.
 #[test]
 fn join_fs_unions_prefixes_and_denies() {
     let m = witness_a().join(witness_b());
@@ -979,14 +891,10 @@ fn join_fs_unions_prefixes_and_denies() {
     );
 }
 
-/// Decode accepts known `xdg:` tokens (with and without a sub-path),
-/// tilde and absolute paths.  With the `XDG_*_HOME` overrides cleared,
-/// every token resolves under the synthetic home, so the escape guard
-/// passes and the freeze inside decode succeeds.
-// Unix-only: the `/usr/bin` literal and `xdg:`/tilde tokens freeze to
-// paths that only satisfy the post-freeze absoluteness check on Unix;
-// on Windows a driveless `/usr/bin` is not absolute. Mirrors the gate
-// on `decode_rewrites_sigils_to_concrete_paths`.
+/// With the `XDG_*_HOME` overrides cleared every token resolves under the
+/// synthetic home, so the escape guard passes and the freeze succeeds.
+// Unix-only: a driveless `/usr/bin` fails the post-freeze absoluteness
+// check on Windows.
 #[cfg(unix)]
 #[test]
 fn decode_accepts_known_tokens() {
@@ -1014,10 +922,8 @@ fn decode_accepts_known_tokens() {
         .expect("known tokens should decode and freeze");
 }
 
-/// A typo in the `xdg:` namespace is caught at decode instead of
-/// silently passing through to match nothing at runtime.  Mirrors the
-/// `deny_unknown_fields` ethos.  Env-independent: the typo fails to
-/// parse before any resolution against the environment.
+/// A typo in the `xdg:` namespace fails at decode, before any resolution
+/// against the environment, rather than silently matching nothing at runtime.
 #[test]
 fn decode_rejects_xdg_typo() {
     let v = map(vec![("fs", map(vec![("read", strs(&["xdg:cofnig"]))]))]);
@@ -1026,13 +932,10 @@ fn decode_rejects_xdg_typo() {
     assert!(err.contains("config"), "should list known kinds: {err}");
 }
 
-/// Decode rewrites every sigil into a concrete absolute path: the
-/// returned `Capabilities` carries no sigils, so subsequent matching is
+/// Decode rewrites every sigil to a concrete absolute path, so matching is
 /// decoupled from any later env mutation.
-// Unix-only: sigil expansion joins via `PathBuf`, which on Windows
-// produces backslashes against the synthetic `/h` home — the key
-// `/h/.local/bin` never lands in the exec map.  The grant subsystem
-// is Unix-only.
+// Unix-only: sigil expansion joins via `PathBuf`, which on Windows yields
+// backslashes against the synthetic `/h` home, so `/h/.local/bin` never lands.
 #[cfg(unix)]
 #[test]
 fn decode_rewrites_sigils_to_concrete_paths() {
@@ -1048,8 +951,7 @@ fn decode_rewrites_sigils_to_concrete_paths() {
     ]);
     let caps = with_xdg_defaults(|| decode_capability_map(&v, "test", &test_ctx("/h")))
         .expect("known sigils freeze");
-    // Dir keys are stored slash-free; sigil expansion rewrites them to
-    // concrete absolute prefixes.
+    // Dir keys are stored slash-free.
     let exec = caps.exec.unwrap();
     assert!(
         exec.allow_dirs
@@ -1062,12 +964,9 @@ fn decode_rewrites_sigils_to_concrete_paths() {
     assert_eq!(reads[1], "/etc");
 }
 
-/// The trailing slash is the only thing separating a directory grant
-/// from a literal one, so omitting it on a real directory would decode
-/// to a grant on a binary that cannot exist and fail closed at use time
-/// as a bare "denied by active grant".  Freeze catches it and points at
-/// the slash.
-// Unix-only, like its sigil-freezing siblings.
+/// The trailing slash is all that separates a directory grant from a literal
+/// one, so omitting it would decode to a grant on a binary that cannot exist
+/// and fail closed at use time as a bare "denied by active grant".
 #[cfg(unix)]
 #[test]
 fn decode_rejects_directory_as_literal_command() {
@@ -1079,12 +978,9 @@ fn decode_rejects_directory_as_literal_command() {
     assert!(err.contains("/etc/"), "should hint the slash: {err}");
 }
 
-/// Defence in depth: a caller who sets `XDG_DATA_HOME=/etc` must not be
-/// able to widen a policy that names `xdg:data`.  Decode rejects the
-/// resolution at the boundary with a message naming the offending env
-/// var so the operator can diagnose it.
-// Unix-only: the boundary check compares Unix path prefixes that
-// don't survive Windows path normalisation.
+/// Defence in depth: `XDG_DATA_HOME=/etc` must not widen a policy naming
+/// `xdg:data`; decode rejects it and names the offending env var.
+// Unix-only: the boundary check compares Unix path prefixes.
 #[cfg(unix)]
 #[test]
 fn decode_rejects_xdg_var_outside_home() {
@@ -1101,9 +997,7 @@ fn decode_rejects_xdg_var_outside_home() {
     assert!(err.contains("HOME"), "should mention HOME: {err}");
 }
 
-/// Empty `home` is a configuration error, not a silent allow.
-/// The check produces a question-shaped message — per the
-/// `ral` style, we prefer prompting over guessing.
+/// An empty `home` is a configuration error, not a silent allow.
 #[test]
 fn decode_errors_when_home_is_empty() {
     let v = map(vec![("fs", map(vec![("read", strs(&["~/x"]))]))]);
@@ -1111,10 +1005,8 @@ fn decode_errors_when_home_is_empty() {
     assert!(err.contains("HOME"), "got {err}");
 }
 
-/// A bare relative fs prefix is rejected at decode: it survives freeze
-/// unchanged and would otherwise anchor to the live cwd at check time,
-/// so the same grant would mean a different directory after a `cd`.
-/// The error names the offending entry and points at the `cwd:` sigil.
+/// A bare relative prefix survives freeze unchanged and would anchor to the
+/// live cwd at check time, so the same grant would shift meaning after a `cd`.
 #[test]
 fn decode_rejects_bare_relative_fs_path() {
     let v = map(vec![("fs", map(vec![("read", strs(&["proj"]))]))]);
@@ -1123,15 +1015,13 @@ fn decode_rejects_bare_relative_fs_path() {
     assert!(err.contains("cwd:"), "should hint the cwd: sigil: {err}");
 }
 
-/// `.`/`..`-relative fs prefixes are rejected for the same reason.
 #[test]
 fn decode_rejects_dot_relative_fs_paths() {
     let v = map(vec![("fs", map(vec![("read", strs(&["./a", "../b"]))]))]);
     assert!(decode_capability_map(&v, "test", &test_ctx("/h")).is_err());
 }
 
-/// A path-shaped relative exec literal is rejected: it carries a `/`,
-/// so it is a path, not a bare command name.
+/// It carries a `/`, so it is a path, not a bare command name.
 #[test]
 fn decode_rejects_relative_exec_literal() {
     let v = map(vec![(
@@ -1141,8 +1031,7 @@ fn decode_rejects_relative_exec_literal() {
     assert!(decode_capability_map(&v, "test", &test_ctx("/h")).is_err());
 }
 
-/// A bare command name in the exec map is a name, not a path, so it is
-/// exempt from the absoluteness rule and passes through unchanged.
+/// A bare name is a name, not a path, so the absoluteness rule spares it.
 #[test]
 fn decode_accepts_bare_exec_name() {
     let v = map(vec![(
@@ -1154,11 +1043,9 @@ fn decode_accepts_bare_exec_name() {
     assert!(caps.exec.unwrap().literals.contains_key("git"));
 }
 
-/// `cwd:proj` freezes to an absolute path, so it is accepted — the
-/// sanctioned "relative to here" form the rejection message points at.
-// Unix-only: `cwd:proj` joins the synthetic `/h` cwd via `PathBuf`,
-// which on Windows yields a driveless path that fails the post-freeze
-// absoluteness check.
+/// `cwd:proj` freezes to an absolute path — the sanctioned "relative to here"
+/// the bare-relative rejection points at.
+// Unix-only: the joined `/h` cwd is driveless, so Windows calls it relative.
 #[cfg(unix)]
 #[test]
 fn decode_accepts_cwd_relative_fs_path() {
@@ -1167,8 +1054,7 @@ fn decode_accepts_cwd_relative_fs_path() {
         .expect("cwd: sigil freezes to an absolute path");
 }
 
-/// A bool-typed `editor` sub-key must hold a genuine `Bool`.  A non-Bool
-/// value is a hard decode error naming the wrong type — not a silent
+/// A non-Bool is a hard decode error naming the expected type, not a silent
 /// fold to `false` that would quietly deny the capability.
 #[test]
 fn decode_rejects_non_bool_editor_field() {
@@ -1180,7 +1066,6 @@ fn decode_rejects_non_bool_editor_field() {
     assert!(err.contains("Bool"), "should name the expected type: {err}");
 }
 
-/// `shell.chdir` is bool-typed; a non-Bool value errors via `decode_bool`.
 #[test]
 fn decode_rejects_non_bool_shell_field() {
     let v = map(vec![("shell", map(vec![("chdir", Value::Int(5))]))]);
@@ -1188,8 +1073,6 @@ fn decode_rejects_non_bool_shell_field() {
     assert!(err.contains("Bool"), "should name the expected type: {err}");
 }
 
-/// `audit` is bool-typed; a non-Bool value errors rather than silently
-/// disabling auditing.
 #[test]
 fn decode_rejects_non_bool_audit_field() {
     let v = map(vec![("audit", Value::String("true".into()))]);
@@ -1197,7 +1080,6 @@ fn decode_rejects_non_bool_audit_field() {
     assert!(err.contains("Bool"), "should name the expected type: {err}");
 }
 
-/// Genuine Bools still decode to the matching policy fields.
 #[test]
 fn decode_accepts_bool_dimension_fields() {
     let v = map(vec![

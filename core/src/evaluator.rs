@@ -1,20 +1,7 @@
-//! CBPV evaluator for `ral`.
-//!
-//! The run/block evaluation verbs and the tail-absorption seam they share;
-//! per-verb contract detail lives on each function's own doc.
-//!
-//! - [`eval_top_level`] (`pub(crate)`) — runs a top-level run, installing
-//!   the post-run [`Mobile`](crate::types::Mobile) on the parent shell on
-//!   every outcome.
-//! - [`evaluate`] — a bare tail-absorbed run with no mobile contract, for
-//!   callers already inside an active session (module loading, prelude
-//!   bootstrap, capability profiles, REPL plugin / config loading).
-//! - [`eval_block`] (`pub(crate)`) — the block contract: scope-isolated
-//!   body, mobile discarded on exit.  External callers reach it through
-//!   [`apply`], the crate-private thunk-application verb.
-//! - [`absorb_tail`] is the seam every absorption point funnels through to
-//!   land an escaping [`TailCall`] and turn a `Raw<Value>` into a
-//!   `Settled<Value>`.
+//! CBPV evaluation verbs: the top-level run, the bare in-session run, and
+//! the block.  Each funnels its result through [`absorb_tail`], the one seam
+//! that lands an escaping [`TailCall`], so `Tail` never leaves this module
+//! tree.
 
 pub mod audit;
 pub(crate) mod call;
@@ -38,10 +25,9 @@ pub(crate) use trampoline::apply;
 
 // ── Tail absorption ──────────────────────────────────────────────────────
 
-/// Land any escaping [`TailCall`] through the trampoline; pass `Break`
-/// through verbatim.  The seam every absorption point funnels through
-/// to turn a `Raw<Value>` into a `Settled<Value>` — boundary verbs,
-/// thread-worker roots, IPC seams, pipeline stage helpers.
+/// Land an escaping [`TailCall`] through the trampoline; pass `Break`
+/// verbatim.  The one `Raw<Value>` → `Settled<Value>` seam: the verbs here,
+/// thread-worker roots, `child_eval`'s cross-process stage, redirect bodies.
 pub(crate) fn absorb_tail(
     raw: crate::types::Raw<Value>,
     mooring: &Mooring,
@@ -54,22 +40,14 @@ pub(crate) fn absorb_tail(
     }
 }
 
-/// Tail-absorbed run of `comp` against `shell` in place.  Not a run:
-/// no mobile install or discard, no scope frame, no transport dispatch.
-///
-/// Evaluated under a non-trivial continuation ([`Tail::No`]): the caller
-/// already has obligations beyond `comp` (it threads the result on),
-/// and `absorb_tail` lands any terminal tail call locally regardless.
-///
-/// For callers already inside an active session — module loading,
-/// prelude bootstrap, capability profiles, REPL plugin / config files.
-/// Wrapping them in a run boundary would round-trip a mobile they
-/// never wanted snapshotted.
+/// Tail-absorbed run of `comp` in place — no mobile install or discard, no
+/// scope frame, no transport dispatch.  For callers already inside a session
+/// (prelude bootstrap, module loading, REPL prompt and config), where a run
+/// boundary would round-trip a mobile they never wanted snapshotted.
+/// [`Tail::No`], since the caller has obligations beyond `comp`.
 ///
 /// # Errors
-/// Returns `Err` if evaluating `comp` raises a `Break` — a recoverable
-/// runtime error (`Break::Error`) or a non-local escape (`Break::Escape`,
-/// e.g. `exit`).
+/// A `Break` from `comp` — a recoverable error, or an escape such as `exit`.
 pub fn evaluate(comp: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     debug_assert!(
         !shell.mobile.context.grants.is_empty(),
@@ -84,25 +62,18 @@ pub fn evaluate(comp: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Settl
 
 // ── Boundary verbs ───────────────────────────────────────────────────────
 //
-// Both verbs evaluate the body **in process**: a `grant` is a dynamic
-// effect scope, not a process boundary, so nested grants compose by
-// intersection over authority in the evaluator's dynamic context.  OS
-// confinement is a separate, per-child locus — the launcher in
-// `build_command` (crate::runtime::command::process) enters the OS sandbox
-// for an admitted external or bundled-as-image child under an active
-// projection, so a `grant [net:false] { <pure ral> }` fails closed only
-// when a child is actually spawned, not at body entry.
+// Both evaluate the body in this process: a `grant` is a dynamic effect
+// scope, not a process boundary, so OS confinement happens per child in
+// `build_command` (`runtime::command::process`), never at body entry.
 
-/// Run `comp` as a top-level run.  Installs the post-run [`Mobile`]
-/// on `shell` for every outcome — Ok, Error, Exit — so a `let`
-/// followed by a failing command still leaves the binding visible to
-/// the next run.
+/// Run `comp` as a top-level run, installing the post-run
+/// [`Mobile`](crate::types::Mobile) for every outcome — Ok, Error, Exit —
+/// so a `let` before a failing command still binds for the next run.
 ///
-/// The run's program is its sole computation, evaluated under a
-/// trivial continuation ([`Tail::Yes`]): its value is handed straight
-/// back to the [`Shell::run`](crate::Shell::run) door that
-/// drove it, which relays it to the host.  The run's mobile is swapped
-/// in for its duration, so any terminal tail call is absorbed under it.
+/// The program is the run's sole computation, hence [`Tail::Yes`]; its value
+/// goes straight back to the [`Shell::run`](crate::Shell::run) door.  The
+/// run's mobile is swapped in for the duration, so a terminal tail call is
+/// absorbed under it.
 pub(crate) fn eval_top_level(
     comp: &Arc<Comp>,
     mooring: &Mooring,
@@ -120,29 +91,20 @@ pub(crate) fn eval_top_level(
     outcome
 }
 
-/// Run a thunk body as a block: scope-isolated, mobile discarded on
-/// exit.  `let`, `cd`, module loads, plugin registrations, env-var
-/// changes — none propagate.  Only `last_status` (folded onto
-/// `shell.mobile`) and audit nodes (which the body posts straight to the
-/// shared trail) cross the boundary.
+/// Run a thunk body as a block: scope-isolated, mobile discarded on exit, so
+/// `let`, `cd`, module loads, plugin registrations, and env-var changes do
+/// not propagate.  Only `last_status` and audit nodes, which the body posts
+/// straight to the shared trail, cross the boundary.
 ///
-/// `captured` is the closure's lexical environment — the snapshot a
-/// `Value::Block` carries.  [`Shell::with_thunk_body`] runs the body in
-/// place: it swaps in a mobile rescoped to `captured` plus a fresh frame
-/// for the body's own `let` bindings, brackets the parent's
-/// `repl.pending_chpwd`, and — as a [`ThunkBody::Block`] — folds only
-/// `last_status` back, discarding the body's `cd`.
+/// `captured` is the lexical environment a `Value::Block` carries;
+/// [`Shell::with_thunk_body`] rescopes the body's mobile to it plus a fresh
+/// frame and, as a [`ThunkBody::Block`], folds only `last_status` back.
 ///
-/// `tail` forwards the block's own tail position to its body: a block
-/// applied in tail position (the trampoline's final argument) grants
-/// [`Tail::Yes`] so the body's final call trampolines; a forced block
-/// or a pipeline value-edge force passes [`Tail::No`].  The body's
-/// mobile is swapped in for the run, absorbing any terminal tail call
-/// under it, so the grant only chooses whether that absorption
-/// trampolines.
+/// `tail` is the block's own tail position, granted [`Tail::Yes`] only by the
+/// trampoline's final argument.  The body's mobile is installed for the
+/// absorption either way; tail-ness only chooses whether it trampolines.
 ///
-/// `pub(crate)`: external callers reach the block contract through
-/// [`apply`] on a `Value::Block`.
+/// Outside the crate the block contract is reached through [`apply`].
 pub(crate) fn eval_block(
     body: &Arc<Comp>,
     captured: &Arc<Env>,
@@ -161,8 +123,6 @@ pub(crate) fn eval_block(
 mod tests {
     use super::*;
 
-    /// A `let` followed by `exit` must still leave the binding
-    /// installed for the next run.
     #[test]
     fn top_level_persists_let_on_error() {
         let source = "let persist_top = 41; exit 7";
@@ -175,7 +135,6 @@ mod tests {
         );
     }
 
-    /// A `let` inside a block must not be visible after.
     #[test]
     fn block_discards_let() {
         let source = "let leak_block = 1";

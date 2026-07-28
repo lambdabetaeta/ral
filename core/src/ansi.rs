@@ -1,14 +1,11 @@
-//! ANSI styling: escape constants and color-gating predicates.
+//! ANSI escape constants, OSC sequence builders, and the color gate.
 //!
-//! Gating helpers ([`use_color`], [`use_ui_color`]) consult a cached
-//! [`TerminalState`] seeded once at REPL startup via [`set_terminal`].
-//! When the cache is empty, [`use_color`] falls back to inline probing
-//! (batch runs and early-startup errors), whereas [`use_ui_color`] is
-//! cache-only and yields false until [`set_terminal`] has run.
-//!
-//! Value-output styling (the REPL's `=> ` prefix and color) lives in the
-//! `ral` crate's `repl::theme` module — it is configured from the rc file
-//! and consumed only by the REPL's value-printing path.
+//! [`use_color`] (stderr) and [`use_ui_color`] (stdout) consult a
+//! [`TerminalState`] that each frontend seeds once at startup through
+//! [`set_terminal`], re-exported as `diagnostic::set_terminal`.  Until then
+//! [`use_color`] probes inline, so early-startup errors still color.  The OSC
+//! builders only format; whether a sequence may be emitted is decided by the
+//! `TerminalState::ui_*_ok` predicates.
 
 use std::sync::OnceLock;
 
@@ -39,11 +36,10 @@ pub const BOLD_CYAN: &str = "\x1b[1;36m";
 
 pub const UNDERLINE_RED: &str = "\x1b[4;31m";
 
-/// Map a standard color name to its ANSI SGR escape string.
+/// SGR escape for one of the eight standard color names, case-insensitively.
 ///
-/// Accepts `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, and
-/// `white` (case-insensitively).  Every other name — including `none`/`off`
-/// and any typo — returns `None`; there is no special-cased disable keyword.
+/// Every other name returns `None`, and ral's `repl::theme` reads `None` as
+/// "no color" — a typo in the RC file drops value styling instead of erroring.
 pub fn named_color(name: &str) -> Option<String> {
     match name.to_ascii_lowercase().as_str() {
         "black" => Some(BLACK.into()),
@@ -59,61 +55,32 @@ pub fn named_color(name: &str) -> Option<String> {
 }
 
 // ── OSC sequence builders ────────────────────────────────────────────────
-//
-// Each builder returns an owned `String` so callers can write the sequence
-// to any sink (stderr, an external printer, a captured byte buffer for
-// tests) without committing to an IO target here.  Gating — *should we
-// emit?* — lives in `TerminalState::ui_*_ok`; this module only knows how
-// to format a well-formed sequence once a caller has decided to.
-//
-// Two string terminators appear in the wild: BEL (`\x07`) and ST
-// (`ESC \`, `\x1b\\`).  Each builder's own doc records which it emits
-// and why.
 
-/// Build an OSC 0 sequence to set the terminal window/icon title.
+/// OSC 0 — set the terminal's window and icon title.
 ///
-/// `ESC ] 0 ; <title> BEL` — OSC introducer, parameter 0 (sets both
-/// icon and window title), content, BEL terminator.  BEL is the
-/// broadly-portable alternative to the ST string terminator
-/// (`ESC \`); xterm, iTerm2, GNOME Terminal, Windows Terminal, and
-/// every modern multiplexer all accept it.
+/// Terminated with BEL rather than ST, which every terminal and multiplexer
+/// in practice accepts.
 pub fn osc_set_title(title: &str) -> String {
     format!("\x1b]0;{title}\x07")
 }
 
-/// Build an OSC 8 hyperlink that wraps `text` with a link to `uri`.
+/// OSC 8 — wrap `text` in a hyperlink to `uri`, closed by an empty-URI OSC 8.
 ///
-/// `ESC ] 8 ; ; <uri> ESC \ <text> ESC ] 8 ; ; ESC \` — open with the
-/// URI, write the visible text, close with an empty-URI OSC 8.  The
-/// empty parameter slot is reserved for `id=…` and similar attributes
-/// we do not currently produce.
-///
-/// Embedded ESC bytes in either argument would terminate the sequence
-/// prematurely; callers that may receive untrusted input should
-/// sanitise first.  Newlines are passed through as-is.
+/// An ESC byte in either argument ends the sequence early, so sanitise
+/// anything untrusted before calling.
 pub fn osc8_link(uri: &str, text: &str) -> String {
     format!("\x1b]8;;{uri}\x1b\\{text}\x1b]8;;\x1b\\")
 }
 
-/// Build an OSC 52 sequence that asks the terminal to write `payload`
-/// to the system clipboard.
+/// OSC 52 — ask the terminal to put `base64_payload` on the system clipboard.
 ///
-/// `ESC ] 52 ; c ; <base64> BEL` — `c` selects the system clipboard;
-/// the payload must already be base64-encoded by the caller.  Pushing
-/// the encoder up to the call site keeps `core` dependency-free
-/// (`ral` and `exarch` both have the `base64` crate available).
+/// The caller encodes, which is what keeps `core` free of a base64 dependency.
+/// Terminated with BEL, not ST: tmux relays a copy through its `Ms` capability,
+/// which emits BEL, and some terminals implementing OSC 52 never learned ST.
+/// Every yank path, REPL and exarch alike, goes through here.
 ///
-/// BEL, not ST: tmux's own OSC parser accepts either terminator (its
-/// `input.c` notes OSC "may be terminated by \007 as well as ST"), but
-/// tmux's `Ms` capability — what it uses to relay a copy to the outer
-/// terminal — itself emits BEL, and some terminals that implement OSC
-/// 52 do not recognise the ST form at all.  BEL is therefore the
-/// terminator most likely to be understood end to end; this is the one
-/// builder every yank call site (REPL and exarch alike) should use.
-///
-/// Reads (`ESC ] 52 ; c ; ? ST`) are intentionally not provided: the
-/// permission-prompt landscape across terminals is too uneven, and
-/// `TerminalState` only surfaces the write capability.
+/// Write only.  Clipboard reads are not offered because the permission prompts
+/// vary too much between terminals, and `TerminalState` gates only the write.
 pub fn osc52_copy(base64_payload: &str) -> String {
     format!("\x1b]52;c;{base64_payload}\x07")
 }
@@ -122,18 +89,12 @@ pub fn osc52_copy(base64_payload: &str) -> String {
 
 const ESC: u8 = 0x1b;
 
-/// Byte length of the escape sequence beginning at `bytes[at]`, which must
-/// be `ESC` (`0x1b`).
+/// Byte length of the escape sequence at `bytes[at]`, which must be `ESC`.
 ///
-/// Recognises the introducers that carry no visible payload:
-///   * CSI (`ESC [` … final byte `0x40..=0x7e`);
-///   * the string sequences OSC/DCS/SOS/PM/APC (`ESC` `] P X ^ _` …),
-///     terminated by BEL (`0x07`) or ST (`ESC \`);
-///   * any other two-byte escape (`ESC` + one final byte).
-///
-/// A non-ASCII byte after `ESC` is visible payload, not an escape final,
-/// so the lone `ESC` is consumed (length 1) to avoid landing mid-codepoint.
-/// An `ESC` at the very end of the slice is also length 1.
+/// Covers CSI, the string sequences OSC/DCS/SOS/PM/APC (BEL- or ST-terminated),
+/// and plain two-byte escapes — every introducer carrying no visible payload.
+/// A non-ASCII byte after `ESC` is payload, not a final, so the lone `ESC` is
+/// consumed to avoid landing mid-codepoint; a trailing `ESC` measures 1 too.
 pub fn escape_seq_len(bytes: &[u8], at: usize) -> usize {
     debug_assert_eq!(bytes[at], ESC);
     match bytes.get(at + 1) {
@@ -167,10 +128,8 @@ pub fn escape_seq_len(bytes: &[u8], at: usize) -> usize {
 
 /// Drop every ANSI escape sequence from `s`, leaving the visible text.
 ///
-/// Escape spans are recognised by [`escape_seq_len`]; the bytes between
-/// them are copied verbatim, so the result is the prompt/line as it would
-/// appear with styling removed (no cursor-motion simulation — see
-/// exarch's `digest::visible_text` for that).
+/// Styling only: carriage returns and backspaces survive untouched, since
+/// nothing here replays cursor motion.  exarch's `digest::visible_text` does.
 pub fn strip(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
@@ -193,17 +152,16 @@ pub fn strip(s: &str) -> String {
 
 static CACHED_TERMINAL: OnceLock<TerminalState> = OnceLock::new();
 
-/// Seed the cached `TerminalState` consulted by `use_color` and `use_ui_color`.
-/// Call once per process after probing.  Subsequent calls are silently ignored.
+/// Seed the cached [`TerminalState`] once per process, after probing.  The
+/// first call wins; later ones are ignored.
 pub fn set_terminal(t: &TerminalState) {
     let _ = CACHED_TERMINAL.set(*t);
 }
 
-/// Whether to emit ANSI color on stderr (diagnostics, errors, warnings).
+/// Whether stderr — diagnostics, errors, warnings — may carry color.
 ///
-/// Consults the cached `TerminalState` when available so all ANSI gating
-/// agrees on one source of truth.  Falls back to inline probing for batch
-/// runs and early-startup errors.
+/// Prefers the cached snapshot so all gating agrees on one source of truth,
+/// and probes inline while the cache is still empty.
 pub fn use_color() -> bool {
     if let Some(t) = CACHED_TERMINAL.get() {
         return t.stderr_ansi_ok();
@@ -229,17 +187,15 @@ pub fn use_color() -> bool {
     }
 }
 
-/// Whether to emit ANSI color on stdout (REPL value output, help, etc.).
+/// Whether stdout — REPL value output, help — may carry color.
 ///
-/// Checks `ui_ansi_ok()` — stdout tty + TERM + `NO_COLOR` — rather than the
-/// stderr-oriented `stderr_ansi_ok()` used by `use_color`.
+/// Cache-only, so false until [`set_terminal`] runs, and gated on the stdout
+/// predicate: stdout can be piped into a pager while stderr stays a tty.
 pub fn use_ui_color() -> bool {
     CACHED_TERMINAL.get().is_some_and(TerminalState::ui_ansi_ok)
 }
 
-/// Return `code` when `enabled` is true, otherwise the empty string.
-///
-/// Convenience for the common `if color { "\x1b[...]" } else { "" }` pattern.
+/// `code` when `enabled`, the empty string otherwise.
 pub fn when(enabled: bool, code: &'static str) -> &'static str {
     if enabled { code } else { "" }
 }
@@ -262,16 +218,14 @@ mod tests {
 
     #[test]
     fn osc8_link_empty_uri_still_well_formed() {
-        // An empty URI is the close-link sentinel; callers shouldn't use
-        // it to wrap text, but the builder must still produce a parseable
-        // sequence rather than a malformed prefix.
+        // The empty URI is the close-link sentinel; wrapping text in it is a
+        // caller error, but must still parse rather than truncate the stream.
         assert_eq!(osc8_link("", "text"), "\x1b]8;;\x1b\\text\x1b]8;;\x1b\\");
     }
 
     #[test]
     fn osc52_copy_uses_system_clipboard_target_and_bel() {
-        // Payload is opaque to this builder — `aGVsbG8=` is "hello" in
-        // base64 but we don't decode it here, we just splice.
+        // The payload is opaque to the builder; `aGVsbG8=` is "hello", spliced.
         assert_eq!(osc52_copy("aGVsbG8="), "\x1b]52;c;aGVsbG8=\x07");
     }
 
@@ -284,8 +238,6 @@ mod tests {
 
     #[test]
     fn strip_drops_string_sequences() {
-        // OSC (BEL- and ST-terminated), and the DCS/SOS/PM/APC introducers
-        // the prompt stripper covers — all payload-free.
         assert_eq!(strip("pre\x1b]0;title\x07post"), "prepost");
         assert_eq!(strip("a\x1b]8;;https://x\x1b\\b"), "ab");
         assert_eq!(strip("a\x1bPq…data…\x1b\\b"), "ab");
@@ -294,8 +246,6 @@ mod tests {
 
     #[test]
     fn strip_keeps_multibyte_char_after_bare_esc() {
-        // A non-ASCII byte after ESC is payload; consume the lone ESC so
-        // the char survives intact.
         assert_eq!(strip("\x1bλ tail"), "λ tail");
     }
 
@@ -304,7 +254,6 @@ mod tests {
         assert_eq!(escape_seq_len(b"\x1b[0m", 0), 4);
         assert_eq!(escape_seq_len(b"\x1b]0;t\x07", 0), 6);
         assert_eq!(escape_seq_len(b"\x1bX", 0), 2);
-        // ESC at end of slice, and ESC + non-ASCII, both consume ESC alone.
         assert_eq!(escape_seq_len(b"\x1b", 0), 1);
         assert_eq!(escape_seq_len("\x1bλ".as_bytes(), 0), 1);
     }

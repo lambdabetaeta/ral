@@ -23,9 +23,8 @@ use super::tui_loop::Tui;
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 
 pub static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
-/// Whether the kitty keyboard-enhancement flags are currently pushed, so the
-/// matching pop runs exactly once even when the panic hook and `Drop` both
-/// reach [`restore_terminal_modes`] on an unwind.
+/// Whether the kitty enhancement flags are pushed, so the pop runs exactly once
+/// when the panic hook and `Drop` both reach `restore_terminal_modes`.
 pub(super) static KBD_ENHANCED: AtomicBool = AtomicBool::new(false);
 pub(super) static PANIC_RESTORE_HOOK: Once = Once::new();
 
@@ -37,20 +36,17 @@ pub(super) fn install_panic_restore_hook() {
                 restore_terminal_modes();
             }
             previous(info);
-            // Flush stderr so the panic message reaches the log before
-            // TerminalGuard::drop restores the fd — without this the
-            // message sits in the file buffer and is lost on abort.
+            // Flush before `TerminalGuard::drop` restores fd 2, or the panic
+            // message dies in the log file's buffer on abort.
             use std::io::Write;
             let _ = std::io::stderr().flush();
         }));
     });
 }
 
-/// Apply the raw-mode + alternate-screen + bracketed-paste + mouse-capture
-/// modes to the current `stdout`, and opt into the kitty keyboard protocol.
-/// Split out from [`enter_terminal_modes`] so the editor hatch
-/// ([`compose_in_editor`]) can re-enter the same modes after suspending the
-/// TUI for a child editor, without building a second [`Term`].
+/// Apply the TUI's terminal modes to the current `stdout`.  Separate from
+/// [`enter_terminal_modes`] so the `C-x C-e` hatch can re-enter them after
+/// the child editor exits, without building a second [`Term`].
 pub(super) fn apply_terminal_modes() -> io::Result<()> {
     enable_raw_mode()?;
     execute!(
@@ -58,24 +54,14 @@ pub(super) fn apply_terminal_modes() -> io::Result<()> {
         EnterAlternateScreen,
         EnableBracketedPaste,
         EnableMouseCapture,
-        // Any-motion mouse reporting (DECSET 1003), on top of the button
-        // tracking `EnableMouseCapture` turns on: the terminal reports
-        // pointer motion with no button held, so the hover-dial glyph can
-        // track the pointer.  Crossterm has no typed command for 1003, so
-        // the sequence is emitted raw; `restore_terminal_modes` pops it.
+        // Any-motion reporting (DECSET 1003), so the hover dial follows a
+        // pointer with no button held.  Crossterm has no typed command for it.
         Print("\x1b[?1003h"),
     )?;
-    // Without the enhancement protocol the Meta/Alt chords the emacs keymap
-    // binds — M-f, M-b, M-d, M-<, M-> — never reach crossterm as ALT events.
-    // An ANSI terminal that does not implement it merely ignores the sequence,
-    // but the *legacy Windows console API* (conhost) instead makes the push
-    // itself fail — `PushKeyboardEnhancementFlags` returns "not implemented for
-    // the legacy Windows API", which would abort terminal setup and take the
-    // whole TUI down on startup. So gate the push on a support probe: where the
-    // protocol is unsupported, skip it and degrade gracefully (losing only the
-    // Meta/Alt chords) rather than refusing to open. The matching pop in
-    // `restore_terminal_modes` is gated on `KBD_ENHANCED`, so a skipped push
-    // stays balanced.
+    // Without the protocol the emacs keymap's Meta chords never reach crossterm
+    // as ALT events.  A terminal lacking it ignores the sequence, but legacy
+    // conhost fails the push itself, which would take startup down — so probe,
+    // and lose the Meta chords rather than refuse to open.
     if supports_keyboard_enhancement().unwrap_or(false) {
         execute!(
             io::stdout(),
@@ -97,17 +83,11 @@ pub(super) fn restore_terminal_modes() {
     if KBD_ENHANCED.swap(false, Ordering::AcqRel) {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
-    // Each step below runs as its own `execute!` call rather than one batched
-    // call: `execute!`/`queue!` chain commands with `.and_then`, so a single
-    // failing write would abort every later command in the same batch.
-    // conhost supports neither the kitty keyboard protocol nor DECSET 1003
-    // and just ignores the bytes rather than erroring, but a batch is not
-    // the place to bet on that — keeping each step independent means one
-    // terminal quirk can never leave the console stuck in the alternate
-    // screen or still capturing the mouse.
+    // One `execute!` per step: it chains commands with `.and_then`, so a single
+    // failing write inside a batch would swallow every later one and could
+    // strand the console in the alternate screen or still capturing the mouse.
     let _ = execute!(io::stdout(), Show);
-    // Pop any-motion reporting (1003) before the rest of mouse capture,
-    // balancing the raw enable in `apply_terminal_modes`.
+    // Any-motion reporting off, balancing the raw enable in `apply_terminal_modes`.
     let _ = execute!(io::stdout(), Print("\x1b[?1003l"));
     let _ = execute!(io::stdout(), DisableMouseCapture);
     let _ = execute!(io::stdout(), DisableBracketedPaste);
@@ -115,17 +95,14 @@ pub(super) fn restore_terminal_modes() {
     let _ = disable_raw_mode();
 }
 
-/// The editor spec used when neither `$VISUAL` nor `$EDITOR` is set: `vi` on
-/// Unix, `notepad` on Windows (`vi` isn't installed there).
+/// The editor spec used when neither `$VISUAL` nor `$EDITOR` is set.
 #[cfg(windows)]
 pub(super) const DEFAULT_EDITOR: &str = "notepad";
 #[cfg(not(windows))]
 pub(super) const DEFAULT_EDITOR: &str = "vi";
 
-/// Pick the editor spec: `visual` if non-blank, else `editor` if non-blank,
-/// else `default`.  Pulled out of [`editor_command`] as a pure function of
-/// its inputs so the fallback logic is unit-testable without touching the
-/// process environment.
+/// The first non-blank of `visual`, `editor`, `default`.  Split out of
+/// [`editor_command`] so the fallback is testable without the environment.
 pub(super) fn pick_editor_spec(
     visual: Option<&str>,
     editor: Option<&str>,
@@ -138,9 +115,8 @@ pub(super) fn pick_editor_spec(
         .to_string()
 }
 
-/// Resolve the editor to launch for `C-x C-e`: `$VISUAL`, then `$EDITOR`,
-/// then [`DEFAULT_EDITOR`].  The value is split on whitespace so a spec like
-/// `emacsclient -t` or `code --wait` keeps its arguments.
+/// Resolve the editor to launch for `C-x C-e`.  Split on whitespace so a spec
+/// like `emacsclient -t` keeps its arguments.
 pub(super) fn editor_command() -> (String, Vec<String>) {
     let visual = std::env::var("VISUAL").ok();
     let editor = std::env::var("EDITOR").ok();
@@ -152,14 +128,10 @@ pub(super) fn editor_command() -> (String, Vec<String>) {
     (program, parts.collect())
 }
 
-/// Compose `draft` in the user's `$EDITOR`: write it to a scratch file, suspend
-/// the TUI's terminal modes so the child editor owns the tty, run it, then
-/// re-enter and read the result back.  Returns the edited text with one
-/// trailing newline trimmed (the prompt is newline-joined, so the editor's
-/// final newline would otherwise add a blank last row), or `None` when the
-/// editor could not be launched, exited non-zero, or left nothing readable —
-/// in every such case the original draft is kept.  Only a failure to re-enter
-/// the terminal modes (a broken tty) propagates, since the TUI cannot continue.
+/// Compose `draft` in the user's `$EDITOR`: scratch file, suspend the terminal
+/// modes so the child owns the tty, run, re-enter, read back.  One trailing
+/// newline is trimmed, the prompt being newline-joined.  `None` keeps the
+/// original draft; only failure to re-enter the modes propagates.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:editor-compose] writes the prompt draft to a scratch file, spawns the user's $EDITOR on it, and reads it back for the C-x C-e hatch; a UI action on a temp file, not turn-time model I/O"
@@ -192,9 +164,8 @@ pub(super) fn edit_text_in_editor(draft: &str) -> io::Result<Option<String>> {
     Ok(edited)
 }
 
-/// Drive the `C-x C-e` editor hatch from the UI loop, which owns the terminal
-/// the editor must borrow.  Adopts the edited text as the prompt draft and
-/// forces a full repaint over whatever the editor left on the screen.
+/// Drive the `C-x C-e` hatch from the UI loop, which owns the terminal the
+/// editor must borrow.  Repaints over whatever the editor left on the screen.
 pub fn compose_in_editor(tui: &mut Tui) -> io::Result<()> {
     let draft = tui.app.prompt_state.prompt_text();
     if let Some(edited) = edit_text_in_editor(&draft)? {
@@ -204,15 +175,9 @@ pub fn compose_in_editor(tui: &mut Tui) -> io::Result<()> {
     Ok(())
 }
 
-/// RAII guard for the raw-mode + bracketed-paste + alternate-screen +
-/// mouse-capture lifetime.  Cleanup is in `Drop` so it can't be skipped
-/// on unwind.
-///
-/// While the guard is live, file descriptor 2 is redirected to a
-/// per-process log file so that `dbg_trace!` (and any other stray
-/// `eprintln!`) does not tear through the rendered frame.  The
-/// original fd is restored in `Drop`, after the TUI is torn down,
-/// so post-session writes land on the user's real shell.
+/// RAII guard over the terminal modes and, while it is live, a redirect of fd 2
+/// to a per-process log so `dbg_trace!` cannot tear through the rendered frame.
+/// `Drop` undoes both, so unwinding cannot skip the cleanup.
 pub struct TerminalGuard {
     term: Term,
     #[cfg(unix)]
@@ -262,9 +227,8 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         restore_terminal_modes();
         TUI_ACTIVE.store(false, Ordering::Release);
-        // Restore stderr last — while teardown is running, any stray
-        // diagnostics still belong in the log file, not on the user's
-        // freshly-restored prompt row.
+        // stderr last: teardown's own stray diagnostics still belong in the
+        // log, not on the freshly-restored prompt row.
         #[cfg(any(unix, windows))]
         if let Some(backup) = self.stderr_backup.take() {
             restore_stderr(backup);
@@ -272,15 +236,9 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Open `path` for append and alias it onto fd 2, returning a backup of
-/// the original fd 2 so the caller can restore it later.  The backup is
-/// deliberately cloexec: it exists only so this process can restore fd 2
-/// on teardown, and must not leak into any child spawned while the
-/// redirect is active.  `dbg_trace!` writes to fd 2 directly via
-/// `eprintln!`; without this redirect those writes interleave with the
-/// rendered frame and corrupt it.  Child processes that inherit fds
-/// (re-execed sandbox helpers) pick up the redirected fd, so their
-/// `dbg_trace!` output flows into the same log.
+/// Alias `path` onto fd 2, returning a cloexec backup of the original.  The
+/// backup must not leak into a child; the redirect itself is inherited on
+/// purpose, so a re-execed sandbox helper's traces join the same log.
 #[cfg(unix)]
 #[allow(
     clippy::disallowed_methods,
@@ -293,16 +251,13 @@ pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<std::os::fd::Ow
     let file = OpenOptions::new().create(true).append(true).open(path)?;
     let backup =
         rustix::io::fcntl_dupfd_cloexec(rustix::stdio::stderr(), 0).map_err(io::Error::from)?;
-    // SAFETY: fd 2 is a process-global fd slot; retargeting it onto the
-    // log file is exactly the redirect this function exists to perform.
+    // SAFETY: fd 2 is a live process-global slot, all `clobber_slot` asks.
     unsafe { ral_core::process::clobber_slot(file.as_fd(), rustix::stdio::raw_stderr()) }?;
     Ok(backup)
 }
 
-/// Restore fd 2 from the cloexec backup saved by [`redirect_stderr_to_file`].
-/// Best-effort: any failure inside the TUI's drop has nowhere useful
-/// to surface, and the process is about to return to the user's
-/// shell anyway.
+/// Restore fd 2 from the backup [`redirect_stderr_to_file`] saved.  Best-effort:
+/// a failure inside the TUI's drop has nowhere useful to surface.
 #[cfg(unix)]
 #[allow(
     clippy::needless_pass_by_value,
@@ -312,54 +267,38 @@ pub(super) fn restore_stderr(backup: std::os::fd::OwnedFd) {
     use std::os::fd::AsFd;
 
     let target = rustix::stdio::raw_stderr();
-    // SAFETY: fd 2 is a process-global fd slot; retargeting it back onto
-    // the backup is exactly the restore this function exists to perform.
+    // SAFETY: fd 2 is a live process-global slot, all `clobber_slot` asks.
     let _ = unsafe { ral_core::process::clobber_slot(backup.as_fd(), target) };
 }
 
 /// Everything [`restore_stderr`] needs to undo [`redirect_stderr_to_file`]'s
 /// two redirections on Windows.
 ///
-/// Unlike the Unix path, `SetStdHandle` does not duplicate the handle it is
-/// given — it stores the pointer as-is — so `log_handle` must stay open and
-/// owned for as long as the redirect is active; closing it out from under
-/// `SetStdHandle` would leave `STD_ERROR_HANDLE` dangling. It is closed
-/// exactly once, in `restore_stderr`.
+/// `SetStdHandle` stores the pointer it is given rather than duplicating it, so
+/// `log_handle` must stay open and owned for the life of the redirect or
+/// `STD_ERROR_HANDLE` dangles.  It is closed exactly once, in `restore_stderr`.
 #[cfg(windows)]
 pub(super) struct WindowsStderrBackup {
-    /// `STD_ERROR_HANDLE`'s value before the redirect, restored via
-    /// `SetStdHandle`.  May be null/invalid if nothing had set it, which
-    /// `SetStdHandle` tolerates on restore the same way it did on entry.
+    /// `STD_ERROR_HANDLE` before the redirect; may be null, which `SetStdHandle`
+    /// tolerates on restore as it did on entry.
     backup_std_handle: windows_sys::Win32::Foundation::HANDLE,
-    /// A `dup` of the CRT's fd 2 before the redirect, restored via `_dup2`.
     backup_crt_fd: libc::c_int,
-    /// The log file's handle, installed as `STD_ERROR_HANDLE`; owned by
-    /// this backup and closed on restore.
+    /// The log file, installed as `STD_ERROR_HANDLE`; closed on restore.
     log_handle: windows_sys::Win32::Foundation::HANDLE,
 }
 
-// SAFETY: `HANDLE` is a raw pointer with no thread-affinity; this backup is
-// only ever moved from the thread that opens the TUI to the thread that
-// tears it down (never shared concurrently), the same pattern
-// `core::process::signal::windows::GroupState` uses for the same reason.
+// SAFETY: `HANDLE` is a raw pointer with no thread affinity, and this backup
+// only ever moves from the thread that opens the TUI to the one that tears it
+// down, never shared — as `GroupState` in `core/src/process/signal/windows.rs`.
 #[cfg(windows)]
 unsafe impl Send for WindowsStderrBackup {}
 
-/// Windows counterpart of [`redirect_stderr_to_file`]: there is no `dup2`
-/// onto a single kernel fd table, so two independent redirections are
-/// needed, both undone by [`restore_stderr`].
-///
-/// `std::io::stderr` calls `GetStdHandle(STD_ERROR_HANDLE)` fresh on every
-/// write rather than caching it, so `SetStdHandle` alone redirects every
-/// `eprintln!` exarch itself writes (and the writes of any child spawned
-/// with `Stdio::inherit()`, since that inherits the *current* std handle).
-/// It does not touch the CRT's fd table, though: linked C code that writes
-/// to fd 2 via `_write`/the `stderr` `FILE*` reaches the old target
-/// regardless of `SetStdHandle` — so the CRT fd is redirected too, via
-/// `_dup2` reached through `libc`'s Windows CRT bindings (`_dup`, `_dup2`,
-/// `_open_osfhandle`), the same call the Unix path makes through the kernel
-/// directly.  Both are restored on exit, mirroring
-/// `TerminalGuard.stderr_backup`'s lifecycle exactly.
+/// Windows counterpart of the Unix `redirect_stderr_to_file`: with no single
+/// kernel fd table to `dup2` onto, two independent redirections are needed,
+/// both undone by [`restore_stderr`].  `std::io::stderr` calls `GetStdHandle`
+/// fresh on every write, so `SetStdHandle` alone catches every `eprintln!`
+/// exarch writes and every child spawned with `Stdio::inherit()`; it leaves the
+/// CRT fd table alone, which linked C code uses — hence the `_dup2` too.
 #[cfg(windows)]
 #[allow(
     clippy::disallowed_methods,
@@ -375,19 +314,15 @@ pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<WindowsStderrBa
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
     let file = OpenOptions::new().create(true).append(true).open(path)?;
-    // `into_raw_handle` hands the handle out without running `File`'s
-    // `Drop` — see `WindowsStderrBackup`'s doc for why it must stay open.
+    // Handed out without running `File`'s `Drop`; ownership passes to the
+    // `WindowsStderrBackup`, whose doc says why it must stay open.
     let log_handle = file.into_raw_handle() as HANDLE;
 
-    // A second, independent handle to the same file for the CRT fd path:
-    // `_open_osfhandle` (below) gives the handle it's passed to the CRT fd
-    // it creates, which is closed — taking its handle with it — once
-    // `_dup2` has duplicated it onto fd 2 and the temporary fd is no
-    // longer needed.  Sharing `log_handle` for that would close the very
-    // handle `SetStdHandle` is holding.
+    // A second, independent handle for the CRT path: `_open_osfhandle` gives its
+    // handle to the fd it creates, and closing that temporary fd would close the
+    // very handle `SetStdHandle` holds.
     let mut crt_handle: HANDLE = std::ptr::null_mut();
-    // SAFETY: `log_handle` is open (just obtained above); `crt_handle` is
-    // an out-param this call fills on success.
+    // SAFETY: `log_handle` is open; `crt_handle` is an out-param filled on success.
     let ok = unsafe {
         DuplicateHandle(
             GetCurrentProcess(),
@@ -401,27 +336,23 @@ pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<WindowsStderrBa
     };
     if ok == 0 {
         let e = io::Error::last_os_error();
-        // SAFETY: `log_handle` is a handle this call owns and hasn't
-        // handed off yet.
+        // SAFETY: `log_handle` is this call's, not yet handed off.
         unsafe {
             CloseHandle(log_handle);
         }
         return Err(e);
     }
 
-    // SAFETY: `crt_handle` is a valid, freshly duplicated handle owned by
-    // this call; `_open_osfhandle` adopts it into the CRT fd table, so it
-    // must not be `CloseHandle`d directly after this succeeds.  `O_BINARY`
-    // keeps the CRT fd's writes byte-for-byte: without it the CRT layer
-    // translates `\n` to `\r\n`, so C writers and Rust writers (which go
-    // straight to the handle, untranslated) would disagree on the log's
-    // bytes.
+    // SAFETY: `crt_handle` is freshly duplicated and owned here; the CRT adopts
+    // it, so it must not be `CloseHandle`d once this succeeds.  `O_BINARY` stops
+    // the CRT rewriting `\n`, which would disagree with Rust's untranslated
+    // writes straight to the handle.
     let crt_fd =
         unsafe { libc::open_osfhandle(crt_handle as isize, libc::O_APPEND | libc::O_BINARY) };
     if crt_fd < 0 {
         let e = io::Error::last_os_error();
-        // SAFETY: `_open_osfhandle` failed, so `crt_handle` was never
-        // adopted and is still this call's to close; `log_handle` likewise.
+        // SAFETY: the adoption failed, so `crt_handle` is still this call's to
+        // close, as is `log_handle`.
         unsafe {
             CloseHandle(crt_handle);
             CloseHandle(log_handle);
@@ -429,28 +360,25 @@ pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<WindowsStderrBa
         return Err(e);
     }
 
-    // SAFETY: fd 2 is always a valid CRT fd in a normal process; `_dup`
-    // either returns a new fd or `-1` with errno set.
+    // SAFETY: fd 2 is always a valid CRT fd in a normal process.
     let backup_crt_fd = unsafe { libc::dup(2) };
     if backup_crt_fd < 0 {
         let e = io::Error::last_os_error();
-        // SAFETY: `crt_fd` is this call's to close; doing so also closes
-        // the `crt_handle` it adopted.  `log_handle` is still ours too.
+        // SAFETY: closing `crt_fd` also closes the `crt_handle` it adopted;
+        // `log_handle` is still ours.
         unsafe {
             libc::close(crt_fd);
             CloseHandle(log_handle);
         }
         return Err(e);
     }
-    // SAFETY: `crt_fd` is open for the duration of this call; `_dup2`
-    // atomically closes fd 2's existing CRT entry and duplicates `crt_fd`
-    // onto it, so the two hold independent handles to the same file
-    // afterwards — the CRT analogue of the Unix `dup2` call above.
+    // SAFETY: `crt_fd` is open here; `_dup2` closes fd 2's CRT entry and
+    // duplicates onto it — the CRT analogue of the Unix path's `clobber_slot`.
     let r = unsafe { libc::dup2(crt_fd, 2) };
     if r < 0 {
         let e = io::Error::last_os_error();
-        // SAFETY: `backup_crt_fd`/`crt_fd` are both this call's to close;
-        // `dup2` did not take ownership of either on failure.
+        // SAFETY: `_dup2` took ownership of nothing on failure, so both fds
+        // and `log_handle` are still this call's to close.
         unsafe {
             libc::close(backup_crt_fd);
             libc::close(crt_fd);
@@ -458,21 +386,18 @@ pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<WindowsStderrBa
         }
         return Err(e);
     }
-    // SAFETY: `_dup2` already duplicated `crt_fd`'s handle onto fd 2;
-    // closing the temporary fd does not affect fd 2's own copy.
+    // SAFETY: fd 2 holds its own duplicate now, unaffected by this close.
     unsafe {
         libc::close(crt_fd);
     }
 
-    // SAFETY: `GetStdHandle`/`SetStdHandle` take no invariant beyond the
-    // named constant; a null/invalid `backup_std_handle` is a legitimate
-    // "nothing was set" reading that `restore_stderr` passes straight back
-    // to `SetStdHandle`, exactly as `GetStdHandle` returned it.
+    // SAFETY: these take no invariant beyond the named constant; a null reading
+    // is a legitimate "nothing was set" that `restore_stderr` hands straight back.
     let backup_std_handle = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
     if unsafe { SetStdHandle(STD_ERROR_HANDLE, log_handle) } == 0 {
         let e = io::Error::last_os_error();
-        // SAFETY: undo the CRT-fd redirect and release `log_handle`, which
-        // `SetStdHandle` never adopted since the call failed.
+        // SAFETY: `SetStdHandle` failed, so it never adopted `log_handle`;
+        // undo the CRT-fd redirect and release it.
         unsafe {
             libc::dup2(backup_crt_fd, 2);
             libc::close(backup_crt_fd);
@@ -488,11 +413,9 @@ pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<WindowsStderrBa
     })
 }
 
-/// Restore both redirections made by [`redirect_stderr_to_file`]: the CRT
-/// fd via `_dup2` (mirroring the Unix restore), then `STD_ERROR_HANDLE` via
-/// `SetStdHandle`, then close the log handle this backup owned. Best-effort,
-/// same rationale as the Unix restore: any failure inside the TUI's drop
-/// has nowhere useful to surface.
+/// Undo both of [`redirect_stderr_to_file`]'s redirections, then close the log
+/// handle this backup owned.  Best-effort: a failure inside the TUI's drop has
+/// nowhere useful to surface.
 #[cfg(windows)]
 #[allow(
     clippy::needless_pass_by_value,
@@ -502,40 +425,28 @@ pub(super) fn restore_stderr(backup: WindowsStderrBackup) {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, SetStdHandle};
 
-    // SAFETY: `backup.backup_crt_fd` is a live fd from `_dup`; `_dup2` is
-    // idempotent on the target and `_close` releases the backup — same
-    // shape as the Unix restore.
+    // SAFETY: `backup_crt_fd` is a live fd from `_dup`, duplicated back onto
+    // fd 2 and then released.
     unsafe {
         libc::dup2(backup.backup_crt_fd, 2);
         libc::close(backup.backup_crt_fd);
     }
-    // SAFETY: `backup.backup_std_handle` is whatever `GetStdHandle` held
-    // before the redirect (possibly null/invalid, which `SetStdHandle`
-    // tolerates); `backup.log_handle` is this backup's own handle, valid
-    // until the `CloseHandle` below.
+    // SAFETY: `backup_std_handle` is whatever `GetStdHandle` held, possibly null;
+    // `log_handle` is this backup's own, valid until the `CloseHandle` below.
     unsafe {
         SetStdHandle(STD_ERROR_HANDLE, backup.backup_std_handle);
         CloseHandle(backup.log_handle);
     }
 }
 
-/// Raw-byte ceiling for an OSC 52 yank: base64-expanded (3→4 bytes) this
-/// stays under the tightest common per-sequence cap (kitty's 8 KiB), so
-/// the terminal accepts rather than silently drops the sequence.
+/// Raw-byte ceiling for an OSC 52 yank: base64 expands 3→4, keeping this under
+/// the tightest common per-sequence cap, kitty's 8 KiB.
 pub(super) const YANK_CAP: usize = 6000;
 
-/// Emit `text` to the host terminal's system clipboard via OSC 52.
-///
-/// Builds the sequence with `ral_core::ansi::osc52_copy` (see its doc
-/// for the BEL-vs-ST terminator rationale); this function only owns
-/// the base64 encoding and the write to stdout.  Terminals impose
-/// per-sequence size limits (kitty defaults to 8 KiB; iTerm2 silently
-/// drops oversized payloads); callers should bound the slice they pass
-/// to something screen-sized.
-///
-/// For tmux users: requires `set -g set-clipboard on`, and on tmux 3.3+
-/// `set -g allow-passthrough on` as well — otherwise tmux strips the
-/// sequence before it reaches the host terminal.
+/// Emit `text` to the host terminal's clipboard via OSC 52.  Oversized sequences
+/// are dropped in silence, so callers bound the slice (see [`YANK_CAP`]); tmux
+/// needs `set-clipboard on`, and on 3.3+ `allow-passthrough on`, or it eats the
+/// sequence on the way out.
 pub(super) fn osc52_copy(text: &str) -> io::Result<()> {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use std::io::Write;
@@ -546,9 +457,8 @@ pub(super) fn osc52_copy(text: &str) -> io::Result<()> {
     out.flush()
 }
 
-/// The last `cap` bytes of `text`, snapped forward to the nearest char
-/// boundary so the slice is always valid UTF-8.  Returns all of `text`
-/// when it already fits.
+/// The last `cap` bytes of `text`, snapped forward to a char boundary; all of
+/// `text` when it already fits.
 pub(super) fn tail_bytes(text: &str, cap: usize) -> &str {
     if text.len() <= cap {
         return text;
@@ -559,11 +469,6 @@ pub(super) fn tail_bytes(text: &str, cap: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    //! [`pick_editor_spec`] is a plain function of its three string
-    //! arguments, so the `$VISUAL`/`$EDITOR`/default fallback logic is
-    //! exercised here without touching the process environment or the
-    //! platform default (`DEFAULT_EDITOR` is passed in, not read).
-
     use super::pick_editor_spec;
 
     #[test]

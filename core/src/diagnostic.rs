@@ -1,11 +1,5 @@
-//! Error formatting and diagnostic rendering.
-//!
-//! All user-visible error output -- parse errors, type errors, and runtime
-//! errors -- is funnelled through this module.  Structured errors are
-//! rendered via the `ariadne` crate with source-span underlining; when no
-//! span is available, a compact one-liner format is used instead.
-//!
-//! Color output is gated by [`ansi::use_color`].
+//! Every user-visible parse, type, and runtime error is rendered here: through
+//! `ariadne` when a span points somewhere, as a one-liner when it does not.
 
 use crate::ansi::{self, BOLD_CYAN, BOLD_RED, BOLD_YELLOW, RESET};
 use crate::source::{SourceDb, Span, byte_to_line_col};
@@ -15,15 +9,14 @@ use crate::text::byte_to_char;
 use crate::typecheck::TypeError;
 use std::fmt::Write;
 
-// Re-export the color-gating functions so diagnostics and their gate share
-// one import.
+// Frontends seed and read the gate through here: `ral::platform` and exarch's
+// bootstrap each call `diagnostic::set_terminal` once at startup.
 pub use ansi::{set_terminal, use_color};
 
 // ── Source location ───────────────────────────────────────────────────────
 
-/// A resolved source position: script name + 1-indexed (line, col).  The
-/// audit and wire shape a [`Span`] resolves to via the session's
-/// [`SourceDb`]; hosts read it off audit nodes and capability checks.
+/// A [`Span`] resolved against the session's [`SourceDb`] — script name and
+/// 1-indexed line/column, as it rides out on audit nodes and capability checks.
 #[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CallSite {
     pub script: String,
@@ -31,10 +24,10 @@ pub struct CallSite {
     pub col: usize,
 }
 
-// ── Format functions (ariadne) ────────────────────────────────────────────
+// ── Palette and spanless fallback ─────────────────────────────────────────
 
-/// The `(error-colour, hint-colour, reset)` triple — empty strings when
-/// color is disabled so the same `format!` works either way.
+/// `(error, hint, reset)` — empty strings when colour is off, so one
+/// `format!` serves both.
 fn error_palette() -> (&'static str, &'static str, &'static str) {
     if use_color() {
         (BOLD_RED, BOLD_CYAN, RESET)
@@ -43,10 +36,8 @@ fn error_palette() -> (&'static str, &'static str, &'static str) {
     }
 }
 
-/// Render a bare "code: message" line when there's no source span to point at.
-/// The shared messageless fallback for both the type-error path (error
-/// lacks a span) and the runtime-error path (no location, or its source is
-/// unresolved in the registry).
+/// The spanless fallback: a type error carrying no position, or a runtime span
+/// the [`SourceDb`] cannot resolve.
 fn render_messageless(code: Option<&str>, message: &str, hint: Option<&str>) -> String {
     let mut out = String::new();
     let (head, cyan, reset) = error_palette();
@@ -65,12 +56,6 @@ fn render_messageless(code: Option<&str>, message: &str, hint: Option<&str>) -> 
 }
 
 // ── Ariadne render core ──────────────────────────────────────────────────
-//
-// Every ariadne render is the same shape: clamp a char range to source,
-// build a single-label red report with code/message and optional help,
-// write it to a byte buffer, return the UTF-8 string.  `render_ariadne`
-// is that shape.  The three public entry points differ only in how they
-// derive the range and the label phrase.
 
 /// Source range plus the phrase placed next to its underline.
 struct LabelRange {
@@ -78,10 +63,8 @@ struct LabelRange {
     label: String,
 }
 
-/// Render an ariadne report with one red primary label, an optional
-/// yellow secondary label, and an optional help line.  Single entry
-/// point for every diagnostic in the codebase: callers vary in how
-/// they derive the ranges and phrases, not in the report shape.
+/// The one report shape — red primary label, optional yellow secondary,
+/// optional help.  Callers differ only in how they derive the ranges.
 #[allow(clippy::too_many_arguments)]
 fn render_ariadne(
     file: &str,
@@ -123,8 +106,7 @@ fn render_ariadne(
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-/// Char range starting at `start` of the given char-width, clamped so the
-/// caret always points at *some* character even at end-of-source.
+/// Clamped so the caret still points at *some* character at end-of-source.
 fn caret_range(source: &str, start: usize, width: usize) -> std::ops::Range<usize> {
     let char_len = source.chars().count();
     let s = start.min(char_len);
@@ -132,12 +114,8 @@ fn caret_range(source: &str, start: usize, width: usize) -> std::ops::Range<usiz
     s..e
 }
 
-/// Render a parse error via ariadne.
-///
-/// When the error originated in the
-/// lexer the structured kind drives a dual-label render (opening
-/// delimiter + EOF position + nested-form note); otherwise a single
-/// red label points at the offending token.
+/// Render a parse error: a structured `lex_kind` drives the two-label report
+/// (opener plus EOF), anything else gets one red label on the offending token.
 pub fn format_parse_error_ariadne(file: &str, source: &str, err: &ParseError) -> String {
     if let Some(kind) = &err.lex_kind
         && let Some(report) = lex_error_report(source, kind)
@@ -170,10 +148,9 @@ pub fn format_parse_error_ariadne(file: &str, source: &str, err: &ParseError) ->
     )
 }
 
-// ── Lex-error report ──────────────────────────────────────────────────────
+// ── Spans and lex-error reports ───────────────────────────────────────────
 
-/// Byte→char clamp.  Spans arrive in bytes from the lexer; ariadne is
-/// configured for chars, so every span passes through here.
+/// Spans count bytes; ariadne indexes by char, so every span crosses here.
 fn byte_span_to_char_range(source: &str, span: Span) -> std::ops::Range<usize> {
     let s = byte_to_char(source, span.start as usize);
     let e = byte_to_char(source, span.end.max(span.start + 1) as usize);
@@ -184,10 +161,8 @@ fn eof_char_range(source: &str) -> std::ops::Range<usize> {
     caret_range(source, source.chars().count(), 1)
 }
 
-/// Recursive description of a nested `LexErrorKind` for the help line —
-/// `"foo !{$(unclosed"` becomes "`{…}` opened at 1:6, which itself
-/// contains `$(…)` opened at 1:8".  Line/column is recovered from
-/// `source` at render time rather than carried on the error.
+/// Prose for the help line — "`{…}` opened at 1:6, which itself contains …".
+/// Line/column is recovered from `source` here, not carried on the error.
 fn describe_inner(source: &str, kind: &LexErrorKind) -> String {
     let pos = |span: Span| {
         let (line, col) = byte_to_line_col(source, span.start as usize);
@@ -222,7 +197,7 @@ fn describe_inner(source: &str, kind: &LexErrorKind) -> String {
     }
 }
 
-/// Decomposition of a `LexErrorKind` into the parts `render_ariadne` consumes.
+/// The parts `render_ariadne` consumes.
 struct LexErrorReport {
     code: &'static str,
     message: String,
@@ -231,9 +206,7 @@ struct LexErrorReport {
     hint: Option<String>,
 }
 
-/// Decompose a `LexErrorKind` into the parts `render_ariadne` consumes.
-/// Returns `None` for `Other(_)` so the caller falls back to the
-/// generic single-label parse-error render.
+/// `None` for `Other(_)`, so the caller falls back to the single-label render.
 fn lex_error_report(source: &str, kind: &LexErrorKind) -> Option<LexErrorReport> {
     match kind {
         LexErrorKind::UnterminatedString {
@@ -293,16 +266,13 @@ fn lex_error_report(source: &str, kind: &LexErrorKind) -> Option<LexErrorReport>
             secondary: None,
             hint: Some("expected closing `)` before end of input".into()),
         }),
-        // L0004 is reserved for the proposed raw-delimiter near-miss (260608).
-        // L0005 is retired: it rejected `<<`, which is now the here-string
-        // redirect; the `<<EOF` near-miss is a parser diagnostic instead.
+        // Codes are never reused: the next lex diagnostic takes L0006.
         LexErrorKind::Other(_) => None,
     }
 }
 
-/// Render a type error via the ariadne crate — structured labels, error
-/// code, and optional help.  Falls back to a messageless render when the
-/// error carries no span (nothing to point at).
+/// Render one type error, falling back to the spanless form when it carries
+/// no position.
 pub fn format_type_error_ariadne(file: &str, source: &str, err: &TypeError) -> String {
     let message = err.kind.render_message();
     let code = err.kind.code();
@@ -325,22 +295,17 @@ pub fn format_type_error_ariadne(file: &str, source: &str, err: &TypeError) -> S
     )
 }
 
-/// Render every type error in `errs` via ariadne, concatenated — one
-/// span-and-caret report per error.  The REPL/script/rc/`--check` paths
-/// use this; the loaders collapse to a single message instead.
+/// Every error in `errs`, one caret report each.  The script, `--check`, and
+/// rc paths render this way; the module loaders and the REPL print `Display`.
 pub fn format_type_errors_ariadne(file: &str, source: &str, errs: &[TypeError]) -> String {
     errs.iter()
         .map(|e| format_type_error_ariadne(file, source, e))
         .collect()
 }
 
-/// Render a runtime error via ariadne.
-///
-/// Resolves `span`'s [`FileId`](crate::source::FileId) against `db` to
-/// recover the file name and text, then underlines the span's byte range
-/// there.  Falls back to a messageless render when there is no span or `db`
-/// does not hold its source — the live cross-source guard: a span the
-/// renderer cannot resolve never draws a caret at an unrelated byte.
+/// Draw the caret into the source `span` names, resolved through `db`.  A span
+/// `db` cannot resolve falls back to spanless: no caret beats one in the wrong
+/// file.
 pub fn format_runtime_error_ariadne(
     db: &SourceDb,
     span: Option<Span>,
@@ -364,12 +329,10 @@ pub fn format_runtime_error_ariadne(
     )
 }
 
-/// Render a runtime error, choosing the compact or ariadne format automatically.
-///
-/// `compact_root` is `Some(root)` when the input compiled to a single command,
-/// carrying that input's own [`FileId`](crate::source::FileId); `None` when it
-/// did not.  Shape alone cannot decide: `boom` at the prompt is one command,
-/// but if it is an alias the error is inside the rc, where only a caret points.
+/// Compact only when the error stayed inside `compact_root`'s file — the id of
+/// an input that compiled to a single command.  Shape alone will not do: `boom`
+/// at the prompt is one command, but as an alias its error lives in the rc,
+/// where only a caret can point.
 pub fn format_runtime_error_auto(
     db: &SourceDb,
     err: &crate::types::Error,
@@ -383,14 +346,9 @@ pub fn format_runtime_error_auto(
     }
 }
 
-/// Run-result epilogue shared by every host that runs a top-level run:
-///
-/// render the caught runtime error via [`format_runtime_error_auto`] into
-/// `out`, then hand back the process-exit-code-clamped status.
-///
-/// A host that
-/// wants to suppress the rendering (e.g. under an audit trace that reports
-/// the error itself) passes [`std::io::sink`] and still gets the exit code.
+/// The run epilogue every host shares: render into `out`, return the clamped
+/// exit code.  A host whose audit trace already reports the error passes
+/// [`std::io::sink`] and still gets the code.
 pub fn report_runtime_error(
     out: &mut dyn std::io::Write,
     db: &SourceDb,
@@ -404,9 +362,7 @@ pub fn report_runtime_error(
 
 // ── Ad-hoc error helpers ──────────────────────────────────────────────────
 
-/// Print a one-line command error to stderr: `{cmd}: {msg}`.
-///
-/// The command prefix is colored bold red when color is enabled.
+/// Print `{cmd}: {msg}` to stderr.
 pub fn cmd_error(cmd: &str, msg: &str) {
     if use_color() {
         eprintln!("{BOLD_RED}{cmd}{RESET}: {msg}");
@@ -415,11 +371,8 @@ pub fn cmd_error(cmd: &str, msg: &str) {
     }
 }
 
-/// Render a runtime error without a source span — compact one-liner format.
-///
-/// Produces `error: {message} (exit status N)\nhint: {hint}\n`.
-/// Used when the whole input is a single command, where the ariadne
-/// source-span arrow adds no information.
+/// The one-liner for a single-command input, where a caret would only point
+/// back at the line the user just typed.
 pub fn format_runtime_error_compact(err: &crate::types::Error) -> String {
     let (red, cyan, reset) = error_palette();
     let mut out = format!("{red}error{reset}: {}", err.message);
@@ -433,7 +386,7 @@ pub fn format_runtime_error_compact(err: &crate::types::Error) -> String {
     out
 }
 
-/// Print a warning line to stderr: `warning: {msg}`.
+/// Print `warning: {msg}` to stderr.
 pub fn shell_warning(msg: &str) {
     if use_color() {
         eprintln!("{BOLD_YELLOW}warning{RESET}: {msg}");
@@ -444,28 +397,17 @@ pub fn shell_warning(msg: &str) {
 
 // ── Debug tracing ────────────────────────────────────────────────────────
 //
-// One stderr trace macro for development, on in debug builds and compiled
-// to nothing in release — no environment flag.  Its call sites are
-// permanent instrumentation, not temporary print statements, and should
-// never be removed from the source.
+// Call sites of `dbg_trace!` are permanent instrumentation, not stray print
+// statements; leave them in.
 
-/// Emit a bright-red `[[DEBUG] tag]` line to stderr in debug builds.
-///
-/// Compiled to nothing in release.  Usage:
-///
-/// ```ignore
-/// dbg_trace!("exec", "cmd={cmd} inherit={inherit}");
-/// dbg_trace!("repl", "entering loop");
-/// ```
+/// Emit a `[[DEBUG] tag]` line to stderr; nothing at all in release builds.
 #[cfg(debug_assertions)]
 #[macro_export]
 macro_rules! dbg_trace {
     ($tag:expr, $($arg:tt)*) => {
-        // Honor the same color gate as the diagnostics ([`use_color`]): a trace
-        // must not emit ANSI when NO_COLOR / TERM=dumb / a non-tty stderr says
-        // otherwise. `use_color()` is false until `set_terminal` runs, so any
-        // trace before terminal setup (e.g. the sandbox `boot_recover` sweep at
-        // `early_init`) renders plain.
+        // Same gate as the diagnostics: no ANSI under NO_COLOR, TERM=dumb, or a
+        // non-tty stderr — `use_color` probes inline until `set_terminal` seeds
+        // it, so a trace from before terminal setup is gated too.
         if $crate::diagnostic::use_color() {
             eprintln!("\x1b[1;91m[[DEBUG] {}]\x1b[0m {}", $tag, format!($($arg)*))
         } else {
@@ -550,7 +492,6 @@ mod tests {
         assert!(output.contains("`{…}`"), "got:\n{output}");
     }
 
-    /// Register one source in a fresh db and return the db plus the id.
     fn db_with(name: &str, text: &str) -> (SourceDb, FileId) {
         let mut db = SourceDb::default();
         let id = db.register(Source::from_text(name, text));
@@ -583,12 +524,9 @@ mod tests {
         assert!(output.contains("the right-hand side must evaluate to a list"));
     }
 
-    /// A span is a byte range: for a multi-byte token the caret width is the
-    /// token's character count, not its byte count, so the underline stops at
-    /// the token boundary instead of running into the following text.
+    /// `café` is 5 bytes and 4 chars; the underline must stop at the token.
     #[test]
     fn runtime_error_caret_width_is_char_count_for_multibyte() {
-        // The token `café` occupies bytes 0..5 but spans 4 characters.
         let range = byte_span_to_char_range("café bar", Span::new(FileId::DUMMY, 0, 5));
         assert_eq!(range, 0..4, "caret must span 4 chars, not 5 bytes");
     }
@@ -631,8 +569,6 @@ mod tests {
         assert!(output.contains("T0002"));
     }
 
-    /// A runtime error whose span resolves in the db draws its caret
-    /// into the named source's bytes.
     #[test]
     fn runtime_error_resolved_source_draws_caret() {
         let (db, file) = db_with("main.ral", "echo x");
@@ -645,9 +581,7 @@ mod tests {
         assert!(out.contains("main.ral"));
     }
 
-    /// A runtime error whose span names a source the registry does not
-    /// hold (e.g. the placeholder id) falls back to a messageless render —
-    /// the live cross-source guard never draws a caret at an unrelated byte.
+    /// The placeholder id names no source, so no caret is drawn in any of them.
     #[test]
     fn runtime_error_in_unregistered_source_is_messageless() {
         let (db, _) = db_with("main.ral", "echo x");
@@ -661,19 +595,16 @@ mod tests {
         );
     }
 
-    /// The cross-source fix in one renderer call: two sources registered in
-    /// one db; an error whose span names the *module's* id draws into the
-    /// module's bytes, not the top-level script's, even when the module's
-    /// byte range would land elsewhere in the top-level text.
+    /// Two sources in one db: the caret follows the span's file, not the
+    /// top-level's, even where the same byte range would land in both.
     #[test]
     fn runtime_error_in_module_draws_into_module_source() {
         let mut db = SourceDb::default();
         let _top = db.register(Source::from_text("main.ral", "source 'mod.ral'\n"));
         let module = db.register(Source::from_text("mod.ral", "let a = 1\nfail 'kaboom'\n"));
-        // Bytes 10..14 of the module are `fail`, past the top-level's end.
-        // Strip ANSI before asserting: ariadne colors the underlined span
-        // character-by-character when color is on (a tty), so the raw bytes
-        // of `fail` are split by escapes.  The test is about the visible text.
+        // Bytes 10..14 of the module are `fail`, past the top-level's end.  Strip
+        // ANSI: on a tty ariadne colours the span character by character, which
+        // splits `fail` with escapes.
         let out = ansi::strip(&format_runtime_error_ariadne(
             &db,
             Some(Span::new(module, 10, 14)),
@@ -697,10 +628,9 @@ mod tests {
 
     #[test]
     fn no_color_output_has_no_ansi() {
-        // NO_COLOR path: messageless render produces no escape codes.
+        // Absence of escapes is not assertable — `use_color` may be true in a
+        // tty — so only the content is checked.
         let out = render_messageless(Some("T9999"), "message", Some("hint"));
-        // We can't assert absence globally (use_color may be true in a tty),
-        // but the content must include code + message + hint regardless.
         assert!(out.contains("T9999"));
         assert!(out.contains("message"));
         assert!(out.contains("hint"));

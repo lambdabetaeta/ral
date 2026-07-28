@@ -1,16 +1,11 @@
-//! The diff mark's interior: a [`Hunk`] is a run of [`Row`]s, and a
-//! [`Row`] is a run of [`Seg`]ments — the shape a changed line takes when
-//! `similar`'s word-level diff has picked out what actually moved.
-//!
-//! [`whole_file_hunks`] is the one place a pair of file texts becomes this
-//! structure, grouped with context the way a unified diff reads.
+//! The diff mark's interior: a [`Hunk`] is a run of [`Row`]s, and a [`Row`] a
+//! run of [`Seg`]ments carrying the word-level emphasis `similar` picks out.
+//! [`whole_file_hunks`] is the one place a pair of texts becomes this shape.
 
 use serde::Serialize;
 
-/// Total changed lines (deletions + additions) across `hunks`.
-///
-/// The diff magnitude, shared by [`crate::bus::card::Card::magnitude`] and
-/// the renderer's size-bar. Context rows are unchanged, so they do not count.
+/// Total changed lines across `hunks`, context counting for nothing — the
+/// magnitude `Card::magnitude` and `tui::line`'s size bar both read.
 pub(crate) fn hunk_magnitude(hunks: &[Hunk]) -> u32 {
     #[allow(
         clippy::cast_possible_truncation,
@@ -24,28 +19,20 @@ pub(crate) fn hunk_magnitude(hunks: &[Hunk]) -> u32 {
     n
 }
 
-/// One grouped hunk of a whole-file diff, carried by a [`crate::bus::card::Mark::Diff`].
+/// One grouped hunk of a whole-file diff, carried by a `Mark::Diff`: context,
+/// deletions and insertions interleaved as one unified list of [`Row`]s.
 ///
-/// A flat unified list of [`Row`]s — context,
-/// deletions, and insertions interleaved exactly as `similar`'s grouped ops
-/// yield them.
-/// `start` is the 1-indexed original line of the hunk's first
-/// row; the sink walks the rows from there, advancing an old- and a
-/// new-side counter — a `Context` advances both, a `Del` advances the old
-/// counter (and keeps its pre-edit number), an `Add` advances the new
-/// counter (and takes its post-edit number).
+/// `start` is the 1-indexed *original* line of the first row; `tui::line`
+/// numbers the gutter by walking from there, advancing an old- and a new-side
+/// counter separately.
 #[derive(Clone, Debug, Serialize)]
 pub struct Hunk {
     pub start: u32,
     pub rows: Vec<Row>,
 }
 
-/// One run of a diff row's text: a contiguous slice flagged `emph` when it is
-/// the part that actually changed against the row's paired line — the
-/// intra-line word diff `similar` computes.
-///
-/// A context row, and the unchanged
-/// stretches that surround a change on a del/add row, carry `emph: false`.
+/// One run of a row's text, `emph` when it is the part that changed against
+/// the row's paired line — `similar`'s intra-line word diff.
 #[derive(Clone, Debug, Serialize)]
 pub struct Seg {
     pub emph: bool,
@@ -53,8 +40,7 @@ pub struct Seg {
 }
 
 impl Seg {
-    /// A whole, unemphasised run — the shape a context row carries and the
-    /// default a plainly-constructed del/add row falls back to.
+    /// A whole, unemphasised run — what a context row carries.
     pub fn plain(text: impl Into<String>) -> Self {
         Self {
             emph: false,
@@ -63,12 +49,8 @@ impl Seg {
     }
 }
 
-/// One row of a [`Hunk`]'s unified line list: unchanged context, a removed
-/// line, or an inserted line.
-///
-/// Each carries its text as a run of [`Seg`]ments
-/// so a del/add can mark the words that changed against its paired line; a
-/// context row is a single unemphasised segment.
+/// One row of a [`Hunk`]'s unified list — context, a removed line, or an
+/// inserted line — carrying its text as a run of [`Seg`]ments.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "tag", content = "segs", rename_all = "snake_case")]
 pub enum Row {
@@ -85,24 +67,18 @@ impl Row {
         }
     }
 
-    /// The row's full text — its segments concatenated, dropping the
-    /// inline-emphasis distinction (the plain-text/headless rendering).
+    /// The row's segments concatenated, dropping the emphasis distinction.
     pub fn text(&self) -> String {
         self.segs().iter().map(|s| s.text.as_str()).collect()
     }
 }
 
-/// Compute the whole-file line-level diff of `old` vs `new`, grouped into
-/// hunks with ±2 lines of context.  Each hunk's `start` is the 1-indexed
-/// original line of its first row, and its rows are the unified context /
-/// deletion / insertion list `similar` yields.
+/// The whole-file line diff of `old` vs `new`, grouped into hunks with ±2
+/// lines of context.
 ///
-/// The sole caller is [`crate::bus::card::io::write_preview`], so every committed write reaches
-/// this same diff through the one [`crate::bus::card::value_to_io`]/[`crate::bus::card::io_card`] decode,
-/// whatever wrote it: a `>` redirect (core composes the `` `io `` value
-/// itself) or `edit-hash`/`edit-replace` (`shell_eval/builtins.rs`'s
-/// [`crate::shell_eval::builtins::surface_write`] composes the identical value by hand, since those
-/// builtins write below the redirect frame and so must self-report).
+/// Called only from `write_preview` in the sibling `io` module, so every
+/// committed write — a `>` redirect, `edit-hash`, `edit-replace` — is diffed
+/// here and nowhere else.
 pub(crate) fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
     use similar::{ChangeTag, TextDiff};
     let diff = TextDiff::from_lines(old, new);
@@ -116,8 +92,7 @@ pub(crate) fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
         let start = first.old_range().start as u32 + 1;
         let mut rows = Vec::new();
         for op in &group {
-            // `iter_inline_changes` is what buys the per-row [`Seg`] shape:
-            // an `Equal` op still yields one whole (unemphasised) segment.
+            // An `Equal` op still yields one whole, unemphasised segment.
             for change in diff.iter_inline_changes(op) {
                 let mut segs: Vec<Seg> = change
                     .iter_strings_lossy()
@@ -127,9 +102,8 @@ pub(crate) fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
                     })
                     .collect();
                 // `from_lines` keeps a trailing `\n` on each row's final
-                // segment; strip it so the row carries a bare line, matching
-                // how `rows_of` splits the file.  If stripping leaves that
-                // segment empty (a line that was pure `\n`), drop it outright.
+                // segment; strip it so the row carries a bare line, and drop
+                // the segment outright if that leaves it empty.
                 if let Some(last) = segs.last_mut() {
                     if let Some(bare) = last.text.strip_suffix('\n') {
                         last.text = bare.to_string();
@@ -154,26 +128,19 @@ pub(crate) fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
 mod tests {
     use super::*;
 
-    /// Our wiring of `similar`'s inline changes into [`Row`]s: a changed line
-    /// threads through as segments that concatenate back to the original line
-    /// (trailing newline stripped) and carry *both* an emphasised and an
-    /// unemphasised run, so the emph distinction the renderer needs survives.
-    /// *Which* words `similar` flags is its concern, not ours, so we don't
-    /// assert the boundary.
+    /// A changed line threads through as segments that rejoin to the original
+    /// line, newline stripped, carrying both an emphasised and an unemphasised
+    /// run.  *Which* words `similar` flags is its business, not ours.
     #[test]
     fn whole_file_hunks_threads_inline_segments() {
         let hunks = whole_file_hunks("alpha\nthe quick brown fox\n", "alpha\nthe quick red fox\n");
         let rows: Vec<&Row> = hunks.iter().flat_map(|h| h.rows.iter()).collect();
         let find = |want: fn(&Row) -> bool| *rows.iter().find(|r| want(r)).expect("the row");
 
-        // The shared `alpha` line maps to a context row of one unemphasised
-        // segment — our `Equal → Context` mapping.
         let ctx = find(|r| matches!(r, Row::Context(_)));
         assert_eq!(ctx.text(), "alpha");
         assert!(ctx.segs().iter().all(|s| !s.emph));
 
-        // The edited line round-trips on each side, with the `\n` `from_lines`
-        // carries stripped, and keeps both an emphasised and an unchanged run.
         for (row, text) in [
             (find(|r| matches!(r, Row::Del(_))), "the quick brown fox"),
             (find(|r| matches!(r, Row::Add(_))), "the quick red fox"),

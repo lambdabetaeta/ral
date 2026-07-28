@@ -1,19 +1,6 @@
-//! Unified stream plumbing.
-//!
-//! Three submodules carry the building blocks.  [`terminal`] caches the
-//! startup isatty / ANSI / `NO_COLOR` / mode bits.  [`source`] is a stage's
-//! byte input.  [`sink`] is its byte output, together with the child-process
-//! routing plan and the in-memory buffer primitives.  Public items from each
-//! are re-exported below so callers spell them `crate::io::Sink`,
-//! `crate::io::TerminalState`, etc.
-//!
-//! This file holds [`Io`] — the per-Shell IO bundle (stdin / stdout /
-//! stderr / interactive / terminal / `launch_role` / `capture_outer`) — and
-//! [`LaunchRole`], the process-group role that distinguishes the top-level
-//! orchestrator from a pipeline-local child. Terminal-foreground authority is
-//! no longer carried here — that is the session's
-//! [`TerminalLease`](crate::process::TerminalLease); this type only governs
-//! process-group placement.
+//! Unified stream plumbing: [`Io`], the per-`Shell` bundle of byte streams and
+//! terminal state, over the [`source`] / [`sink`] / [`terminal`] submodules
+//! whose public items are re-exported here as `crate::io::*`.
 
 mod sink;
 mod source;
@@ -35,29 +22,24 @@ pub use terminal::{
 
 use std::io;
 
-/// The process-group role of the current shell context: the top-level
-/// orchestrator, or a pipeline-local child.
+/// Process-group role of a shell context: top-level orchestrator, or
+/// pipeline-local child.
 ///
-/// This is the residue of the former `JobControl` once terminal-foreground
-/// authority moved to the session's
-/// [`TerminalLease`](crate::process::TerminalLease). It still decides
-/// process-group *placement* — a top-level standalone external may lead its
-/// own group (so a watchdog cancel can `kill(-pgid, …)` the whole subtree),
-/// while a pipeline stage must join the pipeline's pgid and never become a
-/// new-leader orchestrator on its own — and it forgives SIGPIPE on pipeline
-/// children. It no longer says anything about who may foreground.
+/// It decides pgid placement — a top-level standalone external may lead its own
+/// group, so a watchdog cancel can `kill(-pgid, …)` the whole subtree — and
+/// forgives SIGPIPE on pipeline children.  Being top-level is also one conjunct
+/// of the foreground gate in `runtime/command/foreground.rs`; holding the
+/// session's [`TerminalLease`](crate::process::TerminalLease) is another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum LaunchRole {
-    /// The orchestrator: a top-level eval or single-command exec.
+    /// A top-level eval or single-command exec.
     #[default]
     TopLevel,
-    /// A pipeline-local child. Joins the pipeline's pgid; never leads its own
-    /// group independently.
+    /// Joins the pipeline's pgid; never leads a group of its own.
     PipelineStage,
 }
 
 impl LaunchRole {
-    /// Whether this is the top-level orchestrator (not a pipeline stage).
     pub fn is_top_level(self) -> bool {
         matches!(self, Self::TopLevel)
     }
@@ -65,39 +47,31 @@ impl LaunchRole {
 
 /// All pipeline-stage IO state for a single Shell.
 pub struct Io {
-    /// Byte source for this stage.
     pub stdin: Source,
-    /// Byte sink for this stage.
     pub stdout: Sink,
-    /// Byte sink for this stage's stderr.  Defaults to `Sink::Stderr`.
-    /// Spawned handles install a `Sink::Buffer` here so errors are buffered
-    /// in the handle and replayed on `await` (§13.3 replay rule).
+    /// `spawn` installs a buffer sink here, so a worker's errors are held in
+    /// its handle and drained on `await`, never interleaved with the parent's.
     pub stderr: Sink,
-    /// True when the shell is running as an interactive REPL.
+    /// Running as an interactive REPL — not merely attached to a tty.
     pub interactive: bool,
-    /// Cached isatty results from shell startup.
+    /// Probed once at startup; nothing re-queries the OS mid-session.
     pub terminal: TerminalState,
-    /// This shell context's process-group role. `TopLevel` for orchestrator
-    /// paths; `PipelineStage` inside helper-owned pipeline code. Governs pgid
-    /// placement and SIGPIPE forgiveness, not terminal foreground — that is the
-    /// session [`TerminalLease`](crate::process::TerminalLease).
     pub launch_role: LaunchRole,
-    /// The stdout that was active before the current `with_capture` installed
-    /// its buffer.  `Comp::Seq` flushes non-final commands' bytes here so
-    /// side-effects remain visible rather than being silently discarded.
-    /// `None` when not inside a capture context.
+    /// The stdout displaced by the enclosing `with_capture`.  `Comp::Seq`
+    /// flushes non-final commands' bytes here, so their side effects stay
+    /// visible instead of vanishing into the captured value.  `None` outside a
+    /// capture.
     pub capture_outer: Option<Sink>,
 }
 
 impl Io {
-    /// Clone the Io state for a child thread.
+    /// Duplicate this bundle, dup'ing each sink's file descriptor.
     ///
-    /// `stdin` is not propagated: it is a read-once resource consumed by the
-    /// child that spawns it.  The caller must set `child.io.stdin` explicitly.
+    /// `stdin` is not propagated: it is read-once, so the caller installs the
+    /// new bundle's source itself.
     ///
     /// # Errors
-    /// Returns `Err` if duplicating the `stdout`, `stderr`, or `capture_outer`
-    /// sink's underlying file descriptor fails.
+    /// Returns `Err` if any sink's file descriptor cannot be duplicated.
     pub fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             stdin: Source::Terminal,
@@ -114,13 +88,12 @@ impl Io {
         })
     }
 
-    /// Install Io state from `parent` into `self` for a same-thread child shell
-    /// (thunk body, `try`, `audit`, …).  Bytes sinks are `try_clone`d; the
-    /// pipe stdin is *moved* out of the parent so the child consumes it once.
-    /// `try_clone` failure collapses to the default terminal sink: by then
-    /// the parent's FDs are already gone, and `Sink::Terminal` routes
-    /// through the sink machinery to the inherited fd 1, which this
-    /// same-thread child shares with the parent.
+    /// Install `parent`'s IO into a cross-process pipeline-stage child — via
+    /// `Shell::child_of`, over the throwaway parent `child_eval` rebuilds in the
+    /// helper process.  Sinks are `try_clone`d; stdin is *moved*, since only one
+    /// of the two may consume a read-once source.  A failed `try_clone`
+    /// collapses to the terminal sink, which routes to the inherited fd 1 the
+    /// child shares with that parent anyway.
     pub fn inherit_from(&mut self, parent: &mut Self) {
         self.stdout = parent.stdout.try_clone().unwrap_or(Sink::Terminal);
         self.stderr = parent.stderr.try_clone().unwrap_or(Sink::Stderr);
@@ -131,14 +104,13 @@ impl Io {
         self.terminal = parent.terminal;
         self.interactive = parent.interactive;
         self.launch_role = parent.launch_role;
-        // Move the whole source so every marker (`Empty` as well as a `Pipe` /
-        // `File`) reaches the child: a child of an `Empty`-stdin run must also
-        // see no fall-through to fd 0, not silently revert to `Terminal`.
+        // The whole source moves, markers included: a child of an `Empty` stdin
+        // must also see no fall-through to fd 0, not revert to `Terminal`.
         self.stdin = std::mem::replace(&mut parent.stdin, Source::Terminal);
     }
 
-    /// STT-out: return the read-once stdin to `parent` so subsequent
-    /// sibling calls see the unconsumed pipe.  Mirror of `inherit_from`.
+    /// Hand the read-once stdin back to `parent`, so a later sibling still sees
+    /// the unconsumed pipe.
     pub fn return_to(&mut self, parent: &mut Self) {
         parent.stdin = std::mem::replace(&mut self.stdin, Source::Terminal);
     }

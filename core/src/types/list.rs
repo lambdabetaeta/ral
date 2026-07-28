@@ -1,64 +1,51 @@
 //! List value (the inner of `Value::List`).
 //!
-//! Opaque newtype around an `imbl::Vector<Value>`.  The persistent
-//! vector is chosen for O(1)-amortised structural sharing on `clone` —
-//! list literals and tail-cons patterns clone the spine on every step
-//! through the evaluator and through pattern matching.  Wrapping it in
-//! a newtype keeps `imbl` an internal implementation detail of `types/`
-//! and makes the public surface deliberate: only the operations listed
-//! here are exposed to the rest of the tree.
+//! The persistent `imbl::Vector` shares its spine on `clone` and `split_off`
+//! rather than copying elements: that is what lets `eval_list` cons onto a
+//! spread and `...rest` patterns bind a tail for free, both in `evaluator/`.
+//! The newtype keeps `imbl` from leaking past `types/`.
 
 use super::value::Value;
 use imbl::shared_ptr::DefaultSharedPtr;
 
-/// A persistent list of `Value`s.  Cheap to clone and to share across
-/// scopes; copy-on-write on mutation.
+/// A persistent list of `Value`s: cheap to clone, copy-on-write on mutation.
 #[derive(Debug, Clone, Default)]
 pub struct List(imbl::Vector<Value>);
 
 impl List {
-    /// Empty list.
     pub fn new() -> Self {
         Self(imbl::Vector::new())
     }
 
-    /// Length of the list.
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
-    /// `true` if the list has no elements.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// Iterate the elements in order.
     pub fn iter(&self) -> Iter<'_> {
         Iter(self.0.iter())
     }
 
-    /// Element at `index`, or `None` if out of bounds.
     pub fn get(&self, index: usize) -> Option<&Value> {
         self.0.get(index)
     }
 
-    /// Append `v` to the end.  Copy-on-write on the persistent spine.
     pub fn push_back(&mut self, v: Value) {
         self.0.push_back(v);
     }
 
-    /// Prepend `v` to the front.
     pub fn push_front(&mut self, v: Value) {
         self.0.push_front(v);
     }
 
-    /// Append the contents of `other` onto the end of `self`.
     pub fn append(&mut self, other: Self) {
         self.0.append(other.0);
     }
 
-    /// Split the list at `index`: `self` keeps `[0, index)`, the
-    /// returned list contains `[index, len)`.
+    /// `self` keeps `[0, index)`; the returned list takes `[index, len)`.
     pub fn split_off(&mut self, index: usize) -> Self {
         Self(self.0.split_off(index))
     }
@@ -76,9 +63,8 @@ impl FromIterator<Value> for List {
     }
 }
 
-/// Owning iterator over a [`List`].  Newtype over the underlying imbl
-/// consuming iterator so the imbl type does not leak through
-/// [`IntoIterator::IntoIter`].
+/// Owning iterator over a [`List`], newtyped so imbl's pointer-kind generic
+/// stays off the public signature.
 pub struct IntoIter(imbl::vector::ConsumingIter<Value, DefaultSharedPtr>);
 
 impl Iterator for IntoIter {
@@ -91,7 +77,6 @@ impl Iterator for IntoIter {
     }
 }
 
-/// Borrowing iterator over a [`List`].
 pub struct Iter<'a>(imbl::vector::Iter<'a, Value, DefaultSharedPtr>);
 
 impl<'a> Iterator for Iter<'a> {

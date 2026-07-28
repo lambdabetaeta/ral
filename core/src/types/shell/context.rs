@@ -1,15 +1,9 @@
-//! `impl Context`: dynamic-context verbs over the capability-attenuable
-//! subtree of [`Mobile`](super::Mobile).
+//! `impl Context`: verbs over the dynamic context — env overrides, `$HOME` /
+//! `$USER`, the audit gate, and the [`Resolver`] bound to the live home/cwd pair.
 //!
-//! [`Context`] lives as `mobile.context` and is what
-//! [`Shell::inherit_from`](super::Shell::inherit_from) and
-//! [`Shell::spawn_thread`](super::Shell::spawn_thread) clone into
-//! children.  The methods here are its own verbs: dynamic env-override
-//! reads/writes (`PWD` / `OLDPWD` live on `context.cwd`, not in
-//! `env_overrides`); `$HOME` and `$USER` lookups
-//! that pin "which env var, what fallback" in one place; the
-//! audit-gating predicate; and the [`Resolver`] constructors that bind
-//! the active cwd / home pair.
+//! [`Context`] is the `mobile.context` subtree that `Shell::inherit_from` and
+//! `Shell::spawn_thread` clone into a child.  `PWD` / `OLDPWD` stay out of
+//! `env_overrides`; the canonical pair lives on `context.cwd`.
 
 use super::Context;
 use crate::path::Resolver;
@@ -17,9 +11,7 @@ use crate::types::{Audit, EnvVars};
 use std::path::Path;
 
 impl Context {
-    /// Read-only borrow of the env-overrides map.  Callers iterate or
-    /// look up by name; mutation goes through [`Self::set_env_var`]
-    /// (and friends).
+    /// Read-only borrow; mutation goes through [`Self::set_env_var`] and friends.
     pub fn env_overrides(&self) -> &EnvVars {
         &self.env_overrides
     }
@@ -46,50 +38,34 @@ impl Context {
         }
     }
 
-    /// True when capability checks should emit nodes into the audit
-    /// tree.  Requires both an active trail (`audit { … }` or
-    /// `ral --audit`) and `audit: true` on at least one enclosing
-    /// grants layer (SPEC §11.4–11.5).
+    /// True when capability checks should emit audit nodes: an active trail
+    /// (`audit { … }` or `ral --audit`) and `audit: true` on some grants layer.
     pub fn should_audit_capabilities(&self, audit: &Audit) -> bool {
         audit.active() && self.grants.any_audits()
     }
 
-    /// Effective `$HOME` at this dynamic layer.  Forwards to
-    /// [`crate::path::home`] — see [`crate::path::tilde`] for the
-    /// resolution order.
+    /// Effective `$HOME` via [`crate::path::home`]: these overrides first, then
+    /// the host env, empty string when neither binds.
     pub(crate) fn home(&self) -> String {
         crate::path::home(&self.env_overrides)
     }
 
-    /// `$USER` from the dynamic env, empty string if unset.  The
-    /// principal recorded on audit-tree nodes — `audit::*` builders
-    /// and the capability-check emitter all read it here so the
-    /// "which env var, what fallback" decision lives in one place.
+    /// The `$USER` stamped on audit-tree nodes.  Overrides only, with no
+    /// host-env fallback, so it stays empty until a front end has run
+    /// [`Shell::seed_default_env_vars`](super::Shell::seed_default_env_vars).
     pub fn principal(&self) -> String {
         self.env_overrides.get("USER").cloned().unwrap_or_default()
     }
 
-    /// Effective shell cwd as a borrow: the `within [dir: …]`
-    /// override if any, else the `cd`-mutated persistent cwd, else
-    /// `None` (the caller falls back through `process_cwd`).
-    ///
-    /// Single source of truth for the `dir > cwd.current` precedence
-    /// rule.  [`Self::resolver`] and [`Shell::cwd`](super::Shell::cwd)
-    /// both consume this — keeping the rule in one place means a future
-    /// tweak (a third source, a different policy) ports once.
+    /// Effective cwd: the `within [dir: …]` override, else the `cd`-mutated
+    /// persistent cwd.  Sole home of that precedence, read by [`Self::resolver`]
+    /// and [`Shell::cwd`](super::Shell::cwd), which adds the process-cwd fallback.
     pub(crate) fn cwd_chain(&self) -> Option<&Path> {
         self.dir.as_deref().or(self.cwd.current.as_deref())
     }
 
-    /// Build a [`Resolver`] tied to this dynamic layer, binding the
-    /// active home / cwd pair.  Used for grant-prefix resolution,
-    /// deny-path canonicalisation, and access-side fs checks.
-    ///
-    /// The interpreter always runs unconfined (a `grant` body evaluates
-    /// locally; only the per-command launcher enters the OS sandbox, in
-    /// a separate child process), so the in-process fs gate canonicalises
-    /// leniently — missing components fall back through the ancestor
-    /// walk — and grants follow symlinks.
+    /// A [`Resolver`] bound to this layer's home and effective cwd — grant-prefix
+    /// resolution, deny-path canonicalisation, and the fs gates all mint one here.
     pub(crate) fn resolver(&self) -> Resolver<'_> {
         Resolver {
             home: self.home(),

@@ -1,15 +1,11 @@
 //! In-process ral evaluation against a persistent `Shell`.
 //!
-//! Runs each tool call as a top-level run under a pushed capabilities
-//! frame with stdout/stderr captured.  The capabilities come from the user's grant
-//! policy; there is no source-level `grant { … }` wrapper around the
-//! model's body — the boundary is enforced by `eval_top_level` plus the
-//! pushed frame, not by surface syntax the model could evade.
-//!
-//! Each tool call's stdout and stderr are captured into in-memory
-//! buffers, replayed to the model in conversation history and written to
-//! the session log in full.  Nothing streams live to the user; the rail
-//! surfaces tool summaries, patches, writes, and tasks instead.
+//! Each tool call is a top-level run under a pushed capabilities frame, with
+//! stdout and stderr captured into buffers rather than streamed: the model
+//! reads them back from history, the user sees only what the rail renders.
+//! There is no source-level `grant { … }` around the model's body — the
+//! boundary is `eval_top_level` plus the pushed frame, not surface syntax the
+//! model could evade.
 
 pub mod builtins;
 pub mod skill;
@@ -28,60 +24,49 @@ use ral_core::types::DeferredSink;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Idle bound of the lease armed on every detached `spawn` worker: a
-/// still-running worker is reaped one hour after the last eliminator
-/// named its handle — well past the 30 s foreground wall, renewed by any
-/// `poll`/`await`/`race` — so an abandoned worker cannot become an
-/// immortal zombie while a babysat one stays alive.  `pub(crate)` so the
-/// `/resources` fold reads the same constant its lease rows describe.
+/// Idle bound of the lease armed on every detached `spawn` worker, renewed by
+/// any `poll`/`await`/`race`: an abandoned worker is reaped, a babysat one
+/// lives.  `pub(crate)` so the `/resources` fold reads the same constant its
+/// lease rows describe.
 pub(crate) const DETACHED_WORKER_CEILING: Duration = Duration::from_hours(1);
 
-/// Absolute backstop of the same lease, measured from spawn: no amount
-/// of ritual polling extends a worker past a day.  Observation renews
-/// idleness, never age.
+/// Absolute backstop of the same lease, measured from spawn: observation
+/// renews idleness, never age.
 pub(crate) const DETACHED_WORKER_BACKSTOP: Duration = Duration::from_hours(24);
 
-/// Admission cap on concurrently *running* workers per agent, enforced by
-/// core at the spawn door: the 65th spawn is refused with an error naming
-/// `await`/`cancel` while 64 still run.  Durable services count (live work
-/// is live work); settled entries lingering under retention never block
-/// admission.
+/// Admission cap on concurrently *running* workers per agent, enforced by core
+/// at the spawn door.  A durable service holds a seat; a settled entry
+/// lingering under retention does not.
 pub(crate) const LIVE_WORKER_CAP: usize = 64;
 
-/// Birth budget on `detach` per session shell: the 17th surviving process
-/// is refused.
-///
-/// Deliberately not [`LIVE_WORKER_CAP`]: a detach occupies no seat, so no
-/// cap counting *live work this session owns* can bound it — and it needs a
-/// bound of its own precisely because nothing later reclaims it.  Reset by
-/// `/clear`, which reboots the shell this is armed on.
+/// Birth budget on `detach` per session shell.  Deliberately not
+/// [`LIVE_WORKER_CAP`]: a detach occupies no seat, so a cap counting live work
+/// cannot bound it, and it needs a bound of its own precisely because nothing
+/// later reclaims it.  Reset by `/clear`, which reboots the shell.
 pub const DETACH_BIRTH_BUDGET: u64 = 16;
 
-/// Retention bound, in ral calls, on a settled worker's unclaimed result:
-/// the entry is swept this many calls after
-/// [`Agent::run_shell`](crate::agent::Agent)'s per-call epoch sweep first
-/// observes it settled.  256 matches the binding lease's scratch expiry —
-/// the two ledgers read the same ral-call clock.
+/// Retention bound, in ral calls, on a settled worker's unclaimed result,
+/// counted from the per-call epoch sweep in `Agent::run_shell` that first
+/// observes it settled.
 pub(crate) const SETTLED_WORKER_RETENTION: u64 = 256;
 
 /// Idle bound, in committed ral calls, on the binding-lease ledger armed on
-/// every agent shell: a top-level name unused for this many calls is
-/// pruned at the next ready boundary.
-/// Reuses the settled-worker retention figure — one ral-call clock, read by
-/// both ledgers for their own idle policy.
+/// every agent shell: a top-level name unused this long is pruned at the next
+/// ready boundary.  Shares its figure with [`SETTLED_WORKER_RETENTION`] — one
+/// ral-call clock, two ledgers reading it for their own idle policy.
 pub(crate) const BINDING_IDLE_CALLS: u64 = 256;
 
-/// Soft byte threshold on a session-scope install's shallow-size estimate
-/// (`Value::shallow_size`): meeting or exceeding this queues a
-/// `LargeBindingNotice` — a residency nudge, never an eviction, recommending
-/// a file path over captured bytes.
+/// Soft threshold on a session-scope install's `Value::shallow_size`: meeting
+/// it queues a `LargeBindingNotice`, a nudge toward a file path over captured
+/// bytes, never an eviction.
 pub(crate) const LARGE_BINDING_BYTES: u64 = 1024 * 1024;
 
 /// The prelude baked into this binary at build time by `build.rs`.
 pub static PRELUDE: ral_core::boot::BakedPrelude = ral_core::baked_prelude!();
 
-/// A successful tool run, broken into named pieces so the caller can
-/// render twice (full / capped) without parsing the rendered form.
+/// A successful tool run, kept in named pieces so `agent::digest::render` can
+/// clip each section against its own cap and one oversized stream cannot crowd
+/// out the others.
 pub struct ToolResult {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -89,17 +74,15 @@ pub struct ToolResult {
     pub exit: i32,
 }
 
-/// What `run_shell` produces.  `Static` is for parse / type errors —
-/// already-formatted ariadne text with no further structure to cap.
+/// What `run_shell` produces.  `Static` is a parse or type failure: ariadne
+/// text the seam already formatted, with no sections, so it is clipped whole.
 pub enum Outcome {
     Ran(ToolResult),
     Static(String),
 }
 
-/// One mirrored pin: the card the user sees.
-///
-/// The bus and viewport still carry plain `Kind::Pin`;
-/// this struct exists only inside the agent's session mirror.
+/// One mirrored pin.  The bus and viewport carry plain [`Kind::Pin`]; this
+/// exists only inside the agent's session mirror.
 #[derive(Clone, Debug)]
 pub struct PinDigest {
     pub(crate) card: crate::bus::card::Card,
@@ -111,22 +94,16 @@ impl PinDigest {
     }
 }
 
-/// A shared, session-owned register of current pinned-state digests.
-///
-/// Written
-/// by the live surface sink as `` `pin ``/`` `unpin `` flow by and read by the
-/// nudge facility to describe what the model has pinned.  The session clones a
-/// handle into each run's surface sink; `None` (tests, any path with no
-/// nudge layer) disables the mirror.  The session is otherwise pin-blind — pins
-/// flow past it to the frontend — so this small mirror is how the boundary
-/// nudge can name them.
+/// A shared, session-owned register of pinned-state digests, written as
+/// `` `pin ``/`` `unpin `` flow past the live surface sink.  Pins otherwise
+/// flow straight through the session to the frontend, so this mirror is the
+/// only way the boundary nudge can name them; `None` (tests, any path with no
+/// nudge layer) disables it.
 pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, PinDigest>>>;
 
-/// Reserved register key for the host-owned durable-service ledger
-/// (`Agent::reconcile_service_pins`): one card listing every live durable
-/// service.  A model may observe it, but ordinary `surface` calls cannot
-/// write or clear it — only the host, reconciling against the live worker
-/// registry, authors it.
+/// Reserved register key for the durable-service ledger — one card listing
+/// every live service, authored only by `Agent::reconcile_service_pins` against
+/// the live worker registry.  A model may read it, never write or clear it.
 pub(crate) const SERVICES_PIN_KEY: &str = "services";
 
 pub(crate) fn is_service_pin(key: &str) -> bool {
@@ -134,40 +111,14 @@ pub(crate) fn is_service_pin(key: &str) -> bool {
 }
 
 /// Decode one surfaced `Value` into the [`Kind`] it renders as — the single
-/// decoder both delivery regimes share.
+/// decoder both delivery regimes share, so the live sink's events and the
+/// deferred sink's later `deliver` cannot drift.
 ///
-/// The live foreground sink
-/// (the transport event loop) calls it to emit now; the deferred sink's
-/// `deliver` calls the *same* function to mint the identical events at the exchange
-/// boundary.  Four shapes arrive on the one `surface` channel:
-///
-///   * a structural I/O event core emits (a read, write, exec, or grep) — a
-///     `Map` tagged by its `io` field, decoded into a typed [`IoEvent`] and
-///     paired with the [`Card`] composed from it ([`Kind::Io`]);
-///   * a `` `notice `` core's own ready-boundary housekeeping pushes (a
-///     worker reap or an idle-binding prune),
-///     decoded into a [`Notice`](crate::bus::card::Notice) and paired with its
-///     card ([`Kind::Notice`]);
-///   * a render document a ral kit composed (a `` `card `` variant of Bertin
-///     marks), decoded into a [`Card`] ([`Kind::Card`]); and
-///   * the `` `done `` completion event a detached worker flushes at the end of
-///     its deferred batch, decoded into its [`DoneOutcome`](crate::bus::card::DoneOutcome)
-///     and paired with its one-line outcome [`Card`] ([`Kind::Done`]).
-///
-/// A fifth shape rides the same channel as a render *disposition*, tried
-/// first: a `` `pin ``/`` `unpin `` wrapper carrying *state* rather than an
-/// event ([`value_to_pin`]) — a render document keyed to a register slot,
-/// overwritten in place on re-pin ([`Kind::Pin`]/[`Kind::Unpin`]) rather than
-/// appended to scrollback.
-///
-/// They cannot collide — io is a `Map`; a notice, a card, a `done`, and a pin
-/// are distinct `Variant` labels — and the order (pin, then io, then notice,
-/// then card, then done) is the tried-first sequence, so the raw effect
-/// record always reaches the bus beside its rendering.  A value that is none
-/// of these returns `None` and is dropped.
-///
-/// [`Card`]: crate::bus::card::Card
-/// [`IoEvent`]: crate::bus::card::IoEvent
+/// The five shapes riding the one `surface` channel are disjoint — an io event
+/// is a `Map` tagged by its `io` field, the rest are distinct variant labels —
+/// so the arm order below carries no meaning.  A pin is the odd one: it is
+/// *state*, keyed to a register slot and overwritten in place on re-pin, not an
+/// event appended to scrollback.  Anything else drops to `None`.
 pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
     if let Some((key, body)) = value_to_pin(ev) {
         Some(match body {
@@ -190,9 +141,8 @@ pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
     }
 }
 
-/// Decode one surfaced value and apply the protected-pin guard: the [`Kind`]
-/// to emit, or `None` when the value decodes to nothing or is a rejected
-/// protected-pin write.  Shared by the live and deferred-batch surface sinks.
+/// Decode one surfaced value and apply the protected-pin guard.  Shared by the
+/// live and deferred-batch surface sinks.
 pub(crate) fn accepted_surface(val: &RalValue, emit: &Emitter) -> Option<Kind> {
     let kind = decode_surface(val)?;
     (!reject_protected_pin(&kind, emit)).then_some(kind)
@@ -211,54 +161,33 @@ fn reject_protected_pin(kind: &Kind, emit: &Emitter) -> bool {
 }
 
 /// The deferred half of `surface`: the session-lived [`DeferredSink`] a
-/// detached `spawn` worker flushes its buffered batch to at completion.  It is
-/// surface's *deferred destination* — not a new channel — so it carries the
-/// same ordinary surface vocabulary the live sink does, posted through the
-/// session's own [`Mailbox`] as a [`Post::Surface`] for the host to render
-/// at the next exchange boundary (the [`Card`]/`Io` events the live path mints now,
-/// minted later) — the spawn worker flushes its deferred surface batch into the
-/// agent that ran the spawn.  The id it stamps is the **root** session's, so a
-/// spawn worker's cards land in the root viewport — a spawn worker registers no
-/// tab of its own.
+/// detached `spawn` worker flushes its buffered batch to at completion.  Not a
+/// second channel — the live sink's own vocabulary, posted through the
+/// session's [`Mailbox`] as a [`Post::Surface`] to render at the next boundary.
 ///
-/// The generation guard mirrors the async `agent`'s exactly: it captures the
-/// [`AgentRegistry`]'s generation at construction and stamps every batch
-/// [`Self::deliver`] flushes with it, rather than re-checking the live
-/// counter itself — a worker settling mid-`/clear` cannot decide its own
-/// staleness (its compose and its push are two separate steps a `/clear` can
-/// fall between), so the batch always reaches the inbox and the consuming
-/// edge (`Agent::admits`) rejects it there if the generation it carries has
-/// fallen behind, exactly as a stale [`AgentResult`](crate::bus::AgentResult)
-/// is rejected.
-///
-/// [`Card`]: crate::bus::card::Card
+/// A worker settling mid-`/clear` cannot decide its own staleness, since
+/// composing the batch and pushing it are two steps a `/clear` can fall
+/// between; so the sink stamps every batch with the [`AgentRegistry`]
+/// generation it captured at construction and always pushes, leaving
+/// `Agent::admits` to reject a stale one at the consuming edge.
 struct InboxDeferred {
-    /// The session's own inbox sender; a spawn worker flushes its deferred
-    /// surface batch into the agent that ran the spawn.
     mailbox: Mailbox,
-    /// The root session id, stamped on every batch so a spawn worker's cards
-    /// render in the root viewport.
+    /// The **root** session's id: a spawn worker registers no tab of its own,
+    /// so its cards must land in the root viewport.
     root: AgentId,
-    /// The registry generation captured at construction; carried on every
-    /// batch for the consuming edge to check.
     generation: u64,
-    /// Reports a rejected batch through the existing error vocabulary
-    /// (`Kind::Error`, recorded straight to the durable trace) — `deliver`
-    /// has no caller to return a `Result` to (it runs on the spawn worker's
-    /// own completion, not a synchronous tool call), so this is how the drop
-    /// stays visible rather than silent.  A `Transcript`, deliberately
-    /// not a whole `Emitter`: this sink outlives the run (installed once,
-    /// flushed whenever the worker settles), and an `Emitter` carries a live
-    /// bus sender whose lifetime would then wrongly extend with it — the
-    /// exact daemon-task-hang shape `drain_pass`'s own doc warns against. A
-    /// `Transcript` is just a durable file handle, safe to hold that long.
+    /// `deliver` runs on the worker's own completion, with no caller to return
+    /// a `Result` to, so recording here is how a dropped batch stays visible.
+    /// A `Transcript` and not an `Emitter`: this sink outlives the run, and an
+    /// `Emitter`'s live bus sender held that long is the daemon-task-hang shape
+    /// `drain_pass` guards against.
     transcript: Transcript,
 }
 
 impl DeferredSink for InboxDeferred {
     fn deliver(&self, batch: Vec<ral_core::serial::FOValue>) {
-        // Decode once, totally, at this door: the deferred batch carries
-        // first-order values, the inbox renders `Value`s.
+        // Decode once, totally, at this door: the batch crosses as first-order
+        // values, the inbox renders `Value`s.
         let values = batch.into_iter().map(RalValue::from).collect();
         if let Err(reject) = self.mailbox.push(Post::Surface {
             id: self.root,
@@ -275,13 +204,9 @@ impl DeferredSink for InboxDeferred {
     }
 }
 
-/// Build the [`Arc<dyn DeferredSink>`] a tool run installs: an
-/// [`InboxDeferred`] over `emit`'s session inbox, stamping batches with `root`
-/// and `registry`'s generation at this moment.
-///
-/// Cloned into the
-/// worker's run state by core, so a nested `spawn` inherits it and flushes at
-/// its own completion.
+/// Build the [`DeferredSink`] a tool run installs, over `emit`'s session inbox.
+/// Core clones it into each worker's run state, so a nested `spawn` inherits it
+/// and flushes at its own completion.
 pub fn deferred_sink(
     emit: &Emitter,
     root: AgentId,
@@ -295,12 +220,9 @@ pub fn deferred_sink(
     })
 }
 
-/// Evaluate `cmd` against `transport`, wrapped in `caps`, capturing
-/// stdout and stderr into buffers. Returns the result as an [`Outcome`].
-///
-/// Routes through the transport seam: builds a `Source` [`Run`], dispatches
-/// it, drains surface events to the bus, and converts the terminal
-/// [`Report`] into the structured result.
+/// Evaluate `cmd` against `transport` under `caps`, capturing stdout and
+/// stderr.  Everything crosses the transport seam: a `Source` `Run` out, a
+/// stream of surface events drained to the bus, one terminal `Report` back.
 pub(crate) fn run_shell(
     transport: &dyn ral_core::transport::Transport,
     caps: &ral_core::types::Capabilities,
@@ -336,11 +258,9 @@ pub(crate) fn run_shell(
         stdin: RunStdin::Empty,
     };
 
-    // Dispatch and drain to the Report, rendering surface classes to the bus.
-    // The live sink tracks pins; the deferred batch (a deferred worker's
-    // flush) renders identically but never touches the pin mirror. Shared
-    // with the identity `DeskBinding` adapter (`desk.rs`) so the two paths
-    // cannot diverge.
+    // The live sink folds pins into the mirror; a deferred worker's flush
+    // renders identically but never touches it.  Shared with the identity
+    // path's `DeskBinding` adapter so the two cannot diverge.
     let applier = crate::fleet::desk::SurfaceApplier {
         emit: emit.clone(),
         pins: pins.cloned(),
@@ -350,12 +270,10 @@ pub(crate) fn run_shell(
         run,
         |val| applier.live(val),
         |batch| applier.deferred(batch),
-        // Dead under the identity transport (`transport.set_desk` answers a
-        // mid-dispatch `Shell::enquire` directly); live only for a wire
-        // engine's `Event::Enquiry`, per `dispatch_to_report`'s own doc.
-        // "One handler, two bindings": the identical `ExarchDesk::handle`
-        // this closure calls is the one `DeskBinding` wraps for the
-        // identity path.
+        // Dead under the identity transport, where the desk installed by
+        // `set_desk` answers a mid-dispatch `Shell::enquire` directly; live
+        // only for a wire engine's `Event::Enquiry`.  Either way it is the
+        // same `ExarchDesk::handle` that `DeskBinding` wraps.
         |req| match desk {
             Some(desk) => desk
                 .handle(req)
@@ -409,10 +327,9 @@ pub(crate) fn run_shell(
                         command_exit,
                     } => {
                         if timed_out {
-                            // The wall fired: the model needs the remedy, not
-                            // the cancellation diagnostic — replace the
-                            // rendering wholesale, exit 124 by exarch's own
-                            // timeout convention.
+                            // The model needs the remedy, not the cancellation
+                            // diagnostic, so this replaces the rendering
+                            // wholesale; 124 is the conventional timeout exit.
                             let msg = format!(
                                 "error: ral tool: timed out after {timeout_secs}s. If the command is simply slow \
                                  and there is nothing to overlap it with, retry with a higher `timeout_secs`. \
@@ -424,11 +341,10 @@ pub(crate) fn run_shell(
                             stderr_bytes.extend_from_slice(msg.as_bytes());
                             (124, None)
                         } else {
-                            // The seam already rendered the full diagnostic —
-                            // prefix, exit status, hint, caret — against the
-                            // engine's own source map; print it verbatim,
-                            // exactly as the REPL does, and take the engine's
-                            // once-computed status as the tool exit.
+                            // The seam already rendered the whole diagnostic
+                            // against the engine's source map: print it
+                            // verbatim as the REPL does, and take the status
+                            // the engine computed rather than recomputing it.
                             stderr_bytes.extend_from_slice(rendered.as_bytes());
                             if *command_exit {
                                 let mut tip = String::from(
@@ -468,12 +384,9 @@ pub(crate) fn run_shell(
     }
 }
 
-/// Render a ral value as the text the `VALUE` section carries.
-///
-/// Top-level strings and bytes are payloads, so they pass through raw: file
-/// windows, markdown reports, and captured byte text keep their exact lines.
-/// Structured values print in ral surface syntax instead of detouring through
-/// JSON, so variants stay variants and records stay records.
+/// Print settings for the `VALUE` section: structured values print in ral
+/// surface syntax rather than detouring through JSON, so variants stay variants
+/// and records stay records.
 const VALUE_PRINT_PARAMS: ral_core::builtins::PrintParams = ral_core::builtins::PrintParams {
     max_width: 120,
     max_string: 72,
@@ -482,6 +395,9 @@ const VALUE_PRINT_PARAMS: ral_core::builtins::PrintParams = ral_core::builtins::
     quote_bytes: true,
 };
 
+/// Render a ral value as the text the `VALUE` section carries.  A top-level
+/// string or byte string is a payload and passes through raw, so file windows,
+/// markdown reports, and captured byte text keep their exact lines.
 pub(crate) fn ral_value_to_text(value: &RalValue) -> Option<String> {
     match value {
         RalValue::Unit => None,
@@ -495,27 +411,12 @@ pub(crate) fn ral_value_to_text(value: &RalValue) -> Option<String> {
     }
 }
 
-/// Project a `reply`'s first-order payload to the JSON a user-facing edge
-/// (the headless `result`) reads — **not** [`FOValue`]'s own
-/// `serde`/[`Serialize`] impl,
-/// which is the transport encoding: internally tagged by `kind`, floats
-/// carried by IEEE-754 bits (`core/src/serial.rs:31–84`).  That encoding
-/// would break the promise this projection keeps: a string reply stays a
-/// bare JSON string, and a structured one stays ordinary JSON, not a
-/// `{"kind":"string","value":"…"}` wrapper.
-///
-/// The policy, one arm per [`FOValue`] variant:
-/// - `Unit` → `null`; `Bool`/`Int` → the JSON scalar.
-/// - `Float` → a JSON number for a finite value; JSON has no representation
-///   for NaN or ±∞, so a non-finite float crosses as the string `"NaN"`,
-///   `"Infinity"`, or `"-Infinity"`.
-/// - `String` → the string, raw.
-/// - `Bytes` → a base64-encoded string (JSON has no byte-string type).
-/// - `List` → an array; `Map` → an object, key order preserved.
-/// - `Variant` with a payload → a single-key object `{label: payload}`;
-///   a payload-less variant → the bare label as a string.
-///
-/// [`Serialize`]: serde::Serialize
+/// Project a `reply`'s first-order payload to the JSON a user-facing edge (the
+/// headless `result`) reads — deliberately **not** [`FOValue`]'s own `serde`
+/// impl, which is the transport encoding (internally tagged by `kind`, floats
+/// as IEEE-754 bits) and would hand the user a `{"kind":"string",…}` wrapper
+/// where a bare JSON string was promised.  JSON has neither non-finite floats
+/// nor a byte type, so those cross as named strings and as base64.
 pub(crate) fn user_json(v: &FOValue) -> serde_json::Value {
     match v {
         FOValue::Unit => serde_json::Value::Null,
@@ -572,21 +473,12 @@ pub(crate) fn user_json(v: &FOValue) -> serde_json::Value {
 mod tests {
     //! Documented-semantics tests for exarch's tool-call evaluator.
     //!
-    //! These hold a single [`Shell`] across two `run_shell` calls — the
-    //! exact harness shape exarch uses between consecutive tool calls in
-    //! a session — and verify the three top-level properties that
-    //! motivate routing through `evaluator::eval_top_level`:
-    //!
-    //!   1. `let` bindings persist across calls.
-    //!   2. Effects before a failing line still persist; effects after
-    //!      the failing line do not appear (the line never ran).
-    //!   3. `cd` persists across calls.
-    //!
-    //! Equivalent end-to-end coverage of the top-level contract itself
-    //! lives in `core/tests/top_level_vs_block.rs`; the exarch-tier
-    //! tests below pin that `run_shell`'s wrapping (capabilities frame,
-    //! stdout/stderr tees, location bookkeeping) does not perturb the
-    //! mobile-install contract.
+    //! They hold one `Shell` across two `run_shell` calls — the harness shape
+    //! exarch uses between consecutive tool calls — to pin what routing through
+    //! `eval_top_level` buys: `let` bindings persist, effects before a failing
+    //! line persist while those after it never ran, and `cd` persists.  The
+    //! contract itself is covered in `core/tests/top_level_vs_block.rs`; these
+    //! pin that `run_shell`'s wrapping does not perturb it.
 
     use super::*;
     use crate::bus::{Emitter, Inbox, channel};
@@ -594,12 +486,9 @@ mod tests {
     use ral_core::Shell;
     use ral_core::types::Capabilities;
 
-    /// Render a path without a trailing platform separator.  Some hosts
-    /// return `"/tmp/"` from `std::env::temp_dir()`; `Shell::cwd()` never
-    /// carries a trailing separator, so trimming here makes the
-    /// comparison portable while preserving the `/var` ↔ `/private/var`
-    /// firmlink fallback used below.  The `len > 1` guard keeps "/"
-    /// itself intact.
+    /// Render a path without a trailing separator.  Some hosts return
+    /// `"/tmp/"` from `std::env::temp_dir()` while `Shell::cwd()` never
+    /// carries one; the `len > 1` guard keeps "/" itself intact.
     fn display_no_trailing_sep(path: &std::path::Path) -> String {
         let s = path.display().to_string();
         if s.len() > 1 {
@@ -609,9 +498,8 @@ mod tests {
         }
     }
 
-    /// Build a `Shell` that mirrors `bootstrap::boot_shell` without
-    /// signal-handler installation (which is global, racey under
-    /// `cargo test`, and not under test here).
+    /// A `Shell` mirroring `bootstrap::boot_shell` without signal-handler
+    /// installation — global, and racey under `cargo test`.
     fn fresh_shell() -> Shell {
         let mut shell = ral_core::boot::boot_shell(
             ral_core::io::TerminalState::default(),
@@ -624,14 +512,10 @@ mod tests {
         shell
     }
 
-    /// Run one tool run through the **real** production [`run_shell`], so the
-    /// test path can never drift from what a live tool call does.  The only
-    /// thing the helper owns that production does not is the `&mut Shell`: it
-    /// moves the shell into a throwaway [`IdentityTransport`], routes the run
-    /// through `run_shell` (which builds the `Run`, dispatches, drains the
-    /// surface stream into `emit`, and computes the exit code — including the
-    /// timeout→124 mapping and the full error rendering), then moves the shell
-    /// back out so the caller keeps its session across calls.
+    /// One tool run through the **real** production `run_shell`, so the test
+    /// path cannot drift from what a live tool call does.  The only thing this
+    /// owns that production does not is the `&mut Shell`, borrowed through a
+    /// throwaway `IdentityTransport` and handed back.
     fn run_shell_direct(
         shell: &mut ral_core::Shell,
         caps: &Capabilities,
@@ -639,29 +523,24 @@ mod tests {
         timeout_secs: u64,
         emit: &Emitter,
     ) -> Outcome {
-        // Move the live shell out behind a cheap throwaway so we can hand it to
-        // the transport, which owns its `Shell`.  The placeholder is discarded
-        // when we swap the real shell back in below.
+        // The transport owns its `Shell`, so move the live one out behind a
+        // placeholder that the swap below discards.
         let taken = std::mem::replace(
             shell,
             ral_core::Shell::new(ral_core::io::TerminalState::probe_from_env().1),
         );
         let transport = ral_core::transport::IdentityTransport::new(taken);
         let outcome = run_shell(&transport, caps, cmd, timeout_secs, emit, None, None);
-        // Recover the (now-mutated) shell so `let`/`cd`/binding state persists
-        // into the caller's next run — the across-calls contract these tests pin.
+        // Recover the mutated shell so `let`/`cd`/binding state reaches the
+        // caller's next run — the across-calls contract these tests pin.
         *shell = transport.into_shell();
         outcome
     }
 
-    /// Run one tool run and return its [`ToolResult`], delegating to
-    /// [`run_shell_direct`] under `Capabilities::root()` — exarch's
-    /// least-restricted default, letting every test source here compile and
-    /// run without exercising the OS sandbox (covered separately by
-    /// `core/tests/top_level_vs_block.rs`'s sandbox-parity tests).  Panics on
-    /// a static (parse/type) failure: every call site below treats the
-    /// return as a successful [`ToolResult`], never handling
-    /// [`Outcome::Static`] itself.
+    /// One tool run under `Capabilities::root()` — exarch's least-restricted
+    /// default, so every source here runs without exercising the OS sandbox,
+    /// which `core/tests/top_level_vs_block.rs` covers separately.  Panics on
+    /// a static failure: every call site below expects a `ToolResult`.
     fn run_once(shell: &mut ral_core::Shell, cmd: &str) -> ToolResult {
         let (emit, _rx) = crate::bus::dummy_emitter();
         match run_shell_direct(shell, &Capabilities::root(), cmd, 30, &emit) {
@@ -670,10 +549,9 @@ mod tests {
         }
     }
 
-    /// Capability frame with an `fs` projection over the whole tree while
-    /// admitting ordinary Unix tools.  This mirrors a restrictive exarch
-    /// base: the body evaluates locally, and any external command it spawns
-    /// is confined per-command under the OS sandbox.
+    /// A restrictive exarch base: the body evaluates locally under an `fs`
+    /// projection, and every external command it spawns is confined
+    /// per-command under the OS sandbox.
     #[cfg(unix)]
     fn projecting_caps() -> Capabilities {
         Capabilities {
@@ -686,8 +564,8 @@ mod tests {
         }
     }
 
-    /// `view-text` is the human read primitive: `view-text PATH 1 2` numbers
-    /// the first line and tags it with its witness, each row `<n>\t<hash>\t<text>`.
+    /// `view-text` returns one record per line: its number, its witness hash,
+    /// and its text.
     #[cfg(unix)]
     #[test]
     fn view_tags_lines_with_hash() {
@@ -728,10 +606,8 @@ mod tests {
         );
     }
 
-    /// Two-call sequence: `let persist_n = 41` then `$[$persist_n + 1]`.
-    /// The second call must see the binding from the first — locks in
-    /// that exarch's per-call `eval_top_level` install survives across
-    /// the tool-call boundary.
+    /// The second call must see the first's binding: exarch's per-call
+    /// `eval_top_level` install survives the tool-call boundary.
     #[test]
     fn tool_call_let_persists_across_calls() {
         let mut shell = fresh_shell();
@@ -743,8 +619,6 @@ mod tests {
             "second tool call must succeed; stderr was: {}",
             String::from_utf8_lossy(&second.stderr)
         );
-        // Tool results render scalars in the direct ral value printer.
-        // An Int returns its ordinary surface form.
         assert_eq!(
             second.value.as_deref(),
             Some("42"),
@@ -752,10 +626,8 @@ mod tests {
         );
     }
 
-    /// Single tool call: `let pre_x = 1; cat /nonexistent; let post_y = 2`.
-    /// The middle command fails, so the line fails; `pre_x` must be defined
-    /// and `post_y` must not be.  Locks in the install-on-Error rule across
-    /// the tool-call boundary.
+    /// The install-on-Error rule across the tool-call boundary: the middle
+    /// command fails, so `pre_x` is defined and `post_y` never ran.
     #[test]
     fn tool_call_partial_effects_persist_on_error() {
         let mut shell = fresh_shell();
@@ -768,11 +640,9 @@ mod tests {
             "the failing tool call must surface a non-zero exit"
         );
 
-        // Check survival directly against the live shell's scope rather than
-        // with a follow-up tool call: looking up an undefined name from ral
-        // elaborates to a type error (caught as Static), the wrong failure
-        // shape for a check that expects one name present and the other
-        // simply absent.
+        // Against the live shell's scope, not a follow-up tool call: looking
+        // up an undefined name from ral elaborates to a type error and
+        // surfaces as `Static`, the wrong shape for "simply absent".
         assert!(
             shell.scope_lookup("pre_x").is_some(),
             "pre-failure `let` must persist into the next tool call"
@@ -783,9 +653,8 @@ mod tests {
         );
     }
 
-    /// `cd <tmp>` in one tool call must be observable to `cwd` in the
-    /// next.  Locks in `logical_cwd` riding the mobile across the
-    /// tool-call boundary.
+    /// `logical_cwd` rides the mobile across the tool-call boundary: a `cd` in
+    /// one call is observable to `cwd` in the next.
     #[test]
     fn tool_call_cd_persists_across_calls() {
         let mut shell = fresh_shell();
@@ -811,17 +680,15 @@ mod tests {
         );
     }
 
-    /// Each line is addressed by the smallest context that makes it unique, so
-    /// two lines with the same text but different surroundings get distinct
-    /// witnesses — what a bare line hash could not do — and even a line deep in
-    /// a run of identical lines grows its window to the run's edge and stays
-    /// addressable, so `edit-hash` always picks exactly one line.
+    /// A witness is the smallest context that makes its line unique, so two
+    /// identical lines in different surroundings differ — which a bare line
+    /// hash could not manage — and a line buried in a run of identical lines
+    /// grows its window to the run's edge rather than going unaddressable.
     #[test]
     fn edit_window_hash_addresses_repeated_lines() {
         let mut shell = fresh_shell();
         let tmp = scratch_dir("window-edit");
 
-        // Two `target` lines, different context: distinguishable.
         let repeated = tmp.join("repeated.txt");
         let original = "\
 section one:
@@ -863,9 +730,6 @@ target
             "only the first `target` changes; the second is untouched"
         );
 
-        // A line buried in a run of identical lines: the adaptive-context
-        // witness grows each line's window to the run's boundary, so even the
-        // interior is uniquely addressable — the edit picks exactly one line.
         let run = tmp.join("run.txt");
         let run_original = "head\ndup\ndup\ndup\ndup\ndup\ndup\ndup\ndup\ntail\n";
         std::fs::write(&run, run_original).expect("write run fixture");
@@ -892,12 +756,10 @@ target
         );
     }
 
-    /// The batch resolves every hash against one read of the file before
-    /// it writes, so a batch is atomic and its edits never interfere —
-    /// even adjacent lines, which a per-call edit could not touch together
-    /// without one invalidating the next. Pins both halves: a batch with
-    /// any stale hash writes nothing, and a clean batch of adjacent edits
-    /// (replace, delete, and a one-to-many expansion) applies in one pass.
+    /// Every hash resolves against one read before anything is written, so
+    /// edits cannot interfere — not even adjacent lines, which per-call edits
+    /// could not touch together without one invalidating the next.  Both
+    /// halves: one stale hash writes nothing, a clean batch applies in a pass.
     #[test]
     fn edit_batch_is_atomic_and_non_interfering() {
         let mut shell = fresh_shell();
@@ -913,7 +775,6 @@ keep-bottom
         std::fs::write(&path, original).expect("write batch fixture");
         let path_str = display_no_trailing_sep(&path);
 
-        // One stale hash poisons the whole batch: nothing is written.
         // `hzzzzzz` is not `h` + six hex, so it can match no witness.
         let poisoned = run_once(
             &mut shell,
@@ -930,8 +791,6 @@ keep-bottom
             "a failed batch must leave the file untouched"
         );
 
-        // A clean batch over adjacent lines: replace, delete, and expand
-        // one line into two — all witnessed from the one read.
         let ok = run_once(
             &mut shell,
             &format!(
@@ -961,10 +820,9 @@ keep-bottom
         );
     }
 
-    /// A committed `edit-hash` notes what it changed on stderr, for the model:
-    /// singular for one line and plural with a comma-joined list for a batch —
-    /// plus a trailing warning when a replacement looks like it carries an
-    /// unintended `\n`/`\t`-style escape rather than the real character.
+    /// A committed `edit-hash` notes what it changed on stderr for the model,
+    /// plus a warning when a replacement looks like it carries an unintended
+    /// `\n`/`\t`-style escape rather than the real character.
     #[test]
     fn edit_notes_changed_lines_on_stderr() {
         let mut shell = fresh_shell();
@@ -1003,9 +861,9 @@ keep-bottom
         );
     }
 
-    /// `edit-replace` notes the line(s) it changed the same way `edit-hash` does,
-    /// computed from where its unique match starts: a single line reads
-    /// `line n`, a match spanning a real newline in `from` reads `lines n-m`.
+    /// `edit-replace` notes its changed lines as `edit-hash` does, counted
+    /// from where its unique match starts: `line n`, or `lines n-m` when the
+    /// match spans a real newline in `from`.
     #[test]
     fn edit_replace_notes_changed_line_range_on_stderr() {
         let mut shell = fresh_shell();
@@ -1042,24 +900,18 @@ keep-bottom
         );
     }
 
-    /// Regression: a witness hash that happens to read as a number must
-    /// still round-trip from `view-text` into `edit-hash`. The agent copies the hash
-    /// out of a `view-text` result and types it as a *bare* `edit-hash` argument, so
-    /// an all-digit hash like `152347` lexes as an `Int` while the hash
-    /// `edit-hash` recomputes is a `String`; the witness check then rejects a
-    /// correct hash and the agent loops forever re-issuing the same edit.
-    /// The leading-zero case (`012345`) is the sharper one: its integer
-    /// reading drops the zero, so no string coercion inside `edit-hash` could
-    /// recover the original — only an un-numeric witness format can.
+    /// The agent types a witness as a *bare* argument, so an all-digit one
+    /// lexes as an `Int` against the `String` `edit-hash` recomputes, the check
+    /// rejects a correct hash, and the agent loops forever re-issuing the same
+    /// edit.  The leading-zero case is sharper: its integer reading drops the
+    /// zero, so only an un-numeric witness format can recover it.
     #[cfg(unix)]
     #[test]
     fn edit_accepts_numeric_witness_hash() {
-        // The witness `view-text` shows is the adaptive-context hash, not the
-        // bare line digest, so mirror that computation here to search for an
-        // all-digit one. For a file written as "{content}\n" the line list is
-        // [content, ""]; that's shorter than a full ±MIN_RADIUS (5) window, so
-        // line 1 (index 0) clamps to the whole file at the floor radius and its
-        // witness is line-hash("5:0:" ++ lh(content) ++ lh("")).
+        // Mirror the adaptive-context hash to search for an all-digit one.  A
+        // file written "{content}\n" has lines [content, ""], shorter than a
+        // ±MIN_RADIUS (5) window, so line 1 clamps to the whole file at the
+        // floor radius: its witness is lh("5:0:" ++ lh(content) ++ lh("")).
         fn lh(s: &str) -> String {
             format!(
                 "h{}",
@@ -1088,7 +940,7 @@ keep-bottom
                 &format!("{content}\n"),
             );
 
-            // Read the witness exactly as the agent would: from `view-text`.
+            // Read the witness as the agent would: from `view-text`.
             let vr = run_once(
                 &mut shell,
                 &format!("let rows = view-text '{path_str}' 1 2; $rows[0][hash]"),
@@ -1106,8 +958,7 @@ keep-bottom
                 .trim_matches('"')
                 .to_string();
 
-            // Feed the hash straight back as a *bare* token, the way the
-            // agent copies it out of the read.
+            // Feed it back as a *bare* token, the way the agent copies it.
             let er = run_once(
                 &mut shell,
                 &format!("edit-hash '{path_str}' [[hash: {witness}, line: 'REPLACED']]"),
@@ -1128,17 +979,11 @@ keep-bottom
         assert_round_trips("leading-zero", &line_with_digit_digest(true));
     }
 
-    /// The shared decoder both regimes use round-trips each surface class to
-    /// its `Kind` — an io `Map` to `Kind::Io`, a `` `notice `` to
-    /// `Kind::Notice`, a `` `card `` variant to `Kind::Card`, the `` `done ``
-    /// completion event to `Kind::Done` (structured outcome kept, not just
-    /// its ink), and a `` `pin ``/`` `unpin `` disposition to
-    /// `Kind::Pin`/`Kind::Unpin` — and drops a junk value to `None`.  The
-    /// foreground sink emits these now; the deferred sink's `deliver` mints
-    /// the identical ones at the exchange boundary.
+    /// Every surface class round-trips to its `Kind`, structured payload kept
+    /// beside the rendered card, and junk drops to `None`.  One decoder, so
+    /// what the live sink emits now is what a deferred `deliver` mints later.
     #[test]
     fn decode_surface_round_trips_each_class() {
-        // An io map → Kind::Io.
         assert!(matches!(
             decode_surface(&RalValue::map(vec![
                 ("io".into(), RalValue::String("read".into())),
@@ -1146,8 +991,6 @@ keep-bottom
             ])),
             Some(Kind::Io { .. })
         ));
-        // A `notice` variant → Kind::Notice, its outcome structure kept
-        // beside the rendered card.
         assert!(matches!(
             decode_surface(&RalValue::Variant {
                 label: "notice".into(),
@@ -1168,7 +1011,6 @@ keep-bottom
                 ..
             })
         ));
-        // A `card` variant → Kind::Card.
         assert!(matches!(
             decode_surface(&RalValue::Variant {
                 label: "card".into(),
@@ -1176,7 +1018,6 @@ keep-bottom
             }),
             Some(Kind::Card(_))
         ));
-        // A `done` event → Kind::Done, its typed outcome kept beside the card.
         assert!(matches!(
             decode_surface(&RalValue::Variant {
                 label: "done".into(),
@@ -1196,7 +1037,6 @@ keep-bottom
                 ..
             })
         ));
-        // A `pin` wrapper with a non-empty body → Kind::Pin, decoded by value_to_card.
         assert!(matches!(
             decode_surface(&RalValue::Variant {
                 label: "pin".into(),
@@ -1215,7 +1055,6 @@ keep-bottom
             }),
             Some(Kind::Pin { .. })
         ));
-        // `unpin`, and a `pin` whose body is absent, both → Kind::Unpin.
         for label in ["unpin", "pin"] {
             assert!(matches!(
                 decode_surface(&RalValue::Variant {
@@ -1228,8 +1067,8 @@ keep-bottom
                 Some(Kind::Unpin { .. })
             ));
         }
-        // A `pin` whose body is an *empty* card also drops the slot — a pin
-        // with nothing to show is the same as `unpin`.
+        // An *empty* card drops the slot too: a pin with nothing to show is
+        // an `unpin`.
         assert!(matches!(
             decode_surface(&RalValue::Variant {
                 label: "pin".into(),
@@ -1246,7 +1085,6 @@ keep-bottom
             }),
             Some(Kind::Unpin { .. })
         ));
-        // A value that is none of these → None.
         assert!(decode_surface(&RalValue::String("nope".into())).is_none());
     }
 
@@ -1271,12 +1109,10 @@ keep-bottom
         assert!(!reject_protected_pin(&ordinary, &emit));
     }
 
-    /// The `InboxDeferred` always posts a deferred worker's batch as a
-    /// `Post::Surface` stamped with the root id and its own construction-time
-    /// generation — including a batch flushed after a `/clear` advanced the
-    /// registry past it. Staleness is not this sink's call: it is decided at
-    /// the consuming edge (`Agent::admits`), exactly as a stale `AgentResult`
-    /// is, so the sink itself neither checks nor withholds.
+    /// The sink always posts, stamped with the root id and its birth
+    /// generation — even after a `/clear` advanced the registry past it.
+    /// Staleness is `Agent::admits`'s call at the consuming edge, so the sink
+    /// itself neither checks nor withholds.
     #[test]
     fn inbox_deferred_always_pushes_stamped_with_its_birth_generation() {
         let registry = AgentRegistry::new();
@@ -1286,8 +1122,6 @@ keep-bottom
         let deferred = deferred_sink(&emit, 7, &registry);
         let born = registry.generation();
 
-        // A fresh batch reaches the inbox, stamped with the root id (7) and
-        // the generation live at construction.
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
         match inbox.next_item() {
             Some(crate::bus::Item::Surface { id, generation, .. }) => {
@@ -1297,9 +1131,7 @@ keep-bottom
             other => panic!("a delivered batch surfaces as Item::Surface, got {other:?}"),
         }
 
-        // A `/clear` bumps the registry generation past the sink's captured
-        // one, but a later flush still reaches the inbox, carrying the now-stale
-        // generation for the consuming edge to reject.
+        // A `/clear` bumps the registry past the sink's captured generation.
         registry.clear_subtree(7);
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
         match inbox.next_item() {
@@ -1313,9 +1145,8 @@ keep-bottom
         }
     }
 
-    /// Colour suppression reaches spawned commands through the
-    /// environment: a child shell must see `NO_COLOR=1` and
-    /// `CLICOLOR_FORCE=0` (see `bootstrap::seed_no_color`).
+    /// `bootstrap::seed_no_color`'s suppression reaches spawned commands
+    /// through the environment, not just the host's own rendering.
     #[cfg(unix)]
     #[test]
     fn spawned_commands_inherit_color_suppression() {
@@ -1328,29 +1159,22 @@ keep-bottom
         assert_eq!(String::from_utf8_lossy(&r.stdout), "1/0");
     }
 
-    /// A `timeout` is a hard wall-clock bound, not advisory: a command
-    /// that sleeps far longer than its timeout must return in ≈ the
-    /// timeout with exit 124, and the *whole* spawned process tree must
-    /// be dead afterward — including a grandchild the direct child
-    /// forked off.
+    /// A timeout is a hard wall-clock bound, and the *whole* spawned tree must
+    /// be dead after it — including a grandchild the direct child forked off.
     ///
-    /// The fixture is the `python runtests.py` shape: `/bin/sh` forks a
-    /// `sleep` grandchild that holds the stdout pipe open, then blocks in
-    /// `wait`.  The standalone external leads its own process group rather
-    /// than inheriting the parent's, so the watchdog's cancel path can
-    /// SIGTERM (then SIGKILL) the whole group by pgid; `child.kill()`ing
-    /// only the `/bin/sh` leader by pid would leave the orphaned `sleep`
-    /// holding the pipe open and the stdout-pump `drain()` join blocked for
-    /// the full timeout window instead of returning at the 2 s wall.
+    /// The fixture is the `python runtests.py` shape: `/bin/sh` forks a `sleep`
+    /// grandchild holding the stdout pipe open, then blocks in `wait`.  A
+    /// standalone external leads its own process group, so cancel tears the
+    /// group down by pgid; killing the leader by pid would leave the orphan
+    /// holding the pipe and the stdout pump's `drain()` join blocked.
     #[cfg(unix)]
     #[test]
     fn timeout_kills_external_subprocess_tree() {
         let mut shell = fresh_shell();
         let (emit, _rx) = crate::bus::dummy_emitter();
-        // The grandchild prints its own pid so the test can prove it was
-        // reaped, then sleeps far past the timeout; the `/bin/sh` leader
-        // blocks in `wait`, holding the call open until the grandchild
-        // exits unless the timeout tears the group down.
+        // The leader blocks in `wait`, holding the call open unless the
+        // timeout tears the group down; the grandchild prints its pid so the
+        // test can prove it was reaped.
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
         let r = match run_shell_direct(&mut shell, &Capabilities::root(), cmd, 2, &emit) {
@@ -1359,8 +1183,6 @@ keep-bottom
         };
         let elapsed = t0.elapsed();
 
-        // The timeout is enforced: returns at ≈2 s, not the 30 s the
-        // `sleep` would have run for, with the conventional exit 124.
         assert!(
             elapsed.as_secs() < 10,
             "timeout must bound wall-clock: returned after {elapsed:?} (sleep was 30s)"
@@ -1370,9 +1192,8 @@ keep-bottom
             "a timed-out call reports the timeout exit code"
         );
 
-        // The forked grandchild must be gone: `kill(pid, 0)` returns
-        // ESRCH once it is reaped.  Poll briefly to absorb the tiny
-        // window between the group SIGKILL and the kernel reaping it.
+        // `kill(pid, 0)` returns ESRCH once the grandchild is reaped.  Poll to
+        // absorb the window between the group SIGKILL and the kernel reaping.
         let gc_pid: i32 = String::from_utf8_lossy(&r.stdout)
             .lines()
             .next()
@@ -1394,13 +1215,10 @@ keep-bottom
         );
     }
 
-    /// The timeout message names both its budget and the knob to raise.
-    /// Mirrors `timeout_kills_external_subprocess_tree`'s fixture — a 2 s
-    /// budget over a `sleep 30` — but asserts on the surfaced message rather
-    /// than the process tree: exit 124, and a stderr that reports the elapsed
-    /// budget ("timed out after 2s") and names `timeout_secs`, the knob the
-    /// model raises to give a slow command more room. Those substrings are
-    /// load-bearing for steering, so keep them stable.
+    /// `timeout_kills_external_subprocess_tree`'s fixture, asserted on the
+    /// surfaced message rather than the process tree.  The elapsed budget and
+    /// the `timeout_secs` name are load-bearing for steering the model, so
+    /// they must stay in the text.
     #[cfg(unix)]
     #[test]
     fn timeout_message_names_budget_and_knob() {
@@ -1426,11 +1244,9 @@ keep-bottom
         );
     }
 
-    /// A failing external command surfaces the seam's rendering exactly
-    /// once — one `error:` prefix, never a host-side re-render on top — with
-    /// the command's true exit code as the tool exit (the engine computed it
-    /// once; the host must not collapse it to 1) and the recovery tip,
-    /// which fires only for a command's own non-zero exit.
+    /// The seam's rendering surfaces exactly once — no host-side re-render on
+    /// top — carrying the command's true exit code rather than a host
+    /// collapse to 1, plus the tip that fires only for a command's own exit.
     #[cfg(unix)]
     #[test]
     fn command_exit_renders_once_with_true_code_and_tip() {
@@ -1463,10 +1279,9 @@ keep-bottom
         );
     }
 
-    /// A raised error — `fail`, not an external command's exit — carries no
-    /// command-exit recovery tip: the tip's advice (read the captured
-    /// output as data) is about tools that speak through exit codes, and
-    /// would be noise on an explicit failure.
+    /// A raised error carries no recovery tip: its advice — read the captured
+    /// output as data — is about tools that speak through exit codes, and is
+    /// noise on an explicit `fail`.
     #[test]
     fn raised_error_carries_no_recovery_tip() {
         let mut shell = fresh_shell();
@@ -1488,10 +1303,9 @@ keep-bottom
         );
     }
 
-    /// The same timeout must also tear down a sandbox-confined eval child.
-    /// That path is blocked in IPC in the parent while the helper runs the
-    /// body, so cooperative cancel polling inside the parent is not enough.
-    /// The parent must kill the confined helper's subprocess tree out of band.
+    /// The same timeout must tear down a sandbox-confined eval child.  The
+    /// parent is blocked in IPC while the helper runs the body, so cooperative
+    /// cancel polling cannot reach it: the tree must be killed out of band.
     #[cfg(unix)]
     #[test]
     fn timeout_kills_sandboxed_subprocess_tree() {
@@ -1544,15 +1358,12 @@ keep-bottom
         );
     }
 
-    /// The eval-layer half of the registry cascade: cancelling a forked
-    /// session's durable root ([`Shell::cancel_handle`] — the handle
-    /// `AgentRegistry` holds per agent) unwinds an in-flight `run_shell`
-    /// promptly, long before its `timeout_secs` wall, and tears down the
-    /// spawned process tree.  The fixture is the timeout tests' pipe-holding
-    /// `sleep` tree under a generous 30 s budget, so only the root cancel
-    /// can explain a fast return.  The shell is a `fork_session` child — the
-    /// sub-agent shape — which never publishes the process signal slots:
-    /// this handle is the only way to stop it, and it must suffice.
+    /// The eval-layer half of the registry cascade: cancelling the durable root
+    /// `AgentRegistry` holds per agent (`Shell::cancel_handle`) unwinds an
+    /// in-flight `run_shell` and tears down its tree.  A 30 s budget, so only
+    /// the cancel can explain a fast return, over a `fork_session` child — the
+    /// sub-agent shape, which publishes no process signal slots, leaving this
+    /// handle the only way to stop it.
     #[cfg(unix)]
     #[test]
     fn root_cancel_unwinds_inflight_run_shell() {
@@ -1568,8 +1379,8 @@ keep-bottom
                     Outcome::Static(msg) => panic!("static failure: {msg}"),
                 }
             });
-            // Let the eval reach the blocking external wait, then cancel the
-            // root from outside — the registry cascade's move.
+            // Let the eval reach the blocking external wait, then cancel from
+            // outside — the registry cascade's move.
             std::thread::sleep(std::time::Duration::from_millis(300));
             handle.cancel(ral_core::process::CancelCause::Explicit);
             worker.join().expect("run_shell worker")
@@ -1581,11 +1392,9 @@ keep-bottom
             "a root cancel must unwind the eval promptly: returned after \
              {elapsed:?} (sleep was 30s, budget 30s)"
         );
-        // What surfaces depends on where the eval was when the cancel
-        // landed: blocked in the child wait, the teardown SIGTERMs the group
-        // and the command's signal death is the statement error; between
-        // statements, `check` raises the Explicit cause as "cancelled".
-        // Either shape is the unwind under test.
+        // Two shapes, both the unwind under test: blocked in the child wait,
+        // teardown SIGTERMs the group and the signal death is the statement
+        // error; between statements, `check` raises Explicit as "cancelled".
         assert_ne!(r.exit, 0, "a cancelled run must not report success");
         let stderr = String::from_utf8_lossy(&r.stderr);
         assert!(
@@ -1593,8 +1402,6 @@ keep-bottom
             "the unwind surfaces the cancel or the torn-down child; stderr was: {stderr}"
         );
 
-        // The compute actually stops: the forked grandchild is reaped, not
-        // left grinding as an orphan.
         let gc_pid: i32 = String::from_utf8_lossy(&r.stdout)
             .lines()
             .next()
@@ -1616,14 +1423,10 @@ keep-bottom
         );
     }
 
-    /// A `Bytes` field in a structured result renders to the model as
-    /// lossy-UTF-8 text, not the decimal integer array `to-json` uses for
-    /// data round-trips.  Captured diagnostics — a job's or `audit` node's
-    /// `stderr` — are byte-typed but text by intent; the model must read
-    /// the message, not a wall of codes.  Here `to-bytes` mints bytes that
-    /// decode to "killed" plus one stray non-UTF-8 byte (0xff): the readable
-    /// prefix survives as text and the bad byte becomes a replacement char,
-    /// with no decimal code in sight.
+    /// A `Bytes` field renders to the model as lossy UTF-8, not the decimal
+    /// array `to-json` uses for data round-trips: captured diagnostics — a
+    /// job's or `audit` node's `stderr` — are byte-typed but text by intent,
+    /// and the model must read the message, not a wall of codes.
     #[test]
     fn byte_fields_render_as_lossy_text_not_decimal() {
         let mut shell = fresh_shell();
@@ -1648,14 +1451,11 @@ keep-bottom
         );
     }
 
-    /// The programmatic bulk-edit pipeline, end to end and entirely in ral:
-    /// `grep-files` finds every `[TODO]` across the tree, the hits fold into a
-    /// per-file list, and each file's matching lines are rewritten in one atomic
-    /// `edit-hash`.  The hashes come from `view-text`, reading the whole file so
-    /// its handles match what `edit-hash` recomputes — no hash is ever read by eye.
-    /// A regex `re-replace` turns
-    /// each `[TODO]` into `[DONE]` in place.  This is the sweep example in
-    /// `data/ral.md`, kept honest by running it.
+    /// The bulk-edit pipeline end to end, entirely in ral: `grep-files` finds
+    /// every `[TODO]`, the hits fold per file, and each file's lines are
+    /// rewritten in one atomic `edit-hash`.  The hashes come from a whole-file
+    /// `view-text`, so they match what `edit-hash` recomputes — no witness is
+    /// ever read by eye.
     #[test]
     fn programmatic_todo_sweep_rewrites_every_match() {
         let mut shell = fresh_shell();
@@ -1706,9 +1506,9 @@ return !{{length $hits}}"
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// `edit-replace` (`data/agent.ral`) — the read/`string-replace`/write idiom
-    /// collapsed into one call, kept honest by running it. A unique match
-    /// rewrites the file; 0 or >1 matches error and leave it untouched.
+    /// `edit-replace` (defined in `data/agent.ral`) collapses the
+    /// read/`string-replace`/write idiom into one call: a unique match rewrites
+    /// the file, and 0 or >1 matches error rather than guess.
     #[test]
     fn edit_replace_replaces_unique_match_and_rejects_ambiguity() {
         let mut shell = fresh_shell();
@@ -1758,13 +1558,10 @@ return !{{length $hits}}"
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// `edit-replace` writes through core's atomic door and surfaces the SAME
-    /// structural `write` io event a committed `>` raises: the old and new
-    /// snapshots ride as `old_bytes`/`new_bytes`, so the write card renders a
-    /// whole-file diff.  The forensic record is the effect itself (a
-    /// committed write to PATH), not only its rendered diff — and going
-    /// through the shared write door is what preserves the target's
-    /// mode/symlink/durability across the edit.
+    /// `edit-replace` goes through core's atomic write door, so it raises the
+    /// same structural `write` event a committed `>` does — old and new
+    /// snapshots riding along for the card to diff — and inherits that door's
+    /// mode, symlink, and durability preservation.
     #[test]
     fn edit_replace_surfaces_a_write_io_event_with_diff() {
         use crate::bus::card::{IoEvent, WriteMode, WriteOutcome, io_card};
@@ -1813,10 +1610,9 @@ return !{{length $hits}}"
         );
     }
 
-    /// `edit-replace` writes through core's mode-preserving atomic door, so
-    /// editing an executable file leaves its `0o755` mode intact — a plain
-    /// temp-file-then-rename persist would narrow it to the temp file's own
-    /// `0o600`, stripping the exec bit off a script.
+    /// Editing an executable leaves its `0o755` intact: a plain
+    /// temp-file-then-rename would narrow it to the temp file's own `0o600`,
+    /// stripping the exec bit off a script.
     #[cfg(unix)]
     #[test]
     fn edit_replace_preserves_the_target_file_mode() {
@@ -1843,12 +1639,9 @@ return !{{length $hits}}"
         );
     }
 
-    /// Drive one tool call through `run_shell` with a real bus `Emitter`,
-    /// returning the result alongside every `Kind` event captured off the
-    /// channel.  The end-to-end coverage harness: it exercises the whole
-    /// `core surface → decode_surface → Kind` path the io-door tests below
-    /// assert on, hoisted so they share one wiring rather than re-threading
-    /// the channel each time.
+    /// One tool call through `run_shell` over a real bus `Emitter`, returning
+    /// the result and every `Kind` off the channel — the whole
+    /// `core surface → decode_surface → Kind` path the io-door tests assert on.
     fn run_capturing(shell: &mut Shell, cmd: &str) -> (ToolResult, Vec<crate::bus::Kind>) {
         let (tx, rx) = channel();
         let emit = Emitter::new(tx, 0);
@@ -1856,8 +1649,8 @@ return !{{length $hits}}"
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static (parse/type) failure: {s}"),
         };
-        // Drop the emitter so the channel disconnects and `try_recv` drains
-        // cleanly to empty rather than blocking.
+        // Drop the emitter so the channel disconnects and `try_recv` drains to
+        // empty rather than blocking.
         drop(emit);
         let kinds: Vec<crate::bus::Kind> = std::iter::from_fn(|| rx.try_recv().ok())
             .map(|ev| ev.kind)
@@ -1865,9 +1658,8 @@ return !{{length $hits}}"
         (result, kinds)
     }
 
-    /// The `IoEvent`s carried by the captured `Kind::Io` events, in order —
-    /// the structural effect records the gap tests assert on without caring
-    /// about the card composed beside each.
+    /// The `IoEvent`s carried by the captured `Kind::Io` events, in order,
+    /// dropping the card composed beside each.
     fn io_events(kinds: &[crate::bus::Kind]) -> Vec<&crate::bus::card::IoEvent> {
         kinds
             .iter()
@@ -1878,8 +1670,8 @@ return !{{length $hits}}"
             .collect()
     }
 
-    /// Fresh, empty per-test temp dir named after `tag`.  Any stale dir from
-    /// a prior run is removed first.
+    /// Fresh, empty per-test temp dir named after `tag`; any stale dir from a
+    /// prior run is removed first.
     fn scratch_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("exarch-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1887,9 +1679,8 @@ return !{{length $hits}}"
         dir
     }
 
-    /// Write `body` into a fresh per-test temp dir and return both the dir and
-    /// the display path of the file inside it (no trailing separator), the
-    /// fixture shape the redirect/exec coverage tests need.
+    /// Write `body` into a fresh per-test temp dir, returning the dir and the
+    /// display path of the file inside it.
     fn scratch_file(tag: &str, name: &str, body: &str) -> (std::path::PathBuf, String) {
         let dir = scratch_dir(tag);
         let path = dir.join(name);
@@ -1898,10 +1689,8 @@ return !{{length $hits}}"
         (dir, disp)
     }
 
-    /// Coverage — the READ door end-to-end: a bare `from-string < a` reads
-    /// stdin through one `<` redirect, so exactly one `Kind::Io` carrying a
-    /// `Read` event for that path reaches the bus.  No exec card: `from-string`
-    /// is a builtin, not an external image.
+    /// The READ door end to end: one `<` redirect raises exactly one `Read`
+    /// event, and no exec card — `from-string` is a builtin, not an image.
     #[test]
     fn bare_read_redirect_surfaces_one_read_card() {
         use crate::bus::card::IoEvent;
@@ -1930,14 +1719,13 @@ return !{{length $hits}}"
         );
     }
 
-    /// Coverage — the WRITE door end-to-end: a bare `to-string "x" > b`
-    /// commits an atomic write through one `>` redirect, so exactly one
-    /// `Kind::Io` carrying a committed `Write` event reaches the bus.
+    /// The WRITE door end to end: one `>` redirect commits an atomic write and
+    /// raises exactly one committed `Write` event.
     #[test]
     fn bare_write_redirect_surfaces_one_committed_write_card() {
         use crate::bus::card::{IoEvent, WriteMode, WriteOutcome};
         let mut shell = fresh_shell();
-        // A fresh dir with no fixture file: the write creates the target.
+        // No fixture file: the write creates the target.
         let dir = scratch_dir("cov-write");
         let path = display_no_trailing_sep(&dir.join("b"));
 
@@ -1964,22 +1752,18 @@ return !{{length $hits}}"
                 path,
                 mode: WriteMode::Write,
                 outcome: WriteOutcome::Committed,
-                // The committed content rides as `new_bytes`, seeding the write
-                // card's content preview.
                 new_bytes: Some(b"x".to_vec()),
-                // `b` is a fresh path — nothing existed to diff against.
+                // A fresh path: nothing existed to diff against.
                 old_bytes: None,
             },
             "the one io event is a committed write of the redirect path"
         );
     }
 
-    /// Coverage — the WRITE door overwriting an *existing* file: the atomic
-    /// recipe leaves the target untouched until the rename, so core reads it
-    /// for free and threads it through as `old_bytes` alongside the usual
-    /// `new_bytes` preview.  The card layer turns that pair into a whole-file
-    /// diff — the same `Mark::Diff` `edit-hash`/`edit-replace` surface explicitly, here
-    /// for any `>` redirect with no builtin required.
+    /// Overwriting an *existing* file: the atomic recipe leaves the target
+    /// untouched until the rename, so core reads it for free and threads it
+    /// through as `old_bytes`.  The card layer turns the pair into a whole-file
+    /// diff, so any `>` redirect gets one with no builtin required.
     #[test]
     fn bare_write_redirect_over_existing_file_surfaces_a_diff_card() {
         use crate::bus::card::{IoEvent, WriteMode, WriteOutcome, io_card};
@@ -2017,8 +1801,7 @@ return !{{length $hits}}"
                 mode: WriteMode::Write,
                 outcome: WriteOutcome::Committed,
                 new_bytes: Some(b"hello\nfriend\n".to_vec()),
-                // `b` pre-existed: the atomic commit reads it before the
-                // rename and threads it through as the diff's "before" side.
+                // Read before the rename: the diff's "before" side.
                 old_bytes: Some(b"hello\nworld\n".to_vec()),
             },
             "old_bytes carries the pre-existing content, new_bytes the committed one"
@@ -2031,17 +1814,15 @@ return !{{length $hits}}"
         );
     }
 
-    /// Coverage — the WRITE door overwriting an existing file too large to
-    /// diff safely: core's `old_snapshot_for_diff` gates on both sides
-    /// fitting its read cap (64KiB), so a bigger pre-existing file must not
-    /// produce a partial, misleading diff — `old_bytes` stays absent and the
-    /// card falls back to the plain listing preview, exactly as a brand-new
-    /// write would.
+    /// Overwriting a file too large to diff safely: `old_snapshot_for_diff`
+    /// gates on both sides fitting its 64KiB read cap, so rather than render a
+    /// partial and misleading diff it withholds `old_bytes` and the card falls
+    /// back to the listing preview a brand-new write gets.
     #[test]
     fn bare_write_redirect_over_oversized_existing_file_falls_back_to_listing() {
         use crate::bus::card::{IoEvent, WriteOutcome, io_card};
         let mut shell = fresh_shell();
-        // Comfortably past core's 64KiB (65536-byte) read cap.
+        // Comfortably past the 64KiB read cap.
         let big = "x".repeat(70_000);
         let (dir, path) = scratch_file("cov-write-oversized", "b", &big);
 
@@ -2086,10 +1867,8 @@ return !{{length $hits}}"
         );
     }
 
-    /// Coverage — the EXEC door end-to-end: a bare external command raises
-    /// exactly one `Kind::Io` carrying an `Exec` event with the resolved argv
-    /// and exit status.  `/usr/bin/true` is the deterministic, always-present
-    /// image the core suite already leans on.
+    /// The EXEC door end to end: a bare external raises exactly one `Exec`
+    /// event, carrying the resolved argv and exit status.
     #[cfg(unix)]
     #[test]
     fn bare_external_surfaces_one_exec_card() {
@@ -2121,10 +1900,9 @@ return !{{length $hits}}"
         );
     }
 
-    /// `view-text` is a host builtin that reads its path in Rust, NOT an
-    /// external image: `view-text a 1 2` reads the whole file below the ral line
-    /// and surfaces exactly one READ card itself — one logical read surface, no
-    /// exec card, like `grep-files` and `edit-hash`.
+    /// `view-text` reads its path in Rust, below the ral line, so like
+    /// `grep-files` and `edit-hash` it surfaces its own single READ card and no
+    /// exec card at all.
     #[cfg(unix)]
     #[test]
     fn view_is_a_helper_not_an_exec_image() {
@@ -2157,10 +1935,9 @@ return !{{length $hits}}"
         );
     }
 
-    /// Two model operations in one command: `cat < a` installs a `<` redirect
-    /// (one READ card) and then runs the external `cat` over that stdin (one
-    /// EXEC card) — exactly two io cards, in that order, because the read door
-    /// announces eagerly on install, before the body it feeds runs.
+    /// `cat < a` is two operations: the redirect's READ, then the EXEC over
+    /// that stdin.  The read comes first because the door announces eagerly on
+    /// install, before the body it feeds runs.
     #[cfg(unix)]
     #[test]
     fn cat_redirect_surfaces_read_then_exec_in_order() {
@@ -2204,11 +1981,9 @@ return !{{length $hits}}"
         );
     }
 
-    /// Documented boundary — code loading is not turn-time data I/O: sourcing
-    /// a small ral file (and `use`-ing one) loads it through `std::fs` below
-    /// the redirect frame, so it raises NO io card.  Only the file's own
-    /// effects, if any, would surface — here the file is pure bindings, so the
-    /// bus stays silent of io events.
+    /// Code loading is not turn-time data I/O: `source` and `use` read through
+    /// `std::fs` below the redirect frame, so they raise no io card.  Only the
+    /// loaded file's own effects would surface, and this one is pure bindings.
     #[test]
     fn sourcing_a_ral_file_raises_no_io_card() {
         let mut shell = fresh_shell();
@@ -2242,11 +2017,9 @@ return !{{length $hits}}"
         );
     }
 
-    /// The transcript seam (`transcript::event_record`) is the *operational*
-    /// view: a `Kind::Io` projects to `("io", { event })`, keeping the raw
-    /// structural effect the rendered card erases — but NOT the card itself,
-    /// which is a rendering and belongs to the TUI's `user.log`.  Driven
-    /// against `event_record` directly — not a TUI render.
+    /// `transcript::event_record` is the *operational* view: it keeps the raw
+    /// structural effect the rendered card erases, and drops the card itself,
+    /// which is a presentation and belongs to the TUI's `user.log`.
     #[test]
     fn io_event_record_carries_structural_event_not_card() {
         use crate::bus::card::{IoEvent, io_card};
@@ -2262,14 +2035,11 @@ return !{{length $hits}}"
         let rec = crate::agent::transcript::event_record(7, 3, &kind).expect("an io event records");
 
         assert_eq!(rec["kind"], "io", "the record is tagged io");
-        // The raw structural event survives, tagged by its `io` field with the
-        // mode/outcome enums as snake_case strings.
+        // The mode/outcome enums cross as snake_case strings.
         assert_eq!(rec["event"]["io"], "write");
         assert_eq!(rec["event"]["path"], "b.rs");
         assert_eq!(rec["event"]["mode"], "append");
         assert_eq!(rec["event"]["outcome"], "committed");
-        // The rendered card does NOT ride along — it is a presentation, not an
-        // operational effect.
         assert!(
             rec.get("card").is_none(),
             "the operational trace drops the rendered card, got {rec:?}"
@@ -2317,11 +2087,7 @@ return !{{length $hits}}"
 
     // ── `user_json` ──────────────────────────────────────────────────────
     //
-    // The reply projection's policy table, one case per `FOValue` variant —
-    // deliberately **not** `FOValue`'s own `serde` encoding (internally
-    // tagged, floats by bits), which would break the promise that a string
-    // reply stays a raw JSON string and a structured one stays ordinary
-    // JSON.
+    // The reply projection's policy table, one case per `FOValue` variant.
 
     #[test]
     fn user_json_unit_is_null() {
@@ -2348,8 +2114,7 @@ return !{{length $hits}}"
         );
     }
 
-    /// JSON has no representation for NaN or ±∞; each crosses as its own
-    /// named string rather than silently becoming `null`.
+    /// Each crosses as its own named string rather than silently as `null`.
     #[test]
     fn user_json_non_finite_floats_become_named_strings() {
         assert_eq!(

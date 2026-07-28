@@ -18,17 +18,14 @@ use ral_core::path::sigil::expand_path_prefix;
 pub(super) struct SlashCommand {
     pub(super) name: &'static str,
     pub(super) aliases: &'static [&'static str],
-    /// The trailing argument the command consumes, e.g. `Some("<path>")`
-    /// for `/export`.  `None` marks an argument-less command, which
-    /// [`lookup_command`] matches only when typed alone — trailing text
-    /// means the user meant a prompt, not the command.  Shown in `/help`.
+    /// The trailing argument, e.g. `Some("<path>")` for `/export`; `None` marks
+    /// a command that matches only when typed alone.
     pub(super) arg: Option<&'static str>,
     pub(super) help: &'static str,
 }
 
-/// The slash-command registry — the single source of truth for the prompt-box
-/// highlight ([`is_slash_command`]), the routing match ([`route_submit`]), and
-/// the `/help` listing, so the three cannot drift.
+/// The one registry behind the prompt-box highlight, the routing match, and the
+/// `/help` listing, so the three cannot drift.
 pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/help",
@@ -110,12 +107,9 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
     },
 ];
 
-/// The command named by `trimmed`'s first token together with the trailing
-/// argument it consumes, if any.  The first whitespace-delimited token is
-/// matched against each command's name and aliases; the remainder, trimmed,
-/// is the argument.  An argument-less command ([`SlashCommand::arg`] `None`)
-/// matches only when typed alone — trailing text means the user meant a
-/// prompt, so it declines and the line proceeds to the model.
+/// The command named by `trimmed`'s first token, with the trimmed remainder as
+/// its argument.  An argument-less command matches only when typed alone, so
+/// `/copy this` declines and the line proceeds to the model as a prompt.
 pub(super) fn lookup_command(trimmed: &str) -> Option<(&'static SlashCommand, &str)> {
     let (head, rest) = split_head(trimmed);
     let cmd = SLASH_COMMANDS
@@ -127,17 +121,14 @@ pub(super) fn lookup_command(trimmed: &str) -> Option<(&'static SlashCommand, &s
     Some((cmd, rest))
 }
 
-/// Whether `text`, as typed, is a recognized slash command — its first
-/// token matched, mirroring [`lookup_command`]'s dispatch (so an
-/// argument-less command with trailing text reads as a prompt, not a
-/// command).
+/// Whether `text` names a command — the prompt-box highlight, run through
+/// [`lookup_command`] so the highlight and the dispatch cannot disagree.
 pub(super) fn is_slash_command(text: &str) -> bool {
     lookup_command(text.trim()).is_some()
 }
 
-/// Split `trimmed` into its first whitespace-delimited token and the trimmed
-/// remainder — the head/rest shape both [`lookup_command`] and the worker's
-/// `ReplControl::command` parse a command line into.
+/// Split off the first whitespace-delimited token — the head/rest shape both
+/// [`lookup_command`] and the worker's `ReplControl::command` parse into.
 pub(super) fn split_head(trimmed: &str) -> (&str, &str) {
     match trimmed.split_once(char::is_whitespace) {
         Some((h, r)) => (h, r.trim()),
@@ -145,12 +136,9 @@ pub(super) fn split_head(trimmed: &str) -> (&str, &str) {
     }
 }
 
-/// The head token of `trimmed`, when it names no [`SLASH_COMMANDS`] entry at
-/// all — a typo like `/bogus`, as opposed to a real command misused (`/copy
-/// this`, an argless command with trailing text), which [`lookup_command`]
-/// also declines but which stays a deliberate fall-through to the model.  A
-/// bare word with no leading `/` is never a command attempt, so it returns
-/// `None` and proceeds to the model as it always has.
+/// The head token when it starts with `/` and names no command — a typo like
+/// `/bogus`, unlike `/copy this`, whose trailing text makes it a deliberate
+/// fall-through to the model.
 pub(super) fn unrecognized_command(trimmed: &str) -> Option<&str> {
     let head = trimmed.split_whitespace().next()?;
     let known = SLASH_COMMANDS
@@ -159,18 +147,13 @@ pub(super) fn unrecognized_command(trimmed: &str) -> Option<&str> {
     (head.starts_with('/') && !known).then_some(head)
 }
 
-/// Resolve a user-typed `/export` path: expand a leading `~`/`xdg:` sigil
-/// against the home dir, then anchor a still-relative path at `cwd` (where
-/// exarch was launched) so `/export notes.md` lands there rather than in
-/// whatever directory the process happens to sit in.  [`resolve_str`] folds
-/// `.`/`..` and joins the cwd.
+/// Resolve a typed `/export` path: expand a `~`/`xdg:` head, then anchor a
+/// still-relative path at the launch `cwd` rather than the process's own.
 pub(super) fn resolve_export_path(arg: &str, cwd: &str) -> PathBuf {
     let expanded = expand_path_prefix(arg, &ral_core::host::home());
     ral_core::path::resolve_str(Some(cwd), &expanded)
 }
 
-/// Emit one dim transcript line per registry entry: the command token
-/// (with aliases) left-padded to a common width, then its description.
 pub(super) fn cmd_help(app: &mut App) {
     let id = app.tabs.root();
     let names: Vec<String> = SLASH_COMMANDS
@@ -193,18 +176,13 @@ pub(super) fn cmd_help(app: &mut App) {
     }
 }
 
-/// Push the visual-vocabulary legend onto the transcript as ambient, rail-less
-/// chrome — the panel that decodes the rail, bars, grain, and fidelity
-/// treatments, rendered as the graphic's own samples.
 pub(super) fn cmd_legend(app: &mut App) {
     app.push_chrome(app.tabs.root(), RailShape::Plain, banner::legend_panel());
 }
 
-/// Copy the latest assistant reply — the focused tab's trailing prose, as raw
-/// markdown — to the system clipboard via OSC 52.  An oversized reply exceeds
-/// the terminal's per-sequence limit, so copy its tail (bounded by `YANK_CAP`)
-/// and say so, rather than let the terminal drop the whole sequence and copy
-/// nothing silently.
+/// Copy the latest reply, as raw markdown, to the clipboard via OSC 52.  A reply
+/// past the terminal's per-sequence limit is copied tail-first and announced,
+/// since the terminal would otherwise drop the sequence and copy nothing.
 pub(super) fn cmd_copy(app: &mut App) {
     let id = app.tabs.root();
     let reply = app.latest_reply();
@@ -228,11 +206,8 @@ pub(super) fn cmd_copy(app: &mut App) {
     app.push_note(id, &note);
 }
 
-/// Write the focused tab's user view — its rendered `user.log` — to `arg`, a
-/// path that may be absolute, relative to the launch cwd, or `~`/`xdg:`-
-/// prefixed.  Refuses to overwrite an existing file so an export never clobbers;
-/// an empty argument prints the usage line.  The copy itself goes through
-/// [`viewport::export_log`], where the `user.log` I/O door lives.
+/// Write the focused tab's rendered `user.log` to `arg`, never over an existing
+/// file.  The copy goes through [`viewport::export_log`], the I/O door.
 pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
     let id = app.tabs.root();
     if arg.is_empty() {
@@ -257,12 +232,9 @@ pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
     }
 }
 
-/// Jump focus to the live tab named `arg` — the gesture that reaches a
-/// demoted tab, since `TAB` no longer cycles onto one. Resolves through the
-/// registry, the same way `agent-cancel`/`message` resolve a name, then
-/// checks the resolved id actually has a tab before landing on it. Never
-/// renews the lease: focusing is enumeration/attention, not the human
-/// exchange that does.
+/// Jump focus to the live tab named `arg` — the only way onto a demoted tab,
+/// which `TAB` skips.  The registry resolves the name but is never renewed:
+/// attention alone must not keep a child alive.
 pub(super) fn cmd_focus(app: &mut App, arg: &str, agents: &AgentRegistry) {
     let id = app.tabs.focused();
     if arg.is_empty() {
@@ -275,9 +247,8 @@ pub(super) fn cmd_focus(app: &mut App, arg: &str, agents: &AgentRegistry) {
     }
 }
 
-/// Post a session command to the worker's inbox, surfacing a rejection (the
-/// inbox at quota — vanishingly rare, since `Command` is user-paced, never a
-/// flood) to the UI rather than dropping it silently.
+/// Post a session command to the worker's inbox, surfacing a full-inbox
+/// rejection rather than dropping the command silently.
 fn push_command(tui: &mut Tui, mailbox: &Mailbox, cmd: String) {
     if let Err(reject) = mailbox.push(Post::Command(cmd)) {
         tui.app
@@ -285,28 +256,15 @@ fn push_command(tui: &mut Tui, mailbox: &Mailbox, cmd: String) {
     }
 }
 
-/// The one submit path, shared by every tab: it parses the line once and then
-/// decides what to do from the parse and the focused tab, so nothing upstream
-/// forks root-vs-non-root before parsing.  A view command (`/help`, `/legend`,
-/// `/copy`, `/export`, `/model`) touches only the App, clipboard, file, or
-/// picker, so it runs here on the UI thread.  A session command (`/clear`,
-/// `/compact`, `/resources`, `/quit`) and a plain prompt on the
-/// trunk go onto the session inbox, where the worker's attend loop drains them —
-/// `/clear` *also* clears the viewport UI-side so the screen blanks immediately,
-/// before the worker rebuilds the session.  A slash token naming no registered
-/// command ([`unrecognized_command`]) prints an error instead of mailing the
-/// typo to the model as a prompt.
-///
-/// Commands act on the trunk session alone.  On a sub-agent tab a recognized
-/// command cannot be serviced — sub-agents run under `NoControl`, and routing
-/// to the trunk's inbox would act on the wrong session — so it is refused on
-/// the focused tab rather than misfired.  `/close` and `/focus` are the two
-/// exceptions: neither touches a session inbox, so both run regardless of
-/// which tab is focused.  A plain line instead steers the focused tab: the
-/// trunk's session inbox, or the focused sub-agent's mailbox through
-/// `AgentRegistry::steer` (dropped if that agent died between focus and
-/// submit).  Errors and notes target the focused tab so they appear where
-/// the user typed.
+/// The one submit path for every tab: parse once, then act on the parse and the
+/// focused tab.  A view command (`/help`, `/legend`, `/copy`, `/export`,
+/// `/model`, `/login`) touches only the App, clipboard, file, or picker, so it
+/// runs here on the UI thread; the rest ride the session inbox to the worker's
+/// `ReplControl`, which owns the trunk's context.  A command typed on a sub-agent
+/// tab is therefore refused rather than misfired — a sub-agent attends under
+/// `NoControl`, and the trunk's inbox would act on the wrong session — save
+/// `/close` and `/focus`, which touch no inbox.  A plain line steers the focused
+/// tab instead.  Errors land on the focused tab, where the user typed.
 pub(super) fn route_submit(
     text: String,
     tui: &mut Tui,
@@ -319,10 +277,8 @@ pub(super) fn route_submit(
     let focused = tui.app.tabs.focused();
     let unrecognized = unrecognized_command(trimmed);
     match lookup_command(trimmed) {
-        // `/close` kills the focused branch and its subtree — one of the two
-        // commands admitted off the trunk (`/focus` is the other, below).
-        // Both must be matched before the "not available on this tab"
-        // refusal, which would otherwise swallow them.
+        // `/close` and `/focus` are matched ahead of the off-trunk refusal
+        // below, which would otherwise swallow both.
         Some((cmd, _)) if cmd.name == "/close" => {
             if focused == root {
                 tui.app
@@ -334,10 +290,6 @@ pub(super) fn route_submit(
                 ctx.agents.remove_subtree(focused);
             }
         }
-        // `/focus` is the other command admitted off the trunk: it moves
-        // focus itself, so it must run regardless of which tab it is typed
-        // from — matched before the "not available on this tab" refusal for
-        // the same reason `/close` is.
         Some((cmd, arg)) if cmd.name == "/focus" => cmd_focus(&mut tui.app, arg, ctx.agents),
         Some((cmd, _)) if focused != root => {
             tui.app.push_error(
@@ -354,50 +306,32 @@ pub(super) fn route_submit(
                 pick_model(tui, ctx);
             }
             "/login" => login::login(tui, ctx),
-            // The viewport blanks immediately, and the in-flight model response
-            // is cancelled first — otherwise streamed tokens sitting in the bus
-            // keep flowing into the cleared viewport until the worker, parked
-            // inside `deliberate`, hits its next poll (50 ms) and the model's
-            // turn ends on its own.  Raising the interrupt cancels the trunk's
-            // published token and the ral foreground, exactly as Esc does, at
-            // interrupt strength — so the next exchange boundary's `reset`
-            // clears it. `cancel_descendants` reaps any live descendants now
-            // rather than after the worker reaches the `Item::Command`, leaving
-            // the trunk's own entry, and its sticky token, untouched: `/clear`
-            // rebuilds the trunk in place rather than ending it, and a
-            // terminate-class cause on its token would be permanent.
-            // Stragglers already in the unbounded bus channel are dropped in
-            // `App::handle` by the clear-drain guard `root_clear_drain` arms.
-            // Then the `/clear` itself reaches the worker's attend loop and
-            // rebuilds the session.
+            // Cancel before blanking: tokens already in flight would otherwise
+            // paint into the cleared viewport until the worker's next poll, and
+            // what the bus still holds `App::handle`'s clear-drain drops.
+            // Descendants only — a terminate-class cause on the trunk's own
+            // token is permanent, and `/clear` rebuilds the trunk in place.
             "/clear" => {
                 crate::agent::cancel::raise_interrupt();
                 ctx.agents.cancel_descendants(root);
                 tui.app.clear(info, tui.guard.term())?;
                 push_command(tui, mailbox, "/clear".into());
             }
-            // The worker's `ReplControl` compacts the history / returns Quit.
             _ => push_command(tui, mailbox, text.clone()),
         },
-        // A bare typo like `/bogus` is not a prompt in disguise — say so
-        // rather than silently mailing it to the model as one, on any tab.
+        // A typo is not a prompt in disguise: say so rather than mail it to the
+        // model as one.
         None if unrecognized.is_some() => {
             let head = unrecognized.expect("checked Some above");
             tui.app
                 .push_error(focused, &format!("unknown command: {head} (see /help)"));
         }
-        // A plain prompt steers the focused tab: the trunk's session inbox, or
-        // the focused sub-agent's mailbox, delivered through the registry's
-        // one steering door (`steer`), which also renews its idle lease. An
-        // agent that died between focus and submit has no live entry, so
-        // `steer` drops the line rather than reviving it.
+        // `steer` is the registry's one delivery door: it renews the agent's
+        // idle lease, and drops the line if that agent died since it was focused.
         None => {
             if focused == root {
-                // A model-less launch parks the trunk with no model bound;
-                // dispatching a prompt would reach the provider with an empty
-                // model and fail on the wire. Refuse it here with the same
-                // pointer the status bar shows, so the human opens /model
-                // first rather than seeing a network error.
+                // A model-less launch would reach the provider with an empty
+                // model and fail on the wire; point at `/model` instead.
                 if ctx
                     .agents
                     .provider(root)
@@ -420,8 +354,6 @@ pub(super) fn route_submit(
 mod tests {
     use super::{lookup_command, resolve_export_path, unrecognized_command};
 
-    /// The matched command's canonical name plus the argument
-    /// `lookup_command` peeled off — `None` when nothing matched.
     fn dispatch(input: &str) -> Option<(&'static str, String)> {
         lookup_command(input).map(|(c, arg)| (c.name, arg.to_string()))
     }
@@ -429,12 +361,8 @@ mod tests {
     #[test]
     fn argless_command_matches_alone_but_not_with_trailing_text() {
         assert_eq!(dispatch("/copy"), Some(("/copy", String::new())));
-        // Trailing text on an argument-less command is not that command: it
-        // falls through to the model as a prompt rather than running /copy.
         assert_eq!(dispatch("/copy this"), None);
-        // An alias resolves to its canonical entry.
         assert_eq!(dispatch("/exit"), Some(("/quit", String::new())));
-        // The probe fold is a registered, argument-less session command.
         assert_eq!(dispatch("/resources"), Some(("/resources", String::new())));
     }
 
@@ -444,13 +372,12 @@ mod tests {
             dispatch("/export ~/notes.md"),
             Some(("/export", "~/notes.md".to_string()))
         );
-        // Whitespace around the argument is trimmed.
         assert_eq!(
             dispatch("/export   /tmp/a.txt  "),
             Some(("/export", "/tmp/a.txt".to_string()))
         );
-        // A bare /export still matches, with the empty argument its handler
-        // turns into the usage hint.
+        // A bare command matches; its handler turns the empty argument into the
+        // usage hint.
         assert_eq!(dispatch("/export"), Some(("/export", String::new())));
     }
 
@@ -460,19 +387,14 @@ mod tests {
             dispatch("/focus scout"),
             Some(("/focus", "scout".to_string()))
         );
-        // A bare /focus still matches, with the empty argument its handler
-        // turns into the usage hint.
         assert_eq!(dispatch("/focus"), Some(("/focus", String::new())));
     }
 
     #[test]
     fn branch_matches_bare_and_with_prompt_and_close_resolves() {
-        // `/branch` takes an optional prompt, so it matches both alone and with
-        // trailing text — unlike an argument-less command, which declines the
-        // latter.
+        // An optional argument admits trailing text an argless one declines.
         assert_eq!(dispatch("/branch"), Some(("/branch", String::new())));
         assert_eq!(dispatch("/branch hi"), Some(("/branch", "hi".to_string())));
-        // `/close` is argument-less and resolves on its own.
         assert_eq!(dispatch("/close"), Some(("/close", String::new())));
     }
 
@@ -484,31 +406,26 @@ mod tests {
 
     #[test]
     fn unrecognized_command_flags_only_a_slash_typo() {
-        // A slash token naming no registered command is a typo to report...
         assert_eq!(unrecognized_command("/bogus"), Some("/bogus"));
         assert_eq!(
             unrecognized_command("/bad_command here are the argv"),
             Some("/bad_command")
         );
-        // ...but a real command misused with trailing text is a deliberate
-        // fall-through to the model, not a typo.
+        // A real command misused with trailing text is a deliberate fall-through
+        // to the model, not a typo.
         assert_eq!(unrecognized_command("/copy this"), None);
-        // A plain prompt never looks like a command attempt.
         assert_eq!(unrecognized_command("just a prompt"), None);
     }
 
-    // Per-platform twins rather than one genericised test: absoluteness
-    // is host-defined (`/tmp/out.txt` is not absolute on Windows), so
-    // each host pins its own native fixtures.
+    // Twins rather than one genericised test: absoluteness is host-defined
+    // (`/tmp/out.txt` is not absolute on Windows), so each host pins its own.
     #[cfg(unix)]
     #[test]
     fn export_path_resolves_absolute_and_relative() {
-        // An absolute path passes through (dots folded, cwd ignored).
         assert_eq!(
             resolve_export_path("/tmp/out.txt", "/Users/me/proj").to_str(),
             Some("/tmp/out.txt")
         );
-        // A relative path anchors at the launch cwd, not the process cwd.
         assert_eq!(
             resolve_export_path("notes.md", "/Users/me/proj").to_str(),
             Some("/Users/me/proj/notes.md")
@@ -518,12 +435,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn export_path_resolves_absolute_and_relative() {
-        // An absolute path passes through (dots folded, cwd ignored).
         assert_eq!(
             resolve_export_path(r"C:\scratch\out.txt", r"C:\Users\me\proj").to_str(),
             Some(r"C:\scratch\out.txt")
         );
-        // A relative path anchors at the launch cwd, not the process cwd.
         assert_eq!(
             resolve_export_path("notes.md", r"C:\Users\me\proj").to_str(),
             Some(r"C:\Users\me\proj\notes.md")

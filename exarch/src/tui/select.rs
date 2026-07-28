@@ -1,10 +1,9 @@
-//! Drag-selection helpers, shared by the two moments a selection is read:
-//! [`highlight_range`] reverse-videos it live as the mouse drags
-//! ([`super::render::paint_selection`]); [`plain_slice`] extracts the plain
-//! text once released, for the clipboard copy ([`super::viewport::Viewport::
-//! selection_text`]).  Both work in cell columns relative to the text area,
-//! with the leading [`RAIL_W`] rail gutter excluded from either end, so a
-//! selection never reaches into the glyph.
+//! Drag-selection geometry, in text-area cell columns: `render::paint_selection`
+//! reverse-videos a live drag through [`highlight_range`], and
+//! `Viewport::selection_text` copies the released text through [`plain_slice`].
+//! Both subtract the leading [`RAIL_W`] gutter, so no selection reaches into the
+//! rail glyph, and both stop at a short line's end — which is how the callers
+//! spell `u16::MAX` as "to end of row".
 use super::line::{plain, rail_skip};
 use super::palette::RAIL_W;
 use ratatui::{
@@ -13,9 +12,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Normalize a screen cell-column range to content columns: subtract the
-/// [`RAIL_W`] rail gutter from each end (columns landing inside the rail
-/// clamp to the start of content) and order them low..high.
+/// Screen cell columns to ordered content columns; a column inside the rail clamps to 0.
 #[allow(
     clippy::cast_possible_truncation,
     reason = "small compile-time constant fits u16"
@@ -26,10 +23,7 @@ fn content_range(start_cell: u16, end_cell: u16) -> (u16, u16) {
     (lo.min(hi), lo.max(hi))
 }
 
-/// Extract plain text between two cell-column positions within a line.
-/// `start_cell` and `end_cell` are absolute cell columns within the text
-/// area (0 = left edge).  The rail glyph occupies the first [`RAIL_W`]
-/// columns; columns landing inside the rail clamp to the start of content.
+/// Plain text of `line` between two cell columns, in either order.
 pub(super) fn plain_slice(line: &Line<'_>, start_cell: u16, end_cell: u16) -> String {
     let text = plain(line);
     if text.is_empty() {
@@ -57,9 +51,7 @@ pub(super) fn plain_slice(line: &Line<'_>, start_cell: u16, end_cell: u16) -> St
     text[byte_lo..byte_hi].to_string()
 }
 
-/// Apply [`Modifier::REVERSED`] to a cell-column range within a [`Line`],
-/// splitting any span that straddles the boundary so the highlight stays
-/// granular.  The rail glyph (first [`RAIL_W`] columns) is excluded.
+/// Reverse-video a cell-column range, splitting any span that straddles an edge.
 pub(super) fn highlight_range(line: &mut Line<'static>, start_cell: u16, end_cell: u16) {
     let skip = rail_skip(line);
     let (lo, hi) = content_range(start_cell, end_cell);

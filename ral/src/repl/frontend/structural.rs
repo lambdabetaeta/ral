@@ -17,12 +17,9 @@
 //! `read` and left before the line is returned, so the session evaluates and
 //! prints command output to the ordinary screen between reads.
 //!
-//! This is the keystone cut: the typed spine (live per-stage inference), a
-//! read-only worksheet, and a handles matrix over both env-held spawn handles
-//! and pgid jobs (Ctrl-Z, Unix only).  The reactive re-flow, fork,
-//! detached-worker enumeration, and point-at-value matrix actions the design
-//! proposal also describes are later parcels; the projections here read
-//! runtime state and never mutate it.
+//! The worksheet is read-only and the handles matrix spans both env-held spawn
+//! handles and pgid jobs (Ctrl-Z, Unix only); every projection here reads
+//! runtime state and never mutates it.
 
 use ral_core::Shell;
 use ral_core::ir::{Comp, CompKind};

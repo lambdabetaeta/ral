@@ -1,70 +1,35 @@
-//! The two normal-form path types the grant pipeline trusts.
+//! The two normal-form path types the grant pipeline trusts:
+//! [`ResolvedPath`] on the access side, [`NormalizedPrefix`] on the grant
+//! side.
 //!
-//! [`ResolvedPath`] is the access-side stage-2 output: a path that is
-//! absolute, `.`/`..`-collapsed, and anchored against the *logical*
-//! cwd.  [`NormalizedPrefix`] is the grant-side counterpart: a record
-//! minted at policy freeze that carries *both* the `surface` form (as
-//! authored, `.`/`..`-folded) and the `resolved` form (symlinks
-//! followed) alongside the `namespace` the two forms agree in.
+//! A prefix carries its symlink-followed `resolved` form on the value, so
+//! composition ([`Capabilities::meet`](crate::types::Capabilities::meet)
+//! and the lattices under it) is a total pure function of two policies:
+//! the disk is consulted once, at freeze.  Enforcement still re-resolves
+//! against the live filesystem — composition speaks about the policy,
+//! enforcement about the world.
 //!
-//! Carrying `resolved` on the value, rather than re-deriving it from
-//! disk at every comparison, is what lets composition
-//! ([`Capabilities::meet`](crate::types::Capabilities::meet), the
-//! `ExecMap`/`FsPolicy` lattices) be a total pure function of two
-//! policies: minting consults the disk once, at freeze; composing two
-//! already-minted prefixes never does.  Enforcement — the gate at the
-//! point of use — still re-resolves against the live filesystem, and
-//! that is correct: composition is a statement about the policy,
-//! enforcement is a statement about the world.
-//!
-//! Both types have private fields.  A [`ResolvedPath`] is minted only
-//! through [`super::Resolver::resolve`]; the grant-side freeze door is
-//! the lexer ([`super::sigil`]).  [`NormalizedPrefix`] also admits
-//! [`NormalizedPrefix::from_surface`], which re-folds an already-normal
-//! surface form for the prefix-set projection and the OS-sandbox
-//! renderer.  Every door — `Resolver::resolve`, `freeze`,
-//! `from_surface` — runs the one `.`/`..`-folding kernel
-//! ([`super::lex::fold_dots`]), so an access-side path and a grant-side
-//! prefix compare like-for-like under [`super::path_within`].  There is
-//! no `From<&str>`/`From<String>` sugar: a `From` impl cannot consult
-//! the oracle a `resolved` field needs, so it would be a door for
-//! fabricating one.
-//!
-//! One door answers to a different operating system:
-//! [`NormalizedPrefix::from_guest`], for a prefix this process mints but
-//! never matches, because the gate that matches it runs inside a Linux
-//! guest.  It folds with the guest's kernel and tags the result
-//! [`Namespace::Guest`] — the [`Namespace`] doc carries the
-//! cross-namespace overlap rule that tag exists for.
-//!
-//! Canonicalisation against `realpath(3)` is anchored on this normal
-//! form: [`ResolvedPath::canonicalise_strict`] /
-//! [`ResolvedPath::canonicalise_lenient`] take an already-resolved
-//! path.  The lenient canonicaliser is also reachable on a bare
-//! `&Path` through [`super::canon::match_variants`] (the
-//! kernel-sandbox variant generator); there the `.`/`..`-defence is
-//! `canonicalise_lenient`'s own [`fold_dots`](super::lex::fold_dots)
-//! first step, not the `ResolvedPath` type.
+//! Both types have private fields, and every door runs the one
+//! `.`/`..`-folding kernel [`fold_dots`](super::lex::fold_dots), so an
+//! access-side path and a grant-side prefix compare like-for-like under
+//! [`path_within`](super::lex::path_within).  There is no `From<&str>`
+//! sugar: a `From` impl cannot consult the disk oracle `resolved` needs,
+//! so it would be a door for fabricating one.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
 /// A lexically-resolved path: absolute, `.`/`..`-collapsed, anchored
-/// against the logical cwd.
-///
-/// The stage-2 (`lex`) output of the grant
-/// pipeline, reified so that canonicalisation can only follow
-/// resolution — there is no way to `realpath` a path that has not
-/// first been resolved against the logical cwd.
+/// against the logical cwd.  Reified so that canonicalisation can only
+/// follow resolution — there is no way to `realpath` a path that has not
+/// first been anchored.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedPath(PathBuf);
 
 impl ResolvedPath {
-    /// Wrap the stage-2 output of [`super::lex::resolve_path`].  The
-    /// three invariants below are precisely what `resolve_path`
-    /// guarantees, so this constructor is that kernel wrapped — no new
-    /// normalisation.  Crate-internal: the public door is
-    /// [`super::Resolver::resolve`].
+    /// Wrap the output of [`super::lex::resolve_path`], asserting exactly
+    /// what that kernel guarantees — no further normalisation happens
+    /// here.  The public door is [`super::Resolver::resolve`].
     pub(super) fn from_lexed(path: PathBuf) -> Self {
         debug_assert!(
             path.is_absolute(),
@@ -85,8 +50,7 @@ impl ResolvedPath {
         Self(path)
     }
 
-    /// The resolved path as a borrow, for the disk operation the check
-    /// authorised.
+    /// A borrow, for the disk operation the check authorised.
     pub fn as_path(&self) -> &Path {
         &self.0
     }
@@ -96,14 +60,13 @@ impl ResolvedPath {
         self.0
     }
 
-    /// Display the resolved path, for audit fields and denial messages.
+    /// For audit fields and denial messages.
     pub fn display(&self) -> std::path::Display<'_> {
         self.0.display()
     }
 
-    /// Strict `realpath(3)`: errors when the path or an intermediate
-    /// component is missing.  The input is already absolute and folded,
-    /// so `realpath` has nothing to anchor against the *process* cwd.
+    /// Strict `realpath(3)`.  The input is already absolute and folded, so
+    /// nothing here can anchor against the *process* cwd.
     ///
     /// # Errors
     /// Returns `Err` if the path or any intermediate component does not
@@ -123,42 +86,27 @@ impl ResolvedPath {
 /// Which operating system's namespace a [`NormalizedPrefix`]'s
 /// `resolved` form was resolved in.
 ///
-/// Composition keys overlap on `(namespace, resolved)`
-/// ([`super::meet_prefixes`]), so a prefix minted for one namespace
-/// never overlaps one minted for another — the meet is fail-closed
-/// across namespaces rather than silently comparing spellings that
-/// were never meant to agree.
+/// [`super::meet_prefixes`] keys overlap on `(namespace, resolved)`, so a
+/// prefix minted for one namespace never overlaps one minted for another:
+/// the meet is fail-closed across namespaces rather than silently
+/// comparing spellings that were never meant to agree.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Namespace {
-    /// Resolved by and matched against this process's own filesystem.
+    /// This process's own filesystem.
     Host,
-    /// Resolved by and matched against a Linux guest's filesystem —
-    /// see [`NormalizedPrefix::from_guest`].
+    /// A Linux guest's filesystem — see [`NormalizedPrefix::from_guest`].
     Guest,
 }
 
-/// A frozen grant prefix, carrying both the form the author wrote and
-/// the form the gate matches against.
+/// A frozen grant prefix: `surface` as the author wrote it (absolute and
+/// `.`/`..`-collapsed, the normal form a [`ResolvedPath`] also carries)
+/// and `resolved`, that same path with symlinks followed in `namespace`.
 ///
-/// `surface` is absolute and `.`/`..`-collapsed, in the same normal
-/// form a [`ResolvedPath`] carries.  `resolved` is `surface` with
-/// symlinks followed, in `namespace`.  Carrying both is what lets the
-/// lattice meets be pure (see the module doc): minting is the one
-/// place this type touches the filesystem.
-///
-/// Private fields; the grant-side door is the freeze lexer
-/// ([`super::sigil`]), save for a prefix bound for another OS's
-/// namespace — see [`NormalizedPrefix::from_guest`].  Field order is
-/// load-bearing: the derived `Ord` sorts by `surface` first, so a
-/// `BTreeSet` dedups two spellings of one directory by the string the
-/// author wrote, not by where it resolves — collapsing on `resolved`
-/// instead would fold two distinct-looking grants into one and change
-/// the rendered OS rule list.
-///
-/// `Serialize`/`Deserialize` are the ordinary derived (struct) form —
-/// not transparent — since the wire boundary (`WireContext` across the
-/// re-exec'd child) is a trusted, same-build hop and the whole record,
-/// not just `surface`, must survive it.
+/// Field order is load-bearing: the derived `Ord` sorts by `surface`
+/// first, so a `BTreeSet` dedups two spellings of one directory by the
+/// string the author wrote.  Deduping on `resolved` instead would fold
+/// two distinct-looking grants into one and change the rendered OS rule
+/// list.
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NormalizedPrefix {
     surface: String,
@@ -167,13 +115,10 @@ pub struct NormalizedPrefix {
 }
 
 impl NormalizedPrefix {
-    /// Fold `path`, follow its symlinks, and wrap both forms.  The
-    /// constructor enforces the `.`/`..`-collapsed invariant the gate
-    /// would otherwise apply at match time and does the one disk
-    /// consultation this type ever needs, performed once at the door so
-    /// authorised-form and matched-form are one normal form.
-    /// Crate-internal: the grant-side door is the freeze lexer in
-    /// [`super::sigil`].
+    /// Fold `path`, follow its symlinks, and wrap both forms — the one
+    /// disk consultation this type ever makes, done here at the door so
+    /// authorised form and matched form are one normal form.  The
+    /// grant-side door is the freeze pass in [`super::sigil`].
     pub(super) fn freeze(path: &Path) -> Self {
         let folded = super::lex::fold_dots(path);
         let resolved = super::canon::canonicalise_lenient(&folded);
@@ -184,37 +129,28 @@ impl NormalizedPrefix {
         }
     }
 
-    /// Mint a prefix from an already-resolved surface form — the output
-    /// of [`PrefixSet::surface`](super::PrefixSet::surface) and the bytes
-    /// the OS-sandbox renderer emits.  Runs the same fold-then-resolve
-    /// kernel (idempotent on a surface form, which is already normal),
-    /// so the projection's prefixes pass through the identical
-    /// normaliser the access-side [`ResolvedPath`] and the grant-side
-    /// freeze do.
+    /// Mint a prefix from an already-normal surface form — what
+    /// [`PrefixSet::surface`](super::PrefixSet::surface) yields and what
+    /// the OS-sandbox renderer emits.  Same fold-then-resolve kernel,
+    /// idempotent on such a form.
     pub fn from_surface(path: impl AsRef<Path>) -> Self {
         Self::freeze(path.as_ref())
     }
 
-    /// Mint a prefix that names a path inside the Linux guest, whichever
-    /// host is doing the minting.
+    /// Mint a prefix naming a path inside the Linux guest, whichever host
+    /// mints it.
     ///
-    /// Synod is the case this exists for: the granted folder is admitted
-    /// at its guest mount point (`/work`), and the gate that will match
-    /// against the prefix runs *inside* the machine.  So the normaliser
-    /// that has to agree with the access side is Linux's
+    /// The gate that matches it runs *inside* the machine, so the
+    /// normaliser that must agree with the access side is Linux's
     /// ([`fold_dots_posix`](super::lex::fold_dots_posix)), not this
-    /// process's — see `MachineSpec::resolve` for the same reasoning
-    /// applied to absoluteness.  Not interchangeable with
-    /// [`from_surface`](Self::from_surface): a prefix that will be
-    /// matched on *this* computer must go through that one, which is why
-    /// it takes an `AsRef<Path>` and this takes a `&str`.
-    ///
-    /// There is no `realpath(3)` on this host for a path inside another
-    /// machine, so `resolved` is just `surface` again, tagged
-    /// [`Namespace::Guest`].  That tag makes a host-side meet against a
-    /// guest prefix the empty, fail-closed intersection (see
-    /// [`Namespace`]), so the only place a guest grant can be narrowed
-    /// is inside the guest, by the guest's own kernel — the right one.
+    /// process's — hence a `&str` here where
+    /// [`from_surface`](Self::from_surface), for prefixes matched on
+    /// *this* computer, takes an `AsRef<Path>`.  There is no `realpath(3)`
+    /// on this host for another machine's path, so `resolved` is `surface`
+    /// again, tagged [`Namespace::Guest`]: a host-side meet against a
+    /// guest prefix is then the empty, fail-closed intersection, leaving
+    /// the guest's own kernel as the only thing that can narrow a guest
+    /// grant.
     #[must_use]
     pub fn from_guest(path: &str) -> Self {
         debug_assert!(
@@ -229,7 +165,7 @@ impl NormalizedPrefix {
         }
     }
 
-    /// The prefix as a borrow, for containment matching.
+    /// The surface form as a `Path`, for containment matching.
     #[allow(
         clippy::disallowed_methods,
         reason = "lexical Path::new over a surface already in normal form — no I/O behind it"
@@ -243,7 +179,7 @@ impl NormalizedPrefix {
         &self.surface
     }
 
-    /// The resolved (symlink-followed) form, for composition overlap.
+    /// The symlink-followed form, for composition overlap.
     pub fn resolved(&self) -> &str {
         &self.resolved
     }
@@ -253,44 +189,39 @@ impl NormalizedPrefix {
         self.namespace
     }
 
-    /// True iff `self` and `other` are the same directory as far as the
-    /// enforcement gate (`longest_dir_match`) is concerned, even if
-    /// they carry different `resolved` forms because they were frozen
-    /// against different disk state.  Not byte equality on `surface`:
-    /// the gate's own containment check, [`super::lex::path_within`],
-    /// matches modulo the host's path identity — macOS firmlink
-    /// aliases (`/tmp` ↔ `/private/tmp`) and, under Windows identity,
-    /// case, separator spelling, and a `\\?\`-verbatim prefix — so two
-    /// surfaces the gate treats as one directory can still differ
-    /// byte-for-byte.  "Same directory" is mutual containment under
-    /// that rule, gated on matching `namespace` since cross-namespace
-    /// surfaces are never the same directory regardless of spelling.
-    /// A set operation that means "does this clash with something the
-    /// gate would treat as the same dir" must use this, not the
-    /// derived `Eq`/`Ord`, which compares `resolved` too and compares
-    /// `surface` by bytes.
+    /// True iff the enforcement gate (`capability::exec::longest_dir_match`)
+    /// would treat `self` and `other` as one directory: mutual containment
+    /// under [`path_within_str`](super::lex::path_within_str), plus a
+    /// matching namespace.
+    ///
+    /// Not byte equality.  That containment rule folds macOS firmlink
+    /// aliases (`/tmp` ↔ `/private/tmp`) and, under Windows identity, case,
+    /// separator spelling and a `\\?\`-verbatim prefix, so two surfaces the
+    /// gate calls one directory can differ byte-for-byte — and two prefixes
+    /// frozen against different disk state can differ in `resolved`.  Any
+    /// set operation asking "does this clash with something the gate calls
+    /// the same dir" needs this, not the derived `Eq`/`Ord`.
     pub fn same_gate_dir(&self, other: &Self) -> bool {
         self.namespace == other.namespace
             && super::lex::path_within_str(&self.surface, &other.surface)
             && super::lex::path_within_str(&other.surface, &self.surface)
     }
 
-    /// Consume into the owned surface `String`, for the wire/render
+    /// Consume into the owned surface `String`, for the wire and render
     /// forms that flatten the prefix back to bytes.
     pub fn into_string(self) -> String {
         self.surface
     }
 
-    /// True iff this prefix is absolute.  The freeze pass asserts this
-    /// after minting, surfacing the same error the post-hoc check did.
+    /// True iff this prefix is absolute; `capability::decode` rejects a
+    /// frozen entry that is not.
     pub fn is_absolute(&self) -> bool {
         self.as_path().is_absolute()
     }
 
-    /// Test-only mint with an explicit, possibly divergent
-    /// `surface`/`resolved` pair — the shape a real symlink freezes to,
-    /// without a disk.  `#[cfg(test)]` so it can never become a
-    /// production door for fabricating a resolved form.
+    /// Mint a divergent `surface`/`resolved` pair — the shape a real
+    /// symlink freezes to, without a disk.  `#[cfg(test)]` so it can never
+    /// become a production door for fabricating a resolved form.
     #[cfg(test)]
     pub(crate) fn for_test(surface: &str, resolved: &str, namespace: Namespace) -> Self {
         Self {
@@ -329,13 +260,10 @@ impl PartialEq<String> for NormalizedPrefix {
 mod tests {
     use super::NormalizedPrefix;
 
-    /// A guest prefix survives being minted on this computer, whichever
-    /// computer this is.  The assertion is on the *bytes*, deliberately:
-    /// a test that instead checked whether the prefix admits
-    /// `/work/letter.docx` would pass on Windows even when both sides are
-    /// mangled, because the access side folds with the same host kernel.
-    /// Only the spelling shows the split, because only the spelling is
-    /// what crosses to the guest.
+    /// Asserting on the *bytes* is deliberate: a test that instead checked
+    /// admission of `/work/letter.docx` would pass on Windows even with
+    /// both sides mangled, since the access side folds with the same host
+    /// kernel.  Only the spelling crosses to the guest.
     #[test]
     fn a_guest_prefix_is_spelled_the_guests_way_on_every_host() {
         assert_eq!(NormalizedPrefix::from_guest("/work").as_str(), "/work");

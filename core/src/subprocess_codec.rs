@@ -1,16 +1,12 @@
-//! Length-prefixed JSON frames for ral subprocess helpers.
-//!
-//! Used by the pipeline-stage helper path so every re-exec protocol
-//! shares one framing codec.
+//! Length-prefixed JSON frames: the one framing codec on every ral IPC
+//! channel — the pipeline gate / report protocol, the helper stages it
+//! re-execs, and the engine wire in `wire`.
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::io::{self, Read, Write};
 
-/// The largest frame body this codec will allocate for. A length prefix
-/// above this bound is a protocol fault — a corrupt or adversarial peer,
-/// never a legitimate frame — and is rejected before any allocation, so it
-/// can never become a multi-gigabyte allocator abort or stall.
+/// Checked before the body is allocated, so no peer names a huge buffer.
 const MAX_FRAME_LEN: u32 = 256 * 1024 * 1024;
 
 pub fn write_frame<W: Write + ?Sized, T: Serialize>(w: &mut W, value: &T) -> io::Result<()> {
@@ -24,24 +20,14 @@ pub fn write_frame<W: Write + ?Sized, T: Serialize>(w: &mut W, value: &T) -> io:
     Ok(())
 }
 
-/// Suppress SIGPIPE for the duration of a protocol write.
+/// Block SIGPIPE around a protocol write.
 ///
-/// Batch mode runs with `SIGPIPE = SIG_DFL` so the bundled coreutils see
-/// `EPIPE` and exit cleanly when their downstream closes (`yes | head`).
-/// That same disposition would otherwise turn a parent-side protocol
-/// write to a helper that has already exited — the gate / report / IPC
-/// channels — into a fatal signal (status 141) before the `EPIPE` the
-/// error path is written to observe can materialise.
-///
-/// The fix is per-write, not process-wide: SIGPIPE is synchronous and
-/// thread-directed — it is delivered to the very thread whose `write`
-/// found a dead peer — so blocking it on this thread for the extent of
-/// the write makes the syscall return `EPIPE` instead.  This is the one
-/// mechanism portable across Linux/macOS/BSD: `SO_NOSIGPIPE` is
-/// BSD-only and `MSG_NOSIGNAL` needs `send(2)` rather than the
-/// `write(2)` that `std::io::Write` performs, whereas masking rides the
-/// `Write` trait unchanged.  On Windows there is no SIGPIPE; the guard
-/// is a no-op and a dead-peer write returns an `io::Error` directly.
+/// Batch mode leaves SIGPIPE at `SIG_DFL` so the bundled coreutils die on a
+/// closed downstream (`yes | head`) — but it would equally kill the parent
+/// mid-write to a helper that has already exited, instead of yielding the
+/// `EPIPE` the error path is written to observe.  SIGPIPE is thread-directed,
+/// so masking it on the writing thread suffices, and unlike `SO_NOSIGPIPE`
+/// (BSD-only) or `MSG_NOSIGNAL` (wants `send(2)`) it rides `Write` unchanged.
 #[cfg(unix)]
 mod sigpipe {
     pub(super) struct Suppress {
@@ -49,8 +35,7 @@ mod sigpipe {
     }
 
     impl Suppress {
-        /// Block SIGPIPE on the current thread, remembering whether it
-        /// was already blocked so [`Drop`] only unblocks what we blocked.
+        /// Remembers a pre-existing block, so `Drop` unblocks only ours.
         pub(super) fn install() -> Self {
             use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
             let mut set = SigSet::empty();
@@ -65,31 +50,25 @@ mod sigpipe {
 
     impl Drop for Suppress {
         fn drop(&mut self) {
-            // SIGPIPE was already blocked before us — leave the mask
-            // exactly as we found it, and do not consume a signal the
-            // surrounding code may be managing itself.
+            // Blocked before us: leave the mask alone, and do not consume a
+            // signal the surrounding code may be managing itself.
             if self.was_blocked {
                 return;
             }
             use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
             let mut set = SigSet::empty();
             set.add(Signal::SIGPIPE);
-            // `nix` has no `sigpending(2)` wrapper, so the pending check
-            // itself still goes through libc; everything else here is nix.
-            //
-            // Safety: `raw` is fully written by `sigpending` before it is
-            // read via `assume_init`.
+            // `nix` wraps no `sigpending(2)`, so this one call drops to libc.
+            // Safety: `sigpending` fills `raw` before `assume_init` reads it.
             let pending = unsafe {
                 let mut raw = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
                 (libc::sigpending(raw.as_mut_ptr()) == 0)
                     .then(|| SigSet::from_sigset_t_unchecked(raw.assume_init()))
             };
-            // A dead-peer write while SIGPIPE was blocked leaves it
-            // pending; consume it before unblocking so restoring the mask
-            // cannot deliver a deferred signal and kill the process under
-            // the batch-mode SIG_DFL disposition. `wait` returns
-            // immediately here since it is only called once `sigpending`
-            // reports SIGPIPE pending.
+            // A dead-peer write left SIGPIPE pending; consume it before
+            // unblocking, or restoring the mask delivers it under batch
+            // mode's `SIG_DFL`.  `wait` cannot block: it is reached only
+            // with SIGPIPE already pending.
             if pending.is_some_and(|p| p.contains(Signal::SIGPIPE)) {
                 let _ = set.wait();
             }
@@ -115,17 +94,14 @@ pub fn read_frame<R: Read + ?Sized, T: DeserializeOwned>(r: &mut R) -> io::Resul
     decode_body(&body).map(Some)
 }
 
-/// Read one length-prefixed frame body off `r`, retrying a signal-cut
-/// length read.  `Ok(None)` is a clean EOF at a frame boundary.
+/// `Ok(None)` is a clean EOF at a frame boundary, not a truncated frame.
 fn read_body<R: Read + ?Sized>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
     let mut len_buf = [0u8; 4];
     let mut got = 0;
     while got < 4 {
         match r.read(&mut len_buf[got..]) {
-            // EINTR is not a frame fault: the read was interrupted by a
-            // signal before any byte moved, so retry rather than abandon
-            // the channel (latent under `libc::signal` BSD restart
-            // semantics).
+            // A signal cut the read before any byte moved: retry rather than
+            // abandon the channel.  Rare — `libc::signal` restarts syscalls.
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => return Err(e),
             Ok(0) if got == 0 => return Ok(None),
@@ -150,8 +126,7 @@ fn read_body<R: Read + ?Sized>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(body))
 }
 
-/// Deserialise a frame body, turning a failure into an `io::Error` after
-/// dumping the raw bytes for post-mortem.
+/// A failed decode dumps the raw body and names the dump in the error.
 fn decode_body<T: DeserializeOwned>(body: &[u8]) -> io::Result<T> {
     match serde_json::from_slice(body) {
         Ok(value) => Ok(value),
@@ -172,8 +147,7 @@ fn decode_body<T: DeserializeOwned>(body: &[u8]) -> io::Result<T> {
     }
 }
 
-/// Write a post-mortem frame dump to `path`.  On Unix the file is created
-/// with owner-only permissions rather than the process umask's default.
+/// Owner-only, not the umask default: a frame body is unredacted payload.
 #[cfg(unix)]
 #[allow(
     clippy::disallowed_methods,
@@ -207,9 +181,6 @@ fn dump_frame(path: &std::path::Path, body: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    /// A reader that returns `Interrupted` on the first read of each frame
-    /// before delivering the buffered bytes — modelling the BSD `signal`
-    /// restart semantics under which a length read can be cut short.
     struct InterruptOnce {
         bytes: std::io::Cursor<Vec<u8>>,
         interrupted: bool,
@@ -242,8 +213,6 @@ mod tests {
     fn decode_failure_dump_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
 
-        // A frame whose payload fails to deserialise as the expected type
-        // dumps the raw bytes for post-mortem; the dump must be owner-only.
         let mut framed = Vec::new();
         write_frame(&mut framed, &"not a number").unwrap();
         let mut reader = std::io::Cursor::new(framed);

@@ -30,15 +30,13 @@ pub struct SessionInfo<'a> {
     pub cwd: &'a str,
 }
 
-/// A rail-less Plain like the splash above it.  Hue is spent only where it
-/// names something: a path carries the Path identity, a `dangerous` base
-/// alarms; names and quantities stay plain ink.
+/// The startup metadata matrix.  Hue is spent only where it names something:
+/// paths carry Path, a `dangerous` base alarms, quantities stay plain ink.
 pub(super) fn session_card(s: &SessionInfo<'_>) -> Card {
     let mut rows: Vec<Field> = vec![meta_field("cwd", vec![CardSpan::new(Role::Path, s.cwd)])];
 
-    // Neither the provider, the model, nor its context window is named here:
-    // the live status bar carries all of that (and updates it on a `/model`
-    // switch), so the one-shot banner card need not.
+    // Provider, model and context window are absent by design: the status bar
+    // carries them live and repaints on `/model` (`App::update_live_model`).
     let base_role = if s.base == "dangerous" {
         Role::Bad
     } else {
@@ -85,7 +83,6 @@ pub(super) fn session_card(s: &SessionInfo<'_>) -> Card {
     Card(vec![Mark::Fields { rows }])
 }
 
-/// One `(label, value)` row of the startup metadata matrix.
 pub(super) fn meta_field(label: &str, value: Vec<CardSpan>) -> Field {
     Field {
         label: label.to_string(),
@@ -93,7 +90,6 @@ pub(super) fn meta_field(label: &str, value: Vec<CardSpan>) -> Field {
     }
 }
 
-/// A comma-joined display of `paths` for a single matrix value cell.
 pub(super) fn join_paths(paths: &[PathBuf]) -> String {
     paths
         .iter()
@@ -102,12 +98,9 @@ pub(super) fn join_paths(paths: &[PathBuf]) -> String {
         .join(", ")
 }
 
-/// The `/legend` panel: the transcript's visual vocabulary exhibited as a
-/// graphic — each rail shape, agent hue, value step, stratum, bar, and
-/// fidelity grade shown as the literal styled output it wears in the flow,
-/// under plain slate-bold heads.  The samples derive from [`rail::RAIL_SHAPES`],
-/// [`AGENT_HUES`], and the bar / grain / spark / fidelity builders, so a
-/// palette or shape change updates the legend with no edit here.
+/// The `/legend` panel: every rail shape, agent hue, value step, stratum, bar
+/// and fidelity grade, drawn by the real builders rather than redescribed, so a
+/// palette or shape change shows up here with no edit.
 pub(super) fn legend_panel() -> Vec<Line<'static>> {
     let head = |s: &str| {
         Line::from(Span::styled(
@@ -122,7 +115,6 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
         head("legend — the transcript as a graphic"),
     ];
 
-    // ── rail: one cell, three variables ───────────────────────────────
     ls.push(Line::default());
     ls.push(head("rail · shape = block kind"));
     ls.extend(line::legend_rows(
@@ -155,9 +147,8 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
     ));
     ls.push(Line::default());
     ls.push(head("rail · value = magnitude (brighter is bigger)"));
-    // One shape, the same hue, stepped up the value ramp by feeding one
-    // magnitude per `rail::value_step` bucket (0..=3) — so the row *is* the
-    // ramp the rail lightens by, not a restatement of it.
+    // One magnitude per `rail::value_step` bucket, so the row is the ramp
+    // itself; these numbers must keep tracking that function's thresholds.
     ls.extend(line::legend_rows(vec![(
         "small → large",
         [Some(4), Some(20), Some(80), Some(200)]
@@ -166,13 +157,11 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
             .collect(),
     )]));
 
-    // ── strata: who is speaking, read off the background ───────────────
     ls.push(Line::default());
     ls.push(head("strata · background = machine region"));
-    // Each swatch is the literal `line::wash` output, so the legend wears the
-    // exact tones the transcript paints. Background is reserved for one thing —
-    // machine text, a recessed panel; prose sits at the base, and your prompt
-    // is fenced by a rule (the rail's `❖`), not a fill.
+    // Two rows because there are two strata: background belongs to machine
+    // text, prose sits at the base, and the human's turn is fenced by the
+    // rail's `❖` rather than a fill.
     let swatch = |text: &str, bg: Option<Color>| match bg {
         Some(bg) => line::wash(Line::from(Span::raw(text.to_string())), bg, None).spans,
         None => vec![note(text)],
@@ -188,7 +177,6 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
         ),
     ]));
 
-    // ── the ordered bars ───────────────────────────────────────────────
     ls.push(Line::default());
     ls.push(head("bars · length and texture, beside a collapsed header"));
     ls.extend(line::legend_rows(vec![
@@ -218,7 +206,6 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
         ),
     ]));
 
-    // ── the status line's two bottom bars ──────────────────────────────
     ls.push(Line::default());
     ls.push(head("status line · the two bars under the transcript"));
     ls.extend(line::legend_rows(vec![
@@ -234,13 +221,10 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
         }),
     ]));
 
-    // ── coherent degradation: how much to trust a passage ──────────────
     ls.push(Line::default());
     ls.push(head(
         "fidelity · a shaky answer renders drained, not authoritative",
     ));
-    // Real prose through the real `render_md`, so the drain and wash are
-    // exactly what a degraded block wears — never a re-derived colour.
     let prose = "An answer the model committed to the transcript.";
     let sample = |f: Fidelity| {
         md::render_md(prose, READ_W, 0, f)
@@ -270,7 +254,6 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
         "  context pressure drains the ink; echoing its own script washes the field behind it",
     )));
 
-    // ── disclosure: detail is something you dial ───────────────────────
     ls.push(Line::default());
     ls.push(head("disclosure · dial detail on the rail (wheel / click)"));
     ls.push(Line::from(note(
@@ -287,8 +270,7 @@ mod tests {
     use crate::tui::{line, rail};
     use std::path::{Path, PathBuf};
 
-    /// A representative session: default system prompt, no extend/restrict.
-    #[allow(clippy::disallowed_methods)] // test scaffolding: a fixed literal scratch path, no path semantics to get wrong
+    #[allow(clippy::disallowed_methods)] // a literal scratch path; no path semantics at stake
     fn sample(base: &'static str) -> SessionInfo<'static> {
         SessionInfo {
             system_size: 4096,
@@ -312,8 +294,7 @@ mod tests {
         }
     }
 
-    /// The nominal role of a row's leading value span — `None` for a plain
-    /// (roleless) quantity readout or a measure.
+    /// The role of a row's leading value span; `None` for plain ink or a measure.
     fn lead_role(v: &FieldVal) -> Option<Role> {
         match v {
             FieldVal::Inline(spans) => spans.first().and_then(|sp| sp.role),
@@ -321,8 +302,6 @@ mod tests {
         }
     }
 
-    /// The matrix orders location → identity → capacity → security → prompt,
-    /// roles paths as Path, and leaves quantities as plain ink (no hue).
     #[test]
     fn session_card_orders_and_roles_fields() {
         let rs = rows(&sample("read-only"));
@@ -343,8 +322,6 @@ mod tests {
         assert_eq!(role("scratch"), Some(Role::Path), "scratch is a path");
     }
 
-    /// Hue is spent on `base` only when it alarms: `dangerous` → Bad (red),
-    /// every safe base → Strong (plain bold).
     #[test]
     fn dangerous_base_is_the_one_field_that_earns_a_hue() {
         let base_role = |b: &'static str| {
@@ -356,8 +333,6 @@ mod tests {
         assert_eq!(base_role("confined"), Some(Role::Strong));
     }
 
-    /// Present extend-base / restrict paths carry the Path identity; absent
-    /// ones read as a muted "none" rather than borrowing a hue.
     #[test]
     fn security_paths_are_roled_present_and_muted_when_absent() {
         let rs = rows(&sample("read-only"));
@@ -383,8 +358,6 @@ mod tests {
         );
     }
 
-    /// The Bertin claim: rendered, every value lands in one shared column —
-    /// each field line opens with a label cell of identical width.
     #[test]
     fn rendered_matrix_aligns_every_value_in_one_column() {
         let card = session_card(&sample("dangerous"));
@@ -415,9 +388,7 @@ mod tests {
         }
     }
 
-    /// The legend enumerates the rail's *own* shape vocabulary: every
-    /// `RAIL_SHAPES` entry's name appears as a row label, so a new shape
-    /// cannot land on the rail without showing up in the legend.
+    /// Guards the derivation: a shape cannot reach the rail unnamed here.
     #[test]
     fn legend_names_every_rail_shape() {
         let text: String = legend_panel()
@@ -430,10 +401,8 @@ mod tests {
         }
     }
 
-    /// The legend is ambient, rail-less chrome: no row borrows a marginal
-    /// rail glyph as its leading span.  The shape samples *contain* the
-    /// glyphs, but always in a value cell behind a label — never as the
-    /// row-leading rail the copy contract ([`line::plain`]) would strip.
+    /// The samples carry rail glyphs, but always in a value cell behind a
+    /// label — never as the leading span `line::plain` strips on copy.
     #[test]
     fn legend_wears_no_marginal_rail() {
         for l in legend_panel() {

@@ -27,10 +27,8 @@ struct NameScope {
 #[derive(Clone)]
 pub struct TyEnv {
     scopes: Vec<NameScope>,
-    /// The checked session's builtin table — names a `Bind`/`Exec`/`Val`
-    /// site resolves against before falling through to a lexical binding
-    /// or handler.  Set once by `seed_env`; unchanged for the rest of the
-    /// run's inference.
+    /// The run's builtin table, seeded once by `seed_env`.  A name resolves
+    /// here after a lexical binding and before a handler.
     pub builtins: crate::types::BuiltinTable,
 }
 
@@ -91,11 +89,9 @@ impl TyEnv {
         );
     }
 
-    /// Remove a binding from whichever scope owns it.  Used by
-    /// `infer_letrec` to drop the temporary mono self-binding before
-    /// generalising — leaving it in place would let its free comp
-    /// vars leak into `env_free_vars` as residuals, blocking
-    /// quantification of exactly the vars we need to quantify over.
+    /// Remove a binding from whichever scope owns it.  `infer_letrec` drops its
+    /// mono self-bindings before generalising: left in place, their free vars
+    /// read as environment residuals and block quantification.
     pub fn unbind(&mut self, name: &str) {
         for scope in self.scopes.iter_mut().rev() {
             if scope.bindings.remove(name).is_some() {
@@ -130,47 +126,27 @@ impl TyEnv {
 // Inference context
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The `bind_tys`/`stage_specs`/`bind_outputs` maps are keyed by node
-/// address and are valid only for the exact tree passed to `infer_comp`,
-///
-/// read by `annotate` before any node is freed; a clone between the two
-/// passes would silently miss.
+/// Side tables inference fills and the annotation pass reads back.  Every map is
+/// keyed by node address, so both passes must walk the very same live tree; a
+/// clone between them silently misses.
 pub struct InferCtx {
     pub unifier: Unifier,
     pub errors: Vec<TypeError>,
-    /// Current source position for newly emitted [`TypeError`]s.
-    /// Narrowed scopewise by [`Inferencer::with_span`](crate::source::WithSpan::with_span) (in
-    /// `typecheck/infer.rs`), the single per-position narrowing
-    /// primitive the inferencer uses.
+    /// Source position for newly emitted [`TypeError`]s, narrowed by `with_span`.
     pub pos: Option<Span>,
-    /// Pre-generalisation bound types of `Name`-pattern `Bind` nodes,
-    /// keyed by node address.  Written by the `Bind` rule in
-    /// `infer.rs`, read by the annotation pass, which resolves each
-    /// against the final unifier and quantifies the residuals.
+    /// Pre-generalisation type bound by each `Name`-pattern `Bind`.
     pub bind_tys: HashMap<usize, Ty>,
-    /// The `F[input, output]` spec inferred for each pipeline stage,
-    /// keyed by the stage `Comp`'s address.  Written at the end of
-    /// `infer_pipeline` after every adjacency is unified; read by the
-    /// annotation pass, which grounds each spec into a [`crate::mode::Wire`].  The
-    /// recorded modes may still be variables — they resolve at
-    /// annotation time, after the whole walk.
+    /// Each stage's `F[I,O]`, settled only once `infer_pipeline` has unified every
+    /// adjacency; its modes may still be variables until grounded to a
+    /// [`crate::mode::Wire`].
     pub stage_specs: HashMap<usize, PipeSpec>,
-    /// The inferred *value* type of each pipeline stage — the data flowing
-    /// out of it — keyed by the stage `Comp`'s address.  Written at the end
-    /// of `infer_pipeline` alongside `stage_specs`; read by the annotation
-    /// pass, which resolves each against the final unifier and writes the
-    /// `Vec<Ty>` onto the `Pipeline` node.  Retained for the structural
-    /// REPL's typed spine; the evaluator never reads it.
+    /// The value flowing out of each pipeline stage.  Feeds the structural REPL's
+    /// typed spine; the evaluator never reads it.
     pub stage_types: HashMap<usize, Ty>,
-    /// The output mode of each `Bind` node's RHS, keyed by the `Bind`
-    /// `Comp`'s address.  Written by the `Bind` rule for every pattern;
-    /// read by the annotation pass, which grounds it into the node's
-    /// `rhs_output` `ByteMode`.
     pub bind_outputs: HashMap<usize, PipeMode>,
-    /// The output mode of the final computation whose value a node returns.
-    /// A `Seq` may write bytes before its last statement; those bytes are
-    /// effects, not the returned value's byte source.  This map keeps the two
-    /// facts separate for `let` and `try` value-boundary typing.
+    /// The output mode of the computation a node's value actually comes from: a
+    /// `Seq` may write bytes before its last statement, and those are effects, not
+    /// the value's byte source.
     pub final_outputs: HashMap<usize, PipeMode>,
 }
 
@@ -194,10 +170,7 @@ impl InferCtx {
         }
     }
 
-    /// Ground a pipeline mode into a [`ByteMode`], resolving it through
-    /// the final unifier and defaulting an unresolved variable to the
-    /// `∅` channel — the single defaulting rule applied at the
-    /// unification frontier.
+    /// Ground a mode into a [`ByteMode`]; a still-unresolved variable defaults empty.
     pub fn ground(&mut self, mode: PipeMode) -> ByteMode {
         match self.unifier.resolve_mode(&mode) {
             PipeMode::Bytes => ByteMode::Bytes,
@@ -205,8 +178,7 @@ impl InferCtx {
         }
     }
 
-    /// Push a direct diagnosis — a structured kind that is its own story,
-    /// with no constraint provenance.
+    /// Push a diagnosis that is its own story, with no constraint provenance.
     pub fn diagnose(&mut self, kind: TypeErrorKind) {
         self.errors.push(TypeError {
             pos: self.pos,
@@ -224,21 +196,21 @@ impl InferCtx {
         });
     }
 
-    /// Unify two value types, reporting a constraint failure under `why` on mismatch.
+    /// Unify two value types, reporting a mismatch under `why`.
     pub fn unify_ty(&mut self, a: &Ty, b: &Ty, why: Reason) {
         if let Err(kind) = self.unifier.unify_ty(a, b) {
             self.report(kind, why);
         }
     }
 
-    /// Unify two computation types, reporting a constraint failure under `why` on mismatch.
+    /// Unify two computation types, reporting a mismatch under `why`.
     pub fn unify_comp_ty(&mut self, a: &CompTy, b: &CompTy, why: Reason) {
         if let Err(kind) = self.unifier.unify_comp_ty(a, b) {
             self.report(kind, why);
         }
     }
 
-    /// Unify two pipeline modes, reporting a `ModeMismatch` under `why` on mismatch.
+    /// Unify two pipeline modes, reporting a `ModeMismatch` under `why`.
     pub fn unify_mode(&mut self, a: &PipeMode, b: &PipeMode, why: Reason) {
         if let Err(m) = self.unifier.unify_mode(a, b) {
             self.report(

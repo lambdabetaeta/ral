@@ -100,17 +100,13 @@ fn audited_external_command_large_stderr_does_not_deadlock() {
 #[test]
 fn audit_cli_captures_command_stdout() {
     // SPEC §10.3: every command node in the emitted execution tree
-    // populates its `stdout` / `stderr` fields.  Pre-fix `ral --audit`
-    // called `shell.local.audit.enable()` but left the byte-capture policy
-    // at the default `CapturePolicy::Off`, so command nodes carried
-    // empty buffers regardless of what the command printed.  The fix
-    // mirrors the `audit { … }` builtin and sets the policy to
-    // `CapturePolicy::Bytes`; this test pins that contract end-to-end
-    // by running a script that prints a unique marker and asserting
-    // the marker appears inside the audit-tree JSON's `stdout` field
-    // (not merely anywhere in stderr — the marker also leaks into
-    // `args` and is forwarded by /bin/echo to the inherited stdout,
-    // so a loose substring check would pass even without the fix).
+    // populates its `stdout` / `stderr` fields, so `ral --audit` must
+    // install `CapturePolicy::Bytes` as the `audit { … }` builtin does;
+    // the default `Off` leaves every node's buffers empty.  The marker
+    // has to land inside the audit-tree JSON's `stdout` field, not
+    // merely anywhere in stderr — it also leaks into `args` and is
+    // forwarded by /bin/echo to the inherited stdout, so a loose
+    // substring check would pass with capture off.
     let marker = "ral_audit_capture_marker_42";
     let script = format!("/bin/echo {marker}\n");
     let o = run_with_timeout(&["--audit"], &script, Duration::from_secs(5))

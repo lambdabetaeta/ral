@@ -1,29 +1,12 @@
-//! Process sandbox for capability-restricted execution.
-//!
-//! External commands spawned inside a `grant` block run under an OS-level
-//! sandbox that enforces the declared **filesystem and network**
-//! capabilities.  Exec is gated in-process on every platform —
-//! `capability::check_exec_args` vets the arguments before the spawn — and
-//! on macOS the Seatbelt profile additionally renders a `process-exec`
-//! allow-list, catching the re-execs the in-process check never sees
-//! (`sh -c`, `find -exec`); bwrap on Linux has no path-exec filter, so
-//! there the in-process gate stands alone.
-//!
-//! The module is organised into platform backends (`linux`, `macos`,
-//! `windows`), a per-command launcher (`launch`) that confines a single
-//! external/bundled child under the platform backend, a binary-pinning
-//! and re-exec layer (`reexec`), and post-mortem kernel-denial
+//! OS-level confinement for the children a `grant` block spawns: platform
+//! backends (`linux`, `macos`, `windows`), the per-command launcher
+//! (`launch`), binary pinning and re-exec (`reexec`), kernel-denial
 //! diagnostics (`diag`).
 //!
-//! Entry points:
-//! - [`early_init`] — called once at program startup to consume
-//!   `--sandbox-projection`, pin the binary, and (on Unix) enter the
-//!   OS process sandbox for the per-command `--sandbox-projection` child.
-//! - [`make_command`] — builds the external [`Command`] and, when a
-//!   capability grant is active, installs the resource-limit `pre_exec`
-//!   hooks (no OS policy wrapping).
-//! - [`apply_child_limits`] — post-spawn resource caps (Windows only;
-//!   no-op on Unix where limits are set via `pre_exec`).
+//! Exec is gated in-process everywhere by `capability::check_exec_args`.
+//! macOS also renders a Seatbelt `process-exec` allow-list, catching the
+//! re-execs that check never sees (`sh -c`, `find -exec`); bwrap has no
+//! path-exec filter, so on Linux the in-process gate stands alone.
 
 mod diag;
 mod launch;
@@ -39,26 +22,11 @@ use crate::types::{SandboxProjection, Shell};
 use std::process::Command;
 use std::sync::OnceLock;
 
-/// Host-supplied constructor that a re-exec'd child calls to recover its
-/// [`HostSurface`](crate::boot::HostSurface) and install it on its fresh
-/// shell, so host-owned builtin sets join `CORE_BUILTINS` before any body
-/// is evaluated.
-///
-/// `Shell::new` installs only `CORE_BUILTINS`.  A host like `exarch`
-/// publishes additional static entries (`explore-dir`, `line-hash`,
-/// …) that core cannot link, and the mobile transfer cannot carry a
-/// `HostSurface` either (its entries hold function pointers, which are
-/// not valid across process address spaces).  A pipeline-stage helper is
-/// a re-execed copy of the host binary, so the host registers this hook
-/// before [`early_init`]; the child calls it on its `Shell::new` *before*
-/// [`crate::subprocess::install_shell_mobile`] runs.  `install_shell_mobile`
-/// preserves the receiver's builtin table by design, so the surface
-/// installed here survives the mobile install and the body sees the same
-/// surface as the parent.
-///
-/// `OnceLock` makes the registration last for the process lifetime
-/// and idempotent on second-time calls — handy for test harnesses
-/// that exercise `main` more than once.
+/// Host-supplied constructor a re-exec'd child calls to rebuild its
+/// [`HostSurface`](crate::boot::HostSurface): a mobile cannot carry one across
+/// processes, its entries being function pointers, and `Shell::new` installs
+/// only `CORE_BUILTINS`.  `subprocess::reexec_child_shell` runs the hook first,
+/// then overlays the wire mobile, which preserves the builtin table it finds.
 static CHILD_SHELL_HOOK: OnceLock<fn() -> crate::boot::HostSurface> = OnceLock::new();
 
 /// Register the host's builtin surface for re-exec'd children.  Must be
@@ -67,29 +35,25 @@ pub fn set_child_shell_extension(surface: fn() -> crate::boot::HostSurface) {
     let _ = CHILD_SHELL_HOOK.set(surface);
 }
 
-/// Install the registered host surface on `shell`, if any.
 pub(crate) fn run_child_shell_extension(shell: &mut Shell) {
     if let Some(surface) = CHILD_SHELL_HOOK.get() {
         surface().install_into(&mut shell.session.builtins);
     }
 }
 
-// Per-command OS sandbox launcher: `build_command` routes an external /
-// bundled child through here when the process is not already confined and
-// a projection is active.  `serve_sandbox_exec` is the macOS post-Seatbelt
-// `execve` hook for the host re-exec tail.
+// `runtime::command::process::build_command` routes an external/bundled child
+// through `sandboxed_command` when a projection is active and no guest jail
+// already confines it; `serve_sandbox_exec` is the macOS post-Seatbelt tail.
 pub use launch::serve_sandbox_exec;
 pub(crate) use launch::{LaunchTarget, Ownership, sandboxed_command};
 
-// Kernel-denial diagnostics: the command runners call these on a failure
-// that ran under an active OS sandbox to attach an actionable hint
-// naming the denied path and how to grant it.
+// Called by the command runners on a failure that ran under an active OS
+// sandbox, to attach a hint naming the denied path.
 pub(crate) use diag::{augment_failure, sample_descendants};
 
-/// Whether this platform's OS backend can actually enforce a network
-/// restriction (`net: false`).  Linux (`--unshare-net`), macOS (deny-default
-/// Seatbelt), and Windows (an `AppContainer` granted no network capability SID
-/// cannot open a socket) all can.
+/// Whether this platform can enforce `net: false`: Linux via `--unshare-net`,
+/// macOS via deny-default Seatbelt, Windows via an `AppContainer` with no
+/// network capability SID, which cannot open a socket.
 fn net_enforced() -> bool {
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     {
@@ -101,10 +65,9 @@ fn net_enforced() -> bool {
     }
 }
 
-/// Returns `Err(reason)` when `projection` requests a restriction this
-/// platform's OS backend cannot actually enforce. The only such axis is
-/// offline/`net`: a `net: false` projection on a backend without kernel
-/// network enforcement must error rather than run where net is ignored.
+/// `Err(reason)` when `projection` asks for a restriction this platform cannot
+/// enforce.  Offline is the only such axis: `net: false` must refuse rather
+/// than run somewhere the bit is silently ignored.
 pub(crate) fn projection_enforceable(projection: &SandboxProjection) -> Result<(), &'static str> {
     if !projection.net && !net_enforced() {
         return Err(
@@ -115,26 +78,23 @@ pub(crate) fn projection_enforceable(projection: &SandboxProjection) -> Result<(
     Ok(())
 }
 
-/// CLI flag that carries the JSON-encoded [`SandboxProjection`] into a
-/// re-exec'd ral process.
+/// Carries the JSON-encoded [`SandboxProjection`] into a re-exec'd ral process.
 const SANDBOX_PROJECTION_FLAG: &str = "--sandbox-projection";
 
-/// macOS-only sentinel for the per-command host re-exec tail
-/// (`ral --sandbox-projection <json> --ral-sandbox-exec <program> <args…>`).
-/// After `early_init` enters Seatbelt, [`serve_sandbox_exec`] `execve`s the
-/// program inside that Seatbelt.  Distinct from `--ral-bundled-tool`, which
-/// runs a bundled tool in-process confined instead of execing a host binary.
+/// Tail of the macOS per-command host re-exec: once `early_init` has entered
+/// Seatbelt, [`serve_sandbox_exec`] `execve`s the program inside it.  Distinct
+/// from `--ral-bundled-tool`, which runs a bundled tool in-process rather than
+/// execing a host binary.
 #[cfg(target_os = "macos")]
 const SANDBOX_EXEC_FLAG: &str = "--ral-sandbox-exec";
 
-/// Undocumented debug switch.  When set (any value), front-ends call
-/// [`dump_profile_if_requested`] on startup to print the OS-sandbox
-/// profile they would install.
+/// Debug switch: set to any value to make [`dump_profile_if_requested`] print
+/// the OS-sandbox profile that would be installed.
 pub const SANDBOX_DUMP_PROFILE_ENV: &str = "RAL_DUMP_SANDBOX_PROFILE";
 
-/// Render the OS sandbox profile for `policy` and print it to stderr
-/// when [`SANDBOX_DUMP_PROFILE_ENV`] is set.  No-op otherwise.
-// A sandbox marker presence probe, not a basedir.
+/// Print the OS-sandbox profile for `policy` to stderr when
+/// [`SANDBOX_DUMP_PROFILE_ENV`] is set.
+// A presence probe on a debug switch, not a basedir lookup.
 #[allow(clippy::disallowed_methods)]
 pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
     if std::env::var_os(SANDBOX_DUMP_PROFILE_ENV).is_none() {
@@ -172,18 +132,15 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
     }
 }
 
-/// Fork-bomb mitigation cap: the maximum number of live processes a
-/// grant-confined child's Job Object permits (Windows only).
+/// Live-process ceiling on a grant-confined child's Job Object: fork-bomb cap.
 #[cfg(windows)]
 pub(crate) const ACTIVE_PROCESS_CAP: u32 = 512;
 
-/// Assign OS-level resource limits to an already-spawned child process.
+/// Assign OS-level resource limits to an already-spawned child.
 ///
-/// On Unix the limits are applied before exec via a `pre_exec` hook in
-/// `make_command`; this function is a no-op there.  On Windows, where
-/// `pre_exec` does not exist, a Job Object is attached post-spawn to cap
-/// the process tree at `ACTIVE_PROCESS_CAP` processes (preventing fork
-/// bombs).
+/// Windows only: `pre_exec` does not exist there, so a Job Object caps the tree
+/// at `ACTIVE_PROCESS_CAP` after the spawn.  On Unix `apply_resource_limits`
+/// set them before exec, and this is a no-op.
 #[cfg_attr(
     not(windows),
     allow(
@@ -196,8 +153,7 @@ pub fn apply_child_limits(child: &crate::process::ChildHandle) {
     windows::apply_job_limits(child);
 }
 
-/// Same as [`apply_child_limits`] but for a child that is already a
-/// member of a pipeline Job Object.
+/// [`apply_child_limits`] for a child already in a pipeline Job Object.
 #[cfg_attr(
     not(windows),
     allow(
@@ -225,19 +181,15 @@ pub fn apply_child_limits_in_pipeline(
     }
 }
 
-/// Register the current executable for helper subprocesses that run before
-/// `early_init` reaches the normal sandbox setup path.  Used by the Unix
-/// pipeline-helper re-exec path; the Windows pipeline helper goes through
-/// `early_init` directly.
+/// Pin this executable for the Unix pipeline-stage helper, which serves its
+/// mode and exits before [`early_init`] would have pinned it.
 #[cfg(unix)]
 pub(crate) fn register_self_for_helpers() {
     reexec::register_sandbox_self();
 }
 
-/// Build a `Command` that re-execs the current ral binary.
-///
-/// Prefers the pinned sandbox self-path when available so helper subprocesses
-/// stay bound to the boot-time binary even if the on-disk path changes.
+/// Re-exec the current ral binary, preferring the pinned self-path so helpers
+/// stay bound to the boot-time build even if the on-disk path is swapped.
 #[cfg(unix)]
 #[allow(
     clippy::disallowed_methods,
@@ -251,26 +203,22 @@ pub(crate) fn self_command() -> std::io::Result<Command> {
     Ok(Command::new(exe))
 }
 
-/// Perform all sandbox startup work and return the stripped argument list.
-///
-/// Handles, in order: consuming --sandbox-projection from argv; recording the
-/// current executable path for subprocess re-invocation; entering the OS
-/// process sandbox when --sandbox-projection was given (Unix only — on
-/// Windows the sandbox is applied by the parent at child spawn time).
+/// All sandbox startup work, returning argv stripped of
+/// `--sandbox-projection`.  Pins this binary and, on Unix, enters the OS
+/// process sandbox when a projection was supplied; Windows instead confines
+/// the child from the parent at spawn time.  A returned code means we are the
+/// bwrap respawn parent and should exit with it.
 ///
 /// # Errors
-/// Returns `Err` if `--sandbox-projection` is malformed (its JSON argument
-/// missing, the flag repeated, or the JSON invalid), or if entering the OS
-/// process sandbox fails.
+/// A malformed `--sandbox-projection`, or a failure to enter the sandbox.
 pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> {
     let (policy, stripped) = strip_policy_arg(argv)?;
-    // Pin this binary's executable so a per-command `--sandbox-projection`
-    // child re-execs *us*, immune to on-disk swaps.
+    // So a per-command `--sandbox-projection` child re-execs this binary and
+    // not whatever the on-disk path holds by then.
     reexec::register_sandbox_self();
-    // Boot sweep: reclaim DACL grants a crashed prior session left stamped.
-    // Only a primary session process runs it — a confined re-exec child
-    // (bundled-tool multicall, pipeline-stage helper) is not a session boot
-    // and cannot reach the ledger from inside its AppContainer anyway.
+    // Reclaim DACL grants a crashed prior session left stamped.  Only a primary
+    // session sweeps: a confined re-exec child could not reach the ledger from
+    // inside its AppContainer anyway.
     #[cfg(windows)]
     {
         use crate::runtime::pipeline::helper::{BUNDLED_TOOL_FLAG, HELPER_FLAG};
@@ -287,43 +235,24 @@ pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> 
     Ok((stripped, None))
 }
 
-/// Tear down the per-session OS sandbox at a clean shutdown seam: revert
-/// grant ACEs and delete the session's `AppContainer` profiles (one per
-/// distinct fs projection it confined).
+/// Revert this session's grant ACEs and delete its `AppContainer` profiles.
 ///
-/// Windows only; a no-op elsewhere, where per-command confinement holds no
-/// session-global state. Called once from each front end's clean-shutdown
-/// seam (`ral`'s `Drop for Session`, `exarch`'s `main`) — cheap and
-/// idempotent, so a portable seam calling it unconditionally costs nothing
-/// on Unix. A session that exits without reaching it (a panic unwinding
-/// past the seam, an abrupt `process::exit`) leaves its DACL ledger — which
-/// also names its registered profiles — for the next process start's boot
-/// sweep ([`early_init`]) to reclaim.
+/// Windows only, and idempotent, so the portable shutdown seams that call it
+/// (`ral`'s `Drop for Session`, `exarch`'s `main`) cost nothing elsewhere.  A
+/// session that never reaches the seam leaves its DACL ledger for the next
+/// start's boot sweep in [`early_init`] to reclaim.
 pub fn teardown_session() {
     #[cfg(windows)]
     windows::session::teardown();
 }
 
-/// The OS-sandbox stage of the pre-`main` dispatch, as an `Option<u8>`
-/// building block:
-///
-/// run [`early_init`] over the process argv and, when this
-/// process is the Linux bwrap respawn child, surface its exit code so the
-/// caller can terminate. A normal top-level invocation yields `None`.
-/// `early_init` also pins `SANDBOX_SELF` here. The stripped argv is
-/// otherwise discarded — callers that need to parse a CLI from it (the
-/// `ral` binary) call `early_init` directly.
-///
-/// After sandbox setup this also serves the per-command re-exec tails on
-/// the post-`early_init` argv (Seatbelt / bwrap already applied): the
-/// `--ral-bundled-tool` multicall (via [`crate::try_run_bundled_tool`])
-/// runs a bundled tool in-process confined, and on macOS
-/// [`serve_sandbox_exec`] `execve`s the host program for a per-command
-/// host launch.  Both are reachable from the test ctors and the exarch
-/// frontend that route their pre-`main` dispatch through here — exactly as
-/// the `ral` binary serves them on its own `early_init` result. The order
-/// matters: a `--sandbox-projection` child enters the OS sandbox in
-/// `early_init` first, then runs the tool / host binary confined.
+/// The whole pre-`main` sandbox stage as one `Option<u8>`, for exarch and the
+/// test ctors: [`early_init`], then the per-command re-exec tails on the argv
+/// it leaves — the `--ral-bundled-tool` multicall via
+/// [`crate::try_run_bundled_tool`], and on macOS the host `execve` via
+/// [`serve_sandbox_exec`].  That order is the point: a `--sandbox-projection`
+/// child is confined before its tail runs.  The stripped argv is discarded, so
+/// the `ral` binary, which parses a CLI out of it, calls [`early_init`] itself.
 pub fn serve_sandbox_early_init() -> Option<u8> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     match early_init(&argv) {
@@ -338,8 +267,8 @@ pub fn serve_sandbox_early_init() -> Option<u8> {
     }
 }
 
-/// Extract and deserialise `--sandbox-projection <json>` from `raw`, returning
-/// the parsed policy (if any) and the remaining arguments.
+/// Split `--sandbox-projection <json>` out of `raw`: the parsed policy, then
+/// the arguments that remain.
 fn strip_policy_arg(raw: &[String]) -> Result<(Option<SandboxProjection>, Vec<String>), String> {
     let mut args = Vec::new();
     let mut policy = None;
@@ -363,16 +292,12 @@ fn strip_policy_arg(raw: &[String]) -> Result<(Option<SandboxProjection>, Vec<St
     Ok((policy, args))
 }
 
-/// Install `pre_exec` hooks for cheap resource hardening.
-///
-/// Core dumps are disabled on every Unix sandboxed child.  On non-macOS
-/// Unix we also cap `RLIMIT_NPROC` at 512 as fork-bomb mitigation.
-/// Darwin counts `RLIMIT_NPROC` against the whole real UID rather than the
-/// sandboxed process tree, so lowering it here can leave only a handful of
-/// spawn slots when the desktop session is already busy (native builds then
-/// fail with `EAGAIN` / "Resource temporarily unavailable").  Seatbelt
-/// still gates `process-fork` and `process-exec`; macOS therefore skips the
-/// per-UID process cap until we have a subtree-scoped mechanism there.
+/// Install `pre_exec` hooks: no core dumps anywhere, plus a 512-process
+/// `RLIMIT_NPROC` cap off macOS as fork-bomb mitigation.  Darwin counts
+/// `RLIMIT_NPROC` against the whole real UID rather than the sandboxed subtree,
+/// so lowering it there starves a busy desktop session of spawn slots
+/// (`EAGAIN`); Seatbelt still gates `process-fork`, so macOS waits for a
+/// subtree-scoped mechanism.
 #[cfg(unix)]
 pub(crate) fn apply_resource_limits(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
@@ -420,8 +345,7 @@ mod tests {
 
     #[test]
     fn projection_enforceable_allows_net_true_on_any_platform() {
-        // `net: true` requests no network restriction, so there is nothing
-        // for the OS backend to enforce — it is `Ok` everywhere.
+        // `net: true` asks for no restriction, so there is nothing to enforce.
         let p_net_true = SandboxProjection {
             fs: crate::types::FsProjection::default(),
             net: true,
@@ -432,9 +356,7 @@ mod tests {
 
     #[test]
     fn projection_enforceable_net_false_tracks_net_enforced() {
-        // The guard's invariant, stated relationally so it holds on any
-        // host: a `net: false` projection is enforceable exactly when this
-        // platform's OS backend can enforce a network restriction.
+        // Stated relationally, so the assertion holds on any host.
         let p_net_false = SandboxProjection {
             fs: crate::types::FsProjection::default(),
             net: false,
@@ -446,9 +368,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn projection_enforceable_allows_net_false_on_windows() {
-        // An AppContainer granted no network capability SID cannot open a
-        // socket, so `net: false` is enforceable on Windows — the projection
-        // is accepted rather than refused.
+        // An AppContainer with no network capability SID cannot open a socket.
         let p_net_false = SandboxProjection {
             fs: crate::types::FsProjection::default(),
             net: false,
@@ -473,9 +393,9 @@ mod tests {
             policy,
             Some(SandboxProjection {
                 fs: crate::types::FsProjection::Restricted(crate::types::FsPolicy {
-                    // The wire deserializes the record verbatim, without
-                    // re-folding (`from_surface` would fold `/tmp` to `\tmp`
-                    // on Windows), so mint the expected prefix the same way.
+                    // The wire deserialises verbatim, without re-folding, so
+                    // mint the expectation the same way: `from_surface` would
+                    // fold `/tmp` to `\tmp` on Windows.
                     read_prefixes: vec![
                         serde_json::from_str::<crate::path::NormalizedPrefix>(
                             r#"{"surface":"/tmp","resolved":"/tmp","namespace":"Host"}"#,

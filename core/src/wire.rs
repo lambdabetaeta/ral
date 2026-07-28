@@ -1,44 +1,22 @@
-//! Duplex framed channel over the host's own local stream socket.
+//! Duplex framed channel: one connection is one session, carrying
+//! length-prefixed JSON frames (`subprocess_codec`) in either direction.
 //!
-//! One `WireChannel` is one connection, and the connection is the session:
-//! length-prefixed JSON frames ([`crate::subprocess_codec`]) in either
-//! direction, over a socket this module never has to know the provenance of.
-//!
-//! # The stream type is a wrapper, not a claim about the address family
-//!
-//! [`WireStream`] is `UnixStream` on Unix and `TcpStream` on Windows, and
-//! neither name says what the socket underneath actually is.  A `UnixStream`
-//! built from an `AF_VSOCK` descriptor — what `vm-manager`'s
-//! Virtualization.framework backend hands back from a booted guest — is not a
-//! Unix-domain socket, and a `TcpStream` built from an `AF_HYPERV` socket —
-//! what its Hyper-V backend hands back — is not TCP.  Both types are used
-//! here purely as std's ready-made owner of a *connected stream socket*: read,
-//! write, duplicate, shut down.  Each of those is the same syscall whatever
-//! the family, which is what makes the borrowing sound rather than merely
-//! convenient.
-//!
-//! The one operation that would expose the pretence is asking a stream for its
-//! own or its peer's address, and nothing here or upstream of here ever does.
-//! The only place a family-specific option is set is [`WireChannel::pair`]'s
-//! loopback socket, which really is TCP.
+//! [`WireStream`] is `UnixStream` on Unix and `TcpStream` on Windows, yet
+//! `vm-manager` hands back `AF_VSOCK` and `AF_HYPERV` sockets: the types are
+//! borrowed only as std's owner of a *connected stream socket*, every operation
+//! used here being one syscall in any family.  Nothing here or above asks such
+//! a stream for an address — the one question that would expose the pretence.
 
 use crate::transport::Frame;
 use std::io;
 
-/// The connected stream socket a [`WireChannel`] frames over.
-///
-/// See the module docs: this is std's owner type for a stream socket, not a
-/// statement about the address family — under a real guest it is an
-/// `AF_VSOCK` connection wearing this type.
+/// The connected stream socket a [`WireChannel`] frames over: std's owner
+/// type, not a statement about the address family.
 #[cfg(unix)]
 pub type WireStream = std::os::unix::net::UnixStream;
 
-/// The connected stream socket a [`WireChannel`] frames over.
-///
-/// See the module docs: this is std's owner type for a stream socket, not a
-/// statement about the address family — under a real guest it is the
-/// `AF_HYPERV` control-plane socket, adopted through
-/// `From<OwnedSocket>`, and never a TCP connection.
+/// The connected stream socket a [`WireChannel`] frames over: std's owner
+/// type, not a statement about the address family.
 #[cfg(windows)]
 pub type WireStream = std::net::TcpStream;
 
@@ -62,10 +40,8 @@ impl WireChannel {
     /// process tree.
     ///
     /// Windows has no `socketpair(2)`, so the pair is a loopback connection
-    /// made and accepted here.  Nagle is turned off because a frame protocol
-    /// wants each frame on the wire now rather than coalesced with a next one
-    /// that may never come; this is the one socket in the module that really
-    /// is TCP, so it is the one place a TCP-level option means anything.
+    /// made and accepted here — genuinely TCP, hence the one place Nagle is
+    /// worth turning off: a frame protocol wants each frame on the wire now.
     ///
     /// # Errors
     /// Returns the socket error if the loopback pair cannot be established.
@@ -80,11 +56,8 @@ impl WireChannel {
     }
 
     /// Frame over an already-connected stream: one end of a [`Self::pair`], or
-    /// the virtual-socket connection into a guest VM.
-    ///
-    /// Generic over `Into<WireStream>` so a backend's own owned handle — an
-    /// `OwnedFd` on Unix, an `OwnedSocket` on Windows — can be adopted
-    /// directly, without the caller naming the platform's stream type.
+    /// the virtual-socket connection into a guest VM — a backend's own
+    /// `OwnedFd` or `OwnedSocket` converts straight in.
     pub fn from_stream(stream: impl Into<WireStream>) -> Self {
         Self {
             stream: stream.into(),
@@ -95,7 +68,7 @@ impl WireChannel {
     ///
     /// # Errors
     /// Returns the read or decode error.  `Ok(None)` is a clean EOF: the peer
-    /// closed the connection between frames.
+    /// closed between frames.
     pub fn read_frame(&mut self) -> io::Result<Option<Frame>> {
         crate::subprocess_codec::read_frame(&mut self.stream)
     }
@@ -108,12 +81,9 @@ impl WireChannel {
         crate::subprocess_codec::write_frame(&mut self.stream, frame)
     }
 
-    /// Duplicate the underlying socket so one `WireChannel` can be read from
-    /// while another writes to the same connection.
-    ///
-    /// Both platforms' `try_clone` keeps the duplicate out of a child's
-    /// inheritance — close-on-exec on Unix, non-inheritable on Windows — so it
-    /// is never handed to a process a run spawns.
+    /// Duplicate the socket so one channel reads while another writes the same
+    /// connection.  The duplicate is uninheritable on both platforms, so no
+    /// process a run spawns receives it.
     ///
     /// # Errors
     /// Returns the duplication error.
@@ -123,30 +93,20 @@ impl WireChannel {
         })
     }
 
-    /// Expose the raw fd for passing to a child process via `pre_exec`.
-    ///
-    /// Unix only, and so is the one thing it serves: handing the engine end of
-    /// a socketpair to a same-host child on fd 3
-    /// ([`WireTransport::new`](crate::transport::WireTransport::new)).  A
-    /// Windows front-end has no such child — its engine is a guest, reached
-    /// through [`Self::from_stream`] — so there is no descriptor to inherit.
+    /// The raw fd, for `pre_exec` to place on fd 3 in the engine child
+    /// ([`WireTransport::new`](crate::transport::WireTransport::new)).  Unix
+    /// only: a Windows engine is a guest, adopted through [`Self::from_stream`].
     #[cfg(unix)]
     pub fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
         use std::os::unix::io::AsRawFd;
         self.stream.as_raw_fd()
     }
 
-    /// Wait until the channel has a frame to read, or `timeout` passes.
-    /// `None` waits indefinitely.  Returns whether the channel is readable —
-    /// which includes a peer hangup, so a `true` answer means `read_frame`
-    /// will return promptly, with a frame, `None`, or an error.
-    ///
-    /// This is the liveness primitive: a reader that must notice a silent
-    /// peer parks here on a tick instead of blocking forever inside
-    /// `read_frame`.  The deadline governs frame *arrival*; once bytes are
-    /// flowing, `read_frame` is entitled to block for the frame's remainder,
-    /// because a peer that dies mid-frame tears the connection and errs the
-    /// read rather than stalling it.
+    /// Wait until a frame is readable, or `timeout` passes; `None` waits
+    /// indefinitely.  A hangup counts as readable, so `true` promises
+    /// `read_frame` returns promptly — frame, `None`, or error.  This is how
+    /// `engine_session` notices a silent front-end; the deadline governs frame
+    /// *arrival*, a peer dying mid-frame erring the read rather than stalling.
     ///
     /// # Errors
     /// Returns the `poll(2)` error, with `EINTR` retried against the
@@ -182,22 +142,17 @@ impl WireChannel {
         }
     }
 
-    /// Wait until the channel has a frame to read, or `timeout` passes.
-    /// `None` waits indefinitely.
-    ///
-    /// The Unix twin above carries the law this upholds.  `WSAPoll` is
-    /// Winsock's `poll(2)` and `POLLRDNORM` its `POLLIN`; a hangup surfaces
-    /// the same way, as a readable socket whose next read returns zero bytes.
-    /// There is no `EINTR` to retry — Winsock has no interrupting signals —
-    /// so the loop the Unix side needs collapses to one call here.
+    /// Wait until a frame is readable, or `timeout` passes; `None` waits
+    /// indefinitely — the Unix twin above states the contract.  `WSAPoll` is
+    /// Winsock's `poll(2)` and `POLLRDNORM` its `POLLIN`; with no interrupting
+    /// signals there is no `EINTR`, so that loop collapses to one call.
     ///
     /// # Errors
     /// Returns the `WSAPoll` error.
     ///
     /// # Panics
-    /// Panics if this process's socket handle does not fit a pointer — which is
-    /// to say never: Winsock's own `SOCKET` *is* a pointer-sized value, and
-    /// `RawSocket` is the widest integer that could hold one on any Windows.
+    /// Never: Winsock's `SOCKET` *is* a pointer-sized value, and `RawSocket` is
+    /// the widest integer that could hold one on any Windows.
     #[cfg(windows)]
     pub fn poll_readable(&self, timeout: Option<std::time::Duration>) -> io::Result<bool> {
         use std::os::windows::io::AsRawSocket;
@@ -224,9 +179,9 @@ impl WireChannel {
         Ok(rc > 0)
     }
 
-    /// Shut the socket down in both directions, waking any thread parked in
-    /// `read_frame` or [`Self::poll_readable`] on this socket — including
-    /// through clones, which share the one underlying connection.
+    /// Shut the socket down both ways, waking any thread parked in
+    /// `read_frame` or [`Self::poll_readable`] — clones included, since they
+    /// share the one underlying connection.
     pub fn shutdown(&self) {
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
     }
@@ -254,10 +209,9 @@ mod tests {
         assert!(got.is_none());
     }
 
-    /// The liveness primitive answers both ways on either platform: silence
-    /// is not readable, and a frame in flight is.  The heartbeat ticker's
-    /// whole deadline discipline rests on that difference, so it is pinned
-    /// here rather than left to the transport's integration tests.
+    /// Silence is not readable and a frame in flight is — the difference the
+    /// engine's silence deadline rests on, pinned here rather than left to the
+    /// transport's integration tests.
     #[test]
     fn poll_readable_tells_silence_from_traffic() {
         let (mut a, b) = WireChannel::pair().unwrap();

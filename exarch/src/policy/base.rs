@@ -1,31 +1,13 @@
-//! Built-in capability bases for exarch sessions.
+//! The six built-in capability bases, embedded from the `.ral` scripts in
+//! `exarch/data/` and loaded through
+//! [`load_capabilities_from_str`](ral_core::capability::load_capabilities_from_str),
+//! the same surface the ral CLI's `--capabilities` flag consumes.
 //!
-//! Six bake-ins are embedded from `.ral` capability scripts in
-//! `exarch/data/`, each a ral script whose terminal expression is a map
-//! shaped like the argument of `grant [...] { body }`.  Loading goes
-//! through [`ral_core::capability::load_capabilities_from_str`] — the same
-//! surface a `--capabilities <path>.ral` flag at the ral CLI consumes.
-//! Two surfaces, one model.
-//!
-//! Ordered loosely from no-attenuation down to tightest:
-//!
-//! - `dangerous`  — `Capabilities::root()`.  Lattice top; no attenuation.
-//! - `reasonable` — everyday tooling + standard binary dirs (default).
-//! - `edit-only`  — `reasonable` reads/exec, writes to working tree + scratch.
-//! - `read-only`  — `reasonable` reads/exec, but writes only to scratch.
-//! - `minimal`    — coreutils + cwd + /tmp + tempdir + net + chdir.
-//!   Small base for additive `--extend-base` composition.
-//! - `confined`   — build-jail shape (after `BrianSwift`'s `confined.sb`):
-//!   tight reads/writes, no network, exec by subpath only.
-//!
-//! Every profile but `dangerous` names `cwd:` and `tempdir:` sigils in its
-//! `fs` and `exec` entries; the freeze pass inside
-//! [`ral_core::capability::decode_capability_map`] resolves them at session
-//! start, so the per-invocation working directory is baked into the policy
-//! without exarch having to inject it dynamically.
-//!
-//! See `exarch/PROFILES.md` for the per-profile shapes and guidance on
-//! when to use each.
+//! Loosest to tightest: `dangerous` (the lattice top), `reasonable`,
+//! `edit-only`, `read-only`, `minimal`, `confined`.  Every profile but
+//! `dangerous` names `cwd:` and `tempdir:` sigils, which the loader freezes at
+//! session start — so the per-invocation working directory is baked into the
+//! policy and exarch never injects it dynamically.
 
 use ral_core::io::TerminalState;
 use ral_core::types::{Capabilities, FsPolicy, Shell};
@@ -36,14 +18,12 @@ const READ_ONLY_RAL: &str = include_str!("../../data/read-only.exarch.ral");
 const EDIT_ONLY_RAL: &str = include_str!("../../data/edit-only.exarch.ral");
 const CONFINED_RAL: &str = include_str!("../../data/confined.exarch.ral");
 const DANGEROUS_RAL: &str = include_str!("../../data/dangerous.exarch.ral");
-// Unix-gated with its only consumers: the extension-join tests below,
-// whose fixtures are Unix-shaped (`/usr/bin`, Homebrew trees).
+// Gated with its only consumers, the Unix-shaped extension-join tests below.
 #[cfg(all(test, unix))]
 const GIT_EXTENSION_RAL: &str = include_str!("../../examples/git.exarch.ral");
 
-/// Resolve `name` to a frozen [`Capabilities`], resolving every sigil
-/// against `ctx`.  The orchestrator (`policy::for_invocation`) then joins
-/// an extend-base and meets restrict files — all on resolved bundles.
+/// Resolve `name` to a frozen [`Capabilities`], every sigil resolved against
+/// `ctx`, so `super::for_invocation` composes on already-resolved bundles.
 pub(super) fn resolve_base(
     name: &str,
     ctx: &ral_core::path::sigil::FreezeCtx<'_>,
@@ -84,17 +64,12 @@ pub(super) fn resolve_base(
     Ok(caps)
 }
 
-/// Remove exec literal entries naming a bundled coreutils tool that
-/// does not exist as a bundled tool on this platform — the
-/// `coreutils-unix-only` set (`id`, `kill`, `stat`, `tac`, `test`,
-/// `timeout`), whose upstream `uu_*` crates never link on Windows —
-/// so a rendered profile never advertises a grant it cannot honour.
+/// Drop exec literals naming a coreutil this platform cannot bundle — the
+/// `coreutils-unix-only` set, whose `uu_*` crates compile on Unix alone — so a
+/// rendered profile never advertises a grant it cannot honour.
 ///
-/// `unix_available` is a parameter rather than a `cfg(unix)` read
-/// inside this function so the drop has a unit test that runs on
-/// every host: the real call site in [`resolve_base`] passes
-/// `cfg!(unix)`, and the test below passes `false` directly to check
-/// the Windows shape without a Windows machine.
+/// `unix_available` is a parameter rather than a `cfg!(unix)` read here so the
+/// non-Unix shape is testable from a Unix host.
 fn drop_dead_exec_grants(caps: &mut Capabilities, unix_available: bool) {
     if unix_available {
         return;
@@ -106,10 +81,9 @@ fn drop_dead_exec_grants(caps: &mut Capabilities, unix_available: bool) {
     }
 }
 
-/// Preserve otherwise-unrestricted filesystem authority while still
-/// carving out `deny_paths` for active restriction files.  The `/`
-/// ceiling is a grant-side prefix, so it is minted in the same normal
-/// form every other prefix carries.
+/// The implicit ceiling made concrete: `super::deny_paths` installs this so a
+/// restriction file's carve-outs land on a policy rather than on nothing.  `/`
+/// is minted in the normal form every other grant-side prefix carries.
 pub(super) fn root_fs_policy() -> FsPolicy {
     let root = || ral_core::path::NormalizedPrefix::from_surface("/");
     FsPolicy {
@@ -124,8 +98,7 @@ pub(super) fn root_fs_policy() -> FsPolicy {
 mod tests {
     use super::*;
     use ral_core::path::sigil::FreezeCtx;
-    // Used only by the Unix-fixture tests below; gated so the Windows
-    // build of this module stays warning-free.
+    // Gated with their only users below, so the Windows build stays warning-free.
     #[cfg(unix)]
     use ral_core::path::sigil::expand_path_prefix;
     #[cfg(unix)]
@@ -133,10 +106,8 @@ mod tests {
     use ral_core::types::{Capabilities, Shell};
     use std::path::Path;
 
-    /// Load and freeze a bake-in against `ctx`.  Freezing happens inside
-    /// the loader now, so this both parses the script and resolves every
-    /// sigil — a failure here is a malformed profile, an unknown `xdg:`
-    /// token, or an xdg-escape violation.
+    /// Parse *and* freeze a bake-in: the loader resolves sigils, so a failure
+    /// here is malformed source, an unknown `xdg:` token, or an xdg escape.
     fn load(name: &str, text: &str, ctx: &FreezeCtx<'_>) -> Capabilities {
         let mut shell = Shell::new(TerminalState::default());
         ral_core::capability::load_capabilities_from_str(
@@ -149,10 +120,8 @@ mod tests {
         .unwrap_or_else(|e| panic!("base '{name}' failed to load: {e:?}"))
     }
 
-    /// Every bake-in must parse, validate, and freeze against the real
-    /// `$HOME`.  Catches malformed ral source, unknown `xdg:` tokens, and
-    /// xdg-escape violations at `cargo test` time rather than at first
-    /// user invocation.
+    /// Every bake-in must load against the real `$HOME`, so a broken profile
+    /// fails at `cargo test` rather than at a user's first invocation.
     #[cfg(unix)]
     #[test]
     fn bakeins_parse() {
@@ -173,14 +142,11 @@ mod tests {
         }
     }
 
-    /// Windows fixture: every bake-in carries Unix-only absolute
-    /// literals (`/tmp`, `/usr/local/bin/`, `/opt/homebrew/`, …) —
-    /// rooted paths with no drive letter.  These must be dropped as
-    /// dead grants at freeze time rather than tripping the freeze
-    /// pass's absoluteness check, or the *entire* profile would refuse
-    /// to load, leaving `dangerous` the only usable Windows base.
-    /// Windows-only: the freeze pass's foreign-rooted branch only fires
-    /// under a real `cfg!(windows)`.
+    /// Every bake-in carries Unix-only literals (`/tmp`, `/opt/homebrew/`, …).
+    /// On Windows they are foreign-rooted and must drop as dead grants rather
+    /// than trip the freeze pass's absoluteness check, or the whole profile
+    /// would refuse to load and `dangerous` would be the only usable base.
+    /// Gated because that branch fires only under a real `cfg!(windows)`.
     #[cfg(windows)]
     #[test]
     fn bakeins_parse_on_windows() {
@@ -201,11 +167,8 @@ mod tests {
         }
     }
 
-    /// Windows fixture: the Unix-only `/tmp` fs literal and the
-    /// `/opt/homebrew/` exec-dir override in `minimal` are both
-    /// foreign-rooted on Windows and must be dropped rather than
-    /// carried forward as grants that can never match a real access —
-    /// `policy show` should never advertise authority it can't back.
+    /// The drop reaches fs literals and exec-dir overrides alike: a grant that
+    /// can never match a real access must not show up as authority.
     #[cfg(windows)]
     #[test]
     fn minimal_drops_foreign_rooted_grants_on_windows() {
@@ -231,12 +194,9 @@ mod tests {
         );
     }
 
-    /// `confined` is the build-jail profile: net off, no user-home
-    /// reads, exec by subpath only.  These three properties are the
-    /// load-bearing differences vs `reasonable`; pin them so a future
-    /// edit doesn't accidentally widen the build jail.  `confined` names
-    /// no `~`/`xdg:` path, so a synthetic home is enough to freeze it,
-    /// and no resolved prefix may fall under that home.
+    /// The three load-bearing differences from `reasonable`, pinned so an edit
+    /// cannot quietly widen the build jail.  `confined` names no `~`/`xdg:`
+    /// path, so a synthetic home suffices — and nothing may resolve under it.
     #[cfg(unix)]
     #[test]
     fn confined_is_offline_subpath_only_no_home_reads() {
@@ -247,7 +207,6 @@ mod tests {
         let caps = load("confined", CONFINED_RAL, &ctx);
         assert_eq!(caps.net, Some(false), "confined must have net off");
         let exec = caps.exec.as_ref().expect("confined declares exec");
-        // No bare-name admits — every admit is a directory prefix.
         assert!(
             exec.literals.is_empty(),
             "confined exec has literal keys; build jail uses directory prefixes only"
@@ -262,10 +221,8 @@ mod tests {
         }
     }
 
-    /// `read-only` differs from `reasonable` only in that writes
-    /// don't include the working tree.  Fold a future regression
-    /// where someone re-adds `cwd:` to `write_prefixes`.  `cwd:` freezes
-    /// to the synthetic working dir, independent of the environment.
+    /// The one difference from `reasonable`: the working tree is readable but
+    /// not writable.  Guards against `cwd:` creeping back into `write`.
     #[cfg(unix)]
     #[test]
     fn read_only_does_not_write_cwd() {
@@ -298,9 +255,8 @@ mod tests {
         );
     }
 
-    /// Reasonable's `exec` includes the `xdg:bin` directory key, which
-    /// freezes to `${XDG_BIN_HOME:-~/.local/bin}`.  Assert the resolved
-    /// prefix lands in the `dirs` half (where directory keys live).
+    /// `xdg:bin` freezes to `${XDG_BIN_HOME:-~/.local/bin}` and must land in
+    /// the `dirs` half of the exec map, where directory keys live.
     #[cfg(unix)]
     #[test]
     fn reasonable_carries_xdg_bin_subpath_in_exec() {
@@ -318,20 +274,16 @@ mod tests {
         );
     }
 
-    /// `cwd:` and `tempdir:` directory keys land in `exec` and matching
-    /// plain sigils land in `fs` for both `minimal` and `reasonable`, so a
-    /// per-invocation working tree is admitted without exarch injecting it
-    /// dynamically.  After freeze the keys are the resolved working dir
-    /// and platform temp dir.
+    /// The per-invocation working tree and temp dir reach both halves of the
+    /// policy: directory keys in `exec`, plain sigils in `fs`.
     #[cfg(unix)]
     #[test]
     fn minimal_and_reasonable_carry_cwd_and_tempdir_sigils() {
         let home = ral_core::path::home_from_env();
         let cwd = Path::new("/work/proj");
         let ctx = FreezeCtx { home: &home, cwd };
-        // Freeze folds away any trailing separator the platform temp
-        // dir carries (macOS `$TMPDIR` ends in `/`), so compare against
-        // the same normal form the frozen keys hold.
+        // Freeze folds away the trailing separator macOS `$TMPDIR` carries, so
+        // compare in the same normal form the frozen keys hold.
         let normal = |p: &str| ral_core::path::NormalizedPrefix::from_surface(p).into_string();
         let cwd_resolved = normal(&cwd.to_string_lossy());
         let tempdir_resolved = normal(&std::env::temp_dir().to_string_lossy());
@@ -368,14 +320,8 @@ mod tests {
         }
     }
 
-    /// End-to-end: a path-style exec under cwd is admitted after
-    /// freeze rewrites `cwd:` into the project's working directory.
-    ///
-    /// Unix-only: the test inputs `/work/proj` and `/work/proj/configure`
-    /// are Unix-shaped absolute paths, and the bake-in policy's exec
-    /// admittance keys (`/bin/`, `/usr/bin/`, …) are Unix paths.  The
-    /// Windows path-comparison machinery is exercised by integration
-    /// tests under `cargo test --test windows_*`.
+    /// End-to-end: once freeze rewrites `cwd:` into the working directory, a
+    /// path-style exec beneath it is admitted.
     #[cfg(unix)]
     #[test]
     fn freeze_admits_relative_exec_under_cwd_sigil() {
@@ -397,18 +343,10 @@ mod tests {
             .expect("./configure under cwd: must be admitted");
     }
 
-    /// Regression: a command at /opt/homebrew/bin/cmake — invoked
-    /// by short name OR full absolute path — must be admitted by
-    /// reasonable's `system:` exec grant even though cmake itself is
-    /// not a per-name entry.  `system:` only contributes a Homebrew
-    /// root when one exists on the host (the plan's "when present"
-    /// qualifier), so this test is a no-op on a Homebrew-less
-    /// machine rather than a false regression — GitHub's hosted macOS
-    /// runners ship Homebrew pre-installed, so the assertion still
-    /// runs in CI.
-    ///
-    /// Unix-only: the path under test (`/opt/homebrew/bin/cmake`) has
-    /// no Windows analogue in the bake-in policy.
+    /// `system:`'s Homebrew root admits cmake by short name and by full path
+    /// alike, though cmake is no per-name entry.  That root exists only where
+    /// Homebrew does, so on a brew-less host this passes vacuously rather than
+    /// failing falsely; CI's macOS runners ship Homebrew, so it still bites.
     #[cfg(unix)]
     #[test]
     fn reasonable_admits_cmake_under_homebrew_when_present() {
@@ -443,9 +381,8 @@ mod tests {
             .expect("full-path cmake under /opt/homebrew/bin must be admitted");
     }
 
-    /// `cargo` invoked through rustup resolves to a binary under
-    /// `~/.rustup/toolchains/`, a path shape easy to miss when
-    /// hand-enumerating exec roots.
+    /// Rustup resolves `cargo` under `~/.rustup/toolchains/`, a path shape easy
+    /// to miss when hand-enumerating exec roots.
     #[cfg(unix)]
     #[test]
     fn reasonable_admits_cargo_under_rustup_toolchain() {
@@ -464,8 +401,6 @@ mod tests {
             .expect("rustup toolchain cargo must be admitted");
     }
 
-    /// `go` at `/usr/local/go/bin/go` (official installer) and user
-    /// tools at `~/go/bin/` must be admitted.
     #[cfg(unix)]
     #[test]
     fn reasonable_admits_go_official_and_user_tools() {
@@ -489,8 +424,6 @@ mod tests {
         }
     }
 
-    /// `node` resolved by nvm to `~/.nvm/versions/node/<v>/bin/node`
-    /// must be admitted.
     #[cfg(unix)]
     #[test]
     fn reasonable_admits_nvm_node() {
@@ -507,8 +440,7 @@ mod tests {
             .expect("nvm node must be admitted");
     }
 
-    /// `python3` resolved by pyenv to `~/.pyenv/versions/<v>/bin/python3`
-    /// must be admitted; same for the pyenv shim layer.
+    /// Both the versioned install and the shim layer pyenv puts on `$PATH`.
     #[cfg(unix)]
     #[test]
     fn reasonable_admits_pyenv_python() {
@@ -530,13 +462,10 @@ mod tests {
         }
     }
 
-    /// `git` is admitted in `reasonable` and `read-only` so commit
-    /// flows ("commit please") work without `--extend-base`.  Pin
-    /// this so a future profile edit doesn't silently re-deny.
-    /// Network-git surfaces (push, signed commit) still depend on
-    /// credential / signing helpers — those are gated by the fs
-    /// grant (`~/.ssh`, `~/.gnupg` unreadable) plus, on macOS,
-    /// whatever the user has configured in their keychain.
+    /// Both admit `git` and read `~/.gitconfig`, so a commit works without
+    /// `--extend-base`.  Push and signed commits still don't: their credential
+    /// and signing helpers need `~/.ssh` and `~/.gnupg`, which the fs grant
+    /// leaves unreadable.
     #[cfg(unix)]
     #[test]
     fn reasonable_and_read_only_admit_git() {
@@ -562,16 +491,10 @@ mod tests {
         }
     }
 
-    /// `minimal` admits the *system* git under `/usr/bin/` (folded into
-    /// `system:`'s tool-root grant) but not a Homebrew git under
-    /// `/opt/homebrew/bin` — minimal carries an explicit
-    /// `/opt/homebrew/': 'deny'` override precisely so `system:`
-    /// including Homebrew when present doesn't widen minimal's
-    /// documented "no homebrew tree" narrowing; user-installed brew
-    /// tools stay opt-in.  A non-root cwd keeps the `cwd:/` allow from
-    /// masking the test: under `cwd: /` everything resolves inside the
-    /// working tree.  The git extension's `git: 'allow'` is what
-    /// carries a Homebrew install.
+    /// `minimal`'s explicit `/opt/homebrew/` deny is what keeps `system:`,
+    /// which folds a Homebrew tree in when the host has one, from widening it:
+    /// brew tools stay opt-in, and the git extension is the opt-in.  The cwd
+    /// must not be `/`, or the `cwd:/` allow would admit everything.
     #[cfg(unix)]
     #[test]
     fn minimal_admits_system_git_not_homebrew() {
@@ -605,23 +528,11 @@ mod tests {
         );
     }
 
-    /// The git extension adds gitconfig *reads* (and a portable `git`
-    /// exec grant) to a tight base: `minimal` and `confined` grant no
-    /// home reads and admit only the system git under `/usr/bin/`, while
-    /// `reasonable` and `read-only` already read `~/.gitconfig`.
-    ///
-    /// Two facts about the join are pinned here:
-    ///
-    /// 1. Joining against `minimal` keeps git admitted (the extension's
-    ///    one-sided `git: 'allow'` survives) and makes gitconfig
-    ///    readable.
-    /// 2. The base's gh/op/gcloud credential denies survive the join:
-    ///    `FsPolicy::join` unions deny sets, so a veto is preserved even
-    ///    though the extension no longer re-states it.  This is the
-    ///    sticky-veto property that lets an overlay stay purely additive.
-    ///
-    /// Both sides freeze against the same home, so the resolved
-    /// `xdg:config/*` paths coincide.
+    /// The extension widens `minimal` — gitconfig readable, `git` admitted —
+    /// while `reasonable`'s credential denies survive: `FsPolicy::join` unions
+    /// deny sets, so a veto sticks without the overlay re-stating it, which is
+    /// what lets an overlay stay purely additive.  Both sides freeze against
+    /// the same home, so their `xdg:config/*` paths coincide.
     #[cfg(unix)]
     #[test]
     fn git_extension_widens_into_git_capable_profile() {
@@ -671,25 +582,16 @@ mod tests {
         }
     }
 
-    /// Every base that declares `exec` must *admit* (not merely
-    /// reference) the platform's live tool roots — i.e. `system:`
-    /// really expanded, wiring-wise, to an `Allow` verdict.  Asserting
-    /// only `contains_key` would pass on a `Deny` entry too, missing
-    /// the whole point of "admits".  Not gated on `cfg(unix)`: on a
-    /// real Windows host (`windows-check`) `system_tool_roots` walks
-    /// the Windows branch instead, and this same assertion holds.
-    ///
-    /// One documented exception: `minimal` explicitly denies Homebrew
-    /// even though `system:` folds it in when present (see
-    /// `minimal_admits_system_git_not_homebrew`) — that override must
-    /// survive, so this test asserts `Deny` there instead of `Allow`.
+    /// `system:` must expand to an `Allow` verdict for every live tool root —
+    /// merely finding the key would pass on a `Deny` too, which is the whole
+    /// point.  `minimal` is the one exception: its Homebrew override must
+    /// survive as a `Deny`.  Ungated, since `system_tool_roots` walks the
+    /// platform's own branch and the assertion holds either way.
     #[test]
     fn every_exec_base_admits_live_system_tool_roots() {
         let home = ral_core::path::home_from_env();
-        // An absolute path on every platform (unlike the Unix-shaped
-        // `/work` literal other tests in this file use, which is not
-        // absolute under Windows path semantics — those tests are
-        // `cfg(unix)`-gated for exactly that reason; this one is not).
+        // Absolute on every platform, unlike the `/work` literal the
+        // `cfg(unix)`-gated tests use — Windows reads that as rootless.
         let cwd = std::env::temp_dir();
         let ctx = FreezeCtx {
             home: &home,
@@ -730,11 +632,8 @@ mod tests {
         }
     }
 
-    /// Windows fixture: `system_tool_roots`' Windows branch, exercised
-    /// directly with synthetic env values so it produces a sane
-    /// Windows grant set from any host — `%SystemRoot%\System32`, the
-    /// bundled PowerShell home, and Git-for-Windows' `usr\bin` when a
-    /// synthetic "install" is present.
+    /// The Windows branch, driven with synthetic env and a synthetic install
+    /// probe so it can be checked from any host.
     #[test]
     fn windows_tool_roots_produce_a_sane_grant_set() {
         let roots =
@@ -755,11 +654,9 @@ mod tests {
         );
     }
 
-    /// Windows fixture: the `coreutils-unix-only` grants (`tac`,
-    /// `test`, among the shipped bases) are dropped when the platform
-    /// can't back them, so `reasonable`'s rendered exec map never
-    /// advertises a bundled tool Windows doesn't have.  `false`
-    /// simulates "not unix" from any host — see [`drop_dead_exec_grants`].
+    /// Passing [`drop_dead_exec_grants`] `false` simulates a non-Unix host:
+    /// the `coreutils-unix-only` grants go, ordinary and cross-platform names
+    /// stay.  Unix-gated because it first checks the host really bundles them.
     #[cfg(unix)]
     #[test]
     fn reasonable_drops_unix_only_bundled_tool_grants_off_unix() {

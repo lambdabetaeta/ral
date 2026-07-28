@@ -1,19 +1,14 @@
 //! Generalization and instantiation for HM polymorphism.
 //!
-//! `generalize` closes over the free type/mode/row variables in a type that
-//! are not mentioned in the ambient environment, producing a ∀-quantified
-//! scheme.  `instantiate` opens a scheme by replacing each quantified variable
-//! with a fresh unification variable.
+//! Equi-recursion is the twist: a cyclic type is anchored at a union-find
+//! root, so a scheme snapshots that root's binding and `instantiate`
+//! re-anchors it at a fresh root instead of sharing the original slot.
 
 use super::env::TyEnv;
 use super::scheme::Scheme;
 use super::ty::{CompTy, CompTyVar, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar};
 use super::unify::{Unifier, Visited};
 use std::collections::{HashMap, HashSet};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Free-variable collection
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// All four variable kinds, collected in one traversal.
 pub struct FreeVars {
@@ -33,8 +28,6 @@ impl FreeVars {
         }
     }
 
-    /// Pull cached residual free vars (`BTreeSet`, persisted form) into
-    /// this `FreeVars` (`HashSet`, in-flight form).
     pub fn merge_cached(&mut self, cached: &super::scheme::CachedFreeVars) {
         self.tys.extend(&cached.ty_fv);
         self.comps.extend(&cached.comp_fv);
@@ -42,7 +35,6 @@ impl FreeVars {
         self.rows.extend(&cached.row_fv);
     }
 
-    /// Move all four sets into `target`, leaving `self` empty.
     pub fn merge_into(self, target: &mut Self) {
         target.tys.extend(self.tys);
         target.comps.extend(self.comps);
@@ -50,8 +42,7 @@ impl FreeVars {
         target.rows.extend(self.rows);
     }
 
-    /// Drop the variables quantified by `s` from each set.  Companion to
-    /// scheme instantiation, where the quantified vars are minted fresh.
+    /// Instantiation mints these fresh, so they are not free in the environment.
     pub fn remove_quantified(&mut self, s: &Scheme) {
         for v in &s.ty_vars {
             self.tys.remove(v);
@@ -67,9 +58,7 @@ impl FreeVars {
         }
     }
 
-    /// Intersect with `env` and persist as a [`CachedFreeVars`] — the
-    /// "residual" free vars of a scheme, those visible in the
-    /// surrounding environment and therefore not quantified.
+    /// The *residual* free vars — mentioned by `env`, so left unquantified.
     pub fn intersect_into_cached(&self, env: &Self) -> super::scheme::CachedFreeVars {
         super::scheme::CachedFreeVars {
             ty_fv: self.tys.intersection(&env.tys).copied().collect(),
@@ -86,10 +75,8 @@ pub fn free_ty(u: &mut Unifier, ty: &Ty, out: &mut FreeVars) {
 }
 
 fn free_ty_inner(u: &mut Unifier, ty: &Ty, out: &mut FreeVars, visited: &mut Visited) {
-    // Set-discipline cycle guard: skipping a sibling revisit is correct
-    // here because we are not modifying the unifier — the binding behind
-    // the root is constant during traversal, so the first walk already
-    // collected every free var reachable from it.
+    // Cycle guard.  Skipping a sibling revisit is sound because the walk never
+    // binds: the first visit collected every free var behind this root.
     let root = match ty {
         Ty::Var(TyVar(i)) => Some(u.ty_root(*i)),
         _ => None,
@@ -106,9 +93,8 @@ fn free_ty_inner(u: &mut Unifier, ty: &Ty, out: &mut FreeVars, visited: &mut Vis
         Ty::List(a) | Ty::Map(a) | Ty::Handle(a) => free_ty_inner(u, &a, out, visited),
         Ty::Record(r) | Ty::Variant(r) => free_row_inner(u, &r, out, visited),
         Ty::Thunk(b) => free_comp_inner(u, &b, out, visited),
-        // Ground types carry no variables.  Enumerating them means a new
-        // `Ty` constructor with free vars fails the build here instead of
-        // being silently dropped (which would under-generalise it).
+        // Enumerated, not `_`: a new `Ty` carrying variables then fails the
+        // build here instead of being dropped and silently under-generalised.
         Ty::Unit | Ty::Bytes | Ty::Bool | Ty::Int | Ty::Float | Ty::String => {}
     }
 }
@@ -127,7 +113,7 @@ fn free_row_inner(u: &mut Unifier, row: &Row, out: &mut FreeVars, visited: &mut 
 }
 
 fn free_comp_inner(u: &mut Unifier, cty: &CompTy, out: &mut FreeVars, visited: &mut Visited) {
-    // Set-discipline cycle guard, same reasoning as `free_ty_inner`.
+    // Cycle guard, same reasoning as `free_ty_inner`.
     let root = match cty {
         CompTy::Var(CompTyVar(i)) => Some(u.comp_root(*i)),
         _ => None,
@@ -139,8 +125,6 @@ fn free_comp_inner(u: &mut Unifier, cty: &CompTy, out: &mut FreeVars, visited: &
     }
     match u.resolve_comp_ty(cty) {
         CompTy::Var(v) => {
-            // Unbound comp var — record it so generalize can quantify
-            // over it and instantiate can mint fresh ids per use site.
             out.comps.insert(v);
         }
         CompTy::Return(spec, a) => {
@@ -161,7 +145,6 @@ fn free_mode_inner(u: &mut Unifier, mode: PipeMode, out: &mut FreeVars) {
     }
 }
 
-/// Collect free variables across all schemes in the environment.
 pub fn env_free_vars(u: &mut Unifier, env: &TyEnv) -> FreeVars {
     let mut out = FreeVars::new();
     for s in env.all_schemes() {
@@ -189,19 +172,11 @@ pub fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
     let mode_vars: Vec<ModeVar> = fvs.modes.difference(&env_fvs.modes).copied().collect();
     let row_vars: Vec<RowVar> = fvs.rows.difference(&env_fvs.rows).copied().collect();
 
-    // Cache the residual free variables: those that appear in the environment
-    // and were therefore NOT generalised.  For top-level bindings these are
-    // all empty.  Stored so that future env_free_vars calls can skip traversal
-    // for this scheme instead of re-walking the type tree.
+    // Cached so later `env_free_vars` calls read the sets instead of re-walking
+    // this scheme's type tree.  Empty for top-level bindings.
     let residuals = fvs.intersect_into_cached(&env_fvs);
-    // Each residual must be an unbound canonical root *in this unifier* at mint
-    // time — the rescuing invariant for the cache outliving later `unite`/`bind`
-    // calls is that every residual originates from a monomorphic (`Scheme::mono`)
-    // environment binding that outlives every generalised scheme mentioning it,
-    // so its var is never the one a later step moves or binds.  Holds by
-    // construction here (a residual is drawn from `free_ty`'s output, which only
-    // reports unbound canonical roots); the assertion makes the contract
-    // explicit and guards a future change that derives residuals otherwise.
+    // Holds by construction: residuals come from monomorphic env bindings that
+    // outlive every scheme mentioning them, so no later step moves or binds one.
     #[allow(
         clippy::debug_assert_with_mut_call,
         reason = "the &mut is union-find path compression, semantically idempotent; skipping it in release is harmless"
@@ -215,19 +190,10 @@ pub fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
     }
     let cached_fv = Some(residuals);
 
-    // Snapshot any cyclic var bindings reachable from `applied`.  The
-    // cycle-aware `apply_*` chain leaves back-edges as `CompTy::Var(root)`
-    // / `Ty::Var(root)` nodes; collecting those roots and their bindings
-    // lets `instantiate` mint fresh ids without sharing the original
-    // union-find slot across instantiations.
-    //
-    // A cyclic root that is also free in the environment is monomorphic —
-    // it must stay anchored at its original union-find slot so a constraint
-    // from one use propagates to every other.  Freshening it per
-    // instantiation (as the snapshot does for genuinely polymorphic roots)
-    // would sever that sharing, so env-reachable roots are filtered out of
-    // the snapshot, exactly as they are excluded from the plain quantifier
-    // sets above.
+    // `apply_*` leaves each cycle as a `Var(root)` back-edge; snapshotting root
+    // and binding lets `instantiate` rebuild the cycle in a fresh slot.  Roots
+    // free in the env are excluded, as from the quantifier sets above: they are
+    // monomorphic and must stay anchored so one use's constraint reaches all.
     let env_comp_roots: std::collections::HashSet<u32> =
         env_fvs.comps.iter().map(|v| v.0).collect();
     let env_ty_roots: std::collections::HashSet<u32> = env_fvs.tys.iter().map(|v| v.0).collect();
@@ -240,8 +206,8 @@ pub fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
         .filter(|(r, _)| !env_ty_roots.contains(r))
         .collect();
 
-    // Cyclic roots already appear in `*_bindings` — drop them from the
-    // plain quantifier sets so they are not double-counted.
+    // Cyclic roots already appear in `*_bindings`; drop them from the plain
+    // quantifier sets so instantiation does not mint two fresh ids for one var.
     let cyclic_comp_roots: std::collections::HashSet<u32> =
         comp_ty_bindings.iter().map(|(r, _)| *r).collect();
     let comp_ty_vars: Vec<CompTyVar> = comp_ty_vars
@@ -265,9 +231,6 @@ pub fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
     }
 }
 
-/// Does every cached residual resolve to an unbound canonical root in `u`?
-/// A residual that has been united (its root moved) or bound (resolves to a
-/// non-`Var`) would make the cache silently disagree with the live unifier.
 fn residuals_are_live_roots(u: &mut Unifier, residuals: &super::scheme::CachedFreeVars) -> bool {
     residuals
         .ty_fv
@@ -286,15 +249,10 @@ fn residuals_are_live_roots(u: &mut Unifier, residuals: &super::scheme::CachedFr
             .all(|v| matches!(u.resolve_row(&Row::Var(*v)), Row::Var(rv) if rv == *v))
 }
 
-/// A scheme is *closed* when every free variable in its body is either
-/// quantified or captured as a cyclic-binding root.  The two scheme-minting
-/// sites (`annotate`'s `Bind` rule, `alias_arm_scheme`) generalise against an
-/// empty environment, so they must leave nothing free — an unquantified
-/// residual would be a leaked open-scheme id that `Store::find`/`ensure`
-/// silently tolerate as free and a later `fresh()` can re-mint and alias.
-/// This makes that `schemes-leave-closed` invariant mechanical: a violation
-/// trips the `debug_assert!` at the minting site rather than corrupting a
-/// later inference run.
+/// A scheme is *closed* when every free variable in its body is quantified or
+/// captured as a cyclic-binding root.  An unquantified residual is an id no
+/// live slot owns, which `Store` in `unify.rs` tolerates as free and a later
+/// `fresh()` can re-mint, aliasing two unrelated variables.
 pub fn scheme_is_closed(u: &mut Unifier, scheme: &Scheme) -> bool {
     let mut fvs = FreeVars::new();
     free_ty(u, &scheme.ty, &mut fvs);
@@ -313,11 +271,9 @@ pub fn scheme_is_closed(u: &mut Unifier, scheme: &Scheme) -> bool {
         && fvs.rows.iter().all(|v| scheme.row_vars.contains(v))
 }
 
-/// Debug-only guard that a freshly minted scheme leaves no variable free.
-/// Every empty-environment generalisation site (`annotate`'s `Bind` rule,
-/// `alias_arm_scheme`, `binding_value_scheme`) must satisfy this closure
-/// invariant; `msg` names the site so a violation trips there rather than
-/// corrupting a later inference run.
+/// Guards closure at the three empty-environment generalisation sites —
+/// `annotate`'s `Bind` rule, `alias_arm_scheme`, `binding_value_scheme` — so a
+/// violation trips there, not in a later run.  `msg` names the site.
 #[allow(
     clippy::debug_assert_with_mut_call,
     reason = "the &mut is union-find path compression, semantically idempotent; skipping it in release is harmless"
@@ -330,10 +286,7 @@ pub fn instantiate(u: &mut Unifier, scheme: &Scheme) -> Ty {
     if !scheme.is_poly() {
         return scheme.ty.clone();
     }
-    // Build comp-var and ty-var rename maps covering both the
-    // non-cyclic quantified sets and the cyclic-binding roots.  Mints
-    // a fresh union-find root per old id so two instantiations never
-    // share state.
+    // A fresh union-find root per old id: two instantiations never share state.
     let mut cm: HashMap<u32, u32> = HashMap::new();
     for v in &scheme.comp_ty_vars {
         cm.insert(v.0, u.fresh_comp_root());
@@ -364,9 +317,7 @@ pub fn instantiate(u: &mut Unifier, scheme: &Scheme) -> Ty {
         cm: cm.clone(),
         tcm: tcm.clone(),
     };
-    // Re-bind each fresh cyclic var root to the substituted binding so the
-    // cycle survives instantiation but lives in fresh union-find slots.
-    // Non-cyclic vars are left as fresh free roots.
+    // Re-binding the fresh roots is what carries the cycle across instantiation.
     for (old, binding) in &scheme.comp_ty_bindings {
         let fresh_root = cm[old];
         let substituted = sm.comp(binding);
@@ -380,11 +331,8 @@ pub fn instantiate(u: &mut Unifier, scheme: &Scheme) -> Ty {
     sm.ty(&scheme.ty)
 }
 
-/// Walk an applied type and collect the comp-var roots that appear as
-/// `CompTy::Var(_)` back-edges, paired with each root's resolved binding
-/// from the unifier.  Bindings are themselves applied (cycle-aware) so
-/// that re-binding fresh roots to them at instantiation time produces a
-/// detached copy of the cyclic structure.
+/// Each cyclic comp-var root in `applied` with its binding.  The bindings are
+/// themselves applied, cycle-aware, so re-binding fresh roots detaches the copy.
 fn snapshot_cyclic_comp_bindings(u: &mut Unifier, applied: &Ty) -> Vec<(u32, CompTy)> {
     u.cyclic_comp_roots_in_ty(applied)
         .into_iter()
@@ -397,9 +345,8 @@ fn snapshot_cyclic_comp_bindings(u: &mut Unifier, applied: &Ty) -> Vec<(u32, Com
         .collect()
 }
 
-/// Mirror of `snapshot_cyclic_comp_bindings` for value-type cycles.  The
-/// canonical case is the streaming-consumer α := Variant {`more {head,
-/// tail: Thunk(α)}, `done | ρ}.
+/// Mirror of `snapshot_cyclic_comp_bindings` for value-type cycles — the
+/// streaming consumer `α := Variant {more {head, tail: Thunk(α)}, done | ρ}`.
 fn snapshot_cyclic_ty_bindings(u: &mut Unifier, applied: &Ty) -> Vec<(u32, Ty)> {
     u.cyclic_ty_roots_in_ty(applied)
         .into_iter()
@@ -412,9 +359,8 @@ fn snapshot_cyclic_ty_bindings(u: &mut Unifier, applied: &Ty) -> Vec<(u32, Ty)> 
         .collect()
 }
 
-/// Simultaneous substitution of type, mode, row, comp-ty, and cyclic
-/// ty-root variables.  `cm` and `tcm` carry the mappings from old cyclic
-/// roots to fresh ones — empty for non-recursive schemes.
+/// Simultaneous substitution over all four variable kinds.  `cm` and `tcm`
+/// carry the cyclic back-edge roots — empty for non-recursive schemes.
 struct SubstMap {
     tm: HashMap<TyVar, TyVar>,
     mm: HashMap<ModeVar, ModeVar>,
@@ -427,12 +373,9 @@ impl SubstMap {
     fn ty(&self, ty: &Ty) -> Ty {
         match ty {
             Ty::Var(TyVar(i)) => {
-                // Cyclic-ty back-edge first: rewrite to the freshly minted
-                // root id when the scheme captured this one as cyclic.
                 if let Some(&fresh) = self.tcm.get(i) {
                     return Ty::Var(TyVar(fresh));
                 }
-                // Otherwise, plain quantified ty var.
                 self.tm
                     .get(&TyVar(*i))
                     .map_or_else(|| ty.clone(), |&f| Ty::Var(f))
@@ -443,10 +386,8 @@ impl SubstMap {
             Ty::Record(r) => Ty::Record(self.row(r)),
             Ty::Variant(r) => Ty::Variant(self.row(r)),
             Ty::Thunk(b) => Ty::Thunk(Box::new(self.comp(b))),
-            // Ground types carry no variables to rename.  Enumerating them
-            // means a new `Ty` constructor with a quantifiable variable
-            // fails the build here instead of being cloned unsubstituted
-            // (instantiation capture).
+            // Enumerated, not `_`, as in `free_ty_inner`: cloning a new
+            // variable-carrying `Ty` unsubstituted would be variable capture.
             Ty::Unit | Ty::Bytes | Ty::Bool | Ty::Int | Ty::Float | Ty::String => ty.clone(),
         }
     }
@@ -464,8 +405,6 @@ impl SubstMap {
     fn comp(&self, cty: &CompTy) -> CompTy {
         match cty {
             CompTy::Var(CompTyVar(i)) => {
-                // Cyclic-comp back-edge: rewrite to the freshly minted
-                // root id when the scheme captured this one as cyclic.
                 let id = *self.cm.get(i).unwrap_or(i);
                 CompTy::Var(CompTyVar(id))
             }

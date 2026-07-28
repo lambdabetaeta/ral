@@ -1,17 +1,13 @@
 //! Live model lists, cached with a TTL, behind a network seam.
 //!
-//! A provider's model list is the provider's to know, not exarch's: API-key
-//! providers list through genai and `ChatGPT` subscriptions list through the
-//! Codex backend. Fetching is **lazy** (the picker pulls a provider's list
-//! when it is shown), **cached** to the XDG cache dir with a TTL, and **manual
-//! entry** is always the fallback — a list that fails to fetch, or that omits
-//! the wanted model, never blocks a selection.
+//! A provider's model list is the provider's to know: API-key providers list
+//! through genai, `ChatGPT` subscriptions through the Codex backend. Fetching
+//! is lazy and never load-bearing — a list that fails, or that omits the
+//! wanted model, still leaves manual entry.
 //!
-//! All network I/O sits behind the [`ModelSource`] trait so `cargo test`
-//! drives the resolution logic and the in-memory memo against a fake and
-//! never touches the network. The tests run [`ModelCatalog::memo_only`] (no
-//! `cache_path`), so the disk cache and the TTL-staleness path are not
-//! exercised by them.
+//! All network I/O sits behind [`ModelSource`], so tests drive the resolution
+//! logic against a fake; they take [`ModelCatalog::memo_only`], leaving the
+//! disk cache and its staleness path unexercised.
 
 use crate::provider::credential::{Credential, CredentialStore};
 use crate::provider::oauth;
@@ -24,80 +20,53 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// How long a cached model list stays fresh. A provider's catalog changes
-/// on the order of weeks; a day keeps the picker snappy on repeat opens
-/// while still picking up new models within a session or two.
+/// How long a cached model list stays fresh — a provider's catalog moves on
+/// the order of weeks.
 const TTL: Duration = Duration::from_hours(24);
 
 const CHATGPT_MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
 
 /// One upstream provider `OpenRouter` can route a given model to — a row of the
-/// `/model` overlay's provider control.
-///
-/// `OpenRouter` fronts several serving
-/// providers per model (`DeepInfra`, Novita, …) that differ in context window and
-/// quantization; this is the picker's view of one such endpoint, distilled from
-/// `OpenRouter`'s per-model `/endpoints` listing.
+/// `/model` overlay's provider control, distilled from the per-model
+/// `/endpoints` listing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderEndpoint {
-    /// The human display name, e.g. `"DeepInfra"`.
     pub provider_name: String,
-    /// The routing slug — what `provider.order` wants in the request body. It is
-    /// the part of the endpoint `tag` before the `/` (`"deepinfra/fp4"` →
-    /// `"deepinfra"`), which equals the `/api/v1/providers` slug.
+    /// What `provider.order` wants in the request body: the endpoint `tag`'s
+    /// prefix, which equals the `/api/v1/providers` slug.
     pub slug: String,
-    /// This endpoint's context window in tokens, when reported — often the
-    /// deciding factor between providers serving the same model.
     pub context_length: Option<u64>,
-    /// The weight quantization (`"fp8"`, `"fp4"`, …), when reported — it bears
-    /// on output quality.
     pub quantization: Option<String>,
 }
 
-/// The seam every fetch of a provider's model list goes through.
-///
-/// The live
-/// implementation talks to genai (model lists) and `OpenRouter`'s REST API
-/// (per-model endpoints); tests substitute an in-memory fake so no suite ever
-/// reaches the network.
+/// The seam every fetch of a provider's model list goes through: live against
+/// genai and `OpenRouter`'s REST API, an in-memory fake in tests.
 pub trait ModelSource {
-    /// Fetch the full model-name list for `id`, or an error message
-    /// describing why the fetch failed (the caller degrades to manual
-    /// entry).
+    /// `id`'s full model-name list.
+    ///
+    /// # Errors
+    /// Returns `Err` with a message describing why the fetch failed; the
+    /// caller degrades to manual entry.
+    fn list(&self, id: &ProviderId) -> Result<Vec<String>, String>;
+
+    /// The upstream serving providers `OpenRouter` lists for `model`. Only
+    /// `OpenRouter` routes, so the picker calls this for nothing else.
     ///
     /// # Errors
     /// Returns `Err` with a message describing why the fetch failed.
-    fn list(&self, id: &ProviderId) -> Result<Vec<String>, String>;
-
-    /// Fetch the upstream serving providers `OpenRouter` lists for `model`, or an
-    /// error message. Only meaningful for `OpenRouter` `vendor/model` ids — the
-    /// only provider that routes — so the picker calls this solely for an
-    /// `OpenRouter` selection.
-    ///
-    /// # Errors
-    /// Returns `Err` with a message describing why the endpoint fetch failed.
     fn endpoints(&self, model: &str) -> Result<Vec<ProviderEndpoint>, String>;
 }
 
-/// The live source: builds a genai client per provider from the in-memory
-/// credentials and calls `all_model_names`.
-///
-/// One short-lived tokio runtime
-/// backs each fetch — model listing happens at most a handful of times per
-/// session, so a dedicated runtime per call is cheaper than holding one
-/// open for the picker's whole lifetime.
-///
-/// `Clone` is cheap (a small key map plus a clone of the shared genai
-/// client) and lets the picker hand a copy to a background fetch thread
-/// without sharing the catalog's caches.
+/// The live source: genai's `all_model_names` over the in-memory credentials.
+/// `Clone` is cheap, which is what lets the picker hand a copy to a background
+/// fetch thread without sharing the catalog's caches.
 #[derive(Clone)]
 pub struct LiveSource {
-    /// Each resolved credential, cloned out of the store so a background
-    /// listing thread needs neither the store nor the UI thread. OAuth cells
-    /// stay shared, so a refreshed token is visible to the catalog request.
+    /// Cloned out of the store so a listing thread needs neither the store nor
+    /// the UI thread; OAuth cells stay shared, so a refreshed token is visible.
     credentials: BTreeMap<ProviderId, Credential>,
-    /// One genai client, reused across every provider's listing call — the
-    /// per-provider endpoint and key ride the per-call `ProviderConfig`.
+    /// One client for every provider's listing call — the endpoint and key ride
+    /// the per-call `ProviderConfig`.
     client: Client,
 }
 
@@ -116,18 +85,16 @@ impl LiveSource {
         }
     }
 
-    /// Admit one freshly-resolved credential into the live source — the
-    /// mid-session counterpart of the startup clone in [`Self::new`], so a
-    /// `/model` listing for an account signed in this session (or one whose
-    /// token just refreshed) reads the same credential the store now holds,
-    /// with no catalog rebuild.
+    /// Admit a credential resolved after startup — a sign-in this session, say
+    /// — so its listing reads what the store now holds, with no rebuild.
     pub fn add_credential(&mut self, id: ProviderId, credential: Credential) {
         self.credentials.insert(id, credential);
     }
 }
 
-/// A short-lived current-thread runtime for one blocking listing call.
-/// `what` names the caller in the build-failure message.
+/// A runtime for one blocking listing call — listing happens a handful of
+/// times a session, so a runtime per call beats holding one open. `what` names
+/// the caller in the build-failure message.
 fn blocking_runtime(what: &str) -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -187,12 +154,9 @@ impl ModelSource for LiveSource {
 
 impl LiveSource {
     fn list_api_key(&self, id: &ProviderId, key: &str) -> Result<Vec<String>, String> {
-        // Pass the provider's endpoint (when it has a custom one) and the
-        // in-memory key explicitly, so listing does not depend on the
-        // client's auth resolver being consulted for a catalog request. The
-        // endpoint comes from the `ProviderId` — the single source — so this
-        // does not restate provider knowledge. A custom provider lists through
-        // its declared endpoint and adapter exactly as a famous one does.
+        // Endpoint and key passed explicitly, so a catalog request never leans
+        // on the client's auth resolver. Both come from the `ProviderId`, so a
+        // custom provider lists exactly as a famous one does.
         let provider_config = ProviderConfig {
             endpoint: id.endpoint().map(Endpoint::from_owned),
             auth: Some(AuthData::from_single(key.to_owned())),
@@ -206,13 +170,11 @@ impl LiveSource {
             .map_err(|e| format!("list models for {}: {e}", id.label()))
     }
 
-    /// `GET /backend-api/codex/models?client_version=<codex cli version>` is
-    /// the subscription catalog. The `client_version` is the pinned real Codex
-    /// CLI version ([`oauth::codex_client_version`]), not exarch's own — the
-    /// backend gates the returned models on it, so a low version yields an empty
-    /// list. It is authenticated with the same live OAuth cell as a Responses
-    /// request, so a refreshed token is used without rebuilding the catalog
-    /// source.
+    /// The subscription catalog. `client_version` must be a real Codex CLI
+    /// version (`oauth::codex_client_version`), never exarch's own: the backend
+    /// gates the returned models on it and answers a low one with an empty
+    /// list. Authenticated from the live OAuth cell, so a token refreshed here
+    /// needs no new source.
     fn list_chatgpt(
         id: &ProviderId,
         cell: &std::sync::Arc<std::sync::Mutex<oauth::OAuthToken>>,
@@ -263,9 +225,8 @@ struct CodexModel {
     slug: String,
 }
 
-/// `OpenRouter`'s `/endpoints` envelope: the model object carries the serving
-/// `endpoints` array. Only the fields the picker shows (and the routing slug)
-/// are read; the rest of each entry (pricing, uptime, latency) is ignored.
+/// `OpenRouter`'s `/endpoints` envelope; only the fields the picker shows are
+/// read, and the rest of each entry (pricing, uptime, latency) ignored.
 #[derive(Deserialize)]
 struct EndpointsResponse {
     data: EndpointsData,
@@ -289,8 +250,7 @@ struct EndpointWire {
 }
 
 impl ProviderEndpoint {
-    /// Distil a wire endpoint into the picker's view, deriving the routing slug
-    /// from the `tag` prefix (the whole tag when it carries no `/`).
+    /// A tag carrying no `/` is its own slug — a provider with one variant.
     fn from_wire(wire: EndpointWire) -> Self {
         let slug = wire
             .tag
@@ -306,44 +266,35 @@ impl ProviderEndpoint {
     }
 }
 
-/// One provider's cached list and when it was fetched.
 #[derive(Serialize, Deserialize, Clone)]
 struct CacheEntry {
-    /// Unix seconds at fetch time. Compared against [`TTL`] for staleness.
+    /// Unix seconds at fetch time, checked against [`TTL`].
     fetched_at: u64,
     models: Vec<String>,
 }
 
-/// The on-disk cache: a provider→entry map serialised as JSON under the
-/// XDG cache dir.
+/// The on-disk cache, JSON under the XDG cache dir.
 #[derive(Serialize, Deserialize, Default)]
 struct CacheFile {
-    /// Keyed by the provider's stable label (field `.0` of [`ProviderKind::info`]),
-    /// so the file stays readable and survives reordering the enum.
+    /// Keyed by [`ProviderId::label`], so the file stays readable and outlives
+    /// any reordering of [`ProviderKind`].
     providers: BTreeMap<String, CacheEntry>,
 }
 
-/// The model catalog: a live (or fake) [`ModelSource`] in front of the
-/// XDG-cached, TTL'd lists.
-///
-/// Holds a per-process in-memory copy too, so a
-/// provider's list is fetched at most once per session even before the
-/// disk cache is consulted again.
+/// A [`ModelSource`] in front of the XDG-cached, TTL'd lists, plus a
+/// per-process memo so a provider's list is fetched at most once a session.
 pub struct ModelCatalog<S: ModelSource> {
     source: S,
-    /// `None` disables the disk cache (tests); `Some` is the JSON cache
-    /// file path under `$XDG_CACHE_HOME/exarch/models.json`.
+    /// `None` disables the disk cache; `Some` is `<xdg cache>/models.json`.
     cache_path: Option<PathBuf>,
     memo: BTreeMap<ProviderId, Vec<String>>,
-    /// In-session per-model serving-provider lists, keyed by `OpenRouter` model
-    /// id. Memo-only (no disk cache): provider availability is volatile and the
-    /// fetch is cheap, so it is refetched once per session rather than persisted.
+    /// Keyed by `OpenRouter` model id. Memo-only: serving-provider availability
+    /// is volatile and the fetch cheap, so it is refetched, never persisted.
     endpoints_memo: BTreeMap<String, Vec<ProviderEndpoint>>,
 }
 
 impl<S: ModelSource> ModelCatalog<S> {
-    /// A catalog backed by `source`, persisting to `app`'s standard XDG
-    /// cache path when one resolves.
+    /// A catalog persisting to `app`'s XDG cache path, when one resolves.
     pub fn new(source: S, app: crate::bootstrap::App) -> Self {
         Self {
             source,
@@ -353,9 +304,8 @@ impl<S: ModelSource> ModelCatalog<S> {
         }
     }
 
-    /// A catalog with no disk cache — the in-memory memo only. Tests, and
-    /// any caller that must never touch a user's cache dir, take this
-    /// instead of [`Self::new`].
+    /// A catalog with the memo alone — for tests, and any caller that must
+    /// never touch a user's cache dir.
     pub fn memo_only(source: S) -> Self {
         Self {
             source,
@@ -365,23 +315,20 @@ impl<S: ModelSource> ModelCatalog<S> {
         }
     }
 
-    /// `model`'s serving providers if already fetched this session, without
-    /// touching the network — the picker seeds instantly from this and spawns a
-    /// background fetch (through [`Self::source`]) only on a memo miss.
+    /// `model`'s serving providers if already fetched this session. The picker
+    /// seeds from this and spawns a background fetch only on a miss.
     pub fn cached_endpoints(&self, model: &str) -> Option<Vec<ProviderEndpoint>> {
         self.endpoints_memo.get(model).cloned()
     }
 
-    /// Fold a freshly-fetched serving-provider list into the in-session memo.
-    /// The picker fetches on a background thread and hands the result back here,
-    /// on the main thread, mirroring [`Self::record`] for model lists.
+    /// Fold a background fetch's result into the memo, on the main thread —
+    /// [`Self::record`]'s counterpart for serving providers.
     pub fn record_endpoints(&mut self, model: &str, endpoints: Vec<ProviderEndpoint>) {
         self.endpoints_memo.insert(model.to_string(), endpoints);
     }
 
-    /// `id`'s model list. Served from the in-memory memo, then a fresh
-    /// disk-cache entry, then a live fetch (which refreshes both caches).
-    /// `None` when the fetch fails — callers degrade to manual entry.
+    /// `id`'s model list: the memo, then a fresh disk entry, then a live fetch
+    /// that refreshes both. `None` on failure — callers degrade to manual entry.
     pub fn list(&mut self, id: &ProviderId) -> Option<Vec<String>> {
         if let Some(models) = self.memo.get(id) {
             return Some(models.clone());
@@ -396,10 +343,8 @@ impl<S: ModelSource> ModelCatalog<S> {
         Some(models)
     }
 
-    /// `id`'s list if it is already cached (in-memory memo or a fresh
-    /// disk entry), without ever fetching. The picker calls this on open to
-    /// fill instantly from cache and spawns a background fetch only for the
-    /// providers this returns `None` for.
+    /// `id`'s list if already cached, never fetching. `Listing::open` fills
+    /// from this on open and spawns a fetch only where it returns `None`.
     pub fn cached(&mut self, id: &ProviderId) -> Option<Vec<String>> {
         if let Some(models) = self.memo.get(id) {
             return Some(models.clone());
@@ -409,24 +354,20 @@ impl<S: ModelSource> ModelCatalog<S> {
         Some(models)
     }
 
-    /// Fold a freshly-fetched list into both caches. The picker fetches on
-    /// background threads (so the UI shows "loading…" rather than freezing)
-    /// and hands the results back here, on the main thread, so the disk
-    /// write stays single-threaded.
+    /// Fold a freshly-fetched list into both caches. Fetches run on background
+    /// threads and land here, on the main thread, so the disk write is serial.
     pub fn record(&mut self, id: &ProviderId, models: Vec<String>) {
         self.write_disk(id, &models);
         self.memo.insert(id.clone(), models);
     }
 
-    /// The source, cloned, for a background fetch thread. The thread fetches
-    /// through the [`ModelSource`] seam and reports back; the catalog's
-    /// caches are touched only on the main thread via [`Self::record`].
+    /// The seam, for a background thread to clone; it reports back through
+    /// [`Self::record`] rather than touching the caches itself.
     pub fn source(&self) -> &S {
         &self.source
     }
 
-    /// A non-stale disk-cache entry for `id`, or `None` when the cache is
-    /// absent, unreadable, missing this provider, or stale.
+    /// `None` when the cache is absent, unreadable, missing `id`, or stale.
     fn fresh_from_disk(&self, id: &ProviderId) -> Option<Vec<String>> {
         let path = self.cache_path.as_ref()?;
         let file = read_cache(path)?;
@@ -435,9 +376,8 @@ impl<S: ModelSource> ModelCatalog<S> {
         (age < TTL.as_secs()).then(|| entry.models.clone())
     }
 
-    /// Merge `models` into the disk cache under `kind`, stamping the fetch
-    /// time. Best-effort: a cache the process cannot write is not fatal —
-    /// the in-memory memo still serves the session.
+    /// Best-effort: a cache the process cannot write is not fatal, since the
+    /// memo still serves the session.
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:silent:models-cache-write] persists the model catalog cache; registry infra, not turn-time data I/O"
@@ -464,16 +404,14 @@ impl<S: ModelSource> ModelCatalog<S> {
 }
 
 impl ModelCatalog<LiveSource> {
-    /// Admit a freshly signed-in account without exposing the catalog's
-    /// generic source to arbitrary mutation.
+    /// Admit a freshly signed-in account without exposing the generic source.
     pub fn add_credential(&mut self, id: ProviderId, credential: Credential) {
         self.source.add_credential(id, credential);
     }
 }
 
-/// `$XDG_CACHE_HOME/<app>/models.json`, or `None` when no cache base
-/// resolves (`$HOME` unset and no absolute override) — the catalog then
-/// runs memo-only.
+/// `None` when no cache base resolves (`$HOME` unset, no absolute override) —
+/// the catalog then runs memo-only.
 fn cache_path(app: crate::bootstrap::App) -> Option<PathBuf> {
     let dir = app.xdg_dir(ral_core::path::basedir::XdgKind::Cache);
     dir.is_absolute().then(|| dir.join("models.json"))
@@ -488,17 +426,9 @@ fn read_cache(path: &PathBuf) -> Option<CacheFile> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Resolve a user-supplied `--model` name to the provider that should
-/// serve it.
-///
-/// Prefers the available provider whose live list contains the
-/// name; failing that, falls back to a name-shape match (an `openrouter`
-/// slug like `vendor/model` resolves to `OpenRouter` when available). Errors
-/// clearly when no available provider can plausibly serve the name.
-///
-/// `catalog.list` may fetch, so this is a network-touching call when the
-/// name is not yet cached — it runs only on an explicit `--model` override,
-/// never on the common path.
+/// Resolve a `--model` name to the provider that should serve it: the
+/// available provider whose live list holds it, failing that a name-shape
+/// match. Fetches on a cache miss, so it runs only for an explicit `--model`.
 ///
 /// # Errors
 /// Returns `Err` if no provider is available, or if no available provider
@@ -518,10 +448,9 @@ pub fn resolve_model_provider<S: ModelSource>(
             return Ok(id.clone());
         }
     }
-    // No listed match — fall back to the name's shape. A `vendor/model`
-    // slug is an OpenRouter convention; bare names go to the single
-    // available provider when there is exactly one, so a scripted run with
-    // one key set need not name the provider.
+    // No listed match — fall back to the name's shape. `vendor/model` is an
+    // OpenRouter convention; a bare name goes to the sole available provider,
+    // so a scripted run with one key set need not name it.
     if name.contains('/')
         && let Some(id) = available
             .iter()
@@ -539,13 +468,10 @@ pub fn resolve_model_provider<S: ModelSource>(
     ))
 }
 
-/// The error when the credential store resolved no provider at all — the
-/// user has set no key, so no name can be served.
 fn no_provider_error() -> String {
     "no provider available — set a provider API key (e.g. ANTHROPIC_API_KEY)".into()
 }
 
-/// The available providers' labels, comma-joined for an error message.
 fn available_labels(available: &[ProviderId]) -> String {
     available
         .iter()
@@ -554,13 +480,9 @@ fn available_labels(available: &[ProviderId]) -> String {
         .join(", ")
 }
 
-/// Resolve an explicit `--provider` label to the matching available provider,
-/// pinning it verbatim.
-///
-/// No model-listing lookup happens here — that is the
-/// whole point of pinning — so the caller may then name a model the provider
-/// does not advertise. Errors clearly when the label matches no available
-/// provider.
+/// Resolve an explicit `--provider` label, pinning it verbatim. No listing
+/// lookup — that is the point of pinning, so the caller may then name a model
+/// the provider does not advertise.
 ///
 /// # Errors
 /// Returns `Err` if no provider is available, or if no available provider's
@@ -585,13 +507,12 @@ mod tests {
     use std::cell::Cell;
     use std::sync::Arc;
 
-    /// A famous provider's id — the common case in these tests.
     fn fam(kind: ProviderKind) -> ProviderId {
         ProviderId::Famous(kind)
     }
 
-    /// A custom provider's id with `label`; the other facts are immaterial to
-    /// the catalog/resolver (they key on the label).
+    /// The facts besides `label` are immaterial: catalog and resolver key on
+    /// the label alone.
     fn custom(label: &str) -> ProviderId {
         ProviderId::Custom(Arc::new(crate::provider::CustomProvider {
             label: label.into(),
@@ -601,8 +522,7 @@ mod tests {
         }))
     }
 
-    /// A fake source returning canned lists and counting fetches, so tests
-    /// can assert the memo and TTL prevent redundant network calls.
+    /// Counts fetches, so a test can assert the memo prevents a second one.
     struct FakeSource {
         lists: BTreeMap<ProviderId, Result<Vec<String>, String>>,
         endpoints: BTreeMap<String, Result<Vec<ProviderEndpoint>, String>>,
@@ -650,8 +570,6 @@ mod tests {
         m
     }
 
-    /// A listed provider returns its models, and a second `list` is served
-    /// from the in-memory memo without a second fetch.
     #[test]
     fn lists_then_memoises() {
         let source = FakeSource::new(one(
@@ -671,8 +589,6 @@ mod tests {
         );
     }
 
-    /// The routing slug is the endpoint `tag` prefix; a tag with no `/`
-    /// (a single-variant provider) is its own slug.
     #[test]
     fn endpoint_slug_is_tag_prefix() {
         let with_variant = ProviderEndpoint::from_wire(EndpointWire {
@@ -691,7 +607,6 @@ mod tests {
         assert_eq!(bare.slug, "streamlake");
     }
 
-    /// Recorded serving providers are served back from the in-session memo.
     #[test]
     fn endpoints_memo_round_trips() {
         let model = "deepseek/deepseek-chat";
@@ -713,8 +628,6 @@ mod tests {
         assert_eq!(cat.cached_endpoints(model), Some(fetched));
     }
 
-    /// A custom provider lists through the same catalog/source seam as a
-    /// famous one, keyed by its label.
     #[test]
     fn custom_provider_lists_through_catalog() {
         let id = custom("local-llama");
@@ -726,9 +639,8 @@ mod tests {
         );
     }
 
-    /// A failed fetch degrades to `None` (the picker then offers manual
-    /// entry); the reason is surfaced by the source seam, which the picker
-    /// reads directly for its note.
+    /// The catalog drops the reason on the floor; the picker reads it off the
+    /// source seam instead, for the note beside its manual-entry row.
     #[test]
     fn failed_fetch_is_none_with_reason_at_the_source() {
         let mut lists = BTreeMap::new();
@@ -743,7 +655,6 @@ mod tests {
         );
     }
 
-    /// `--model` resolves to the available provider whose list contains it.
     #[test]
     fn resolve_prefers_listing_match() {
         let mut lists = BTreeMap::new();
@@ -763,8 +674,6 @@ mod tests {
         );
     }
 
-    /// `--model` resolves to a custom provider whose live list contains the
-    /// name, exactly as it does for a famous one.
     #[test]
     fn resolve_prefers_custom_listing_match() {
         let llama = custom("local-llama");
@@ -782,7 +691,6 @@ mod tests {
         );
     }
 
-    /// A `vendor/model` slug falls back to `OpenRouter` when no list matches.
     #[test]
     fn resolve_slug_falls_back_to_openrouter() {
         let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
@@ -793,8 +701,8 @@ mod tests {
         );
     }
 
-    /// A single available provider serves a bare name even when its list
-    /// does not contain it — a scripted run need not name the provider.
+    /// Even when its list does not contain the name — a scripted run with one
+    /// key set need not name the provider.
     #[test]
     fn resolve_bare_name_to_sole_provider() {
         let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
@@ -805,8 +713,6 @@ mod tests {
         );
     }
 
-    /// An unknown name with several providers and no slug shape errors
-    /// clearly rather than guessing.
     #[test]
     fn resolve_unknown_with_many_providers_errors() {
         let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
@@ -815,7 +721,6 @@ mod tests {
         assert!(err.contains("not listed"), "got: {err}");
     }
 
-    /// No available provider is a clear error, not a panic.
     #[test]
     fn resolve_with_no_providers_errors() {
         let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
@@ -823,8 +728,7 @@ mod tests {
         assert!(err.contains("no provider available"), "got: {err}");
     }
 
-    /// `--provider` pins by label with no catalog lookup — the point being to
-    /// reach a model the provider does not advertise.
+    /// No catalog is even threaded through — pinning skips the lookup.
     #[test]
     fn pin_provider_matches_by_label() {
         let available = [fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)];
@@ -834,7 +738,6 @@ mod tests {
         );
     }
 
-    /// A pin matches a custom provider by its config-map label just the same.
     #[test]
     fn pin_provider_matches_custom_label() {
         let llama = custom("local-llama");
@@ -845,8 +748,7 @@ mod tests {
         );
     }
 
-    /// Pinning an unavailable provider names the available ones rather than
-    /// silently falling back.
+    /// The error names the available providers rather than falling back to one.
     #[test]
     fn pin_unavailable_provider_errors() {
         let available = [fam(ProviderKind::Anthropic)];
@@ -855,7 +757,6 @@ mod tests {
         assert!(err.contains("anthropic"), "got: {err}");
     }
 
-    /// Pinning with no providers at all is a clear error, not a panic.
     #[test]
     fn pin_with_no_providers_errors() {
         let err = resolve_pinned_provider("anthropic", &[]).unwrap_err();

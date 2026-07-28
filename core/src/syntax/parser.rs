@@ -1,28 +1,16 @@
-//! Parser: token stream → AST.
+//! Recursive-descent parser: [`crate::syntax::lexer`] tokens → AST.
 //!
-//! Recursive-descent over the [`crate::syntax::lexer`] output.  The grammar is
-//! statement-oriented: a *program* is a sequence of statements separated
-//! by newlines or `;`.  A *statement* is either a [binding][Parser::parse_binding_opt]
-//! or a [chain][Parser::parse_chain] of `?`-separated `bg-pipeline`s; a
-//! *bg-pipeline* is a [pipeline][Parser::parse_pipeline] with an optional
-//! trailing `&`; a *pipeline* is `|`-connected stages; a *stage* is
-//! `return`, `if`, `case`, or a command.  `|`, `?`, `,`, and `=` are
-//! continuation tokens — newlines around them are absorbed.
+//! The grammar is statement-oriented: a program is statements separated by
+//! newlines or `;`; a statement is a `let` binding or a `?`-chain of
+//! `|`-pipelines, each arm optionally backgrounded with `&`; a stage is
+//! `return`, `if`, `case`, a control operator, or a command.  Newlines bend
+//! around continuations — freely either side of `|`, one before `?`, any
+//! number after a binder's `=` — and inside `[…]` the lexer drops them.
 //!
-//! The let-RHS chain is intentionally narrower than the statement chain —
-//! see [`Parser::parse_binding_opt`].
-//!
-//! Each statement-list element is wrapped in an [`Stmt`] that carries the
-//! source span of the statement's first token.  The elaborator stamps that
-//! span on the IR it emits, so the parser never has to thread a span
-//! through every constructor.
-//!
-//! Arithmetic inside `$[...]` is parsed by a small Pratt sub-parser
-//! ([`Parser::parse_expr_prec`]) over the token stream the *outer*
-//! lexer produced for the expression block: no re-lex hop, no raw
-//! substring round-trip.  The lexer also fuses `&&` / `||` for us
-//! (see `lexer::Lexer::scan_expr_block`) so Pratt sees the same
-//! bare-word logical operators it would outside any nesting.
+//! Each [`Stmt`] carries the span of its own tokens and the elaborator stamps
+//! that span on the IR it emits, so no constructor here threads a span.
+//! Arithmetic inside `$[…]` is a Pratt sub-parser over the tokens the outer
+//! lexer already produced for the block: no re-lex, no substring round trip.
 
 use crate::source::{Span, Spanned};
 use crate::syntax::ast::{
@@ -37,21 +25,13 @@ use std::fmt;
 
 /// Why a parse failed because the input *stopped short* rather than being
 /// malformed — the REPL reads another line instead of reporting an error.
-///
-/// Each arm names a production the parser was midway through when it ran
-/// out of tokens.  The lexer-origin arms mirror the still-open
-/// [`LexErrorKind`] kinds (see [`LexErrorKind::is_incomplete`]); the
-/// parser-origin arm covers a binder that has its `=` but no right-hand
-/// side yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Incompleteness {
-    /// A string, balanced `{}` / `[]`, or `$(…)` ran past end of input.
+    /// A string, balanced `{}` / `[]`, or `$(…)` ran past end of input —
+    /// exactly the kinds [`LexErrorKind::is_incomplete`] admits.
     UnclosedLexeme,
-    /// A `let` binding consumed its `=` but reached end of input before
-    /// the right-hand side.
     BinderAwaitingRhs,
-    /// A continuation token — a pipeline `|`, a chain `?`, or an
-    /// `if` / `elsif` / `else` keyword — was consumed, then the input ran
+    /// A `|`, `?`, `if`, `elsif`, or `else` was consumed and the input ran
     /// out before the stage, branch, or body it demands.
     AwaitingContinuation,
 }
@@ -59,20 +39,12 @@ pub enum Incompleteness {
 #[derive(Debug)]
 pub struct ParseError {
     pub message: String,
-    /// Byte range of the offending token (or the opening delimiter, for
-    /// lexer-originating errors).  `None` when the parser had no token
-    /// to point at — practically rare given that the lexer always emits
-    /// an `Eof` token, but kept optional per the source.rs idiom.
+    /// The offending token, or the opening delimiter for a lexer error.
     pub span: Option<Span>,
-    /// Set when the failure originated in the lexer; carries enough
-    /// structure for the diagnostic layer to draw multi-label reports
-    /// (opening delimiter + EOF position + nested-form note).  `None`
-    /// for parser-originating errors, which still render as a single
-    /// label.
+    /// Set for a lexer-originating failure; carries the structure the
+    /// diagnostic layer needs to draw more than one label.
     pub lex_kind: Option<LexErrorKind>,
-    /// Set when the failure is the input merely running short of a
-    /// complete program.  Drives REPL line continuation: the parser's own
-    /// signal that the user is mid-typing.
+    /// Set when the input merely ran short; drives REPL line continuation.
     pub incompleteness: Option<Incompleteness>,
 }
 
@@ -110,21 +82,14 @@ impl From<LexError> for ParseError {
 /// Parse `source` into a statement list under a placeholder file id.
 ///
 /// # Errors
-/// Returns `Err` if lexing fails, or if the token stream is not a valid
-/// program — an unexpected token, an unclosed construct, or input that ends
-/// before a production completes.
+/// Returns `Err` if lexing fails or the tokens do not form a valid program.
 pub fn parse(source: &str) -> Result<Vec<Stmt>, ParseError> {
     parse_with(source, crate::source::FileId::DUMMY)
 }
 
 /// Returns `true` when `input` is incomplete and the user's next line should
-/// be joined to it before parsing.
-///
-/// This runs the real parser and asks
-/// whether it failed because the input ran short — an open `'…'`, `"…"`,
-/// `!{…}`, `$(…)`, or an unbalanced `{` / `[`, or a `let` still awaiting
-/// its right-hand side.  The verdict is the parser's own structured
-/// [`Incompleteness`] signal.
+/// be joined to it before parsing.  Runs the real parser and reads its own
+/// [`Incompleteness`] verdict rather than guessing from the raw text.
 pub fn needs_continuation(input: &str) -> bool {
     matches!(
         parse(input),
@@ -138,9 +103,7 @@ pub fn needs_continuation(input: &str) -> bool {
 /// Parse `source` into a statement list, attributing spans to `file`.
 ///
 /// # Errors
-/// Returns `Err` if lexing fails, or if the token stream is not a valid
-/// program — an unexpected token, an unclosed construct, or input that ends
-/// before a production completes.
+/// Returns `Err` if lexing fails or the tokens do not form a valid program.
 pub fn parse_with(source: &str, file: crate::source::FileId) -> Result<Vec<Stmt>, ParseError> {
     let tokens = lexer::lex_with(source, file)?;
     Parser::run_complete(tokens, Parser::parse_program)
@@ -148,9 +111,8 @@ pub fn parse_with(source: &str, file: crate::source::FileId) -> Result<Vec<Stmt>
 
 // ── Parser ───────────────────────────────────────────────────────────────
 
-/// Loop-body verdict for [`Parser::parse_separated_until`]: keep going
-/// after this item, or treat it as the last (caller may consume a
-/// trailing comma, then the closing token).
+/// Loop-body verdict for [`Parser::parse_separated_until`]: keep going after
+/// this item, or treat it as the last one.
 enum SepFlow {
     Cont,
     Stop,
@@ -159,14 +121,9 @@ enum SepFlow {
 struct Parser {
     tokens: Vec<(Token, Span)>,
     pos: usize,
-    /// Current depth of recursive descent through nesting-introducing
-    /// productions.  Each of the three mutually-recursive sub-grammars
-    /// passes through one guarded chokepoint per level —
-    /// [`Parser::parse_primary`] (values), [`Parser::parse_expr_atom`]
-    /// (arithmetic), and [`Parser::parse_pattern`] (patterns) — so this
-    /// one counter bounds them all.  Bumped and decremented by
-    /// [`Parser::nested`] — closure-style so the decrement is always
-    /// paired with its increment on every error-return path.
+    /// Descent depth, maintained only by [`Parser::nested`].  Values,
+    /// arithmetic, and patterns each pass through one guarded chokepoint per
+    /// level, so this one counter bounds all three.
     depth: usize,
 }
 
@@ -179,21 +136,9 @@ impl Parser {
         }
     }
 
-    /// Parse a whole token stream and require that `body` consumed every
-    /// token up to `Eof`.  This is the completion contract every
-    /// sub-token-stream site shares: a `body` production that stops early
-    /// — `parse_program` halting at a stray `RBrace`, `parse_word`
-    /// returning after one word, the Pratt parser settling on one
-    /// expression — must not silently drop the remainder.  The first
-    /// leftover token is reported as trailing input, spanning that token —
-    /// except a leftover `RBrace`, which is named as an unmatched `}`
-    /// rather than folded into the generic message, since neither "trailing"
-    /// nor "after the parse completed" holds when the brace sits mid-program.
-    ///
-    /// It is the only constructor reachable from the sub-stream sites
-    /// (`parse_force_body`, `parse_expr_block`, `parse_index_keys`) and
-    /// from `parse_with` at the top level, where it additionally promotes
-    /// a depth-0 `RBrace` from a stop condition into an error.
+    /// Parse a token stream and require that `body` consumed all of it.  The
+    /// sole constructor, so no entry point — top level or sub-stream — can let
+    /// a production that stops early silently drop the remainder.
     fn run_complete<T>(
         tokens: Vec<(Token, Span)>,
         body: impl FnOnce(&mut Self) -> Result<T, ParseError>,
@@ -201,6 +146,9 @@ impl Parser {
         let mut parser = Self::new(tokens);
         let value = body(&mut parser)?;
         if parser.peek() != &Token::Eof {
+            // `parse_program` stops at `}` without consuming it, so a leftover
+            // one means an unmatched brace — which may sit mid-program, where
+            // "trailing input" would be doubly false.
             if parser.peek() == &Token::RBrace {
                 return Err(parser.error("unmatched `}` — no enclosing block is open"));
             }
@@ -212,13 +160,10 @@ impl Parser {
         Ok(value)
     }
 
-    /// Run `body` under one extra level of recursive descent.  Fails
-    /// with a friendly diagnostic when the cap is exceeded — the
-    /// message names the construct ("nesting too deep") and the limit,
-    /// so a reader knows it isn't a syntax problem but a resource
-    /// limit.  Using a closure rather than an RAII guard sidesteps the
-    /// borrow-checker conflict between holding a `&mut self.depth`
-    /// and calling further `&mut self` methods inside the body.
+    /// Run `body` one level deeper, rejecting past the cap so adversarial
+    /// nesting fails cleanly instead of overflowing the host stack.  A closure,
+    /// not an RAII guard: holding `&mut self.depth` would forbid the `&mut
+    /// self` calls the body must make.
     fn nested<T>(
         &mut self,
         body: impl FnOnce(&mut Self) -> Result<T, ParseError>,
@@ -236,10 +181,8 @@ impl Parser {
         self.tokens.get(self.pos).map_or(&Token::Eof, |(t, _)| t)
     }
 
-    /// Span of the current token, or — once the cursor has run past the
-    /// last token — the EOF token's span.  The lexer always emits an
-    /// `Eof`, so this only falls back to a synthetic point span on a
-    /// truly empty token vector (a state real callers never produce).
+    /// Span of the current token, or of the last one past the end.  The lexer
+    /// always emits an `Eof`, so only an empty vector reaches the fallback.
     fn span(&self) -> Span {
         self.tokens
             .get(self.pos)
@@ -287,9 +230,8 @@ impl Parser {
         }
     }
 
-    /// Like [`Self::error`] but flags the failure as the input running
-    /// short of a complete program — the REPL reads another line rather
-    /// than reporting the error.
+    /// Like [`Self::error`], but the REPL reads another line instead of
+    /// reporting it.
     fn incomplete(&self, why: Incompleteness, message: impl Into<String>) -> ParseError {
         ParseError {
             incompleteness: Some(why),
@@ -297,8 +239,7 @@ impl Parser {
         }
     }
 
-    /// Like [`Self::error`] but attaches an explicit `span` rather than
-    /// the span of the current token.
+    /// Like [`Self::error`] but points at `span` rather than the current token.
     fn error_at(span: Span, message: impl Into<String>) -> ParseError {
         ParseError {
             message: message.into(),
@@ -308,11 +249,9 @@ impl Parser {
         }
     }
 
-    /// Guard the point just after a continuation token (`|`, `?`, `if`,
-    /// `elsif`, `else`) has been consumed and is about to demand a stage,
-    /// branch, or body.  If the input ran out here, report it as
-    /// awaiting-continuation so the REPL reads another line instead of
-    /// erroring on the dangling operator.
+    /// Called just after consuming a `|`, `?`, `if`, `elsif`, or `else` that
+    /// now demands a stage, branch, or body: end of input here is the user
+    /// mid-typing, not a dangling operator.
     fn require_continuation(&self, what: &str) -> Result<(), ParseError> {
         if self.peek() == &Token::Eof {
             return Err(self.incomplete(
@@ -323,20 +262,8 @@ impl Parser {
         Ok(())
     }
 
-    /// Capture the byte span covered by `parse`.  Returns `(span, value)`
-    /// where `span` runs from the byte of the token at the current
-    /// position to the end of the last token `parse` consumed —
-    /// collapsing the open-coded
-    /// `let start = self.span(); let v = …; let span = start.join(self.prev_byte_span())`
-    /// recipe at most per-construct span-capture sites (App args,
-    /// Index keys, If cond, Case operands, Return value, …).  Call
-    /// sites lift the result into whatever shape (`Spanned<Box<Ast>>`,
-    /// `Spanned<Ast>`, raw `Span`) the surrounding AST node expects.
-    ///
-    /// Sites that intentionally keep the recipe inline:
-    /// [`Self::parse_command`] (redirect-interleaved arg loop with
-    /// an outer span) and [`Self::parse_control_op`] (multi-output
-    /// production where threading through a closure adds friction).
+    /// Run `parse` and report the span from the current token to the last it
+    /// consumed.
     fn capture_span<T>(
         &mut self,
         parse: impl FnOnce(&mut Self) -> Result<T, ParseError>,
@@ -347,11 +274,8 @@ impl Parser {
         Ok((span, v))
     }
 
-    /// Drive a comma-separated list terminated by `end`.  The closure
-    /// parses one item and signals whether the run continues (`Cont`)
-    /// or that item closes it (`Stop`).  A trailing comma before `end`
-    /// is allowed in either case.  `label` names the construct ("list",
-    /// "map pattern", …) for the error message on a missing separator.
+    /// Drive a comma-separated list terminated by `end`, with a trailing comma
+    /// allowed.  `label` names the construct in the missing-separator error.
     fn parse_separated_until(
         &mut self,
         end: &Token,
@@ -389,12 +313,9 @@ impl Parser {
         let mut stmts = Vec::new();
         self.skip_newlines();
         while self.peek() != &Token::Eof && self.peek() != &Token::RBrace {
-            // `parse_stmt` stops at (but does not consume) the trailing
-            // newline, so the captured span runs from the first token
-            // of the statement to its last — never a separator.
-            // Underlining the full statement is essential for
-            // diagnostics whose offending Val sub-expression has no
-            // span of its own.
+            // `parse_stmt` leaves the newline, so this span never swallows a
+            // separator.  Underlining the whole statement is the only anchor a
+            // diagnostic has when the guilty sub-expression carries no span.
             let (span, kind) = self.capture_span(Self::parse_stmt)?;
             stmts.push(Spanned::new(span, kind));
             self.skip_newlines();
@@ -404,15 +325,9 @@ impl Parser {
 
     /// stmt = binding | chain
     ///
-    /// A `let` binding is a *statement*, never a pipeline stage or chain
-    /// branch — its RHS already absorbs an entire pipeline-and-chain, and
-    /// embedding it deeper would produce an `Ast::Let` in expression
-    /// position (which the elaborator cannot lower).  Catching it here is
-    /// what keeps `parse_stage`'s leading-`let` rejection truly defensive.
-    ///
-    /// The trailing newline is *not* consumed — that's `parse_program`'s
-    /// job — so callers computing the statement's span see only the
-    /// statement's own tokens.
+    /// Peeling `let` off above the chain is what keeps `Ast::Let` out of
+    /// expression position, where the elaborator treats one as unreachable.
+    /// The trailing newline stays for `parse_program`.
     fn parse_stmt(&mut self) -> Result<Ast, ParseError> {
         match self.parse_binding_opt()? {
             Some(binding) => Ok(binding),
@@ -422,24 +337,19 @@ impl Parser {
 
     /// chain = bg-pipeline (NL? '?' bg-pipeline)*
     ///
-    /// Used for the statement-level `?`-chain.  Each arm may carry its
-    /// own trailing `&` (handled inside `parse_bg_pipeline`).  The
-    /// `let`-RHS chain has its own narrower variant, [`parse_chain_no_bg`],
-    /// that rejects per-arm `&`.
+    /// The statement-level chain, whose arms may each carry a trailing `&`.
     fn parse_chain(&mut self) -> Result<Ast, ParseError> {
         self.parse_chain_of(Self::parse_bg_pipeline)
     }
 
-    /// Variant of `parse_chain` for `let` RHS: arms are bare pipelines, so
-    /// per-arm `&` is rejected — see [`Self::parse_binding_opt`].
+    /// The `let`-RHS chain: bare pipeline arms, so a per-arm `&` is rejected —
+    /// see [`Self::parse_binding_opt`].
     fn parse_chain_no_bg(&mut self) -> Result<Ast, ParseError> {
         self.parse_chain_of(Self::parse_pipeline)
     }
 
-    /// Shared shape of both chain parsers: one or more arms separated by
-    /// `?`-continuations.  A singleton chain collapses to the bare arm —
-    /// `Ast::Chain` is reserved for 2+ branches so downstream passes can
-    /// pattern-match on its presence without a length guard.
+    /// A singleton chain collapses to its bare arm, so `Ast::Chain` always
+    /// means two or more branches and downstream passes need no length guard.
     fn parse_chain_of(
         &mut self,
         parse_arm: fn(&mut Self) -> Result<Ast, ParseError>,
@@ -458,8 +368,8 @@ impl Parser {
         })
     }
 
-    /// Consume `?` with at most one preceding newline (the continuation
-    /// rule in §1).  Rewinds and returns false if no `?` follows.
+    /// Consume `?` with at most one preceding newline and none after; rewinds
+    /// and returns false if no `?` follows.
     fn eat_chain_question(&mut self) -> bool {
         let save = self.pos;
         if self.peek() == &Token::Newline {
@@ -475,13 +385,10 @@ impl Parser {
     }
 
     /// pipeline = stage ('|' stage)*
-    ///
-    /// `|` is a continuation token: a newline before or after `|` is ignored.
     fn parse_pipeline(&mut self) -> Result<Ast, ParseError> {
         let (first_span, first) = self.capture_span(Self::parse_stage)?;
         let mut stages = vec![Spanned::new(first_span, first)];
 
-        // `|` is a continuation token: newlines are ignored on either side.
         while self.eat_continuation(&Token::Pipe) {
             self.require_continuation("a pipeline stage")?;
             let (span, stage) = self.capture_span(Self::parse_stage)?;
@@ -489,20 +396,15 @@ impl Parser {
         }
 
         if stages.len() == 1 {
-            // Single stage — unwrap the Stmt and return the stage directly.
             Ok(stages.remove(0).item)
         } else {
             Ok(Ast::Pipeline(stages))
         }
     }
 
-    /// Consume `tok` surrounded by any number of newlines on either side.
-    /// This is the "fully continuation token" rule from SPEC §1: newlines
-    /// before *and* after are absorbed.  Returns true on success; rewinds
-    /// on miss.
-    ///
-    /// The narrower `?` rule — at most one leading newline, zero trailing
-    /// — has its own helper, [`Self::eat_chain_question`].
+    /// Consume `tok` with any number of newlines on either side; rewinds and
+    /// returns false on a miss.  The narrower `?` rule lives in
+    /// [`Self::eat_chain_question`].
     fn eat_continuation(&mut self, tok: &Token) -> bool {
         let save = self.pos;
         self.skip_newlines();
@@ -518,9 +420,8 @@ impl Parser {
 
     /// bg-pipeline = pipeline '&'?
     fn parse_bg_pipeline(&mut self) -> Result<Ast, ParseError> {
-        // Capture the inner pipeline's span *before* checking for `&`,
-        // so a wrapped `Background` underlines just the pipeline (not
-        // the `&` token).
+        // Span captured before the `&` is seen, so a `Background` underlines
+        // the pipeline and not the operator.
         let (inner_span, node) = self.capture_span(Self::parse_pipeline)?;
         if self.peek() == &Token::Ampersand {
             self.advance();
@@ -529,42 +430,23 @@ impl Parser {
         Ok(node)
     }
 
-    /// stage = return-stage | if-stage | case-stage | command | atom-stage
+    /// stage = return-stage | if-stage | case-stage | control-op | command
     ///
-    /// `let` is a statement, not a stage — `parse_stmt` peels it off
-    /// before reaching here.  Seeing it now means the caller embedded
-    /// a binding in pipeline or chain position (`cmd | let x = …`,
-    /// `cmd ? let x = …`); reject it with a clear error rather than
-    /// mis-parse `let` as a command head.
+    /// The dispatch below is also the list of words reserved in stage position.
     fn parse_stage(&mut self) -> Result<Ast, ParseError> {
-        // The plain-word head of the stage decides which dedicated form
-        // (if any) takes over before falling through to `parse_command`.
-        // Each special form is named once here, so the dispatch table
-        // doubles as a list of reserved stage keywords.
         match self.peek().as_plain_word() {
-            // `let` is a statement, not a stage — `parse_stmt` peels it
-            // off before reaching here.  Reaching this arm means the
-            // caller embedded a binding in pipeline or chain position
-            // (`cmd | let x = …`, `cmd ? let x = …`).
+            // `parse_stmt` peels `let` off first, so arriving here means a
+            // binding embedded in pipeline or chain position.
             Some("let") => Err(self.error(
                 "`let` is a statement, not a pipeline stage or chain branch — \
                  move the binding to its own line, or wrap the consumer in a \
                  block: `{ let x = …; … }`",
             )),
-            // `return` lifts a value into a computation — not an
-            // implicit control-flow escape.
             Some("return") => self.parse_return_stage(),
-            // `if`: syntactic stage form, bespoke AST node.
             Some("if") => self.parse_if(),
-            // `case <scrutinee> [<handlers>]`: tag-keyed record of
-            // thunks as the table; the typing rule is bespoke, so it
-            // gets a dedicated AST node rather than going through the
-            // regular command path.
             Some("case") => self.parse_case(),
-            // Control-operator stage forms (`try`/`guard`/`within`/
-            // `grant`/`audit`).  The `^try` external-only form is
-            // unaffected — it begins with `Token::Caret` and falls
-            // through to `parse_command` via the default arm.
+            // `^try` and friends stay external: a `Token::Caret` head yields
+            // no plain word, so it falls to `parse_command` below.
             Some(name) => match ScopeAst::lookup_keyword(name) {
                 Some(kw) => self.parse_control_op(kw),
                 None => self.parse_command(),
@@ -573,18 +455,10 @@ impl Parser {
         }
     }
 
-    /// Parse a fixed-arity control operator described by `kw`: the
-    /// bare-head keyword, followed by exactly `kw.arity` function-
-    /// atom operands and an optional run of trailing I/O redirects.
-    /// `kw.build` destructures the arity-validated operand vector
-    /// into the matching [`ScopeAst`]; the result is wrapped in
-    /// [`Ast::Scope`] carrying any trailing redirects.
-    ///
-    /// Each operand is an atom, not a call argument: the operands fill
-    /// fixed positions rather than a splat-able argument list, so a
-    /// spread (`...x`) is meaningless here and is rejected outright —
-    /// using `parse_arg` would admit an `Ast::Spread` that has no
-    /// control-operator lowering.
+    /// Parse the keyword `kw` names, then exactly `kw.arity` operands and any
+    /// trailing redirects, into an [`Ast::Scope`].  Operands are atoms, not
+    /// arguments: `parse_arg` would admit an `Ast::Spread` that these fixed
+    /// positions have no lowering for.
     fn parse_control_op(&mut self, kw: &ScopeKeyword) -> Result<Ast, ParseError> {
         self.advance(); // consume the head name
         let mut operands = Vec::with_capacity(kw.arity);
@@ -614,12 +488,8 @@ impl Parser {
         Ok(Ast::Scope { op, redirects })
     }
 
-    /// Collect a (possibly empty) run of trailing I/O redirects.  Used
-    /// by [`parse_control_op`], whose operand arity is fixed: any
-    /// `Token::Redirect` after the last operand attaches to the whole
-    /// scope form.  `parse_command` uses its own arg/redirect-
-    /// interleaved loop because plain commands accept redirects
-    /// anywhere among their arguments.
+    /// Only a fixed-arity form can collect redirects at the end like this;
+    /// `parse_command` interleaves them, since a command takes them anywhere.
     fn collect_trailing_redirects(&mut self) -> Result<Vec<Redirect>, ParseError> {
         let mut redirects = Vec::new();
         while !self.at_cmd_end() && matches!(self.peek(), Token::Redirect { .. }) {
@@ -628,13 +498,10 @@ impl Parser {
         Ok(redirects)
     }
 
-    /// case = 'case' atom atom
+    /// case = 'case' atom atom  (scrutinee, then a tag-keyed table of thunks)
     ///
-    /// The first atom is the scrutinee (a variant value); the second is a
-    /// tag-keyed record literal of handler thunks.  Both restrictions are
-    /// enforced by the typechecker rather than the parser — any atom is
-    /// accepted here so that error messages downstream can refer to the
-    /// resolved type.
+    /// Any atom is accepted for either: the typechecker enforces the shapes,
+    /// and its errors can name the resolved type where the parser could not.
     fn parse_case(&mut self) -> Result<Ast, ParseError> {
         self.advance(); // consume `case`
         self.skip_newlines();
@@ -647,15 +514,10 @@ impl Parser {
         })
     }
 
-    /// if = 'if' atom atom [elsif atom atom]* [else atom]
+    /// if = 'if' atom atom ('elsif' atom atom)* ('else' atom)?
     ///
-    /// Both branches are atoms: blocks, force expressions, variables — any value.
-    /// The typechecker ensures they are thunks.  When no else branch is given
-    /// the condition is evaluated for side effects only (type Unit).
-    ///
-    /// The leading `if` and every `elsif` collapse into one `branches`
-    /// vector on the surface — they parse the same way and have the
-    /// same semantics, only the keyword differs.
+    /// Conditions and bodies are any atom; the typechecker demands the thunks.
+    /// The leading `if` and every `elsif` collapse into one `branches` vector.
     fn parse_if(&mut self) -> Result<Ast, ParseError> {
         self.advance(); // consume 'if'
         self.skip_newlines();
@@ -664,7 +526,8 @@ impl Parser {
         let mut else_ = None;
 
         loop {
-            // Allow the elsif/else keywords on the next line.
+            // `elsif` / `else` may open the next line, so newlines are skipped
+            // speculatively and rewound if neither keyword follows.
             let save = self.pos;
             self.skip_newlines();
             match self.peek() {
@@ -683,10 +546,9 @@ impl Parser {
                     break;
                 }
                 _ => {
-                    // Detect old three-block syntax: `if cond then { else }`.
-                    // self.pos == save means skip_newlines() consumed nothing —
-                    // we are on the same line.  A bare `{` here is the missing
-                    // `else` keyword.
+                    // `self.pos == save` means no newline intervened, so a `{`
+                    // on this line is a third block where `else` should be —
+                    // on the next line it would be a statement of its own.
                     if self.pos == save && matches!(self.peek(), Token::LBrace) {
                         return Err(
                             self.error("unexpected `{` after `if` — did you mean `else { … }`?")
@@ -701,8 +563,7 @@ impl Parser {
         Ok(Ast::If { branches, else_ })
     }
 
-    /// Parse one `cond body` pair — shared by the leading `if` arm and
-    /// every `elsif` arm.
+    /// One `cond body` pair, shared by the leading `if` and every `elsif`.
     fn parse_if_branch(&mut self) -> Result<IfBranch, ParseError> {
         let (cond_span, cond) = self.capture_span(Self::parse_atom)?;
         self.skip_newlines();
@@ -730,12 +591,10 @@ impl Parser {
 
     /// binding = 'let' pattern '=' pipeline (NL? '?' pipeline)* '&'?
     ///
-    /// Returns `None` if the next token is not `let`, so callers can fall
-    /// through to the chain-statement path.  The let RHS is intentionally
-    /// narrower than a top-level [`parse_chain`]: per-arm `&` is rejected
-    /// (a chain arm here is a bare `pipeline`), and a single trailing `&`
-    /// backgrounds the *whole* RHS.  This avoids the ambiguity where
-    /// `let x = a ? b &` would otherwise read as backgrounding only `b`.
+    /// `None` when the next token is not `let`, so the caller falls through to
+    /// the chain statement.  This RHS is narrower than [`Self::parse_chain`]:
+    /// a per-arm `&` is rejected and a single trailing one backgrounds the
+    /// whole RHS, so `let x = a ? b &` cannot background `b` alone.
     fn parse_binding_opt(&mut self) -> Result<Option<Ast>, ParseError> {
         if self.peek().as_plain_word() != Some("let") {
             return Ok(None);
@@ -748,7 +607,7 @@ impl Parser {
             }
             _ => return Err(self.error("expected '=' after the binding name in `let`")),
         }
-        // Allow the RHS to start on the next line: `let x =\n  expr`.
+        // The RHS may start on the next line: `let x =\n  expr`.
         self.skip_newlines();
         if self.peek() == &Token::Eof {
             return Err(self.incomplete(
@@ -756,12 +615,10 @@ impl Parser {
                 "expected the right-hand side of the `let` binding",
             ));
         }
-        // `inner_span` covers the chain itself; the wrapping `Background`
-        // (if `&` follows) underlines just the chain, while the
-        // outer `value_span` extends to include the `&` token so the
-        // `Spanned<Box<Ast>>` on `Let.value` covers the full RHS.
+        // Two spans, deliberately: `inner_span` stops before the `&` so a
+        // `Background` underlines only the chain, while `value_span` reaches
+        // past it so `Let.value` covers the whole RHS.
         let (inner_span, mut value) = self.capture_span(Self::parse_chain_no_bg)?;
-        // Trailing `&` backgrounds the whole RHS — see the fn doc.
         if self.peek() == &Token::Ampersand {
             self.advance();
             value = Ast::Background(Spanned::boxed(inner_span, value));
@@ -773,12 +630,9 @@ impl Parser {
         }))
     }
 
-    /// Parse a pattern (binding LHS or lambda params).
-    ///
-    /// The *pattern* grammar's `nested()` chokepoint, and its sole entry:
-    /// list and map patterns recurse back through here for each element,
-    /// so one guard at the top bounds the whole pattern recursion — the
-    /// pattern-grammar analogue of [`Self::parse_primary`].
+    /// A binding LHS or lambda parameter, and the pattern grammar's sole entry:
+    /// list and map patterns recurse back here per element, so the one
+    /// `nested()` guard bounds the whole recursion.
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
         self.nested(|p| match p.peek() {
             Token::LBracket => p.parse_pattern_inner(),
@@ -804,7 +658,6 @@ impl Parser {
     fn parse_pattern_inner(&mut self) -> Result<Pattern, ParseError> {
         self.expect(&Token::LBracket)?;
 
-        // Empty list []
         if self.peek() == &Token::RBracket {
             self.advance();
             return Ok(Pattern::List {
@@ -813,8 +666,7 @@ impl Parser {
             });
         }
 
-        // Peek to determine if this is a map pattern: KEY ':' …  The key
-        // alphabet matches map literals minus the dynamic `$var` key,
+        // Same key alphabet as a map literal minus the dynamic `$var` key,
         // which a pattern cannot bind through.
         let is_map = self.key_colon_at(self.pos, /*allow_deref=*/ false);
 
@@ -830,7 +682,8 @@ impl Parser {
         let mut rest = None;
 
         self.parse_separated_until(&Token::RBracket, "list pattern", |p| {
-            // Rest pattern: ...name — terminal, must be the last element.
+            // `...name` is terminal: `SepFlow::Stop` is what forbids elements
+            // after it.
             if p.peek() == &Token::Spread {
                 p.advance();
                 let Token::Word(Word::Plain(name)) = p.peek().clone() else {
@@ -860,7 +713,7 @@ impl Parser {
 
     fn parse_map_pattern(&mut self) -> Result<Pattern, ParseError> {
         let mut entries = Vec::new();
-        // Mirror the literal side: bare and tag alphabets cannot mix.
+        // Mirrors the literal side: bare and tag alphabets cannot mix.
         let mut alphabet: Option<bool> = None;
 
         self.parse_separated_until(&Token::RBracket, "map pattern", |p| {
@@ -872,7 +725,6 @@ impl Parser {
             )?;
             p.expect(&Token::Colon)?;
             let pattern = p.parse_pattern()?;
-            // Optional default: = atom
             let default = if p.peek().as_plain_word() == Some("=") {
                 p.advance();
                 Some(p.parse_atom()?)
@@ -890,10 +742,8 @@ impl Parser {
         Ok(Pattern::Map(entries))
     }
 
-    /// pkey = IDENT | QUOTED | TAG  (map-pattern keys)
-    ///
-    /// Returns a [`MapKey`] carrying the parsed label.  Map-literal keys
-    /// also accept `$deref`; that lives in [`Self::parse_map_key`].
+    /// pkey = IDENT | QUOTED | TAG — the map-*pattern* key alphabet.  Literals
+    /// additionally admit `$deref`, which is [`Self::parse_map_key`]'s job.
     fn parse_static_key(&mut self) -> Result<MapKey, ParseError> {
         match self.peek().clone() {
             Token::Word(Word::Plain(k)) if lexer::is_ident(&k) => {
@@ -912,11 +762,9 @@ impl Parser {
         }
     }
 
-    /// mapkey = IDENT | QUOTED | deref | TAG  (map-literal keys)
-    ///
-    /// Returns the parsed key form so the caller can construct either
-    /// a [`MapEntry::Entry`] (for static keys) or a [`MapEntry::Deref`]
-    /// (for `$name`) after the `:` and value are consumed.
+    /// mapkey = IDENT | QUOTED | deref | TAG — the map-*literal* key alphabet.
+    /// The form is returned rather than the entry, because which [`MapEntry`]
+    /// to build is only settled once the `:` and value are consumed.
     fn parse_map_key(&mut self) -> Result<MapKeyForm, ParseError> {
         match self.peek().clone() {
             Token::Word(Word::Plain(k)) if lexer::is_ident(&k) => {
@@ -936,9 +784,8 @@ impl Parser {
         }
     }
 
-    /// Enforce that `is_tag` matches the previously-seen alphabet (or
-    /// record it on the first key).  Used by both map literals and map
-    /// patterns to reject alphabet mixing such as `` [host: ..., `dev: ...] ``.
+    /// The first key fixes the alphabet and every later one must match, so
+    /// `` [host: …, `dev: …] `` is rejected in literal and pattern alike.
     fn check_key_alphabet(
         &self,
         seen_is_tag: &mut Option<bool>,
@@ -955,14 +802,9 @@ impl Parser {
 
     /// primary = word | tag | block | collection
     ///
-    /// The *value* grammar's `nested()` chokepoint: every nested value
-    /// form (`{ … }`, `[ … ]`, `!{ … }`, `$[ … ]` via `parse_word`'s
-    /// `Token::Bang`/`Token::Expr` arms) passes through here, so one depth
-    /// check bounds the value recursion.  The sibling sub-grammars carry
-    /// their own chokepoints — [`Self::parse_expr_atom`] (arithmetic) and
-    /// [`Self::parse_pattern`] (patterns) — since neither routes through a
-    /// primary.  The matching cap on *lexer* nesting lives in
-    /// [`lexer::Lexer::scan_token_group`].
+    /// The value grammar's `nested()` chokepoint.  Arithmetic and patterns
+    /// route around it and guard themselves, at [`Self::parse_expr_atom`] and
+    /// [`Self::parse_pattern`]; the lexer caps its delimiter nesting likewise.
     fn parse_primary(&mut self) -> Result<Ast, ParseError> {
         self.nested(|p| match p.peek() {
             Token::LBrace => p.parse_block(),
@@ -973,20 +815,13 @@ impl Parser {
 
     /// `atom = primary ('[' word ']')*`
     ///
-    /// Postfix indexing is folded directly into a single
-    /// `Ast::Index { target, keys }` node — building nested
-    /// one-key-at-a-time `Index` chains here and flattening afterwards
-    /// would do the same work twice.  Variable indexing
-    /// (`$name[key]`) is already resolved by the lexer via adjacency
-    /// and arrives as an `Ast::Index` from `parse_primary`; further
-    /// postfix `[k]`s extend its keys list in place.
+    /// A run of postfix keys becomes one flat `Ast::Index`, never a nest of
+    /// single-key ones.
     fn parse_atom(&mut self) -> Result<Ast, ParseError> {
         let (node_span, node) = self.capture_span(Self::parse_primary)?;
         let mut new_keys: Vec<Spanned<Ast>> = Vec::new();
         while self.peek() == &Token::LBracket && self.next_token_is_adjacent() {
-            // Span the whole `[key]` — including the brackets — so the
-            // caret highlights the part the user wrote, not just the
-            // inner word.
+            // Brackets included, so the caret underlines what the user wrote.
             let (span, k) = self.capture_span(|p| {
                 p.advance();
                 let k = p.parse_word()?;
@@ -998,9 +833,8 @@ impl Parser {
         if new_keys.is_empty() {
             return Ok(node);
         }
-        // Merge into an existing `Ast::Index` if `parse_primary` produced
-        // one (lexer-emitted `$name[k]` arrives this way), so the result
-        // is a single flat `Index` node rather than nested.
+        // `$name[k]` is fused by the lexer and reaches us already an
+        // `Ast::Index`, so extend that node rather than wrapping it.
         Ok(match node {
             Ast::Index {
                 target,
@@ -1019,6 +853,8 @@ impl Parser {
         })
     }
 
+    /// No gap since the previous token — what separates `$xs[0]` (an index)
+    /// from `cmd $xs [0]` (a second argument).
     fn next_token_is_adjacent(&self) -> bool {
         let Some((_, prev_span)) = self.tokens.get(self.pos.saturating_sub(1)) else {
             return false;
@@ -1044,6 +880,7 @@ impl Parser {
                         "`<<` always feeds stdin — drop the file-descriptor prefix",
                     ));
                 }
+                // Reads and here-strings feed fd 0; everything else writes fd 1.
                 let default_fd = u32::from(!matches!(
                     mode,
                     RedirectMode::Read | RedirectMode::HereString
@@ -1082,10 +919,8 @@ impl Parser {
 
     /// arg = atom | '...' atom
     ///
-    /// `...x` in argument position becomes [`Ast::Spread`], distinct
-    /// from `[...x]` (a list literal containing a spread); the
-    /// elaborator uses the distinction to splice `x`'s elements into
-    /// the call's argument list rather than treat the list as one arg.
+    /// The [`Ast::Spread`] node tells the elaborator to splice `x`'s elements
+    /// into the argument list; `[...x]` is a literal and stays one argument.
     fn parse_arg(&mut self) -> Result<Ast, ParseError> {
         if self.peek() == &Token::Spread {
             self.advance();
@@ -1135,12 +970,8 @@ impl Parser {
             }
         }
 
-        // Argument-less, redirect-less heads that are really values
-        // (`$x`, a literal `true`/`false`/`unit`) skip the `Ast::Call`
-        // wrapper so downstream passes see the raw value.  Everything
-        // else becomes a `Call`, regardless of whether the arg / redirect
-        // lists happen to be empty.  `return` cannot reach here — it is a
-        // dedicated stage form intercepted by `parse_stage`.
+        // A bare head that is really a value (`$x`, `true`, `42`) sheds the
+        // `Ast::Call` wrapper so downstream passes see the value itself.
         if args.is_empty() && redirects.is_empty() {
             match head {
                 Head::Value(value) => return Ok(*value),
@@ -1157,16 +988,16 @@ impl Parser {
         })
     }
 
-    /// Byte span of the most recently consumed token.  Used to compute the
-    /// end of an `Ast::Call` once all args have been parsed.  Falls back to
-    /// the current-position span at the start of input.
+    /// Byte span of the last consumed token — where the production that just
+    /// finished ends.  Falls back to the current one at input start.
     fn prev_byte_span(&self) -> Span {
         self.tokens
             .get(self.pos.saturating_sub(1))
             .map_or_else(|| self.span(), |(_, s)| *s)
     }
 
-    /// Check if we've reached the end of a command's argument list.
+    /// End of a command's argument list: a statement end, or the `?` / `|`
+    /// that hands the result to the next arm or stage.
     fn at_cmd_end(&self) -> bool {
         self.at_stmt_end() || self.peek() == &Token::Question || self.peek() == &Token::Pipe
     }
@@ -1221,12 +1052,8 @@ impl Parser {
         }
     }
 
-    /// True at boundaries where a backtick tag should remain nullary instead of
-    /// greedily absorbing the next atom as a payload — separator and closer
-    /// tokens, basically.  In atom contexts (list elements, argument lists,
-    /// command heads) anything that looks like a value following a tag is
-    /// taken as the payload; the writer picks separators (`,` in lists,
-    /// newline in stages) to terminate.
+    /// Separators and closers, at which a backtick tag stays nullary.  It is
+    /// otherwise greedy: anything value-shaped after it becomes the payload.
     fn at_tag_payload_end(&self) -> bool {
         matches!(
             self.peek(),
@@ -1245,17 +1072,9 @@ impl Parser {
         )
     }
 
-    /// force = '!' primary
-    ///
-    /// Consumes the `!` itself so the captured span runs from `!` to
-    /// the end of the forced primary.  Both callers (`parse_word`'s
-    /// `Token::Bang` arm and `parse_expr_atom`'s — `$[!{…}]` inside
-    /// `$[…]`) leave the `!` token unconsumed when delegating here.
-    ///
-    /// Postfix `[k]` indexing is intentionally left to the outer
-    /// `parse_atom` so that `!{cmd}[k]` parses as `Index(Force(Block), k)`
-    /// — force first, then index — rather than the incorrect
-    /// `Force(Index(Block, k))`.
+    /// force = '!' primary — both callers leave the `!` for us, so the span
+    /// starts there.  A `primary`, not an atom: leaving postfix `[k]` to the
+    /// enclosing `parse_atom` makes `!{cmd}[k]` force first and index after.
     fn parse_bang(&mut self) -> Result<Ast, ParseError> {
         let (span, inner) = self.capture_span(|p| {
             p.advance(); // consume `!`
@@ -1264,7 +1083,7 @@ impl Parser {
         Ok(Ast::Force(Spanned::boxed(span, inner)))
     }
 
-    /// Parse a block: { program } or lambda: { |params| body }
+    /// block = '{' program '}' | '{' '|' pattern+ '|' program '}'
     fn parse_block(&mut self) -> Result<Ast, ParseError> {
         self.expect(&Token::LBrace)?;
         if self.peek() == &Token::Pipe {
@@ -1288,13 +1107,9 @@ impl Parser {
                     body,
                 })
             } else {
-                // Currying desugar: { |x y z| body } → { |x| { |y| { |z| body } } }.
-                // Each intermediate lambda's body is a single synthetic
-                // statement wrapping the next-nested lambda.  We reuse the
-                // span of the original body's first statement (so
-                // diagnostics inside the curried form still point at user
-                // code); when the body is empty, fall back to the current
-                // parser position.
+                // Curry: { |x y z| body } → { |x| { |y| { |z| body } } }.  The
+                // synthetic wrapper statements borrow the real body's span, so
+                // a diagnostic inside them still lands on user code.
                 let synth_span: Option<Span> = body
                     .first()
                     .and_then(|s| s.span)
@@ -1318,17 +1133,16 @@ impl Parser {
         }
     }
 
-    /// Parse a collection: list or map.
+    /// collection = list | map — `[]` is the empty list, `[:]` the empty map,
+    /// and anything else is settled by lookahead for a `key:`.
     fn parse_collection(&mut self) -> Result<Ast, ParseError> {
         self.expect(&Token::LBracket)?;
 
-        // Empty list: []
         if self.peek() == &Token::RBracket {
             self.advance();
             return Ok(Ast::List(vec![]));
         }
 
-        // Empty map: [:]
         if self.peek() == &Token::Colon
             && self.tokens.get(self.pos + 1).map(|(t, _)| t) == Some(&Token::RBracket)
         {
@@ -1337,7 +1151,6 @@ impl Parser {
             return Ok(Ast::Map(vec![]));
         }
 
-        // Determine if this is a map or list by looking for bare_word ':' pattern
         let is_map = self.is_map_ahead();
 
         if is_map {
@@ -1348,14 +1161,11 @@ impl Parser {
     }
 
     fn is_map_ahead(&self) -> bool {
-        // A map starts with either `bare_word :` or `...`
-        // Check first non-spread element
         let mut i = self.pos;
-        // Skip leading spread entries to find the first keyed element.  The
-        // spread operand is a whole atom and may nest brackets/braces
-        // (`...[a: 1]`), so the scan tracks depth: only a `,` or `]` at the
-        // operand's own level ends it, not the inner `]` of a nested
-        // collection.
+        // A leading `...` decides nothing, so skip past it.  Its operand is a
+        // whole atom and may nest (`...[a: 1]`), so only a `,` or `]` at the
+        // operand's own level ends it — or the end of input, without which an
+        // unterminated nesting would spin here.
         while matches!(self.tokens.get(i).map(|(t, _)| t), Some(Token::Spread)) {
             i += 1;
             let mut depth = 0usize;
@@ -1374,18 +1184,13 @@ impl Parser {
             }
         }
 
-        // A map literal additionally admits a dynamic `$var` key, so the
-        // lookahead permits a `Deref` head here; map *patterns* do not
-        // (you cannot bind through a dynamic key), so `parse_pattern_inner`
-        // passes `allow_deref = false`.
+        // Literals admit a dynamic `$var` key; patterns cannot bind through
+        // one, so `parse_pattern_inner` passes `false` here.
         self.key_colon_at(i, /*allow_deref=*/ true)
     }
 
-    /// True when `tokens[i]` is a static map key — a bare word, a quoted
-    /// string, or a backtick tag (plus a `$var` deref when `allow_deref`)
-    /// — immediately followed by `:` at `i + 1`.  The single shape test
-    /// shared by the map-literal lookahead ([`Self::is_map_ahead`]) and
-    /// the map-pattern lookahead ([`Self::parse_pattern_inner`]).
+    /// True when `tokens[i]` is a map key followed by `:`.  The one shape test
+    /// behind both lookaheads, so the two cannot drift on what a key is.
     fn key_colon_at(&self, i: usize, allow_deref: bool) -> bool {
         let is_key = matches!(
             self.tokens.get(i).map(|(t, _)| t),
@@ -1416,9 +1221,8 @@ impl Parser {
 
     fn parse_map_entries(&mut self) -> Result<Ast, ParseError> {
         let mut entries = Vec::new();
-        // Track the alphabet of static keys (literal `name` vs tag `` `name ``)
-        // so that mixing them in one literal is rejected at parse time.
-        // Dynamic `$var` keys do not contribute to the alphabet decision.
+        // Bare `name` versus tag `` `name ``; a dynamic `$var` key is unknown
+        // until runtime and so votes for neither alphabet.
         let mut alphabet: Option<bool> = None;
 
         self.parse_separated_until(&Token::RBracket, "map", |p| {
@@ -1449,11 +1253,9 @@ impl Parser {
         Ok(Ast::Map(entries))
     }
 
-    /// Parse interpolation parts from a double-quoted string.  Each
-    /// part carries its own byte range (computed by the lexer in
-    /// `scan_double_quoted`); we transfer that range onto the
-    /// surrounding `Spanned<Ast>`, and on `Force` segments also onto
-    /// the inner block so the forced body has a real span of its own.
+    /// Lower the segments of a double-quoted string.  Each keeps the byte range
+    /// the lexer gave it, and a `Force` segment passes that range to its inner
+    /// block too, so the forced body has a span of its own.
     fn parse_interpolation_parts(parts: &[Spanned<StringPart>]) -> Result<Ast, ParseError> {
         if parts.len() == 1
             && let StringPart::Literal(s) = &parts[0].item
@@ -1481,11 +1283,9 @@ impl Parser {
 
     // ── Arithmetic (Pratt parser) ────────────────────────────────────
 
-    /// Precedence-climbing loop.  The depth-growing recursions —
-    /// parenthesised sub-expressions and unary prefixes — all bottom out
-    /// in [`Self::parse_expr_atom`], which carries the `nested()` guard,
-    /// so this loop needs none of its own: its only self-recursion is the
-    /// binary right-hand side, bounded by the fixed precedence ladder.
+    /// Precedence-climbing loop.  It needs no depth guard of its own: every
+    /// depth-growing recursion bottoms out in [`Self::parse_expr_atom`], and
+    /// the binary right-hand side is bounded by the precedence ladder.
     fn parse_expr_prec(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
         let mut left = self.parse_expr_atom()?;
 
@@ -1505,13 +1305,10 @@ impl Parser {
         Ok(left)
     }
 
-    /// One operand of the arithmetic grammar — and that grammar's single
-    /// `nested()` chokepoint.  Parenthesised sub-expressions recurse via
-    /// [`Self::parse_expr_prec`] and the unary prefixes `-` / `not` recurse
-    /// straight back here, so guarding this one entry bounds every
-    /// depth-growing path inside `$[…]`.  The body lives in
-    /// [`Self::parse_expr_operand`]; this wrapper exists only to apply the
-    /// guard, mirroring [`Self::parse_primary`] and [`Self::parse_pattern`].
+    /// The arithmetic grammar's `nested()` chokepoint, wrapping
+    /// [`Self::parse_expr_operand`].  Parenthesised sub-expressions and the
+    /// unary prefixes both come back here, so this guard bounds every
+    /// depth-growing path inside `$[…]`.
     fn parse_expr_atom(&mut self) -> Result<Expr, ParseError> {
         self.nested(Self::parse_expr_operand)
     }
@@ -1537,10 +1334,8 @@ impl Parser {
                 result
             }
             Token::Bang => {
-                // `parse_bang` always returns `Ast::Force`; lift the
-                // inner `Spanned<Box<Ast>>` directly into `Expr::Force`
-                // so the force-operand span survives into the expression
-                // grammar.
+                // Lifted rather than re-parsed, so the operand span crosses
+                // into the expression grammar intact.
                 let Ast::Force(body) = self.parse_bang()? else {
                     unreachable!("parse_bang yields Ast::Force by construction");
                 };
@@ -1549,10 +1344,9 @@ impl Parser {
             Token::Word(Word::Plain(s)) if s == "-" => {
                 self.advance();
                 let inner = self.parse_expr_atom()?;
-                // Fold the negation into literal atoms so the unary-minus
-                // zero does not force a spurious `Float` side into the
-                // binary operator's type check (e.g. `-1.5` stays `Float`,
-                // `-$x` stays the operand's numeric type via `Int` zero).
+                // Folded into the literal where there is one: the `0 - x`
+                // fallback unifies the two operand types, so it would reject
+                // `-1.5` for pairing an `Int` zero with a `Float`.
                 Ok(match inner {
                     Expr::Integer(n) => Expr::Integer(-n),
                     Expr::Number(n) => Expr::Number(-n),
@@ -1563,9 +1357,8 @@ impl Parser {
             }
             Token::Word(Word::Plain(s)) if s == "not" => {
                 self.advance();
-                // `not` is a prefix operator binding tighter than any binary
-                // op (see `peek_expr_op`'s precedence table): it takes a single
-                // atom, so `not $x == 0` parses as `(not $x) == 0`.
+                // An atom, not an expression: `not` binds tighter than every
+                // binary operator, so `not $x == 0` is `(not $x) == 0`.
                 let inner = self.parse_expr_atom()?;
                 Ok(Expr::Not(Box::new(inner)))
             }
@@ -1578,12 +1371,8 @@ impl Parser {
                 Ok(Expr::Bool(false))
             }
             Token::Word(Word::Plain(s)) => {
-                // Share the numeric shape rule with bare-word literals
-                // ([`WordLiteral::classify`]): an integer must `i64`-parse,
-                // a float must carry a `.`.  A blanket `f64` parse here
-                // would silently admit `inf`, `nan`, and `1e5` as numbers
-                // inside `$[…]` while the rest of the language reads them
-                // as strings.  `true` / `false` are taken by the arms above.
+                // `classify`, not a blanket `f64` parse, so `inf`, `nan`, and
+                // `1e5` stay the strings they are outside `$[…]`.
                 match WordLiteral::classify(&s) {
                     Some(WordLiteral::Int(n)) => {
                         self.advance();
@@ -1599,13 +1388,9 @@ impl Parser {
                     ))),
                 }
             }
-            // `<` / `>` reach the expression grammar as `Redirect` tokens
-            // ([`Self::peek_expr_op`] reads them as comparison operators).
-            // Hitting one in *operand* position means the comparison was
-            // misplaced — most often a digit glued to the operator, since
-            // `$[2>3]` lexes `2` as a file descriptor (`2>`) rather than the
-            // operand of `>`.  Point at the spacing fix instead of naming the
-            // bare `redirect` token.
+            // `<` and `>` arrive as `Redirect` tokens.  One in *operand*
+            // position is usually a digit glued to the operator — `$[2>3]`
+            // lexes `2>` as a file descriptor — so name the spacing.
             Token::Redirect { fd, kind, .. } => {
                 let op = match kind {
                     RedirectMode::Read => Some("<"),
@@ -1631,10 +1416,10 @@ impl Parser {
         }
     }
 
+    /// The operator at the cursor and its binding power, low to high: `||`,
+    /// `&&`, comparison, add/sub, mul/div/mod.  The unary prefixes bind tighter
+    /// than all of these.
     fn peek_expr_op(&self) -> Option<(InfixOp, u8)> {
-        // Precedence (low → high): ||=1, &&=2, comparison=3, add/sub=4,
-        // mul/div/mod=5.  Unary `-` / `not` bind tighter than any binary
-        // and are handled in `parse_expr_atom`.
         match self.peek() {
             Token::Word(Word::Plain(s)) => match s.as_str() {
                 "||" => Some((InfixOp::Or, 1)),
@@ -1653,7 +1438,7 @@ impl Parser {
                 _ => None,
             },
             Token::Word(Word::Slash(s)) if s == "/" => Some((InfixOp::Op(BinaryOp::Div), 5)),
-            // < and > are lexed as Redirect tokens, handle them as expr operators
+            // A bare `<` or `>` lexes as a redirect; here it is a comparison.
             Token::Redirect {
                 fd: None,
                 kind: RedirectMode::Read,
@@ -1676,16 +1461,9 @@ enum InfixOp {
     Or,
 }
 
-/// Parse the pre-lexed key streams of `$name[k1][k2]…` into AST nodes.
-///
-/// The lexer has already lexed each `[k]` body — there is no re-lex
-/// here.  Each stream contains the tokens for a single `word` (an
-/// identifier, a `'quoted'` literal, a `$var` deref, etc.) and we use
-/// the regular [`Parser::parse_word`] entry point so the grammar stays
-/// in one place.  Inner-token spans already attribute to the outer
-/// source, so any diagnostic from the sub-parser underlines the right
-/// column; [`Parser::peek`] yields `Eof` past the slice end, so no
-/// sentinel is needed.
+/// Parse the pre-lexed key streams of `$name[k1][k2]…`, one `word` apiece,
+/// through the ordinary [`Parser::parse_word`].  Their spans still address the
+/// outer source, so a diagnostic from down here underlines the right column.
 fn parse_index_keys(
     keys: Vec<Spanned<Vec<(Token, Span)>>>,
 ) -> Result<Vec<Spanned<Ast>>, ParseError> {
@@ -1697,11 +1475,9 @@ fn parse_index_keys(
         .collect()
 }
 
-/// Build an [`Ast::Index`] from a lexer-fused `$name[k1][k2]…` deref: the
-/// `$name` head becomes the indexed target and each key stream is parsed
-/// by [`parse_index_keys`].  Shared by the two sites that consume a
-/// [`StringPart::Index`] — `parse_word`'s `Token::Deref` arm and the
-/// double-quoted interpolation arm — so both construct it the same way.
+/// Build an [`Ast::Index`] from a lexer-fused `$name[k1][k2]…` deref.  Shared
+/// by both consumers of a [`StringPart::Index`], bare and inside a string, so
+/// the two cannot construct it differently.
 fn deref_index_to_ast(
     name: Spanned<String>,
     keys: Vec<Spanned<Vec<(Token, Span)>>>,
@@ -1712,33 +1488,26 @@ fn deref_index_to_ast(
     })
 }
 
-/// Parse the pre-lexed body of `$[…]` as a Pratt expression.  The
-/// lexer fused `&&`/`||` already (see [`lexer::Lexer::scan_expr_block`]),
-/// so the parser sees the same shape it would for a bare-word `&&`
-/// outside any nesting — no fusion happens here.
+/// Parse the pre-lexed body of `$[…]` as a Pratt expression.  The lexer has
+/// already fused the block's adjacent `&` / `|` pairs into `&&` / `||` words.
 fn parse_expr_block(tokens: Vec<(Token, Span)>) -> Result<Expr, ParseError> {
     Parser::run_complete(tokens, |p| p.parse_expr_prec(0))
 }
 
-/// Parse the pre-lexed body of a `!{…}` interpolation as a statement
-/// list.  No re-lex: the tokens already came out of the outer lexer.
+/// Parse the pre-lexed body of a `!{…}` interpolation as a statement list.
 fn parse_force_body(tokens: Vec<(Token, Span)>) -> Result<Vec<Stmt>, ParseError> {
     Parser::run_complete(tokens, Parser::parse_program)
 }
 
-/// Keywords and value literals that may not be used as binding names: a
-/// keyword ([`crate::syntax::is_keyword`] — control flow plus the
-/// control-operator names) or a value literal (`true`, `false`, `unit`).
-/// The `^name` head form bypasses this predicate — `^try` parses as
-/// `Head::ExternalName("try")` and dispatches to PATH lookup.
+/// Names no binding may take: a keyword by [`crate::syntax::is_keyword`], or a
+/// value literal.  A `^name` head never reaches a pattern, so `^try` still
+/// resolves through PATH.
 fn is_reserved(s: &str) -> bool {
     crate::syntax::is_keyword(s) || matches!(s, "true" | "false" | "unit")
 }
 
-/// Parsed map-literal key — either a static label (bare or tag, via
-/// [`MapKey`]) or a runtime deref (`$name`).  The map-literal parser
-/// produces this from one token and then constructs the matching
-/// [`MapEntry`] variant after parsing the `:` and value.
+/// A map-literal key before its entry is built: a static label or a `$name`
+/// resolved at runtime.
 enum MapKeyForm {
     Static(MapKey),
     Deref(String),
@@ -1755,10 +1524,8 @@ mod tests {
         Ast::Word(Word::Plain(s.into()))
     }
 
-    /// Wrap an `Ast` in a synthetic `Spanned` — used by test fixtures
-    /// to construct list / map / chain / interpolation elements which
-    /// the parser produces as `Spanned<Ast>` but tests don't predict
-    /// concrete positions for.
+    /// Span-free `Spanned`.  These fixtures compare shapes, never positions,
+    /// so both sides of every assertion are normalised to `None` spans.
     fn sp(a: Ast) -> Spanned<Ast> {
         Spanned::synthetic(a)
     }
@@ -1783,9 +1550,6 @@ mod tests {
         Head::Value(Box::new(ast))
     }
 
-    /// Construct an `Ast::Call` with no redirects — the parser tests
-    /// do not inspect spans, and `strip_one` already drops them, so
-    /// this keeps the expected-AST literals readable.
     fn app(head: Head, args: Vec<Ast>) -> Ast {
         Ast::Call {
             head,
@@ -1794,8 +1558,6 @@ mod tests {
         }
     }
 
-    /// Construct an `Ast::Call` with explicit redirects, for tests
-    /// that need to verify redirect attachment.
     fn app_redir(head: Head, args: Vec<Ast>, redirects: Vec<Redirect>) -> Ast {
         Ast::Call {
             head,
@@ -1804,27 +1566,19 @@ mod tests {
         }
     }
 
-    /// Wrap a list of bare `Ast`s into the `Vec<Stmt>` shape that block /
-    /// lambda / pipeline bodies demand.  Spans are normalised to `None` —
-    /// `strip_stmts` matches that on the parsed side, so expected-AST
-    /// equality holds.
+    /// Bare `Ast`s in the `Vec<Stmt>` shape a block, lambda, or pipeline body
+    /// demands.
     fn body(asts: Vec<Ast>) -> Vec<Stmt> {
         asts.into_iter().map(Spanned::synthetic).collect()
     }
 
-    /// Unwrap `Stmt` wrappers down to `Ast` and normalise lone-atom
-    /// `Call`s, for top-level test assertions.  The `Stmt` span field
-    /// is not inspected by these tests, so dropping it yields the
-    /// `Vec<Ast>` shape the fixtures compare against.
+    /// A parsed program as the bare `Vec<Ast>` the fixtures are written in.
     fn unwrap_stmts(stmts: Vec<Stmt>) -> Vec<Ast> {
         stmts.into_iter().map(|s| strip_one(s.item)).collect()
     }
 
-    /// Like [`unwrap_stmts`] but for nested statement sequences (block /
-    /// lambda bodies, pipeline stages) — keeps the `Stmt` wrapper so the
-    /// expected AST shape stays well-typed, but normalises spans to
-    /// `None` so equality holds against synthetic Stmts built by
-    /// [`body`].
+    /// Like [`unwrap_stmts`], but for a nested body, where the `Stmt` wrapper
+    /// has to stay for the expected shape to typecheck.
     fn strip_stmts(stmts: Vec<Stmt>) -> Vec<Stmt> {
         stmts
             .into_iter()
@@ -1836,12 +1590,6 @@ mod tests {
         args.into_iter().map(strip_one).collect()
     }
 
-    /// Normalise a `Vec<Spanned<Ast>>` (used by `Ast::Call.args` and
-    /// `Ast::Index.keys` after the `Spanned<T>` refactor) — drops the
-    /// span info and recurses through `strip_one` on each item.  Tests
-    /// reconstruct equivalent fixtures with `None` spans, so the
-    /// parse-vs-fixture comparison still holds without callers having
-    /// to predict positions.
     fn strip_spanned_args(args: Vec<Spanned<Ast>>) -> Vec<Spanned<Ast>> {
         args.into_iter()
             .map(|sp| Spanned::synthetic(strip_one(sp.item)))
@@ -1855,10 +1603,10 @@ mod tests {
         }
     }
 
+    /// Drop every span and unwrap a lone head out of its `Call`, so a fixture
+    /// can name the shape without predicting byte positions.
     fn strip_one(n: Ast) -> Ast {
         match n {
-            // Unwrap Call { head, args: [], redirects: [] } → head atom
-            // (lone bare/path/tilde/value in command position).
             Ast::Call {
                 head,
                 args,
@@ -2097,7 +1845,7 @@ mod tests {
 
     #[test]
     fn parse_let_rhs_chain() {
-        // `let x = a ? b` binds the *chain* to x, not just `a`.
+        // The whole chain binds to `x`, not just `a`.
         let ast = unwrap_stmts(parse("let x = a ? b").unwrap());
         assert_eq!(
             ast,
@@ -2110,8 +1858,7 @@ mod tests {
 
     #[test]
     fn parse_let_rhs_trailing_amp_backgrounds_whole_chain() {
-        // The trailing `&` on a let RHS must wrap the whole chain, never
-        // greedily attach to only the last arm.
+        // The `&` wraps the whole chain, never just the last arm.
         let ast = unwrap_stmts(parse("let x = a ? b &").unwrap());
         assert_eq!(
             ast,
@@ -2126,15 +1873,14 @@ mod tests {
 
     #[test]
     fn parse_let_rhs_per_arm_amp_rejected() {
-        // `let x = a & ? b` is not legal: per-arm `&` is reserved for
-        // statement-level chains.  The parser stops after `a &`, then sees
-        // a stray `?`.
+        // A per-arm `&` belongs to statement chains only, so the RHS ends at
+        // `a &` and the `?` is left stray.
         assert!(parse("let x = a & ? b").is_err());
     }
 
     #[test]
     fn parse_chain_arms_may_background_at_stmt_level() {
-        // At the statement level, every chain arm may carry its own `&`.
+        // Where, at statement level, it is exactly what is allowed.
         let ast = unwrap_stmts(parse("a & ? b &").unwrap());
         assert_eq!(
             ast,
@@ -2165,10 +1911,8 @@ mod tests {
         );
     }
 
-    // ── A6: sub-token-stream parsers require EOF ─────────────────────
+    // ── Sub-token-stream parsers require EOF ─────────────────────────
 
-    /// F4: an expression block `$[…]` with trailing tokens after the
-    /// first expression must reject, not silently drop `2 3`.
     #[test]
     fn expr_block_rejects_trailing_input() {
         let err = parse("echo $[1 2 3]").unwrap_err();
@@ -2179,10 +1923,8 @@ mod tests {
         );
     }
 
-    /// A numeric literal glued to a comparison operator inside `$[…]`
-    /// (`2>3`) lexes the digit as a file descriptor, so the `>` lands in
-    /// operand position.  The error must name the `2>` shape and point at
-    /// the spacing fix rather than reporting a bare "redirect" token.
+    /// `$[2>3]` lexes `2>` as a file descriptor, so `>` lands in operand
+    /// position; the error must name the glued shape, not "redirect".
     #[test]
     fn glued_comparison_suggests_spacing() {
         let err = parse("return $[2>3]").unwrap_err();
@@ -2192,8 +1934,7 @@ mod tests {
             err.message
         );
 
-        // A bare operator with no left operand reports the comparison, not a
-        // file descriptor (there is no glued digit to blame).
+        // No glued digit to blame, so the message names the comparison.
         let err = parse("return $[< 3]").unwrap_err();
         assert!(
             err.message.contains("comparison operator"),
@@ -2202,8 +1943,7 @@ mod tests {
         );
     }
 
-    /// F4: an index key stream `$m[k]` with trailing tokens after the
-    /// first word must reject, not index by `a` alone.
+    /// A key stream holds one word; `$m[a b]` must reject, not index by `a`.
     #[test]
     fn index_keys_reject_trailing_input() {
         let err = parse("$m[a b]").unwrap_err();
@@ -2214,11 +1954,7 @@ mod tests {
         );
     }
 
-    /// F5: a stray top-level `}` must be a parse error rather than a
-    /// silent stop condition that truncates the program, and must be
-    /// named as an unmatched brace rather than folded into the generic
-    /// trailing-input message (neither "trailing" nor "after the parse
-    /// completed" is true when statements follow the brace).
+    /// A stray `}` is an error, not a stop that truncates the program.
     #[test]
     fn top_level_stray_rbrace_rejected() {
         let err = parse("echo a\n}\necho b").unwrap_err();
@@ -2229,10 +1965,8 @@ mod tests {
         );
     }
 
-    /// The same shape after a well-formed block, with more statements
-    /// following the stray brace — the "trailing input" wording would be
-    /// doubly wrong here since the brace isn't trailing and the parse
-    /// hasn't completed.
+    /// With statements after the stray brace, "trailing input" would be doubly
+    /// wrong: it is not trailing, and the parse has not completed.
     #[test]
     fn mid_program_stray_rbrace_names_unmatched_brace() {
         let err = parse("{ let x = 1 } } let y = 2").unwrap_err();
@@ -2243,8 +1977,6 @@ mod tests {
         );
     }
 
-    /// A well-formed block body still parses — `run_complete` only fires
-    /// on tokens the body genuinely left unconsumed.
     #[test]
     fn well_formed_block_still_parses() {
         let ast = unwrap_stmts(parse("echo a; { echo b }").unwrap());
@@ -2404,9 +2136,7 @@ mod tests {
         );
     }
 
-    /// F11: an expression atom shares the numeric shape rule with
-    /// bare-word literals — a float needs a `.`, so `inf`/`nan`/`1e5`
-    /// are not numbers inside `$[…]` (they would be `String`s elsewhere).
+    /// A float needs a `.`, so these three stay strings inside `$[…]` too.
     #[test]
     fn expr_atom_rejects_non_dotted_float_shapes() {
         for s in ["$[nan]", "$[inf]", "$[1e5]"] {
@@ -2419,15 +2149,13 @@ mod tests {
         }
     }
 
-    /// A dotted float still parses inside `$[…]`.
     #[test]
     fn expr_atom_accepts_dotted_float() {
         let ast = unwrap_stmts(parse("$[1.5]").unwrap());
         assert_eq!(ast, vec![Ast::Expr(Box::new(Expr::Number(1.5)))]);
     }
 
-    /// `not` binds tighter than any binary operator, so `not $x == 0`
-    /// parses as `(not $x) == 0`, not `not ($x == 0)`.
+    /// `not $x == 0` is `(not $x) == 0`, never `not ($x == 0)`.
     #[test]
     fn not_binds_tighter_than_binary_op() {
         let ast = unwrap_stmts(parse("$[not $x == 0]").unwrap());
@@ -2610,8 +2338,8 @@ mod tests {
 
     #[test]
     fn parse_leading_spread_disambiguates_to_map() {
-        // `[...$d, k: v]` starts with a spread, then has a `key: val` pair —
-        // the lookahead must look past the spread to see that this is a map.
+        // The `key: val` pair sits past the spread, where the lookahead has to
+        // reach to call this a map.
         let ast = unwrap_stmts(parse("[...$d, k: 'v']").unwrap());
         assert_eq!(
             ast,
@@ -2625,10 +2353,8 @@ mod tests {
         );
     }
 
-    /// F14: the lookahead past a leading spread must track nesting — the
-    /// spread operand `[a: 1]` is a nested collection whose inner `]`
-    /// must not be mistaken for the outer list's close.  `[...[a: 1], b: 2]`
-    /// is a map.
+    /// The inner `]` of the spread operand must not be read as the outer
+    /// collection's close, or `[...[a: 1], b: 2]` would parse as a list.
     #[test]
     fn parse_leading_spread_of_nested_collection_disambiguates_to_map() {
         let ast = unwrap_stmts(parse("[...[a: 1], b: 2]").unwrap());
@@ -2647,9 +2373,7 @@ mod tests {
         );
     }
 
-    /// An unterminated nested collection inside a leading spread must not
-    /// spin the disambiguation lookahead: EOF ends the scan regardless of
-    /// bracket depth, so the parser reports an error rather than hanging.
+    /// Unterminated, the same lookahead must error rather than hang.
     #[test]
     fn parse_unterminated_leading_spread_errors_without_hang() {
         assert!(parse("[...[a: 1").is_err());
@@ -2657,7 +2381,7 @@ mod tests {
 
     #[test]
     fn parse_leading_spread_disambiguates_to_list() {
-        // `[...$xs, a]` starts with a spread, then a bare element — list.
+        // Past the spread sits a bare element, so this one is a list.
         let ast = unwrap_stmts(parse("[...$xs, a]").unwrap());
         assert_eq!(
             ast,
@@ -2670,13 +2394,13 @@ mod tests {
 
     #[test]
     fn parse_map_with_blocks() {
-        // First test: multiline map standalone parses as a value form.
+        // Standalone: a multiline map is a value, not a command.
         let src1 = "[\n    quit: { echo q },\n    help: { echo h },\n]";
         let ast1 = unwrap_stmts(parse(src1).unwrap());
         assert_eq!(ast1.len(), 1);
         assert!(matches!(&ast1[0], Ast::Map(_)));
 
-        // Second test: multiline map as command argument
+        // And the same map in argument position.
         let src = "dispatch $action [\n    quit: { echo quitting },\n    help: { echo help },\n    _: { echo unknown },\n]";
         let ast = unwrap_stmts(parse(src).unwrap());
         match &ast[0] {
@@ -2781,8 +2505,7 @@ mod tests {
         }
     }
 
-    /// `<< $var` feeds a stored string; the payload word admits the same
-    /// value forms as any other redirect operand.
+    /// A here-string payload takes any value form a redirect operand does.
     #[test]
     fn parse_herestring_variable_payload() {
         let ast = unwrap_stmts(parse("cat << $body").unwrap());
@@ -2798,9 +2521,8 @@ mod tests {
         }
     }
 
-    /// The bash-heredoc reflex `<<EOF` (and `<< EOF`) is a targeted parse
-    /// error naming the raw-string form, not a silent feed of the literal
-    /// word `EOF`.
+    /// The bash-heredoc reflex earns an error naming the raw-string form, not
+    /// a silent feed of the literal word `EOF`.
     #[test]
     fn herestring_bare_word_is_rejected() {
         for src in ["cat <<EOF", "cat << EOF"] {
@@ -2813,16 +2535,14 @@ mod tests {
         }
     }
 
-    /// A path after `<<` gets the `< path` correction instead of the
-    /// heredoc message.
+    /// A path after `<<` gets the `< path` correction instead.
     #[test]
     fn herestring_path_word_is_rejected() {
         let err = parse("cat << ./body.txt").expect_err("path after `<<` must not parse");
         assert!(err.message.contains("use `< path`"), "got: {}", err.message);
     }
 
-    /// `<<` always feeds stdin: fd 0 may be spelled explicitly, anything
-    /// else is an error.
+    /// `<<` always feeds stdin: fd 0 may be spelled out, anything else errors.
     #[test]
     fn herestring_fd_prefix() {
         let ast = unwrap_stmts(parse("cat 0<< #'x'#").unwrap());
@@ -2852,7 +2572,6 @@ mod tests {
 
     #[test]
     fn parse_tilde_as_command_arg() {
-        // ~ as an argument to a command should parse as Tilde, not be wrapped in Command
         let ast = unwrap_stmts(parse("cd ~").unwrap());
         assert_eq!(
             ast,
@@ -2949,7 +2668,8 @@ mod tests {
 
     #[test]
     fn parse_tilde_with_space_is_bare() {
-        // "~ foo" — space between ~ and word means ~ is standalone, foo is a separate arg
+        // The space cuts the tilde loose: `foo` is a second argument, not a
+        // suffix on `~`.
         let ast = unwrap_stmts(parse("echo ~ foo").unwrap());
         assert_eq!(
             ast,
@@ -2980,16 +2700,11 @@ mod tests {
 
     // ── Recursion-depth chokepoints ─────────────────────────────────────
     //
-    // The three mutually-recursive sub-grammars each descend through one
-    // `nested()` guard (`parse_primary` / `parse_expr_atom` /
-    // `parse_pattern`).  These exercise the two sub-grammars whose
-    // recursion does *not* route through `parse_primary`, so adversarial
-    // depth rejects cleanly rather than overflowing the call stack.  The
-    // depth used sits well above the cap (64) but far below any real stack
-    // ceiling, so a regression surfaces as a missing error, not a crash.
+    // These cover the two sub-grammars that do not route through
+    // `parse_primary` and so guard themselves.  Each uses a depth well past
+    // the cap but far short of any real stack ceiling, so a lost guard shows
+    // up as a missing error rather than a crash.
 
-    /// Nested destructuring patterns recurse through `parse_pattern`; deep
-    /// nesting must hit the cap, not overflow the stack.
     #[test]
     fn deeply_nested_pattern_hits_nesting_cap() {
         let n = 200;
@@ -3002,8 +2717,6 @@ mod tests {
         );
     }
 
-    /// A long run of unary `-` recurses through `parse_expr_atom`; deep
-    /// nesting must hit the cap, not overflow the stack.
     #[test]
     fn deeply_nested_unary_minus_hits_nesting_cap() {
         let src = format!("$[{}1]", "- ".repeat(200));
@@ -3015,8 +2728,6 @@ mod tests {
         );
     }
 
-    /// A long run of `not` recurses through `parse_expr_atom`; deep nesting
-    /// must hit the cap, not overflow the stack.
     #[test]
     fn deeply_nested_not_hits_nesting_cap() {
         let src = format!("$[{}$x]", "not ".repeat(200));
@@ -3046,7 +2757,6 @@ mod tests {
 
     #[test]
     fn let_rhs_on_next_line() {
-        // `let x =\n expr` — newline between = and RHS is allowed.
         let ast = unwrap_stmts(parse("let x =\necho hi").unwrap());
         assert_eq!(
             ast,
@@ -3059,7 +2769,6 @@ mod tests {
 
     #[test]
     fn let_rhs_on_next_line_multiple_newlines() {
-        // Multiple blank lines between = and RHS are also fine.
         let ast = unwrap_stmts(parse("let x =\n\necho hi").unwrap());
         assert_eq!(
             ast,
@@ -3072,7 +2781,6 @@ mod tests {
 
     #[test]
     fn let_destructure_rhs_on_next_line() {
-        // Destructuring pattern with newline before RHS.
         let ast = unwrap_stmts(parse("let [a, b] =\n[1, 2]").unwrap());
         assert_eq!(
             ast,
@@ -3106,7 +2814,6 @@ mod tests {
 
     #[test]
     fn pipeline_continuation_after_pipe() {
-        // cmd1 |\ncmd2 — pipe at end of line continues.
         let ast = unwrap_stmts(parse("echo hello |\nupper").unwrap());
         assert_eq!(
             ast,
@@ -3119,7 +2826,6 @@ mod tests {
 
     #[test]
     fn pipeline_continuation_before_pipe() {
-        // cmd1\n| cmd2 — pipe at start of next line continues.
         let ast = unwrap_stmts(parse("echo hello\n| upper").unwrap());
         assert_eq!(
             ast,
@@ -3132,7 +2838,7 @@ mod tests {
 
     #[test]
     fn newline_terminates_command_args() {
-        // echo hello\nworld — two separate statements, not one command.
+        // Two statements, not one command with two arguments.
         let ast = unwrap_stmts(parse("echo hello\nworld").unwrap());
         assert_eq!(ast.len(), 2);
     }
@@ -3144,14 +2850,12 @@ mod tests {
 
     #[test]
     fn needs_continuation_on_unterminated_string() {
-        // Plain unterminated double quote: the REPL must offer another line.
         assert!(needs_continuation("\"foo"));
     }
 
     #[test]
     fn needs_continuation_on_unterminated_string_with_inner_force() {
-        // Outer string + inner unclosed `!{...}` is still "user is
-        // mid-typing"; both unclosed pieces mean continuation.
+        // Nested unclosed forms are still one verdict, not a competing pair.
         assert!(needs_continuation("\"foo !{cmd"));
     }
 
@@ -3160,9 +2864,8 @@ mod tests {
         assert!(!needs_continuation("echo done"));
     }
 
-    /// F14: an unbalanced top-level `{` / `[` is "user is mid-typing" —
-    /// the lexer now reports it as an unterminated delimiter, so the REPL
-    /// offers another line instead of erroring on the spot.
+    /// The lexer calls an unbalanced top-level `{` or `[` an unterminated
+    /// delimiter, which reaches the REPL as a request for another line.
     #[test]
     fn needs_continuation_on_unbalanced_open_delimiters() {
         assert!(needs_continuation("let f = {"));
@@ -3170,16 +2873,14 @@ mod tests {
         assert!(needs_continuation("if true {"));
     }
 
-    /// A balanced program still terminates — no spurious continuation.
     #[test]
     fn balanced_delimiters_do_not_need_continuation() {
         assert!(!needs_continuation("let f = { return 1 }"));
         assert!(!needs_continuation("return [a, b]"));
     }
 
-    /// Bug (a): a comment that runs to EOF must not mask an open
-    /// delimiter.  An open `{` / `[` followed only by a trailing comment
-    /// is still "user is mid-typing".
+    /// A comment running to end of input must not mask the open delimiter
+    /// before it.
     #[test]
     fn needs_continuation_on_open_delim_then_comment_to_eof() {
         assert!(needs_continuation("let f = {# comment"));
@@ -3188,27 +2889,20 @@ mod tests {
         assert!(needs_continuation("[# comment"));
     }
 
-    /// Bug (a), companion: a *balanced* program with a trailing comment
-    /// still terminates — the comment alone must not trigger a spurious
-    /// continuation.
     #[test]
     fn balanced_program_with_trailing_comment_does_not_need_continuation() {
         assert!(!needs_continuation("let f = { return 1 } # done"));
         assert!(!needs_continuation("echo done # done"));
     }
 
-    /// Bug (b): a `let` whose RHS is missing is incomplete — the REPL
-    /// must offer another line for the right-hand side.
     #[test]
     fn needs_continuation_on_let_awaiting_rhs() {
         assert!(needs_continuation("let x ="));
         assert!(needs_continuation("let [a, b] ="));
     }
 
-    /// Bug (b): a trailing bare `=` that is *not* a `let` binder marks
-    /// the end of a complete command (`=` is a plain-word argument), so
-    /// it must NOT be flagged as needing continuation — otherwise the
-    /// REPL hangs on a line that already parses.
+    /// A trailing `=` outside a binder is a plain-word argument, and a line
+    /// that already parses must never ask for another.
     #[test]
     fn trailing_bare_equals_does_not_need_continuation() {
         assert!(parse("x =").is_ok());
@@ -3217,9 +2911,6 @@ mod tests {
         assert!(!needs_continuation("echo a ="));
     }
 
-    /// A dangling continuation operator or control keyword leaves the
-    /// parser midway through a production it has committed to — the REPL
-    /// reads the stage, branch, or body on the next line.
     #[test]
     fn needs_continuation_on_dangling_continuation_token() {
         assert!(needs_continuation("echo hi |"));
@@ -3227,14 +2918,14 @@ mod tests {
         assert!(needs_continuation("if"));
         assert!(needs_continuation("if true x\nelsif"));
         assert!(needs_continuation("if true x\nelse"));
-        // Condition parsed, body demanded but input ran out.
+        // Condition parsed, body demanded, input gone.
         assert!(needs_continuation("if $c"));
         assert!(needs_continuation("if true a\nelsif $c"));
     }
 
     #[test]
     fn if_same_line_bare_block_is_error() {
-        // Old three-block syntax: if cond then else (no `else` keyword).
+        // A third block on the same line wants the `else` keyword.
         let err = parse("if $c { a } { b }").unwrap_err();
         assert!(
             err.message.contains("else"),
@@ -3244,7 +2935,7 @@ mod tests {
 
     #[test]
     fn if_newline_block_is_valid() {
-        // Bare block on the next line is a separate statement — valid.
+        // On the next line it is a statement of its own.
         assert!(parse("if $c { a }\n{ b }").is_ok());
     }
 
@@ -3255,8 +2946,6 @@ mod tests {
 
     // ── Control operators (try / guard / within / grant / audit) ────────
 
-    /// Helper: assert the parsed program is a single `Ast::Scope` and
-    /// destructure it.
     fn unwrap_single_scope(ast: Vec<Stmt>) -> (ScopeAst, Vec<Redirect>) {
         let stripped: Vec<_> = ast.into_iter().map(|s| s.item).collect();
         match stripped.as_slice() {
@@ -3265,8 +2954,6 @@ mod tests {
         }
     }
 
-    /// Helper: assert the parsed program is a single `Ast::Call` and
-    /// destructure it.
     fn unwrap_single_exec(ast: Vec<Stmt>) -> (Head, Vec<Ast>) {
         let stripped: Vec<_> = ast.into_iter().map(|s| s.item).collect();
         match stripped.as_slice() {
@@ -3292,7 +2979,7 @@ mod tests {
 
     #[test]
     fn parse_try_body_then_lambda() {
-        // Prelude shape: `try $body { |err| ... }`.
+        // The shape the prelude writes: a bound body, a lambda handler.
         let (op, redirects) =
             unwrap_single_scope(parse("try $body { |err| return unit }").unwrap());
         assert!(redirects.is_empty());

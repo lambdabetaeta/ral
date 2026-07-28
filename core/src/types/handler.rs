@@ -1,10 +1,6 @@
-//! The user handler stack.
-//!
-//! [`HandlerFrame`] is one frame of the user handler stack.  All frames
-//! share one flat `Vec<HandlerFrame>` in [`HandlerStack`], ordered
-//! innermost-last (last-pushed-wins).  Scoped `within` handlers are removed
-//! by handle; aliases are removed by name and carry an explicit
-//! `removable_by_unalias` bit.
+//! The user handler stack — one flat `Vec<HandlerFrame>` shared by `alias` and
+//! `within [handlers: …]`, ordered innermost-last.  Scoped frames come off by
+//! handle, alias frames by name.
 
 use super::value::Value;
 use crate::typecheck;
@@ -13,60 +9,38 @@ use std::fmt;
 
 use super::flow::Settled;
 
-/// Opaque handle returned by [`HandlerStack::push`].
+/// Frame identity, minted from a monotonic counter on [`HandlerStack`].
 ///
-/// Generational — allocated from a monotonic counter on [`HandlerStack`],
-/// one per push.  Passing the handle back to [`HandlerStack::remove_by_handle`]
-/// locates the frame by identity rather than index, so removal is robust
-/// to sibling alias removals that would shift array indices between push
-/// and paired pop.
+/// Removal finds the frame by handle rather than index, so an alias dropped
+/// between a push and its paired pop cannot shift the wrong frame out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHandle(pub(crate) u64);
 
-/// Calling convention of a handler invocation — fixed by the surface
-/// form at install time, never inferred from the value's runtime shape.
-///
-/// A per-name handler (`within [handlers: …]`) and an alias are always
-/// [`Unary`]: a unary lambda `{ |args| … }` invoked with the command's
-/// argument list.  A catch-all (`within [handler: …]`) is always
-/// [`CatchAll`]: a binary lambda `{ |name args| … }` invoked with the
-/// command name and the argument list.  The install boundary rejects any
-/// value that does not match the required arity.
-///
-/// [`Unary`]: HandlerArity::Unary
-/// [`CatchAll`]: HandlerArity::CatchAll
+/// Calling convention of a handler — fixed by its surface form at install,
+/// never inferred from the thunk at the call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HandlerArity {
-    /// Catch-all: thunk receives `(name, args)`.
+    /// `within [handler: …]` — the thunk receives `(name, args)`.
     CatchAll,
-    /// Per-name lambda: thunk receives `(args)`.
+    /// `alias` or `within [handlers: …]` — the thunk receives `(args)`.
     Unary,
 }
 
-/// One user handler entry — the unit of installation in a
-/// [`HandlerFrame`].  Builtins are represented by
-/// [`BuiltinEntry`](super::BuiltinEntry), not by this type.
+/// One user handler — the unit of installation in a [`HandlerFrame`].
+/// Builtins are `BuiltinEntry` instead.
 #[derive(Clone)]
 pub struct HandlerEntry {
     pub name: Cow<'static, str>,
-    /// Calling convention for the dispatch site.  Read directly off the
-    /// entry rather than inferred from the thunk shape per call.
     pub arity: HandlerArity,
     pub thunk: Value,
-    /// The arm's closed scheme, stored at install for persistent (alias)
-    /// frames so the next run's check sees the alias as the installing
-    /// run did.  `None` on `within [handlers: …]` entries, whose frames
-    /// never outlive their run.
+    /// The arm's closed scheme, kept only on alias entries: their frames
+    /// outlive the installing run and must seed the next run's check.
     pub scheme: Option<crate::typecheck::Scheme>,
 }
 
 impl HandlerEntry {
-    /// Build a per-name entry for a user-defined `within [handlers: …]`
-    /// or `alias` thunk.  Always [`HandlerArity::Unary`]: a per-name
-    /// handler's calling convention is fixed by its surface form, so its
-    /// thunk is a unary lambda `{ |args| … }` invoked with the command's
-    /// argument list.  The caller validates at the install boundary that
-    /// the thunk is in fact a unary lambda.
+    /// Build a per-name entry, unary by construction.  Vetting the thunk's
+    /// shape belongs to the caller, at the install boundary.
     pub fn ral_per_name(name: String, thunk: Value) -> Self {
         Self {
             name: Cow::Owned(name),
@@ -76,28 +50,16 @@ impl HandlerEntry {
         }
     }
 
-    /// Vet `thunk` as the handler body for `name` and build the entry to
-    /// install — the single gate shared by `alias` and `within [handlers:
-    /// …]` so the name-conflict check, the shape check, and the
-    /// mode-preservation check are each written once regardless of which
-    /// install path is calling.
+    /// Vet `thunk` as the body for `name` and build the entry to install —
+    /// the one gate shared by `Shell::install_alias` and `within [handlers:
+    /// …]`, so each check is written once.
     ///
-    /// Checked in order: `name` must be free of both a lexical binding
-    /// and a builtin (a handler needs a head of its own to dispatch on);
-    /// `thunk` must be a unary lambda `{ |args| … }`, enforced by
-    /// [`validate_handler_arity`]; its body must preserve the head's
-    /// pipeline mode, enforced by [`crate::typecheck::alias_arm_scheme`].
-    /// `role` names the diagnostic and picks whether the inferred scheme
-    /// is persisted on the entry — an alias frame outlives its
-    /// installing run and needs it seeded for the next run's check; a
-    /// `within [handlers: …]` frame is popped before the run ends and
-    /// needs none.
+    /// `name` must be free of both a lexical binding and a builtin: a handler
+    /// needs a head of its own to dispatch on.
     ///
     /// # Errors
-    /// Returns `Err` if `name` is already a lexical binding in scope, if
-    /// `name` is a builtin, if `thunk` is not a unary lambda (per
-    /// [`validate_handler_arity`]), or if the arm's body changes the head's
-    /// pipeline mode (per [`crate::typecheck::alias_arm_scheme`]).
+    /// `name` already bound lexically or as a builtin, `thunk` not a unary
+    /// lambda, or its body changing the head's pipeline mode.
     pub fn vet(
         name: String,
         thunk: Value,
@@ -140,16 +102,14 @@ impl HandlerEntry {
     }
 }
 
-/// Which install path is vetting a handler entry through
-/// [`HandlerEntry::vet`] — picks the diagnostic's label and whether the
-/// arm's inferred scheme is persisted on the entry.
+/// Which install path is calling [`HandlerEntry::vet`] — picks the diagnostic's
+/// label and whether the inferred scheme is kept on the entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandlerRole {
-    /// `alias NAME { |args| … }` — the frame outlives its installing
-    /// run, so its scheme is persisted for the next run's check.
+    /// `alias NAME { |args| … }` — the frame outlives its installing run, so
+    /// its scheme seeds the next run's check.
     Alias,
-    /// `within [handlers: …]` — the frame is popped before the run
-    /// ends, so no scheme needs to survive it.
+    /// `within [handlers: …]` — the frame is popped before the run ends.
     Scoped,
 }
 
@@ -166,19 +126,13 @@ impl HandlerRole {
     }
 }
 
-/// Validate that a handler thunk's surface form matches the required
-/// calling convention: it must be a lambda of exactly `arity` arguments.
-///
-/// The calling convention of a handler is fixed by its surface form, not
-/// inferred from its runtime shape, so this is the single gate at every
-/// install boundary (`alias`, `within [handlers: …]`, `within [handler:
-/// …]`).  A non-lambda value or a lambda of the wrong arity is rejected
-/// with a message that names what was wrong and `context` (e.g. ``alias:
-/// `greet` ``) so the diagnostic points at the offending install site.
+/// Check that `value` is a lambda of exactly `arity` arguments — the gate at
+/// every install boundary (`alias`, `within [handlers: …]`, `within [handler:
+/// …]`), a handler's calling convention being fixed by its surface form.
+/// `context` names the offending install site in the message.
 ///
 /// # Errors
-/// Returns `Err` if `value` is not a lambda, or is a lambda whose
-/// curry-chain arity is not exactly `arity`.
+/// `value` is not a lambda, or its curry-chain arity is not `arity`.
 pub fn validate_handler_arity(value: &Value, arity: usize, context: &str) -> Settled<()> {
     let form = match arity {
         1 => "a unary lambda `{ |args| ... }`",
@@ -207,31 +161,22 @@ impl fmt::Debug for HandlerEntry {
     }
 }
 
-/// One frame of the handler stack.
-///
-/// Per-name entries are checked before the catch-all within the same
-/// frame.  If a frame has neither a matching entry nor a catch-all,
-/// command lookup falls through to the next handler frame.  Scoped
-/// handlers and aliases share this frame shape, with an explicit
-/// removability bit for `unalias`.
+/// One frame of the handler stack, shared shape for scoped handlers and
+/// aliases.
 #[derive(Debug, Clone)]
 pub struct HandlerFrame {
     pub entries: Vec<HandlerEntry>,
-    /// Catch-all handler: `within [handler: thunk]`.  `None` on alias
-    /// frames.  Its arity is implicit ([`HandlerArity::CatchAll`]).
+    /// `within [handler: thunk]`; `None` on alias frames.
     pub catch_all: Option<Value>,
-    /// Opaque identity for paired push / remove.
     pub handle: FrameHandle,
-    /// True only for frames installed by `alias` and removable by
-    /// `unalias`; scoped `within` frames are removed by handle.
+    /// Set only by `alias`; scoped `within` frames come off by handle instead.
     pub removable_by_unalias: bool,
 }
 
 impl HandlerFrame {
-    /// Whether this frame is the alias frame for `name`: it carries the
-    /// `removable_by_unalias` bit and has exactly one per-name entry
-    /// matching `name` with no catch-all.  The single shape predicate
-    /// shared by alias removal and alias presence queries.
+    /// Whether this frame is *the* alias frame for `name` — the one shape
+    /// predicate behind both [`HandlerStack::remove_alias`] and
+    /// `Shell::has_alias`.
     pub fn is_alias_for(&self, name: &str) -> bool {
         self.removable_by_unalias
             && self.catch_all.is_none()
@@ -240,21 +185,11 @@ impl HandlerFrame {
     }
 }
 
-/// The handler stack.
+/// The handler stack: the innermost frame sits at the highest index.
 ///
-/// A flat `Vec<HandlerFrame>` with last-pushed-wins ordering — the
-/// innermost frame is at the highest index.  Scoped `within` handlers
-/// are removed by handle; aliases are removed by walking for the
-/// matching removable name.
-///
-/// The two-pass [`HandlerStack::lookup`] rule (`per-name across all
-/// frames, then catch-all across all frames`) ensures any per-name
-/// handler beats any catch-all regardless of stack position.
-///
-/// No `Serialize` / `Deserialize`: frames carry `Value`, which holds
-/// closures that must be interned through `serial::InternCtx` at IPC
-/// boundaries; the wire mirror in `subprocess::WireHandlerFrame` handles
-/// that conversion field-by-field.
+/// No `Serialize` / `Deserialize` — frames carry `Value`, whose closures must
+/// be interned through `serial::InternCtx` to cross an IPC boundary, which
+/// `subprocess`'s `WireHandlerFrame` does field by field.
 #[derive(Debug, Clone, Default)]
 pub struct HandlerStack {
     frames: Vec<HandlerFrame>,
@@ -262,10 +197,8 @@ pub struct HandlerStack {
 }
 
 impl HandlerStack {
-    /// Allocate a new handle, append a frame, and return the handle.
-    ///
-    /// Covers scoped `within` installation.  The caller is responsible
-    /// for removing the frame via [`Self::remove_by_handle`].
+    /// Push a scoped `within` frame.  `Shell::with_handlers` owns the paired
+    /// [`Self::remove_by_handle`].
     pub fn push(&mut self, entries: Vec<HandlerEntry>, catch_all: Option<Value>) -> FrameHandle {
         self.push_frame(HandlerFrame {
             entries,
@@ -275,7 +208,7 @@ impl HandlerStack {
         })
     }
 
-    /// Install an alias frame removable by [`Self::remove_alias`].
+    /// Push a frame that `unalias` can remove.
     pub fn push_alias(&mut self, entries: Vec<HandlerEntry>) -> FrameHandle {
         self.push_frame(HandlerFrame {
             entries,
@@ -285,11 +218,10 @@ impl HandlerStack {
         })
     }
 
-    /// Append a complete [`HandlerFrame`], minting a fresh handle from
-    /// this stack's counter and preserving every other field — notably
-    /// `removable_by_unalias`, so a wire-hydrated alias frame stays
-    /// removable by `unalias`.  The frame's incoming `handle` is
-    /// discarded; identity belongs to the receiving stack.
+    /// Append a whole frame, minting a fresh handle and keeping every other
+    /// field — notably `removable_by_unalias`, so a wire-hydrated alias stays
+    /// removable.  The incoming handle is discarded: identity belongs to the
+    /// receiving stack.
     pub fn push_frame(&mut self, mut frame: HandlerFrame) -> FrameHandle {
         let handle = FrameHandle(self.next_handle);
         self.next_handle += 1;
@@ -298,54 +230,33 @@ impl HandlerStack {
         handle
     }
 
-    /// Remove the frame with the given handle (walk innermost-first;
-    /// usually near the top).  Returns the removed frame, or `None` if
-    /// no frame carries that handle.  Used by `with_handlers`'s paired
-    /// pop.
+    /// Remove the frame carrying `handle`, searching innermost-first.
     pub fn remove_by_handle(&mut self, handle: FrameHandle) -> Option<HandlerFrame> {
         let pos = self.frames.iter().rposition(|f| f.handle == handle)?;
         Some(self.frames.remove(pos))
     }
 
-    /// Remove the innermost alias frame for `name` (see
-    /// [`HandlerFrame::is_alias_for`]).  Returns the removed frame, or
-    /// `None` if no such frame is installed.
-    ///
-    /// Selection turns on the `removable_by_unalias` bit, which `push`
-    /// clears on scoped `within` frames; only frames installed by
-    /// `alias` carry it.  A `within [handlers: [foo: t]]` frame is thus
-    /// excluded by construction even when it shares the one-entry,
-    /// no-catch-all shape of an alias for `foo`.
+    /// Remove the innermost alias frame for `name`.  The `removable_by_unalias`
+    /// bit excludes a `within [handlers: [foo: t]]` frame by construction, even
+    /// though it shares an alias's one-entry, no-catch-all shape.
     pub fn remove_alias(&mut self, name: &str) -> Option<HandlerFrame> {
         let pos = self.frames.iter().rposition(|f| f.is_alias_for(name))?;
         Some(self.frames.remove(pos))
     }
 
-    /// Walk the stack in two passes, returning the winning handler for
-    /// `name`.  Returns the matched entry together with `depth` — the
-    /// count of frames from the top to (and including) the matched
-    /// frame, used by self-masking invocation to locate and lift the
-    /// matched frame for the dynamic extent of the body.
+    /// The winning handler for `name`, with the depth of its frame counted from
+    /// the top — what [`Self::strip_matched`] needs to mask it.
     ///
-    /// **Pass 1 — per-name:** scan all frames innermost-first.  The
-    /// first frame that has an explicit entry whose name equals `name`
-    /// wins immediately.
-    ///
-    /// **Pass 2 — catch-all:** if no per-name entry was found anywhere,
-    /// scan all frames innermost-first again.  The first frame that
-    /// carries a catch-all thunk wins; the synthesized `HandlerEntry`
-    /// has `arity = CatchAll` and `thunk` set to the catch-all value.
-    ///
-    /// Returning `None` means the name is not handled by the stack at
-    /// all (the caller falls through to external command lookup).
+    /// Two innermost-first passes over the whole stack: per-name entries, then
+    /// catch-alls only if no frame anywhere held a per-name match.  So any
+    /// per-name handler beats any catch-all whatever their relative depth.
+    /// `None` means the caller falls through to external command lookup.
     pub fn lookup(&self, name: &str) -> Option<(HandlerEntry, usize)> {
-        // Pass 1: per-name match across all frames.
         for (depth, frame) in self.frames.iter().rev().enumerate() {
             if let Some(entry) = frame.entries.iter().find(|e| e.name == name) {
                 return Some((entry.clone(), depth + 1));
             }
         }
-        // Pass 2: catch-all match across all frames.
         for (depth, frame) in self.frames.iter().rev().enumerate() {
             if let Some(thunk) = &frame.catch_all {
                 return Some((
@@ -362,14 +273,14 @@ impl HandlerStack {
         None
     }
 
-    /// All per-name handler entries installed across the stack,
-    /// innermost first.  Duplicates are not de-duplicated.
+    /// Every per-name entry on the stack, innermost first.  A shadowed name
+    /// appears once per frame that binds it.
     pub fn entries(&self) -> impl Iterator<Item = &HandlerEntry> {
         self.frames.iter().rev().flat_map(|f| f.entries.iter())
     }
 
-    /// The (name, scheme) pairs of installed alias arms, outermost first
-    /// — the alias half of the next run's check seed.
+    /// The installed alias arms' schemes, outermost first — the alias half of
+    /// the seed `Shell::session_schemes` hands the next run's check.
     pub fn alias_schemes(&self) -> Vec<(String, typecheck::Scheme)> {
         self.frames
             .iter()
@@ -388,28 +299,19 @@ impl HandlerStack {
         self.frames.iter()
     }
 
-    /// Lift the matched frame off the stack and return it.  Pair with
-    /// [`Self::restore_matched`].  Only the matched frame is removed —
-    /// frames newer or older than it stay in place, so outer handlers
-    /// for *other* names remain visible inside the running body.
-    /// `depth` is the value returned alongside the match by
-    /// [`Self::lookup`].  The frame carries its own `handle`, which
-    /// `restore_matched` reads to find the insertion point.
+    /// Lift the frame at `depth`, as returned by [`Self::lookup`], off the
+    /// stack; pair with [`Self::restore_matched`].  Only that frame goes, so
+    /// outer handlers for *other* names stay visible to the running body.
     pub fn strip_matched(&mut self, depth: usize) -> HandlerFrame {
         let index = self.frames.len() - depth;
         self.frames.remove(index)
     }
 
-    /// Re-insert the frame previously taken by [`Self::strip_matched`]
-    /// at its correct position, using its handle to find the insertion
-    /// point that preserves the original relative ordering.
+    /// Put a frame taken by [`Self::strip_matched`] back where it was.
     ///
-    /// The frame must go back *under* any frames newer than it (frames
-    /// with higher handle values) and *over* anything older.  Since
-    /// handles are monotonically allocated, we find the rightmost frame
-    /// whose handle is strictly older and insert after it.  In practice
-    /// this walks at most a few entries — only frames pushed during the
-    /// matched body's own execution will have newer handles.
+    /// Handles are monotonic, so inserting after the rightmost strictly older
+    /// handle restores the original order; the only newer frames are those the
+    /// masked body pushed itself.
     pub fn restore_matched(&mut self, frame: HandlerFrame) {
         let insert_at = self
             .frames
@@ -429,9 +331,8 @@ impl<'a> IntoIterator for &'a HandlerStack {
 }
 
 impl From<Vec<HandlerFrame>> for HandlerStack {
-    /// Build a `HandlerStack` from a raw frame vec, assigning new handles.
-    /// Used at IPC boundaries where deserialized frames arrive without
-    /// handles (the wire format does not carry them).
+    /// Assigns fresh handles, the wire format not carrying them: this is how
+    /// frames hydrated from a subprocess envelope acquire identity.
     fn from(v: Vec<HandlerFrame>) -> Self {
         let mut stack = Self::default();
         for frame in v {

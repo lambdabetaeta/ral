@@ -1,19 +1,11 @@
-//! Process-staged pipeline launcher for *ral helper* stages.
+//! Parent side of one ral helper stage: a re-execed
+//! `--ral-pipeline-stage-helper` subprocess that blocks on a
+//! [`ChildEvalRequest`] gate frame and answers with a [`ChildEvalResponse`].
 //!
-//! A ral helper stage runs in a re-execed ral subprocess
-//! (`--ral-pipeline-stage-helper`) that takes a [`ChildEvalRequest`]
-//! frame from the parent and emits a [`ChildEvalResponse`] frame back.
-//! The helper gates itself on the job frame — no user code runs before
-//! the parent has finished spawning every stage and (interactive) called
-//! `tcsetpgrp`.
-//!
-//! ## Final value transport
-//!
-//! The final ral helper stage's value comes back inside the
-//! [`ChildEvalResponse`] frame, not on a separate value pipe.  A reader
-//! thread per ral helper drains the report fd concurrently with the
-//! helper running, so a large value/audit payload cannot block the
-//! helper while the parent waits on the OS process.
+//! The last stage's value rides home inside that response, not on a value
+//! pipe, so the report is read by its own thread while the helper still runs:
+//! a large value or audit payload must not wedge the helper against the
+//! parent's `wait`.
 
 use super::super::command;
 use super::collect::StageObservation;
@@ -26,15 +18,6 @@ use crate::child_eval::{ChildEvalRequest, ChildEvalResponse, DecodedResponse, de
 use crate::types::{AuditFragment, Break, Error, Mooring, Settled, Shell};
 
 /// A running ral helper stage: one process and one report-reader thread.
-///
-/// `report` drains the helper's structured outcome (status, audit nodes,
-/// and — for the last value-typed stage — the final value).  The reader
-/// is started concurrently with the helper so the helper cannot deadlock
-/// on a full kernel buffer while the parent waits on the OS process.
-///
-/// On a stop, the reader thread is detached: it remains parked on the
-/// stopped helper's pipe and exits naturally when the eventual `fg`
-/// resumes the helper to completion.
 pub(super) struct HelperStageHandle {
     pub(super) running: command::RunningChild,
     pub(super) span: Option<crate::source::Span>,
@@ -42,20 +25,17 @@ pub(super) struct HelperStageHandle {
 }
 
 impl HelperStageHandle {
-    /// Abandon the running helper without killing or reaping it.  The
-    /// report reader thread is detached implicitly: dropping the
-    /// `FrameReader` does not stop the thread, and the thread exits on
-    /// EOF when the helper eventually closes its write end.
+    /// Let the helper go without killing or reaping it, for a pipeline a
+    /// sibling's stop has parked.  Dropping the `FrameReader` detaches its
+    /// thread rather than stopping it; the thread sees EOF once a later `fg`
+    /// runs the helper out.
     #[cfg(unix)]
     pub(super) fn abandon(self) {
         self.running.abandon();
     }
 
-    /// Reduce one ral helper stage to a [`StageObservation`].
-    /// Mirrors `collect::observe_external_stage` for direct externals:
-    /// parked foreground jobs become control outcomes; helper semantic
-    /// errors become failures; audit nodes ride along in the fragment
-    /// for the collector to merge into the surrounding scope.
+    /// Reduce one helper stage to a [`StageObservation`], the peer of
+    /// `collect::observe_external_stage` for directly spawned externals.
     pub(super) fn observe(
         self,
         shell: &Shell,
@@ -72,24 +52,14 @@ impl HelperStageHandle {
             Err(br) => return Ok(StageObservation::from_break(br)),
         };
 
-        // The OS wait has returned, so the helper's write end has
-        // closed; the reader sees EOF or the last frame and the join
-        // returns immediately.
+        // The OS wait returned, so the helper's write end is closed and this
+        // join cannot block.
         let report_result = report.join().map_err(pipe_error)?;
 
-        // Report-first contract: a ral semantic error always rides in
-        // the report and the helper exits 0.  We unpack before
-        // consulting the OS outcome so the user sees the ral-level
-        // diagnostic (with hint and span) rather than an
-        // opaque process-failure shape.  Audit nodes — including
-        // nested-external captures collected *before* the failure —
-        // travel through the observation; the OS outcome only wins
-        // when there is no report (helper killed, protocol-layer
-        // failure).
+        // Report-first: a semantic error rides in the report and the helper
+        // still exits 0, so the report outranks the OS outcome, which carries
+        // no span or hint.
         if let Some(report) = report_result {
-            // Pipeline stages are subshells: the parent installs only
-            // `last_status`, so the response's `mobile` and `surface_events`
-            // are dropped (a stage child has no surface sink to replay to).
             let DecodedResponse {
                 value,
                 last_status,
@@ -117,10 +87,9 @@ impl HelperStageHandle {
                 .with_audit(audit));
         }
 
-        // No report: the helper died before it could write one
-        // (signal, kernel kill, sigkill on abort).  Fall back to the
-        // OS wait outcome.  A forgiven failure (SIGPIPE on a non-final
-        // stage) is success with status 0.
+        // No report: the helper died before writing one, so the OS outcome is
+        // all there is.  A SIGPIPE forgiven on a non-final stage leaves no
+        // failure and lands on the status-0 tail.
         if let Some(failure) = failure {
             let mut err = Error::from_command_failure("ral pipeline stage", failure, shell);
             err.span = span;

@@ -1,17 +1,10 @@
-//! The shared remote-eval runner: one wire shape, one child runner,
-//! for the process-staged pipeline stage.
+//! One wire shape and one child runner for the re-exec'd pipeline stage.
 //!
-//! A process-staged pipeline stage (`runtime/pipeline/`) re-execs a child
-//! to evaluate a [`Comp`]: it packs the body plus a [`WireMobile`]
-//! snapshot, reconstructs a shell in the child, evaluates, and reports a
-//! structured outcome with audit nodes.  Value serialization is gated by
-//! [`ChildEvalRequest`]'s `wants_value`.
-//!
-//! One request frame in, one response frame out.  The child does not
-//! stream audit live: it drains its audit fragment after eval and ships
-//! it in the single response, so there is no per-node frame loop.  Live
-//! streaming, if a future parcel wants it, reintroduces a frame loop and
-//! does not belong here.
+//! A process-staged stage (`runtime/pipeline/`) packs a [`Comp`] body plus a
+//! [`WireMobile`] snapshot, re-execs, and gets one response back: outcome,
+//! `last_status`, audit.  Strictly one frame each way — the child drains its
+//! audit fragment after eval rather than streaming it live, so no per-node
+//! frame loop exists.
 
 use crate::evaluator::absorb_tail;
 use crate::evaluator::call;
@@ -27,14 +20,10 @@ use crate::types::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// The source a pipeline stage's body span points into: the [`FileId`] the
-/// parent's `SourceDb` already resolves it under, plus that source's name
-/// and text.  Registered in the
-/// child under the parent's id ([`Shell::install_remote_context`]), never
-/// re-minted, so a [`Span`] the child raises resolves to the same source in
-/// both processes.  Carried on the eval-request envelope rather than
-/// [`WireMobile`], mirroring `audit_policy`: it names the parent's run
-/// state, not a property of the mobile snapshot itself.
+/// The source a stage body's span points into.  Registered in the child
+/// under the parent's own [`FileId`] ([`Shell::install_remote_context`]),
+/// never re-minted, so a [`Span`] resolves to the same source in both
+/// processes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WireScriptContext {
     pub file: FileId,
@@ -43,8 +32,7 @@ pub(crate) struct WireScriptContext {
 }
 
 impl WireScriptContext {
-    /// Capture the source `span` points into, or `None` when the stage
-    /// body carries no span or its source is unregistered.
+    /// `None` when the body carries no span, or its source is unregistered.
     pub(crate) fn capture(span: Option<Span>, sources: &SourceDb) -> Option<Self> {
         let file = span?.file;
         let source = sources.get(file)?;
@@ -57,47 +45,33 @@ impl WireScriptContext {
 }
 
 /// Serialized one-body evaluation request.
-///
-/// `wants_value` gates the response's return value *before*
-/// serialization: a stage that does not need its return value (a
-/// byte-mode pipeline stage) must not fail the whole run over an
-/// incidental non-transferable retained value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ChildEvalRequest {
-    /// Interned scope table shared across every `SerialValue` /
-    /// `SerialEnvSnapshot` in this request — including the env scopes
-    /// embedded in `mobile` and `captured`.
+    /// Interned once for the whole request, including the env scopes nested
+    /// inside `mobile` and `captured`.
     pub scope_table: ScopeTable,
     pub body: Arc<Comp>,
     pub mobile: WireMobile,
-    /// Stage closure env: the child pushes a child scope and applies
-    /// `body` via [`call::invoke`] with the upstream value data-last.
+    /// Stage closure env: the child pushes a child scope and applies `body`
+    /// via [`call::invoke`] with the upstream value data-last.
     pub captured: Option<SerialEnvSnapshot>,
-    /// Carried separately from `mobile`; see
-    /// [`Audit::active_policy`](crate::types::Audit::active_policy)
-    /// for why audit policy isn't part of the mobile snapshot.
+    /// An instruction to the child rather than snapshot state, hence its own
+    /// field — see [`Audit::active_policy`](crate::types::Audit::active_policy).
     pub audit_policy: Option<CapturePolicy>,
-    /// Whether the child serializes its return value into the response on
-    /// success.  Pipeline: only the final value-typed stage
-    /// (`FinalValue::Report`).
+    /// Whether the child serializes its return value.  Only the final
+    /// value-typed stage (`FinalValue::Report`) asks: a byte-mode stage must
+    /// not fail the run over an incidental non-transferable retained value.
     pub wants_value: bool,
-    /// The stage body's source, so the child resolves its spans against
-    /// the parent's real source instead of `comp.rs`'s no-source fallback.
-    /// See [`WireScriptContext`].
+    /// So spans the child resolves locally — audit call sites — name the
+    /// parent's source instead of `Shell::site_of`'s empty fallback.
     pub script: Option<WireScriptContext>,
 }
 
 /// Structured body outcome returned by the child.
 ///
-/// `Ok` carries the body's success value when [`ChildEvalRequest`]'s
-/// `wants_value` asked for it (`None` otherwise); `Error` carries a
-/// structured error to re-raise as `Break::Error`; `Exit` propagates
-/// `Escape::Exit`; `Stopped` propagates `Escape::Stopped` (a child
-/// parked by a job-control stop signal).  `pgid` / `signal` cross the
-/// wire as raw `i32` because `Pgid` / `Signal` do not derive
-/// `Serialize`/`Deserialize`; [`decode_response`] reconstructs the
-/// newtypes.  `Tail` has no wire variant — the child's trampoline
-/// absorbs it before encoding.
+/// `pgid` / `signal` cross as raw `i32` because `Pgid` / `Signal` derive no
+/// serde impls; [`decode_response`] rebuilds the newtypes.  [`Tail`] has no
+/// wire variant — the child's trampoline absorbs it before encoding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum WireOutcome {
     Ok(Option<SerialValue>),
@@ -105,10 +79,8 @@ pub(crate) enum WireOutcome {
         message: String,
         status: i32,
         hint: Option<String>,
-        /// Span of the node the error broke on, when the child's break path
-        /// stamped one.  Its [`FileId`] was minted in the parent before the
-        /// body crossed the wire, so the parent resolves it against its own
-        /// `SourceDb` at render and the caret lands in the right source.
+        /// Its [`FileId`] was minted in the parent, so the parent resolves
+        /// it against its own [`SourceDb`] and the caret lands correctly.
         span: Option<Span>,
     },
     Exit {
@@ -122,7 +94,7 @@ pub(crate) enum WireOutcome {
     },
 }
 
-/// Wire mirror of `ExecNode`, using `SerialValue` for the value field.
+/// Wire mirror of [`ExecNode`], its value field interned as a [`SerialValue`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WireExecNode {
     pub kind: ExecNodeKind,
@@ -196,10 +168,8 @@ pub(crate) struct WireAuditNode {
     pub node: WireExecNode,
 }
 
-/// Full response emitted by one child.
-///
-/// `audit_nodes` survives a semantic failure so audit captured before the
-/// failure reaches the parent.
+/// Full response emitted by one child.  `audit_nodes` survives a semantic
+/// failure, so work recorded before the failure still reaches the parent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ChildEvalResponse {
     pub scope_table: ScopeTable,
@@ -208,13 +178,9 @@ pub(crate) struct ChildEvalResponse {
     pub audit_nodes: Vec<WireAuditNode>,
 }
 
-/// Decoded response ready for the pipeline-stage parent.
-///
-/// `value` is the body's return value (present iff the child packed one);
-/// `signal` carries the helper-reported semantic outcome as a [`Break`]
-/// (`Some` for `Error` / `Exit` / `Stopped`, `None` for success).  The
-/// two are returned side by side with `audit_nodes` so the parent can
-/// record audit before surfacing a failure.
+/// Decoded response ready for the pipeline-stage parent.  `signal` is the
+/// body's own outcome ([`None`] on success), returned beside `audit_nodes`
+/// so the parent records audit before surfacing a failure.
 pub(crate) struct DecodedResponse {
     pub value: Option<Value>,
     pub last_status: i32,
@@ -222,13 +188,10 @@ pub(crate) struct DecodedResponse {
     pub signal: Option<Break>,
 }
 
-/// Re-phrase a value-serialization failure as a process-boundary error.
-/// A value type that already explains *how* to avoid the crossing — a
-/// `Handle`, whose serializer hints at `await` — keeps its own hint; an
-/// otherwise hintless failure gets the generic boundary guidance.
-///
-/// Shared by both serial-boundary crossings: the remote-eval response
-/// edge here, and the pipeline value edge in `runtime/pipeline/helper`.
+/// Re-phrase a value-serialization failure as a process-boundary error,
+/// keeping the value's own hint when it has one (a `Handle`'s already points
+/// at `await`).  Shared with the pipeline value edge in
+/// `runtime/pipeline/helper`.
 pub(crate) fn transfer_error(err: &Error) -> Error {
     let hint = err.hint.clone().unwrap_or_else(|| {
         "encode the value first, or avoid transferring live handles across a process boundary"
@@ -242,10 +205,8 @@ pub(crate) fn transfer_error(err: &Error) -> Error {
 }
 
 /// Reify a [`Mobile`] and a body into a wire-ready [`ChildEvalRequest`].
-/// Inverse of [`decode_response`].  `captured` carries the pipeline stage
-/// closure env; `span` is the stage body's own span, resolved against
-/// `sources` into a [`WireScriptContext`] so the child resolves its spans
-/// against the same source under the same [`FileId`].
+/// `span` is the stage body's own, resolved against `sources` so the child
+/// sees the same source under the same [`FileId`].
 pub(crate) fn pack_request(
     body: Arc<Comp>,
     mobile: &Mobile,
@@ -272,23 +233,19 @@ pub(crate) fn pack_request(
     })
 }
 
-/// Output of evaluating one request in the child: the already-settled
-/// body result (the local trampoline absorbed any terminal `Tail` —
-/// it cannot cross the process boundary), the audit nodes drained after
-/// eval, and the `last_status` the parent installs.
+/// One request evaluated in the child.  `result` is already settled: the
+/// local trampoline absorbed any terminal [`Tail`], which cannot cross a
+/// process boundary.
 struct EvalOutcome {
     result: Settled<Value>,
     audit_nodes: Vec<ExecNode>,
     last_status: i32,
 }
 
-/// Build the child shell, install policy and a buffering surface sink,
-/// evaluate the pipeline stage, drain audit, and read `last_status`.
-/// `force_output` forces the body's value once before it ships
-/// (`x | f = f !{x}`); the serving child derives it from its own
-/// value-out edge.  The outer `Err` is a *pre-eval* fault (arc rebuild /
-/// mobile hydration) — the body never ran — which [`run_child_eval`]
-/// folds into a [`break_response`].
+/// Evaluate one stage in a freshly hydrated child shell.  `force_output`
+/// applies the value edge's `!{x}` before the value ships.  An outer `Err`
+/// is a *pre-eval* fault — arc rebuild or mobile hydration, the body never
+/// ran — which [`run_child_eval`] folds into a [`break_response`].
 fn eval_request(
     request: ChildEvalRequest,
     upstream: Option<Value>,
@@ -310,8 +267,8 @@ fn eval_request(
     if let Some(ctx) = script {
         shell.install_remote_context(&ctx.name, ctx.file, &ctx.text);
     }
-    // The stage child has no surface sink to replay to, but the body may
-    // still call `surface`; the no-op `()` sink discards those calls.
+    // No sink to replay to, yet the body may still call `surface`: `()` is
+    // the `EventSink` that discards.
     let mooring = Mooring::for_stage(shell.durable_root(), Arc::new(()));
     crate::dbg_trace!(
         "child-eval",
@@ -330,17 +287,13 @@ fn eval_request(
         })?
         .into_runtime(&arcs)?;
     let mut child = Shell::child_of(&captured, &mut shell);
-    // Helper-local absorption point: a tail call cannot cross the process
-    // boundary (the parent's callee/args wouldn't be valid in this address
-    // space), so settle it here; the stage's tail-ness has no effect
-    // across the boundary ([`Tail::No`]).
+    // A tail call cannot cross the boundary — the parent's callee and args
+    // are meaningless in this address space — so settle it here.
     let result = absorb_tail(
         call::invoke(&body, upstream, Tail::No, &mooring, &mut child),
         &mooring,
         &mut child,
     );
-    // `x | f = f !{x}`: a value-edge producer's output is forced once
-    // before it ships, via the shared value-edge `!{x}`.
     let result = if force_output {
         result.and_then(|value| {
             crate::runtime::pipeline::force_pipe_value(value, &mooring, &mut child)
@@ -348,8 +301,7 @@ fn eval_request(
     } else {
         result
     };
-    // Drain the child's audit before `return_to` merges it into the outer
-    // shell.
+    // Before `return_to`, which would merge the fragment into the outer shell.
     let audit_nodes = child.local.audit.take_fragment().into_nodes();
     child.return_to(&mut shell);
 
@@ -367,7 +319,8 @@ fn eval_request(
     })
 }
 
-/// Intern each runtime [`ExecNode`] into a [`WireAuditNode`] for transport.
+/// Each node interns against its own scope table, independent of the
+/// response's.
 fn pack_audit_nodes(nodes: Vec<ExecNode>) -> Settled<Vec<WireAuditNode>> {
     let mut out = Vec::with_capacity(nodes.len());
     for node in nodes {
@@ -381,12 +334,9 @@ fn pack_audit_nodes(nodes: Vec<ExecNode>) -> Settled<Vec<WireAuditNode>> {
     Ok(out)
 }
 
-/// Project a non-`Ok` body outcome into the wire-form [`WireOutcome`].
-///
-/// `Stopped` flows through as its own wire variant carrying pgid /
-/// signal / cmd, so the parent REPL can park the job correctly rather
-/// than seeing a generic error.  The `Ok` arm is handled separately by
-/// the caller because its serialization is gated on `wants_value`.
+/// Project a non-`Ok` body outcome onto the wire.  `Stopped` keeps its own
+/// variant so the parent REPL parks the job rather than seeing a generic
+/// error; the `Ok` arm stays with the caller, gated on `wants_value`.
 fn break_to_outcome(b: Break) -> WireOutcome {
     match b {
         Break::Error(err) => {
@@ -408,16 +358,11 @@ fn break_to_outcome(b: Break) -> WireOutcome {
     }
 }
 
-/// The one child runner.  Build the shell, evaluate the stage, and pack
-/// one [`ChildEvalResponse`].  The returned `Option<Value>` is the
-/// in-process value for the pipeline's value-out edge — independent of
-/// `wants_value`, which only gates the value serialized into the response.
-/// `force_output` forces the body's value once before it ships
-/// (`x | f = f !{x}`).
-///
-/// Value serialization is gated before serialization: a non-transferable
-/// `Ok` value (with `wants_value`) becomes a structured `WireOutcome::Error`
-/// carrying the hinted "cannot cross the process boundary" message.
+/// The one child runner.  The returned [`Value`] is the in-process value for
+/// the pipeline's value-out edge — independent of `wants_value`, which gates
+/// only the value serialized into the response.  A value that `wants_value`
+/// asked for but cannot be serialized becomes a [`WireOutcome::Error`], not a
+/// transport fault.
 pub(crate) fn run_child_eval(
     request: ChildEvalRequest,
     upstream: Option<Value>,
@@ -426,8 +371,7 @@ pub(crate) fn run_child_eval(
     let wants_value = request.wants_value;
     let outcome = match eval_request(request, upstream, force_output) {
         Ok(outcome) => outcome,
-        // Pre-eval fault: the body never ran.  No audit, no output value;
-        // the parent reads `last_status` off the response.
+        // The body never ran: no audit, no output value.
         Err(b) => return (break_response(b), None),
     };
     let EvalOutcome {
@@ -483,13 +427,10 @@ fn finish(
     )
 }
 
-/// Build a response for a pre-eval failure: empty audit, the signal
-/// projected to the outcome.  Used for failures that fire before (or
-/// instead of) a real eval.
+/// A response for a failure that fires before, or instead of, a real eval:
+/// empty audit, the signal projected onto the outcome.
 pub(crate) fn break_response(signal: Break) -> ChildEvalResponse {
-    // For an `Error` signal the user-visible exit code is the error's own
-    // status, so `$?` reflects what the body would have set; any other
-    // signal falls back to `1`.
+    // `$?` reports what the body would have set; other signals fall back to 1.
     let last_status = match &signal {
         Break::Error(err) => err.exit_code(),
         Break::Escape(_) => 1,
@@ -502,13 +443,9 @@ pub(crate) fn break_response(signal: Break) -> ChildEvalResponse {
     }
 }
 
-/// Rehydrate a [`ChildEvalResponse`] into runtime values, audit nodes,
-/// and the body's pass/fail signal, returning audit and signal side by
-/// side so the parent can record audit before surfacing a failure.
-///
-/// The outer `Err` is a *decode fault* — the wire payload could not be
-/// turned back into runtime values — distinct from `signal`, which is the
-/// body's own outcome that crossed the wire intact.
+/// Rehydrate a child's response for its parent.  An outer `Err` is a *decode
+/// fault* — the payload would not turn back into runtime values — as distinct
+/// from `signal`, the body's own outcome, which crossed the wire intact.
 pub(crate) fn decode_response(response: ChildEvalResponse) -> Settled<DecodedResponse> {
     let mut audit_nodes = Vec::with_capacity(response.audit_nodes.len());
     for entry in response.audit_nodes {
@@ -572,7 +509,7 @@ mod tests {
         evaluate(&compile_one(source), &Mooring::adrift(), shell).expect("eval")
     }
 
-    /// Pack a pipeline-stage request from a freshly captured snapshot.
+    /// A stage request from a freshly captured snapshot.
     fn pack_stage(stage: Arc<Comp>, shell: &Shell, wants_value: bool) -> ChildEvalRequest {
         let captured = shell.snapshot();
         let span = stage.span;
@@ -604,11 +541,8 @@ mod tests {
 
     #[test]
     fn stage_report_carries_audit_even_on_helper_error() {
-        // The decode contract: a response carrying both audit nodes and a
-        // structured failure must surface both to the parent.  Audit
-        // captures from nested external commands (or any partial work)
-        // survive the failure so the user can see what ran before things
-        // went wrong.
+        // A response carrying both audit and a failure must surface both, so
+        // the user sees what ran before things went wrong.
         let mut ctx = InternCtx::new();
         let node = WireExecNode::from_runtime(
             ExecNode::command(
@@ -658,14 +592,9 @@ mod tests {
 
     #[test]
     fn alias_stays_removable_across_the_mobile_wire() {
-        // R3: an alias frame carries `removable_by_unalias`, the flag
-        // `unalias` filters on.  Hydration must preserve it, or a pipeline
-        // helper cannot `unalias` a name the parent aliased — stage
-        // evaluation would diverge from local.  This drives the exact
-        // hydration seam: install an alias, pack the mobile through
-        // `WireMobile`, JSON-frame it as the codec does, rebuild the child
-        // shell, and confirm the alias is both visible (`has_alias`) and
-        // removable (`remove_alias`).
+        // An alias frame carries `removable_by_unalias`, the flag `unalias`
+        // filters on.  Lose it in hydration and a stage cannot `unalias` a
+        // name the parent aliased, diverging from local evaluation.
         let mut parent = Shell::default();
         let thunk = eval_value("return { |args| echo aliased }", &mut parent);
         parent
@@ -686,7 +615,7 @@ mod tests {
             script: None,
         };
 
-        // Cross the actual codec: serialize the request and read it back.
+        // Cross the actual codec, not just the wire types.
         let json = serde_json::to_vec(&request).expect("serialise request");
         let request: ChildEvalRequest = serde_json::from_slice(&json).expect("deserialise request");
 
@@ -704,12 +633,9 @@ mod tests {
 
     #[test]
     fn wire_exec_node_kind_survives_a_json_round_trip() {
-        // The audit-tree node's kind crosses the wire as a serde enum, not
-        // a string with a defaulting decode arm: a capability-check node
-        // round-trips through the wire codec as `CapabilityCheck`, never
-        // silently degraded to `Command`.  Adding an `ExecNodeKind`
-        // variant now fails the build at the wire rather than aliasing
-        // onto the catch-all.
+        // The kind crosses as a serde enum, not a string with a defaulting
+        // decode arm, so a new `ExecNodeKind` variant fails the build here
+        // rather than silently degrading to `Command`.
         let mut ctx = InternCtx::new();
         let node = WireExecNode::from_runtime(
             ExecNode::capability_check(
@@ -741,11 +667,9 @@ mod tests {
 
     #[test]
     fn stage_job_skips_report_value_when_parent_does_not_need_it() {
-        // Byte-mode stages do not embed their return value in the
-        // response — the parent reads bytes off the stage's stdout and
-        // never asks for a value.  Without this gate, an incidental
-        // non-transferable retained value (a handle, etc.) would fail the
-        // whole pipeline while building the response.
+        // The parent reads bytes off stdout and never asks for a value.
+        // Without the gate, an incidental non-transferable retained value
+        // would fail the whole pipeline while building the response.
         let shell = Shell::default();
         let stage = compile_one("return 7");
         let request = pack_stage(stage, &shell, false);
@@ -754,8 +678,7 @@ mod tests {
             matches!(response.outcome, WireOutcome::Ok(None)),
             "response value should be skipped"
         );
-        // Output value still flows so an inter-stage value-out edge
-        // remains usable.
+        // The value-out edge stays usable regardless.
         assert_eq!(value, Some(Value::Int(7)));
     }
 
@@ -774,10 +697,8 @@ mod tests {
 
     #[test]
     fn transfer_error_phrases_non_transferable_values_for_the_boundary() {
-        // A non-transferable value (a `Handle`) becomes the hinted
-        // process-boundary error the value-serialization gate raises
-        // before the value reaches the response, rather than a transport
-        // fault.
+        // A `Handle` fails the gate before the response is built, and reads
+        // as a boundary error rather than a transport fault.
         use std::sync::Mutex;
         let handle = Value::Handle(crate::types::HandleInner {
             result: Arc::new(Mutex::new(None)),

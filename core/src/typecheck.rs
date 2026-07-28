@@ -1,22 +1,6 @@
-//! Hindley-Milner type inference for ral.
-//!
-//! Types sit at the CBPV IR level — on Val and Comp after elaboration.
-//! Value types (A) describe data; computation types (B) describe effectful
-//! computations with pipeline modes.  Polymorphism by let-generalisation.
-//!
-//! The two sorts:
-//!
-//!   `Value ::= Unit | Bool | Int | Float | String | [Value] | [String:Value]`
-//!   `       | {l₁:V₁, …, lₙ:Vₙ | row}`   -- record (row-polymorphic)
-//!   `       | {Comp} | Handle | TypeVar`
-//!   `Comp ::= F[I,O] Value | Value → Comp | CompVar`
-//!   `I,O ::= ∅ | Bytes | IOVar`
-//!
-//! Generalisation happens at Bind (let) nodes, and also at `LetRec`: each
-//! recursive binding is typed monomorphically against itself first
-//! (`infer_letrec_betas`), then generalised once the group's mono
-//! self-bindings are dropped from scope, so mutually recursive bindings
-//! still end up polymorphic at their use sites.
+//! Hindley-Milner inference over the CBPV IR: value types on `Val`, computation
+//! types on `Comp`, polymorphism by let-generalisation.  Seeding and entry points
+//! live here; the inference rules live in `infer`.
 
 mod annotate;
 pub mod builtins;
@@ -31,8 +15,6 @@ mod scope;
 mod ty;
 mod unify;
 
-// Public re-exports: preserve the existing `typecheck::Ty`, `typecheck::CompTy`,
-// etc. paths consumed by main.rs and the test suite.
 pub use self::builtins::builtin_type_hint;
 pub use self::env::{InferCtx, TyEnv};
 pub use self::error::{CompDiff, Reason, TypeError, TypeErrorKind};
@@ -44,16 +26,9 @@ pub use self::unify::Unifier;
 use self::generalize::generalize;
 use crate::ir::{Comp, CompKind, IrPattern};
 
-/// The live session as the checker sees it:
-///
-/// every top-level name with
-/// the scheme on its runtime binding (`None` for a name installed by an
-/// unchecked path — a `source`d file, a plugin), plus the persistent
-/// alias arms' schemes off the handler stack.
-///
-/// This is the single seed of a run's check.  A name with a scheme is
-/// bound to it; a name without one is a bare name that elaborates as a
-/// variable and infers at a fresh type variable per use site.
+/// The seed of a run's check, read off the live session by `Shell::session_schemes`.
+/// A binding with no scheme came from an unchecked path — a `source`d file, a
+/// plugin — and infers at a fresh variable per use site.
 #[derive(Debug, Clone)]
 pub struct SessionSchemes {
     pub bindings: Vec<(String, Option<Scheme>)>,
@@ -62,9 +37,8 @@ pub struct SessionSchemes {
 }
 
 impl Default for SessionSchemes {
-    /// A core-only table, absent any host dressing — serves `bake_prelude`
-    /// (build-time: core builtins only, correct by definition) and the
-    /// structural-frontend tests, which check with no live shell.
+    /// Core builtins alone, no host dressing: `bake_prelude` at build time and
+    /// the structural-frontend tests, which check with no live shell.
     fn default() -> Self {
         Self {
             bindings: Vec::new(),
@@ -75,9 +49,8 @@ impl Default for SessionSchemes {
 }
 
 impl SessionSchemes {
-    /// Seed of checked bindings alone — the baked prelude list, for
-    /// callers with no live shell (`--check`, batch scripts, tests) —
-    /// against the given host surface's builtin table.
+    /// Seed from a fixed scheme list — the baked prelude — against a host
+    /// surface's table, for callers with no live shell: `--check`, batch, tests.
     pub fn from_schemes(
         schemes: &[(String, Scheme)],
         builtins: crate::types::BuiltinTable,
@@ -93,11 +66,8 @@ impl SessionSchemes {
     }
 }
 
-/// Seed the typing environment from a live session.  Checked bindings
-/// bind their scheme; an unchecked entry (`None`) is skipped, leaving
-/// the name to elaborate as a bare variable.  Alias arms bind as
-/// removable handler frames so a run-level `unalias` unbinds them
-/// statically.  Builtins own their names and are never overwritten.
+/// Builtins own their names and shadow both lists.  Alias arms bind as removable
+/// handler frames, so a run-level `unalias` unbinds them statically.
 fn seed_env(env: &mut TyEnv, schemes: SessionSchemes) {
     env.builtins = schemes.builtins;
     for (name, scheme) in schemes.bindings {
@@ -116,22 +86,14 @@ fn seed_env(env: &mut TyEnv, schemes: SessionSchemes) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Public entry point
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Type-check `comp`, seeding the type environment from the live session.
-///
-/// The scheme verdict rides inside the returned comp: the annotation pass
-/// writes each top-level bind's generalised scheme onto its `Bind` node.
-/// Only a closed scheme leaves the checker — each run's unifier dies
-/// with the run and its variable ids restart at zero, so an open scheme
-/// from run *N* would alias run *N+1*'s fresh variables.
+/// Type-check `comp`, seeding from the live session.  The verdict rides back on
+/// the returned comp: `annotate` writes each top-level bind's generalised scheme
+/// onto its `Bind` node.  Only closed schemes leave — a run's unifier dies with
+/// the run and its variable ids restart at zero, so an open scheme from run *N*
+/// would alias run *N+1*'s fresh variables.
 ///
 /// # Errors
-/// Returns `Err` with every diagnostic the inference pass collected —
-/// unbound identifiers, type/row/mode unification mismatches, arity and
-/// application errors — whenever that list is non-empty.
+/// Every diagnostic the inference pass collected, whenever that list is non-empty.
 pub fn typecheck(comp: &Comp, schemes: SessionSchemes) -> Result<Comp, Vec<TypeError>> {
     let mut ctx = InferCtx::new();
     let mut env = TyEnv::new();
@@ -145,9 +107,7 @@ pub fn typecheck(comp: &Comp, schemes: SessionSchemes) -> Result<Comp, Vec<TypeE
     }
 }
 
-/// Read the (name, scheme) pairs off an annotated comp's top-level
-/// `Bind` nodes — the one harvest behind both the build-time prelude
-/// bake and a run's installs.
+/// The (name, scheme) pairs on an *annotated* comp's top-level `Bind` nodes.
 fn harvest_schemes(comp: &Comp) -> Vec<(String, Scheme)> {
     let mut out = Vec::new();
     harvest_into(comp, &mut out);
@@ -175,21 +135,15 @@ fn harvest_into(comp: &Comp, out: &mut Vec<(String, Scheme)>) {
     }
 }
 
-/// Type-check the prelude IR, returning the annotated comp and the schemes
-/// harvested off its top-level `Bind` nodes.
-///
-/// Called by `ral/build.rs` at build time and by tests at runtime.
-/// Callers serialise the *annotated* prelude, so the comp blob and the
-/// schemes blob come out of one checked pass; evaluating the annotated
-/// prelude installs each binding's scheme next to its value.
-///
-/// The pass runs through the same [`typecheck`] entry the runtime uses,
-/// seeded with an empty session — builtins are resolved dynamically during
-/// inference, and no prior bindings exist at bake time.  A type error is
-/// fatal: the build script panics with the formatted errors.
+/// Type-check the prelude IR, returning the annotated comp and the schemes on its
+/// top-level `Bind` nodes.  Callers — `boot::bake_prelude_to_out_dir`, from each
+/// host's build script — serialise the *annotated* prelude, so the comp blob and
+/// the scheme blob come out of one checked pass and evaluating the prelude installs
+/// each binding's scheme beside its value.  Builtin names are filtered out: the
+/// table owns them, not the prelude.
 ///
 /// # Panics
-/// Panics if the prelude fails to type-check, reporting the errors.
+/// If the prelude fails to type-check, reporting the errors.
 pub fn bake_prelude(comp: &Comp) -> (Comp, Vec<(String, Scheme)>) {
     let seed = SessionSchemes::default();
     let table = seed.builtins.clone();
@@ -207,26 +161,17 @@ pub fn bake_prelude(comp: &Comp) -> (Comp, Vec<(String, Scheme)>) {
     (annotated, schemes)
 }
 
-/// The scheme stored on a persistent alias frame at install
-/// (`Shell::install_alias`):
-///
-/// the arm body for head `head` inferred under
-/// the runtime handler calling convention (a lambda arm receives the argv
-/// list), seeded from the live session and closed against its own unifier
-/// so later runs' checks can be seeded with it.
-///
-/// The arm's `PipeSpec` is pinned to the head's known spec — the session
-/// scheme for `head` when one exists, otherwise the external default
-/// `F[μ, Bytes]` — leaving the arm's value type free.  A mode-changing arm
-/// (a value-output body under a byte-output head) is the lone rejected
-/// failure, returned as a [`crate::mode::ModeMismatch`]; all other arm
-/// inference errors keep today's behaviour — an `alias` statement's arm was
-/// already checked by its run, and rc/plugin arms surface their failures
-/// at use.
+/// The scheme for a handler arm, computed by `HandlerEntry::vet` at install and
+/// persisted only on alias frames, which outlive their run.  The arm is inferred
+/// under the runtime handler calling convention — a lambda arm receives the argv
+/// list — and closed against its own unifier so a later run's check can be seeded
+/// with it.  Pinning constrains only the arm's `PipeSpec`, leaving its value type
+/// free: to the head's handler scheme when one is in scope, otherwise to a fresh
+/// `F[μ, ν]` the arm itself pins down.
 ///
 /// # Errors
-/// Returns `Err` if pinning the arm to the head's spec finds a mode clash
-/// — a value-output body under a byte-output head.
+/// The lone rejection: a ground mode clash, a value-output body under a
+/// byte-output head.
 pub fn alias_arm_scheme(
     head: &str,
     param: &crate::ir::IrPattern,
@@ -252,16 +197,11 @@ pub fn alias_arm_scheme(
     Ok(scheme)
 }
 
-/// The scheme stored for a value binding installed as a lexical scope binding
-/// (`Shell::bind_value`, the rc `bindings:` path):
-///
-/// the value's type
-/// inferred under the ordinary value/function-application convention — a
-/// lambda is a function `Fun(param, body)` whose parameter binds an
-/// independent value type, not an argv-forced arm — seeded from the live
-/// session and closed against its own unifier so later runs' checks can
-/// be seeded with it.  A lexical binding is not pinned to a head, so this
-/// returns the scheme directly.
+/// The scheme for a value binding (`Shell::bind_value`, `Shell::register_hook`),
+/// inferred under the ordinary value/function-application convention: a lambda is
+/// a `Fun(param, body)` whose parameter binds an independent value type, not the
+/// argv list an alias arm is forced onto.  Closed against its own unifier; with no
+/// head to pin to, the scheme comes back directly.
 pub fn binding_value_scheme(
     param: Option<&crate::ir::IrPattern>,
     body: &Comp,

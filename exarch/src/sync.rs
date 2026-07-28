@@ -1,10 +1,8 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-/// Lock the mutex, recovering the guard if a prior holder panicked while
-/// holding it. Every lock in this crate guards data whose invariants survive
-/// a panicked critical section (each mutation is total), so a poisoned lock
-/// is not evidence of corruption — propagating it would only turn one
-/// unrelated panic into a permanently unusable lock for everyone else.
+/// Lock, recovering the guard if a prior holder panicked. Every mutation under
+/// these locks is total, so poison marks an unrelated panic rather than corrupt
+/// data, and propagating it would disable the lock for everyone thereafter.
 pub(crate) trait LockExt<T> {
     fn lock_ignore_poison(&self) -> MutexGuard<'_, T>;
 }

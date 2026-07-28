@@ -1,27 +1,14 @@
-//! Byte input for a pipeline stage.
-//!
-//! [`Source`] is the per-stage input slot ("upstream pipe", "redirected
-//! file", "fall through to fd 0", or "no input at all").  [`SourceReader`]
-//! is the owning handle returned once a *resource* source (pipe / file) has
-//! been claimed: callers then use it as a `Read`, an `AsRawFd`, or convert
-//! into a `process::Stdio` for spawn.  The two fd-less markers — `Terminal`
-//! and `Empty` — yield no reader; a consumer that must tell them apart reads
-//! the `Source` directly.
+//! Byte input for a pipeline stage — the mirror of `sink` on the output side.
 
 use std::io::{self, Read};
 
 /// Where a stage's byte input comes from.
 ///
-/// `Pipe` is the upstream pipeline writer; `File` is a `<file` redirect that
-/// has been opened upstream and parked here so consumers see all redirected
-/// input through one channel rather than racing the cached `stdin_tty` against
-/// a `dup2`'d fd 0.  `Terminal` means "no redirect — fall through to whatever
-/// fd 0 of the shell process is".  `Empty` means "no input at all" — an
-/// explicit empty source that reads as immediate EOF and wires a child's stdin
-/// to `/dev/null`, with *no* fall-through to fd 0.  It is what an exarch tool
-/// run installs so a tool command can never steal the TUI's controlling
-/// terminal; it is distinct from `Terminal` precisely so denial of foreground
-/// authority and denial of byte input stay separate effects.
+/// A `<file` redirect is parked here as `File` by `install_stdin_redirect`
+/// rather than `dup2`'d onto fd 0, which keeps the cached `startup_stdin_tty`
+/// honest: consumers consult it only when this is `Terminal`.  `Empty` denies
+/// byte input without denying foreground authority — immediate EOF for
+/// readers, `/dev/null` for a child, never `Terminal`'s fall-through to fd 0.
 pub enum Source {
     Terminal,
     Empty,
@@ -29,25 +16,17 @@ pub enum Source {
     File(std::fs::File),
 }
 
-/// Owning handle to a non-terminal input source, returned by
-/// [`Source::take_reader`].
-///
-/// Read-trait consumers (codecs, `lines`) call `Read` directly; fd consumers
-/// (sandbox spawn, externals) reach for `AsRawFd` / `Into<Stdio>` without
-/// caring whether the underlying handle was a pipe or a file.
+/// Owning handle to a claimed pipe or file, returned by [`Source::take_reader`];
+/// consumers use it as a `Read`, an `AsRawFd`, or a `process::Stdio`.
 pub enum SourceReader {
     Pipe(os_pipe::PipeReader),
     File(std::fs::File),
 }
 
 impl Source {
-    /// Claim a *resource* source (pipe / file), leaving `Terminal` in place.
-    ///
-    /// Returns `None` for both fd-less markers: `Terminal` (fall through to
-    /// fd 0) and `Empty` (no input). `Empty` is restored in place rather than
-    /// collapsing to `Terminal`, so a second read in the same run still sees
-    /// no fd-0 fall-through; a consumer that must distinguish the two markers
-    /// inspects the `Source` itself.
+    /// Claim a pipe or file source; both fd-less markers yield `None`, and
+    /// `Empty` is restored in place rather than collapsing to `Terminal`, so a
+    /// second read still sees no fd-0 fall-through.
     pub fn take_reader(&mut self) -> Option<SourceReader> {
         match std::mem::replace(self, Self::Terminal) {
             Self::Terminal => None,

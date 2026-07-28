@@ -1,50 +1,37 @@
-//! Pre-spawn vetting: turn a [`CommandIdentity`] plus argv values into
-//! a [`SpawnPlan`] or refuse with a focused diagnostic.
+//! Pre-spawn vetting: a [`CommandIdentity`] and its argv values become a
+//! [`SpawnPlan`], or a focused refusal.
 //!
-//! Three judgments run in order so the diagnostic priority layers
-//! correctly:
-//!
-//!   1. **Existence** — a bare name that doesn't resolve on PATH
-//!      surfaces 127 (or 126 when the file is on disk but lacks +x).
-//!      Bundled uutils tools and path / tilde literals skip the
-//!      probe; the kernel produces an adequate ENOENT for the latter
-//!      at spawn time.
-//!   2. **Argv shape** — list / map / lambda / block / handle / bytes
-//!      arguments are rejected with `...$xs` / `to-bytes` hints.
-//!      Requires existence to have settled first: "does this command
-//!      exist?" is a higher-priority diagnostic than "is this
-//!      argument the right shape?".
-//!   3. **Grant policy** — the full `(head, args)` call clears the
-//!      active grant lattice via `check_exec_args`.
-//!
-//! The result is a [`SpawnPlan`] both single-command exec and pipeline
-//! stages consume, so the vetting rules live in exactly one place.
+//! Existence, then argv shape, then grant policy through
+//! `Shell::check_exec_call` — the order is diagnostic priority: "does this
+//! command exist?" outranks "is this argument the right shape?".  Both
+//! single-command exec and pipeline stages consume the plan, so the rules
+//! live in exactly one place.
 
 use crate::ir::CommandName;
 use crate::types::{Break, Context, Error, Settled, Shell, Value};
 
 use super::identity::CommandIdentity;
 
-/// The executable image a vetted call resolves to.  A host program is
-/// run by path (or bare name) via `Command::new`; a bundled
-/// coreutils/diffutils/ripgrep tool is run as a child placement of ral
-/// itself (`ral --ral-bundled-tool <tool> …`) so it goes through the
-/// same spawn/stdio/`RunningChild`/audit machinery as a host external.
+/// The executable image a vetted call resolves to: a host program named by
+/// resolved path (or by bare name, when the PATH walk missed), or a bundled
+/// tool run as a child placement of ral itself (`ral --ral-bundled-tool
+/// <tool> …`) so it shares a host external's spawn/stdio/audit machinery.
 pub(crate) enum ExecImage {
-    Host(String),                 // resolved path (or bare name) for `Command::new`
-    BundledTool { tool: String }, // run as `ral --ral-bundled-tool <tool>`
+    Host(String),
+    BundledTool { tool: String },
 }
 
-/// A vetted call, ready to feed [`super::process::build_command`].
-/// `shown` is the surface name (diagnostics, audit), `image` is the
-/// resolved executable image, and `args` is the stringified argv.
+/// A vetted call, ready for [`super::process::build_command`].  `shown` is the
+/// name diagnostics and audit report; `image` is what actually runs.
 pub(crate) struct SpawnPlan {
     pub(crate) shown: String,
     pub(crate) image: ExecImage,
     pub(crate) args: Vec<String>,
 }
 
-/// Vet a pre-built [`CommandIdentity`] for spawn.
+/// Vet a pre-built [`CommandIdentity`] for spawn.  The broad veto set is
+/// widened from the narrow admission set rather than recomputed, because
+/// `policy_names` may walk `PATH`.
 pub(crate) fn vet(id: &CommandIdentity, args: &[Value], shell: &mut Shell) -> Settled<SpawnPlan> {
     check_existence(id, &shell.mobile.context)?;
     let arg_strs = validate_argv(id, args, shell)?;
@@ -66,12 +53,10 @@ pub(crate) fn vet(id: &CommandIdentity, args: &[Value], shell: &mut Shell) -> Se
     })
 }
 
-/// 127 when a bare name doesn't resolve on PATH, 126 when it's on
-/// disk but lacks `+x`.  Path / tilde literals reach the OS unchanged
-/// — kernel ENOENT at spawn is a perfectly good diagnostic.  Bundled
-/// uutils tools live inside the ral binary, so they short-circuit
-/// before the disk probe and stay bundled-authoritative even on
-/// hosts that ship a same-named system binary.
+/// 127 when a bare name misses on `PATH`, 126 when a file of that name is
+/// there but lacks `+x`.  Bundled tools short-circuit ahead of the probe, so
+/// the in-binary implementation wins on hosts that ship a same-named system
+/// binary; path and tilde heads are left to the kernel's ENOENT at spawn.
 fn check_existence(id: &CommandIdentity, ctx: &Context) -> Settled<()> {
     let CommandName::Bare(bare) = &id.name else {
         return Ok(());
@@ -95,11 +80,7 @@ fn check_existence(id: &CommandIdentity, ctx: &Context) -> Settled<()> {
     )))
 }
 
-/// Stringify `args`, refusing any shape the syscall boundary cannot
-/// accept.  Takes `&CommandIdentity` rather than `&str` because
-/// [`reject_exec_arg`] needs `id.shown` for its hints.  Diagnostic
-/// ordering — existence before shape — is a property of [`vet`]'s call
-/// sequence, not of this signature.
+/// Stringify `args`, refusing any shape the syscall boundary cannot carry.
 fn validate_argv(id: &CommandIdentity, args: &[Value], shell: &Shell) -> Settled<Vec<String>> {
     for arg in args {
         if let Some(sig) = reject_exec_arg(id, arg, shell) {
@@ -109,11 +90,9 @@ fn validate_argv(id: &CommandIdentity, args: &[Value], shell: &Shell) -> Settled
     Ok(args.iter().map(std::string::ToString::to_string).collect())
 }
 
-/// Per-argument shape gate.  Lists / maps / lambdas / blocks /
-/// handles / bytes never reach `execve(2)` — each carries its own
-/// hint pointing at the idiom that lowers it (`...$xs` for lists,
-/// `to-bytes` / decode for bytes).  Everything else stringifies
-/// through [`Value::to_string`] at the caller.
+/// Per-argument shape gate: nothing here can reach `execve(2)`, so each
+/// refusal names the idiom that lowers it — `...$xs` for a list, `to-bytes`
+/// or a decode for bytes.
 fn reject_exec_arg(id: &CommandIdentity, arg: &Value, shell: &Shell) -> Option<Break> {
     let cmd = id.shown.as_str();
     match arg {
@@ -150,12 +129,8 @@ fn reject_exec_arg(id: &CommandIdentity, arg: &Value, shell: &Shell) -> Option<B
 mod tests {
     use super::*;
 
-    /// Existence is bundled-first: a bare uutils name passes even
-    /// when `PATH` is empty.  `ls` lives inside the ral binary, so
-    /// the disk probe never fires for it.  The `coreutils` feature
-    /// is what populates the bundled set; without it
-    /// `is_uutils_tool` returns false for every name, so the test
-    /// is feature-gated.
+    /// Bundled names short-circuit the disk probe: `ls` passes on an empty
+    /// `PATH`.  Gated because without `coreutils` the bundled set is empty.
     #[cfg(feature = "coreutils")]
     #[test]
     fn bundled_name_passes_existence_with_empty_path() {
@@ -171,9 +146,7 @@ mod tests {
         assert_eq!(id.shown, "ls");
     }
 
-    /// A bare name that is neither bundled nor on `PATH` surfaces
-    /// 127.  Confirms the bundled-first short-circuit is the only
-    /// escape from the disk probe.
+    /// A bare name that is neither bundled nor on `PATH` surfaces 127.
     #[test]
     fn missing_non_bundled_name_produces_127() {
         let dir = tempfile::tempdir().unwrap();

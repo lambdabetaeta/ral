@@ -1,75 +1,44 @@
-//! Tool-result rendering for the model's conversation history and the
-//! post-mortem transcript.
+//! Tool-result rendering for the model's history and the transcript.
 //!
-//! A single view over a [`shell_eval::ToolResult`]: each named section
-//! (`STDOUT:` / `STDERR:` / `VALUE:` / `EXIT:`) flows through
-//! [`clip`] at its own per-section cap.  A section over its cap keeps a
-//! head+tail digest and elides the middle, with a banner nudging the
-//! model to scope the query at its source and read the result in slices
-//! rather than dump it whole.  The same rendering is what the model
-//! receives on later turns and what the transcript records — the user
-//! never sees more of a result than the model does.
-//!
-//! A couple of non-`ral` producers call [`clip`] directly on their own
-//! output — agent replies and opaque parse-error blobs — each at its own
-//! cap.
-//!
-//! The section caps here bound one tool result; the model's whole history
-//! is bounded separately by the compaction budget ([`compaction_due`] /
-//! [`COMPACT_THRESHOLD`]), which summarises older exchanges once context
-//! pressure crosses the reserve.
+//! Each named section of a [`shell_eval::ToolResult`] is clipped at its own
+//! cap, so one oversized stream cannot crowd out the others.  The string the
+//! model reads on later turns is the one the transcript records, so the user
+//! never sees more of a result than the model did.  These caps bound a single
+//! result; the whole history is bounded by compaction ([`compaction_due`]).
 
 use crate::shell_eval;
 use std::fmt::Write;
 
-/// Head+tail caps, one per tool-result section.  [`clip`] keeps ~half
-/// the cap as head and ~half as tail, so a section over its cap is
-/// elided in the middle rather than truncated at the end.  Values get
-/// the most room because structured returns often carry the agent's
-/// working set; stdout and stderr keep enough context for ordinary
-/// command output and diagnostics without becoming the reporting path.
+/// Head+tail caps, one per tool-result section.  Values get the most room:
+/// a structured return often carries the agent's working set.
 const VALUE_CAP: usize = 20_000;
 const STDOUT_CAP: usize = 10_000;
 const STDERR_CAP: usize = 10_000;
 
-/// Cap for an `Outcome::Static` blob (parse / type errors etc.).
-///
-/// A diagnostic the model reads in full and cannot query.  These are short:
-/// a blob that blows past a few KB is noise, not signal, so the cap sits
-/// well under the streamed sections' caps.
+/// Cap for a `shell_eval::Outcome::Static` blob (parse / type errors), which
+/// the model reads whole and cannot query — so it sits well under the
+/// section caps: a diagnostic past a few KB is noise.
 pub const OPAQUE_CAP: usize = 3000;
 
-/// Cap for the payload a child agent returns through `reply` — a curated,
-/// deliberately-constructed report, not a scraped tail, so it keeps by far
-/// the most room.
-///
-/// Wide enough that a thorough report fits whole, with middle-elision (the
-/// [`clip`] backstop) reserved for the genuinely oversized reply rather than
-/// the common case.
+/// Cap for the payload a child agent returns through `reply` — a curated
+/// report, not a scraped tail, so it gets room to arrive whole and elision
+/// stays a backstop.
 pub const AGENT_REPLY_CAP: usize = 16_000;
 
 /// Fallback compaction trigger, in serialised model-view bytes, for
-/// [`crate::agent::Agent::compact`] — used only when the model's
-/// context window is unknown (a native provider with no fetched catalog).
-///
-/// When the window *is* known, compaction tracks real token pressure
-/// against the window via [`compaction_due`].  500 KB keeps roughly a
-/// dozen tool results in flight before compaction.
+/// `Agent::compact` — used only when the model's context window is unknown
+/// (a native provider with no fetched catalog); a known window goes through
+/// [`compaction_due`] instead.
 pub const COMPACT_THRESHOLD: usize = 500 * 1024;
 
-/// Summary output cap, in tokens, when the window is unknown — the
-/// companion to [`COMPACT_THRESHOLD`]'s byte trigger.
-///
-/// A generous fixed
-/// ceiling: a faithful summary is far smaller, but it must be wide enough
-/// that a verbose summariser finishes, since a truncated summary aborts
-/// the whole compaction.
+/// Summary output cap when the window is unknown.  Generous on purpose: a
+/// truncated summary aborts the whole compaction, so a verbose summariser
+/// must be able to finish.
 pub const SUMMARY_CAP_FALLBACK_TOKENS: u32 = 8_192;
 
 /// Tokens held back from the window for the next prompt and the summary
-/// response — the headroom compaction keeps free.  Mirrors oh-my-pi's
-/// `effectiveReserveTokens`: at least 15% of the window, with a fixed
-/// floor so a small window still reserves a usable margin.
+/// response.  Mirrors oh-my-pi's `effectiveReserveTokens`: 15% of the
+/// window, with a floor so a small window still keeps a usable margin.
 fn reserve_tokens(window: u64) -> u64 {
     const RESERVE_FLOOR_TOKENS: u64 = 16_384;
     (window * 15 / 100).max(RESERVE_FLOOR_TOKENS)
@@ -77,21 +46,13 @@ fn reserve_tokens(window: u64) -> u64 {
 
 /// Whether the live context (`used` input tokens) has grown into the
 /// reserve — i.e. crossed `window − reserve`.
-///
-/// The window-aware
-/// compaction trigger; an unknown window falls back to
-/// [`COMPACT_THRESHOLD`] on the serialised history bytes at the call site.
 pub fn compaction_due(used: u64, window: u64) -> bool {
     used + reserve_tokens(window) > window
 }
 
-/// Summary output cap for a known `window`: four-fifths of the reserve
-/// (oh-my-pi's `0.8 * reserve`).
-///
-/// Clamped so a small window still allows a
-/// usable summary and a huge one does not invite a rambling one.  Exarch
-/// keeps a recent suffix verbatim ([`suffix_keep_budget`]), so the summary
-/// covers only the dropped prefix and stays concise.
+/// Summary output cap for a known `window`: four-fifths of the reserve,
+/// clamped at both ends.  A compaction keeps its recent suffix verbatim
+/// ([`suffix_keep_budget`]), so the summary covers only the dropped prefix.
 pub fn summary_cap_tokens(window: u64) -> u32 {
     const MIN: u64 = 4_096;
     const MAX: u64 = 32_768;
@@ -99,42 +60,26 @@ pub fn summary_cap_tokens(window: u64) -> u32 {
 }
 
 /// Byte budget for the verbatim suffix kept across a compaction: half the
-/// current model-view bytes, so compaction summarises the older half and
-/// keeps the recent half intact.
-///
-/// Window-agnostic by design — it splits
-/// whatever is in context, which the token trigger already bounds.
+/// model-view bytes, the older half being what gets summarised.  Window-
+/// agnostic — it splits whatever is in context, which the trigger bounds.
 pub fn suffix_keep_budget(history_bytes: usize) -> usize {
     history_bytes / 2
 }
 
-/// The elided bytes are gone, so the model's recourse is to narrow what
-/// it asked for — scope the query at its source, or read the result in
-/// slices.  Re-running the command, or `$x`-dumping the whole binding,
-/// only reproduces the same cut.
+/// The elided bytes are kept nowhere, so re-running the command reproduces
+/// the same cut; the model's only recourse is to ask for less.
 const ELISION_NUDGE: &str = "; narrow the output by using within/filter/take/view-text/tail";
 
-/// Cap `text` at `cap` bytes for the model's history and the transcript.
-///
-/// If the visible text ([`visible_text`]) fits within `cap`, it passes
-/// through unchanged.  Otherwise the middle is elided to a head+tail
-/// digest whose banner ([`ELISION_NUDGE`]) points the model at
-/// narrowing what it asked for; the elided bytes are not retained
-/// anywhere.
-///
-/// Called by [`render`] per section and by each non-`ral` tool on its
-/// own output.  One pass over the text either way.
+/// Cap `text` at `cap` bytes, measured on the visible text
+/// ([`visible_text`]) rather than the raw bytes, eliding the middle when it
+/// does not fit.
 pub fn clip(text: &str, cap: usize) -> String {
     let plain = visible_text(text);
     head_tail(&plain, cap, ELISION_NUDGE).unwrap_or(plain)
 }
 
-/// Render `r` as the named-section block the model receives on later
-/// turns — `STDOUT:` / `STDERR:` / `VALUE:` / `EXIT:`, each
-/// body clipped at its own cap.
-///
-/// This is also the string the transcript
-/// records, so the user never sees more of a result than the model.
+/// Render `r` as the block the model receives on later turns — `STDOUT:` /
+/// `STDERR:` / `VALUE:` / `EXIT:`, each body clipped at its own cap.
 pub fn render(r: &shell_eval::ToolResult) -> String {
     let mut out = String::new();
     if !r.stdout.is_empty() {
@@ -162,9 +107,8 @@ pub fn render(r: &shell_eval::ToolResult) -> String {
     out
 }
 
-/// Head+tail digest.  Returns `None` if `s` fits in `cap`.  Otherwise
-/// returns a digest with an `[elided N bytes{extra}]` marker.  Cuts
-/// prefer a newline boundary in a small window, else a UTF-8 boundary.
+/// Head+tail digest with an `[elided N bytes{extra}]` marker, or `None` if
+/// `s` already fits in `cap`.
 fn head_tail(s: &str, cap: usize, extra: &str) -> Option<String> {
     if s.len() <= cap {
         return None;
@@ -180,10 +124,9 @@ fn head_tail(s: &str, cap: usize, extra: &str) -> Option<String> {
     ))
 }
 
-/// Walk back from `idx` to a newline within a small window, falling
-/// back to the nearest UTF-8 boundary at or before `idx`.  The newline
-/// itself is excluded — the elision banner supplies the line break — so
-/// the head doesn't end in a doubled newline.
+/// Back from `idx` to a newline within a small window, else the nearest
+/// UTF-8 boundary at or before it.  The newline itself is excluded: the
+/// elision banner supplies that break, and two would show as a blank line.
 fn align_cut_back(s: &str, idx: usize) -> usize {
     const WINDOW: usize = 1024;
     let lo = idx.saturating_sub(WINDOW);
@@ -193,9 +136,8 @@ fn align_cut_back(s: &str, idx: usize) -> usize {
     ral_core::text::floor_char_boundary(s, idx)
 }
 
-/// Walk forward from `idx` to one past a newline within a small
-/// window, falling back to the nearest UTF-8 boundary at or after
-/// `idx`.
+/// Forward from `idx` to one past a newline within a small window, else the
+/// nearest UTF-8 boundary at or after it.
 fn align_cut_forward(s: &str, idx: usize) -> usize {
     const WINDOW: usize = 1024;
     let hi = (idx + WINDOW).min(s.len());
@@ -205,15 +147,12 @@ fn align_cut_forward(s: &str, idx: usize) -> usize {
     ral_core::text::ceil_char_boundary(s, idx)
 }
 
-/// Reduce `text` to the visible payload a terminal would leave on
-/// screen.  CSI and OSC escape sequences are dropped (Ariadne styling,
-/// forced colour).  Within a line, a carriage return rewinds the write
-/// position to column zero so later text overwrites earlier text — a
-/// progress meter collapses to its final frame — and a backspace
-/// rewinds one cell, so nroff-style overstrike keeps the last glyph
-/// written.  A cell is one `char`, not a width-aware grapheme cluster;
-/// that is exact for the meter and overstrike output this simulates
-/// and a harmless approximation beyond it.
+/// Reduce `text` to what a terminal would leave on screen: escape sequences
+/// dropped, carriage return rewinding to column zero (a progress meter
+/// collapses to its final frame), backspace rewinding one cell (nroff
+/// overstrike keeps the last glyph).  `ral_core::ansi::strip` does the first
+/// alone; this is the one place cursor motion is replayed.  A cell is one
+/// `char`, not a width-aware grapheme — exact for both, harmless beyond.
 fn visible_text(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -282,8 +221,8 @@ mod tests {
         let out = head_tail(&input, CAP, "").unwrap();
         assert!(out.contains("FIRST_LINE") && out.contains("LAST_LINE"));
         assert!(out.contains("\n... [elided") && out.contains("] ...\n"));
-        // The newline-aligned head excludes its trailing newline; the
-        // banner supplies the break, so no blank line precedes it.
+        // The head drops its trailing newline, so the banner is not preceded
+        // by a blank line.
         assert!(!out.contains("\n\n... [elided"));
         assert!(!out.contains(&"X".repeat(1000)));
         assert!(out.len() <= CAP + 64);
@@ -320,8 +259,6 @@ mod tests {
 
     #[test]
     fn render_caps_each_section_independently() {
-        // A huge stdout is elided; the small stderr passes through whole
-        // — each section is held to its own cap, not a shared budget.
         let stdout = "noise\n".repeat(20_000);
         let stderr = "ERROR: division by zero at line 42\n".to_string();
         let out = render(&tr(&stdout, &stderr, None, 1));
@@ -331,8 +268,7 @@ mod tests {
 
     #[test]
     fn render_value_gets_more_room_than_stdout() {
-        // A body between the two caps passes through as VALUE (20_000)
-        // but is clamped as STDOUT (10_000) — the caps differ by section.
+        // 12_000 sits between the two caps.
         let body = "x".repeat(12_000);
         assert!(!render(&tr("", "", Some(&body), 0)).contains("elided"));
         assert!(render(&tr(&body, "", None, 0)).contains("elided"));
@@ -347,8 +283,7 @@ mod tests {
     fn clip_elides_oversize_inline_with_nudge() {
         let body = "y".repeat(STDOUT_CAP * 2);
         let out = clip(&body, STDOUT_CAP);
-        // Elided in place with the narrow-it nudge; nothing is written
-        // to disk to recover later.
+        // Nothing spills to a file the model could read the rest from.
         assert!(out.contains("elided"));
         assert!(out.contains("narrow the output"));
         assert!(!out.contains("full at "));
@@ -357,7 +292,6 @@ mod tests {
 
     #[test]
     fn clip_strips_ansi_before_measuring() {
-        // Pure ANSI that strips to a tiny payload passes through.
         let raw = "\x1b[31m".repeat(2000) + "tiny";
         assert!(raw.len() > 1024);
         assert_eq!(clip(&raw, 1024), "tiny");
@@ -386,8 +320,8 @@ mod tests {
 
     #[test]
     fn backspace_overstrike_keeps_last_glyph() {
-        // nroff bold (b BS b) and underline (_ BS x) both resolve to
-        // the final glyph; a backspace at column zero is inert.
+        // nroff bold (b BS b) and underline (_ BS x); a backspace at column
+        // zero is inert.
         assert_eq!(visible_text("b\u{8}bo\u{8}o000"), "bo000");
         assert_eq!(visible_text("_\u{8}x"), "x");
         assert_eq!(visible_text("\u{8}a"), "a");
@@ -395,9 +329,6 @@ mod tests {
 
     #[test]
     fn clip_measures_after_overwrite_simulation() {
-        // Megabytes of progress-meter churn collapse to one final frame
-        // and pass through whole — the cap is measured on what a
-        // terminal would actually show.
         let churn = "spinner\r".repeat(100_000) + "done.  ";
         assert!(churn.len() > STDOUT_CAP);
         assert_eq!(clip(&churn, STDOUT_CAP), "done.  ");

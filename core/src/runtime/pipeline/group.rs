@@ -1,28 +1,14 @@
 //! Unix process-group lifecycle for process-staged pipelines.
 //!
-//! ## SIGINT/relay invariant
-//!
-//! The interactive shell's SIGINT relay is *only ever active when the
-//! pipeline pgid contains at least one real (non-anchor) child*.  In
-//! that state, killing the pgid is safe — it terminates the children
-//! the user wants gone, and the still-spawning loop's per-stage
-//! `signal::check` will surface the `interrupted` error before any
-//! later stage attempts to join the (now possibly empty) group.
-//!
-//! Concretely: `prepare` spawns the anchor for a multi-stage pipeline
-//! and records its pgid as `leader`, but does *not* claim a relay
-//! slot.  `spawn` claims the relay slot on its first call — after
-//! `spawn_with_pgid` returns, the first real child has already joined
-//! the anchor pgid via `pre_exec`'s `setpgid`, so the relay forwarding
-//! SIGINT to `-pgid` cannot leave the group with nothing in it.  On
-//! non-Unix, and for single-stage pipelines, where `prepare` is a
-//! no-op, the rule is the same: the relay is claimed once, on the
-//! first `spawn` that establishes a `leader`.
-//!
-//! Between `prepare` and the first `spawn`, no relay is active, so a
-//! SIGINT racing the launch sequence merely cancels the run's
-//! foreground scope.  The launch loop's per-stage `signal::check`
-//! observes the scope and aborts cleanly before any stage spawns.
+//! The SIGINT relay is claimed only once the pgid holds a real child:
+//! `prepare` establishes the anchor and its pgid, and `spawn` takes the
+//! relay slot after the first stage has joined.  A `kill(-pgid)` any
+//! earlier would take out the anchor — the join target every later stage
+//! needs — and nothing the user asked to stop; in that window a SIGINT
+//! instead cancels the run's foreground scope, which the launch loop's
+//! per-stage `process::check` observes before the next stage spawns.
+//! Off Unix and for single-stage pipelines `prepare` is a no-op, and the
+//! first `spawn` establishes the leader and claims the relay together.
 
 #[cfg(unix)]
 use super::protocol::pipe_error;
@@ -32,23 +18,13 @@ use crate::process::{Pgid, PgidPolicy};
 use crate::types::Break;
 use crate::types::{Mooring, Settled, Shell};
 
-/// Encapsulates pipeline-group lifecycle on every platform.
-///
-/// On Unix, process-staged pipelines own a stable pgid anchor and an
-/// optional foreground guard.  On Windows the existing pgid abstraction
-/// still stands in for the group; the anchor is Unix-only.
-///
-/// Start gating is owned by [`super::launch`]: helper stages wait for
-/// their deferred job frames until every stage has spawned and any
-/// foreground handoff has completed.  Direct external stages are admitted
-/// only when that gate is unnecessary.  This type stays focused on pgid
-/// lifecycle.
+/// Pgid lifecycle for one pipeline: the anchor, the foreground guard and
+/// the SIGINT relay slot, all released together on drop.  Stage start
+/// gating belongs to `super::launch`, not here.
 pub(super) struct PipelineGroup {
     terminal: TerminalPlan,
     leader: Option<Pgid>,
     foreground: Option<crate::process::ForegroundGuard>,
-    /// SIGINT-forwarding relay slot; see the SIGINT/relay invariant note
-    /// at the top of this file.  Dropped with the group.
     relay: Option<crate::process::PipelineRelay>,
     #[cfg(unix)]
     anchor: Option<AnchorProcess>,
@@ -79,10 +55,9 @@ impl PipelineGroup {
         if self.leader.is_some() {
             return Ok(());
         }
-        // The anchor exists so a stage's `setpgid` join target cannot
-        // die before a *later* stage joins.  A single-stage pipeline
-        // has no later join: its only child establishes the group as
-        // leader on `spawn`, exactly the non-Unix rule above.
+        // The anchor keeps a stage's `setpgid` join target alive until
+        // the last stage has joined.  One stage has no later join: its
+        // own child leads the group.
         if stages < 2 {
             return Ok(());
         }
@@ -90,10 +65,6 @@ impl PipelineGroup {
         let pgid = anchor.pgid();
         self.leader = Some(pgid);
         self.anchor = Some(anchor);
-        // Relay install is *not* done here — see the SIGINT/relay
-        // invariant note at the top of this file.  Between this point
-        // and the first `spawn`, the launch loop's per-stage
-        // `signal::check` is the abort path for racing SIGINTs.
         Ok(())
     }
 
@@ -123,9 +94,7 @@ impl PipelineGroup {
         if self.leader.is_none() {
             self.leader = leader;
         }
-        // Claim the relay slot now that a real child is in the pgid.
-        // See the SIGINT/relay invariant note: the relay must never be
-        // active over a child-less pgid.
+        // Only now, with a real child in the pgid, may SIGINT be relayed to it.
         if self.relay.is_none()
             && let Some(group) = self.leader
         {
@@ -135,9 +104,8 @@ impl PipelineGroup {
     }
 
     pub(super) fn claim_foreground(&mut self, shell: &Shell, mooring: &Mooring) {
-        // The terminal plan was already resolved against the lease, so a
-        // `ForegroundExternalGroup` here implies the run holds one; the
-        // borrow is the unforgeable proof `try_acquire` now demands.
+        // `resolve_terminal_plan` already gated `owns_tty` on the lease;
+        // re-borrowing it here is the proof `try_acquire` demands.
         if self.terminal.owns_tty()
             && self.foreground.is_none()
             && let Some(group) = self.leader
@@ -163,7 +131,6 @@ impl Drop for PipelineGroup {
     }
 }
 
-/// The child's OS pid as a `pid_t`.
 #[cfg(unix)]
 #[allow(
     clippy::cast_possible_wrap,
@@ -187,8 +154,6 @@ impl AnchorProcess {
         cmd.stdin(crate::process::StdioSpec::null());
         cmd.stdout(crate::process::StdioSpec::null());
         cmd.stderr(crate::process::StdioSpec::null());
-        // Mark the child end inheritable + stash its fd in env, the
-        // same primitive the protocol's gate setup uses.
         super::protocol::pass(&mut cmd, super::helper::ANCHOR_FD_ENV, &child_end)?;
         let (mut child, leader, _jail) = cmd.spawn(PgidPolicy::NewLeader).map_err(|e| {
             Break::Error(crate::types::Error::new(format!("pipeline anchor: {e}"), 1))
@@ -197,11 +162,8 @@ impl AnchorProcess {
             crate::sandbox::apply_child_limits(&child);
         }
         let Some(_pgid) = leader else {
-            // `std::process::Child::drop` neither kills nor reaps, so the
-            // just-spawned anchor would leak as a running zombie. Kill and
-            // reap it before unwinding. The child was just spawned and has
-            // no pgid yet, so it cannot be SIGSTOP'd — a plain blocking
-            // `wait` after SIGKILL reaps it without the WUNTRACED dance.
+            // `Child::drop` neither kills nor reaps, so the anchor would
+            // outlive the unwind as a live process.
             let _ = child.kill();
             let _ = child.reap();
             return Err(Break::Error(crate::types::Error::new(
@@ -221,16 +183,14 @@ impl AnchorProcess {
             .expect("a child pid is positive")
     }
 
-    /// Close the release pipe and reap the anchor.  When the pipeline
-    /// has been parked as a stopped job the anchor is in stopped state
-    /// (it was in the foreground pgid that received SIGTSTP), so a bare
-    /// `wait()` here would block forever.  Sending `SIGCONT` to just
-    /// the anchor's pid (not `-pgid`) wakes the anchor without
-    /// disturbing the parked sibling stages: the anchor resumes its
-    /// `read` on the release fd, sees EOF, and exits cleanly.  The
-    /// pgid number stays addressable afterwards because surviving
-    /// stages keep it alive — POSIX won't recycle the leader's pid
-    /// until the group is empty.
+    /// Close the release pipe and reap the anchor.
+    ///
+    /// A pipeline parked as a stopped job leaves the anchor stopped too —
+    /// it shared the foreground pgid that took SIGTSTP — so a bare wait
+    /// would block forever.  `SIGCONT` goes to the anchor's pid alone;
+    /// `-pgid` would wake the parked stages with it.  The pgid stays
+    /// addressable meanwhile: POSIX will not recycle a leader's pid while
+    /// the group is non-empty.
     fn finish(mut self) {
         let _ = self.release.take();
         if let Some(mut child) = self.child.take() {
@@ -239,9 +199,6 @@ impl AnchorProcess {
                 rustix::process::Pid::from_raw(pid).unwrap(),
                 rustix::process::Signal::CONT,
             );
-            // Anchor was already SIGCONT'd above, so it's running again
-            // (not stopped); a plain blocking wait suffices and the
-            // WUNTRACED dance of ChildHandle would never observe a stop.
             let _ = child.reap();
         }
     }

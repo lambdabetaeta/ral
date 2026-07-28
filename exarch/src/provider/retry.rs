@@ -1,4 +1,5 @@
-//! Cancellation-aware retry policy and idle budgets.
+//! Cancellation-aware retry policy and idle budgets for the attempt loops in
+//! `stream.rs`, keyed on the variant `error.rs` classified.
 
 use super::ProviderError;
 use super::tls::STREAM_IDLE_TIMEOUT;
@@ -7,23 +8,16 @@ use std::time::Duration;
 
 /// Retry budget for transient stream and network failures.
 pub(crate) const MAX_ATTEMPTS: u32 = 3;
-/// Rate limits get a longer leash than a generic transient: a 429 means
-/// the provider is telling us to wait, not that the request is broken, so
-/// giving up early wastes a turn the provider would have served.
+/// A 429 asks for time; it is not a broken request, so it earns a longer leash.
 const RATE_LIMIT_MAX_ATTEMPTS: u32 = 6;
 const BASE_DELAY_MS: u64 = 750;
 const MAX_DELAY_MS: u64 = 8_000;
-/// Providers commonly ask for tens of seconds via `Retry-After` on a 429;
-/// this ceiling is high enough to honour that wait rather than abandon
-/// the retry loop first.
+/// High enough to honour the tens of seconds a `Retry-After` commonly asks for.
 const RATE_LIMIT_MAX_DELAY_MS: u64 = 30_000;
 const RETRY_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 
-/// The first attempt gets the full [`STREAM_IDLE_TIMEOUT`] — a slow
-/// time-to-first-token should not be mistaken for a dead connection.
-/// Every retry after that uses the shorter [`RETRY_IDLE_TIMEOUT`], so a
-/// run stuck hitting dead connections fails out of the retry budget
-/// instead of waiting out the long timeout on each attempt.
+/// The first attempt keeps the full [`STREAM_IDLE_TIMEOUT`]; retries take the
+/// shorter one, spending the attempt budget rather than the clock.
 pub(super) fn idle_timeout(attempt: u32) -> Duration {
     if attempt <= 1 {
         STREAM_IDLE_TIMEOUT
@@ -39,12 +33,9 @@ fn retry_limits(error: &ProviderError) -> (u32, u64) {
     }
 }
 
-/// Honour the server's own `Retry-After` wait when present, capped at
-/// `max_delay_ms` so one provider-supplied value can't stall the whole
-/// loop; otherwise back off exponentially from `BASE_DELAY_MS`, same cap.
-/// The shift is capped at 16 defensively — well past any real attempt
-/// count the retry budgets above allow — so `1u64 << shift` can never
-/// overflow.
+/// The server's own `Retry-After` wins when present, capped like the
+/// exponential fallback so one provider value cannot stall the loop; the shift
+/// cap only guards `1u64 << shift` against overflow.
 async fn backoff_sleep(attempt: u32, retry_after: Option<Duration>, max_delay_ms: u64) {
     if let Some(delay) = retry_after {
         tokio::time::sleep(delay.min(Duration::from_millis(max_delay_ms))).await;
@@ -60,20 +51,12 @@ async fn backoff_sleep(attempt: u32, retry_after: Option<Duration>, max_delay_ms
 pub(super) enum Attempt<T> {
     /// A completed attempt, including a committed partial stream.
     Done(T),
-    /// An error the driver may retry.
     Failed(ProviderError),
 }
 
-/// Drive `one` through the shared retry/backoff policy.
-///
-/// Only [`ProviderError::Transient`] and [`ProviderError::RateLimited`]
-/// are retried, each against its own budget from [`retry_limits`]; every
-/// other variant returns immediately, including a `Cancelled` that `one`
-/// raises itself.  Cancellation is checked before each attempt and raced
-/// against the backoff sleep via a `biased` `select!`, so a cancel signal
-/// that lands mid-backoff is never made to wait out the delay.
-/// `cancel_site` labels this call's own `Cancelled` for that race and the
-/// pre-attempt check.
+/// Drive `one` through the shared retry policy: only `Transient` and
+/// `RateLimited` are retried, each against its own budget, and cancellation
+/// races the backoff sleep, so a cancel mid-delay never waits it out.
 pub(super) async fn retry_with_backoff<T>(
     cancel_site: &'static str,
     cancel: &cancel::Token,
@@ -114,19 +97,15 @@ pub(super) async fn retry_with_backoff<T>(
     }
 }
 
-/// Resolves once `cancel` is raised.  [`cancel::Token`] is a bare atomic
-/// flag with no waker to notify, so this polls at a coarse 50ms grain —
-/// fine as the losing arm of the `biased select!`s that race it against a
-/// request, a stream read, or a backoff sleep.
+/// [`cancel::Token`] is a bare atomic with no waker, so a cancel is noticed
+/// only on the next poll — the 50ms is that latency.
 pub(super) async fn wait_for_cancel(cancel: &cancel::Token) {
     while !cancel.is_cancelled() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
-/// Overwrite the final attempt count on a `Transient` failure.
-/// [`ProviderError::RateLimited`] carries no such field, so it — and
-/// everything else — passes through unchanged.
+/// Only `Transient` carries an attempt count; the rest pass through untouched.
 fn stamp_attempts(error: ProviderError, attempts: u32) -> ProviderError {
     match error {
         ProviderError::Transient { cause, body, .. } => ProviderError::Transient {

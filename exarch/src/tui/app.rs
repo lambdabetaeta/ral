@@ -1,8 +1,5 @@
-//! The main TUI application state and its methods.
-//!
-//! One [`App`] owns the tabs, viewports, prompt, gesture state, and
-//! the event-routing logic that turns a [`crate::bus::Event`] stream
-//! into scrollback blocks.
+//! One [`App`] owns the tabs, viewports, prompt, and gesture state, and routes
+//! the [`crate::bus::Event`] stream into scrollback blocks.
 
 use super::banner;
 use super::block::{AgentSlot, RailShape};
@@ -38,93 +35,49 @@ use std::{
     time::Duration,
 };
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/// Rows a wheel notch moves the view; paging keys move a frame-height at
-/// a time, derived per-keystroke from the last drawn content height.
+/// Rows one wheel notch scrolls; paging keys instead move a frame height,
+/// measured per-keystroke off the last drawn content.
 const SCROLL_STEP: isize = 3;
 
-// ---------------------------------------------------------------------------
-// App struct
-// ---------------------------------------------------------------------------
-
-/// The one modal overlay that may be open at a time — the `/model` picker or
-/// the `/login` sign-in flow. Two variants is exactly the threshold at which
-/// this stops being premature: each site that used to check "is the picker
-/// open" (the key guard, the cursor suppression, the draw-last dispatch)
-/// checks "is *an* overlay open" instead, so "at most one, and only one kind
-/// at a time" is structural rather than disciplinary.
+/// The one modal overlay that may be open at a time.
 pub(super) enum Overlay {
     Picker(Picker),
     Login(LoginOverlay),
 }
 
-/// The main TUI application state.
-///
-/// Owns one [`Viewport`] per session and a flat list of visible tabs.
-/// The currently focused tab's committed lines flow into the host
-/// terminal's native scrollback; off-focus tabs accumulate locally
-/// and replay in full when the user tabs to them.
+/// The focused tab's committed lines flow into the host terminal's native
+/// scrollback; off-focus tabs accumulate locally and replay in full on focus.
 pub(crate) struct App {
     pub(super) tabs: Tabs,
     pub(super) prompt_state: PromptState,
-    /// The session's own inbox, shared with the input editor, queued-user
-    /// strip, and worker attend loop. A submitted prompt is pushed onto it
-    /// (through a `Mailbox`); the worker drains a non-slash prefix after a
-    /// tool result to steer the next assistant step ([`Agent::run_batch`])
-    /// and the remainder at the next exchange boundary ([`Inbox::next_or_idle`]).
-    /// Until drained, the strip renders queued user prompts, and bare Up on
-    /// an empty prompt pulls the whole queued run back into the editor for
-    /// revision.
+    /// Shared with the editor and the worker, which drains a non-slash prefix
+    /// mid-turn (`Agent::run_batch`) and the rest at the exchange boundary
+    /// (`Inbox::next_or_idle`).
     pub(super) inbox: Inbox,
-    /// The fleet's shared agent registry — a clone of the same handle the
-    /// worker and every fork mutate, so whether the focused tab is steerable
-    /// and whether it is waiting for input are derived by lookup rather than
-    /// sampled and pushed into the App each frame.
+    /// A clone of the handle the worker and every fork mutate, so steerability
+    /// and waiting-for-input are looked up rather than pushed in each frame.
     agents: AgentRegistry,
     pub(super) total_usage: Usage,
-    /// Last turn's prompt size (genai's `prompt_tokens`, which already
-    /// folds the cache-read and cache-creation counts in); drives the
-    /// `ctx N%` gauge.  Overwritten, not accumulated.
+    /// Last turn's prompt size — genai's `prompt_tokens`, which already folds
+    /// the cache counts in. Overwritten, not accumulated.
     pub(super) last_input: u64,
     /// Hidden when `None` (native providers with no fetched catalog).
     pub(super) context_window: Option<u64>,
-    /// The live `provider model` shown in the per-frame status bar,
-    /// updated on a `/model` switch. The startup banner is one-shot
-    /// chrome; this is where the current model stays visible.
     pub(super) status_model: String,
-    /// The active modal overlay — the `/model` picker or the `/login` sign-in
-    /// flow. `None` when the prompt is the normal text editor. Modal in
-    /// behaviour (an early-return guard in [`Self::key`]) and in
-    /// rendering — a floating, bezel-framed modal drawn last, over the
-    /// (dimmed) session.
+    /// Modal in behaviour — an early-return guard in [`Self::key`] — and in
+    /// rendering: drawn last, over the dimmed session.
     pub(super) overlay: Option<Overlay>,
-    /// Grouped surface accumulator: patch-diff coalescing and I/O observation
-    /// bucketing, moved out to [`SurfaceBuffer`].
     surface: SurfaceBuffer,
-    /// Geometry of the content area, active selection, in-flight press,
-    /// hover target, and copy-confirmation toast — extracted to [`gesture::GestureState`].
     pub(super) gesture: GestureState,
-    /// How the multi-agent matrix orders its rows — a render-time
-    /// projection of the same `tabs`/`viewports` model, never a reshuffle
-    /// of the underlying state.
+    /// A render-time projection over `tabs`, never a reshuffle of the model.
     pub(super) matrix_sort: MatrixSort,
-    /// Set by [`Self::clear`] when the trunk viewport is blanked: drops leftover
-    /// events from an exchange cancelled in flight (`Token`, `Boundary`, ...) until
-    /// the next prompt genuinely begins.  Only the root needs guarding —
-    /// retired sub-agent tabs are already dropped in [`Self::handle`] via the
-    /// `dying` linger window — because the unbounded bus channel can still
-    /// carry tokens the worker emitted between the cancel and when the
-    /// streaming select notices the flag (at most one `wait_for_cancel` poll).
-    /// Disarmed when the next `UserPromptEcho` arrives.
+    /// Armed by [`Self::clear`]: drops root's straggler events — tokens the
+    /// worker emitted before the streaming select noticed the cancel — until
+    /// the next `UserPromptEcho`. Sub-agent tabs are covered instead by the
+    /// `dying` window in [`Self::handle`].
     root_clear_drain: bool,
-    /// The terminal tab's cwd basename — session-constant, computed once
-    /// here rather than lazily cached by [`render::emit_tab_title`].
     pub(super) cwd_basename: String,
-    /// The last terminal tab title [`render::emit_tab_title`] emitted, so it
-    /// skips the write when the composed title is unchanged.
+    /// Lets `render::emit_tab_title` skip the write when the title is unchanged.
     pub(super) last_title: String,
 }
 
@@ -164,58 +117,49 @@ impl App {
         self.total_usage
     }
 
-    /// The turn-level context-pressure floor (`0..=3`), the seed signal of
-    /// coherent degradation (Move 7): `last_input` against the model's
-    /// `context_window`.  Passed into each markdown commit so a stressed
-    /// turn's prose renders degraded; `0` when no context window is known.
+    /// The turn-level context-pressure floor (`0..=3`), passed into each
+    /// markdown commit so a stressed turn's prose renders degraded. `0` when
+    /// no context window is known.
     fn context_floor(&self) -> u8 {
         fidelity::context_floor(self.last_input, self.context_window)
     }
 
-    /// Set the live model from the focused agent's provider.  Updates the
-    /// status bar label and the context window — the denominator of the ctx%
-    /// gauge — so both follow `/model` and `TAB`.  Call at startup, after
-    /// every focus change, and after a model switch.
+    /// Set the status bar label and the ctx-gauge denominator from the focused
+    /// agent's provider. Call at startup and after every focus or model change.
     pub fn update_live_model(&mut self, p: &Provider) {
         let status_provider = crate::provider::provider_label(p.subscription(), p.id().label());
-        // A model-less launch (a custom provider with no default model, no
-        // `--model`, no saved selection) shows the provider plus a nudge to
-        // the picker rather than a bare trailing slash.
+        // A custom provider can launch with no model at all.
         self.status_model = if p.model().is_empty() {
             format!("{status_provider} · no model — run /model")
         } else {
-            // The rung in force, in the picker's own ladder label — read off
-            // the tuning, so a model the catalog says takes no reasoning
-            // control reads `auto`, which is what goes on the wire.
+            // The rung in force, in the picker's own ladder label: a model the
+            // catalog says takes no reasoning control reads `auto`, which is
+            // what goes on the wire.
             let effort = crate::provider::effort_label(&p.tuning().effort).unwrap_or("custom");
             format!("{status_provider}/{} ({effort})", p.model())
         };
         self.context_window = crate::provider::pricing::caps_or_default(p.model()).context_window;
     }
 
-    /// Whether the focused tab is steerable — root always is, a live
-    /// sub-agent with a registered mailbox is, and a dead/lingering one is
-    /// not.
+    /// Root and any sub-agent with a registered mailbox; a dead or lingering
+    /// tab is not.
     pub(super) fn is_steerable(&self) -> bool {
         let focused = self.tabs.focused();
         focused == self.tabs.root() || self.agents.mailbox(focused).is_some()
     }
 
-    /// Whether the focused tab's agent is parked waiting for input — a dead
-    /// or lingering tab has no mailbox to be busy on, so it reads as waiting.
+    /// A dead or lingering tab has no mailbox to be busy on, so it reads as
+    /// waiting.
     pub(super) fn focused_waiting(&self) -> bool {
         self.agents
             .mailbox(self.tabs.focused())
             .is_none_or(|mb| mb.waiting_for_input())
     }
 
-    /// Idle-and-parked sub-agent tabs due for demotion out of the TAB cycle
-    /// and tab bar into the compact matrix strip, each paired with its
-    /// current idle span — a per-frame projection off the registry's
-    /// exchange clock, never stored state. `waiting_for_input` keeps a
-    /// mid-run tab in the cycle regardless of how stale its exchange clock
-    /// is; excluding the focused id means a tab leaves the cycle only the
-    /// frame after `TAB` moves off it. Root is never a member.
+    /// Idle-and-parked sub-agent tabs due to leave the TAB cycle for the matrix
+    /// strip, with their idle spans — projected per frame off the registry's
+    /// exchange clock, never stored. Excluding the focused id means a tab leaves
+    /// the cycle only the frame after `TAB` moves off it; root never leaves.
     pub(super) fn demoted(&self) -> HashMap<AgentId, Duration> {
         let root = self.tabs.root();
         let focused = self.tabs.focused();
@@ -236,8 +180,7 @@ impl App {
             .collect()
     }
 
-    /// Mutable access to the active `/model` picker, for the REPL's picker
-    /// loop.
+    /// Mutable access to the active `/model` picker, for `drive_picker`.
     pub(super) fn picker_mut(&mut self) -> Option<&mut Picker> {
         match self.overlay.as_mut() {
             Some(Overlay::Picker(p)) => Some(p),
@@ -245,8 +188,7 @@ impl App {
         }
     }
 
-    /// Mutable access to the active `/login` overlay, for the REPL's login
-    /// loop.
+    /// Mutable access to the active `/login` overlay, for `drive_login`.
     pub(super) fn login_mut(&mut self) -> Option<&mut LoginOverlay> {
         match self.overlay.as_mut() {
             Some(Overlay::Login(l)) => Some(l),
@@ -255,21 +197,16 @@ impl App {
     }
 
     pub fn busy_off(&mut self) {
-        // An exchange ending supersedes any live phase label: clear it on the
-        // focused viewport so the elapsed-wait bar disappears.
+        // An exchange ending supersedes any live phase label.
         let focused = self.tabs.focused();
         if let Some(vp) = self.tabs.viewport_mut(focused) {
             vp.clear_phase();
         }
     }
 
-    /// True while a time-driven visual is live and must keep repainting on
-    /// its own — the UI loop redraws on this even when no bus or input event
-    /// arrived. Covers the focused tab's elapsed-wait bar (ticks with wall
-    /// time while a phase is in flight), a live copy toast (needs one more
-    /// draw right after its own expiry to erase itself, hence `margin`), and
-    /// the terminal tab-title spinner (rotates only while the trunk is
-    /// working, and has no bus event of its own to announce a tick).
+    /// True while a time-driven visual must keep repainting with no event to
+    /// drive it: the elapsed-wait bar, the tab-title spinner, or a copy toast —
+    /// which needs one draw past its own expiry to erase itself, hence `margin`.
     pub(super) fn animating(&self, margin: Duration) -> bool {
         let phase_live = self
             .tabs
@@ -279,26 +216,16 @@ impl App {
     }
 
     /// Age out sub-session tabs, reset root scrollback, zero cost, redraw the
-    /// banner.  A `/clear` cancels every live background worker and bumps the
-    /// registry generation; here the frontend twin retires their tabs through
-    /// the existing `dying`/`LINGER` path rather than dropping them abruptly,
-    /// so a worker cancelled across the context rebuild fades out instead of
-    /// vanishing — and the [`Self::handle`] dying-guard stops it painting into
-    /// the rebuilt session in the meantime.  `tick` then reaps the faded tabs
-    /// (their viewports persist for `flush_logs`, exactly as a naturally-dead
-    /// child's do).
+    /// banner. The workers `/clear` cancels fade out through the usual
+    /// `dying`/`LINGER` path, so their viewports still reach `flush_logs`.
     pub fn clear(&mut self, info: &banner::SessionInfo<'_>, term: &mut Term) -> io::Result<()> {
         let root = self.tabs.root();
-        // Retire every still-live non-root tab into the linger window. A tab
-        // already dying keeps its earlier death instant, so a child that died
-        // just before the clear is not given a fresh full window.
+        // A tab already dying keeps its earlier death instant, so a child that
+        // died just before the clear is not given a fresh full window.
         self.tabs.retire_all();
-        // A `/clear` on the trunk cancels an in-flight model response in
-        // `route_submit`; the cancel trips within one `wait_for_cancel` poll
-        // (~50 ms), but the unbounded bus can still carry tokens the worker
-        // emitted before the streaming select noticed the flag.  Until the
-        // next prompt echoes genuinely, drop those stragglers in
-        // [`Self::handle`].
+        // `route_submit` cancels the in-flight response, but the unbounded bus
+        // still holds whatever the worker emitted before the streaming select
+        // noticed the flag — one `wait_for_cancel` poll, ~50 ms.
         self.root_clear_drain = true;
         if let Some(vp) = self.tabs.viewport_mut(root) {
             vp.reset();
@@ -307,37 +234,23 @@ impl App {
         self.last_input = 0;
         self.surface.clear();
         self.gesture.clear_selection();
-        // A fresh root: drop queued user prompts and any stale non-human
-        // deliveries (a wakeup or agent result that has not been drained).
+        // Queued prompts and undrained wakeups belong to the old context.
         self.inbox.clear();
         self.banner(term, info)
     }
 
-    /// Route one event to its viewport.  Born registers a pane; Died
-    /// flushes; Usage accumulates globally; everything else renders to
-    /// one viewport via [`line`](mod@line). `bus` is read only for
-    /// `Kind::Resources`'s depth/byte figures — the bus is the UI thread's
-    /// own receiver, so this never contends with a producer's push.
+    /// Route one event to its viewport. `bus` is read only for
+    /// `Kind::Resources`'s depth/byte figures — it is the UI thread's own
+    /// receiver, so this never contends with a producer's push.
     pub fn handle(&mut self, Event { id, kind }: Event, bus: &BusReceiver) {
-        // A tab in the linger window is frozen: its worker has emitted `Died`
-        // (natural death) or been retired by `/clear` (a cancelled background
-        // worker still winding down).  Either way no further event belongs in
-        // it — dropping them here stops a cancelled worker painting into the
-        // rebuilt session, the visual twin of the inbox's stale-generation
-        // rejection, while the tab still renders its final frame and ages out.
-        // Root never enters `dying`, so its events always pass.
+        // A tab in the linger window is frozen: it still renders its final frame
+        // and ages out, but no further event belongs in it, so a worker
+        // cancelled by `/clear` cannot paint into the rebuilt session.
         if self.tabs.is_dying(id) {
             return;
         }
-        // While the trunk viewport is freshly cleared (`App::clear` armed
-        // `root_clear_drain`), drop the straggler events the cancelled exchange
-        // left in the unbounded bus — the tokens and trailing chrome the
-        // worker emitted before the streaming `select!` noticed the cancel
-        // flag, at most one `wait_for_cancel` poll (~50 ms) of queued events.
-        // The first `UserPromptEcho` is the genuine next prompt: disarm the
-        // guard and let it through unchanged.  A `Born`/`Died` carries a
-        // sub-agent own id, never root, so the dying guard above owns them;
-        // for root we drop the lot.
+        // The first `UserPromptEcho` is the genuine next prompt: disarm and let
+        // it through. Everything the cancelled exchange left queued is dropped.
         if id == self.tabs.root() && self.root_clear_drain {
             let echo = matches!(kind, Kind::UserPromptEcho(_));
             self.root_clear_drain = !echo;
@@ -345,10 +258,8 @@ impl App {
                 return;
             }
         }
-        // A phase label names the silent gap before the next thing
-        // happens, so any other event supersedes it.  Clear the live
-        // phase on the event's viewport first, resetting the elapsed-wait
-        // bar so it tracks only the gap before the *next* phase.
+        // A phase label names the silent gap before the next thing happens, so
+        // any other event supersedes it and resets the elapsed-wait bar.
         if !matches!(kind, Kind::Phase(_))
             && let Some(vp) = self.tabs.viewport_mut(id)
         {
@@ -372,19 +283,14 @@ impl App {
             Kind::Died => {
                 let floor = self.context_floor();
                 self.with_viewport(id, |vp| vp.flush_open(floor));
-                // Root never enters the linger window; it lives as
-                // long as the program does.
+                // Root never enters the linger window; it outlives the session.
                 self.tabs.died(id);
             }
             Kind::Usage(u) => {
-                // `u.input` (genai's `prompt_tokens`) already folds in the
-                // cache_creation and cache_read counts on every adapter, so
-                // adding them again double-counts the prompt — ~2x on a
-                // cache-heavy session, on the one gauge that tells the user
-                // when to `/compact` (X4).  Take the prompt total as-is.
-                // Only the root's own prompt size belongs on that gauge; a
-                // concurrently-running sub-agent's small fresh-context usage
-                // would otherwise clobber it until the root's next round-trip.
+                // `u.input` already folds in the cache_creation and cache_read
+                // counts on every adapter, so adding them again double-counts.
+                // Only root's own size belongs on the ctx gauge — a sub-agent's
+                // small fresh context would clobber it until root's next turn.
                 if id == self.tabs.root() {
                     self.last_input = u.input;
                 }
@@ -404,20 +310,17 @@ impl App {
                 let floor = self.context_floor();
                 self.with_viewport(id, |vp| vp.close_boundary(floor));
             }
-            // Final reasoning is its own block; the answer's markdown run
-            // remains a separate `·` block.
+            // Its own block; the answer's markdown run stays a separate one.
             Kind::Reasoning { text, answer_chars } => {
                 self.with_viewport(id, |vp| vp.commit_thinking(text, answer_chars));
             }
             Kind::Step { n, .. } => self.push_chrome(id, RailShape::Step, line::step(n as usize)),
-            // Route to the event's viewport; `set_phase` restarts the
-            // elapsed-wait clock, so a consecutive Phase event simply
-            // resets the bar to the new phase.
+            // `set_phase` restarts the clock, so a consecutive Phase resets the
+            // bar rather than stacking.
             Kind::Phase(label) => self.with_viewport(id, |vp| vp.set_phase(label)),
-            // A desk verb changed the world outside the turn, so it renders
-            // as an act — its own block kind, its own rail shape, and a
-            // barrier the coalescing projection never folds into a run of
-            // observations.
+            // A desk verb changed the world outside the turn, so it renders as
+            // an act — a barrier the coalescing projection never folds into a
+            // run of observations.
             Kind::HarnessCall {
                 verb,
                 subject,
@@ -431,13 +334,12 @@ impl App {
                 ral_core::dbg_trace!("tui", "ToolCall tool={tool} cmd={cmd:?}");
                 let floor = self.context_floor();
                 self.with_viewport(id, |vp| match summary {
-                    // A summary marks a call worth revealing: the label
-                    // shows shut, the script on a click.
+                    // A summary marks a call worth revealing: label shut, script
+                    // on a click.
                     Some(s) => vp.push_tool_call(tool, s, cmd, floor),
-                    // A summary-less call is a plain tool call, shown standalone.
-                    // Its cmd being the parse-failure sentinel makes it an invisible
-                    // boundary (`None`): present only so its result attaches there,
-                    // never reaching back to clobber an earlier call's size bar.
+                    // The parse-failure sentinel makes an invisible boundary:
+                    // present only so the result attaches there, never reaching
+                    // back to clobber an earlier call's size bar.
                     None => {
                         vp.push_plain_call(
                             (cmd != crate::shell_eval::tools::ral::INVALID_INPUT).then_some(cmd),
@@ -445,12 +347,9 @@ impl App {
                     }
                 });
             }
-            // A tool result's body is not rendered — the script the user
-            // can open is the whole of what a call surfaces, and the model
-            // receives the full result through the history pipeline — but
-            // its line count is the call's magnitude, attached to the
-            // most-recent tool-call block as the collapsed header's
-            // size-bar.
+            // The body is not rendered — the openable script is the whole of
+            // what a call surfaces, and the model gets the full result through
+            // history — but its line count is the most recent call's size bar.
             Kind::ToolResult(text) => {
                 self.with_viewport(id, |vp| vp.set_result_size(&text));
             }
@@ -462,11 +361,8 @@ impl App {
             }
             Kind::Error(msg) => self.push_chrome(id, RailShape::Error, line::error(&msg)),
             Kind::SystemNote(text) => self.push_chrome(id, RailShape::Plain, line::note(&text)),
-            // Quiet on the rail; recorded in the trace at the emit seam.  An
-            // act's result joins them there: a desk result is always one
-            // line, so the size bar a `ToolResult` stamps would be constant
-            // ink here, and the act row has already said everything the act
-            // has to say.
+            // Quiet on the rail, recorded in the trace at the emit seam. A desk
+            // result is always one line, so a size bar would be constant ink.
             Kind::Nudge { .. } | Kind::HarnessResult(_) => {}
             Kind::ProviderError(error) => {
                 self.push_chrome(id, RailShape::Error, line::provider_error(&error));
@@ -479,28 +375,22 @@ impl App {
             } => {
                 let (text, error) = outcome.breadcrumb(&text);
                 // The event carries no child session id, so the child's own
-                // per-block fidelity is unreachable here; the breadcrumb is
-                // root's reception of the result, so it degrades with root's
-                // turn-level context floor (echo does not apply — there is
-                // no preceding `ral` call in this render context).
+                // fidelity is unreachable; the breadcrumb is root's reception
+                // of the result, and no preceding `ral` call means no echo.
                 let fidelity = Fidelity {
                     context: self.context_floor(),
                     echo: 0,
                 };
-                // Always lands in root, regardless of which nesting
-                // level emitted — main is the permanent record of
-                // delegated work.
+                // Always root, whatever nesting level emitted — the trunk is
+                // the permanent record of delegated work.
                 let root = self.tabs.root();
                 self.with_viewport(root, |vp| {
                     vp.push_subagent(name, text, error, elapsed, fidelity);
                 });
             }
-            // A surfaced render document: a kit raised a card through the
-            // `surface` builtin — a deliberate choice to communicate with the
-            // user.  A single-`diff` card joins the patch-grouping buffer so
-            // consecutive edits to one file merge into one block, the way a
-            // unified diff presents one file; every other card is its own
-            // scrollback block.
+            // A card a kit raised through the `surface` builtin. A single-`diff`
+            // card joins the patch-grouping buffer, so consecutive edits to one
+            // file merge; every other card is its own block.
             Kind::Card(card) => {
                 ral_core::dbg_trace!(
                     "tui",
@@ -517,21 +407,14 @@ impl App {
                     Err(card) => self.with_viewport(id, |vp| vp.push_card(card)),
                 }
             }
-            // A detached worker settled (its one-line outcome card, never
-            // through the diff-detection path above since it is always plain
-            // text) or core's own ready-boundary housekeeping pushed a notice
-            // (a worker the lease chain reaped, or idle bindings the ledger
-            // pruned): either way the card lands as its own scrollback block.
+            // A detached worker's outcome, or core's ready-boundary housekeeping
+            // notice. Always plain text, so never the diff path above.
             Kind::Done { card, .. } | Kind::Notice { card, .. } => {
                 self.with_viewport(id, |vp| vp.push_card(card));
             }
-            // The `/resources` fold: the agent's card arrives carrying its
-            // own rows; the frontend appends the rows for the accumulators
-            // *it* owns — the probed agent's viewport figures, the fleet's
-            // view counts, and the bus — before the card lands.  Appended
-            // here, at the render seam, because only this thread may read
-            // the tabs/viewport structures; the agent's transcript keeps
-            // the agent rows, and these stay presentation.
+            // The agent's card arrives with its own rows; the frontend appends
+            // the accumulators it owns. Here, at the render seam, because only
+            // this thread may read the tabs and viewports.
             Kind::Resources { mut card, .. } => {
                 let (blocks, rows, bytes) = self
                     .tabs
@@ -562,41 +445,34 @@ impl App {
                     .push(crate::agent::resources::section_mark("frontend"));
                 card.0.push(crate::agent::resources::rows_mark(&frontend));
                 self.with_viewport(id, |vp| vp.push_card(card));
-                // One dim line per tombstoned view, right beside the fold —
-                // the `views.dead` row is a count; this is where each one's
-                // (id, status, log path) is actually named.
+                // The `views.dead` row is a count; this names each tombstoned
+                // view's id, status, and log path.
                 let tombstones = self.tabs.tombstone_lines();
                 if !tombstones.is_empty() {
                     self.push_chrome(id, RailShape::Plain, tombstones);
                 }
             }
-            // A write surfaced: a barrier that ends the ral block, landed
-            // standalone as its own card — the `write <path> <outcome>` heading
-            // plus a preview of what it wrote (composed at the emit seam in
-            // `io_card`).  It never buffers; `with_viewport` flushes any pending
-            // observation run first so the write lands after it on the rail.
+            // A write is a barrier that ends the ral block, so it never buffers:
+            // `with_viewport` flushes any pending observation run first and the
+            // write lands after it on the rail.
             Kind::Io {
                 event: IoEvent::Write { .. },
                 card,
             } => {
                 self.with_viewport(id, |vp| vp.push_write_card(card));
             }
-            // An observation effect surfaced: a read, exec, or grep.  Each lands
-            // as its own `Kind::Io`, so a burst reads as `Read…, $…, Read…, $…`
-            // clutter — the io buffer collapses a run (even interleaved) into one
-            // block per kind, flushed at the next boundary.  The per-event `card`
-            // is dropped on the render path; it is reconstructed grouped at
-            // flush, and the structured per-event record already reached the
-            // transcript at the emit seam (`Emitter::emit`), upstream of this UI
-            // handler, so nothing is lost.
+            // A read, exec, or grep. Each lands as its own event, so a burst
+            // reads as `Read…, $…, Read…, $…` clutter — the io buffer collapses
+            // a run, even interleaved, into one block per kind. The `card` is
+            // dropped here: flush rebuilds it grouped, and the structured record
+            // already reached the transcript at `Emitter::emit`.
             Kind::Io { event, .. } => {
                 self.surface
                     .absorb_observation(self.tabs.viewports_mut(), id, event);
             }
-            // Pinned state: write or drop a register slot in place.  Routed
-            // directly, *not* through `with_viewport` — a pin is ambient state
-            // like `Kind::Usage`, never a scrollback barrier, so it must not
-            // flush the io/patch grouping windows the way a landing block does.
+            // A pin is ambient state like `Kind::Usage`, never a scrollback
+            // barrier, so it is routed directly rather than through
+            // `with_viewport`, which would flush the grouping windows.
             Kind::Pin { key, card } => {
                 if let Some(vp) = self.tabs.viewport_mut(id) {
                     vp.set_pin(key, card);
@@ -610,10 +486,9 @@ impl App {
         }
     }
 
-    /// Commit any pending grouped surfaces, then hand the session's viewport
-    /// to `f`.  Any other content closes both grouping windows: a pending io
-    /// group or `▎ diff` must land before the new block, or the merged block
-    /// would appear *after* whatever follows it on the rail.
+    /// Commit any pending grouped surfaces, then hand the session's viewport to
+    /// `f`. A pending io group or `▎ diff` must land before the new block, or
+    /// the merged block would appear after whatever follows it on the rail.
     fn with_viewport(&mut self, id: AgentId, f: impl FnOnce(&mut Viewport)) {
         self.surface.flush_surfaces(self.tabs.viewports_mut());
         match self.tabs.viewport_mut(id) {
@@ -632,17 +507,14 @@ impl App {
         self.with_viewport(id, |vp| vp.push_chrome(shape, lines));
     }
 
-    /// Draw a dim UI note straight to the viewport — view-local chrome (a slash
-    /// legend row, a clipboard or export ack) that names nothing about the run,
-    /// so it is *drawn, not recorded*: it never becomes an event, the way the
-    /// rendered `Kind::SystemNote` does at the emit seam.
+    /// A dim view-local note — a slash legend, a clipboard ack. Drawn, not
+    /// recorded: unlike `Kind::SystemNote` it never becomes an event.
     pub(super) fn push_note(&mut self, id: AgentId, text: &str) {
         self.push_chrome(id, RailShape::Plain, line::note(text));
     }
 
-    /// Draw an error line straight to the viewport — the UI-thread twin of
-    /// [`Agent::note_error`], for the view commands that surface their own
-    /// failures.  Drawn, not recorded.
+    /// The UI-thread twin of `Agent::note_error`, for view commands that
+    /// surface their own failures. Drawn, not recorded.
     pub(super) fn push_error(&mut self, id: AgentId, message: &str) {
         self.push_chrome(id, RailShape::Error, line::error(message));
     }
@@ -650,21 +522,16 @@ impl App {
         if k.kind != KeyEventKind::Press {
             return;
         }
-        // A modal overlay (the `/model` picker or the `/login` flow) is
-        // exclusive: while one is open no key reaches the textarea or the
-        // scrollback. Its own key handling runs in the UI loop's overlay
-        // loop (`drive_picker`/`drive_login`), which drives it directly;
-        // this guard only keeps a stray key (e.g. one arriving on a
-        // non-prompt path) from leaking through.
+        // An overlay is exclusive; its own keys are handled by `drive_picker`
+        // and `drive_login`. This guard only stops a stray key leaking through.
         if self.overlay.is_some() {
             return;
         }
         let can_edit = self.is_steerable();
-        // Ctrl-X opens the editor-command prefix (emacs convention).  The next
-        // key completes the chord: Ctrl-E composes the prompt in `$EDITOR` (the
-        // request is drained by the UI loop, which owns the terminal it must
-        // suspend); any other key cancels.  The widget's own Ctrl-X (cut) yields
-        // to the prefix — killing stays on Ctrl-W / Ctrl-K.
+        // Ctrl-X opens the editor-command prefix (emacs convention): Ctrl-E
+        // composes the prompt in `$EDITOR` — drained by the UI loop, which owns
+        // the terminal it must suspend — and any other key cancels. The
+        // widget's own Ctrl-X (cut) yields; killing stays on Ctrl-W / Ctrl-K.
         if self.prompt_state.take_cx_pending() {
             if can_edit
                 && k.code == KeyCode::Char('e')
@@ -678,14 +545,11 @@ impl App {
             self.prompt_state.set_cx_pending();
             return;
         }
-        // Tab cycles regardless of focus; every other key is delivered to
-        // the textarea only on an editable tab (`can_edit`) — root, or a live
-        // peer the caller resolved a steering mailbox for.  A dead/lingering
-        // subagent tab is watch-only, keeping the global textarea pristine for
-        // when the user tabs home.
+        // Tab cycles regardless of focus; every other key reaches the textarea
+        // only on an editable tab, so a lingering subagent is watch-only and the
+        // global prompt stays pristine for when the user tabs home.
         match k.code {
-            // Paging scrolls the focused pane on any tab; bare Up/Down
-            // stay bound to prompt history below.
+            // Paging scrolls any tab; bare Up/Down stay bound to history below.
             KeyCode::PageUp => {
                 let f = self.tabs.focused();
                 self.gesture.scroll_page(self.tabs.viewports_mut(), f, -1);
@@ -694,8 +558,8 @@ impl App {
                 let f = self.tabs.focused();
                 self.gesture.scroll_page(self.tabs.viewports_mut(), f, 1);
             }
-            // Not collapsible into a match guard: with <=1 tab, Tab must
-            // be a no-op, not fall through to the textarea-input arm below.
+            // Not collapsible into a guard: with <=1 tab, Tab must be a no-op,
+            // not fall through to the textarea arm below.
             #[allow(clippy::collapsible_match)]
             KeyCode::Tab => {
                 if self.tabs.len() > 1 {
@@ -703,12 +567,9 @@ impl App {
                     self.tabs.focus_next(&demoted);
                 }
             }
-            // Up/Down walk the prompt history, but only from the
-            // prompt's edge rows: with the cursor mid-text in a
-            // multi-line draft they fall through and move the cursor.
-            // When the prompt is empty and prompts are queued above it,
-            // Up pulls the entire queued run back down into the editor,
-            // dequeueing all of them so the user can revise the whole batch.
+            // Up/Down walk history only from the prompt's edge rows; mid-text in
+            // a multi-line draft they fall through and move the cursor. On an
+            // empty prompt, Up dequeues the whole queued run back for revision.
             KeyCode::Up if self.tabs.focused() == self.tabs.root() && k.modifiers.is_empty() => {
                 if self.prompt_state.row() == 0 {
                     if !self.prompt_state.edit_queued_prompt(&self.inbox) {
@@ -732,21 +593,18 @@ impl App {
             _ => {}
         }
     }
-    /// Route a mouse event: the wheel scrolls, a left-drag selects (and
-    /// copies on release), and a left click that never dragged opens the
-    /// block it landed on.  Shift+left falls through to the terminal's
-    /// own selection, so we never see — or fight — it.
+    /// The wheel scrolls, a left-drag selects and copies on release, a click
+    /// that never dragged opens its block. Shift+left falls through to the
+    /// terminal's own selection, so we never see — or fight — it.
     pub fn mouse(&mut self, me: MouseEvent) {
         self.prompt_state.clear_cx_pending();
-        // Refresh the hover mark on every event — motion, wheel, or press —
-        // so the brightened dial glyph tracks the pointer the instant it
-        // crosses a dialable block.
+        // Motion, wheel, and press alike, so the dial glyph brightens the
+        // instant the pointer crosses a dialable block.
         self.gesture
             .update_hover(me, self.tabs.viewports(), self.tabs.focused());
         match me.kind {
-            // Anywhere over a dialable block, the wheel dials its disclosure
-            // level (up reveals, down reduces) and consumes the event; once
-            // the level clamps — or over inert chrome — it scrolls instead.
+            // Over a dialable block the wheel dials disclosure (up reveals) and
+            // consumes the event; once clamped, or over inert chrome, it scrolls.
             MouseEventKind::ScrollUp if self.wheel_dial(1) => {}
             MouseEventKind::ScrollDown if self.wheel_dial(-1) => {}
             MouseEventKind::ScrollUp => {
@@ -775,17 +633,13 @@ impl App {
         }
     }
 
-    /// Dial the dialable block under a wheel event by `delta`, returning
-    /// whether it dialed — `true` only when the level actually changed.  The
-    /// whole vertical extent of the block is the target (the region the
-    /// hover glyph lights), so the wheel dials anywhere over a coalesced
-    /// run, not just on its rail.  A wheel over inert chrome, over a
-    /// non-dialable block, or over a block already clamped at the requested
-    /// end returns `false` and falls through to a viewport scroll — so a
-    /// tall run never traps the wheel.
+    /// Dial the hovered block by `delta`, returning whether the level actually
+    /// changed. The block's whole vertical extent is the target, so the wheel
+    /// dials anywhere over a coalesced run. `false` — inert chrome, a
+    /// non-dialable block, one already clamped — falls through to a scroll, so
+    /// a tall run never traps the wheel.
     fn wheel_dial(&mut self, delta: i8) -> bool {
-        // `App::mouse` already set the hover block for this event, so reuse
-        // it rather than re-mapping the pointer per wheel notch.
+        // `App::mouse` already set the hover block for this event.
         let Some(idx) = self.gesture.hover() else {
             return false;
         };
@@ -796,14 +650,12 @@ impl App {
         vp.dial_block(idx, delta)
     }
 
-    /// Walk every viewport (live, dying, or aged-out) and flush its
-    /// rendered-text accumulator to that session's `user.log`.
-    /// Returns the list of paths, root first, then subagents in
-    /// dispatch order — stable across runs for testing.
+    /// Flush every viewport — live, dying, or aged-out — to its session's
+    /// `user.log`. Returns the paths root first, then subagents in dispatch
+    /// order, stable across runs.
     pub fn flush_logs(&mut self) -> io::Result<Vec<PathBuf>> {
-        // Flush the open markdown buffer first so any trailing
-        // streamed paragraph (no double-newline yet) reaches
-        // `committed`, and the `user.log`, before the final flush.
+        // The open markdown buffer goes first, so a trailing streamed paragraph
+        // with no double-newline yet still reaches the file.
         let floor = self.context_floor();
         for vp in self.tabs.viewports_mut().values_mut() {
             vp.flush_open(floor);
@@ -818,10 +670,8 @@ impl App {
         Ok(paths)
     }
 
-    /// The focused tab's latest assistant reply as raw markdown — the
-    /// trailing run of prose blocks (see [`Viewport::latest_reply_md`]).
-    /// Empty when the tab has no viewport or its last block is not prose.
-    /// `/copy` reads this for the focused tab.
+    /// The focused tab's latest reply as raw markdown, for `/copy`. Empty when
+    /// the tab has no viewport or its last block is not prose.
     pub(in crate::tui) fn latest_reply(&self) -> String {
         self.tabs
             .viewport(self.tabs.focused())
@@ -829,10 +679,8 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// Flush the focused tab's `user.log` and return its path, so `/export`
-    /// can copy the rendered transcript elsewhere.  Flushes the open
-    /// markdown buffer first, mirroring [`Self::flush_logs`], so a trailing
-    /// streamed paragraph reaches the file before the copy.
+    /// Flush the focused tab's `user.log` and return its path for `/export`.
+    /// Flushes the open markdown buffer first, as [`Self::flush_logs`] does.
     pub(in crate::tui) fn flush_focused_log(&mut self) -> io::Result<PathBuf> {
         let focused = self.tabs.focused();
         let floor = self.context_floor();
@@ -845,9 +693,8 @@ impl App {
     }
 
     pub fn banner(&mut self, term: &mut Term, s: &banner::SessionInfo<'_>) -> io::Result<()> {
-        // The wordmark + eagle: a branded splash, an image outside Bertin's
-        // data variables, so it alone keeps the saturated palette and reads
-        // as neon. It carries no rail — it is not a row on the plane.
+        // The wordmark and eagle sit outside Bertin's data variables, so this
+        // alone keeps the saturated palette and carries no rail.
         let mut splash: Vec<Line<'static>> = vec![Line::default()];
         for (a, e) in banner::ART.lines().zip(banner::EAGLE.lines()) {
             splash.push(Line::from(vec![

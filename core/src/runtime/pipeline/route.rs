@@ -1,78 +1,55 @@
-//! Per-stage routing for process-staged pipelines.
+//! Interior edges of a process-staged pipeline: a `Bytes` edge is one kernel
+//! pipe, a `Value` edge one [`ValueChannel`].
 //!
-//! A pipeline is *n* stages separated by *n−1* typed edges.  Every
-//! edge is allocated here, once, before any stage spawns: a `Bytes`
-//! edge is one kernel pipe, a `Value` edge one serialised-value
-//! channel ([`ValueChannel`]).  Each end is moved into the
-//! [`StageRoute`] of the stage that uses it, and a route is consumed
-//! whole by the launcher — ownership makes a leaked or doubly-wired
-//! edge end unrepresentable, and an aborted launch closes every
-//! unconsumed end by dropping the remaining routes.
+//! Every edge is allocated before any stage spawns, and each end lives in
+//! exactly one [`StageRoute`] the launcher consumes whole — so a doubly-wired
+//! end is unrepresentable, and an aborted launch closes what it never spawned.
 
 use super::protocol::{ValueChannel, create_value_pair, pipe_error};
 use super::resolve::PipelinePlan;
 use crate::types::Settled;
 
-/// Whether stage `i` receives a value on its input edge.
-///
-/// A value edge is data-last application (`x | f = f !{x}`): the
-/// upstream value must arrive before the stage invokes.  Stage `i`
-/// receives one iff it has an upstream (`i > 0`) and its input mode is
-/// non-`Bytes`.  [`open_stage_routes`] realizes this edge as the
-/// consumer's [`ValueChannel`] half.
+/// Whether stage `i` receives a value rather than bytes: it has an upstream
+/// and non-`Bytes` input.  This is data-last application (`x | f = f !{x}`),
+/// so the consuming helper blocks on the edge before it invokes.
 pub(super) fn value_edge_in(i: usize, comp_type: crate::mode::PipeSpec) -> bool {
     i > 0 && comp_type.input != crate::mode::PipeMode::Bytes
 }
 
-/// Whether stage `i` of `n` emits a value on its output edge.
-///
-/// The dual of [`value_edge_in`]: stage `i` emits one iff it has a
-/// downstream (`i + 1 < n`) and its output mode is non-`Bytes`.
-/// [`open_stage_routes`] realizes this edge as the producer's
-/// [`ValueChannel`] half.
+/// The dual of [`value_edge_in`]: stage `i` of `n` emits a value iff it has a
+/// downstream and non-`Bytes` output.
 pub(super) fn value_edge_out(i: usize, n: usize, comp_type: crate::mode::PipeSpec) -> bool {
     i + 1 < n && comp_type.output != crate::mode::PipeMode::Bytes
 }
 
 /// Stdin source for one stage.
 pub(super) enum ByteIn {
-    /// Pipeline boundary on the input side: the launcher routes this
-    /// stage's stdin against the shell's stdin (Inherit on a tty when
-    /// the pipeline owns it, Null otherwise).
+    /// The pipeline's input boundary; `launch::route_stdin` resolves it
+    /// against the enclosing shell's stdin.
     Parent,
-    /// Reader end of the byte edge from the upstream stage.
     Upstream(os_pipe::PipeReader),
 }
 
 /// Stdout destination for one stage.
 pub(super) enum ByteOut {
-    /// Pipeline boundary on the output side: the launcher routes this
-    /// stage's stdout against the shell's stdout (Inherit on a tty +
-    /// no audit, Pump-with-optional-tee otherwise).
+    /// The pipeline's output boundary; `launch::wire_stage_stdout` resolves it
+    /// against the shell's stdout sink.
     Parent,
-    /// Writer end of the byte edge to the downstream stage.
     Downstream(os_pipe::PipeWriter),
-    /// Stage emits values, not bytes (its interior output edge is a
-    /// value channel); discard byte output via `Stdio::null()`.
+    /// The stage's output edge is a value channel, so its bytes go nowhere.
     Null,
 }
 
-/// Whether the stage's `ChildEvalResponse` carries the pipeline's final
-/// value back to the parent.  `Report` only applies to the last
-/// value-typed ral stage; everything else (byte-mode last stages,
-/// every non-final stage) is `Ignore`.
+/// Whether the stage's `ChildEvalResponse` carries the pipeline's final value.
+/// Only the last value-typed ral stage reports one.
 pub(super) enum FinalValue {
     Report,
     Ignore,
 }
 
-/// One stage's fully-wired endpoints, consumed by value at spawn.
-///
-/// A stage has at most one incoming and at most one outgoing value
-/// edge because the pipeline is linear; externals never carry either
-/// end.  Both Unix and Windows back the value channel with a real
-/// pipe pair; on Windows the channel is a Reader/Writer enum over an
-/// anonymous OS pipe rather than a Unix-domain socketpair half.
+/// One stage's fully-wired endpoints, consumed by value at spawn.  At most one
+/// value edge per side, the pipeline being linear; a directly spawned external
+/// carries neither, since `resolve::direct_spawnable` refuses value edges.
 pub(super) struct StageRoute {
     pub(super) stdin: ByteIn,
     pub(super) stdout: ByteOut,
@@ -81,32 +58,23 @@ pub(super) struct StageRoute {
     pub(super) final_value: FinalValue,
 }
 
-/// The consumer's half of an interior edge, handed from a producer
-/// stage to its successor while the routes are built.
+/// The consumer's half of an interior edge, carried across one loop iteration.
 enum Inbound {
     Outer,
     Bytes(os_pipe::PipeReader),
     Value(ValueChannel),
 }
 
-/// Allocate every interior edge and distribute the ends into one
-/// [`StageRoute`] per stage.  The producer's output mode decides each
-/// edge's transport — a byte pipe when it emits bytes, a value channel
-/// otherwise; adjacency (the checker unified the wires it emitted)
-/// guarantees the consumer agrees.  On any error the partly-built
-/// `Vec<StageRoute>` drops and every allocated end closes.
+/// Allocate every interior edge.  The producer's output mode alone picks each
+/// edge's transport: the checker unified adjacent wires, so the consumer agrees.
 pub(super) fn open_stage_routes(plan: &PipelinePlan) -> Settled<Vec<StageRoute>> {
     let n = plan.specs.len();
     let mut routes = Vec::with_capacity(n);
     let mut inbound = Inbound::Outer;
     for (i, spec) in plan.specs.iter().enumerate() {
-        // The last stage's output is the pipeline boundary; an interior
-        // edge is a value channel when the producer emits a value edge,
-        // otherwise a byte pipe.
         let (stdout, value_out, downstream) = if value_edge_out(i, n, spec.comp_type) {
-            // `create_value_pair` returns (reader_end, writer_end) on both
-            // backends.  The producer keeps the writer; the consumer gets
-            // the reader.
+            // The pair is (reader, writer), and on Windows the halves are
+            // directional: the producer must keep the writer.
             let (r, w) = create_value_pair()?;
             (ByteOut::Null, Some(w), Inbound::Value(r))
         } else if i + 1 < n {

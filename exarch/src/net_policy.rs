@@ -1,24 +1,21 @@
-//! The IT-owned network policy: a root-owned script naming which public
-//! DNS names a CONNECT tunnel may reach, on port 443, and nothing else.
+//! The IT-owned network policy: which public DNS names a guest's CONNECT
+//! tunnel may reach, on port 443. `guest-net` enforces it; this module only
+//! says what it is.
 //!
-//! A destination allowlist, not an information-flow policy: an admitted
-//! host receives whatever the guest sends once the tunnel is open.
-//!
-//! Read from a fixed system path (no XDG home, no per-user override),
-//! evaluated under a [`ral_core::types::Capabilities::deny_all`] grant like
-//! [`crate::config::load`]; absent, a small built-in default. One file for
-//! every front-end on this machine — exarch and synod answer off the same
-//! allowlist.
+//! A destination allowlist, not an information-flow policy: an admitted host
+//! receives whatever the guest sends once the tunnel is open. Read from a
+//! fixed system path, never a per-user one, and evaluated under the same
+//! no-authority grant as [`crate::config::load`].
 
 use ral_core::Shell;
 use ral_core::types::Value;
 
-/// The one fixed path every front-end reads: IT's ruleset, not the user's.
+/// A system path, deliberately: the sandboxed guest writes only cwd and scratch.
 const POLICY_PATH: &str = "/etc/exarch/net-policy.ral";
 
 const DEFAULT_POLICY_RAL: &str = include_str!("net_policy/default-policy.ral");
 
-/// This module's error-message prefix for `crate::config`'s shared helpers.
+/// Error-message prefix, handed to `crate::config`'s shared load helpers.
 const LABEL: &str = "network policy";
 
 /// One exact, lowercase ASCII DNS name — the only shape this policy admits.
@@ -26,11 +23,9 @@ const LABEL: &str = "network policy";
 pub struct Host(String);
 
 impl Host {
-    /// The only constructor: lowercases `raw` and rejects anything that
-    /// isn't one plain DNS name — no wildcard, no IP literal, no trailing
-    /// dot, no empty label, no underscore, no non-ASCII byte, no label
-    /// outside `[a-z0-9-]` or starting/ending with `-`, no label over 63
-    /// bytes, no name over 253 bytes.
+    /// The only constructor, hence the lowercase invariant. `guest-net` runs
+    /// the CONNECT target through here, so `raw` is bytes an adversary chose;
+    /// wildcards and IP literals are refused rather than matched.
     ///
     /// # Errors
     /// Returns `Err` naming what was wrong with `raw`.
@@ -105,9 +100,8 @@ impl std::fmt::Display for Host {
 #[derive(Debug)]
 pub struct NetPolicy {
     pub hosts: std::collections::HashSet<Host>,
-    /// Whether this machine's agents may use the model provider's built-in,
-    /// server-side web search — a separate verdict from `hosts`, since that
-    /// allowlist cannot constrain a search the provider runs on our behalf.
+    /// The provider's own server-side web search, a separate verdict: we
+    /// never see the URLs it visits, so `hosts` cannot constrain it.
     pub search: bool,
 }
 
@@ -123,8 +117,7 @@ impl NetPolicy {
 ///
 /// # Errors
 /// Returns `Err` if the file is present but unreadable, if evaluating it
-/// raises an error, or if its terminal map fails to decode into a
-/// [`NetPolicy`].
+/// raises, or if its terminal map fails to decode.
 pub fn load() -> Result<NetPolicy, String> {
     let path = std::path::Path::new(POLICY_PATH);
     let (source, display) = match crate::config::read_optional_file(path, LABEL)? {
@@ -142,10 +135,9 @@ pub fn load() -> Result<NetPolicy, String> {
     )
 }
 
-/// Decode the policy's terminal value — a map `[hosts: [...], search: ...]`
-/// — into a [`NetPolicy`]. Strict on shape and on keys: a malformed policy,
-/// or one still written against the retired `read`/`write`/`max-bytes`/
-/// `rate-per-minute` shape, is a hard error naming the offending field.
+/// Decode the policy's terminal map into a [`NetPolicy`]. An unrecognised key
+/// is a hard error naming itself, never ignored — a policy that half-parses
+/// binds nobody.
 fn decode(value: Value, display: &str) -> Result<NetPolicy, String> {
     let Value::Map(map) = value else {
         return Err(format!(
@@ -232,9 +224,7 @@ pub fn refusal(host: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Evaluate a policy `source` string the way [`load`] does — through the
-    /// shared core under the no-authority grant, in a fresh throwaway shell —
-    /// and decode it. Mirrors `config.rs`'s own test-only `parse` helper.
+    /// Evaluate and decode a policy the way [`load`] does; `config.rs` mirrors this.
     fn parse(source: &str) -> Result<NetPolicy, String> {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         let source = ral_core::source::normalize_source_text(source.to_string());

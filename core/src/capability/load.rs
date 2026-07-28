@@ -1,39 +1,24 @@
-//! Load a capability profile from a `.ral` script.
+//! Load a capability profile — a `.ral` script whose terminal expression is
+//! a map shaped like the argument of `grant [...] { body }`.
 //!
-//! A profile is a ral script whose terminal expression is a map shaped
-//! like the argument of `grant [...] { body }`.  This module is a thin
-//! composition of two existing surfaces:
-//!
-//! - [`crate::builtins::modules::evaluate_source`] — parse + elaborate +
-//!   evaluate.  All source-eval machinery lives there; we never
-//!   re-implement it.
-//! - [`crate::capability::decode_capability_map`] — walk the
-//!   resulting `Value::Map` into a frozen `Capabilities`, resolving every
-//!   sigil against a `FreezeCtx`.  All capability decoding lives there; we
-//!   never re-implement it.
-//!
-//! Each profile is frozen at load against the caller-supplied `FreezeCtx`,
-//! so a composed ceiling is the `meet` of already-resolved bundles.  Both
-//! the ral CLI's `--capabilities` flag and exarch's base+extend+restrict
-//! orchestrator consume this layer.
+//! Evaluation is [`crate::builtins::modules::evaluate_source`], decoding is
+//! [`crate::capability::decode_capability_map`]; this file only joins them.
+//! Sigils freeze here, so a composed ceiling is the `meet` of already-resolved
+//! bundles.  Entered by the ral CLI's `--capabilities` flag and by exarch's
+//! base/extend/restrict orchestrator.
 
 use std::path::Path;
 
 use crate::types::{Break, Capabilities, Mooring, Settled, Shell, sig};
 
-/// Evaluate `source` as a `.ral` script and walk its terminal value
-/// into a frozen [`Capabilities`], resolving sigils against `ctx`.
-///
-/// `virtual_path` labels the file in error messages and in the
-/// cycle-detection stack — pass the absolute path for files on disk, or
-/// a synthetic identifier (`<built-in:NAME>`) for embedded profiles.
+/// Evaluate `source` and decode its terminal value into a frozen
+/// [`Capabilities`], resolving sigils against `ctx`.  `virtual_path` names the
+/// file in errors and keys the cycle stack — synthetic (`<built-in:NAME>`) for
+/// embedded profiles.
 ///
 /// # Errors
-/// Returns `Err` if evaluating `source` fails (a parse, elaboration, or
-/// runtime error, wrapped with `virtual_path`), or if its terminal value
-/// does not decode as a capability map (a non-map value, an unknown key, or
-/// a sigil that fails to freeze). A propagated escape (`exit`, a stopped
-/// child) passes through unchanged.
+/// A compile, runtime, or decode failure, named with `virtual_path`; an escape
+/// (`exit`, a stopped child) passes through untouched.
 pub fn load_capabilities_from_str(
     mooring: &Mooring,
     shell: &mut Shell,
@@ -47,12 +32,11 @@ pub fn load_capabilities_from_str(
     crate::capability::decode_capability_map(&value, &prefix, ctx).map_err(Break::from)
 }
 
-/// Read `path` from disk and forward to [`load_capabilities_from_str`].
+/// Read `path` and forward to [`load_capabilities_from_str`], keyed by its
+/// canonical form so two spellings of one file share a cycle-stack entry.
 ///
 /// # Errors
-/// Returns `Err` if the file cannot be read (`file not found`, or any other
-/// IO failure wrapped with the path), or for any failure of
-/// [`load_capabilities_from_str`] on its contents.
+/// The file cannot be read, or any failure of [`load_capabilities_from_str`].
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:cap-load] reads a capability-policy file from disk to configure the sandbox; policy/configuration loading at setup, not turn-time model data I/O, raises no surface card."
@@ -80,27 +64,17 @@ pub fn load_capabilities_from_path(
     load_capabilities_from_str(mooring, shell, &source, &abs, ctx)
 }
 
-/// Load, `meet`-compose, and install a session-wide capability ceiling.
+/// Load each profile in `paths`, `meet`-fold left to right (each file narrows
+/// authority), and push the result as a permanent session-wide ceiling.
 ///
-/// Load each profile in `paths`, freezing each against the session's
-/// `$HOME` and working directory, compose them left-to-right by `meet`
-/// (each successive file narrows authority), and push the result onto
-/// `shell` as a permanent session-wide ceiling.  No-op when `paths` is
-/// empty.
-///
-/// The freeze context is built once and shared, so every profile resolves
-/// its sigils against the same home and cwd.  An `xdg:` path that escapes
-/// `$HOME` is rejected at the profile that names it.  `audit` propagates
-/// upward through `meet`, so any profile declaring `audit: true` makes the
-/// whole session audit.
-///
-/// A load failure carries a neutral mechanism message; a caller prepends
-/// its own provenance (the `--capabilities` flag, a config key).
+/// One `FreezeCtx` serves the whole fold, so every profile resolves its sigils
+/// against the same home and cwd, and an `xdg:` path escaping `$HOME` is
+/// rejected at the profile that names it.  Failures carry a bare mechanism
+/// message; the caller prepends provenance (`--capabilities`, a config key).
 ///
 /// # Errors
-/// Returns `Err` at the first profile that fails to load — a missing file,
-/// or a decode/freeze error (an `xdg:` path escaping `$HOME`) — or forwards
-/// an escape raised while a profile evaluates.
+/// The first profile that fails to load or decode; an escape raised while a
+/// profile evaluates propagates.
 pub fn apply_session_profiles(
     mooring: &Mooring,
     shell: &mut Shell,
@@ -163,7 +137,7 @@ mod tests {
         .unwrap();
         let exec = caps.exec.expect("exec dimension present");
         assert_eq!(exec.literals.get("ls"), Some(&ExecPolicy::Allow));
-        // Other dimensions stay None — no opinion → inherits caller.
+        // `None` is no opinion, so an unmentioned dimension inherits the caller.
         assert!(
             caps.fs.is_none()
                 && caps.net.is_none()
@@ -204,8 +178,6 @@ mod tests {
         );
     }
 
-    /// A non-map terminal value is a programmer error in the profile.
-    /// The error names the file so the user can find the script.
     #[test]
     fn non_map_return_value_errors_with_file_path() {
         let mut shell = shell();
@@ -224,9 +196,7 @@ mod tests {
         assert!(msg.contains("<test:nonmap>"), "should name the file: {msg}");
     }
 
-    /// Unknown top-level keys are caught by the shared walker — no
-    /// silent drop, matching the `deny_unknown_fields` discipline the
-    /// schema enforces.
+    /// The shared walker rejects a typo'd key rather than dropping it silently.
     #[test]
     fn unknown_top_level_key_errors() {
         let mut shell = shell();
@@ -245,8 +215,6 @@ mod tests {
         assert!(msg.contains("unknown key 'fss'"), "{msg}");
     }
 
-    /// An escape raised while a profile evaluates (`exit`) propagates
-    /// unchanged rather than collapsing into an error string.
     #[test]
     fn exit_in_profile_propagates_as_escape() {
         let mut shell = shell();

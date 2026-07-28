@@ -1,9 +1,8 @@
-//! Owned process-launch value.
+//! The owned process-launch value, built once and handed over once.
 //!
-//! The runtime builds one `Launch` and hands it to the process subsystem
-//! exactly once.  Unix lowers it back to `std::process::Command`; Windows owns
-//! the raw `CreateProcessW` boundary so handle admission and Job Object
-//! membership are creation-time facts.
+//! Unix lowers it back to `std::process::Command`; Windows drives
+//! `CreateProcessW` itself, because handle admission and Job Object
+//! membership must be creation-time facts.
 
 use std::ffi::OsStr;
 #[cfg(windows)]
@@ -36,12 +35,8 @@ pub struct Launch {
     security_capabilities: Option<SecurityCapabilitiesAttr>,
 }
 
-/// `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` payload for a confined
-/// spawn: an `AppContainer` SID plus its capability-SID array. Kept as raw
-/// `windows-sys` FFI values rather than the `AppContainer` profile / capability
-/// types that build them (`sandbox::windows::appcontainer`) — this module
-/// owns the spawn boundary and its attribute-list plumbing, not `AppContainer`
-/// policy, so it only borrows the raw SID values the caller keeps alive.
+/// `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` payload, borrowing raw SID
+/// values from the types in `sandbox::windows::appcontainer` that own them.
 #[cfg(windows)]
 struct SecurityCapabilitiesAttr {
     app_container_sid: PSID,
@@ -173,14 +168,9 @@ impl Launch {
         Self { cmd, jail: None }
     }
 
-    /// Adopt an existing `Command`.
-    ///
-    /// Only the program, arguments, environment, and working directory are
-    /// the launch's contract: stdio and redirections must be set on the
-    /// returned `Launch`, never on the incoming `Command`. `std` exposes no
-    /// stdio getters, so the Windows raw-`CreateProcessW` path cannot copy
-    /// them across; treating them as uncarried on every platform keeps that a
-    /// documented contract rather than a Windows-only surprise.
+    /// Adopt an existing `Command`.  Set stdio and redirections on the
+    /// returned `Launch`, never on the incoming one: `std` exposes no stdio
+    /// getters, so the Windows arm cannot carry them across.
     pub fn from_command(cmd: std::process::Command) -> Self {
         Self { cmd, jail: None }
     }
@@ -247,17 +237,13 @@ impl Launch {
         }
     }
 
-    /// Prepare this exec's transient cgroup and register the pre-exec
-    /// closure that places the child in it and drops it to the plan's
-    /// unprivileged uid/gid.  Called by `build_command` when a
-    /// [`crate::process::jail::GuestJail`] is installed on the shell;
-    /// structurally absent from a build that lacks the Linux jail edge,
-    /// the same way [`Self::apply_unix_resource_limits`] is
-    /// `cfg(unix)`-only.
+    /// Prepare this exec's transient cgroup and register the pre-exec that
+    /// puts the child in it at the plan's unprivileged uid/gid.  Called from
+    /// `build_command` in `runtime/command/process.rs` when the shell carries
+    /// a [`GuestJail`](crate::process::jail::GuestJail).
     ///
     /// # Errors
-    /// Returns the kernel's error for any mkdir/write/open the cgroup
-    /// setup performs.
+    /// The kernel's error for any mkdir/write/open the setup performs.
     #[cfg(target_os = "linux")]
     pub(crate) fn apply_guest_jail(
         &mut self,
@@ -286,13 +272,13 @@ impl Launch {
         }
     }
 
-    /// Lower this launch to a `std::process::Command` and spawn it with the
-    /// requested process-group placement, returning the child handle, its
-    /// leader pgid, and the jail cgroup `apply_guest_jail` staged (if any).
+    /// Lower to a `std::process::Command` and spawn it with the requested
+    /// process-group placement: child, leader pgid, and whatever jail cgroup
+    /// `apply_guest_jail` staged.
     ///
     /// # Errors
-    /// Returns `Err` if the spawn fails — the `fork`/`exec` itself or the
-    /// pre-exec `setpgid`/`setsid` installed by [`spawn_with_pgid`](crate::process::spawn_with_pgid).
+    /// The `fork`/`exec` itself, or the pre-exec `setpgid`/`setsid` that
+    /// `process::signal::spawn_with_pgid` installs.
     pub fn spawn(
         &mut self,
         pgid: crate::process::PgidPolicy,
@@ -309,32 +295,19 @@ impl Launch {
         ))
     }
 
-    /// Lower this launch and spawn it *detached*: born by double fork, so
-    /// the survivor is this process's grandchild, reparented onto init and
-    /// alone in a session of its own.  Returns that survivor's pid, and
-    /// nothing else — no child handle, no pgid, no descriptor.  Ownership
-    /// is what it hands over: by construction no teardown path here can
-    /// name the process, which is the whole difference from
-    /// [`Self::spawn`].
+    /// Spawn *detached* by double fork: the survivor is this process's
+    /// grandchild, reparented onto init in a session of its own, and only its
+    /// pid comes back.  Nothing here can then name it — the whole difference
+    /// from [`Self::spawn`].
     ///
-    /// Point all three standard streams somewhere that outlives this
-    /// process first — [`StdioSpec::null`] for stdin, files for the rest.
-    /// An inherited stream dies with us and takes the survivor's writes
-    /// with it.
-    ///
-    /// Unlike [`Self::spawn`], this hands back no [`JailCgroup`]: under a
-    /// guest jail the survivor stays in the transient `exec-N` cgroup it
-    /// was placed in, with that cgroup's limits still enforced, and nobody
-    /// is left to `kill` or `remove` it.  That is the only coherent answer
-    /// — a caller that cannot name the process cannot know when the cgroup
-    /// is empty — and the cost is one inert directory per surviving birth,
-    /// until the guest next boots.
-    ///
-    /// [`JailCgroup`]: crate::process::jail::JailCgroup
+    /// So point all three standard streams at something that outlives this
+    /// process; an inherited one dies with us, taking the survivor's writes
+    /// with it.  And under a guest jail the survivor keeps its `exec-N`
+    /// cgroup and its limits for good, since nobody left can tell when that
+    /// cgroup is empty.
     ///
     /// # Errors
-    /// Returns `Err` if either fork or the `execve` fails, or if the
-    /// grandchild's pid does not come back.
+    /// A failed fork or `execve`, or a pid handshake that comes up short.
     #[cfg(unix)]
     pub(crate) fn spawn_detached(&mut self) -> std::io::Result<u32> {
         crate::process::signal::spawn_detached(&mut self.cmd)
@@ -358,13 +331,9 @@ impl Launch {
         }
     }
 
-    /// Adopt an existing `Command`.
-    ///
-    /// Only the program, arguments, environment, and working directory are
-    /// carried: `std` exposes no stdio getters, so any stdio or redirections
-    /// set on the incoming `Command` are dropped and must be re-set on the
-    /// returned `Launch`. This is a documented contract, matching the
-    /// non-Windows arm.
+    /// Adopt an existing `Command` — program, args, environment, cwd.  `std`
+    /// exposes no stdio getters, so stdio set on it is dropped and must be
+    /// re-set here, exactly as on the non-Windows arm.
     #[allow(
         clippy::needless_pass_by_value,
         reason = "the non-Windows arm moves the `Command` into the launch it returns; both arms take it by value so the shared callers see one cross-platform signature"
@@ -447,15 +416,10 @@ impl Launch {
         }
     }
 
-    /// Attach `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` to the spawn: an
-    /// `AppContainer` SID plus its capability-SID array (built by
-    /// `sandbox::windows::appcontainer` — an `AppContainerProfile`'s SID and
-    /// a `CapabilitySids`' entries). `app_container_sid` and every SID inside
-    /// `capabilities` must stay valid until [`Self::spawn`] returns: this
-    /// only borrows their raw values into the attribute list at spawn time,
-    /// it does not take ownership.  The per-command sandbox launcher
-    /// (`sandbox::windows::session::confine`) threads the projection's
-    /// session-owned profile SID and capability array through here.
+    /// Stage `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` for the spawn.
+    /// Only the raw SID values are borrowed, so they must stay valid until
+    /// [`Self::spawn`] returns; `sandbox::windows::session::confine` passes
+    /// SIDs the session owns for the whole process lifetime.
     pub fn security_capabilities(
         &mut self,
         app_container_sid: PSID,
@@ -468,17 +432,14 @@ impl Launch {
         self
     }
 
-    /// Lower this launch through the raw `CreateProcessW` boundary and spawn
-    /// it with the requested process-group placement, returning the child
-    /// handle and its leader pgid.  The jail cgroup is always `None` here —
-    /// the guest jail exists only inside a Linux guest — kept in the return
-    /// shape purely so callers stay platform-uniform.
+    /// Lower through `CreateProcessW` and spawn with the requested
+    /// process-group placement.  The jail cgroup is always `None` — Linux
+    /// guests only — and stays in the tuple to keep callers uniform.
     ///
     /// # Errors
-    /// Returns `Err` if the program is a `.bat`/`.cmd` file (refused), if any
-    /// argument, path, or environment entry contains a NUL, if handle
-    /// admission or the `CreateProcessW` call fails, or if placing the child
-    /// in its pipeline Job Object fails.
+    /// A `.bat`/`.cmd` program (refused), a NUL in any argument, path, or
+    /// environment entry, a failed handle admission or `CreateProcessW`, or a
+    /// failure to place the child in its pipeline Job Object.
     pub fn spawn(
         &mut self,
         pgid: crate::process::PgidPolicy,
@@ -561,30 +522,23 @@ mod windows_args {
         Ok(())
     }
 
-    // ── Unicode round-trip (item W3.8) ──────────────────────────────────
+    // ── Unicode round-trip ──────────────────────────────────────────────
     //
-    // `make_command_line`/`append_arg` own the UTF-16 conversion at the
-    // spawn boundary; these tests exercise that seam directly (no spawn
-    // needed) with non-ASCII *and* non-BMP (astral-plane, surrogate-pair)
-    // text, so a regression that mangles wide-char conversion — not just
-    // quoting — is caught. `cfg(windows)`: `OsStrExt::encode_wide` doesn't
-    // exist off Windows, so this only builds and runs on Windows CI.
+    // Non-BMP text through the argv UTF-16 conversion, so a wide-char
+    // regression is caught apart from a quoting one.  Windows CI only.
     #[cfg(test)]
     mod tests {
         use super::*;
 
-        /// Decode a `make_command_line` buffer back to a `String`,
-        /// dropping the trailing NUL `make_command_line` always appends.
+        /// Decode a `make_command_line` buffer, dropping its trailing NUL.
         fn decode(wide: &[u16]) -> String {
             let (last, body) = wide.split_last().expect("non-empty command line");
             assert_eq!(*last, 0, "make_command_line must NUL-terminate");
             String::from_utf16(body).expect("well-formed UTF-16")
         }
 
-        /// A program path and a lone plain argument (no space/quote/
-        /// backslash, so `append_arg` takes its no-quoting branch and the
-        /// wide buffer is exactly the UTF-16 re-encoding of the input) —
-        /// isolates the encode/decode round-trip from the quoting rules.
+        /// A plain argument takes `append_arg`'s no-quoting branch, isolating
+        /// the encode/decode round-trip from the quoting rules.
         #[test]
         fn plain_arg_round_trips_non_ascii_and_non_bmp() {
             let program = std::ffi::OsString::from(r"C:\Users\café\bin\日本語.exe");
@@ -601,10 +555,7 @@ mod windows_args {
             );
         }
 
-        /// The same text, but the argument also contains a space — forces
-        /// `append_arg`'s quoting branch, so this proves the astral-plane
-        /// characters survive being wrapped in quotes too, not just the
-        /// unquoted path.
+        /// The same text through `append_arg`'s quoting branch.
         #[test]
         fn quoted_arg_round_trips_non_ascii_and_non_bmp() {
             let program = std::ffi::OsString::from(r"C:\Program Files\ral.exe");
@@ -621,12 +572,9 @@ mod windows_args {
             );
         }
 
-        /// A surrogate-pair character (astral plane) sitting directly
-        /// against the arg boundary and against an escaped embedded quote
-        /// — the two spots most likely to split a surrogate pair if the
-        /// backslash-doubling logic walked `u16` units carelessly. Built
-        /// with `format!`/interpolation rather than hand-escaped string
-        /// literals, so the expected value is unambiguous to read.
+        /// A surrogate pair against the arg boundary and against an escaped
+        /// embedded quote — the two places careless `u16`-unit walking in the
+        /// backslash-doubling would split one.
         #[test]
         fn non_bmp_survives_adjacent_to_escaped_quote() {
             let q = '"';
@@ -634,8 +582,6 @@ mod windows_args {
             let arg = std::ffi::OsString::from(format!("🎉{q}🎊 quoted 🎊{q}🎉"));
             let cmd = make_command_line(program.as_os_str(), std::slice::from_ref(&arg)).unwrap();
             let decoded = decode(&cmd);
-            // Quoted (embedded spaces) with each embedded `"` escaped by
-            // one preceding backslash.
             let expected_payload = format!("🎉\\{q}🎊 quoted 🎊\\{q}🎉");
             assert_eq!(
                 decoded,
@@ -673,13 +619,11 @@ mod windows {
         STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
+    /// Marking a handle inheritable is process-global state, so only one
+    /// spawn at a time may hold that window open across `CreateProcessW`.
     static LAUNCH_LOCK: Mutex<()> = Mutex::new(());
 
-    /// `STARTUPINFOEXW`'s own byte count, as the `u32` its `cb` field is.
-    ///
-    /// A fixed Win32 layout of a little over a hundred bytes, so the
-    /// narrowing from `usize` cannot lose anything — said here rather than
-    /// left as a bare `as` at the assignment.
+    /// `STARTUPINFOEXW`'s own byte count, as the `u32` its `cb` field wants.
     #[allow(
         clippy::cast_possible_truncation,
         reason = "a fixed Win32 layout; size_of is a compile-time constant of ~112, nowhere near u32::MAX"
@@ -736,9 +680,6 @@ mod windows {
             .transpose()?;
         let mut env = environment_block(&launch.env)?;
 
-        // The handle list is always present; the security-capabilities
-        // attribute is present only when a caller has staged an
-        // AppContainer spawn via `Launch::security_capabilities`.
         let attr_count: u32 = if launch.security_capabilities.is_some() {
             2
         } else {
@@ -747,12 +688,8 @@ mod windows {
         let mut attrs = AttributeList::new(attr_count)?;
         attrs.update_handle_list(&inherited)?;
 
-        // Build the SECURITY_CAPABILITIES value now (rather than inside
-        // `AttributeList`) so its address is a plain local that outlives the
-        // `CreateProcessW` call below without any self-referential storage:
-        // the `Capabilities` pointer inside it borrows
-        // `launch.security_capabilities`'s own `Vec`, which `launch` keeps
-        // alive for this whole function.
+        // A plain local, so its address outlives `CreateProcessW` below with
+        // no self-reference: `Capabilities` points into `launch`'s own `Vec`.
         let security_caps_value: Option<SECURITY_CAPABILITIES> = launch
             .security_capabilities
             .as_mut()
@@ -839,17 +776,10 @@ mod windows {
         )))
     }
 
-    /// Refuse to launch a `.bat`/`.cmd` image outright — the correct
-    /// posture for CVE-2024-24576 (Rust std's own `.bat`/`.cmd` argument
-    /// quoting could be broken out of by a crafted argument, because
-    /// batch-file argument quoting has no single safe encoding: `cmd.exe`
-    /// re-interprets the command line through its own escaping rules,
-    /// layered on top of `CreateProcessW`'s). Rather than synthesize a
-    /// `cmd /c` wrapper — which is exactly the unsafe quoting problem,
-    /// one layer removed — this launcher declines the image entirely
-    /// until a from-scratch, tested port of that quoting exists (see the
-    /// ADR at `docs/ral-wiki/decisions/260702_windows-spawn-boundary.md`,
-    /// §"Treat command-line quoting as security").
+    /// Refuse `.bat`/`.cmd` images outright: `cmd.exe` re-interprets the
+    /// command line through its own escaping rules on top of
+    /// `CreateProcessW`'s, so batch argument quoting has no safe general
+    /// encoding (the CVE-2024-24576 class).  A `cmd /c` wrapper only moves it.
     #[allow(
         clippy::disallowed_methods,
         reason = "FFI glue: the image name arrives as the `&OsStr` bound for CreateProcessW; the crate::path helpers are `&str`-shaped, and lossy-decoding a path to classify its extension would be the real hazard"
@@ -1024,10 +954,8 @@ mod windows {
     }
 
     impl AttributeList {
-        /// Allocate an attribute list sized for exactly `attribute_count`
-        /// `UpdateProcThreadAttribute` entries. The count must match the
-        /// number of `update_*` calls the caller goes on to make — Win32
-        /// sizes the underlying buffer from it up front.
+        /// Allocate for exactly `attribute_count` entries — Win32 sizes the
+        /// buffer up front, so it must match the `update_*` calls that follow.
         fn new(attribute_count: u32) -> io::Result<Self> {
             let mut bytes = 0usize;
             unsafe {
@@ -1193,9 +1121,8 @@ mod windows {
 
     // ── Raw CreateProcessW child ───────────────────────────────────────────
     //
-    // The owning handle to a child spawned through this module's raw
-    // `CreateProcessW` boundary, plus the wait/reap methods `ChildHandle`
-    // dispatches to on Windows.
+    // The owning handle to a child born above, plus the wait/reap methods
+    // `ChildHandle` dispatches to.
 
     pub(crate) struct RawChild {
         process: OwnedHandle,
@@ -1252,12 +1179,8 @@ mod windows {
                 .map(|stderr| Box::new(stderr) as Box<dyn std::io::Read + Send>)
         }
 
-        /// Block until the process exits and read its exit status — the
-        /// shared body of [`Self::wait_handling_stop`] and [`Self::reap`],
-        /// which differ only in how they map that status onward (a
-        /// [`crate::process::WaitOutcome`] vs. the raw
-        /// [`std::process::ExitStatus`] `ChildHandle::reap` needs
-        /// cross-platform).
+        /// Block until exit and read the status: [`Self::wait_handling_stop`]
+        /// and [`Self::reap`] differ only in how they map it onward.
         fn wait_and_exit_status(&self) -> io::Result<std::process::ExitStatus> {
             let r = unsafe { WaitForSingleObject(self.raw_process_handle(), INFINITE) };
             if r != WAIT_OBJECT_0 {
@@ -1307,13 +1230,10 @@ mod windows {
         }
     }
 
-    // ── Unicode round-trip (item W3.8) ──────────────────────────────────
+    // ── Unicode round-trip ──────────────────────────────────────────────
     //
-    // `wide_null` owns the program-path/cwd UTF-16 conversion and
-    // `environment_block` owns the env-block conversion; both are tested
-    // directly with non-ASCII and non-BMP (surrogate-pair) text. Only
-    // builds and runs on Windows CI (`OsStrExt::encode_wide` is
-    // Windows-only).
+    // The other two UTF-16 conversions: `wide_null` for the program path and
+    // cwd, `environment_block` for the env block.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -1338,22 +1258,16 @@ mod windows {
             assert_eq!(decode_wide_null(&encoded), path);
         }
 
-        /// `environment_block` layers `edits` over the live process
-        /// environment; the round-trip claim under test is only about the
-        /// UTF-16 conversion of one injected non-ASCII/non-BMP entry, so
-        /// the assertion searches the decoded block for that entry's
-        /// `KEY=value\0` run rather than comparing the whole block (which
-        /// also carries whatever the test process inherited).
+        /// `environment_block` layers `edits` over the live environment, so
+        /// the assertion hunts the block for the one injected entry.
         #[test]
         fn environment_block_round_trips_a_non_ascii_non_bmp_value() {
             let key = super::super::env_key(OsStr::new("RAL_UNICODE_TEST_VAR"));
             let value = OsString::from("🎉𝔘𝔫𝔦𝔠𝔬𝔡𝔢-café-日本語");
             let edits = std::collections::BTreeMap::from([(key, EnvEdit::Set(value.clone()))]);
             let block = environment_block(&edits).unwrap();
-            // The block is a flat run of NUL-terminated `KEY=value` pairs
-            // plus one extra trailing NUL marking the end of the whole
-            // block; strip that outer terminator, then decode and split
-            // on the per-entry NULs to search.
+            // Entries are NUL-terminated, plus one extra NUL closing the whole
+            // block: strip that, then split on the per-entry NULs.
             let (_, body) = block.split_last().expect("non-empty");
             let text = String::from_utf16(body).expect("well-formed UTF-16");
             let expected = format!("RAL_UNICODE_TEST_VAR={}", value.to_str().unwrap());

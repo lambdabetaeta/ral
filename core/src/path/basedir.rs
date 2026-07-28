@@ -1,33 +1,16 @@
-//! The single XDG base-directory resolver.
+//! The single XDG base-directory resolver: everything that asks where the user
+//! keeps their config/data/… goes through [`resolve_xdg`], so the `xdg:` grant
+//! sigil in [`crate::path::sigil`] and the loaders in [`crate::path::config`]
+//! cannot drift apart.
 //!
-//! [`XdgKind`] names the directory roles the [XDG basedir spec]
-//! defines (`config`, `data`, `cache`, `state`) plus the non-spec
-//! but conventional `bin`.  [`resolve_xdg`] maps a kind and a home
-//! directory to its absolute path, and every caller that asks
-//! "where does the user keep their config/data/…?" goes through
-//! it — the grant sigil expander in [`crate::path::sigil`] and the
-//! `ral` binary's own config/data loaders in [`crate::path::config`]
-//! alike — so the two never diverge.
-//!
-//! The policy is XDG-everywhere: the Linux defaults
-//! (`.config`, `.local/share`, …) apply on every platform,
-//! including macOS, matching how cross-platform CLI tools and
-//! dotfiles use XDG.  An `$XDG_*_HOME` override is honoured only
-//! when it holds an absolute path, per the spec's rule that
-//! relative values are ignored; the home-joined default applies
-//! otherwise.
-//!
-//! [XDG basedir spec]: https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html
+//! XDG everywhere: the Linux defaults (`.config`, `.local/share`, …) apply on
+//! every platform, macOS included.  An `$XDG_*_HOME` override counts only when
+//! it is absolute, per the spec's rule that relative values are ignored.
 
 use std::path::{Path, PathBuf};
 
-/// One of the XDG basedir kinds we expose.
-///
-/// `Config`, `Data`, `Cache`, `State` follow the [XDG basedir spec].
-/// `Bin` is non-spec but conventional: many dotfiles set
-/// `XDG_BIN_HOME=$HOME/.local/bin` and we honour it the same way.
-///
-/// [XDG basedir spec]: https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html
+/// An XDG basedir role.  `Bin` is outside the spec, but `XDG_BIN_HOME` is
+/// conventional enough that we honour it identically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XdgKind {
     Config,
@@ -50,13 +33,12 @@ impl XdgKind {
         }
     }
 
-    /// All known kinds, in the canonical order.  Used by error
-    /// messages so a typo lists the alternatives.
+    /// Every kind's token name, so a typo can be answered with the alternatives.
     pub fn all() -> &'static [&'static str] {
         &["config", "data", "cache", "state", "bin"]
     }
 
-    /// Lower-case `NAME` form, the way authors write it in policy.
+    /// The lower-case `NAME` a policy author writes.
     pub fn token_name(self) -> &'static str {
         match self {
             Self::Config => "config",
@@ -67,10 +49,7 @@ impl XdgKind {
         }
     }
 
-    /// The env var that overrides the default for this kind.  Used
-    /// both to read the override and to name it in error messages.
-    /// `bin` is non-spec but `XDG_BIN_HOME` is the conventional
-    /// override.
+    /// The env var that overrides this kind's default.
     pub fn env_var(self) -> &'static str {
         match self {
             Self::Config => "XDG_CONFIG_HOME",
@@ -81,9 +60,7 @@ impl XdgKind {
         }
     }
 
-    /// The home-relative default suffix this kind falls back to
-    /// when its env var is unset or relative — the Linux layout,
-    /// applied on every platform.
+    /// The home-relative default used when the env var is unset or relative.
     pub fn default_suffix(self) -> &'static str {
         match self {
             Self::Config => ".config",
@@ -95,25 +72,18 @@ impl XdgKind {
     }
 }
 
-/// Resolve an XDG kind to its absolute filesystem path.
+/// Resolve an XDG kind: an absolute `XDG_*_HOME`, else `home` joined with the
+/// kind's [default suffix](XdgKind::default_suffix).
 ///
-/// Reads the corresponding `XDG_*_HOME` env var if it holds an
-/// absolute path; otherwise falls back to `home` joined with the
-/// kind's [default suffix](XdgKind::default_suffix).  Both routes
-/// share the same `home` argument so a `within [shell: HOME=…]`
-/// override flows through with the same semantics as tilde sigils —
-/// no detour through a separate process-level HOME lookup.
-///
-/// The XDG spec rule "relative values are ignored" is encoded in
-/// [`absolute_env_var`].
+/// `home` is the caller's, never a process-level `$HOME` lookup, so a
+/// shell-scoped `HOME=` reaches here exactly as it reaches tilde expansion.
+/// The `XDG_*_HOME` vars themselves still come from the process environment.
 #[allow(clippy::disallowed_methods)]
 pub fn resolve_xdg(kind: XdgKind, home: &str) -> PathBuf {
     absolute_env_var(kind.env_var()).unwrap_or_else(|| Path::new(home).join(kind.default_suffix()))
 }
 
-/// Read an env var and return it as a `PathBuf` only if it parses
-/// as an absolute path — matches the XDG spec's rule that relative
-/// values are ignored.
+/// The var's value, kept only when absolute — the spec ignores relative ones.
 #[allow(clippy::disallowed_methods)]
 fn absolute_env_var(key: &str) -> Option<PathBuf> {
     std::env::var_os(key)
@@ -121,9 +91,7 @@ fn absolute_env_var(key: &str) -> Option<PathBuf> {
         .filter(|p| p.is_absolute())
 }
 
-// Unix-only: the assertions compare Unix path shapes; the resolver
-// itself is platform-agnostic, but `/h/.config` vs `\h\.config`
-// makes the literal comparisons Unix-specific.
+// Unix-only: the resolver is platform-agnostic, the asserted literals are not.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

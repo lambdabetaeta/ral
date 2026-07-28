@@ -1,32 +1,25 @@
-//! The value pretty-printer: a rendering utility (not a registered builtin)
-//! that renders a [`Value`] to a bracketed, quote-fenced surface form.
-//!
-//! Two callers, two shapes, tuned through [`PrintParams`]: the REPL wants
-//! narrow, `'`-quoted output for a terminal; exarch's tool-result `VALUE`
-//! section wants wider, always-`#`-fenced output.
+//! Renders a [`Value`] as bracketed, quote-fenced ral surface syntax — a
+//! utility, not a registered builtin. The REPL (`ral/src/repl/exec.rs`) tunes it
+//! narrow for a terminal; exarch's tool-result `VALUE` section
+//! (`exarch/src/shell_eval.rs`) forces `#` fences and quotes bytes, because the
+//! model's prompt teaches only the `#'…'#` string form.
 
 use crate::types::Value;
 
 /// Tuning knobs for [`pretty_print`].
-///
-/// Two callers, two shapes: the REPL wants
-/// narrow, `'`-quoted output for a terminal; exarch's tool-result `VALUE`
-/// section wants wider, always-`#`-fenced output because its system prompt
-/// only teaches the model the hash-quoted string form.
 pub struct PrintParams {
-    /// Inline-vs-multiline threshold for a bracketed `List`/`Map`, in chars.
+    /// Char width above which a bracketed `List`/`Map` breaks across lines; the
+    /// leading indent does not count toward it.
     pub max_width: usize,
-    /// Clip leaf strings longer than this many chars; `0` disables clipping.
+    /// Elide the middle of map values longer than this; `0` keeps them whole.
     pub max_string: usize,
-    /// Structural nesting cap on `List`/`Map` bodies; deeper ones collapse to
-    /// an `[...N items]` / `[:...N pairs]` marker instead of recursing.
+    /// `List`/`Map` nesting depth past which a body collapses to a count marker.
     pub max_depth: usize,
-    /// Floor on the `#` fence count around a quoted string. `0` allows the
-    /// minimal (possibly unfenced) form; `1` always emits at least one `#`.
+    /// Floor on the `#` fence count around a quoted string; `0` allows the
+    /// minimal, possibly unfenced form.
     pub min_quote_hashes: usize,
-    /// Whether a nested `Bytes` value quote-fences like a `String` (exarch,
-    /// whose model-facing surface only speaks quoted strings) or renders as
-    /// raw lossy text (the REPL, showing bytes as their readable content).
+    /// Quote-fence a nested `Bytes` like a `String`, rather than emitting its
+    /// lossy text raw.
     pub quote_bytes: bool,
 }
 
@@ -86,9 +79,8 @@ pub fn pretty_print(val: &Value, indent: usize, params: &PrintParams) -> String 
                 .iter()
                 .map(|(k, v)| {
                     let rendered = match v {
-                        // Only a map's own values are long-text-shaped enough
-                        // (descriptions, file bodies) to be worth eliding —
-                        // a list item keeps its string whole.
+                        // Long text lands in map values (descriptions, file
+                        // bodies); a list item keeps its string whole.
                         Value::String(s) if params.max_string > 0 => {
                             quote_string(&elide(s, params.max_string), params)
                         }
@@ -118,11 +110,9 @@ fn quote_string(body: &str, params: &PrintParams) -> String {
     format!("{hashes}'{body}'{hashes}")
 }
 
-/// Elide the middle of `s` down to a `budget`-char head+tail, leaving an
-/// `[…elided N characters…]` marker in between. A run past the head or
-/// tail's own newline is cut short there instead, so an embedded newline
-/// never survives into the result. Returns `s` unchanged if it already
-/// fits (and has no newline to excise).
+/// Elide the middle of `s` to a `budget`-char head and tail around an
+/// `[…elided N characters…]` marker. Each stops at its nearest newline too, so
+/// no embedded newline survives; `s` returns whole only when nothing was cut.
 fn elide(s: &str, budget: usize) -> String {
     let total = s.chars().count();
     let head_budget = budget / 2;
@@ -169,9 +159,9 @@ fn bracketed(
     )
 }
 
-/// Smallest hash-bump level that lets `body` round-trip inside
-/// `n*'#' + "'" + body + "'" + n*'#'`.  Zero if the body has no `'`;
-/// otherwise one more than the longest run of `#`s following any `'`.
+/// Smallest `n` for which `body` round-trips inside `n*'#' + "'" + body + "'" +
+/// n*'#'`: zero when `body` has no `'`, else one past the longest run of `#`s
+/// following a `'`.
 fn quote_bump_level(body: &str) -> usize {
     let bytes = body.as_bytes();
     let mut max_run: Option<usize> = None;
@@ -195,8 +185,6 @@ fn quote_bump_level(body: &str) -> usize {
 mod tests {
     use super::*;
 
-    /// A `List`/`Map` nested past `max_depth` collapses to a count marker
-    /// instead of unfolding, so a deeply nested value can't blow up output.
     #[test]
     fn pretty_print_elides_past_max_depth() {
         let params = PrintParams {
@@ -209,8 +197,6 @@ mod tests {
         assert_eq!(out, "[[...2 items]]");
     }
 
-    /// The depth cap only counts `List`/`Map` nesting; a `Variant` wrapper
-    /// doesn't consume a depth level on its own.
     #[test]
     fn pretty_print_variant_does_not_consume_depth() {
         let params = PrintParams {
@@ -228,8 +214,6 @@ mod tests {
         assert_eq!(out, "[`some 1]");
     }
 
-    /// A long string as a map value elides its middle to a head+tail with
-    /// an `[…elided N characters…]` marker, not a first-line clip.
     #[test]
     fn pretty_print_elides_long_map_string_value() {
         let params = PrintParams {
@@ -258,8 +242,6 @@ mod tests {
         assert!(out.ends_with("play ended']"), "keeps the tail, got {out:?}");
     }
 
-    /// A string that's a list item, not a map value, is never elided —
-    /// only map values get the truncation treatment.
     #[test]
     fn pretty_print_does_not_elide_list_string_items() {
         let params = PrintParams {

@@ -1,28 +1,12 @@
-//! Per-session canonical event log.
+//! Per-session canonical event log: one session's event vector and the
+//! `events.json` it is appended to.  This is the model view; `tui::viewport`
+//! writes the rendered `user.log` beside it, `agent::transcript` the
+//! operational `transcript.jsonl`.
 //!
-//! [`AgentLog`] is the single source of truth for one continuous agent
-//! session.  It owns:
-//!
-//! - an in-memory `Vec<SessionEvent>` (used to render the next provider
-//!   request and to track the protocol state machine),
-//! - a pretty-printed `events.json` on disk (appended to as each event is
-//!   recorded — survives the process so post-mortem tooling can replay
-//!   the exact turn-by-turn exchange).
-//!
-//! The `events.json` file is the canonical "model view" artefact;
-//! the `user.log` sibling — written by the TUI as a separate rendering
-//! pass — is the canonical "user view".  Both files come from the same
-//! source: the typed event stream below.
-//!
-//! ### On-disk format
-//!
-//! Each [`SessionEvent`] is serialised via [`serde_json::to_writer_pretty`]
-//! and followed by a single `\n`.  The resulting file is a stream of
-//! pretty-printed JSON objects separated by whitespace — fully human-
-//! readable yet trivially parseable via
-//! `serde_json::Deserializer::from_reader(f).into_iter::<SessionEvent>()`,
-//! which skips whitespace between values.  Appending is just
-//! `to_writer_pretty + "\n"`; no closing array bracket to maintain.
+//! `events.json` is a whitespace-separated stream of pretty-printed JSON
+//! values — no array, no line per event — so appending closes no bracket and
+//! `serde_json::Deserializer::from_reader(f).into_iter::<SessionEvent>()`
+//! reads it back.
 
 use crate::bus::AgentId;
 use crate::provider::{ProviderError, Tuning, Usage};
@@ -33,20 +17,17 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-/// One tool result returned to the model.  This is the *model-facing*
-/// content — the rendered, per-section-capped string — not the raw
-/// stdout or stderr bytes.
+/// One tool result as the model sees it: the rendered, per-section-capped
+/// string, never the raw stdout or stderr bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolResult {
     pub id: String,
     pub content: String,
 }
 
-/// A serialisable copy of [`crate::provider::Usage`].
-///
-/// Deriving `Serialize` on `Usage` itself would ripple the trait into the
-/// provider module's public surface, so the event log holds its own
-/// shape and converts in/out.
+/// Serialisable stand-in for [`Usage`], which derives no serde traits; the log
+/// converts in and out rather than ripple the derive through the provider's
+/// public surface.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct UsageDelta {
     pub input: u64,
@@ -68,14 +49,9 @@ impl From<Usage> for UsageDelta {
     }
 }
 
-/// Serialisable mirror of [`crate::provider::ProviderError`] for the
-/// event log.
-///
-/// `ProviderError` carries `&'static str` and `Duration`
-/// fields that don't round-trip through serde cleanly; this struct
-/// flattens them to owned strings and second counts.  The on-screen
-/// renderer reads from this shape, so events.json fully reconstructs
-/// the rendered block.
+/// Serialisable mirror of [`ProviderError`], flattening its `&'static str` and
+/// `Duration` fields to owned strings and whole seconds.  `tui::line` renders
+/// from this shape, so `events.json` reconstructs the on-screen block.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProviderErrorRecord {
@@ -86,11 +62,6 @@ pub enum ProviderErrorRecord {
     Transient {
         cause: String,
         attempts: u32,
-        /// The parsed JSON error body the provider returned, mirrored from
-        /// [`crate::provider::ProviderError`].  `default` lets old
-        /// `events.json` files — written before this field existed —
-        /// deserialise (missing field → `None`); `skip_serializing_if`
-        /// keeps new logs lean by omitting it when absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         body: Option<serde_json::Value>,
     },
@@ -161,18 +132,11 @@ impl From<&ProviderError> for ProviderErrorRecord {
     }
 }
 
-/// One protocol-level event.
-///
-/// The order of variants tracks the natural
-/// order in a session: lifecycle bookends wrap a sequence of (prompt,
-/// step, assistant, tool-results, …) repetitions plus the occasional
-/// meta-event (usage, cancellation, compaction).
+/// One protocol-level event, the variants in the order a session produces them.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionEvent {
-    /// Bookend at the head of every session's event log.  Carries
-    /// enough static metadata (model, provider, parent) that the file
-    /// is self-describing without external context.
+    /// Head bookend, carrying enough metadata that the file reads on its own.
     SessionStarted {
         session_id: AgentId,
         parent: Option<AgentId>,
@@ -181,84 +145,80 @@ pub enum SessionEvent {
         system_prompt_bytes: usize,
         log_dir: PathBuf,
     },
-    /// A user-authored prompt — the seed / typed turn, a synthetic
-    /// continuation injected by the top-level attend loop after a degenerate turn,
-    /// or a steering interjection drained after tool results and before the
-    /// next assistant reply.
-    UserPrompt { text: String },
-    /// A model-visible message inherited from a parent agent's context when a
-    /// mnemon child is born.  It is replayed verbatim to the provider but
-    /// does not drive the local protocol state machine; the child's fresh
-    /// [`Self::UserPrompt`] remains the turn it must answer.
-    ContextMessage { message: ChatMessage },
-    /// Marks the start of one inner step of [`crate::agent::Agent::deliberate`].  Several
-    /// steps may share a single user prompt when the model issues tool
-    /// calls.
-    StepStarted { n: u32, tuning: Tuning },
+    /// A user-role turn: the seed or typed prompt, a nudge continuation the
+    /// attend loop self-posts, or a steering message drained after a tool batch.
+    UserPrompt {
+        text: String,
+    },
+    /// A message a `mnemon` child inherits from its parent's context.  Replayed
+    /// to the provider verbatim but drives no state transition — the child's own
+    /// [`Self::UserPrompt`] is still the turn it must answer.
+    ContextMessage {
+        message: ChatMessage,
+    },
+    /// One inner step of [`crate::agent::Agent::deliberate`]; several share a
+    /// user prompt when the model calls tools.
+    StepStarted {
+        n: u32,
+        tuning: Tuning,
+    },
     /// The assistant's reply for this step.  Tool calls live inside
-    /// `message.content` (genai's structured form); `pending_tool_ids`
-    /// mirrors them out to the top level so the state machine can match
-    /// them against the subsequent `ToolResults`.  `stop_reason` is the
-    /// provider's normalised string (`"end_turn"`, `"max_tokens"`, …).
+    /// `message.content`; `pending_tool_ids` mirrors them out so the state
+    /// machine can match them against the `ToolResults` that follow.
     AssistantMessage {
         message: ChatMessage,
         pending_tool_ids: Vec<String>,
         stop_reason: Option<String>,
     },
-    /// All tool results for the most recent assistant turn, joined into
-    /// one event.  IDs must match the `pending_tool_ids` of the
-    /// preceding [`Self::AssistantMessage`].
-    ToolResults { results: Vec<ToolResult> },
-    /// Per-step token / dollar usage as reported by the provider.
-    UsageDelta { usage: UsageDelta },
-    /// The user pressed Ctrl-C / Esc mid-exchange.  Whatever events were
-    /// pending have been synthesised back to a [`State::ReadyForUser`] state by
-    /// [`AgentLog::quiesce`].
+    /// Every result for the preceding [`Self::AssistantMessage`], joined; the
+    /// ids must match its `pending_tool_ids`.
+    ToolResults {
+        results: Vec<ToolResult>,
+    },
+    UsageDelta {
+        usage: UsageDelta,
+    },
+    /// Ctrl-C or Esc mid-exchange; [`AgentLog::quiesce`] has already synthesised
+    /// whatever the transcript needed to reach [`State::ReadyForUser`].
     Cancelled,
-    /// History was compacted.  The live model view (the summary plus the
-    /// kept suffix) is held in [`AgentLog::compaction`]; this event is
-    /// just the archival breadcrumb so post-mortem tooling can spot where
-    /// the truncation happened and read the summary it produced.
+    /// Archival breadcrumb for a compaction.  The live model view is
+    /// [`AgentLog::compaction`] plus the kept suffix, not this.
     Compacted {
         before_bytes: usize,
         after_bytes: usize,
         summary: String,
     },
-    /// User-facing error diagnostic — surfaced as a red `╳ error` block
-    /// in the rendered log.  Not visible to the model: errors are about
-    /// the orchestration, not the conversation.
-    Error { text: String },
-    /// Recovery breadcrumb the top-level attend loop writes between
-    /// iterations when nudging the model.  Recorded so events.json
-    /// shows where the attend loop intervened.
-    Nudge { used: u32, max: u32, cause: String },
-    /// Structured provider-error block, written when an exchange returns an
-    /// error rather than an assistant message.  Recorded as a
-    /// [`ProviderErrorRecord`] so the on-screen render is fully
-    /// reconstructable from events.json.
-    ProviderError { error: ProviderErrorRecord },
-    /// Bookend at the tail.  Written by [`Agent`](crate::agent::Agent)'s
-    /// [`Drop`] impl, the one funnel every teardown path — a settled `reply`,
-    /// the subtree cascade, or the trunk's own end-of-`attend` teardown —
-    /// runs through.
+    /// A diagnostic for the user alone — about the orchestration, not the
+    /// conversation, so it never reaches the model.
+    Error {
+        text: String,
+    },
+    /// Breadcrumb for a nudge the attend loop posted between iterations.
+    Nudge {
+        used: u32,
+        max: u32,
+        cause: String,
+    },
+    /// An exchange that returned an error instead of an assistant message.
+    ProviderError {
+        error: ProviderErrorRecord,
+    },
+    /// Tail bookend, written by `Agent`'s [`Drop`] impl — the one funnel every
+    /// teardown path runs through.
     SessionEnded,
 }
 
 impl SessionEvent {
-    /// Project this event into a [`ChatMessage`], or `None` if the event
-    /// is not part of the model-visible transcript (e.g. lifecycle, step,
-    /// usage).  Tool result batches expand to one message per result.
+    /// The model-visible messages for this event — empty for the lifecycle,
+    /// step, and usage events; one per result for a tool batch.
     fn into_chat_messages(self) -> Vec<ChatMessage> {
         match self {
             Self::UserPrompt { text } => vec![ChatMessage::user(text)],
             Self::ContextMessage { message }
-            // Pass the assistant message back whole — reasoning included.
-            // genai owns the per-adapter reasoning policy: Anthropic drops
-            // it, the OpenAI Responses adapter ignores it, but the OpenAI
-            // chat-completions adapter (DeepSeek/Kimi reasoners) *requires*
-            // `reasoning_content` echoed back across a tool-use sequence or
-            // it 400s. Stripping it here would break those and buy nothing
-            // elsewhere.
+            // Whole, reasoning included: genai's OpenAI chat-completions
+            // adapter (the DeepSeek/Kimi reasoners) 400s unless
+            // `reasoning_content` is echoed across a tool-use sequence, and
+            // every other adapter drops it itself.
             | Self::AssistantMessage { message, .. } => vec![message],
             Self::ToolResults { results } => results
                 .into_iter()
@@ -269,10 +229,8 @@ impl SessionEvent {
     }
 }
 
-/// Transcript protocol phase.  Enforces the role-alternation invariant at
-/// the event-log boundary: the `append_*`/`quiesce` methods below admit only
-/// the transition each phase allows, so the model view can never carry a
-/// user/assistant/tool-result sequence out of order.
+/// Transcript protocol phase.  `append_*` and `quiesce` admit only the
+/// transition each phase allows, so no model view is ever out of order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum State {
     ReadyForUser,
@@ -281,85 +239,60 @@ enum State {
     AwaitingAssistantAfterToolResults,
 }
 
-/// Why an exchange is being wound back to [`State::ReadyForUser`] without a natural
-/// assistant reply — selects the synthetic stub text recorded in the
-/// transcript so a post-mortem reads the cause in place.
+/// Why an exchange is being wound back to [`State::ReadyForUser`] with no real
+/// assistant reply; picks the stub text recorded in its place.
 #[derive(Clone, Copy)]
 pub enum QuiesceReason {
-    /// The user pressed Ctrl-C / Esc mid-exchange.
     Cancelled,
-    /// The exchange ended on a surfaced error — a transport failure or an
-    /// exhausted retry budget — before the assistant replied.
+    /// A surfaced error — transport failure, exhausted retry budget — before
+    /// the assistant replied.
     Aborted,
-    /// A sub-agent called `reply`: the last round-trip dispatched the reply
-    /// and its result but never asked for a closing assistant message, so the
-    /// machine sits in [`State::AwaitingAssistantAfterToolResults`].  This winds it
-    /// back cleanly — the exchange ended on purpose, not on an error.
+    /// A sub-agent called `reply`: that round-trip never asked for a closing
+    /// assistant message, so the machine sits in
+    /// [`State::AwaitingAssistantAfterToolResults`] on purpose, not in error.
     Replied,
 }
 
-/// Per-session canonical log.
-///
-/// Holds the in-memory event vector, the
-/// on-disk writer, the protocol state machine, and the static origin
-/// metadata (model, provider, sessions root) needed to (re)record
-/// [`SessionEvent::SessionStarted`] on `clear` and to set up forked children — keyed
-/// throughout to one [`AgentId`].
+/// One session's log: the event vector, the `events.json` writer, the protocol
+/// state machine, and the origin metadata `clear` and `fork` re-record.
 pub struct AgentLog {
     id: AgentId,
     dir: PathBuf,
-    /// Append-only writer over `events.json`.  Held open so each
-    /// [`Self::record`] is a buffered append + flush — no reopen-per-event cost,
-    /// and the file is always tail-able.
+    /// Held open, flushed per event, so the file is always tail-able.
     events_file: BufWriter<File>,
-    /// In-memory mirror of every event written to disk.  Reads back to
-    /// render the next provider request and to drive the state machine;
-    /// truncated by `/compact` and by `/clear`.
+    /// Mirror of the events on disk.  `/compact` drops from this alone, since
+    /// the file only ever grows; `/clear` wipes both.
     events: Vec<SessionEvent>,
     state: State,
-    /// Active compaction, if any — see [`Compaction`] for the invariant.
-    /// In-memory only (logs are per-run); the on-disk [`SessionEvent::Compacted`] event is
-    /// the archival breadcrumb.
+    /// See [`Compaction`] for the invariant.  In-memory only; the on-disk
+    /// [`SessionEvent::Compacted`] is the breadcrumb, not the state.
     compaction: Option<Compaction>,
-    /// Model identifier this log records.  Stored so `clear` can
-    /// re-emit `SessionStarted` with the same value, and `fork`
-    /// inherits it for the child's first event.
+    /// Held, with [`Self::provider`], so `clear` re-emits `SessionStarted`
+    /// unchanged and `fork` passes both down to the child.
     model: String,
-    /// Provider label.  Stored alongside [`Self::model`] for the same
-    /// reason — the value is invariant across the life of one process.
     provider: String,
-    /// `<scratch>/sessions/` — the root every forked child's dir lives
-    /// under.  Stored so `fork` doesn't need to thread it through from
-    /// the binary.
+    /// `<scratch>/sessions/`, under which `fork` makes each child's dir.
     sessions_root: PathBuf,
 }
 
-/// The live state of an applied compaction: the summary standing in for
-/// the dropped prefix.
-///
-/// The compaction invariant, authoritative here: `AgentLog::apply_compaction`
-/// physically drops the summarised prefix from `events`, so `events` *is*
-/// the kept verbatim suffix from that point on — there is no cut index to
-/// carry. The model view is this summary followed by `events` in full
-/// ([`AgentLog::project`]).
+/// The summary standing in for a dropped prefix.  [`AgentLog::apply_compaction`]
+/// physically drops that prefix, so `events` *is* the kept verbatim suffix and
+/// the model view is this summary followed by all of it — no cut index to carry.
 struct Compaction {
     summary: String,
 }
 
-/// A planned compaction: the cut to apply (`suffix_start`) and the older
-/// messages to summarise (`prefix_messages`, including any prior summary).
+/// A planned cut: everything before `suffix_start` becomes `prefix_messages`,
+/// the messages to summarise — any prior summary among them.
 pub struct CompactionPlan {
     pub suffix_start: usize,
     pub prefix_messages: Vec<ChatMessage>,
 }
 
-/// The user-message wrapper a compaction summary takes in the model view.
 fn summary_prompt(summary: &str) -> String {
     format!("Summary of prior work in this session:\n\n{summary}")
 }
 
-/// Serialised model-message bytes an event contributes — the per-event
-/// unit [`AgentLog::history_bytes`] sums and the suffix budget measures.
 fn event_message_bytes(e: &SessionEvent) -> usize {
     e.clone()
         .into_chat_messages()
@@ -369,13 +302,11 @@ fn event_message_bytes(e: &SessionEvent) -> usize {
 }
 
 impl AgentLog {
-    /// Build a fresh root session log under `sessions_root` (typically
-    /// `<scratch>/sessions/`).  Wipes any prior directory with the same
-    /// session id so the events file starts empty.
+    /// Build a fresh root session log.  Wipes any prior directory with the
+    /// same session id, so the events file starts empty.
     ///
     /// # Errors
-    /// Returns `Err` if re-creating the session directory or writing the
-    /// initial `SessionStarted` event fails.
+    /// Re-creating the session directory, or writing `SessionStarted`, failed.
     pub fn root(
         sessions_root: &Path,
         session_id: AgentId,
@@ -393,14 +324,11 @@ impl AgentLog {
         Ok(s)
     }
 
-    /// Build a forked child session log.  Inherits the parent's
-    /// `sessions_root`, `model`, and `provider`, recording the parent
-    /// id inside the child's `SessionStarted` event so the on-disk file
-    /// is self-describing.
+    /// Build a forked child log, inheriting `sessions_root`, `model`, and
+    /// `provider` and recording this log's id as the child's parent.
     ///
     /// # Errors
-    /// Returns `Err` if creating the child's session directory or writing
-    /// its initial `SessionStarted` event fails.
+    /// Creating the child's directory, or writing `SessionStarted`, failed.
     pub fn fork(&self, child_id: AgentId, system_prompt_bytes: usize) -> io::Result<Self> {
         let mut s = Self::open_fresh(
             self.sessions_root.clone(),
@@ -421,10 +349,8 @@ impl AgentLog {
         &self.dir
     }
 
-    /// Whether the session is at a settled exchange boundary: the committed
-    /// transcript is complete and a fresh user prompt is admissible.
-    /// The invariant the attend loop relies on — every exchange hands the session
-    /// back here — and the precondition compaction needs.
+    /// Whether a fresh user prompt is admissible.  The attend loop leaves every
+    /// exchange here, and compaction demands it.
     pub fn is_ready(&self) -> bool {
         matches!(self.state, State::ReadyForUser)
     }
@@ -433,18 +359,15 @@ impl AgentLog {
         self.is_ready()
     }
 
-    /// Length of the in-memory event mirror — the event-vector probe
-    /// figure for the host's resource fold. Truncated by `/compact` and
-    /// `/clear` like the mirror itself; a count, never the events.
+    /// Length of the in-memory mirror, for the host's resource probe: a count,
+    /// never the events, and it shrinks with them on `/compact` and `/clear`.
     pub fn event_count(&self) -> usize {
         self.events.len()
     }
 
-    /// Approximate context size as serialised model-view message bytes.
-    /// The fallback compaction trigger in
-    /// [`crate::agent::Agent::compact`], used when the model's context
-    /// window is unknown; otherwise compaction tracks token pressure
-    /// against the window.
+    /// Approximate context size in serialised model-view bytes.  The fallback
+    /// compaction trigger in [`crate::agent::Agent::compact`] when the model's
+    /// context window is unknown; otherwise that tracks token pressure instead.
     pub fn history_bytes(&self) -> usize {
         self.model_messages()
             .iter()
@@ -454,10 +377,8 @@ impl AgentLog {
 
     /// Render the model-view messages for the next provider request.
     ///
-    /// Valid only when the state machine is awaiting an assistant reply.
-    ///
     /// # Errors
-    /// Returns `Err` if the session is not awaiting an assistant reply.
+    /// The session is not awaiting an assistant reply.
     pub fn render_messages(&self) -> Result<Vec<ChatMessage>, String> {
         if !matches!(
             self.state,
@@ -471,16 +392,15 @@ impl AgentLog {
         Ok(self.model_messages())
     }
 
-    /// Render every committed message regardless of phase.  Used by
-    /// compaction to feed the summariser.
+    /// Every committed message whatever the phase; compaction's input.
     pub fn history_messages(&self) -> Vec<ChatMessage> {
         self.model_messages()
     }
 
-    /// The parent context a mnemon child should inherit.  When called from
-    /// a tool-call batch, the parent may be waiting for the very tool result this
-    /// child is about to produce; drop that unfinished assistant frame so the
-    /// child starts from the request context, not a dangling tool protocol.
+    /// The parent context a `mnemon` child inherits.  A spawn from inside a
+    /// tool batch leaves the parent waiting on the very call that made the
+    /// child, so that unfinished assistant frame is dropped: the child starts
+    /// from the request context, not a dangling tool protocol.
     pub fn inherited_context_messages(&self) -> Vec<ChatMessage> {
         let mut events = self.events.as_slice();
         if matches!(self.state, State::AwaitingToolResults { .. })
@@ -498,15 +418,12 @@ impl AgentLog {
         self.project(events)
     }
 
-    /// Import parent context messages without appending a prompt.
-    ///
-    /// A `mnemon` child receives its launch prompt through its inbox, so
-    /// the attend loop commits it through [`Self::append_user`] at deliberate time: the
-    /// same path every other exchange takes.
+    /// Import parent context without appending a prompt: a `mnemon` child's
+    /// launch prompt arrives through its inbox, and `deliberate` commits it
+    /// through [`Self::append_user`] like any other exchange.
     ///
     /// # Errors
-    /// Returns `Err` if the session is not at a ready exchange boundary, or if
-    /// recording an imported context message fails.
+    /// The session is not at a ready boundary, or recording a message failed.
     pub fn import_context(&mut self, messages: Vec<ChatMessage>) -> Result<(), String> {
         if !matches!(self.state, State::ReadyForUser) {
             return Err(format!(
@@ -525,8 +442,7 @@ impl AgentLog {
     /// Commit a top-level user prompt, opening a new exchange.
     ///
     /// # Errors
-    /// Returns `Err` if the session is not at a ready exchange boundary (tool
-    /// results are still pending), or if recording the prompt fails.
+    /// The session is mid-exchange, or recording the prompt failed.
     pub fn append_user(&mut self, text: String) -> Result<(), String> {
         if !matches!(self.state, State::ReadyForUser) {
             return Err(format!(
@@ -539,15 +455,12 @@ impl AgentLog {
         Ok(())
     }
 
-    /// Append a user steering message after a complete tool-result batch, before
-    /// the next provider request.  This is the only mid-exchange user ingress: the
-    /// tool protocol is first brought back to
-    /// [`State::AwaitingAssistantAfterToolResults`], then the queued prompt becomes the
-    /// next model-visible message.
+    /// Append a user message between a complete tool-result batch and the next
+    /// provider request.  The only mid-exchange user ingress there is, which is
+    /// why it admits [`State::AwaitingAssistantAfterToolResults`] alone.
     ///
     /// # Errors
-    /// Returns `Err` if the current tool-result batch is not yet complete, or
-    /// if recording the steering prompt fails.
+    /// The tool-result batch is incomplete, or recording the prompt failed.
     pub fn append_steering(&mut self, text: String) -> Result<(), String> {
         if !matches!(self.state, State::AwaitingAssistantAfterToolResults) {
             return Err(format!(
@@ -560,13 +473,12 @@ impl AgentLog {
         Ok(())
     }
 
-    /// Commit an assistant reply, moving the exchange to await tool results or
-    /// (when no tools were called) back to a ready boundary.
+    /// Commit an assistant reply, moving the exchange on to await tool results
+    /// or — when no tools were called — back to a ready boundary.
     ///
     /// # Errors
-    /// Returns `Err` if an assistant message is not expected in the current
-    /// state, if `message`'s role is not `Assistant`, or if recording the
-    /// message fails.
+    /// No assistant message is expected, `message`'s role is not `Assistant`,
+    /// or recording it failed.
     pub fn append_assistant(
         &mut self,
         message: ChatMessage,
@@ -607,9 +519,8 @@ impl AgentLog {
     /// Commit the tool-result batch answering the pending tool calls.
     ///
     /// # Errors
-    /// Returns `Err` if tool results are not expected in the current state,
-    /// if the results do not match the pending ids (count mismatch, unknown
-    /// id, or duplicate), or if recording the batch fails.
+    /// No results are expected, they do not match the pending ids (wrong count,
+    /// unknown id, duplicate), or recording the batch failed.
     pub fn append_tool_results(&mut self, results: Vec<ToolResult>) -> Result<(), String> {
         let pending_ids = match &self.state {
             State::AwaitingToolResults { pending_ids } => pending_ids.clone(),
@@ -627,16 +538,12 @@ impl AgentLog {
     }
 
     /// Drive the session back to [`State::ReadyForUser`], synthesising whatever
-    /// tool-result and assistant events the role-alternation invariant
-    /// needs.  Called whenever an exchange ends without a natural assistant
-    /// reply — a user cancellation or a surfaced error.  `reason`
-    /// selects the synthetic stub text and the optional breadcrumb.
+    /// events role alternation needs, whenever an exchange ends without a real
+    /// assistant reply.
     ///
-    /// Total: a disk-write failure while synthesising a stub event is
-    /// swallowed ([`Self::record_lossy`]) rather than left unresolved,
-    /// since the caller has no fallback state to quiesce *to* — the
-    /// in-memory mirror still advances so the state machine reaches
-    /// [`State::ReadyForUser`] regardless of `events.json`'s fate.
+    /// Total: a stub that cannot be written to disk is pushed to the in-memory
+    /// mirror anyway ([`Self::record_lossy`]), since the caller has no fallback
+    /// state to quiesce *to*.
     pub fn quiesce(&mut self, reason: QuiesceReason) {
         let already_ready = self.is_ready();
         let (tool_stub, assistant_stub, stop_label) = match reason {
@@ -681,20 +588,16 @@ impl AgentLog {
                 }
             }
         }
-        // Only a cancellation gets a dedicated breadcrumb; an abort's
-        // marker is the `ProviderError` already on disk.  Best-effort: a
-        // failed flush mustn't poison the already-quiesced state.
+        // Only a cancellation earns its own breadcrumb; an abort's marker is
+        // the `ProviderError` already on disk.
         if !already_ready && matches!(reason, QuiesceReason::Cancelled) {
             let _ = self.record(SessionEvent::Cancelled);
         }
     }
 
-    /// Indices in `events` of top-level user prompts — the exchange boundaries a
-    /// compaction may cut at.  Replays the ready/in-exchange state so a mid-exchange
-    /// steering prompt (not a clean boundary) is skipped, and a cut never
-    /// splits an assistant message from its tool results.  `events` is
-    /// already the live view (see [`Compaction`]), so the whole vector is
-    /// candidates — no separate "visible from" index to skip past.
+    /// Indices of the top-level user prompts — the boundaries a compaction may
+    /// cut at.  Replays the ready/in-exchange state so a steering prompt is
+    /// skipped and no cut can split an assistant message from its tool results.
     fn exchange_start_indices(&self) -> Vec<usize> {
         let mut ready = true;
         let mut starts = Vec::new();
@@ -712,8 +615,7 @@ impl AgentLog {
                 SessionEvent::ToolResults { .. } => ready = false,
                 // A compaction only ever commits at a ready boundary, so
                 // whatever state the scan carried into this marker is
-                // superseded — true regardless of where a prior compaction's
-                // marker landed in the (now further-grown) vector.
+                // superseded.
                 SessionEvent::Compacted { .. } => ready = true,
                 _ => {}
             }
@@ -721,18 +623,15 @@ impl AgentLog {
         starts
     }
 
-    /// Plan a compaction: choose the cut so the most recent exchanges fitting
-    /// in `keep_budget_bytes` stay verbatim, and gather the older prefix
-    /// (plus any prior summary) as the messages to summarise.  `None` when
-    /// everything currently visible fits the budget — nothing older than
-    /// the kept suffix to summarise.
+    /// Plan a compaction: the recent exchanges fitting in `keep_budget_bytes`
+    /// stay verbatim, the older prefix becomes the messages to summarise.
+    /// `None` when everything visible already fits.
     pub fn plan_compaction(&self, keep_budget_bytes: usize) -> Option<CompactionPlan> {
         let candidates = self.exchange_start_indices();
 
-        // Walk exchange starts newest-first, growing the kept suffix until it
-        // would exceed the budget; the cut is the oldest start still
-        // inside it.  Default: keep nothing (cut past the end) — a single
-        // exchange larger than the whole budget falls back to summarising all.
+        // Walk the starts newest-first; the cut is the oldest one the budget
+        // still holds.  The default keeps nothing, so a lone exchange bigger
+        // than the whole budget falls back to summarising everything.
         let mut cut = self.events.len();
         let mut acc = 0usize;
         let mut upper = self.events.len();
@@ -758,17 +657,13 @@ impl AgentLog {
         })
     }
 
-    /// Commit a planned compaction: record the archival `Compacted`
-    /// breadcrumb, then physically drop the summarised prefix
-    /// (`events[..suffix_start]`) from the in-memory mirror — heap
-    /// reclamation, not just a narrower read-time view. The durable
-    /// `events.json` is untouched; `events.len()` and `history_bytes()` both
-    /// shrink to summary + suffix on success, and nothing is dropped on the
-    /// early-return failure path.
+    /// Commit a planned compaction: record the `Compacted` breadcrumb, then
+    /// physically drop `events[..suffix_start]` from the in-memory mirror —
+    /// heap reclaimed, not merely a narrower read-time view.  Nothing leaves
+    /// `events.json`, and the failure path drops nothing at all.
     ///
     /// # Errors
-    /// Returns `Err` if the session is not at a ready boundary (tool results
-    /// are pending), or if recording the `Compacted` marker fails.
+    /// Tool results are pending, or recording the `Compacted` marker failed.
     pub fn apply_compaction(&mut self, summary: String, suffix_start: usize) -> Result<(), String> {
         if !self.can_compact() {
             return Err("cannot compact while tool results are pending".into());
@@ -776,15 +671,13 @@ impl AgentLog {
         let before_bytes = self.history_bytes();
         self.record_or_string_err(SessionEvent::Compacted {
             before_bytes,
-            // Patched below, once the new model view is in place; the
-            // on-disk `0` is accepted rather than rewriting a
-            // pretty-printed object in place.
+            // Patched in memory below; the on-disk `0` stands, rather than
+            // rewrite a pretty-printed object in place.
             after_bytes: 0,
             summary: summary.clone(),
         })?;
-        // The just-recorded `Compacted` marker landed at the tail (index
-        // `suffix_start` or later), so it survives this drain along with the
-        // rest of the kept suffix; only the summarised prefix is dropped.
+        // The marker just recorded sits at the tail, at or past `suffix_start`,
+        // so the drain takes only the summarised prefix.
         self.events.drain(..suffix_start);
         self.compaction = Some(Compaction { summary });
         self.state = State::ReadyForUser;
@@ -795,27 +688,25 @@ impl AgentLog {
         Ok(())
     }
 
-    /// `/clear`: wipe in-memory and on-disk events, restart with a
-    /// fresh `SessionStarted` so the log file is internally consistent.
-    /// `parent` is dropped — a cleared session is rooted again — but
-    /// the model/provider metadata is preserved across the wipe.
+    /// `/clear`: wipe the events in memory and on disk, then restart with a
+    /// fresh `SessionStarted` so the file stays self-consistent.  A cleared
+    /// session is rooted again, so `parent` is dropped, but model and provider
+    /// survive.
     ///
     /// # Errors
-    /// Returns `Err` if truncating/reopening `events.json` or writing the
-    /// fresh `SessionStarted` event fails.
+    /// Reopening `events.json`, or writing `SessionStarted`, failed.
     pub fn clear(&mut self, system_prompt_bytes: usize) -> io::Result<()> {
         self.events.clear();
         self.state = State::ReadyForUser;
         self.compaction = None;
-        // Truncate the events file in place.
         self.events_file = open_events_file(&self.dir)?;
         self.record_started(None, system_prompt_bytes)
     }
 
     // ── Meta-events ───────────────────────────────────────────────────────
     //
-    // Each appends one non-protocol breadcrumb to the log; all return `Err`
-    // if serialising the event or writing it to `events.json` fails.
+    // One non-protocol breadcrumb each; all fail only on serialising or
+    // writing to `events.json`.
 
     /// # Errors
     /// See the meta-events note above.
@@ -884,8 +775,7 @@ impl AgentLog {
         })
     }
 
-    /// Record the `SessionStarted` bookend with this log's stored
-    /// origin metadata.  Used by `root`, `fork`, and `clear`.
+    /// The `SessionStarted` bookend `root`, `fork`, and `clear` all write.
     fn record_started(
         &mut self,
         parent: Option<AgentId>,
@@ -902,9 +792,8 @@ impl AgentLog {
         self.record(ev)
     }
 
-    /// Append `ev` to `events.json` — the disk half of [`Self::record`],
-    /// factored out so [`Self::record_lossy`] can push to the in-memory
-    /// mirror even when this fails.
+    /// The disk half of [`Self::record`], apart so [`Self::record_lossy`] can
+    /// go on without it.
     fn write_event(&mut self, ev: &SessionEvent) -> io::Result<()> {
         serde_json::to_writer_pretty(&mut self.events_file, ev).map_err(io::Error::other)?;
         self.events_file.write_all(b"\n")?;
@@ -917,27 +806,22 @@ impl AgentLog {
         Ok(())
     }
 
-    /// [`Self::record`] lifted into `Result<(), String>` for the protocol-mutation
-    /// methods, which already plumb string errors back to the caller.
+    /// [`Self::record`] in the `Result<(), String>` the protocol mutations
+    /// return.
     fn record_or_string_err(&mut self, ev: SessionEvent) -> Result<(), String> {
         self.record(ev).map_err(|e| e.to_string())
     }
 
-    /// Best-effort [`Self::record`]: push to the in-memory mirror regardless of
-    /// whether the disk write succeeds.  Used only by [`Self::quiesce`],
-    /// which has no fallback state to leave the machine in — the
-    /// protocol must reach [`State::ReadyForUser`] even when `events.json` can't
-    /// be written.
+    /// [`Self::record`] with the disk write made best-effort.  Only
+    /// [`Self::quiesce`] may use it: the protocol must reach
+    /// [`State::ReadyForUser`] even when `events.json` cannot be written.
     fn record_lossy(&mut self, ev: SessionEvent) {
         let _ = self.write_event(&ev);
         self.events.push(ev);
     }
 
-    /// Project an event slice into the `Vec<ChatMessage>` shape genai
-    /// wants: the active compaction summary (as a user message) when one is
-    /// live, followed by the slice's events.  Lifecycle / step / usage
-    /// events drop out in [`SessionEvent::into_chat_messages`].  The single
-    /// place the summary-prompt-plus-projection shape is spelled.
+    /// The one place the model view's shape is spelled out: any live compaction
+    /// summary as a leading user message, then the slice.
     fn project(&self, events: &[SessionEvent]) -> Vec<ChatMessage> {
         let mut msgs = Vec::new();
         if let Some(c) = &self.compaction {
@@ -949,15 +833,13 @@ impl AgentLog {
         msgs
     }
 
-    /// The full model view: [`project`](Self::project) over every live
-    /// event.
+    /// [`Self::project`] over every live event.
     fn model_messages(&self) -> Vec<ChatMessage> {
         self.project(&self.events)
     }
 }
 
-/// Always-open `events.json` writer.  Truncate-on-open — callers use
-/// this from constructors and `clear`, both of which want a fresh file.
+/// Truncate-on-open: both callers, the constructor and `clear`, want it fresh.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:events-file] opens events.json for the session event log; infra, not turn-time data I/O"
@@ -1001,8 +883,7 @@ mod tests {
     use super::*;
     use genai::chat::{ContentPart, ToolCall};
 
-    /// Fresh `sessions/` root in a test-unique tempdir.  Each test gets
-    /// its own so concurrent runs don't share state.
+    /// A `sessions/` root keyed to `tag` and this process, so tests never share.
     fn sessions_root(tag: &str) -> PathBuf {
         let p =
             std::env::temp_dir().join(format!("exarch-event-test-{}-{tag}", std::process::id()));
@@ -1126,21 +1007,16 @@ mod tests {
         s.append_user("first".into()).unwrap();
         s.append_assistant(ChatMessage::assistant("done"), vec![], None)
             .unwrap();
-        // Keep no suffix (cut past the end) — the model view collapses to
-        // the summary alone, as it does when no recent exchange fits the budget.
+        // Keep no suffix, as when no exchange fits the budget at all.
         let cut = s.events.len();
         s.apply_compaction("did stuff".into(), cut).unwrap();
-        // Compaction lands in `ReadyForUser`; mimic the REPL by
-        // priming a fresh user prompt before asking what the model
-        // sees on the next exchange.
+        // Compaction lands ready; prime a prompt the way the REPL would.
         s.append_user("next".into()).unwrap();
         let ms = s.render_messages().unwrap();
-        // Model view skips the pre-compaction history: just the
-        // summary prompt plus the new user message.
+        // Summary prompt plus the new user message, and no history.
         assert_eq!(ms.len(), 2);
         assert!(matches!(ms[0].role, ChatRole::User));
         assert!(matches!(ms[1].role, ChatRole::User));
-        // On-disk events still include the pre-compaction history.
         let contents = fs::read_to_string(s.dir().join("events.json")).unwrap();
         assert!(contents.contains("first"));
         assert!(contents.contains("compacted"));
@@ -1155,8 +1031,7 @@ mod tests {
                 .unwrap();
         }
 
-        // A budget that holds exactly the last exchange keeps it verbatim and
-        // summarises everything older.
+        // A budget holding exactly the last exchange keeps it verbatim.
         let last_exchange = &s.events[s.events.len() - 2..];
         let keep = last_exchange.iter().map(event_message_bytes).sum::<usize>();
         let plan = s.plan_compaction(keep).expect("a prefix to summarise");
@@ -1164,7 +1039,6 @@ mod tests {
             .unwrap();
 
         let view = serde_json::to_string(&s.history_messages()).unwrap();
-        // Summary stands in for the dropped exchanges; the last exchange survives.
         assert!(view.contains("PRIOR-WORK"));
         assert!(view.contains("USER3") && view.contains("ASST3"));
         // The summarised prefix is gone from the model view…
@@ -1174,9 +1048,8 @@ mod tests {
         assert!(disk.contains("USER1") && disk.contains("ASST2"));
     }
 
-    /// A successful compaction physically drops the summarised prefix from
-    /// the in-memory event mirror — `event_count`/`history_bytes` shrink to
-    /// summary + suffix, not just the read-time model view.
+    /// A successful compaction reclaims heap: `event_count` and `history_bytes`
+    /// shrink, not just the read-time model view.
     #[test]
     fn apply_compaction_physically_drops_the_prefix_from_the_event_mirror() {
         let mut s = fresh_root("compact-drops-prefix");
@@ -1195,8 +1068,7 @@ mod tests {
         s.apply_compaction("PRIOR-WORK".into(), plan.suffix_start)
             .unwrap();
 
-        // The mirror shrank to the kept suffix plus the Compacted marker
-        // just recorded — not the full pre-compaction history.
+        // The mirror is the kept suffix plus the marker just recorded.
         assert_eq!(
             s.event_count(),
             kept_len + 1,
@@ -1212,9 +1084,8 @@ mod tests {
         );
     }
 
-    /// The append-only durable files are untouched by compaction: everything
-    /// written before the compaction survives as an exact prefix of what is
-    /// on disk afterward — reclamation is for heap, never history.
+    /// Reclamation is for heap, never history: what was on disk before a
+    /// compaction survives as an exact prefix of what is on disk after.
     #[test]
     fn apply_compaction_leaves_the_durable_events_file_byte_for_byte_intact() {
         let mut s = fresh_root("compact-disk-untouched");
@@ -1243,9 +1114,8 @@ mod tests {
         );
     }
 
-    /// A failed compaction (tool results still pending) drops nothing from
-    /// the in-memory mirror — the physical-drop path only ever runs after
-    /// the archival breadcrumb is durably recorded.
+    /// A failed compaction drops nothing: the drop only ever runs after the
+    /// breadcrumb is durably recorded.
     #[test]
     fn apply_compaction_failure_drops_nothing() {
         let mut s = fresh_root("compact-fails-drops-nothing");
@@ -1307,7 +1177,7 @@ mod tests {
     fn quiesce_when_ready_is_a_noop() {
         let mut s = fresh_root("quiesce-noop");
         s.quiesce(QuiesceReason::Cancelled);
-        // No `cancelled` breadcrumb when nothing was pending.
+        // Nothing was pending, so no breadcrumb.
         assert!(
             !s.events
                 .iter()
@@ -1315,22 +1185,18 @@ mod tests {
         );
     }
 
-    /// An exchange that ends on a surfaced error — not a cancel — must still
-    /// wind the committed-but-unanswered prompt back to `ReadyForUser`
-    /// so the next prompt is admitted.  Regression for the
-    /// transport-failure wedge: a stranded `AwaitingAssistantAfterUser`
-    /// rejected every subsequent prompt until `/clear`.
+    /// An abort, not a cancel, must still wind a committed-but-unanswered
+    /// prompt back: stranded, the session rejects every prompt until `/clear`.
     #[test]
     fn quiesce_after_abort_admits_next_prompt() {
         let mut s = fresh_root("quiesce-abort");
         s.append_user("p".into()).unwrap();
-        // No assistant reply arrives — the provider call errored out.
+        // The provider call errored out, so no assistant reply arrives.
         assert!(!s.is_ready());
         s.quiesce(QuiesceReason::Aborted);
         assert!(s.is_ready());
         s.append_user("next".into()).unwrap();
-        // An abort writes no `Cancelled` breadcrumb — the surfaced
-        // `ProviderError` is the on-disk marker.
+        // An abort's marker is the surfaced `ProviderError`, not `Cancelled`.
         assert!(
             !s.events
                 .iter()
@@ -1345,8 +1211,7 @@ mod tests {
         let body = fs::read_to_string(s.dir().join("events.json")).unwrap();
         // Pretty printing puts the `"kind"` field on its own indented line.
         assert!(body.contains("\n  \"kind\":"));
-        // Round-trip parse must yield the same set of events as the log
-        // (session_started + user_prompt = 2 here).
+        // session_started + user_prompt = 2.
         let parsed: Vec<SessionEvent> = serde_json::Deserializer::from_str(&body)
             .into_iter::<SessionEvent>()
             .collect::<Result<_, _>>()
@@ -1356,11 +1221,9 @@ mod tests {
         assert!(matches!(parsed[1], SessionEvent::UserPrompt { .. }));
     }
 
-    /// The model-view forensic breadcrumbs — an error diagnostic, a recovery
-    /// nudge — round-trip through `events.json` as typed events.  Operational
-    /// system notes are deliberately *not* here: they live only in
-    /// `transcript.jsonl`, the operational view, so `events.json` carries only
-    /// what the model saw plus these breadcrumbs.
+    /// The breadcrumbs — an error diagnostic, a nudge — round-trip as typed
+    /// events.  Operational notes deliberately do not: they belong only to
+    /// `transcript.jsonl`.
     #[test]
     fn diagnostic_events_round_trip_through_disk() {
         let mut s = fresh_root("diagnostic-roundtrip");
@@ -1371,7 +1234,7 @@ mod tests {
             .into_iter::<SessionEvent>()
             .collect::<Result<_, _>>()
             .expect("round-trip");
-        // session_started + 2 diagnostics = 3 events.
+        // session_started + 2 diagnostics.
         assert_eq!(parsed.len(), 3);
         assert!(matches!(&parsed[1], SessionEvent::Error { text } if text == "boom"));
         assert!(matches!(

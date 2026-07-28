@@ -1,12 +1,4 @@
-//! Shell construction and the startup env-var seeding pass.
-//!
-//! [`Shell::new`] builds an empty interpreter state — root grant frame,
-//! defaulted env, no audit trail.  [`Shell::seed_default_env_vars`] is
-//! the front-end startup hook that adopts the host process env into the
-//! dynamic context, increments `SHLVL`, and snapshots the process cwd
-//! into the shell-owned [`Cwd`](crate::types::Cwd) pair so later reads
-//! consult shell state instead of resyscalling.  That function's doc
-//! lists the seeded variables.
+//! Building a `Shell`, and the startup pass that adopts the host process env.
 
 use super::{Context, LocalState, Mobile, SessionState, Shell};
 use crate::source::FileId;
@@ -16,19 +8,10 @@ use std::path::PathBuf;
 impl Shell {
     /// Build a new interpreter state with the given terminal state.
     ///
-    /// The terminal flags are passed explicitly so callers cannot
-    /// accidentally leave them at all-false — which would cause
-    /// external commands to see piped I/O instead of the real
-    /// terminal.
-    ///
-    /// Installs [`crate::builtins::CORE_BUILTINS`] into this shell so
-    /// the language's built-in surface is reachable from the first
-    /// command.
-    ///
-    /// The session faces no signals: its cancel scopes fold neither ambient
-    /// cause, so a Ctrl-C or a SIGTERM passes it by. The host that owns the
-    /// process's signals declares itself with [`Self::face_signals`].  Its
-    /// anchor is the root of the run tree every later frame nests under.
+    /// Terminal flags are explicit so a caller cannot leave them all-false,
+    /// which would show external commands piped I/O in place of the real
+    /// terminal.  The session faces no signals — Ctrl-C and SIGTERM pass it by
+    /// — until a host claims them with [`Self::face_signals`].
     pub fn new(terminal: crate::io::TerminalState) -> Self {
         let root = crate::process::DurableRoot::new();
         let mut shell = Self {
@@ -52,9 +35,6 @@ impl Shell {
                 exit_hints: crate::exit_hints::ExitHints::default(),
                 builtins: crate::types::BuiltinTable::default(),
                 library_docs: std::collections::HashMap::new(),
-                // Mint the session's lease from the same predicate that
-                // populates `startup_foreground`. `None` off Unix and whenever
-                // ral did not own the terminal foreground at startup.
                 terminal_lease: crate::process::TerminalLease::mint_at_startup(
                     terminal.startup_foreground,
                 ),
@@ -66,44 +46,30 @@ impl Shell {
         shell
     }
 
-    /// Declare this session the process's signal-facing one: it re-mints its
-    /// durable root so the root folds the ambient shutdown cause and its run
-    /// doors stamp each foreground frame with a birth instant, against which
-    /// the frame reads the ambient interrupt watermark.
+    /// Declare this session the process's signal-facing one: the re-minted root
+    /// folds the ambient shutdown cause, and stamps every foreground frame with
+    /// a birth instant to judge the ambient interrupt watermark against.
     ///
-    /// Called once, at boot, by the host that owns the process's signals —
-    /// the interactive REPL, a batch script, a wire engine, an agent's trunk
-    /// session. A session forked from a facing one ([`Self::fork_session`])
-    /// starts deaf again: its host stops it through
-    /// [`Self::cancel_handle`], not through signals. Several facing sessions
-    /// in one process is well-defined — they read the same watermark, each
-    /// against its own frames' births — so nothing here has to be the only
-    /// caller.
+    /// Called at boot by whoever owns the process's signals.  A session forked
+    /// with [`Self::fork_session`] starts deaf again and stops through
+    /// [`Self::cancel_handle`] instead; several facing sessions in one process
+    /// are well-defined, each reading the shared watermark against its own
+    /// frames.
     pub fn face_signals(&mut self) {
         self.session.root = crate::process::DurableRoot::signal_facing();
         self.session.anchor = self.session.root.worker();
     }
 
-    /// Adopt the host process env at startup.
+    /// Adopt the host process env at startup, defaulting anything unset, and
+    /// snapshot the process cwd onto the shell-owned
+    /// [`Cwd`](crate::types::Cwd) so later reads never resyscall.
     ///
-    /// Seeds the well-known variables (`HOME`, `USER`, `PATH`, `SHELL`,
-    /// `TERM`, `LANG`, `LOGNAME`, `SHLVL`, the `OS_NAME` / `OS_ARCH` /
-    /// `OS_FAMILY` machine facts, and the multiplexer and terminal
-    /// passthroughs) into `context.env_overrides`, filling in sensible
-    /// defaults for anything unset.  These are read from ral
-    /// code as `$ENV[KEY]`; the environment is dynamic state, not a
-    /// lexical binding.  Called once at startup by every front end —
-    /// interactive `ral`, `exarch`, batch scripts — so the language
-    /// sees a consistent baseline regardless of who launched the
-    /// process.
-    ///
-    /// Also seeds the shell-owned [`Cwd`](crate::types::Cwd) pair on
-    /// `context.cwd` from the process cwd at startup, so subsequent
-    /// reads consult the logical field rather than re-syscalling.
-    /// `PWD` / `OLDPWD` live on `cwd.current` / `cwd.previous`;
-    /// [`crate::runtime::command::process::apply_env`] threads them
-    /// into spawned child commands.  `SHLVL` is always incremented
-    /// rather than passed through, matching every other shell.
+    /// Called once by every front end, so ral code — which reads these as
+    /// `$ENV[KEY]` — sees one baseline whoever launched the process.  `SHLVL`
+    /// is incremented rather than passed through, as in every other shell.
+    /// `PWD` / `OLDPWD` are not seeded here: they are `cwd.current` /
+    /// `cwd.previous`, which `apply_env` in
+    /// `core/src/runtime/command/process.rs` threads into each child.
     pub fn seed_default_env_vars(&mut self) {
         let home = crate::path::home_from_env_or_dot();
         let user = crate::path::user_name_from_env();
@@ -124,18 +90,13 @@ impl Shell {
         let lang = std::env::var("LANG").unwrap_or_else(|_| "C.UTF-8".into());
         let logname = std::env::var("LOGNAME").unwrap_or_else(|_| user.clone());
 
-        // Adopt the process cwd as the persistent logical cwd, so
-        // subsequent path resolution and child-process cwd inheritance
-        // flow through shell state instead of resyscalling.  `OLDPWD`,
-        // if the launching shell set it, becomes the logical companion;
-        // otherwise leave it `None` (no prior cwd to return to via
-        // `cd -`).
+        // Only when unseeded: a front end whose working directory is not the
+        // process cwd states it first through `Shell::seed_cwd`.
         if self.mobile.context.cwd.current.is_none() {
             self.mobile.context.cwd.current = crate::path::process_cwd();
         }
         if self.mobile.context.cwd.previous.is_none() {
-            // Env-var lift: OLDPWD is whatever the launching shell set
-            // it to, already-resolved; we adopt it verbatim.
+            // The launching shell already resolved it; adopt verbatim.
             #[allow(clippy::disallowed_methods)]
             let oldpwd = std::env::var_os("OLDPWD").map(PathBuf::from);
             self.mobile.context.cwd.previous = oldpwd;
@@ -176,8 +137,8 @@ impl Shell {
             .to_string();
         self.mobile.context.set_env_var("SHLVL", shlvl);
 
-        // Machine facts (compile-time constants): exposed via `$ENV` so rc
-        // can branch on the OS/arch without shelling out to `uname`.
+        // Compile-time facts, in `$ENV` so rc can branch on the machine
+        // without shelling out to `uname`.
         for (k, v) in [
             ("OS_NAME", crate::host::os_name()),
             ("OS_ARCH", crate::host::arch()),

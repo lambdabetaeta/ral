@@ -1,20 +1,10 @@
-//! The `/login` overlay — "Sign in with `ChatGPT`" driven from inside a running
-//! session, modeled on the `/model` picker (`picker.rs` / `model_picker.rs`).
+//! The `/login` overlay — "Sign in with `ChatGPT`" from inside a running
+//! session.
 //!
-//! [`LoginOverlay`] is a pure display+input component (state + key + render,
-//! no I/O), the picker's own discipline in miniature: it is a fraction of the
-//! picker's size (no fuzzy list, no catalog, no tuning tracks), so it earns
-//! no component/orchestration file split. The orchestration below it —
-//! [`login`], [`drive_login`], [`apply_login`] — mirrors `pick_model` /
-//! `drive_picker` / `apply_model_switch` (`model_picker.rs`): the flow itself
-//! runs on a background thread over [`crate::provider::oauth::login_flow`],
-//! reporting staged [`crate::provider::oauth::LoginPhase`]s back over an
-//! `mpsc` channel while this loop polls keys and redraws.
-//!
-//! The overlay renders progress as a **fixed-position three-station track**
-//! (`step`), never a spinner or a live countdown — the Bertin-compliant
-//! discrete-phase encoding the effort ladder (`picker.rs`) already
-//! establishes: only a station's glyph/brightness changes between phases.
+//! [`LoginOverlay`] is display and input only; the flow runs on a background
+//! thread over [`oauth::login_flow`], reporting staged [`LoginPhase`]s over an
+//! `mpsc` channel while [`drive_login`] polls keys and redraws — the same
+//! component/orchestration split `model_picker.rs` makes.
 
 use super::app::Overlay;
 use super::line;
@@ -34,26 +24,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
-/// The overlay's fixed content width; clamped to the frame when narrower.
 const OVERLAY_W: u16 = 56;
-/// The wrap width for the detail rows (the manual-open URL, the failure
-/// reason): the content width less the bezel border and its padding.
+/// Wrap width for the detail rows: [`OVERLAY_W`] less bezel and padding.
 const BODY_W: usize = OVERLAY_W as usize - 2 - 2 * PAD_X as usize;
 
-/// The overlay's mode: choosing a method, watching the running flow, or
-/// showing a terminal failure (success closes the overlay, so it has no
-/// resting "done" mode).
+/// Success closes the overlay, so there is no resting "done" mode.
 enum Mode {
-    /// Method selector has the keyboard; Enter starts the flow.
     Choosing,
-    /// The flow is running on its background thread. `None` until the first
-    /// phase report lands (an instant after the thread spawns, rendering as
-    /// every station pending); `Some` holds the last staged report. No key is
-    /// live — the driver's cancel chord (Esc, Ctrl-C, Ctrl-D) is the only way
-    /// out.
+    /// `None` until the first phase report lands, an instant after the thread
+    /// spawns; it renders as every station pending. No key is live here — the
+    /// driver's cancel chord is the only way out.
     Running(Option<LoginPhase>),
-    /// The flow failed; the reason is shown. Enter returns to `Choosing`
-    /// (retry); the driver's cancel chord closes.
     Failed(String),
 }
 
@@ -79,22 +60,16 @@ impl LoginOverlay {
     }
 }
 
-/// What a key press resolved to. [`drive_login`] acts on the non-`None`
-/// outcome by spawning the flow thread; cancellation (Esc, Ctrl-C, Ctrl-D) is
-/// resolved by the driver before a key ever reaches [`LoginOverlay::key`], so
-/// it never appears here.
+/// What a key press resolved to. No cancel variant: `overlay_tick` resolves
+/// the cancel chord before a key ever reaches [`LoginOverlay::key`].
 pub(super) enum LoginAction {
-    /// Keep the overlay open; redraw.
     None,
-    /// Enter in `Choosing`: start the flow with the selected method.
     Start(LoginMethod),
 }
 
 impl LoginOverlay {
-    /// Handle one key press. Mirrors `Picker::key` (`picker.rs`). `Choosing`:
-    /// any movement key toggles the two-way method selector, Enter starts.
-    /// `Running`: nothing is live — there is nothing to edit mid-flow.
-    /// `Failed`: Enter retries (back to `Choosing`).
+    /// Handle one key press, mirroring `Picker::key` in `picker.rs`. With two
+    /// methods, every movement key simply toggles.
     pub(super) fn key(&mut self, code: KeyCode) -> LoginAction {
         match &self.mode {
             Mode::Choosing => match code {
@@ -124,10 +99,8 @@ impl LoginOverlay {
     }
 }
 
-/// One station's rendered state on the fixed three-station phase track — the
-/// effort ladder's own glyph vocabulary (`picker.rs`'s `GLYPHS`), applied
-/// discretely rather than as a ramp: pending, active, or complete, never a
-/// value in between and never animated.
+/// One station's state on the phase track. Borrows glyphs from the effort
+/// ladder's `GLYPHS` (`picker.rs`), but three-valued: never a ramp, never a tick.
 #[derive(Clone, Copy)]
 enum Station {
     Pending,
@@ -159,10 +132,8 @@ impl Station {
 }
 
 impl LoginOverlay {
-    /// Draw the floating overlay over the centre of `frame`, reusing the
-    /// picker's own chrome (`centered`, `overlay_frame`) rather than copying it
-    /// — one overlay shell, two overlays. Mirrors `Picker::render`
-    /// (`picker.rs`).
+    /// Draw the overlay centred on `frame`, in the picker's own chrome — one
+    /// shell, two overlays.
     pub(super) fn render(&self, f: &mut Frame, frame: Rect) {
         let (w, h) = self.desired_size(frame);
         let area = centered(w, h, frame);
@@ -201,10 +172,8 @@ impl LoginOverlay {
         lines
     }
 
-    /// One row of the method selector — bright cyan for the active method,
-    /// dim otherwise, the picker's own `field_label` focus treatment
-    /// (`picker.rs`) in miniature. `show_field_label` prints the `method`
-    /// column header on the first row only, blank on the second.
+    /// One row of the method selector. `show_field_label` prints the `method`
+    /// column header on the first row only.
     fn method_line(
         &self,
         method: LoginMethod,
@@ -232,9 +201,9 @@ impl LoginOverlay {
         ])
     }
 
-    /// The fixed-position three-station phase track: `step   █ start   ▆ sign
-    /// in   · exchange`. The mapping from [`Mode`] is total and static —
-    /// nothing ticks, nothing sweeps, no elapsed counter.
+    /// The phase track: `step   █ start   ▆ sign in   · exchange`. Stations
+    /// hold their positions and the mapping from [`Mode`] is static — nothing
+    /// ticks, nothing sweeps, no elapsed counter.
     fn phase_line(&self) -> Line<'static> {
         let (start, sign_in, exchange) = self.stations();
         Line::from(vec![
@@ -260,17 +229,15 @@ impl LoginOverlay {
                 (Station::Complete, Station::Complete, Station::Active)
             }
             Mode::Running(Some(_)) => (Station::Complete, Station::Active, Station::Pending),
-            // The failed attempt's exact stage is not tracked (only its
-            // reason is) — showing every station pending is the honest
-            // reading, not a fabricated "got this far".
+            // A failure carries its reason but not its stage, so all-pending is
+            // the honest reading rather than a fabricated "got this far".
             Mode::Failed(_) => (Station::Pending, Station::Pending, Station::Pending),
         }
     }
 
-    /// The phase-specific detail row(s) below the track: the browser's
-    /// manual-open fallback (the alt-screen replacement for the CLI adapter's
-    /// [`LoginPhase::stderr_line`] — it must be visible here or nowhere),
-    /// the device code and its static expiry text, or the failure reason.
+    /// The phase-specific rows below the track. The alt screen swallows stderr,
+    /// so what [`LoginPhase::stderr_line`] gives the CLI must appear here or
+    /// nowhere — above all the manual-open URL.
     fn detail_lines(&self) -> Vec<Line<'static>> {
         match &self.mode {
             Mode::Choosing | Mode::Running(None | Some(LoginPhase::ExchangingCode)) => Vec::new(),
@@ -320,11 +287,8 @@ fn dim_line(text: &str) -> Line<'static> {
     ))
 }
 
-/// Word-wrap `text` to [`BODY_W`] columns (less its two-column indent),
-/// styled uniformly and left-indented — used for the two detail texts long
-/// enough to need it (a manual-open URL, a failure reason). Backed by
-/// [`line::push_wrapped`], the shared display-width-aware wrap primitive
-/// (`picker.rs`'s failed-provider notes use it for the same job).
+/// Wrap `text` to [`BODY_W`] less its two-column indent, through the shared
+/// display-width-aware [`line::push_wrapped`].
 fn wrap(text: &str, style: Style) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     line::push_wrapped(&mut lines, text, BODY_W.saturating_sub(2), |chunk, _| {
@@ -334,20 +298,16 @@ fn wrap(text: &str, style: Style) -> Vec<Line<'static>> {
 }
 
 // ---------------------------------------------------------------------------
-// Orchestration — mirrors `pick_model` / `drive_picker` / `apply_model_switch`
-// (`model_picker.rs`).
+// Orchestration
 // ---------------------------------------------------------------------------
 
 /// Message from the flow thread to the overlay loop.
 enum LoginMsg {
     Phase(LoginPhase),
-    /// The flow's outcome: the persisted token plus whether an existing
-    /// account was replaced, or the failure text.
+    /// The persisted token and whether it replaced an account, or the failure.
     Done(Result<(OAuthToken, bool), String>),
 }
 
-/// `/login` — open the sign-in overlay, drive it to completion or
-/// cancellation, then commit a successful result.
 pub(super) fn login(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
     tui.app.overlay = Some(Overlay::Login(LoginOverlay::new()));
     let outcome = drive_login(tui);
@@ -357,21 +317,16 @@ pub(super) fn login(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
     }
 }
 
-/// A flow thread in flight: its message channel and its cancel flag. Esc
-/// trips the flag (the wait loops inside `login_flow` poll it, freeing the
-/// loopback listener within ~100 ms) and the overlay closes at once; the
-/// orphaned thread's eventual message lands in a dropped `Receiver` and
-/// vanishes.
+/// A flow thread in flight. Cancelling trips the flag — `login_flow`'s wait
+/// loops poll it every 100 ms, freeing the loopback listener — and returns at
+/// once, leaving the orphan's last message to land in a dropped `Receiver`.
 struct FlowHandle {
     rx: mpsc::Receiver<LoginMsg>,
     cancel: Arc<AtomicBool>,
 }
 
-/// Poll keys and the running flow's messages until the overlay resolves.
-/// Returns the persisted `(token, replaced)` on success, `None` on
-/// cancel/close. Structured exactly as `drive_picker` (`model_picker.rs`):
-/// the flow runs on a background thread reporting over an `mpsc` channel, so
-/// this render/poll loop never blocks on the network.
+/// Poll keys and the flow's messages until the overlay resolves; `None` on
+/// cancel or close. The flow's own thread keeps this loop off the network.
 fn drive_login(tui: &mut Tui) -> Option<(OAuthToken, bool)> {
     let mut flow: Option<FlowHandle> = None;
     loop {
@@ -405,9 +360,8 @@ fn drive_login(tui: &mut Tui) -> Option<(OAuthToken, bool)> {
             OverlayTick::Idle => {}
             OverlayTick::Cancel => {
                 if let Some(handle) = &flow {
-                    // The flag publishes no accompanying data: the flow only
-                    // needs to observe this one monotone bit. Its result and
-                    // phase payloads cross the separately ordered mpsc channel.
+                    // `Relaxed` suffices: the flag publishes no data of its own,
+                    // and the phase and result payloads ride the channel.
                     handle.cancel.store(true, Ordering::Relaxed);
                 }
                 return None;
@@ -435,16 +389,10 @@ fn drive_login(tui: &mut Tui) -> Option<(OAuthToken, bool)> {
     }
 }
 
-/// The commit step (mirrors `apply_model_switch`, `model_picker.rs`).
-/// The flow has already persisted the token to disk (`save_one`, inside
-/// `login_flow`); this makes it *live* in the running session — the
-/// credential store and the model catalog's `LiveSource` — and records the
-/// event. No provider swap: a `ChatGPT` account has no built-in default model
-/// (`lib.rs`'s `resolve_initial_selection`), so the user is not
-/// auto-switched — the note points at `/model`. A re-login for the
-/// account selected by the *focused tab* still needs no swap: `add_oauth`'s
-/// upsert refreshes the very cell that tab's live provider already reads
-/// through.
+/// Make the token `login_flow` already persisted live in this session's
+/// credential store and catalog. No provider swap: a `ChatGPT` account has no
+/// built-in default model, so the user picks one through `/model`; and a
+/// re-login upserts the very cell the focused tab already reads through.
 fn apply_login(tui: &Tui, ctx: &mut CommandCtx<'_>, token: &OAuthToken, replaced: bool) {
     let already_active = ctx
         .agents

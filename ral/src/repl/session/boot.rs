@@ -362,11 +362,10 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
             return Err(format!("{path}: skipped due to type errors"));
         }
     };
-    // Evaluate under the same guarded pipeline `source`/`use`/plugin
-    // loading share: `evaluate_checked` swaps `location.script`/
-    // `location.source` to this file for the duration of the call, so a
-    // runtime error inside the rc file is located against it rather than
-    // whatever script context boot inherited.
+    // Evaluate under the same guarded pipeline `source`/`use`/plugin loading
+    // share: `evaluate_checked` owns the cycle and depth guards, and registers
+    // the text under the id compiled against just above, so a runtime error
+    // inside the rc file is located against it.
     let config = match ral_core::builtins::modules::evaluate_checked(
         &ral_core::types::Mooring::adrift(),
         ctx.shell,

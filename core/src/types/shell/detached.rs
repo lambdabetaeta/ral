@@ -1,48 +1,34 @@
-//! The `detach` budget: the one piece of session state that is meant to
-//! outlive the session.
+//! The `detach` budget: the one piece of session state meant to outlive the
+//! session.
 //!
-//! A detached process is born by double-fork and reparented to pid 1, so
-//! nothing in this process ever observes it again
-//! (`decisions/260725_survives-exit-is-its-own-verb`). Two consequences
-//! shape everything here.
+//! Counting is monotone. A detached process is double-forked and reparented
+//! to pid 1, so its death is unobservable here and a release would be a
+//! number nobody can compute — unlike the worker cap, whose seat a settled
+//! worker frees.
 //!
-//! **The policy is armed, never defaulted.** A [`Shell`](super::Shell) with
-//! no policy simply lacks the capability: the host installs the `detach`
-//! builtin and calls [`Shell::arm_detach`](super::Shell::arm_detach) in one
-//! act, so the verb and the budget it spends cannot drift apart. Core mints
-//! no default — there is no number it could honestly pick.
-//!
-//! **The counter is monotone.** [`DetachPolicy::admit`] counts *births*, not
-//! occupancy: a detached process's death is unobservable from here, so a
-//! release would be a number nobody can compute. This is deliberately unlike
-//! the worker cap, where a settled worker frees its seat.
-//!
-//! **Flow rule.** The policy is `Arc`-shared into a spawned worker's own
-//! `Shell` by [`Shell::spawn_thread`](super::Shell::spawn_thread), exactly as
-//! the worker registry is, so a `detach` inside a `spawn { }` body spends the
-//! owning session's budget rather than a private copy of it. It is equally
-//! deliberately absent from [`LocalState`](super::LocalState)'s [`Drop`],
-//! which cancels the session's workers: the surviving processes are the one
-//! thing a teardown must leave alone.
+//! Core defaults no budget: a host calls
+//! [`Shell::arm_detach`](super::Shell::arm_detach) in the act that installs
+//! the `detach` builtin. [`Shell::spawn_thread`](super::Shell::spawn_thread)
+//! `Arc`-shares the policy into a worker's shell, so a `detach` under
+//! `spawn { }` spends the owning session's budget, while
+//! [`LocalState`](super::LocalState)'s [`Drop`] cancels that session's
+//! workers but never this.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A session's authority to birth processes that outlive it.
 pub struct DetachPolicy {
-    /// How many processes this session may birth over its whole life.
+    /// A whole-life total, not a concurrency limit.
     pub budget: u64,
-    /// Births admitted so far. Never decremented — see the module doc.
     pub(super) births: AtomicU64,
 }
 
 impl DetachPolicy {
-    /// Admit one birth against the budget.
+    /// Admit one birth.
     ///
     /// # Errors
     ///
-    /// The budget it was refused against, once every birth is spent, so the
-    /// caller can name the number in the message it hands the user.
-    /// Exhaustion is permanent: nothing gives a birth back.
+    /// The budget, once spent, so a caller can name the number to the user.
     pub fn admit(&self) -> Result<(), u64> {
         self.births
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {

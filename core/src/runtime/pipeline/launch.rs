@@ -1,15 +1,9 @@
-//! Process-staged pipeline orchestrator.
-//!
-//! Pure-value pipelines never enter here.  Everything else is reduced
-//! through a [`PipelineBuild`] accumulator: one `step` per stage, one
-//! `finish` to release the launch gate.  The accumulator owns every
-//! transient resource — the pipeline group, the running-pipeline
-//! collector, the unconsumed stage routes, and the deferred-frame
-//! backlog — so leak-prone wiring is structurally impossible.
-//!
-//! A direct external stage is allowed only when it needs no helper-owned
-//! work: no value edge, no redirect, no byte audit capture, and no
-//! foreground terminal handoff.  Every other stage runs in a ral helper.
+//! Process-staged pipeline orchestrator: every stage spawns into one
+//! process group behind a gate that opens only once the last has spawned
+//! and the terminal handoff has settled.  Pure-value pipelines fold in
+//! the parent evaluator and never arrive here.  [`PipelineBuild`] owns
+//! every transient resource — group, stage handles, unconsumed routes,
+//! unreleased gates — so a leaked pipe end is a borrow error.
 
 use super::super::command;
 use super::collect::RunningPipeline;
@@ -29,19 +23,13 @@ pub(super) enum StageHandle {
     Helper(HelperStageHandle),
 }
 
-/// Route stdin for a stage whose input side is the pipeline boundary.
-///
-/// This mirrors `command::wire_stdin` for standalone externals: if the
-/// enclosing call has parked a `<file` redirect or a parent-shell pipe
-/// on `shell.io.stdin`, the boundary stage consumes it.  Without this,
-/// `f < file` on a function whose body is a pipeline would silently
-/// drop the redirect — the pipeline saw only `Parent` without ever
-/// reading the source.  Pipeline policy diverges from standalone exec
-/// only in the inherit branch: a foreground pipeline's pgid is what
-/// owns the tty, so the permit kind reflects that.
+/// Route stdin for the stage on the pipeline's input boundary, consuming
+/// whatever `<file` or parent pipe sits on `shell.io.stdin` — otherwise
+/// `f < file` on a function whose body is a pipeline drops the redirect.
+/// Unlike `command::stdio::wire_stdin`, a tty fd 0 is inherited only when
+/// this pgid will own the terminal; a backgrounded reader takes SIGTTIN.
 fn route_parent_stdin(group: &PipelineGroup, shell: &mut Shell) -> command::StdinRoute {
-    // An explicit empty source (an exarch tool run) wires the boundary stage
-    // to `/dev/null` — no fd-0 fall-through, mirroring `command::wire_stdin`.
+    // `Source::Empty` — an exarch tool run — denies byte input outright.
     if matches!(shell.io.stdin, crate::io::Source::Empty) {
         return command::StdinRoute::Null;
     }
@@ -58,9 +46,6 @@ fn route_parent_stdin(group: &PipelineGroup, shell: &mut Shell) -> command::Stdi
     }
 }
 
-/// Resolve a stage's stdin source: an `Upstream` edge moves its reader
-/// straight in; a `Parent` boundary routes the enclosing stdin
-/// (file / pipe / inherit) via [`route_parent_stdin`].
 pub(super) fn route_stdin(
     stdin: ByteIn,
     group: &PipelineGroup,
@@ -72,12 +57,8 @@ pub(super) fn route_stdin(
     }
 }
 
-/// Wire a stage's stdout against its [`ByteOut`] edge, returning the pump
-/// sink the parent must drain when the boundary stdout is non-fd.
-/// Shared by the direct-spawn external path and the ral-helper path: a
-/// `Downstream` edge moves its writer straight into the child; a `Parent`
-/// boundary routes through the shell's stdout child plan; a `Null` stage
-/// (value-out, no bytes) discards to `/dev/null`.
+/// Wire a stage's stdout against its [`ByteOut`] edge, returning the sink
+/// the parent must pump when the boundary stdout is not a plain fd.
 pub(super) fn wire_stage_stdout(
     cmd: &mut crate::process::Launch,
     stdout: ByteOut,
@@ -90,10 +71,8 @@ pub(super) fn wire_stage_stdout(
             Ok(None)
         }
         ByteOut::Parent => {
-            // The final byte stage inherits ral's fd 1 directly — so a pager
-            // or `ls`/`grep` sees a TTY — under the same predicate the
-            // standalone path uses (`stdio::inherit_tty`): fd 1 was a tty at
-            // startup and this group owns the terminal foreground.
+            // Inherit ral's real fd 1 so a pager or `ls` still sees a TTY —
+            // the pipeline analogue of `command::stdio::inherit_tty`.
             let inherit = shell.io.terminal.startup_stdout_tty && group.owns_tty();
             let plan = shell
                 .io
@@ -110,14 +89,8 @@ pub(super) fn wire_stage_stdout(
     }
 }
 
-/// Wire a stage's stdin, stdout, and stderr, moving the route's byte
-/// edge ends into the child's stdio.  Stdin routes via [`route_stdin`]
-/// (upstream reader or the enclosing boundary); stdout fans out through
-/// [`wire_stage_stdout`] (downstream writer, parent sink with an optional
-/// pump, or `/dev/null` for a value-out stage); stderr always goes
-/// through the standard [`Sink::child_stderr`] plan.  Shared by the
-/// direct-spawn external path and the ral-helper path so their wiring
-/// cannot drift.
+/// Wire one stage's stdin, stdout, and stderr from its route.  Shared with
+/// `stage::launch_helper_stage` so helper and direct wiring cannot drift.
 pub(super) fn wire_stage_stdio(
     cmd: &mut crate::process::Launch,
     stdin: ByteIn,
@@ -139,10 +112,8 @@ pub(super) fn wire_stage_stdio(
     })
 }
 
-/// Spawn `cmd` into `group`, apply post-spawn child limits if any
-/// capability layer is active, and assemble a [`command::RunningChild`]
-/// with the parent-side pumps attached.  One funnel for both external
-/// and ral stages so the post-spawn boilerplate cannot drift.
+/// Spawn `cmd` into `group` and assemble the [`command::RunningChild`] —
+/// the one funnel for both direct externals and ral helpers.
 #[allow(
     clippy::too_many_arguments,
     reason = "the single funnel for post-spawn assembly; splitting it would scatter the same parameters"
@@ -159,10 +130,8 @@ pub(super) fn spawn_into_group(
 ) -> Settled<command::RunningChild> {
     let (child, jail) = group.spawn(cmd).map_err(spawn_error)?;
     if shell.has_active_capabilities() {
-        // Pipeline path: any active grant routes its limits through the
-        // pipeline's job (Windows) instead of assigning the child to a
-        // second job; on Unix the limits are pre_exec already and this
-        // call is a no-op.
+        // Windows routes the limits through the pipeline's own job rather
+        // than a second per-child one; on Unix `pre_exec` did it already.
         crate::sandbox::apply_child_limits_in_pipeline(&child, group.leader_pgid());
     }
     Ok(command::RunningChild::assemble_with_owner(
@@ -171,15 +140,13 @@ pub(super) fn spawn_into_group(
         name,
         plumbing,
         park_on_stop,
-        // Pipeline stages borrow the group; `PipelineGroup::Drop`
-        // owns the release.
+        // Windows group release belongs to `PipelineGroup::drop`.
         command::GroupOwner::BorrowedByPipeline,
         mooring.cancel.as_scope().clone(),
         jail,
     ))
 }
 
-/// Per-stage launch context borrowed by [`spawn_stage`].
 struct LaunchCx<'a> {
     mooring: &'a Mooring,
     shell: &'a mut Shell,
@@ -187,21 +154,15 @@ struct LaunchCx<'a> {
     park_on_stop: bool,
 }
 
-/// Resources produced by launching one stage.
-///
-/// The build accumulator consumes this as a linear transition: the
-/// stage handle is collected and `gate` is queued until every stage
-/// has spawned.
+/// One stage's launch product: the handle to collect, and the gate frame
+/// held back until every stage has spawned.
 struct SpawnedStage {
     handle: StageHandle,
     gate: Option<DeferredFrame>,
 }
 
-/// Dispatch a stage to its launcher according to the resolve-time
-/// [`StageLaunch`] decision: a pure external command spawned directly,
-/// or a helper stage (a bundled tool or a ral computation).  The route
-/// is consumed whole — its edge ends move into the spawned child's
-/// stdio and protocol channels.
+/// Dispatch one stage per its resolve-time [`StageLaunch`] — a direct
+/// external spawn, or a helper carrying a packed eval request.
 #[allow(
     clippy::needless_pass_by_value,
     reason = "LaunchCx bundles unique `&mut` borrows; by-value transfers them so callees get mutable access — a shared `&LaunchCx` cannot yield `&mut`"
@@ -229,8 +190,7 @@ fn spawn_stage(
         }
         StageLaunch::HelperEval => {
             let captured = cx.shell.snapshot();
-            // Pipeline stages are subshells: only the final value-typed
-            // stage ships its return value (`wants_value`).
+            // Only the final value-typed stage ships a return value home.
             let wants_value = matches!(route.final_value, FinalValue::Report);
             pack_request(
                 Arc::clone(stage),
@@ -258,15 +218,10 @@ fn spawn_stage(
     })
 }
 
-/// Partial-launch resources in their safe teardown order.
-///
-/// Rust drops fields top-to-bottom.  That order is the invariant:
-/// unreleased stage gates close first, then the unconsumed stage
-/// routes (closing every unspawned stage's edge ends, so any
-/// half-wired neighbour sees EOF), then stage handles are
-/// killed/reaped, and only then may the group/anchor be waited.
-/// Keeping these fields under one owner makes the abort order the
-/// ordinary ownership shape, not a convention at each error site.
+/// Partial-launch resources in teardown order: Rust drops fields top to
+/// bottom, and that order is the invariant.  Gates close first so parked
+/// helpers see EOF and stand down, then unconsumed routes so half-wired
+/// neighbours see EOF, then the children; the pgid anchor outlives all.
 struct PipelineResources {
     deferred_jobs: Vec<DeferredFrame>,
     routes: VecDeque<StageRoute>,
@@ -299,18 +254,10 @@ impl PipelineResources {
     fn signal_group(&self) {}
 }
 
-/// Linear accumulator that drives launch through one stage at a time.
-///
-/// Each [`PipelineBuild::step`] consumes the next pre-built
-/// [`StageRoute`] and advances exactly one stage.  Owning every
-/// transient resource (group, running, deferred jobs, unconsumed
-/// routes) here makes pipe leaks and stranded helpers structurally
-/// impossible — the borrow checker enforces the linear-resource
-/// invariant.
-///
-/// `finish` is the only place `tcsetpgrp` runs and the only place the
-/// deferred frames are written: gate-release happens once, after every
-/// stage has spawned.
+/// Linear accumulator: one [`PipelineBuild::step`] per stage, then
+/// `finish`.  Holding the sole handle to the group, the routes, and the
+/// gates makes a leak a borrow error.  `finish` is the only site of both
+/// `tcsetpgrp` and gate release, so no stage runs user code before it.
 struct PipelineBuild {
     resources: PipelineResources,
     park_on_stop: bool,
@@ -319,10 +266,8 @@ struct PipelineBuild {
 impl PipelineBuild {
     fn new(plan: &PipelinePlan, routes: VecDeque<StageRoute>, shell: &Shell) -> Settled<Self> {
         let mut group = PipelineGroup::new(plan.terminal);
-        // Spawn the pgid anchor (no-op off Unix and for a single
-        // stage).  The anchor holds the pgid for the whole launch
-        // sequence, so a stage's `setpgid` join target cannot die
-        // before launch completes.
+        // The anchor holds the pgid open across the launch so a later stage's
+        // `setpgid` target cannot die first; no-op off Unix and for one stage.
         group.prepare(shell, plan.specs.len())?;
         let park_on_stop = plan.terminal.owns_tty();
         Ok(Self {
@@ -355,38 +300,25 @@ impl PipelineBuild {
         Ok(())
     }
 
-    /// Tear down a partially-launched pipeline after a mid-launch error.
-    ///
-    /// Order is load-bearing.  SIGTERM the pgid first so already-spawned
-    /// helpers and direct externals that respect it exit promptly.
-    /// Then close the unreleased stage gates: a helper parked on its
-    /// job read treats EOF as the parent's "stand down" message and
-    /// exits, closing the inherited anchor fd on the way out.  The
-    /// unconsumed stage routes drop next so any half-wired neighbour
-    /// sees EOF.  Only then do we drop the running handles, whose abort
-    /// path kills, joins pump threads, and reaps.  The group drops
-    /// last, after the anchor can observe channel EOF (or the abort
-    /// kill) and be waited without forming a cycle.
+    /// Tear down a partially-launched pipeline.  SIGTERM the pgid first so
+    /// helpers and externals that honour it leave before the drop order
+    /// reaches SIGKILL; [`PipelineResources`]'s field order does the rest.
     fn abort(self) {
         let Self { resources, .. } = self;
         resources.signal_group();
         drop(resources);
     }
 
-    /// Foreground the pipeline pgid (when interactive) and release every
-    /// gate frame.  Returns the running pipeline, with the
-    /// `PipelineGroup` alongside so its anchor, foreground guard, and
-    /// relay stay alive through collect.
+    /// Hand the terminal to the pipeline pgid, release every gate, and return
+    /// the group alongside — its anchor and guards must outlive collect.
     fn finish(
         self,
         shell: &Shell,
         mooring: &Mooring,
     ) -> Result<(PipelineGroup, RunningPipeline), Break> {
         let Self { mut resources, .. } = self;
-        // Hand the controlling tty to the pipeline pgid (interactive
-        // only) *before* releasing the gate frames so the kernel's
-        // foreground decision is settled when stages start running
-        // user code.
+        // Foreground before releasing the gates, so the kernel's foreground
+        // decision is settled when stages start running user code.
         resources.group.claim_foreground(shell, mooring);
         for deferred in std::mem::take(&mut resources.deferred_jobs) {
             deferred.release()?;
@@ -403,9 +335,9 @@ impl PipelineBuild {
     }
 }
 
-/// Spawn a direct external stage: no stage helper, no
-/// serialisation.  Only used for `NoTerminal` pipelines where there
-/// is no foreground gating and no ral code to evaluate.
+/// Spawn a pure external stage with no helper in front of it.  Admitted by
+/// `resolve::direct_spawnable` alone: no value edge, no redirect, no
+/// byte-capturing audit, no terminal to hand over.
 fn launch_external_stage_direct(
     ext: &ExternalStage,
     route: StageRoute,
@@ -414,15 +346,13 @@ fn launch_external_stage_direct(
     group: &mut PipelineGroup,
     park_on_stop: bool,
 ) -> Result<command::RunningChild, Break> {
-    // `resolve::direct_spawnable` routes any value-carrying stage
-    // through the helper, so a direct-spawn route holds byte ends only.
+    // A value-carrying stage never gets here, so the route is byte ends only.
     debug_assert!(route.value_in.is_none() && route.value_out.is_none());
 
     let rc = command::vet(&ext.id, &ext.args, shell)?;
     let mut cmd = command::build_command(&rc, crate::sandbox::Ownership::Kept, shell)?;
 
-    // Redirect-file branches are unreachable in `wire_stage_stdout` here —
-    // the caller gates on `ext.redirects.is_empty()`.
+    // Nor a redirect, so `ext` carries none and there is no file to open.
     let plumbing = wire_stage_stdio(&mut cmd, route.stdin, route.stdout, group, shell)?;
 
     spawn_into_group(
@@ -437,15 +367,9 @@ fn launch_external_stage_direct(
     )
 }
 
-/// Spawn every stage into the build's pgid.  Per-stage SIGINT/cancel
-/// check at the top of each iteration — the relay slot is claimed
-/// inside `PipelineGroup::spawn` only once a real child has joined the
-/// pgid (see `group.rs`'s SIGINT/relay invariant), so SIGINTs arriving
-/// before that claim — between `prepare` and the first `spawn`, or
-/// between a stage spawn returning and the next stage starting — only
-/// cancel the run's foreground scope.  Polling that scope at the top
-/// of every iteration aborts launch promptly without leaving
-/// anchor-only or partially-spawned groups stranded.
+/// Spawn every stage, polling for cancellation before each.  Until the first
+/// `PipelineGroup::spawn` claims the SIGINT relay slot a SIGINT only cancels
+/// the run's foreground scope; this poll turns that into a prompt abort.
 fn spawn_all_stages(
     build: &mut PipelineBuild,
     stages: &[Arc<crate::ir::Comp>],
@@ -460,13 +384,8 @@ fn spawn_all_stages(
     Ok(())
 }
 
-/// Launch every byte-capable stage into the pipeline's process group.
-///
-/// On any error mid-launch, [`PipelineBuild::abort`] explicitly orders
-/// teardown: signal the pgid, close unreleased gates and pipe ends,
-/// reap stage children, then reap the anchor.  Keeping the anchor last
-/// avoids a deadlock when a helper inherited the anchor channel but is
-/// still blocked waiting for the never-released stage job.
+/// Launch every stage into the pipeline's process group; a mid-launch error
+/// goes to [`PipelineBuild::abort`] for the ordered teardown.
 pub(super) fn launch_pipeline(
     stages: &[Arc<crate::ir::Comp>],
     plan: &PipelinePlan,

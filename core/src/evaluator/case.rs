@@ -1,18 +1,7 @@
 //! Runtime for the `case` sum eliminator.
 //!
-//! Typechecking guarantees that the scrutinee is a variant whose row is
-//! covered by the handler table, so this code's missing-handler branch is
-//! an internal error rather than a user-facing failure.
-//!
-//! ## Tail-call optimisation
-//!
-//! When the eliminator is handed [`Tail::Yes`] — its enclosing
-//! computation granted it the tail position — the matched handler is
-//! returned as a [`TailCall`] signal rather than being applied via a
-//! fresh trampoline frame.  The surrounding trampoline loop catches the
-//! signal and continues in O(1) host stack frames — the same direct-emit
-//! path [`eval_app`](super::call) takes for a tail-positioned
-//! application.
+//! Exhaustiveness is checked only when the handler table is a record
+//! literal; an opaque table reaches the missing-handler branch here instead.
 
 use super::apply;
 use super::val::eval_val;
@@ -20,10 +9,11 @@ use crate::ir::Val;
 use crate::syntax::tag::tag_row_label;
 use crate::types::{Mooring, Raw, Shell, Tail, TailCall, Value};
 
-/// Evaluate `case scrutinee table`: force the matching handler thunk on
-/// the variant's payload (or `Unit` for nullary tags).
+/// Evaluate `case scrutinee table`: apply the matching handler to the
+/// variant's payload, or to `Unit` for a nullary tag — handlers are unary.
 ///
-/// The selected arm inherits the case's tail position.
+/// A granted [`Tail::Yes`] passes to the handler as a [`TailCall`], the same
+/// hand-off `eval_app` in `call.rs` makes for an application.
 pub(crate) fn eval_case(
     scrutinee: &Val,
     table: &Val,

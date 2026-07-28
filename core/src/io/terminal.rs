@@ -1,35 +1,14 @@
-//! Terminal capability snapshot.
+//! Terminal capabilities, probed once at shell start and never re-queried.
 //!
-//! [`InteractiveMode`] resolves `RAL_INTERACTIVE_MODE` once at startup and
-//! [`TerminalState`] caches the shell's entry-time isatty results plus the
-//! ANSI / `NO_COLOR` / tmux / asciinema / CI bits and a small set of opt-in
-//! capability flags (truecolor, OSC 8 hyperlinks, OSC 52 clipboard write,
-//! bracketed paste).  Everything here is a snapshot — nothing re-queries
-//! the OS mid-session.
-//!
-//! The capability flags follow the doc principle "probe, enable
-//! opportunistically, and degrade cleanly to a keyboard-only monochrome
-//! line mode": each flag has a pure probe over an explicit
-//! [`TerminalEnv`] record so tests can drive them as data, and a public
-//! `ui_*_ok` predicate that mixes the raw probe with the active mode and
-//! `NO_COLOR` policy.
-//!
-//! Windows console / VTP detection ([`is_console`],
-//! [`enable_virtual_terminal_processing`], and the `STD_*_HANDLE`
-//! constants) lives at the bottom of this file.  `GetConsoleMode`
-//! succeeds only on real console handles, making it a reliable
-//! `isatty` substitute; `ENABLE_VIRTUAL_TERMINAL_PROCESSING` must be set
-//! before any ANSI output because bundled uutils (`uu_ls` etc.) emit
-//! escape codes but rely on the host process to have switched the
-//! console into VTP mode first.
+//! Each capability is a pure probe over a `TerminalEnv` record, so tests can
+//! drive it as data, paired with a `ui_*_ok` predicate that mixes the raw bit
+//! with the active mode and `NO_COLOR` policy.
 use serde::{Deserialize, Serialize};
-/// Operating mode for the interactive frontend, resolved from
-/// `RAL_INTERACTIVE_MODE` at shell startup.
+/// Frontend operating mode, resolved from `RAL_INTERACTIVE_MODE` at startup.
 ///
-/// `Auto` is the default: capability bits drive feature gating.
-/// `Minimal` forces every terminal round-trip and every ANSI emission off.
-/// `Full` forces ANSI on even when capability detection says otherwise
-/// (useful when piping ral into a wrapper that understands ANSI).
+/// `Auto` gates on the capability bits; `Minimal` forces every round-trip and
+/// every ANSI emission off; `Full` forces ANSI on even for a piped stdout, for
+/// a wrapper that understands the escapes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InteractiveMode {
     #[default]
@@ -39,8 +18,8 @@ pub enum InteractiveMode {
 }
 
 impl InteractiveMode {
-    /// Parse the `RAL_INTERACTIVE_MODE` value.  Unknown values fall back to
-    /// `Auto` and set `warn` so the caller can emit a one-time diagnostic.
+    /// Parse the `RAL_INTERACTIVE_MODE` value; an unknown one falls back to
+    /// `Auto` and returns a warning for the caller to surface once.
     pub fn parse(raw: Option<&str>) -> (Self, Option<String>) {
         match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
             None | Some("" | "auto") => (Self::Auto, None),
@@ -55,93 +34,62 @@ impl InteractiveMode {
         }
     }
 
-    /// True when the mode suppresses all terminal output, round-trips, and ANSI.
     pub fn is_minimal(self) -> bool {
         matches!(self, Self::Minimal)
     }
 }
 
-/// Cached terminal capability snapshot, taken once at shell start.
+/// Terminal capabilities as they stood at process entry.
 ///
-/// `startup_stdin_tty` / `startup_stdout_tty` / `startup_stderr_tty` are the
-/// raw `isatty(3)` results for fds 0/1/2 *at process entry*.  They are the
-/// right oracle for "did the user launch us interactively?" and for any
-/// fall-through code path that reads the inherited fd 0/1/2 directly; they
-/// are the wrong oracle for "is fd N a tty *right now*?", since `<file` and
-/// `>file` redirects can replace the underlying fd transiently.  Code that
-/// asks a current-state question should route through the `Source`/`Sink`
-/// abstractions instead of consulting these fields.
-///
-/// `startup_foreground` records whether ral's process group *owned* the
-/// controlling terminal's foreground at process entry.  It is no longer
-/// consulted as a per-handoff authority — that role moved to the session's
-/// [`TerminalLease`](crate::process::TerminalLease).  It survives as the
-/// lease's *mint condition*: core mints the session lease iff this is true at
-/// construction (see `TerminalLease::mint_at_startup`).  True for an
-/// interactive REPL and a non-interactive script launched at a terminal — both
-/// own the foreground and so get a lease; an exarch tool-eval, a piped
-/// `ral -c`, or a backgrounded `ral … &` does not.
-///
-/// The remaining fields record whether the terminal is known to accept ANSI
-/// escape sequences and which "hostile but common" environment we are running
-/// inside.  Population happens once via `TerminalState::probe_with_mode`;
-/// nothing re-queries the OS mid-session.
+/// The `startup_*_tty` bits answer "was ral launched at a terminal?", never "is
+/// fd N a tty right now".  Consult one only when the matching `Source`/`Sink`
+/// is `Terminal`, since that is exactly the case where the bytes still reach
+/// the inherited fd; a `<file` or `>file` redirect parks elsewhere.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-// A flat record of independent terminal-capability facts, not a state machine;
-// bundling the flags into sub-structs would obscure, not clarify.
+// A flat record of independent facts, not a state machine; sub-structs would
+// obscure rather than clarify.
 #[allow(clippy::struct_excessive_bools)]
 pub struct TerminalState {
     pub startup_stdin_tty: bool,
     pub startup_stdout_tty: bool,
     pub startup_stderr_tty: bool,
-    /// ral's process group owned the controlling terminal's foreground at
-    /// process entry.  False when stdin is not a tty.  See the type doc.
+    /// ral's process group owned the controlling terminal's foreground, and so
+    /// the mint condition for the session's
+    /// [`TerminalLease`](crate::process::TerminalLease): an interactive REPL or
+    /// a script launched at a terminal gets one, a piped `ral -c` or a
+    /// backgrounded `ral … &` does not.  False when stdin is not a tty.
     pub startup_foreground: bool,
-    /// `true` when stdout is a tty *and* TERM/platform checks say ANSI works.
-    /// `RAL_INTERACTIVE_MODE=full` forces it on regardless (see
-    /// [`ansi_supported`]), matching the `ansi_supported` contract.
+    /// stdout is a tty and TERM says ANSI works, or the mode is `Full`.
     pub supports_ansi: bool,
-    /// `true` when TERM/platform checks say stderr's terminal accepts ANSI.
-    /// The stderr analogue of `supports_ansi`, snapshotted the same way at
-    /// probe time — `stderr_ansi_ok` must never live-query the terminal.
+    /// TERM says stderr's terminal accepts ANSI.  Snapshotted here so
+    /// `stderr_ansi_ok` never has to live-query.
     pub stderr_ansi_capable: bool,
-    /// `NO_COLOR` is set in the environment.
     pub no_color: bool,
-    /// Running inside a tmux session.
     pub is_tmux: bool,
-    /// Running under asciinema recording.
     pub is_asciinema: bool,
-    /// Running in a CI environment (GitHub Actions, GitLab CI, etc.).
     pub is_ci: bool,
-    /// 24-bit color advertised by `COLORTERM=truecolor` / `COLORTERM=24bit`.
     pub truecolor: bool,
-    /// OSC 8 hyperlinks recognised by the host terminal.  Probed via
-    /// `TERM_PROGRAM`, `KITTY_WINDOW_ID`, `WT_SESSION`, `VTE_VERSION ≥ 5000`,
-    /// and a small `TERM=` allowlist.
+    /// OSC 8 hyperlinks recognised by the host terminal.
     pub hyperlinks: bool,
-    /// OSC 52 clipboard *write* is expected to land in the system clipboard.
-    /// Read is intentionally not probed: many terminals gate it behind a
-    /// permission prompt and the safer surface is write-only.
+    /// OSC 52 clipboard *write*.  Read is deliberately unprobed: too many
+    /// terminals gate it behind a permission prompt.
     pub clipboard_write: bool,
-    /// Bracketed-paste mode is supported.  Universal in modern ANSI
-    /// terminals; we use `supports_ansi` as a sufficient proxy without
-    /// emitting a round-trip query.
+    /// Bracketed paste, taken to follow `supports_ansi` rather than costing a
+    /// round-trip query — it is universal in modern ANSI terminals.
     pub bracketed_paste: bool,
-    /// Resolved from `RAL_INTERACTIVE_MODE`.
     pub mode: InteractiveMode,
 }
 
 impl TerminalState {
-    /// Back-compat entry point: probe with `InteractiveMode::Auto`.
+    /// Probe in `Auto`, for contexts with no env of their own to consult (a
+    /// re-exec'd pipeline-stage child).
     pub fn probe() -> Self {
         Self::probe_with_mode(InteractiveMode::Auto)
     }
 
-    /// Resolve `RAL_INTERACTIVE_MODE` from the environment and probe in that
-    /// mode.  Returns the resolved mode, the terminal state, and an optional
-    /// warning for an unrecognised mode value (the caller decides whether to
-    /// surface it).  The env-var name and its parsing live here, beside the
-    /// type that defines the modes, rather than being respelled per frontend.
+    /// Probe in the mode `RAL_INTERACTIVE_MODE` names.  The env var is read
+    /// here, beside the type defining the modes, rather than respelled in each
+    /// frontend.
     #[allow(clippy::disallowed_methods)] // mode selector, not a basedir
     pub fn probe_from_env() -> (InteractiveMode, Self, Option<String>) {
         let raw = std::env::var("RAL_INTERACTIVE_MODE").ok();
@@ -149,7 +97,8 @@ impl TerminalState {
         (mode, Self::probe_with_mode(mode), warn)
     }
 
-    /// Query the OS and environment for the current terminal state.
+    /// Query the OS and environment.  Callers seed `crate::ansi::set_terminal`
+    /// with the result so process-wide color gating agrees with this snapshot.
     // TMUX / ASCIINEMA_REC are presence probes, not basedirs.
     #[allow(clippy::disallowed_methods)]
     pub fn probe_with_mode(mode: InteractiveMode) -> Self {
@@ -183,19 +132,16 @@ impl TerminalState {
 
     // ── Policy predicates ─────────────────────────────────────────────────
     //
-    // Each `ui_*_ok` is "raw capability bit ∧ user/mode policy".  Keeping
-    // the bits and the policy separate means a plugin that wants to
-    // override policy (e.g. force OSC 8 emission while debugging) can read
-    // the raw field; everyday code uses the predicate.
+    // Each `ui_*_ok` is "raw capability bit ∧ mode/user policy".  Code that
+    // must override the policy — forcing OSC 8 while debugging, say — reads
+    // the raw field instead.
 
-    /// UI may emit styling.  False under `NO_COLOR`, TERM=dumb, non-tty, or
-    /// `RAL_INTERACTIVE_MODE=minimal`.
+    /// UI may emit styling.
     pub fn ui_ansi_ok(&self) -> bool {
         !self.mode.is_minimal() && self.supports_ansi && !self.no_color
     }
 
-    /// Terminal round-trip queries (CPR, DA, OSC) are appropriate.  False on
-    /// non-tty stdout or in minimal mode.
+    /// Terminal round-trip queries (CPR, DA, OSC) are appropriate.
     pub fn ui_round_trips_ok(&self) -> bool {
         self.startup_stdout_tty && !self.mode.is_minimal()
     }
@@ -205,21 +151,18 @@ impl TerminalState {
         self.ui_round_trips_ok()
     }
 
-    /// 24-bit foreground/background colors may be emitted.  Subsumes
-    /// `ui_ansi_ok`; `NO_COLOR` turns this off too.
+    /// 24-bit foreground/background colors may be emitted.
     pub fn ui_truecolor_ok(&self) -> bool {
         self.ui_ansi_ok() && self.truecolor
     }
 
-    /// OSC 8 hyperlinks may be emitted.  `NO_COLOR` does not block hyperlinks
-    /// — they are structural, not color — but minimal mode and non-tty
-    /// stdout both do.
+    /// OSC 8 hyperlinks may be emitted.  `NO_COLOR` does not block them: they
+    /// are structure, not color.
     pub fn ui_hyperlinks_ok(&self) -> bool {
         self.ui_round_trips_ok() && self.hyperlinks
     }
 
-    /// OSC 52 clipboard writes may be emitted.  Write-only; reads are not
-    /// surfaced because the permission-prompt landscape is too uneven.
+    /// OSC 52 clipboard writes may be emitted.
     pub fn ui_clipboard_write_ok(&self) -> bool {
         self.ui_round_trips_ok() && self.clipboard_write
     }
@@ -229,10 +172,9 @@ impl TerminalState {
         self.ui_round_trips_ok() && self.bracketed_paste
     }
 
-    /// Diagnostics (stderr) may emit ANSI.  Independent of `ui_ansi_ok`
-    /// because stderr may be a tty while stdout is piped to a pager; we still
-    /// want colored errors in that case.  False under `NO_COLOR`, TERM=dumb on
-    /// Auto, non-tty stderr, or minimal mode.
+    /// Diagnostics may emit ANSI.  Separate from `ui_ansi_ok` because stderr
+    /// can be a tty while stdout is piped to a pager, and errors should still
+    /// be colored there.
     pub fn stderr_ansi_ok(&self) -> bool {
         !self.mode.is_minimal()
             && !self.no_color
@@ -240,10 +182,9 @@ impl TerminalState {
             && self.stderr_ansi_capable
     }
 
-    /// Project the terminal snapshot into the user-visible `$TERMINAL`
-    /// map exposed to RC files and plugins.  The shape is stable: ral
-    /// scripts pattern-match on these keys, so adding a key is OK but
-    /// renaming or removing one is a breaking change.
+    /// Project the snapshot into the `$TERMINAL` map bound for RC files and
+    /// plugins.  Scripts pattern-match these keys: adding one is safe,
+    /// renaming or removing one breaks them.
     pub fn to_value(&self) -> crate::types::Value {
         use crate::types::Value;
         let mode = match self.mode {
@@ -286,7 +227,7 @@ impl TerminalState {
     }
 }
 
-// ── isatty + ANSI gating: small named helpers ─────────────────────────────
+// ── isatty and ANSI gating ────────────────────────────────────────────────
 
 /// `(stdin, stdout, stderr)` tty membership at process entry.
 fn probe_isatty() -> (bool, bool, bool) {
@@ -313,14 +254,10 @@ fn probe_isatty() -> (bool, bool, bool) {
     }
 }
 
-/// Whether ral's process group owns the controlling terminal's foreground.
+/// `tcgetpgrp(stdin) == getpgrp()`, and `false` whenever stdin is not a tty.
 ///
-/// Only meaningful when stdin is a tty; `false` otherwise.  On Unix this is
-/// `tcgetpgrp(stdin) == getpgrp()` — true for an interactive REPL and for a
-/// script launched in the foreground, false for a backgrounded `ral … &` or
-/// a tty-less eval.  Windows consoles are shared between attached processes
-/// and have no `tcsetpgrp`, so a console-attached shell is taken to own the
-/// foreground; the value only feeds capability decisions there.
+/// Windows has no `tcsetpgrp` and shares a console between attached processes,
+/// so a console-attached shell counts as owning the foreground there.
 fn probe_foreground(stdin_tty: bool) -> bool {
     if !stdin_tty {
         return false;
@@ -336,10 +273,8 @@ fn probe_foreground(stdin_tty: bool) -> bool {
     }
 }
 
-/// `true` when ANSI styling is acceptable on stdout under the given mode.
-///
-/// `Full` forces ANSI on even with a piped stdout; `Minimal` forces it
-/// off; `Auto` defers to anstyle-query + isatty.
+/// ANSI styling is acceptable on stdout: `Full` forces it on even when piped,
+/// `Minimal` off, `Auto` defers to TERM and isatty.
 fn ansi_supported(mode: InteractiveMode, stdout_tty: bool) -> bool {
     match mode {
         InteractiveMode::Full => true,
@@ -348,11 +283,10 @@ fn ansi_supported(mode: InteractiveMode, stdout_tty: bool) -> bool {
     }
 }
 
-// ── TerminalEnv: owned env snapshot for capability probes ─────────────────
+// ── Environment snapshot for the capability probes ────────────────────────
 
-/// The env values the capability probes consult, captured once so the
-/// probes themselves can be pure procedures on data.  Tests construct
-/// literal values; production calls [`TerminalEnv::from_process`].
+/// The env the capability probes consult, captured once so each probe is a
+/// pure function of data that a test can build as a literal.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct TerminalEnv {
     term: Option<String>,
@@ -364,8 +298,6 @@ struct TerminalEnv {
 }
 
 impl TerminalEnv {
-    /// Read every env var the probes care about from the process
-    /// environment.  Bool flags collapse "present" into `true`.
     // KITTY_WINDOW_ID / WT_SESSION are presence probes, not basedirs.
     #[allow(clippy::disallowed_methods)]
     fn from_process() -> Self {
@@ -379,21 +311,13 @@ impl TerminalEnv {
         }
     }
 
-    /// `COLORTERM` advertises 24-bit color.  This is the de-facto signal
-    /// every major terminal honours.
+    /// `COLORTERM` is the de-facto 24-bit signal every major terminal honours.
     fn advertises_truecolor(&self) -> bool {
         matches!(self.colorterm.as_deref(), Some("truecolor" | "24bit"))
     }
 
-    /// The host terminal is one of the known cohort that recognises both
-    /// OSC 8 hyperlinks and OSC 52 clipboard writes.  Any one source of
-    /// evidence suffices:
-    ///
-    /// * `TERM_PROGRAM` ∈ {iTerm.app, `WezTerm`, vscode, ghostty}
-    /// * `TERM` ∈ {xterm-kitty, foot, xterm-ghostty}
-    /// * `KITTY_WINDOW_ID` is set
-    /// * `WT_SESSION` is set (Windows Terminal)
-    /// * `VTE_VERSION` ≥ 5000 (VTE 0.50+: gnome-terminal, tilix, …)
+    /// The host is in the cohort honouring both OSC 8 and OSC 52; any one
+    /// signal suffices.  5000 is VTE 0.50, the first release with hyperlinks.
     fn recognises_modern_osc(&self) -> bool {
         self.term_program_is_modern()
             || self.term_is_modern()
@@ -432,12 +356,10 @@ pub(crate) use windows_sys::Win32::System::Console::{
     SetConsoleMode,
 };
 
-/// Snapshot the console mode of the stdin handle, for restoring via
-/// [`restore_console_mode`] after raw mode leaves it dirty — the Windows
-/// analogue of `process::termios_snapshot`/`tcsetattr` on Unix, used by
-/// the panic hook. `None` when stdin is not attached to a console
-/// (`GetConsoleMode` fails — redirected to a pipe or file), mirroring
-/// `termios_snapshot`'s `None` on a non-tty stdin.
+/// Snapshot stdin's console mode for [`restore_console_mode`] — the Windows
+/// counterpart of `tcgetattr`, and used the same way by the REPL's panic hook
+/// to undo raw mode before writing a crash log. `None` when stdin is not a
+/// console.
 #[cfg(windows)]
 #[allow(
     clippy::too_long_first_doc_paragraph,
@@ -449,8 +371,7 @@ pub fn console_mode_snapshot() -> Option<u32> {
     (unsafe { GetConsoleMode(h, &raw mut mode) } != 0).then_some(mode)
 }
 
-/// Restore a console mode captured by [`console_mode_snapshot`] onto the
-/// stdin handle.
+/// Restore a mode captured by [`console_mode_snapshot`] onto stdin.
 #[cfg(windows)]
 pub fn restore_console_mode(mode: u32) {
     let h = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
@@ -459,8 +380,8 @@ pub fn restore_console_mode(mode: u32) {
     }
 }
 
-/// Returns true when the given Win32 standard-handle ID is attached to a
-/// console (not a pipe, file, or NUL).  Used as `isatty` on Windows.
+/// Windows `isatty`: `GetConsoleMode` succeeds only on a real console handle,
+/// never on a pipe, file, or NUL.
 #[cfg(windows)]
 pub(crate) fn is_console(std_handle: u32) -> bool {
     let h = unsafe { GetStdHandle(std_handle) };
@@ -471,8 +392,9 @@ pub(crate) fn is_console(std_handle: u32) -> bool {
 /// Enable ANSI virtual-terminal processing on the stdout and stderr console
 /// handles.
 ///
-/// Must be called once at process startup.  A no-op when a handle is
-/// redirected to a pipe or file (`GetConsoleMode` will fail on those).
+/// `main` must call this before anything writes an escape: the bundled uutils
+/// emit escapes through libc and rely on the host having switched the console
+/// into VTP mode first.  A no-op on a handle redirected to a pipe or file.
 #[cfg(windows)]
 pub fn enable_virtual_terminal_processing() {
     const ENABLE_VTP: u32 = 0x0004;
@@ -506,8 +428,8 @@ mod tests {
         assert!(warn.is_some());
     }
 
-    /// Compact constructor for predicate tests.  Capability flags mirror
-    /// the production probe: extras live under `supports_ansi` on a tty.
+    /// Mirrors the production probe in the one way the predicates care about:
+    /// the extra capabilities ride on `supports_ansi`.
     fn make_state(
         mode: InteractiveMode,
         supports_ansi: bool,
@@ -541,7 +463,7 @@ mod tests {
         assert!(!make_state(InteractiveMode::Auto, true, true, true).ui_ansi_ok());
         assert!(!make_state(InteractiveMode::Auto, false, false, true).ui_ansi_ok());
         assert!(!make_state(InteractiveMode::Minimal, true, false, true).ui_ansi_ok());
-        // Full mode still respects NO_COLOR (user intent overrides force).
+        // NO_COLOR beats Full: user intent overrides the force.
         assert!(!make_state(InteractiveMode::Full, true, true, true).ui_ansi_ok());
     }
 
@@ -557,13 +479,13 @@ mod tests {
         assert!(!make_state(InteractiveMode::Auto, true, false, false).stderr_ansi_ok());
         assert!(!make_state(InteractiveMode::Auto, true, true, true).stderr_ansi_ok());
         assert!(!make_state(InteractiveMode::Minimal, true, false, true).stderr_ansi_ok());
-        // Full on a tty with no NO_COLOR → on, regardless of TERM checks.
+        // Full on a tty without NO_COLOR wins regardless of the TERM checks.
         assert!(make_state(InteractiveMode::Full, false, false, true).stderr_ansi_ok());
     }
 
-    // ── New capability probes ─────────────────────────────────────────────
+    // ── Capability probes ─────────────────────────────────────────────────
 
-    /// Build a `TerminalEnv` from named pairs.  `None` for "unset".
+    /// Positional `TerminalEnv` builder; `None` means unset.
     fn env(
         term: Option<&str>,
         term_program: Option<&str>,
@@ -657,7 +579,7 @@ mod tests {
     fn ui_hyperlinks_ok_ignores_no_color_but_needs_tty() {
         let mut s = make_state(InteractiveMode::Auto, true, true, true);
         s.hyperlinks = true;
-        // NO_COLOR is set above; hyperlinks are structural, not color, so still OK.
+        // NO_COLOR is set above; hyperlinks are structure, not color.
         assert!(s.ui_hyperlinks_ok());
 
         s.startup_stdout_tty = false;

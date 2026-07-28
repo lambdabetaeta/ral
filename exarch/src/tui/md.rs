@@ -1,10 +1,8 @@
-//! Paragraph-at-a-time Markdown rendering.
+//! Markdown to ratatui lines: `pulldown-cmark` events walked straight into
+//! spans, with syntect-highlighted fenced code from the `two-face` syntax set.
 //!
-//! Walks `pulldown-cmark` events directly into `ratatui::text::Line`s, with
-//! syntect-highlighted fenced code (from the bat-curated `two-face` syntax
-//! set).  The viewport commits one fence-safe paragraph at a time, so each
-//! call sees a structurally complete slice and no structural-repair pass is
-//! needed.
+//! `super::viewport` commits only fence-safe paragraph prefixes, so every call
+//! here sees a structurally complete slice and needs no repair pass.
 
 use pulldown_cmark::{
     Alignment, CodeBlockKind, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd,
@@ -22,31 +20,20 @@ use super::line::{is_blank, wrap_line};
 use super::palette::{CYAN, LIME, READ_W, SLATE};
 use super::rail::{desaturate, mix};
 
-/// Left inset for assistant markdown lines, marking the model's voice
-/// against the column-0 chrome.
+/// Left inset for assistant markdown, holding the model's voice off the chrome.
 pub(super) const MD_INDENT: u16 = 4;
 
-/// The foreground assumed for spans with no explicit colour (plain prose
-/// rendered at the terminal default), so the fidelity drain has a concrete
-/// colour to desaturate. A degraded answer's prose must visibly lose its
-/// hue, so it cannot stay at the bare terminal default once modulation
-/// kicks in.
+/// The foreground assumed for uncoloured spans — the drain needs a hue to take.
 const BASE_FG: Color = Color::Rgb(208, 213, 224);
 
-/// The flat background wash an echoed paragraph wears: a faint neutral
-/// block behind every span, deepening one step per echo level. Static (no
-/// row-wise oscillation), so it reads as a flagged passage, never a render
-/// glitch. ([`modulate`] explains the foreground/background axis split.)
+/// The flat wash behind an echoed paragraph, one step deeper per echo level.
+/// Static across rows, so it reads as a flagged passage, not a render glitch.
 const ECHO_WASH: Color = Color::Rgb(46, 40, 54);
 
 // ── public entry points ──────────────────────────────────────────────────
 
-/// Render `text` to ratatui lines, clamped to [`READ_W`] columns.  `indent`
-/// shrinks the wrap budget and prepends that many spaces to every non-blank
-/// emitted line, so the prose sits inset from the surrounding chrome.
-/// `fidelity` degrades the rendering medium with its source (Move 7): a
-/// context-stressed turn drains the prose's saturation toward grey, an
-/// echoed paragraph wears a flat background wash.
+/// Render `text` to lines clamped to [`READ_W`] columns.  `indent` both shrinks
+/// the wrap budget and prefixes every non-blank line, insetting the prose.
 pub(super) fn render_md(text: &str, w: u16, indent: u16, fidelity: Fidelity) -> Vec<Line<'static>> {
     let body_w = w.min(READ_W).saturating_sub(indent).max(1) as usize;
     let mut comp = Composer::new(body_w, indent as usize);
@@ -59,21 +46,12 @@ pub(super) fn render_md(text: &str, w: u16, indent: u16, fidelity: Fidelity) -> 
     lines
 }
 
-/// The saturation drained from reasoning prose: enough that the thinking
-/// trace visibly reads as lower-authority scratch work without losing
-/// legibility.
+/// Saturation drained from reasoning prose: scratch work, short of illegible.
 const REASONING_DRAIN: f32 = 0.7;
-/// Dimming factor applied after desaturation: pulls the foreground
-/// toward a darker neutral so reasoning prose reads as scratch work —
-/// visibly lower-luminance, not just lower-saturation.
+/// Dimming applied after the drain, so reasoning drops in luminance too.
 const REASONING_DIM: f32 = 0.35;
-/// Render reasoning prose. Rendered sound, then desaturated wholesale toward
-/// grey at held luminance: the reasoning is a finished image like any other
-/// prose, but the colour has gone out of it, so it never borrows the
-/// committed answer's authority.
-/// This is intrinsic to the reasoning register, deliberately *not* the
-/// context / echo fidelity signals ([`modulate`]) — thinking is provisional
-/// whatever the turn's pressure.
+/// Render reasoning prose, drained and dimmed so it never borrows the answer's
+/// authority — independent of [`Fidelity`], since thinking is always provisional.
 pub(super) fn render_reasoning(text: &str, w: u16, indent: u16) -> Vec<Line<'static>> {
     let mut lines = render_md(text, w, indent, Fidelity::default());
     for line in &mut lines {
@@ -85,15 +63,8 @@ pub(super) fn render_reasoning(text: &str, w: u16, indent: u16) -> Vec<Line<'sta
     lines
 }
 
-/// Degrade finished lines so the medium tracks the model's reliability
-/// (Move 7, coherent degradation): context pressure drains every foreground's
-/// saturation ([`drain`], no `DIM` — that idiom is for ignorable chrome), and
-/// echo similarity lays a flat [`ECHO_WASH`] behind every span.  Both walk the
-/// already-built spans — code, headings, and tables included — so the whole
-/// block reads as one fidelity.  The two signals ride disjoint colour axes
-/// (foreground vs background), and neither is the value/lightness channel that
-/// carries magnitude on the rail and bars, so a degraded answer can never be
-/// misread as a small one.
+/// Degrade every built span, code and tables included, so the ink tracks the
+/// passage's reliability — never through value, which carries magnitude on the rail.
 fn modulate(lines: &mut [Line<'static>], f: Fidelity) {
     if f.context == 0 && f.echo == 0 {
         return;
@@ -105,10 +76,7 @@ fn modulate(lines: &mut [Line<'static>], f: Fidelity) {
     }
 }
 
-/// The saturation a context-pressure floor drains from a foreground:
-/// levels 1–3 desaturate toward the colour's own luma-grey by ~45% / ~70%
-/// / ~90%, holding luminance so legibility survives.  Level 0 carries no
-/// drain.
+/// Saturation drained per context level, toward luma-grey so legibility lives.
 fn drain(context: u8) -> f32 {
     match context {
         0 => 0.0,
@@ -118,12 +86,8 @@ fn drain(context: u8) -> f32 {
     }
 }
 
-/// Degrade one span by a context-pressure floor and an echo level: drain
-/// its foreground's saturation toward grey from level 1 (held luminance),
-/// and shade the field behind it with [`ECHO_WASH`] when the block echoes,
-/// one step per echo level.  The one span-level modulation [`modulate`] and
-/// the coalesced ral block's intent line ([`apply_context`]) share, so
-/// prose and intent degrade alike.
+/// Drain a span's foreground and, when the block echoes, wash the field behind
+/// it.  Shared by [`modulate`] and [`apply_context`]: prose and intent degrade alike.
 fn drain_span(span: &mut Span<'static>, context: u8, echo: u8) {
     if span.content.trim().is_empty() {
         return;
@@ -138,11 +102,8 @@ fn drain_span(span: &mut Span<'static>, context: u8, echo: u8) {
     }
 }
 
-/// Degrade a coalesced ral block's intent line by the turn's context
-/// floor — the same saturation drain committed prose carries (Move 7), so
-/// distress modulates the intent line, never a sparkline bar's height.  No
-/// echo wash: an intent is the model's stated purpose, not committed prose,
-/// and carries no echo signal.
+/// Degrade a ral group's intent line ([`super::group`]) by the turn's context
+/// floor — distress on the ink, never a bar's height.  An intent takes no wash.
 pub(super) fn apply_context(line: &mut Line<'static>, context: u8) {
     for span in &mut line.spans {
         drain_span(span, context, 0);
@@ -156,29 +117,20 @@ fn gfm() -> Options {
         | Options::ENABLE_FOOTNOTES
 }
 
-/// True when the text ends with a blank line — i.e. the input already
-/// signals "paragraph break ahead" and the renderer should leave one
-/// trailing blank as a separator for the next commit.
+/// True when the input already signals a paragraph break, so one blank survives.
 fn ends_with_blank_line(s: &str) -> bool {
     s.ends_with("\n\n") || s == "\n"
 }
 
-/// Drop trailing blank lines from a built line buffer.  Shared by
-/// [`Composer::finish`] and [`highlight_block`], so prose and fenced code
-/// normalize to the same no-trailing-blank baseline before their callers
-/// reason about spacing.
+/// Drop trailing blanks, so prose and fenced code share one spacing baseline.
 fn trim_trailing_blanks(lines: &mut Vec<Line<'static>>) {
     while lines.last().is_some_and(is_blank) {
         lines.pop();
     }
 }
 
-/// Break an over-wide `word` into pieces each at most `budget` columns wide,
-/// splitting between characters.  `emit` is called with every piece *before*
-/// the last one (each ends a wrapped line) and its display width; the final
-/// piece and its width are returned for the caller to place inline (it never
-/// ends a line on its own).  The last piece may be empty only for an empty
-/// input word.
+/// Split an over-wide `word` between characters into `budget`-wide pieces.  All
+/// but the last go to `emit`; the last is returned for the caller to place inline.
 fn char_break(word: &str, budget: usize, mut emit: impl FnMut(String, usize)) -> (String, usize) {
     let mut buf = String::new();
     let mut bw = 0;
@@ -196,43 +148,32 @@ fn char_break(word: &str, budget: usize, mut emit: impl FnMut(String, usize)) ->
 
 // ── composer ─────────────────────────────────────────────────────────────
 
-/// Walks pulldown-cmark events into a `Vec<Line<'static>>`, managing wrap
-/// width, inline style stack, list nesting (with per-item first-line
-/// markers), and a blockquote rail.  Code fences and tables are
-/// sub-rendered and stitched in via [`Self::append_rendered`] so they
-/// share the same left-margin machinery as prose lines.
+/// Walks pulldown-cmark events into lines, holding wrap width, style stack, lists
+/// and rails.  Fences and tables render apart, rejoining via [`Self::append_rendered`].
 struct Composer {
     out: Vec<Line<'static>>,
     cur: Vec<Span<'static>>,
     cur_w: usize,
     body_w: usize,
-    /// Outer chrome indent applied as the leftmost layer of every
-    /// non-blank emitted line.
     indent: usize,
     style: Style,
     style_stack: Vec<Style>,
-    /// Active list containers, innermost last.  Total pad column is the
-    /// sum of their reserved marker widths; each owns its current item's
-    /// first-line marker span.
+    /// Active list containers, innermost last.
     list_stack: Vec<ListCtx>,
     /// Blockquote nesting depth — each level paints one `│ ` slate rail.
     rail_depth: usize,
     /// Open inline links — pop on `TagEnd::Link` to maybe emit `(url)`.
     links: Vec<(LinkType, String)>,
-    /// True when the last pushed token abuts the next with no intervening
-    /// whitespace — the on-screen word is still open.  Suppresses the
-    /// pre-append soft wrap so punctuation fused to a styled span breaks
-    /// with it, not at the seam.  Cleared by whitespace and line breaks.
+    /// True while the on-screen word is still open; cleared by whitespace and breaks.
     mid_word: bool,
 }
 
 struct ListCtx {
     /// `None` for unordered; `Some(n)` is the next ordered marker.
     next: Option<u64>,
-    /// Reserved column width for the marker (alignment for continuation).
+    /// Column width reserved for the marker, so continuations align under it.
     marker_w: usize,
-    /// Bullet/number span for the current item's first emitted line;
-    /// consumed by `left_margin` and re-set on each `Tag::Item`.
+    /// The current item's first-line marker, consumed by `left_margin`.
     pending: Option<Span<'static>>,
 }
 
@@ -253,7 +194,6 @@ impl Composer {
         }
     }
 
-    /// Total list-pad column (sum of active marker widths).
     fn pad(&self) -> usize {
         self.list_stack.iter().map(|c| c.marker_w).sum()
     }
@@ -372,8 +312,7 @@ impl Composer {
             }
             Tag::TableHead | Tag::TableRow | Tag::TableCell => {}
 
-            // Inline tags: push style, and for `Link` also stash the URL
-            // so `TagEnd::Link` can emit `(url)` after the link text.
+            // A link's URL is stashed so `TagEnd::Link` can trail `(url)`.
             Tag::Emphasis
             | Tag::Strong
             | Tag::Strikethrough
@@ -424,12 +363,8 @@ impl Composer {
                 self.list_stack.pop();
                 self.blank_separator();
             }
-            // A tight list (pulldown-cmark emits its item text bare, with
-            // no enclosing `Paragraph`) renders single-spaced: just flush
-            // the item's last row, no inter-item blank.  A loose list wraps
-            // each item's content in `Paragraph` events, whose `block_break`
-            // already inserts the inter-item blank, so loose spacing is
-            // preserved without any work here.
+            // A tight list's item text arrives bare, so the flush is all it needs;
+            // a loose one wraps items in `Paragraph`, which laid the blank already.
             TagEnd::Item => self.flush_line(),
 
             TagEnd::Link => {
@@ -467,12 +402,8 @@ impl Composer {
         }
     }
 
-    /// Pre-append soft wrap: flush the current row when `w` columns won't
-    /// fit — UNLESS we are mid-word, i.e. the token abuts the previous one
-    /// with no intervening whitespace.  A glued unit (a styled span and the
-    /// punctuation fused to it, like `` `code`. `` or `**bold**.`) must
-    /// break together, never at its seam, so its trailing punctuation never
-    /// detaches onto its own visual line.
+    /// Soft-wrap before appending `w` columns, unless mid-word: a styled span and
+    /// the punctuation fused to it (`` `code`. ``) must break as one, not at the seam.
     fn wrap_before(&mut self, w: usize) {
         if !self.mid_word && self.cur_w + w > self.budget() && !self.cur.is_empty() {
             self.flush_line();
@@ -489,7 +420,6 @@ impl Composer {
             self.mid_word = true;
             return;
         }
-        // Word exceeds the budget on its own; break by char.
         let style = self.style;
         let (last, lw) = char_break(word, budget, |chunk, cw| {
             self.cur.push(Span::styled(chunk, style));
@@ -541,9 +471,7 @@ impl Composer {
 
     // ── line management ──
 
-    /// Flush any in-progress line then emit a blank separator unless one
-    /// is already at the tail.  Called at every block boundary, opening
-    /// or closing.
+    /// Flush the open line, then a blank unless one already sits at the tail.
     fn block_break(&mut self) {
         self.flush_line();
         self.blank_separator();
@@ -560,10 +488,8 @@ impl Composer {
         self.cur_w = 0;
     }
 
-    /// Build the left margin for the next emitted line: outer chrome
-    /// indent, then one `│ ` per rail, then `pad - innermost.marker_w`
-    /// spaces and the innermost list's one-shot pending marker
-    /// (consumed) — else just `pad` spaces.
+    /// Build the next line's left margin: chrome indent, one `│ ` per rail, then
+    /// pad spaces and the innermost list's pending marker, which this consumes.
     fn left_margin(&mut self) -> Vec<Span<'static>> {
         let mut sp: Vec<Span<'static>> = Vec::with_capacity(self.rail_depth + 3);
         if self.indent > 0 {
@@ -593,8 +519,7 @@ impl Composer {
         }
     }
 
-    /// Stitch externally-rendered lines (code highlight, table) into
-    /// `out`, applying the rail + pad margin to each non-blank row.
+    /// Stitch externally rendered lines (code, table) into `out` under the margin.
     fn append_rendered(&mut self, lines: Vec<Line<'static>>) {
         for l in lines {
             if is_blank(&l) {
@@ -607,9 +532,7 @@ impl Composer {
         }
     }
 
-    /// Drain any in-progress line, strip trailing blanks, optionally
-    /// append one trailing blank for paragraph separation, and yield
-    /// the line buffer.
+    /// Drain the open line, stripping trailing blanks but for an optional separator.
     fn finish(mut self, trailing_blank: bool) -> Vec<Line<'static>> {
         self.flush_line();
         trim_trailing_blanks(&mut self.out);
@@ -620,9 +543,8 @@ impl Composer {
     }
 }
 
-/// Inline-tag → style modifier.  Returns `None` for block and structural
-/// tags.  Single source of truth shared by [`Composer::start`] and
-/// [`render_table`] so the two walkers can't drift.
+/// Inline-tag → style delta; `None` for block and structural tags.  Shared by
+/// [`Composer::start`] and [`render_table`] so the two walkers cannot drift.
 fn style_delta(tag: &Tag<'_>) -> Option<Style> {
     Some(match tag {
         Tag::Emphasis => Style::default().add_modifier(Modifier::ITALIC),
@@ -648,11 +570,8 @@ fn heading_style(level: HeadingLevel) -> Style {
 
 // ── tables ───────────────────────────────────────────────────────────────
 
-/// Consume events from `p` up to and including `End(Table)` and emit a
-/// boxed table.  Column widths are the natural max, scaled down
-/// proportionally if the total exceeds the budget.  Cell content beyond
-/// its column width word-wraps onto further rows ([`super::line::wrap_line`])
-/// rather than being clipped, so no content is lost to a budget squeeze.
+/// Consume events through `End(Table)` into a boxed table.  Cell content past
+/// its column wraps ([`super::line::wrap_line`]) rather than being clipped.
 fn render_table<'a, I: Iterator<Item = Event<'a>>>(
     p: &mut I,
     aligns: &[Alignment],
@@ -734,14 +653,12 @@ fn render_table<'a, I: Iterator<Item = Event<'a>>>(
             w.max(1)
         })
         .collect();
-    // Frame columns: "│ " + cell + (" │ " + cell) * (n-1) + " │"  =  3n + 1
-    // of fixed chrome, leaving the rest for cell content.
+    // Chrome: "│ " + cell + (" │ " + cell) * (n-1) + " │"  =  3n + 1 columns.
     let frame = 3 * n_cols + 1;
     let avail = budget.saturating_sub(frame);
     let total: usize = widths.iter().sum();
     if total > avail && total > 0 {
-        // Shrink the widest column(s) until the table fits, so narrow
-        // columns keep their natural width and only wide columns yield.
+        // Only the widest column yields, so narrow ones keep their natural width.
         while widths.iter().sum::<usize>() > avail {
             if let Some(i) = (0..n_cols)
                 .filter(|&i| widths[i] > 1)
@@ -765,9 +682,7 @@ fn render_table<'a, I: Iterator<Item = Event<'a>>>(
     out
 }
 
-/// Render one table row, wrapping each cell to its column width.  The row
-/// is as tall as its tallest cell; cells with fewer wrapped lines pad the
-/// remainder with blanks so the column frame stays aligned.
+/// Render one row, as tall as its tallest cell; short cells pad to hold the frame.
 fn render_table_row(
     row: &[Vec<Span<'static>>],
     widths: &[usize],
@@ -898,8 +813,7 @@ mod tests {
         0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)
     }
 
-    /// The non-blank content spans of a rendered block, flattened across
-    /// rows — the ink the modulation acts on.
+    /// Every non-blank span of a rendered block — the ink modulation acts on.
     fn ink<'a>(lines: &'a [Line<'static>]) -> Vec<&'a Span<'static>> {
         lines
             .iter()
@@ -908,8 +822,7 @@ mod tests {
             .collect()
     }
 
-    /// A sound block (fidelity 0) is left untouched: no drained ink, no
-    /// wash behind it, no carried-over `DIM`.
+    /// A sound block is left alone: no wash, no carried-over `DIM`.
     #[test]
     fn sound_prose_is_untouched() {
         let lines = render_md("plain prose here", 80, MD_INDENT, Fidelity::default());
@@ -919,9 +832,7 @@ mod tests {
         }
     }
 
-    /// Context pressure drains saturation at held luminance and adds **no**
-    /// `DIM` — the modifier the app reserves for ignorable chrome. A
-    /// suspect answer must read as important, not minor.
+    /// The drain holds luminance and adds no `DIM` — that idiom is for minor chrome.
     #[test]
     fn context_drains_without_dim() {
         let lines = render_md(
@@ -949,10 +860,7 @@ mod tests {
         }
     }
 
-    /// Echo shades the field behind every span with a static wash — the
-    /// same background on every row, so it reads as a flagged passage, not
-    /// a render glitch. The foreground is left alone: echo and context ride
-    /// disjoint axes.
+    /// One wash on every row — a flag, not a glitch — and the foreground untouched.
     #[test]
     fn echo_washes_background_statically() {
         let lines = render_md(

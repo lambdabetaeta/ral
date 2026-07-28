@@ -1,21 +1,9 @@
-//! Windows sandbox support.
+//! Windows sandbox: the fork-bomb Job Object, and the profile dump.
 //!
-//! - [`apply_job_limits`] — post-spawn Job Object capping a single
-//!   external command's process tree at [`super::ACTIVE_PROCESS_CAP`]
-//!   processes.  Used for plain externals inside a grant; gives
-//!   fork-bomb mitigation, nothing more.  There is a brief window
-//!   between `CreateProcess` and `AssignProcessToJobObject` during which
-//!   the child is unconstrained — acceptable for this use case.
-//! - [`dump_profile_for_windows`] — renders what the `AppContainer` backend
-//!   actually enforces for a projection, for `RAL_DUMP_SANDBOX_PROFILE`.
-//!
-//! This module owns the Job Object plumbing and the profile dump.  Its
-//! submodules carry the `AppContainer` backend: `appcontainer` (profile
-//! lifecycle + `LowBox` spawn capabilities), `dacl` (grant-ACE apply/restore
-//! engine) — both imitating MXC's Tier-3 processcontainer backend
-//! (github.com/microsoft/mxc @ 0e7c3dd) — and `session`, which composes the
-//! two into projection-keyed confinement: one profile per distinct fs
-//! projection, held in session state until teardown.
+//! Confinement proper lives in the submodules — `appcontainer` (profile
+//! lifecycle and `LowBox` spawn capabilities), `dacl` (grant-ACE apply and
+//! restore), and `session`, which composes them into one profile per distinct
+//! fs projection, held until session teardown.
 
 pub(crate) mod appcontainer;
 pub(crate) mod dacl;
@@ -26,6 +14,9 @@ use std::fmt::Write as _;
 use crate::types::SandboxProjection;
 use windows_sys::Win32::Foundation::CloseHandle;
 
+/// Cap a standalone external's process tree at `ACTIVE_PROCESS_CAP` live
+/// processes.  Post-spawn, so the child runs unconstrained for the window
+/// between `CreateProcess` and `AssignProcessToJobObject`.
 pub(super) fn apply_job_limits(child: &crate::process::ChildHandle) {
     use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
     unsafe {
@@ -39,24 +30,22 @@ pub(super) fn apply_job_limits(child: &crate::process::ChildHandle) {
         }
         let proc_handle = child.raw_process_handle();
         if AssignProcessToJobObject(job, proc_handle) == 0 {
-            // The active-process cap silently does not apply — commonly
-            // when ral itself runs inside a job that disallows nesting.
-            // This path returns (), so trace rather than propagate.
+            // Commonly ral itself sitting in a job that forbids nesting.
             crate::dbg_trace!(
                 "sandbox-win",
                 "AssignProcessToJobObject failed, fork-bomb cap not applied: {}",
                 std::io::Error::last_os_error()
             );
         }
+        // The job outlives this handle: it dissolves only once its last member
+        // has exited, so the cap holds for the child's whole tree.
         CloseHandle(job);
     }
 }
 
 /// Render what the `AppContainer` backend enforces for `policy`, for
-/// `RAL_DUMP_SANDBOX_PROFILE`.  Unlike the Seatbelt SBPL / bwrap argv dumps
-/// this describes real enforcement: the `LowBox` profile every confined child
-/// spawns under, the capability SIDs (network on/off), and the host prefixes
-/// stamped with an allow-ACE for the profile SID, read vs read-write.
+/// `RAL_DUMP_SANDBOX_PROFILE`.  Enforcement here is a token plus stamped ACEs,
+/// not a printable artifact like the Seatbelt profile or the bwrap argv.
 pub(super) fn dump_profile_for_windows(policy: &SandboxProjection) -> String {
     let mut out = String::new();
     out.push_str("AppContainer (LowBox token) profile:\n");

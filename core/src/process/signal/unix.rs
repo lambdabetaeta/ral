@@ -1,24 +1,9 @@
-//! Unix signal handling and process-group machinery.
+//! Unix signal handling, process-group placement, and tty ownership — the
+//! platform half of `super`.
 //!
-//! The concerns that interlock here:
-//!
-//!   * **Termination signals** (SIGINT/SIGTERM/SIGHUP) are translated
-//!     into a [`CancelCause`](crate::process::CancelCause) on the ambient
-//!     causes — the same delivery every other cancellation uses — and
-//!     tick the escalation ladder whose third delivery forces `_exit`.
-//!   * **Pipeline relays** keep the controlling tty with the shell while
-//!     mixed pipelines run, fanning Ctrl+C out to every external pgid.
-//!   * **Process-group placement** is the discipline applied at fork:
-//!     every external child gets `setpgid` + `reset_child_signals` via a
-//!     single `pre_exec` funnel.
-//!   * **Detached birth** rides that same funnel and forks once more, so
-//!     the surviving process is a grandchild whose process group this
-//!     process never learns and therefore can never signal.
-//!   * **Wait handling** for stopped children polls `waitpid` with
-//!     [`WaitOptions::UNTRACED`] so a SIGSTOP'd child is classified
-//!     (parked or killed-then-reaped) rather than mistaken for still-running.
-//!   * **Foreground / tty ownership** hands the controlling terminal to a
-//!     foreground child and restores the pgid and line discipline on drop.
+//! A termination signal unwinds nothing by itself: the handler translates it
+//! into a `CancelCause` on the ambient cells that every wait loop already
+//! polls, and ticks an escalation ladder whose third delivery forces `_exit`.
 
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
@@ -34,15 +19,10 @@ use crate::process::cancel::{CancelCause, request_foreground_cancel, request_roo
 
 /// Install handlers for SIGINT, SIGTERM, SIGHUP.
 ///
-/// Snapshots inherited
-/// `SIG_IGN` dispositions *before* installing ral's own handlers so the
-/// nohup rule (preserve dispositions the parent deliberately ignored) can
-/// be honored in spawned children — see [`reset_child_signals`].
-///
-/// SIGWINCH (owned in-process by crossterm's `signal-hook-registry` master
-/// handler) and SIGSEGV (claimed by fff-search's crash hook, if installed)
-/// must never be named here: a raw install would silently and permanently
-/// disconnect that registry's dispatch for the signal.
+/// Snapshots the inherited `SIG_IGN` dispositions first, since afterwards ral's
+/// own are indistinguishable from the parent's.  Never name SIGWINCH or SIGSEGV
+/// here: crossterm's `signal-hook-registry` owns one and fff-search's crash hook
+/// may own the other, and a raw `signal(2)` install unhooks it for good.
 pub fn install_handlers() {
     snapshot_inherited_ignored();
     unsafe {
@@ -55,55 +35,40 @@ pub fn install_handlers() {
 extern "C" fn handler(sig: libc::c_int) {
     let prev = ESCALATION.fetch_add(1, Ordering::Relaxed);
     if prev >= 2 {
-        // Third signal: force exit. Use _exit to avoid atexit deadlocks.
+        // `_exit`, not `exit`: atexit hooks run arbitrary code under a handler.
         unsafe { libc::_exit(128 + sig) };
     }
-    // Translate the signal into a cause on the ambient cells —
-    // async-signal-safe (atomic read-modify-writes on `static`s).  SIGINT is
-    // an interrupt of the runs already in flight; SIGTERM/SIGHUP are a
-    // shutdown request and land on the durable root, reaching detached
-    // workers too.  Every wait loop already polls its scope, so this is
-    // what preempts a blocked external child.
+    // Async-signal-safe: atomic read-modify-writes on `static`s.  SIGTERM/SIGHUP
+    // land on the durable root, so detached workers hear them too.
     if sig == libc::SIGINT {
         request_foreground_cancel(CancelCause::Interrupt);
     } else {
         request_root_cancel(CancelCause::Terminate);
     }
-    // Forward the same signal to any active pipeline groups so external
-    // children die too.  The interactive shell rebinds SIGINT to the relay
-    // handler instead, so SIGINT reaches this forwarding only in batch
-    // mode; SIGTERM/SIGHUP always reach it.
+    // The interactive shell binds SIGINT to `sigint_relay` instead, so SIGINT
+    // reaches this fan-out only in batch mode; SIGTERM/SIGHUP always do.
     relay_signal_to_groups(sig);
 }
 
-/// Return the handler function pointer for selective signal installation.
+/// The termination handler, for a caller installing it signal by signal.
 pub fn term_handler() -> extern "C" fn(libc::c_int) {
     handler
 }
 
 // ── Pipeline relay ─────────────────────────────────────────────────────────
 //
-// When a pipeline has both internal (thread) and external (process) stages,
-// we cannot hand the terminal to the external process group — internal threads
-// live in the shell process and would receive SIGTTIN.  Instead we keep the
-// terminal with the shell and forward SIGINT to every active external group.
-//
-// `RELAY_PGIDS` is a fixed slot array.  Each `PipelineRelay` claims one slot
-// with CAS; the handler iterates all slots and sends to any non-zero entry.
-// The handler is installed once at startup and never removed, so there is no
-// install/uninstall race.  Beyond the relay, the handler also raises the
-// ambient interrupt so an in-process foreground computation unwinds on
-// Ctrl-C; between runs the relay slots are typically empty and every frame
-// still to be born is younger than the cause, so an idle Ctrl-C at the prompt
-// is left to the line editor.
+// A pipeline with both thread and process stages cannot hand the terminal to
+// the external group: its internal stages live in this process and would take
+// SIGTTIN.  The terminal stays with the shell and SIGINT is forwarded instead,
+// to whichever slots of `RELAY_PGIDS` are claimed.  The handler is installed
+// once at startup and never removed, so no signal can arrive mid-install.
 
 const MAX_RELAY: usize = 8;
 
 static RELAY_PGIDS: [AtomicI32; MAX_RELAY] = [const { AtomicI32::new(0) }; MAX_RELAY];
 
-/// Forward `sig` to every occupied relay slot's process group.  Shared by
-/// the batch/term handler and the interactive relay; async-signal-safe (a
-/// slot load and a `kill(2)` per entry).
+/// Forward `sig` to every occupied slot's process group; async-signal-safe (a
+/// load and a `kill(2)` per slot).
 fn relay_signal_to_groups(sig: libc::c_int) {
     for slot in &RELAY_PGIDS {
         let pgid = slot.load(Ordering::Acquire);
@@ -116,40 +81,34 @@ fn relay_signal_to_groups(sig: libc::c_int) {
 }
 
 extern "C" fn sigint_relay(_: libc::c_int) {
-    // Raise the ambient interrupt so in-process foreground work unwinds at
-    // its next poll; a run that has already settled cannot be reached, and
-    // neither can one not yet born (idle Ctrl-C at the prompt is still
-    // handled by the line editor). Detached workers carry no birth instant,
-    // so they are spared.
+    // The watermark reaches only the runs already in flight, so an idle Ctrl-C
+    // at the prompt stays the line editor's and detached workers, carrying no
+    // birth instant at all, are spared.
     request_foreground_cancel(CancelCause::Interrupt);
     relay_signal_to_groups(libc::SIGINT);
 }
 
-/// Return the relay handler for installation by the interactive shell.
+/// The SIGINT handler the interactive shell installs in place of `handler`.
 pub fn relay_handler() -> extern "C" fn(libc::c_int) {
     sigint_relay
 }
 
 extern "C" fn sigquit_handler(_: libc::c_int) {
-    // Ctrl-\ in cooked mode: reap the whole session. Cancel the durable
-    // root, reaching the foreground run and every detached worker — and
-    // latching if the session is idle, since the cause is one-way.
+    // Ctrl-\ reaps the session: the root cause reaches the foreground run and
+    // every detached worker, and latches on an idle session, being one-way.
     request_root_cancel(CancelCause::RootAbort);
 }
 
-/// The SIGQUIT handler for the interactive shell to install for the
-/// "reap everything" gesture.
+/// The SIGQUIT handler behind the interactive "reap everything" gesture.
 pub fn quit_handler() -> extern "C" fn(libc::c_int) {
     sigquit_handler
 }
 
-/// RAII guard: holds a slot in `RELAY_PGIDS` for the duration of a mixed
-/// pipeline.  Clearing the slot on drop is the only cleanup needed.
+/// RAII guard holding a slot in `RELAY_PGIDS` for one mixed pipeline.
 pub struct PipelineRelay(usize);
 
 impl PipelineRelay {
-    /// Claim an empty slot and record `pgid`.  Returns `None` if all slots
-    /// are full (should not happen in practice; 8 concurrent mixed pipelines).
+    /// Claim a slot for `pgid`, or `None` once `MAX_RELAY` are taken.
     pub fn install(pgid: i32) -> Option<Self> {
         for (i, slot) in RELAY_PGIDS.iter().enumerate() {
             if slot
@@ -171,14 +130,10 @@ impl Drop for PipelineRelay {
 
 // ── Inherited dispositions and child-signal reset ──────────────────────────
 
-/// The signals whose startup disposition we snapshot in
-/// [`snapshot_inherited_ignored`] and consult in [`reset_child_signals`].
-/// Listed once so the two consumers cannot drift.
-///
-/// SIGPIPE is deliberately absent: Rust's runtime sets SIGPIPE=IGN at startup
-/// so panics on broken-pipe writes are graceful, and that disposition would
-/// falsely register as "parent intent" by the time ral reads it.  SIGPIPE is
-/// reset unconditionally to `SIG_DFL` — see [`reset_child_signals`].
+/// The signals whose startup disposition is snapshotted and later restored in
+/// children, listed once so the two consumers cannot drift.  SIGPIPE is
+/// deliberately absent: Rust's runtime sets it to `SIG_IGN` at startup, which
+/// by the time ral looks would read as the parent's intent.
 const MANAGED_SIGNALS: &[libc::c_int] = &[
     libc::SIGINT,
     libc::SIGQUIT,
@@ -188,13 +143,8 @@ const MANAGED_SIGNALS: &[libc::c_int] = &[
     libc::SIGHUP,
 ];
 
-/// Bitmask of signals that were `SIG_IGN` when ral started, indexed by signal
-/// number.  Captured by [`install_handlers`] before any of ral's own
-/// dispositions are installed.  Read in [`reset_child_signals`] to honor the
-/// POSIX nohup rule: a signal the parent deliberately set to `SIG_IGN` must
-/// remain `SIG_IGN` in spawned children.
-///
-/// All managed signal numbers are < 64, so a single u64 suffices.
+/// Bitmask of the signals that were `SIG_IGN` when ral started, indexed by
+/// signal number — every managed number is under 64, so one `u64` suffices.
 static INHERITED_IGNORED: AtomicU64 = AtomicU64::new(0);
 
 fn snapshot_inherited_ignored() {
@@ -214,25 +164,14 @@ fn was_inherited_ignored(sig: libc::c_int) -> bool {
     (mask & (1u64 << sig)) != 0
 }
 
-/// Restore the appropriate disposition for the signals that ral overrides
-/// or ignores in its own process.  Must run from the post-fork pre-exec
-/// closure of every external-child spawn.
+/// Restore the child's dispositions for the signals ral overrides.  Must run
+/// from the post-fork `pre_exec` closure of every external-child spawn.
 ///
-/// Without an explicit reset, every spawned external would inherit ral's
-/// handler pointers.  `execve(2)` resets handler pointers to `SIG_DFL`
-/// automatically, so this would mostly work — but `SIG_IGN` survives
-/// `execve`.  Anything whose disposition should be `SIG_IGN` must therefore
-/// be set *explicitly* to `SIG_IGN` here.
-///
-/// The nohup rule: a signal that was already `SIG_IGN` when ral started —
-/// recorded in `INHERITED_IGNORED` — must be `SIG_IGN` in our children too.
-/// The parent deliberately set it; that intent has to survive ral.  For
-/// every other managed signal, `SIG_DFL` is the right disposition.
-///
-/// SIGPIPE is special-cased to `SIG_DFL` unconditionally.  Rust's runtime
-/// sets SIGPIPE=IGN at startup; that's not user intent and must not
-/// propagate — pipeline producers need SIGPIPE=DFL to die cleanly when
-/// their reader closes (`yes | head`).
+/// `execve(2)` already resets handler pointers; what survives it is `SIG_IGN`,
+/// so anything that should stay ignored must be set here explicitly.  That is
+/// the POSIX nohup rule — what the parent deliberately ignored has to outlive
+/// ral.  Everything else gets `SIG_DFL`, SIGPIPE unconditionally so that a
+/// pipeline producer dies when its reader closes (`yes | head`).
 pub fn reset_child_signals() {
     for &sig in MANAGED_SIGNALS {
         let target = if was_inherited_ignored(sig) {
@@ -252,26 +191,17 @@ pub fn reset_child_signals() {
 // ── Process-group placement ────────────────────────────────────────────────
 
 impl PgidPolicy {
-    /// Apply this policy from inside a `pre_exec` closure.  Safe to call
-    /// from the post-fork pre-exec context; no allocation, no stdlib mutex
-    /// use (`io::Error::last_os_error` only reads `errno`).
-    ///
-    /// A failed `setpgid` is an error: a child left in the wrong pgid
-    /// would be invisible to the SIGINT relay and the abort path's
-    /// group-wide SIGTERM.
-    ///
-    /// Callers should not invoke `setpgid` directly — [`spawn_with_pgid`]
-    /// is the single funnel that installs this policy and mirrors it in
-    /// the parent.  Searching for `setpgid` should yield this method plus
-    /// the parent-side mirror inside [`spawn_with_pgid`].
+    /// Apply this policy from inside a post-fork `pre_exec` closure: no
+    /// allocation and no stdlib lock (`last_os_error` only reads `errno`).  The
+    /// failure must not be swallowed — a child left in the wrong group is
+    /// invisible to the SIGINT relay and to the abort path's group-wide SIGTERM.
+    /// Reach this through [`spawn_with_pgid`], the single funnel that also
+    /// mirrors the call in the parent.
     ///
     /// # Errors
-    /// Returns `Err` if the `setpgid` / `setsid` syscall fails (`errno` via
-    /// `last_os_error`); [`Inherit`](PgidPolicy::Inherit) makes no syscall
-    /// and never fails.
+    /// Returns `Err` if `setpgid` / `setsid` fails; `Inherit` makes no syscall.
     pub fn apply(self) -> std::io::Result<()> {
-        // `setsid` returns the new sid (the caller's pid) on success;
-        // `setpgid` returns 0.  Both signal failure with `-1`.
+        // `setsid` returns the new sid and `setpgid` 0; both fail with `-1`.
         let rc = unsafe {
             match self {
                 Self::Inherit => 0,
@@ -287,7 +217,6 @@ impl PgidPolicy {
     }
 }
 
-/// The child's OS pid as an `i32`.
 #[cfg(test)]
 #[allow(
     clippy::cast_possible_wrap,
@@ -297,29 +226,20 @@ fn child_pid(child: &std::process::Child) -> i32 {
     child.id() as i32
 }
 
-/// Spawn `cmd` with a single, canonical pre-exec discipline:
+/// Spawn `cmd` under the one canonical pre-exec discipline: apply `pgid` then
+/// [`reset_child_signals`] in the child, and mirror the `setpgid` in the parent
+/// so the placement holds whichever side wins the race.  `NewSession` has no
+/// mirror — only a process can `setsid` itself — and rests on its `pre_exec`.
+/// The returned leader pgid (`None` only for `Inherit`) is the whole
+/// registration: callers keep it for a later wait or for the pipeline group.
 ///
-///   1. inside the child (post-fork, pre-exec): apply `pgid`, then
-///      [`reset_child_signals`] (with the nohup rule);
-///   2. inside the parent (post-spawn): mirror the `setpgid` so the child's
-///      pgid is established regardless of which side wins the race.  A
-///      `NewSession` child has no such mirror — only the child may `setsid`
-///      itself — so it relies on its own `pre_exec`.
-///
-/// Returns the child plus its leader pgid: `Some` for `NewLeader` /
-/// `NewSession` / `Join`, `None` for `Inherit`.  Callers that need the leader pgid for
-/// later [`wait_handling_stop`] or for the pipeline group simply read it
-/// off the return value — there is no separate registration step.
-///
-/// Ordering: `pre_exec` closures run in registration order, so any caller-
-/// installed `pre_exec` (sandbox `RLIMIT`, `2>&1` dup2) runs *before* the
-/// closure this function adds.  That order is intentional: fd plumbing
-/// and rlimits are independent of pgid placement, and `reset_child_signals`
-/// is the last thing we want to happen before `execve` clears the slate.
+/// `pre_exec` closures run in registration order, so a caller's own hook
+/// (sandbox `RLIMIT`, `2>&1` dup2) runs *before* this one — deliberately, since
+/// the signal reset should be the last thing standing before `execve`.
 ///
 /// # Errors
-/// Returns `Err` if the spawn fails — either the child's `setpgid` / `setsid`
-/// in the pre-exec closure, or the `fork` / `exec` itself.
+/// Returns `Err` if the child's `setpgid` / `setsid`, or the `fork` / `exec`
+/// itself, fails.
 pub fn spawn_with_pgid(
     cmd: &mut std::process::Command,
     pgid: PgidPolicy,
@@ -327,16 +247,13 @@ pub fn spawn_with_pgid(
     spawn_with_pgid_after(cmd, pgid, || Ok(()))
 }
 
-/// Spawn `cmd` with canonical pgid placement and one caller-supplied
-/// post-reset hook in the child.
-///
-/// The hook runs inside the child, after `setpgid` and signal reset, still
-/// before `execve`. Callers must therefore restrict it to async-signal-safe
-/// work such as `read`, `close`, or `dup2` on already-open fds.
+/// [`spawn_with_pgid`] plus one caller hook, run in the child after the signal
+/// reset and before `execve` — so it must keep to async-signal-safe work such
+/// as `read`, `close`, or `dup2` on already-open fds.
 ///
 /// # Errors
-/// Returns `Err` if the child's `setpgid` / `setsid` fails, if the `after`
-/// hook returns an error, or if the `fork` / `exec` itself fails.
+/// Returns `Err` if the child's `setpgid` / `setsid` fails, if `after` returns
+/// an error, or if the `fork` / `exec` itself fails.
 pub fn spawn_with_pgid_after<F>(
     cmd: &mut std::process::Command,
     pgid: PgidPolicy,
@@ -355,10 +272,9 @@ where
         });
     }
     let child = cmd.spawn()?;
-    // The mirror's `setpgid` result is deliberately ignored: by the time
-    // it runs, either the child already applied the policy (a mirror
-    // failure is then the benign post-`execve` `EACCES` race) or the
-    // child's `pre_exec` failed and the spawn above returned the error.
+    // The mirror's result is ignored: either the child already applied the
+    // policy, and a failure here is the benign post-`execve` `EACCES` race, or
+    // its `pre_exec` failed and the spawn above already returned that error.
     let leader = match pgid {
         PgidPolicy::Inherit => None,
         PgidPolicy::NewLeader => {
@@ -367,10 +283,7 @@ where
             Some(Pgid::from_pid(pid))
         }
         PgidPolicy::NewSession => {
-            // `setsid` can run only in the child — a process cannot move
-            // another into a new session — so there is no parent-side
-            // mirror to close the race: the child's `pre_exec` is the sole
-            // authority.  The new session's pgid equals the child's pid.
+            // The new session's pgid equals the child's pid.
             Some(Pgid::from_pid(Pid::from_child(&child)))
         }
         PgidPolicy::Join(group) => {
@@ -384,31 +297,22 @@ where
 /// Spawn `cmd` so that the surviving process is this process's
 /// *grandchild*, and return its pid.
 ///
-/// A double fork, riding the same funnel as every other spawn. `cmd` is
-/// spawned through [`spawn_with_pgid_after`]; the hook forks a second
-/// time, and the intermediate hands the grandchild's pid back over a pipe
-/// and `_exit`s at once. The intermediate is reaped below — it is already
-/// dead, so that wait cannot block and no zombie ever exists — and the
-/// grandchild, orphaned by it, is reparented onto init.
+/// The hook of [`spawn_with_pgid_after`] forks again; the intermediate writes
+/// the grandchild's pid down a pipe and `_exit`s, and is reaped below — already
+/// dead, so that wait cannot block and no zombie exists — leaving the
+/// grandchild it orphans to be reparented onto init.
 ///
 /// **The intermediate's leader [`Pgid`] is dropped on the floor, and that
-/// discard is the point.** Nothing in this process ever holds a pgid
-/// naming the survivor, so no teardown path can reach it with
-/// `kill(-pgid, …)`. The grandchild's own `setsid` — rather than
-/// `setpgid(0, 0)`, and it cannot fail, since a freshly forked child is
-/// never a group leader — leaves it with pid == pgid == sid, so the dead
-/// intermediate's recyclable pid cannot name its group either.
+/// discard is the point:** nothing in this process holds a pgid naming the
+/// survivor, so no teardown path can reach it with `kill(-pgid, …)`, and its
+/// own `setsid` leaves pid == pgid == sid so the dead intermediate's recyclable
+/// pid cannot name the group either.
 ///
-/// The survivor holds no descriptor back to us: the handshake fd is
-/// re-armed close-on-exec before `execve`. Its three standard streams are
-/// the caller's to point somewhere that outlives us; an inherited pipe
-/// would die with this process and take the survivor's writes with it.
-///
-/// Exec failure still surfaces as itself. `std` hands the child a
-/// close-on-exec errno pipe and reads it until every copy is shut: the
-/// intermediate `_exit`s without writing, and the grandchild's copy closes
-/// only at a successful `execve`. So `Ok` here is proof the *grandchild*
-/// exec'd, and a bad program name comes back as `NotFound`.
+/// The survivor keeps no descriptor back to us, the handshake fd being re-armed
+/// close-on-exec, so its standard streams are the caller's to point somewhere
+/// that outlives this process.  `Ok` still proves the *grandchild* exec'd:
+/// `std`'s close-on-exec errno pipe is read until every copy shuts, and the
+/// grandchild's shuts only on a successful `execve`.
 ///
 /// # Errors
 /// Returns `Err` if either fork, the `setsid`, or the `execve` fails, if
@@ -436,9 +340,8 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
             if unsafe { libc::setsid() } == -1 {
                 return Err(std::io::Error::last_os_error());
             }
-            // `std` dup2'd the stdio fds before this hook ran, and dup2 clears
-            // FD_CLOEXEC on its target, so re-arm rather than trust the flag
-            // `os_pipe` set.
+            // `std` dup2'd the stdio fds before this hook ran and dup2 clears
+            // FD_CLOEXEC on its target, so re-arm rather than trust `os_pipe`.
             let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
             if flags < 0 {
                 return Err(std::io::Error::last_os_error());
@@ -468,26 +371,16 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
 
 // ── Wait handling for stopped children ─────────────────────────────────────
 //
-// `Child::wait()` calls `waitpid(pid, &status, 0)` which only returns on
-// termination.  A child stopped by SIGTSTP (Ctrl-Z), SIGSTOP, or SIGTTIN
-// stays stopped indefinitely — the wait blocks, the controlling tty stays
-// owned by the stopped pgid, and ral hangs.
-//
-// `wait_handling_stop` uses `waitpid` with `WaitOptions::UNTRACED` so the
-// wait returns on stop too.  Behaviour on a stop status depends on whether
-// the caller opted into job-control parking:
-//
-//   * `park_on_stop = true` + `pgid = Some(_)`: return `Stopped` without
-//     killing.  The caller (eventually `RunningChild::wait`) surfaces this
-//     as `Escape::Stopped`; the REPL parks the pgid in the job table
-//     and `fg` later resumes it.  Pump threads detach and clean up when
-//     the child eventually completes or is killed.
-//   * otherwise: legacy kill-then-reap.  SIGKILL the pgid (or fall back to
-//     `child.kill()` when no pgid is tracked), drain the wait, return
-//     `StoppedThenKilled`.
+// `Child::wait()` returns only on termination, so a child stopped by SIGTSTP,
+// SIGSTOP or SIGTTIN hangs ral with the tty still owned by the stopped pgid;
+// `WaitOptions::UNTRACED` makes the wait return on a stop as well.  With
+// `park_on_stop` and a tracked pgid the stop surfaces as `Stopped`, which
+// `RunningChild::wait` turns into an `Escape::Stopped` for the REPL to park in
+// its job table and `fg` to resume.  Otherwise the group is SIGKILLed and
+// reaped as `StoppedThenKilled`.
 
-/// Wait for `child` to terminate or stop.  See module-level comment above
-/// for the two stop-handling modes.
+/// Wait for `child` to terminate or stop, classifying a stop per the two modes
+/// above.
 pub(super) fn wait_handling_stop(
     child: &mut std::process::Child,
     pgid: Option<Pgid>,
@@ -498,18 +391,16 @@ pub(super) fn wait_handling_stop(
     classify_wait_status(pid, status, pgid, park_on_stop, child)
 }
 
-/// Wait for `pid`, retrying transparently after `EINTR`.
-///
-/// `EINTR` never reaches the caller, so a signal delivery cannot be mistaken
-/// for `ECHILD` and flip a live child to "gone". `NOHANG` is excluded here by
-/// construction; [`try_waitpid_eintr`] owns the optional result.
+/// Wait for `pid`, retrying after `EINTR` so a signal delivery can never be
+/// mistaken for `ECHILD` and flip a live child to "gone".  `NOHANG` is excluded
+/// by construction; [`try_waitpid_eintr`] owns the optional result.
 fn waitpid_eintr(pid: Pid, options: WaitOptions) -> rustix::io::Result<(Pid, WaitStatus)> {
     wait_blocking_eintr(|| {
         rustix::process::waitpid(Some(pid), options.difference(WaitOptions::NOHANG))
     })
 }
 
-/// Poll `pid`, retrying transparently after `EINTR`.
+/// Poll `pid`, retrying after `EINTR`.
 fn try_waitpid_eintr(
     pid: Pid,
     options: WaitOptions,
@@ -517,13 +408,10 @@ fn try_waitpid_eintr(
     rustix::io::retry_on_intr(|| rustix::process::waitpid(Some(pid), options | WaitOptions::NOHANG))
 }
 
-/// Wait for a member of `pgid`, retrying transparently after `EINTR`.
-///
-/// `NOHANG` is excluded by construction; [`try_waitpgid_eintr`] owns the
-/// optional result.
+/// Wait for a member of `pgid`, retrying after `EINTR`.  `NOHANG` is excluded
+/// by construction; [`try_waitpgid_eintr`] owns the optional result.
 ///
 /// # Errors
-///
 /// Returns any terminal wait error, including `ECHILD`.
 pub fn waitpgid_eintr(pgid: Pgid, options: WaitOptions) -> rustix::io::Result<(Pid, WaitStatus)> {
     wait_blocking_eintr(|| {
@@ -531,12 +419,10 @@ pub fn waitpgid_eintr(pgid: Pgid, options: WaitOptions) -> rustix::io::Result<(P
     })
 }
 
-/// Poll a member of `pgid`, retrying transparently after `EINTR`.
-///
-/// `Ok(None)` means no member has a requested status ready.
+/// Poll a member of `pgid`, retrying after `EINTR`; `Ok(None)` means no member
+/// has a requested status ready.
 ///
 /// # Errors
-///
 /// Returns any terminal wait error, including `ECHILD`.
 pub fn try_waitpgid_eintr(
     pgid: Pgid,
@@ -554,13 +440,9 @@ fn wait_blocking_eintr(
         .map(|status| status.expect("wait without NOHANG returns a status"))
 }
 
-/// Non-blocking variant of [`wait_handling_stop`] for cancel-aware
-/// polling: returns `Ok(None)` when nothing is pending.  Crucially uses
-/// `WaitOptions::UNTRACED` so a SIGSTOP'd child does not look "still
-/// running" — the stop notification is consumed and classified just like in the
-/// blocking path (parked when `park_on_stop`, otherwise killed and
-/// reaped).  Without this, the pre-wait poll in
-/// `RunningChild::wait` would spin forever on a self-stopping child.
+/// Non-blocking peer of `wait_handling_stop`, returning `Ok(None)` when nothing
+/// is pending.  It must keep `UNTRACED`: without it a SIGSTOP'd child reads as
+/// "still running" and the pre-wait poll in `RunningChild::wait` spins forever.
 pub(super) fn try_wait_handling_stop(
     child: &mut std::process::Child,
     pgid: Option<Pgid>,
@@ -573,14 +455,9 @@ pub(super) fn try_wait_handling_stop(
     classify_wait_status(pid, status, pgid, park_on_stop, child).map(Some)
 }
 
-/// Translate a `waitpid` status into a [`WaitOutcome`].  Stopped
-/// statuses fan out to [`handle_stopped`]; exited / signaled / native
-/// statuses map straight through. `WaitStatus` is a total, transparent
-/// view of the kernel bits, so it also classifies termination by a real-time
-/// signal without a fallible enum in the middle. Shared between the blocking
-/// `wait_handling_stop` and the non-blocking `try_wait_handling_stop`.
-///
-/// [`WaitOutcome`]: crate::process::WaitOutcome
+/// Translate a `waitpid` status into a `WaitOutcome`, shared by the blocking and
+/// polling paths.  `WaitStatus` is a total, transparent view of the kernel bits,
+/// so termination by a real-time signal classifies with no fallible enum between.
 fn classify_wait_status(
     pid: Pid,
     status: WaitStatus,
@@ -603,13 +480,8 @@ fn classify_wait_status(
     Ok(crate::process::WaitOutcome::NativeCode(status.as_raw()))
 }
 
-/// Handle a stopped child: either park (when `park_on_stop &&
-/// pgid.is_some()`) returning [`WaitOutcome::Stopped`], or SIGKILL the
-/// pgid (falling back to the direct pid) and reap the terminal status
-/// into [`WaitOutcome::StoppedThenKilled`].
-///
-/// [`WaitOutcome::Stopped`]: crate::process::WaitOutcome::Stopped
-/// [`WaitOutcome::StoppedThenKilled`]: crate::process::WaitOutcome::StoppedThenKilled
+/// Park the stopped child when the caller has a job table to resume it from;
+/// otherwise SIGKILL its group and reap the terminal status.
 fn handle_stopped(
     stopped_by: crate::process::Signal,
     pid: Pid,
@@ -649,46 +521,32 @@ fn handle_stopped(
         });
     }
     if let Some(code) = status.exit_status() {
-        // The child raced the kill and exited on its own in the
-        // stop→kill window — report the real exit, not a kill signal the
-        // kernel never delivered.
+        // The child raced the kill and exited on its own in the stop→kill
+        // window: report that, not a signal the kernel never delivered.
         return Ok(crate::process::WaitOutcome::Exited(code));
     }
     Ok(crate::process::WaitOutcome::NativeCode(status.as_raw()))
 }
 
-/// Capture stdin's line-discipline state via `tcgetattr`.
-///
-/// `None` when stdin is not a tty (ENOTTY) or the call otherwise fails.
-/// The restore is left to the caller, whose `tcsetattr` flush mode
-/// (`Drain` to let the child's last frame drain, `Now` for an immediate
-/// hand-back) is site-specific.
+/// Capture stdin's line-discipline state; `None` when stdin is not a tty.  The
+/// restore is the caller's, the right `tcsetattr` flush mode being site-specific.
 pub fn termios_snapshot() -> Option<Termios> {
     rustix::termios::tcgetattr(rustix::stdio::stdin()).ok()
 }
 
 // ── Foreground ownership ───────────────────────────────────────────────────
 //
-// Two pieces of tty state must be returned to the shell when a foreground
-// child exits: the foreground process group (`tcsetpgrp`) and the line
-// discipline's termios (`tcsetattr`).  Missing the first puts ral into a
-// background pgroup whose next read returns EIO; missing the second
-// inherits whatever cooked/raw/ONLCR settings the child last wrote — vim,
-// less, fzf, `stty -onlcr`, anything calling `cfmakeraw` — yielding the
-// classic Unix staircase output or stuck raw mode.  `ForegroundGuard`
-// snapshots both on acquire and restores both on Drop.
+// A foreground child leaves two pieces of tty state behind.  Miss the process
+// group and ral sits in a background pgroup whose next read returns EIO; miss
+// the termios and we inherit whatever raw/cooked/ONLCR mode the child last
+// wrote — anything calling `cfmakeraw` — for the classic Unix staircase output.
 
-/// RAII guard for terminal foreground ownership and line-discipline state.
+/// RAII guard that snapshots both on acquire and restores both on drop.
 ///
-/// `try_acquire` performs `tcsetpgrp(stdin, target)`, snapshots the
-/// current termios, and remembers the previous foreground pgid; `drop`
-/// restores both.  It cannot be invoked without a [`TerminalLease`] borrow:
-/// holding `&TerminalLease` is the proof that ral owns the controlling
-/// terminal's foreground, replacing the old internal `startup_foreground`
-/// re-check.  Returns `None` only when the pgid handoff itself fails (a
-/// non-positive target, or `tcsetpgrp` errors) — in which case there is
-/// nothing to restore.  Termios snapshot may itself fail (ENOTTY on an
-/// exotic fd); that is non-fatal and only the pgid half is restored on Drop.
+/// It cannot be constructed without borrowing a [`TerminalLease`]: holding one
+/// is the proof that ral owns the controlling terminal's foreground, and only a
+/// run whose terminal policy grants the handoff can obtain the borrow
+/// (`Shell::terminal_lease`).
 ///
 /// [`TerminalLease`]: crate::process::TerminalLease
 pub struct ForegroundGuard {
@@ -698,8 +556,9 @@ pub struct ForegroundGuard {
 
 impl ForegroundGuard {
     /// Hand the controlling tty to `target`, recording the prior pgid and
-    /// termios for the eventual restore.  Returns `None` when no handoff is
-    /// appropriate.
+    /// termios for the restore.  `None` when the pgid handoff itself fails, so
+    /// there is then nothing to restore; a failed termios snapshot is not fatal
+    /// and leaves only the pgid half to put back on drop.
     pub fn try_acquire(target: i32, _lease: &crate::process::TerminalLease) -> Option<Self> {
         if target <= 0 {
             return None;
@@ -732,22 +591,19 @@ impl ForegroundGuard {
     }
 }
 
-/// Thread-local guard that blocks SIGTTOU while ral restores tty ownership.
+/// Thread-local guard blocking SIGTTOU while ral takes tty state back.
 ///
-/// POSIX treats `tcsetpgrp`/`tcsetattr` by a background process group as
-/// terminal output; with SIGTTOU at its default disposition the kernel stops
-/// the caller instead of completing the restore.  Foreground jobs necessarily
-/// put ral in the background while they run, so the release path blocks
-/// SIGTTOU for the tiny restore window.  Children still get SIGTTOU reset by
-/// [`reset_child_signals`]; this guard is parent-local.
+/// POSIX counts `tcsetpgrp` / `tcsetattr` from a background process group as
+/// terminal output, and at the default disposition the kernel stops the caller
+/// mid-restore — exactly ral's position, since a foreground job puts it in the
+/// background by construction.  Parent-local: children have SIGTTOU reset by
+/// [`reset_child_signals`].
 struct SigttouBlock {
-    /// The pre-block mask; `None` when the block could not be installed,
-    /// in which case there is nothing to restore.
+    /// `None` when the block never took, leaving nothing to restore.
     old: Option<SigSet>,
 }
 
 impl SigttouBlock {
-    /// Block SIGTTOU for the current thread, remembering the previous mask.
     fn new() -> Self {
         let mut block = SigSet::empty();
         block.add(nix::sys::signal::Signal::SIGTTOU);
@@ -768,16 +624,11 @@ impl Drop for SigttouBlock {
 impl Drop for ForegroundGuard {
     /// Restore the foreground pgid and termios recorded at acquisition.
     ///
-    /// Pgid first: a missed restore puts ral into a background pgroup whose
-    /// next tty read returns EIO.  The restore blocks SIGTTOU because the
-    /// foreground child made ral a background process group by construction;
-    /// without that mask a batch launcher (`claude.ral`) is itself stopped
-    /// while giving the terminal back.  Termios second, with `Drain` so
-    /// the child's last buffered output drains under the child's settings
-    /// before ours reapply (`Now` would clobber those bytes' line
-    /// discipline; `Flush` would discard input typed during the child's
-    /// final frame).  Both syscalls retry on EINTR; persistent failure is
-    /// logged via `dbg_trace` so silent-loss is at least observable.
+    /// Pgid first, since a missed restore leaves ral in a background pgroup
+    /// whose next tty read returns EIO.  Termios second, with `Drain` so the
+    /// child's last buffered output leaves under the child's own settings:
+    /// `Now` would clobber those bytes' line discipline, and `Flush` would
+    /// discard input typed during the child's final frame.
     fn drop(&mut self) {
         let _sigttou = SigttouBlock::new();
         for _ in 0..3 {
@@ -821,20 +672,16 @@ impl Drop for ForegroundGuard {
     }
 }
 
-/// Deliver the SIGINT that raw mode swallowed — but only to a foreground
-/// job that is an *external* child, not the shell itself.
+/// Deliver the SIGINT that raw mode swallowed, but only to a foreground job
+/// that is an *external* child.
 ///
-/// A frontend that puts the terminal in raw mode disables `ISIG`, so a
-/// keypress no longer makes the kernel SIGINT whichever process group
-/// owns the controlling tty.  When an external child holds the terminal
-/// (its pgid differs from ours) this recreates that delivery, so the
-/// child dies and the evaluator's blocking `wait` returns.  When the
-/// shell itself owns the terminal there is no external process to
-/// signal — the frontend's cooperative [`check`](super::check)
-/// unwinds the in-process eval instead.
-///
-/// Signalling *another* group never touches ral's own escalating
-/// counter, so this carries no risk of the third-signal force-exit.
+/// A frontend in raw mode clears `ISIG`, so a keypress no longer makes the
+/// kernel SIGINT whichever group owns the tty.  When an external child holds it
+/// this recreates that delivery, so the child dies and the evaluator's blocking
+/// `wait` returns; when the shell itself holds it there is nothing external to
+/// signal and the frontend's cooperative [`check`](super::check) unwinds the
+/// in-process eval instead.  Signalling *another* group never ticks ral's
+/// escalation ladder, so no third-signal force-exit can follow from this.
 pub fn interrupt_foreground_child() {
     let Ok(fg) = rustix::termios::tcgetpgrp(rustix::stdio::stdin()) else {
         return;
@@ -846,7 +693,6 @@ pub fn interrupt_foreground_child() {
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
-/// Count of currently occupied relay slots (for testing).
 #[cfg(test)]
 fn active_relay_slots() -> usize {
     RELAY_PGIDS
@@ -866,9 +712,8 @@ mod tests {
     use crate::process::cancel::{DurableRoot, REQUEST_SERIAL, Serial, clear_root_request};
     use std::sync::{Arc, Barrier};
 
-    // All relay tests share a process-wide lock because `RELAY_PGIDS` is a
-    // global.  Tests run concurrently in the same process by default;
-    // without this they would steal each other's slots.
+    // `RELAY_PGIDS` is global and tests share a process, so without this lock
+    // they would steal each other's slots.
     static RELAY_TEST_LOCK: Serial = Serial::new();
 
     fn sigttou_is_blocked() -> bool {
@@ -893,7 +738,6 @@ mod tests {
     fn slots_fill_and_drain() {
         let _lock = RELAY_TEST_LOCK.lock();
 
-        // Claim all 8 slots with distinct pgids.
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_possible_wrap,
@@ -904,10 +748,8 @@ mod tests {
             .collect();
         assert_eq!(active_relay_slots(), MAX_RELAY);
 
-        // A 9th install must fail.
         assert!(PipelineRelay::install(99).is_none());
 
-        // Drop all; every slot must be released.
         drop(guards);
         assert_eq!(active_relay_slots(), 0);
     }
@@ -918,7 +760,6 @@ mod tests {
 
         let g1 = PipelineRelay::install(1).unwrap();
         drop(g1);
-        // The same pgid should be installable again immediately.
         let g2 = PipelineRelay::install(1).unwrap();
         drop(g2);
         assert_eq!(active_relay_slots(), 0);
@@ -928,9 +769,6 @@ mod tests {
 
     #[test]
     fn concurrent_install_drop_stress() {
-        // 8 threads race to claim all slots simultaneously, hold briefly,
-        // release.  Repeat 500 times.  No slot should ever be double-claimed
-        // or leaked.
         let _lock = RELAY_TEST_LOCK.lock();
 
         const ROUNDS: usize = 500;
@@ -941,7 +779,7 @@ mod tests {
                 .map(|t| {
                     let b = barrier.clone();
                     std::thread::spawn(move || {
-                        b.wait(); // all threads start together
+                        b.wait();
                         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, reason = "MAX_RELAY is the const 8 and the loop arithmetic stays in the low thousands, so the usize→i32 conversion neither truncates nor wraps")]
                         let pgid = (round * MAX_RELAY + t + 1) as i32;
                         let g = PipelineRelay::install(pgid)
@@ -960,9 +798,6 @@ mod tests {
 
     #[test]
     fn overflow_returns_none_not_panic() {
-        // Fill all slots, then hammer install from many threads
-        // simultaneously.  Every extra install must return None, never panic
-        // or corrupt state.
         let _lock = RELAY_TEST_LOCK.lock();
 
         #[allow(
@@ -978,7 +813,7 @@ mod tests {
             .map(|_| {
                 std::thread::spawn(|| {
                     for pgid in 100..200i32 {
-                        let _ = PipelineRelay::install(pgid); // must not panic
+                        let _ = PipelineRelay::install(pgid);
                     }
                 })
             })
@@ -990,12 +825,8 @@ mod tests {
 
     // ── Signal translation ─────────────────────────────────────────────────
 
-    /// The batch/term handler translates SIGINT into a foreground
-    /// [`Interrupt`](crate::process::CancelCause::Interrupt): the current
-    /// run unwinds (and its blocked external wakes at the next scope
-    /// poll), while the durable root — and with it every detached
-    /// worker — is left untouched.  The delivery also ticks the
-    /// escalation ladder, which is what backs the third-signal `_exit`.
+    /// SIGINT interrupts the run in flight and leaves the durable root — and
+    /// with it every detached worker — untouched.
     #[test]
     fn handler_translates_sigint_into_foreground_interrupt() {
         let _relay = RELAY_TEST_LOCK.lock();
@@ -1023,13 +854,9 @@ mod tests {
         clear();
     }
 
-    /// SIGTERM and SIGHUP are shutdown requests: the handler translates
-    /// them into a root [`Terminate`](crate::process::CancelCause::Terminate),
-    /// reaching the foreground run *and* every detached worker parented
-    /// under the durable root — the semantics a `timeout(1)`- or
-    /// systemd-style SIGTERM expects.  The interrupt watermark itself is not
-    /// stamped; the foreground observes the cause through its root
-    /// ancestry.
+    /// SIGTERM and SIGHUP are shutdown requests, reaching the foreground run
+    /// *and* every detached worker under the durable root.  The watermark is
+    /// never stamped: the foreground hears the cause through its root ancestry.
     #[test]
     fn handler_translates_sigterm_and_sighup_into_root_terminate() {
         let _relay = RELAY_TEST_LOCK.lock();
@@ -1066,16 +893,9 @@ mod tests {
 
     #[test]
     fn relay_delivers_sigint_to_child_group() {
-        // Spawn `sleep 1000` as a child in its own process group (via
-        // pre_exec).  Claim a relay slot for the child's pgid and call
-        // sigint_relay directly — equivalent to the shell receiving SIGINT
-        // while the pipeline runs.  Verify the child was killed by the
-        // signal.
-        //
-        // We use Command + pre_exec rather than fork() to avoid the hazards
-        // of forking inside a multithreaded test binary.  `sigint_relay`
-        // also raises the ambient interrupt, so this test holds
-        // `REQUEST_SERIAL` alongside the relay lock.
+        // `Command` + `pre_exec` rather than a bare `fork()`, which is a hazard
+        // inside a multithreaded test binary.  `sigint_relay` also raises the
+        // ambient interrupt, hence `REQUEST_SERIAL` alongside the relay lock.
         let _lock = RELAY_TEST_LOCK.lock();
         let _serial = REQUEST_SERIAL.lock();
 
@@ -1093,23 +913,21 @@ mod tests {
         let mut child = cmd.spawn().expect("spawn sleep");
         let child_pid = child_pid(&child);
 
-        // Parent mirrors setpgid to close the race.
+        // The parent mirrors `setpgid` to close the race.
         let _ = rustix::process::setpgid(Pid::from_raw(child_pid), Pid::from_raw(child_pid));
 
-        // Claim relay slot and fire the handler directly.
         let _relay = PipelineRelay::install(child_pid).expect("slot");
         sigint_relay(libc::SIGINT);
 
         #[allow(clippy::disallowed_methods)]
         let status = child.wait().expect("wait");
-        // sleep was killed by SIGINT; exit code should be non-zero.
         assert!(!status.success(), "child should have been killed by SIGINT");
     }
 
     // ── Detached birth ─────────────────────────────────────────────────────
 
     /// A `Command` with all three standard streams pointed away from the
-    /// harness, which is the precondition [`spawn_detached`] documents.
+    /// harness — the precondition [`spawn_detached`] states.
     fn detachable(program: &str) -> std::process::Command {
         let mut cmd = std::process::Command::new(program);
         cmd.stdin(std::process::Stdio::null())
@@ -1118,10 +936,9 @@ mod tests {
         cmd
     }
 
-    /// The survivor belongs to nobody here.  It leads its own process
-    /// group (pid == pgid, from its own `setsid`), it is not waitable
-    /// from this process, and — where `/proc` can say so — its parent is
-    /// no longer us.
+    /// The survivor belongs to nobody here: it leads its own group, no wait
+    /// from this process can name it, and — where `/proc` can say so — its
+    /// parent is no longer us.
     #[test]
     fn detached_survivor_is_orphaned_and_leads_its_own_group() {
         let mut cmd = detachable("sleep");
@@ -1146,9 +963,8 @@ mod tests {
 
         #[cfg(target_os = "linux")]
         {
-            // /proc/<pid>/stat is `pid (comm) state ppid …`, and `comm`
-            // may itself contain spaces and parens — so read the fields
-            // from past the last ')'.
+            // /proc/<pid>/stat is `pid (comm) state ppid …` and `comm` may
+            // itself hold spaces and parens, so read fields past the last ')'.
             let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("survivor stat");
             let tail = &stat[stat.rfind(')').expect("stat has a comm field") + 1..];
             let ppid: i32 = tail
@@ -1167,9 +983,8 @@ mod tests {
         unsafe { libc::kill(raw, libc::SIGKILL) };
     }
 
-    /// The intermediate is reaped inside the birth, so the caller is left
-    /// with no child to wait for and no zombie to accumulate: the pid that
-    /// comes back names a live process that this one does not own.
+    /// The intermediate is reaped inside the birth, leaving the caller no child
+    /// to wait for and no zombie to accumulate.
     #[test]
     fn detached_birth_leaves_nothing_to_reap() {
         let mut cmd = detachable("sleep");
@@ -1210,11 +1025,9 @@ mod tests {
         panic!("the survivor's stdout never reached {}", out.display());
     }
 
-    /// A program that does not exist comes back as `NotFound`, not as a
-    /// pid.  This is the proof that `std`'s close-on-exec errno pipe
-    /// survives the second fork: the parent's read of it completes only
-    /// once *every* copy is shut, and the grandchild's closes at a
-    /// successful `execve` — so `Ok` means the grandchild exec'd.
+    /// A program that does not exist comes back `NotFound`, not as a pid —
+    /// the proof that `std`'s close-on-exec errno pipe survives the second
+    /// fork, so `Ok` really does mean the grandchild exec'd.
     #[test]
     fn detached_missing_program_reports_not_found() {
         let err = spawn_detached(&mut detachable("ral-no-such-program-exists"))

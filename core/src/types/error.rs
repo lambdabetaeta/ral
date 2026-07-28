@@ -1,10 +1,5 @@
-//! Runtime error type and body-result split helper.
-//!
-//! [`Error`] is a located runtime error with an optional hint.  The
-//! type [`Settled<T>`](super::flow::Settled) `= Result<T, Break>` is
-//! the public boundary shape for evaluator outcomes; [`split`] is the
-//! single helper that decomposes a `Settled<Value>` body into a
-//! ([`BodyResult`], [`Escape`]) split for scope helpers.
+//! The runtime error type, and [`split`] — the one decomposition of a body's
+//! outcome into the ([`BodyResult`], [`Escape`]) pair `evaluator::audit` consumes.
 
 use super::flow::{Break, Escape};
 use super::value::Value;
@@ -16,14 +11,12 @@ use std::fmt;
 pub struct Error {
     pub message: String,
     pub status: Status,
-    /// Byte range of the node the error broke on, resolved against a
-    /// [`SourceDb`](crate::source::SourceDb) at render time.  `None` until
-    /// the break path stamps the innermost enclosing node's span.
+    /// `None` until `eval_comp` stamps the innermost enclosing node's span.
     pub span: Option<Span>,
     pub hint: Option<String>,
 }
 
-/// Reduced exit status or structured process failure.
+/// An error's exit status: a bare code, or the process failure behind one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     Code(i32),
@@ -40,7 +33,7 @@ impl Error {
         }
     }
 
-    /// Build a runtime error from a structured command failure.
+    /// A bare exit code takes its hint from the session's `exit_hints` table.
     pub fn from_command_failure(
         cmd: &str,
         failure: CommandFailure,
@@ -76,7 +69,7 @@ impl Error {
         }
     }
 
-    /// Exit code to append in compact formatting, if any.
+    /// `None` for a process failure, whose message already names its status.
     pub fn status_code_for_display(&self) -> Option<i32> {
         match &self.status {
             Status::Code(0) | Status::Process(_) => None,
@@ -93,28 +86,19 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// The non-escape outcome of a delimited body: either a value
-/// (success), or a recoverable runtime error (catchable by `try`,
-/// recorded as a non-zero-status node by `audit`/`grant`/`within`/
-/// `guard`).
+/// A delimited body's non-escape outcome: a value, or an error — catchable by
+/// `try`, recorded as a non-zero-status node by `audit`/`grant`/`within`/`guard`.
 #[derive(Debug)]
 pub enum BodyResult {
     Value(Value),
     Error(Error),
 }
 
-/// Decompose a body's `Settled<Value>` outcome into the
-/// (`BodyResult`, `Escape`) split that scope helpers consume.
-///
-/// Total
-/// by construction: `Settled<Value> = Result<Value, Break>` cannot
-/// encode a tail call — `Tail` lives only in the evaluator-private
-/// `Control` enum and is absorbed by the trampoline before any
-/// `Settled` value is built — so every arm is reachable.
+/// Sort a body's outcome into its non-escape and escape halves.
 ///
 /// # Errors
-/// Returns `Err` if `settled` is a non-local escape (`Break::Escape`); a
-/// value or a recoverable runtime error (`Break::Error`) becomes `Ok`.
+/// An escape returns `Err`; an error stays in `Ok`, since the scope helpers
+/// must still build a node for it.
 pub fn split(settled: super::flow::Settled<Value>) -> Result<BodyResult, Escape> {
     match settled {
         Ok(v) => Ok(BodyResult::Value(v)),

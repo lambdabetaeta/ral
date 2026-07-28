@@ -1,30 +1,20 @@
-//! Structural I/O event values pushed onto a run's `surface` sink at
-//! every redirect read/write door and every exec completion door.
-//!
-//! Core emits plain [`Value::Map`]s here; a host (exarch) decodes them
-//! into cards.  Core names no card type — these constructors fix only
-//! the wire shape:
-//!
-//! ```text
-//! read:  {io:"read",  path:<string>}
-//! write: {io:"write", path:<string>, mode:<"write"|"append"|"stream">,
-//!         outcome:<"committed"|"aborted"|"failed">,
-//!         new_bytes:<bytes?>, old_bytes:<bytes?>}
-//! exec:  {io:"exec",  argv:<list<string>>, outcome:<"ok"|"bad">, status:<int>}
-//! ```
+//! Builds the structural I/O events that redirect and exec doors push onto a
+//! run's surface sink through `Mooring::emit_io`.  Core emits plain
+//! [`Value::Map`]s and names no card type, so these constructors are the whole
+//! wire contract; the host decodes it in `value_to_io`, in
+//! `exarch/src/bus/card/io.rs`.
 
 use crate::syntax::ast::RedirectMode;
 use crate::types::Value;
 
-/// The settled outcome of a write door: how the logical write op ended.
+/// How a write door settled.
 #[derive(Clone, Copy)]
 pub(crate) enum WriteOutcome {
-    /// Body ran to completion and (for atomic `>`) the rename succeeded.
     Committed,
-    /// The body returned `Err` before commit — the logical write op did
-    /// not complete (atomic temp discarded; non-atomic may be partial).
+    /// The body broke before commit: an atomic temp is discarded, but a
+    /// non-atomic target may be left partly written.
     Aborted,
-    /// The open itself failed, or the atomic rename failed at commit.
+    /// The open never succeeded, or the atomic rename failed at commit.
     Failed,
 }
 
@@ -38,8 +28,6 @@ impl WriteOutcome {
     }
 }
 
-/// `RedirectMode` -> the `mode` field string.  The stdin modes (`Read`,
-/// `HereString`) have no write door, so they are not representable here.
 fn mode_str(mode: RedirectMode) -> &'static str {
     match mode {
         RedirectMode::Write => "write",
@@ -59,14 +47,10 @@ pub(crate) fn read(path: &str) -> Value {
     ])
 }
 
-/// `{io:"write", path:<path>, mode:…, outcome:…, new_bytes:<bytes|null>,
-/// old_bytes:<bytes|null>}` — an fd 1/2 file write target, settled at frame
-/// teardown.  `new_bytes` is a bounded prefix of the committed content — the
-/// head the host previews in the write card, not the whole file.  `old_bytes`
-/// is the pre-existing target's whole content, present only when the write
-/// was atomic and overwrote an existing file no larger than the same bound on
-/// either side — the host diffs `old_bytes`/`new_bytes` into a diff card
-/// instead of a plain preview when both are present and differ.
+/// `{io:"write", path, mode, outcome}` — an fd 1/2 file target, settled at
+/// frame teardown.  `new_bytes` (a bounded head of what landed) and
+/// `old_bytes` (the whole prior content, atomic overwrites only) join it when
+/// the caller has them; absent, they are omitted keys rather than nulls.
 pub(crate) fn write(
     path: &str,
     mode: RedirectMode,
@@ -92,8 +76,8 @@ pub(crate) fn write(
     Value::map(fields)
 }
 
-/// `{io:"exec", argv:[prog, …args], outcome:…, status:…}` — an external
-/// or bundled command completed.  `outcome` is `"ok"` iff `status == 0`.
+/// `{io:"exec", argv:[prog, …args], outcome, status}` — an external or
+/// bundled command completed.
 pub(crate) fn exec(program: &str, args: &[String], status: i32) -> Value {
     let argv: Vec<Value> = std::iter::once(Value::String(program.to_string()))
         .chain(args.iter().map(|a| Value::String(a.clone())))

@@ -1,38 +1,24 @@
-//! Pipeline orchestration: compose stages 1–3 in one place.
+//! Stages 1–3 of `crate::path` composed against one `HOME`/cwd pair.
 //!
-//! `Resolver` bundles the per-call resolution context (`HOME`, cwd) and
-//! exposes two entry points:
-//!
-//!   * [`Resolver::resolve`] — sigil-expand then lexically resolve,
-//!     yielding a [`ResolvedPath`].
-//!   * [`Resolver::check`]   — resolve, then leniently canonicalise.
-//!
-//! [`Resolver::resolve`] is the *sole* constructor of a
-//! [`ResolvedPath`], and a `ResolvedPath` is the only thing a
-//! canonicaliser accepts — so canonicalisation cannot run before
-//! sigil-expansion-then-lex.  The pipeline ordering is encoded in the
-//! type, not in convention.
-//!
-//! Stack-allocated; constructed afresh per call from a `Context`
-//! (see [`Context::resolver`](crate::types::Context::resolver)).
-//! Owns its `home` to keep call-site lifetimes simple.
+//! [`Resolver::resolve`] is the sole constructor of a [`ResolvedPath`], and
+//! outside `crate::path` the canonicalisers are reachable only through one —
+//! so the stage order is enforced by the types, not by convention.
 
 use std::path::{Path, PathBuf};
 
 use super::{ResolvedPath, lex, sigil};
 
-/// Per-call resolution context: `HOME` and scoped cwd.  See module doc
-/// for the pipeline.
+/// The `HOME` and logical cwd one resolution runs against.
 pub struct Resolver<'a> {
     pub home: String,
     pub cwd: Option<&'a Path>,
 }
 
 impl Resolver<'_> {
-    /// A resolver with no shell context: empty `HOME`, no scoped cwd.
-    /// For shell-less callers (the `RAL_PATH` walker, the plugin loader,
-    /// the exarch file-picker) that hold an already-absolute candidate
-    /// and only need the sigil/lex/canon kernel, not a `Context`.
+    /// A resolver for callers with no shell — the `RAL_PATH` walker, the
+    /// plugin loader, exarch's fff index — who already hold an absolute
+    /// candidate.  Safe only for those: the empty `home` expands `~/x` to
+    /// `/x`, and a `None` cwd sends `lex::resolve_path` to the process cwd.
     pub fn shell_less() -> Self {
         Resolver {
             home: String::new(),
@@ -40,17 +26,16 @@ impl Resolver<'_> {
         }
     }
 
-    /// Stage 1 + 2: expand `~` / `xdg:` sigils, then lexically
-    /// resolve against `cwd`, minting a [`ResolvedPath`].  Pure: no
-    /// filesystem access.  The sole constructor of a `ResolvedPath`.
+    /// Stages 1 and 2: expand `~`/`xdg:`, then anchor and fold against `cwd`.
+    /// Pure — no filesystem access.
     pub fn resolve(&self, raw: &str) -> ResolvedPath {
         let expanded = sigil::expand_path_prefix(raw, &self.home);
         ResolvedPath::from_lexed(lex::resolve_path(self.cwd, &expanded))
     }
 
-    /// Stage 1 + 2 + 3: full pipeline.  Resolves, then leniently
-    /// canonicalises — following symlinks across the existing prefix and
-    /// re-appending the unresolved tail.
+    /// The whole pipeline: [`Self::resolve`], then canonicalise leniently —
+    /// symlinks followed across the existing prefix, unresolved tail
+    /// re-appended.
     pub fn check(&self, raw: &str) -> PathBuf {
         self.resolve(raw).canonicalise_lenient()
     }
@@ -61,13 +46,8 @@ impl Resolver<'_> {
 mod tests {
     use super::*;
 
-    /// `resolve` composes stage 1 (sigil) and stage 2 (cwd-anchor +
-    /// `.`/`..`).  A tilde-headed path against a fresh `home`
-    /// expands and stays absolute; `cwd` is irrelevant once the
-    /// expanded form is absolute.
-    // Unix-only: `PathBuf::join` produces backslashes on Windows, and the
-    // synthetic `/h` home is a Unix shape with no Windows analogue.  The
-    // grant subsystem this serves is Unix-only.
+    // Unix-only: `/h` is not absolute under Windows rules, so the expanded
+    // form would anchor to the process cwd instead of standing alone.
     #[cfg(unix)]
     #[test]
     fn resolve_expands_tilde_and_normalises() {
@@ -81,13 +61,11 @@ mod tests {
         );
     }
 
-    /// A non-sigil relative path joins to `cwd` and normalises.
-    /// The whole point of stage 2 is that grant prefix matching
-    /// always sees absolute paths.  The cwd fixture is per-platform
-    /// (a driveless `/work/proj` is not absolute on Windows), so the
-    /// stage-2 anchor is pinned on both hosts.
+    /// Stage 2 exists so grant prefix matching only ever sees absolute paths.
     #[test]
     fn resolve_anchors_relative_paths_to_cwd() {
+        // A driveless path is not absolute on Windows, so the fixture is
+        // per-host and the anchoring is pinned on both.
         let cwd = if cfg!(windows) {
             Path::new(r"C:\work\proj")
         } else {
@@ -100,10 +78,8 @@ mod tests {
         assert_eq!(r.resolve("src/lib.rs").as_path(), cwd.join("src/lib.rs"));
     }
 
-    /// `check` walks up to an existing ancestor when the full path is
-    /// missing.  We use a child of `/tmp` (an ancestor that always
-    /// exists) to assert the suffix is re-appended after the lenient
-    /// canonicalisation.
+    /// A child of `/tmp` gives the ancestor walk something that always
+    /// exists, so the assertion is about the tail being re-appended.
     #[test]
     fn check_resolves_partial_paths_against_existing_ancestor() {
         let r = Resolver {
@@ -119,17 +95,12 @@ mod tests {
         );
     }
 
-    /// End-to-end: `xdg:` token through every stage when the env
-    /// var is unset (so the Linux default `~/.local/share` kicks
-    /// in) and the path doesn't exist on disk.  `check` returns
-    /// the lenient canonicalisation, which for a non-existent
-    /// path under a non-existent HOME falls back to the lexical form.
-    // Unix-only: Linux XDG default, Unix path shapes throughout.
+    // Unix-only: Linux XDG defaults, and `/h` is not Windows-absolute.
     #[cfg(unix)]
     #[test]
     fn check_pipeline_handles_xdg_with_unset_env() {
-        // Snapshot+restore XDG_DATA_HOME under the shared env guard so the
-        // test doesn't race other env-mutating tests under parallel runs.
+        // Held for the whole scope: the suite mutates process env in
+        // parallel, and this test's answer depends on XDG_DATA_HOME.
         let _guard = crate::test_env::env_guard();
         let prev = std::env::var_os("XDG_DATA_HOME");
         unsafe { std::env::remove_var("XDG_DATA_HOME") };
@@ -142,18 +113,12 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
             None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
         }
-        // Default xdg:data is ${XDG_DATA_HOME:-~/.local/share}.
-        // With the var unset and home=/h, expansion gives
-        // /h/.local/share, suffix /agda is appended.  /h does not exist,
-        // so lenient canonicalisation returns the lexical form.
+        // `/h` does not exist, so the lenient canonicaliser finds no ancestor
+        // to resolve and hands back the lexical form untouched.
         assert_eq!(out, Path::new("/h/.local/share/agda"));
     }
 
-    /// Plain absolute paths are a fixed point of the lexical pipeline
-    /// (`resolve`): no sigil to expand, already absolute, no `.`/`..`
-    /// to collapse.
-    // Unix-only: `/etc/hostname` is a Unix-style absolute that Windows
-    // reinterprets relative to the current drive (→ `C:\etc\hostname`).
+    // Unix-only: Windows reads `/etc/hostname` relative to the current drive.
     #[cfg(unix)]
     #[test]
     fn ordinary_absolute_path_is_a_fixed_point() {

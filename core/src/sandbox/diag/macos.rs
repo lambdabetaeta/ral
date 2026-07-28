@@ -1,13 +1,10 @@
-//! macOS Seatbelt denial reader.
+//! macOS Seatbelt denial reader — the `platform` module `sandbox::diag`
+//! selects here, mirroring `diag/linux.rs`.
 //!
-//! Seatbelt denials surface to user code as raw `EPERM`; the denied
-//! path and operation appear only in the unified system log, under
-//! `(Sandbox) Sandbox: <proc>(<pid>) deny(...) <op> <path>`.  We read
-//! the relevant slice via `/usr/bin/log show --last <N>s --predicate
-//! 'eventMessage BEGINSWITH "Sandbox: "'`.  The lines are self-describing
-//! (timestamp, process, PID, operation, path); [`extract_pid`] reads the
-//! PID for descendant attribution and [`parse_denial`] splits out the
-//! operation and the fully-resolved path Seatbelt logs.
+//! A denial reaches user code as a bare `EPERM`; only the unified system log
+//! names the operation and path, in the shape
+//! `(Sandbox) Sandbox: <comm>(<pid>) deny(<n>) <op> <operand…>` that every
+//! parser below keys off.
 
 use std::time::Duration;
 
@@ -16,8 +13,8 @@ use std::time::Duration;
     reason = "[io-door:silent:log-show] macOS sandbox diagnostics: shells out to `/usr/bin/log show` to read Seatbelt denial records from the unified log; a diagnostic probe, not turn-time model data I/O, raises no surface card."
 )]
 pub(super) fn read_window(elapsed: Duration) -> Option<String> {
-    // `log show --last <N>s` is whole-second granularity; pad by one
-    // second so a sub-second call still catches its denials.
+    // `--last` rounds to whole seconds, so pad by one or a sub-second call
+    // asks for a zero-length window and sees nothing.
     let secs = elapsed.as_secs().saturating_add(1).to_string();
     let last_arg = format!("{secs}s");
     let output = std::process::Command::new("/usr/bin/log")
@@ -41,8 +38,8 @@ pub(super) fn is_denial_line(line: &str) -> bool {
     line.contains("(Sandbox) Sandbox:") && line.contains("deny")
 }
 
-/// `... (Sandbox) Sandbox: cargo(12345) deny(1) file-read-data /…`
-/// → `Some(12345)`.  Returns `None` on any deviation from that shape.
+/// The PID Seatbelt attributed the denial to — the one inside `comm(pid)`,
+/// which `sandbox::diag` matches against the call's descendant set.
 pub(super) fn extract_pid(line: &str) -> Option<u32> {
     let after_tag = line.split_once("Sandbox: ")?.1;
     let (_, after_open) = after_tag.split_once('(')?;
@@ -50,32 +47,20 @@ pub(super) fn extract_pid(line: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Split a denial line into its `(operation, path)` after the
-/// `Sandbox: ` tag, where the body reads `comm(pid) deny(n) <op>
-/// <operand…>`.  The operation is the whitespace token following the
-/// `deny(...)` token; the operand is the trimmed remainder of the line
-/// — macOS paths can contain spaces, so the remainder is taken whole
-/// and never split further.
-///
-/// A `path` is returned only for filesystem operations (`file-*`),
-/// whose operand Seatbelt logs fully resolved — exactly the path the
-/// user must grant.  For `ipc-*`, `mach-*`, and `network-*` operations
-/// the operand is a service or endpoint name, not a grantable path, so
-/// those yield `Some((op, None))`.  Returns `None` on any deviation from
-/// the `comm(pid) deny(n) <op> …` shape.
+/// Split a denial into `(operation, path)`.  The operand is the whole trimmed
+/// remainder, since macOS paths contain spaces, and counts as a path only for
+/// `file-*`: an `ipc-*`/`mach-*`/`network-*` operand names a service, which
+/// `build_hint` must never offer the user as a path to grant.  Seatbelt
+/// resolves the filesystem paths it logs, so the path returned is exactly the
+/// one the grant needs.
 pub(super) fn parse_denial(line: &str) -> Option<(&str, Option<&str>)> {
     let after_tag = line.split_once("Sandbox: ")?.1;
-    // Skip the `comm(pid)` token, then the `deny(n)` token, landing on
-    // the operation.  `splitn` keeps the operand tail (with its spaces)
-    // intact as the final piece.
     let after_deny = after_tag.split_once("deny(")?.1.split_once(')')?.1;
     let mut rest = after_deny.trim_start().splitn(2, char::is_whitespace);
     let op = rest.next()?;
     if op.is_empty() {
         return None;
     }
-    // Only filesystem operations carry a grantable path; the operand of
-    // an ipc/mach/network denial is a service name, not a path.
     let path = rest
         .next()
         .map(str::trim)
@@ -134,13 +119,10 @@ mod tests {
 
     #[test]
     fn parse_denial_drops_non_filesystem_operand() {
-        // The benign startup denial that misled the diagnostic: the
-        // operand is a POSIX shared-memory region, not a path to grant.
         let shm = "kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
                    ipc-posix-shm-read-data apple.shm.notification_center";
         assert_eq!(parse_denial(shm), Some(("ipc-posix-shm-read-data", None)));
 
-        // mach-lookup names a Mach service in the same position.
         let mach = "kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
                     mach-lookup com.apple.system.notification_center";
         assert_eq!(parse_denial(mach), Some(("mach-lookup", None)));

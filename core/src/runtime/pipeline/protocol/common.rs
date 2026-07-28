@@ -1,17 +1,8 @@
-//! Platform-agnostic primitives for the pipeline gate / report protocol.
-//!
-//! [`FrameReader`] is a detached background thread that reads one
-//! length-prefixed frame from a child-side channel.  [`FrameGate`] is
-//! the parent side of a one-frame "release" gate — it owns the writer
-//! end and the inheritable child-end channel until [`FrameGate::settle`]
-//! turns it into a [`PendingFrame`] for the launcher to release.
-//!
-//! Everything in here is generic over the platform [`Channel`] type
-//! re-exported by the parent module: on Unix the channel is a
-//! socketpair, on Windows it is an anonymous-pipe Reader/Writer pair.  The
-//! primitives don't reach into platform-specific APIs — that's all
-//! tucked behind the [`platform::pass`] backend function in the parent
-//! module.
+//! Platform-agnostic core of the pipeline gate / report protocol: the
+//! parent's one-frame gate, the frame the launcher holds back, and the
+//! background frame reader.  All of it is generic over `platform::Channel`,
+//! so no descriptor API appears here — the `unix`, `windows`, and `fallback`
+//! siblings supply `pair` and `pass`.
 
 use std::io::BufReader;
 use std::marker::PhantomData;
@@ -27,15 +18,11 @@ pub(crate) fn pipe_error(e: impl std::fmt::Display) -> Break {
     Break::Error(Error::new(format!("pipe: {e}"), 1))
 }
 
-// ── FrameReader ────────────────────────────────────────────────────────────
-
 /// Background reader for one length-prefixed frame on a child channel.
 ///
-/// Used for the ral helper's [`ChildEvalResponse`]: drained concurrently
-/// with the helper so a large report cannot block its writer while the
-/// parent waits on the OS process.  The thread is detached on drop, so a
-/// stopped or abandoned child does not need explicit teardown — the
-/// reader exits naturally once its peer's write end closes.
+/// Drains concurrently with the child so a large frame cannot block its
+/// writer while the parent waits on the OS process.  Drop does not stop the
+/// thread: it exits at EOF, so a stopped or abandoned child needs no teardown.
 pub(crate) struct FrameReader<T: serde::de::DeserializeOwned + Send + 'static> {
     handle: thread::JoinHandle<std::io::Result<Option<T>>>,
     panic_msg: &'static str,
@@ -58,15 +45,8 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> FrameReader<T> {
     }
 }
 
-// ── FrameGate ──────────────────────────────────────────────────────────────
-
-/// Parent side of a one-frame gate.  Owns the writer end (parent
-/// writes frames here) and the inheritable child-end channel (kept
-/// alive until [`FrameGate::settle`] so spawn can inherit it, then
-/// dropped so the child's read sees EOF on parent-side close — the
-/// canonical abort path).  The phantom `T` ties the gate to one
-/// payload type; [`FrameGate::settle`] turns it into a
-/// [`PendingFrame<T>`] queued for release.
+/// Parent side of a one-frame gate: the child blocks reading its inherited
+/// end until `settle` and `PendingFrame::release` deliver the payload.
 struct FrameGate<T> {
     writer: platform::Channel,
     child_end: Option<platform::Channel>,
@@ -74,10 +54,6 @@ struct FrameGate<T> {
 }
 
 impl<T: serde::Serialize + Send + 'static> FrameGate<T> {
-    /// Allocate a channel pair, mark the child's reader end as
-    /// inheritable, and stash its identity in `env` on `cmd`.  The
-    /// parent keeps the writer end; the child end is held until
-    /// [`FrameGate::settle`].
     fn wire(cmd: &mut crate::process::Launch, env: &str) -> Settled<Self> {
         let (child_end, writer) = platform::pair()?;
         platform::pass(cmd, env, &child_end)?;
@@ -88,10 +64,8 @@ impl<T: serde::Serialize + Send + 'static> FrameGate<T> {
         })
     }
 
-    /// Drop the inheritable child-end channel and capture `payload`
-    /// for a later release.  Call once the spawn has returned: until
-    /// then the child's reader fd / handle must remain open in the
-    /// parent so the platform launch backend can admit it into the child.
+    /// Call only once spawn has returned: until then the child's end must
+    /// stay open in the parent for the launch backend to hand it over.
     fn settle(mut self, payload: T) -> PendingFrame<T> {
         drop(self.child_end.take());
         PendingFrame {
@@ -101,20 +75,18 @@ impl<T: serde::Serialize + Send + 'static> FrameGate<T> {
     }
 }
 
-/// A queued frame waiting on the parent's release pass: writer is
-/// connected to the child's read fd / handle, payload is the
-/// serialized message that releases the gate.  The launcher collects
-/// these in a `Vec` and writes them all once after `claim_foreground` /
-/// `PendingFrame::release`, so every stage starts together.
+/// A gate frame the parent holds until every stage has spawned.  Dropping one
+/// instead of releasing it closes the writer, so the child's blocked read sees
+/// EOF: that is how an aborted launch tears its stages down.
 pub(crate) struct PendingFrame<T> {
     writer: platform::Channel,
     payload: T,
 }
 
 impl<T: serde::Serialize + Send + 'static> PendingFrame<T> {
-    /// Write the queued frame to the child's gate channel, unblocking the
-    /// child.  Visible to the `pipeline` module so the launcher's
-    /// release loop can call it directly on `PendingFrame<ChildEvalRequest>`.
+    /// Unblock the child.  `launch` calls this on every pending frame in one
+    /// pass after `claim_foreground`, so no stage runs user code before the
+    /// kernel's foreground decision is settled.
     pub(in super::super) fn release(self) -> Settled<()> {
         let Self {
             mut writer,
@@ -124,21 +96,9 @@ impl<T: serde::Serialize + Send + 'static> PendingFrame<T> {
     }
 }
 
-// ── HelperProtocol ────────────────────────────────────────────────────────────
-
-/// Parent-side state for a ral helper stage's protocol.
-///
-/// The gate frame ([`ChildEvalRequest`]) carries the work to evaluate, so
-/// the protocol is always present (no `NoTerminal` skip).
-///
-/// Value-channel ends are passed through here only because the
-/// inheritable channel dance and the env-var naming are part of the same
-/// helper protocol; storing them on the gate keeps the launcher from
-/// reaching into the backend env-var constants.
-///
-/// Generic over the platform [`platform::Channel`] re-exported by the
-/// parent module; the four env-var names that pin the protocol to its
-/// helper-side counterpart come from [`platform::ENV`].
+/// Parent-side ends of a helper stage's four channels — job gate in, report
+/// out, optional value edges — held together because one backend table,
+/// `platform::ENV`, names all four for the helper to find them by.
 pub(crate) struct HelperProtocol {
     job_gate: FrameGate<ChildEvalRequest>,
     child_report_writer: Option<platform::Channel>,
@@ -148,8 +108,7 @@ pub(crate) struct HelperProtocol {
 }
 
 impl HelperProtocol {
-    /// Build the helper launch (re-exec ral with `HELPER_FLAG`)
-    /// and wire job + report + optional value-channel envs.
+    /// Re-exec ral behind `HELPER_FLAG` and wire the four channels onto it.
     pub(crate) fn build_command(
         incoming_value: Option<platform::Channel>,
         outgoing_value: Option<platform::Channel>,
@@ -170,12 +129,10 @@ impl HelperProtocol {
         platform::pass(cmd, env.report, &report_writer)?;
         let report_reader = FrameReader::spawn(report_reader_ch, "pipeline report reader panicked");
 
-        // An absent value channel must be cleared, not merely left
-        // unset: a helper-evaluated stage can itself launch a pipeline
-        // (bundled-tool dispatch goes through `run_pipeline`), and the
-        // spawning helper's own channel vars would otherwise ride the
-        // inherited environment into the nested helper, which would
-        // parse a fd number that is closed in its process.
+        // Clear an absent value channel rather than leave it unset: a stage
+        // the helper evaluates can run a pipeline of its own, and this
+        // helper's vars would otherwise ride the inherited environment into
+        // the nested helper, naming a descriptor closed in that process.
         match incoming_value.as_ref() {
             Some(input) => platform::pass(cmd, env.value_in, input)?,
             None => {
@@ -198,9 +155,9 @@ impl HelperProtocol {
         })
     }
 
-    /// After spawn: drop the inheritable child-end channels (report
-    /// writer, value channels), queue the [`ChildEvalRequest`] release.
-    /// Returns the report reader and the deferred frame.
+    /// After spawn: drop the parent's copies of the child's ends and queue the
+    /// job frame.  The report writer especially must go — while the parent
+    /// holds one, the report reader never sees EOF and its `join` never returns.
     pub(crate) fn settle(
         self,
         job: ChildEvalRequest,
@@ -219,10 +176,8 @@ impl HelperProtocol {
     }
 }
 
-/// Backend-supplied env-var names for the four channels of the helper
-/// protocol.  Unix uses `_FD` suffixes (the helper parses an integer fd
-/// and re-opens via `from_raw_fd`); Windows uses `_HANDLE` suffixes
-/// (the helper parses a numeric `HANDLE` and wraps via `from_raw_handle`).
+/// The env vars a backend uses to name its four channels to the helper, which
+/// parses them back into descriptors in `helper::serve_from_env`.
 pub(crate) struct EnvNames {
     pub(crate) job: &'static str,
     pub(crate) report: &'static str,

@@ -1,27 +1,14 @@
-//! Decode a capability `Value` map into a frozen [`Capabilities`].
+//! Decode a capability `Value` map — the argument of `grant [...]`, or a
+//! `--capabilities` profile — into a frozen [`Capabilities`].
 //!
-//! **The surface is `grant [...]` and its equivalent `--capabilities
-//! <file>` ceiling** — a map keyed by capability dimension (`exec`,
-//! `fs`, `net`, `detach`, `editor`, `shell`, `audit`).  A dimension the
-//! map does not name stays `None` and inherits the surrounding frame, so an
-//! attenuation touches only the dimensions it lists.  The author is the
-//! live user, so every malformed shape is a strict error carrying a
-//! shape-specific hint.
-//!
-//! One kind of path-shaped entry is *not* a shape error: a well-formed
-//! absolute path that names a location foreign to this platform (a
-//! Unix prefix like `/usr/local/bin` frozen on a Windows build, which
-//! has a root but no drive letter).  Such an entry can never match a
-//! real access here, so it is dropped as a dead grant rather than
-//! rejected — the same "unusable on this platform" treatment
-//! `exarch::policy::base::drop_dead_exec_grants` gives a bundled-tool
-//! name Windows can't back.  Because this dropping lives in the one
-//! decoder both the `grant [...]` builtin and the capability-file
-//! loader share, a `--extend-base`/user capability file gets it for
-//! free, alongside the built-in bases.  A genuinely relative entry
-//! (no root at all, on any platform) is still a strict error: that is
-//! an authoring ambiguity (re-anchoring to a future `cd`), not a
-//! platform mismatch.
+//! A dimension the map does not name stays `None` and inherits the
+//! surrounding frame, so an attenuation touches only what it lists.  The
+//! author is the live user, so every malformed shape is a strict error.
+//! The one exception is a path rooted under a foreign platform's
+//! convention: it can never match an access here, so it is dropped as a
+//! dead grant rather than failing the whole profile — the treatment
+//! `exarch::policy::base::drop_dead_exec_grants` gives a bundled tool
+//! Windows cannot back.
 
 use crate::path::NormalizedPrefix;
 use crate::types::{
@@ -30,11 +17,9 @@ use crate::types::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The pre-freeze shape [`decode_exec_grant`] parses a surface `exec`
-/// map into: `dirs` keys are still raw sigil-or-path strings (not yet a
-/// [`NormalizedPrefix`], which only a freeze door can mint), paired
-/// with `true` for a `'deny'` verdict and `false` for `'allow'`.
-/// [`freeze_exec_map`] consumes this and mints the real [`ExecMap`].
+/// [`decode_exec_grant`]'s output, which [`freeze_exec_map`] turns into
+/// the real [`ExecMap`]: `dirs` keys are still raw sigil-or-path strings,
+/// and the bool is `true` for `'deny'`.
 #[derive(Debug, Default)]
 struct RawExecMap {
     literals: BTreeMap<String, ExecPolicy>,
@@ -43,14 +28,8 @@ struct RawExecMap {
 
 // ── Dimension decoders ────────────────────────────────────────────────────
 
-/// `fs: [read: [...], write: [...], deny: [...]]`
-///
-/// `read` and `write` name prefix regions, `deny` carves a hole inside
-/// them.  Each value is a list of paths; any other sub-key is an error.
-/// Every entry is frozen against `ctx` into a [`NormalizedPrefix`]
-/// (sigil-expanded, `.`/`..`-collapsed, required absolute) right here,
-/// so a decoded `FsPolicy` is in the grant-side normal form by
-/// construction.
+/// `fs: [read: [...], write: [...], deny: [...]]`, where `deny` carves
+/// holes inside the `read`/`write` prefix regions.
 fn decode_fs(
     value: &Value,
     err_prefix: &str,
@@ -84,9 +63,7 @@ fn decode_fs(
     Ok(fp)
 }
 
-/// Collect a `Value::List` into owned strings, rejecting any non-String
-/// element with a shape-specific hint.  Shared by the fs path lists and
-/// the exec subcommand lists, both of which are string-only.
+/// The fs path lists and the exec subcommand lists are both string-only.
 fn string_list(items: &List, what: &str, err_prefix: &str) -> Result<Vec<String>, PolicyError> {
     items
         .iter()
@@ -100,22 +77,15 @@ fn string_list(items: &List, what: &str, err_prefix: &str) -> Result<Vec<String>
         .collect()
 }
 
-/// Freeze one sigil-or-path entry and classify the result. Shared by
-/// the fs prefix lists and the exec map keys.
+/// Freeze one sigil-or-path entry, requiring the result absolute.
+/// Shared by the fs prefix lists and the exec map keys.
 ///
-/// * Absolute here: kept.
-/// * Rooted under a foreign platform's convention (a Unix prefix like
-///   `/usr/local/bin`, frozen on a build where it has a root but no
-///   drive letter): dropped (`Ok(None)`) as a dead grant — it can
-///   never match a real access on this host, so silently omitting it
-///   is more honest than erroring the whole profile out.
-/// * Genuinely relative (no root at all): a strict error naming the
-///   spelling the author wrote.  A bare relative prefix (`proj`,
-///   `./a`) folds to a still-relative path that would otherwise
-///   re-anchor to the *live* cwd at check time — the same grant
-///   meaning a different directory after a `cd` — so this is rejected
-///   rather than silently dropped, pointing at the absolute form or
-///   the `cwd:` sigil that pins "relative to here" at freeze.
+/// A path rooted under a foreign platform's convention (`/usr/local/bin`
+/// on a Windows build) yields `Ok(None)` — the dead grant the module
+/// header describes.  A genuinely relative entry is an error instead: it
+/// would re-anchor to the *live* cwd at check time, meaning a different
+/// directory after a `cd`, so the message points at `cwd:`, which pins
+/// "relative to here" at freeze.
 fn freeze_absolute(
     entry: &str,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
@@ -134,9 +104,7 @@ fn freeze_absolute(
     )))
 }
 
-/// Freeze each raw fs entry, requiring the result absolute.  An entry
-/// that freezes to a foreign-rooted dead grant (see [`freeze_absolute`])
-/// is silently omitted rather than erroring.
+/// [`freeze_absolute`] over a list, omitting the dead grants.
 fn freeze_prefix_list(
     raw: Vec<String>,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
@@ -151,10 +119,8 @@ fn freeze_prefix_list(
     Ok(out)
 }
 
-/// A capability bool field: strictly `true` or `false`, any other shape
-/// an error naming the wrong type.  Shared by every boolean dimension
-/// (`net`, `detach`, `editor.*`, `shell.chdir`, `audit`) so a known key
-/// with a non-Bool value fails loudly rather than silently denying.
+/// Strictly `true` or `false`, so a known key carrying some other shape
+/// fails loudly rather than silently denying.
 fn decode_bool(value: &Value, err_prefix: &str) -> Result<bool, PolicyError> {
     match value {
         Value::Bool(b) => Ok(*b),
@@ -193,29 +159,15 @@ fn decode_shell(value: &Value, err_prefix: &str) -> Result<ShellPolicy, PolicyEr
 
 // ── Capability map walker ─────────────────────────────────────────────────
 
-/// Walk a capability map (a `Value::Map`) into a frozen [`Capabilities`],
-/// resolving every sigil against `ctx` before returning.  The single
-/// `Value::Map → Capabilities` constructor, shared between the
-/// `grant [...] { body }` builtin and the capability-file loader, so both
-/// surfaces accept the same schema, produce the same errors, and yield a
-/// bundle whose paths are already resolved.  Both callers are in-crate, so
-/// "a `Capabilities` is always frozen" is a type-level invariant with no
-/// escape hatch.
+/// Walk a capability map into a frozen [`Capabilities`], resolving every
+/// sigil against `ctx`.
 ///
-/// Strict on top-level keys: an unknown key errors instead of being silently
-/// dropped.  Each dimension's decoder is in turn strict on its own keys.
-///
-/// Every dimension stays `None` ("no opinion → inherits caller") unless
-/// the map names it.  A grant or capability-file map attenuates only
-/// along the dimensions named and leaves the rest alone.
-///
-/// The freeze pass resolves `~` / `xdg:` / `cwd:` / `tempdir:` sigils and
-/// rejects an `xdg:` value that escapes `ctx.home` (defence in depth — an
-/// attacker-set `XDG_*_HOME=/etc` would otherwise silently widen the grant).
-/// Freeze errors surface as a [`PolicyError`]; the caller prepends its own
-/// provenance and mints a `Break` from it, since the author of a grant or
-/// capability file is the live user and every malformed shape here is a
-/// message, never a process exit.
+/// The single `Value::Map → Capabilities` constructor, shared by the
+/// `grant [...] { body }` builtin in `evaluator::scope` and the
+/// capability-file loader in `capability::load`; both callers are
+/// in-crate, so "a `Capabilities` has every path already resolved" holds
+/// by construction.  Unknown keys error here and in each dimension's
+/// decoder rather than being silently dropped.
 pub(crate) fn decode_capability_map(
     value: &Value,
     err_prefix: &str,
@@ -241,35 +193,22 @@ pub(crate) fn decode_capability_map(
     Ok(caps)
 }
 
-/// Freeze sigils in exec map keys.  Every `dirs` key is a path/sigil,
-/// so all are frozen and must resolve absolute; among `literals`, only
-/// the path-shaped keys (`xdg:bin`, `~/.cargo/bin`, absolute literal
-/// paths) carry sigils and must resolve absolute, while bare command
-/// names (`git`, `kubectl`) are names rather than paths and pass
-/// through unchanged.
+/// Freeze the exec map's keys.  Every `dirs` key and every path-shaped
+/// `literals` key (`xdg:bin`, `~/.cargo/bin`, `/usr/bin/git`) must
+/// resolve absolute; bare command names (`git`, `kubectl`) are names
+/// rather than paths and pass through unchanged.
 ///
-/// A path-shaped literal that resolves to an existing directory is an
-/// error: the surface distinguishes the two kinds by trailing slash, so
-/// `/usr/bin: 'allow'` would otherwise decode to a literal grant on a
-/// binary that cannot exist and fail closed at use time as a baffling
-/// "denied by active grant".  The freeze pass already consults the
-/// environment (`path:` reads `$PATH`, sigils resolve against `ctx`), so
-/// asking the filesystem here is in keeping.
-///
-/// Two sigils expand to more than one directory and so are special-
-/// cased here rather than in [`freeze_absolute`]: `path:` (one `dirs`
-/// entry per `$PATH` component) and `system:` (one `dirs` entry per
-/// [`crate::path::sigil::system_tool_roots`] — the platform's tool
-/// roots). Both only accept `allow`/`deny` — a subcommand list makes
-/// no sense against a directory prefix.
+/// `path:` and `system:` are special-cased here rather than in
+/// [`freeze_absolute`] because each expands to *many* directories — one
+/// per `$PATH` component, one per
+/// [`crate::path::sigil::system_tool_roots`] entry.
 fn freeze_exec_map(
     map: RawExecMap,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
     err_prefix: &str,
 ) -> Result<ExecMap, PolicyError> {
     use crate::path::sigil::looks_like_path_or_sigil;
-    // `None` means the key froze to a foreign-rooted dead grant (see
-    // `freeze_absolute`) — the caller skips inserting it.
+    // `None` is `freeze_absolute`'s dead grant: skip the key.
     let freeze_key = |key: &str| -> Result<Option<String>, PolicyError> {
         Ok(freeze_absolute(key, ctx, err_prefix)?.map(NormalizedPrefix::into_string))
     };
@@ -301,6 +240,8 @@ fn freeze_exec_map(
             }
         } else if looks_like_path_or_sigil(&key) {
             if let Some(frozen) = freeze_key(&key)? {
+                // A decoder that stats: the freeze pass already reads
+                // `$PATH` and the environment, so disk is in reach.
                 if crate::path::is_dir(&frozen) {
                     return Err(PolicyError::new(format!(
                         "{err_prefix}: '{key}' is a directory, so as a literal command key it \
@@ -309,15 +250,13 @@ fn freeze_exec_map(
                 }
                 literals.insert(frozen, policy);
             }
-            // else: foreign-rooted dead grant — dropped, see `freeze_absolute`.
         } else {
             literals.insert(key, policy);
         }
     }
 
-    // A trailing `/` (`'path:/'`, `'system:/'`) strips to the bare
-    // sigil and lands here in `map.dirs`; reject it before generic
-    // directory handling — `path:`/`system:` is the one spelling.
+    // `'path:/'` strips its slash and lands here in `map.dirs`; reject it
+    // before generic directory handling — `path:` is the one spelling.
     for (key, is_deny) in map.dirs {
         if key == "path:" || key == "system:" {
             return Err(PolicyError::new(format!(
@@ -337,17 +276,11 @@ fn freeze_exec_map(
     })
 }
 
-/// Insert `key` into `allow`/`deny` according to `is_deny`, meeting with
-/// whatever is already there rather than overwriting it.  `system:`'s
-/// expansion and an author's explicit directory grant can name the
-/// same resolved directory (`system:` folding in a Homebrew root that
-/// an author also carves back out with an explicit `deny`); the two
-/// insertion loops above populate the sets in a fixed order, but which
-/// loop "wins" must not be an accident of that order.  So a `deny`
-/// always removes the key from `allow` and adds it to `deny`; an
-/// `allow` is only added when `deny` does not already hold the key —
-/// deny is the sticky veto, matching `ExecPolicy`'s lattice, regardless
-/// of which insertion happens first.
+/// Insert into `allow`/`deny`, meeting rather than overwriting.
+/// `system:`'s expansion and an author's explicit grant can name the same
+/// resolved directory — a Homebrew root the author carves back out with a
+/// `deny` — and which of the two insertion loops above runs first must not
+/// decide the verdict.  Deny is the sticky veto, as in [`ExecPolicy`].
 fn insert_dir_meet(
     allow: &mut BTreeSet<NormalizedPrefix>,
     deny: &mut BTreeSet<NormalizedPrefix>,
@@ -362,14 +295,15 @@ fn insert_dir_meet(
     }
 }
 
-/// Split `$PATH` on the platform separator, normalise each absolute
-/// entry, skip empties and relatives.
+/// Split `$PATH` on the platform separator, keeping the absolute entries.
+/// A relative `$PATH` entry is the environment's business, not the grant
+/// author's, so unlike a relative grant path it is dropped in silence.
 fn path_dirs(err_prefix: &str) -> Result<Vec<NormalizedPrefix>, PolicyError> {
     let path = std::env::var("PATH").unwrap_or_default();
     let mut dirs = Vec::new();
     for entry in std::env::split_paths(&path) {
         if entry.as_os_str().is_empty() || !entry.is_absolute() {
-            continue; // skip empty and relative PATH entries silently
+            continue;
         }
         dirs.push(NormalizedPrefix::from_surface(&entry));
     }
@@ -382,11 +316,9 @@ fn path_dirs(err_prefix: &str) -> Result<Vec<NormalizedPrefix>, PolicyError> {
     Ok(dirs)
 }
 
-/// `system:` directory expansion — see
-/// [`crate::path::sigil::system_tool_roots`].  Unlike `path:` this can
-/// never expand to zero directories: the platform's own tool roots
-/// (`/usr/bin`+`/bin`, or `%SystemRoot%\System32`) are unconditional,
-/// so there is no empty-expansion error to raise.
+/// `system:` expansion.  Unlike `path:` it can never come back empty —
+/// the platform's own tool roots are unconditional — so there is no
+/// empty-expansion error to raise here.
 fn system_dirs() -> Vec<NormalizedPrefix> {
     crate::path::sigil::system_tool_roots()
         .into_iter()
@@ -398,25 +330,15 @@ fn system_dirs() -> Vec<NormalizedPrefix> {
 
 /// Decode the `exec` dimension of a grant into its pre-freeze shape.
 ///
-/// A key ending in `/` names a directory prefix; the slash is dropped
-/// and the entry lands in [`RawExecMap::dirs`], `true` for `'deny'` and
-/// `false` for `'allow'`.  A directory entry must be `'allow'` or
-/// `'deny'` — a subcommand list is name-shaped and requires a literal
-/// key.
+/// A key ending in `/` names a directory prefix and lands in
+/// [`RawExecMap::dirs`]; every other key is a literal command name or
+/// path, taking `'allow'`, `'deny'`, or a subcommand allowlist.  An empty
+/// allowlist is an error rather than a third spelling of `'allow'`:
+/// `meet` intersects subcommand sets, so the empty set already means
+/// "admits nothing", and one surface spelling cannot mean ⊤ and ⊥ at once.
 ///
-/// Every other key is a bare command name or absolute literal path and
-/// lands in [`ExecMap::literals`].  Three surface forms per literal:
-///   * `'allow'`         — admit the command with any arguments.
-///   * `'deny'`          — sticky veto, propagates upward through `meet`.
-///   * `[s, …]`          — subcommand allowlist.  Empty is an error, not a
-///     third spelling of `'allow'`: `meet` on two subcommand sets is
-///     intersection and can produce the empty set, which admits nothing,
-///     so an empty surface list would mean ⊤ and ⊥ at once.
-///
-/// Lowercase strings are the ral surface convention; the internal serde
-/// tags on `ExecPolicy` (capitalised) are reserved for the IPC wire format.
-/// `Bool` and `Thunk` are rejected with shape-specific hints so authors
-/// get better errors than "policy must be a list of subcommands".
+/// The surface takes lowercase strings only; the capitalised serde tags
+/// on [`ExecPolicy`] belong to the IPC wire format.
 fn decode_exec_grant(value: &Value, err_prefix: &str) -> Result<RawExecMap, PolicyError> {
     let entries = as_map(value, err_prefix).map_err(PolicyError::from)?;
     let mut out = RawExecMap::default();
@@ -536,9 +458,6 @@ mod tests {
         }
     }
 
-    /// The ral surface accepts lowercase policy strings only; the
-    /// capitalised serde tag on `ExecPolicy` is reserved for the IPC
-    /// wire path.
     #[test]
     fn decode_exec_grant_rejects_capitalised_string() {
         let v = exec_map(&[("git", Value::String("Allow".into()))]);
@@ -547,8 +466,6 @@ mod tests {
         assert!(msg.contains("Allow"), "expected offending token: {msg}");
     }
 
-    /// A `Bool` policy is rejected with a hint naming all three valid
-    /// forms (`'allow'`, `'deny'`, a subcommand list).
     #[test]
     fn decode_exec_grant_bool_hint_lists_all_forms() {
         let v = exec_map(&[("git", Value::Bool(true))]);
@@ -559,13 +476,9 @@ mod tests {
         );
     }
 
-    /// M4 regression: `insert_dir_meet` must resolve a same-key
-    /// collision to `Deny` regardless of which verdict is inserted
-    /// first.  Before the fix, `freeze_exec_map`'s two insertion loops
-    /// (`system:`/`path:` expansion, then explicit `dirs` entries)
-    /// resolved a collision by last-write-wins — correct only by
-    /// accident of loop order, and silently flipped to widening by a
-    /// harmless-looking reorder or resigil.
+    /// Order-independence is what keeps a reorder or a resigil of
+    /// [`freeze_exec_map`]'s two insertion loops from quietly widening
+    /// authority.
     #[test]
     fn insert_dir_meet_lets_deny_win_regardless_of_insertion_order() {
         let x = NormalizedPrefix::from_surface("/x");

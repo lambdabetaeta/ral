@@ -1,38 +1,27 @@
-//! A set of grant prefixes, deduplicated and unioned/intersected as a
-//! whole.
+//! Union and intersection over sets of grant prefixes.
 //!
-//! Each element is a [`NormalizedPrefix`], already carrying its
-//! `surface` and `resolved` forms — this module contributes the
-//! *set*-level operations over them, not the per-prefix normal form.
-//! [`meet_prefixes`] is the containment kernel [`PrefixSet::meet`] and
-//! every lattice meet in `types::capability` share, judging overlap on
-//! the `(namespace, resolved)` key
-//! ([`Namespace`](super::resolved::Namespace)); it is pure — no disk,
-//! no `Resolver`.
-//!
-//! [`PrefixSet::resolve`] is the one door here that still touches disk:
-//! the sandbox-projection fold holds a live [`Resolver`] and needs the
-//! resolved form of a prefix that may not be frozen yet (a bare
-//! exec-dir string, a `~`-headed fs prefix).  That is enforcement-
-//! adjacent rendering work, not composition, so it keeps consulting
-//! the world — see `dev/docs/260727_policy_kernel_purity.md` §0.
+//! [`meet_prefixes`] is the containment kernel [`PrefixSet::meet`] and every
+//! lattice meet in `types::capability` share; it keys overlap on the
+//! `(namespace, resolved)` form each [`NormalizedPrefix`] froze at mint
+//! time, so composing two policies is pure.  The disk is consulted only
+//! where a prefix is minted afresh — [`PrefixSet::resolve`] and
+//! [`PrefixSet::surface`], both of which re-freeze through
+//! [`NormalizedPrefix::from_surface`] — and that is rendering for the
+//! sandbox projection, not composition.
 
 use super::lex::path_within_str;
 use super::resolved::NormalizedPrefix;
 use super::resolver::Resolver;
 use crate::types::Meet;
 
-/// The one containment judgment: does `a` cover `b`?  Same namespace,
-/// `b`'s resolved form within `a`'s — never the surface spelling.
+/// The one containment judgment: does `a` cover `b`?  Same namespace, `b`'s
+/// resolved form within `a`'s — never the surface spelling.
 pub fn covers(a: &NormalizedPrefix, b: &NormalizedPrefix) -> bool {
     a.namespace() == b.namespace() && path_within_str(b.resolved(), a.resolved())
 }
 
-/// Intersect two prefix lists, keeping every element covered by some
-/// element of the other list — i.e. the deeper prefix of each
-/// overlapping pair survives.
-///
-/// The result is unsorted and may contain duplicates; callers dedup.
+/// Intersect two prefix lists: the deeper prefix of each overlapping pair
+/// survives.  Unsorted and possibly duplicated; callers dedup.
 pub fn meet_prefixes(a: &[NormalizedPrefix], b: &[NormalizedPrefix]) -> Vec<NormalizedPrefix> {
     let is_covered =
         |x: &NormalizedPrefix, others: &[NormalizedPrefix]| others.iter().any(|o| covers(o, x));
@@ -43,18 +32,16 @@ pub fn meet_prefixes(a: &[NormalizedPrefix], b: &[NormalizedPrefix]) -> Vec<Norm
         .collect()
 }
 
-/// A sorted, deduplicated set of [`NormalizedPrefix`]es.  `Default` is
-/// the empty set, the identity for [`union`](PrefixSet::union).
+/// A sorted, deduplicated set of [`NormalizedPrefix`]es.  `Default` is the
+/// empty set, the identity for [`union`](PrefixSet::union).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PrefixSet(Vec<NormalizedPrefix>);
 
 impl PrefixSet {
-    /// Resolve each prefix through `resolver` — sigil/`~` expansion,
-    /// `.`/`..` normalisation, then symlink-following — and mint the
-    /// pair.  Accepts either the grant-side [`NormalizedPrefix`]es or
-    /// the bare exec-dir strings; a `NormalizedPrefix` is idempotent
-    /// under the fold, so re-resolving one already frozen is a no-op
-    /// past the first step.
+    /// Freeze each prefix afresh against the live filesystem — sigil/`~`
+    /// expansion, `.`/`..` folding, then symlink-following.  Takes the
+    /// surface spelling, so an already-frozen [`NormalizedPrefix`] passes
+    /// through unchanged but for a re-resolution of its symlinks.
     pub fn resolve<S: AsRef<str>>(resolver: &Resolver, prefixes: &[S]) -> Self {
         let mut set: Vec<NormalizedPrefix> = prefixes
             .iter()
@@ -67,8 +54,8 @@ impl PrefixSet {
         Self(set)
     }
 
-    /// Accumulate two sets without intersecting — the union a deny
-    /// region wants, since denies are sticky across layers.
+    /// Accumulate without intersecting — what a deny region wants, since
+    /// denies are sticky across layers.
     pub fn union(mut self, other: Self) -> Self {
         self.0.extend(other.0);
         self.0.sort();
@@ -76,10 +63,9 @@ impl PrefixSet {
         self
     }
 
-    /// The surface forms, sorted and unique — what a consumer emits.
-    /// Re-minted through [`NormalizedPrefix::from_surface`] so the
-    /// OS-projection `FsPolicy` carries the same normal form the grant
-    /// side does.
+    /// The surface forms, sorted and unique, re-minted through
+    /// [`NormalizedPrefix::from_surface`] so the rendered `FsPolicy` carries
+    /// the same normal form the grant side does.
     pub fn surface(&self) -> Vec<NormalizedPrefix> {
         let mut out: Vec<String> = self.0.iter().map(|p| p.as_str().to_string()).collect();
         out.sort();
@@ -90,9 +76,7 @@ impl PrefixSet {
     }
 }
 
-/// Intersection: a prefix survives iff some prefix on each side covers
-/// it, and the deeper prefix of each overlapping pair is kept — see
-/// [`meet_prefixes`].
+/// Intersection, via [`meet_prefixes`].
 impl Meet for PrefixSet {
     fn meet(self, other: Self) -> Self {
         let mut out = meet_prefixes(&self.0, &other.0);
@@ -114,14 +98,13 @@ mod tests {
     use super::*;
     use crate::path::resolved::Namespace;
 
-    /// A synthetic prefix with an explicit `surface`/`resolved` pair —
-    /// the shape a real symlink would produce, without touching disk.
+    /// A divergent `surface`/`resolved` pair — what a symlink freezes to,
+    /// without touching disk.
     fn p(surface: &str, resolved: &str) -> NormalizedPrefix {
         NormalizedPrefix::for_test(surface, resolved, Namespace::Host)
     }
 
-    /// A prefix whose surface and resolved forms coincide — the ordinary
-    /// (no-symlink) case.
+    /// The ordinary, no-symlink case: both forms coincide.
     fn lit(s: &str) -> NormalizedPrefix {
         p(s, s)
     }
@@ -137,18 +120,15 @@ mod tests {
             .collect()
     }
 
-    /// The platform normal form of a path literal — `surface()` mints
-    /// its output through `NormalizedPrefix::from_surface`, whose
-    /// `fold_dots` kernel reconstructs each path with the host separator
-    /// (`/a/x` → `\a\x` on Windows).  Expected values pass through the
-    /// same kernel so the assertions hold on both Unix and Windows.
+    /// An expected literal folded through the same kernel `surface()` mints
+    /// with, which rebuilds paths with the host separator (`/a/x` → `\a\x`
+    /// on Windows), so the assertions hold on both hosts.
     fn np(s: &str) -> String {
         NormalizedPrefix::from_surface(s).into_string()
     }
 
     #[test]
     fn meet_keeps_the_deeper_prefix_of_each_overlapping_pair() {
-        // {/a,/b} ∩ {/a/x,/c} admits only /a/x (covered by /a on the left, itself on the right).
         assert_eq!(
             surface(&set(&[lit("/a"), lit("/b")]).meet(set(&[lit("/a/x"), lit("/c")]))),
             vec![np("/a/x")]
@@ -176,20 +156,12 @@ mod tests {
         );
     }
 
-    /// Security regression.  A deeper grant that *lexically* nests under
-    /// a shallower ceiling but resolves — through a symlink — outside it
-    /// must not survive the intersection.  If it did, the surviving
-    /// prefix would reach the OS sandbox and a spawned child could read
-    /// the link's target (`bwrap --bind` follows the source symlink;
-    /// Seatbelt matches lexically).  Judging overlap on the *resolved*
-    /// form is what closes this — the whole reason `NormalizedPrefix`
-    /// carries a resolved form distinct from its surface form.
-    ///
-    /// Over frozen (synthetic) data rather than a real symlink tree: the
-    /// meet's fail-closed property is what this test pins, and minting
-    /// is the only place that ever consulted a disk — see the module
-    /// doc.  `/a/link` lexically nests under the `/a` ceiling but is
-    /// given a `resolved` form (`/x`) that does not.
+    /// Security regression.  A grant that lexically nests under a shallower
+    /// ceiling but resolves outside it through a symlink must not survive
+    /// the meet: the survivor would reach the OS sandbox, where `bwrap
+    /// --bind` follows the source symlink and Seatbelt matches lexically, so
+    /// a spawned child could read the link's target.  Keying overlap on the
+    /// resolved form is what closes this.
     #[test]
     fn symlinked_grant_cannot_escape_a_shallower_ceiling() {
         let base = set(&[lit("/a")]);
@@ -200,10 +172,9 @@ mod tests {
         );
     }
 
-    /// Positive control: a deeper grant that genuinely nests inside the
-    /// ceiling survives.  The resolved-form meet *narrows*; it does not
-    /// blanket-deny — so the regression above is catching the symlink,
-    /// not just an always-empty intersection.
+    /// Positive control: the resolved-form meet narrows, it does not
+    /// blanket-deny, so the regression above is catching the symlink and not
+    /// an always-empty intersection.
     #[test]
     fn legitimate_nesting_survives_the_meet() {
         let base = set(&[lit("/a")]);
@@ -215,17 +186,10 @@ mod tests {
         );
     }
 
-    /// `PrefixSet::meet` folds over `path_within_str`
-    /// ([`super::lex::path_within`]), whose Windows-identity branch —
-    /// case-insensitive, separator-unifying comparison — only fires
-    /// under a genuine `cfg!(windows)` build (the real platform gate
-    /// lives at `path_within`, per its own doc comment).  So, like the
-    /// macOS-only alias tests above, this is gated on `cfg(windows)`
-    /// rather than run host-independently: a grant on `C:\work` must
-    /// still admit `c:/WORK/sub` (same drive, different case and
-    /// separator spelling) once folded through the composed meet, not
-    /// just through `starts_with_identity` in isolation (pinned
-    /// already in `lex`'s own tests).
+    /// Gated because the case- and separator-folding branch of
+    /// `path_within` fires only under a real `cfg!(windows)` build.  `lex`
+    /// pins that comparison in isolation; this pins it through the composed
+    /// meet.
     #[cfg(windows)]
     #[test]
     fn meet_admits_windows_case_and_separator_variant() {
@@ -236,10 +200,9 @@ mod tests {
         );
     }
 
-    /// Same property, through a `\\?\`-verbatim spelling — what
-    /// `std::fs::canonicalize` returns on Windows — so a grant
-    /// resolved through canonicalisation still meets a candidate that
-    /// was never canonicalized.
+    /// Same, through the `\\?\`-verbatim spelling `std::fs::canonicalize`
+    /// returns on Windows, so a canonicalised grant still meets a candidate
+    /// that was never canonicalised.
     #[cfg(windows)]
     #[test]
     fn meet_admits_windows_verbatim_prefix_variant() {

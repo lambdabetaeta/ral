@@ -1,22 +1,9 @@
-//! Two capture-policy primitives that the evaluator wraps around
-//! command dispatch when bytes need to be observed.
-//!
-//! Both follow the same swap-restore-drain dance: replace a Sink on
-//! `shell.io`, run the closure, restore the saved Sink, drain the
-//! buffer.  They differ on visibility:
-//!
-//!   * [`with_capture`] *replaces* `shell.io.stdout` with
-//!     `Sink::Buffer`, diverting final byte output from the terminal so
-//!     it can be bound as a value.
-//!   * [`with_audit_capture`] *tees* through `Sink::Tee(Buffer, real)`,
-//!     so bytes are observed AND stay visible.
-//!
-//! Reading the two side-by-side is the documentation: same shape,
-//! different policy.
+//! Byte-capture brackets: swap a Sink onto `shell.io`, run a closure, restore,
+//! drain the buffer.  [`with_capture`] *replaces* stdout, so the bytes become a
+//! value; [`with_audit_capture`] *tees*, so they are recorded and still seen.
 use crate::io::{Sink, new_buffer, take_buffer, tee_with_buffer};
 use crate::types::Shell;
-/// RAII guard for [`with_capture`]: swaps `shell.io.stdout` for an
-/// in-memory buffer sink and restores it on `Drop` — including on panic.
+/// Restores `shell.io.stdout` and `capture_outer` on `Drop`, panic included.
 struct CaptureScope<'a> {
     shell: &'a mut Shell,
     saved_stdout: Option<Sink>,
@@ -53,12 +40,9 @@ impl Drop for CaptureScope<'_> {
 
 /// Swap stdout for an in-memory buffer, run `f`, restore, return `(result, bytes)`.
 ///
-/// A surrounding `Seq` flushes non-final byte effects to the saved
-/// outer sink, so the drained buffer represents the final byte value
-/// at the binding boundary.
-/// This is the sole capture primitive.  `try` does not capture: control
-/// flow and byte capture are kept separate (§10.1).  Use `audit` to record
-/// per-command bytes into the execution tree.
+/// The displaced sink is left in `shell.io.capture_outer`, where `eval_seq`
+/// flushes a sequence's non-final bytes, so what drains here is the final value
+/// alone.  `try` deliberately captures nothing; `audit` uses the tee below.
 pub fn with_capture<R, F>(shell: &mut Shell, f: F) -> (R, Vec<u8>)
 where
     F: FnOnce(&mut Shell) -> R,
@@ -70,9 +54,7 @@ where
     (result, take_buffer(&buf))
 }
 
-/// RAII guard for [`with_audit_capture`]: tees stdout and stderr through
-/// in-memory buffers and restores the original sinks on `Drop`, panic or
-/// otherwise.
+/// Restores both sinks on `Drop`, panic included.
 struct AuditCaptureScope<'a> {
     shell: &'a mut Shell,
     saved_stdout: Option<Sink>,
@@ -102,35 +84,14 @@ impl Drop for AuditCaptureScope<'_> {
     }
 }
 
-/// Per-command byte capture for `audit { … }`: tee `shell.io.stdout` and
-/// `shell.io.stderr` through in-memory buffers while `f` runs, then restore.
+/// Tee `shell.io.stdout`/`stderr` into buffers while `f` runs, so `audit { … }`
+/// records a command's bytes without hiding them.  Installed by `frame_call` in
+/// `evaluator::audit` around each builtin and standalone external; direct-spawn
+/// pipeline stages never reach here, since their stdout is a kernel pipe to the
+/// next stage and `pipeline::collect` synthesises their node with no bytes.
 ///
-/// Returns `Ok((result, stdout_bytes, stderr_bytes))`.  The output stays
-/// visible — Tee writes to both the buffer and the original sink — which is
-/// the difference from [`with_capture`], whose buffer *replaces* the visible
-/// sink for let-binding semantics.  Restoration is RAII (see
-/// [`AuditCaptureScope`]); a panic from `f` still puts both sinks back.
-///
-/// Teeing requires a clone of the live stdout/stderr sinks; when
-/// [`Sink::try_clone`] fails (e.g. fd exhaustion on a `File`/`Pipe`
-/// destination), the error is returned as `Err` rather than substituting a
-/// different destination, so a command under a redirect or pipeline stage is
-/// never silently rerouted to the terminal.
-///
-/// When `shell.local.audit.captures_bytes()` is false this short-circuits:
-/// `f` runs against the unmodified sinks, the returned buffers are empty, and
-/// no clone or swap occurs.  The capture policy is the single control signal
-/// for "we are inside an `audit` scope"; the Sink shape itself is a
-/// consequence, not the predicate.
-///
-/// Installed once around each *command* dispatch (see
-/// [`crate::evaluator::eval_block`]) for builtins and standalone externals.  Pipeline
-/// stages don't pass through this path — they capture per-stage via
-/// [`crate::io::tee_with_buffer`] at stage launch, because their stdout
-/// is `Sink::Pipe(writer)` to the next stage and never touches
-/// `shell.io.stdout`.  Distinct from `Shell::audit_child` (a method
-/// on `Shell` that collects child `ExecNode`s into an
-/// [`AuditFragment`]).
+/// A failed [`Sink::try_clone`] returns `Err` rather than falling back to the
+/// terminal, so a command under a redirect is never silently rerouted.
 pub(crate) fn with_audit_capture<R, F>(
     shell: &mut Shell,
     f: F,

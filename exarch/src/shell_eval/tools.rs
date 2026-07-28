@@ -1,13 +1,9 @@
-//! `ral` — exarch's one tool.
+//! `ral` — the one tool the provider is offered — and the spawn plumbing
+//! behind `/branch` and the desk's `agent-start`.
 //!
-//! Every other harness affordance the model reaches — spawning a sub-agent,
-//! messaging one, scheduling a wakeup, replying — is an ordinary ral builtin
-//! (`shell_eval/builtins/harness.rs`) that speaks to the host through the
-//! enquiry desk ([`crate::fleet::desk`]). This module holds only what
-//! remains a genuine sibling of that split: `ral` itself (the one call that
-//! crosses the provider boundary; see [`ral`]) and the spawn plumbing every
-//! launch shares (`/branch`'s [`spawn_branch`] and the desk's own spawns,
-//! both built on [`agent::spawn_async`]).
+//! Everything else the model reaches — spawning a sub-agent, messaging one,
+//! scheduling a wakeup, replying — is an ordinary ral builtin in
+//! `shell_eval/builtins/harness.rs`, answered by [`crate::fleet::desk`].
 
 pub(crate) mod agent;
 pub(crate) mod ral;

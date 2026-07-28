@@ -1,25 +1,12 @@
-//! Core type definitions for the Hindley-Milner type checker.
+//! The type language of the Hindley-Milner checker.  Data only: unification
+//! lives in `unify`, inference in `infer`, rendering in `fmt`.
 //!
-//! This module is data-only: enums, structs, and simple constructors.
-//! No unification, inference, or display logic lives here.
-//!
-//! Types follow the CBPV (call-by-push-value) discipline:
-//!
-//! - Value types (`Ty`) classify data at rest: booleans, strings, lists,
-//!   row-polymorphic records, and suspended computations (thunks).
-//! - Computation types (`CompTy`) classify effectful processes: a command
-//!   that reads stdin, writes stdout, and produces a value; or a function
-//!   from a value type to a computation type.
-//! - Pipeline modes ([`PipeMode`]) classify the I/O channels connecting
-//!   pipeline stages: none or raw bytes.  The mode lattice itself lives in
-//!   [`crate::mode`]; this module re-exports it so the existing
-//!   `typecheck::{PipeMode, PipeSpec, …}` paths keep resolving.
+//! The discipline is call-by-push-value — `Ty` classifies data at rest, `CompTy`
+//! effectful processes, and the two meet at `Thunk` (CBPV's `U`) and `Return`
+//! (`F`).  The pipeline-mode lattice is [`crate::mode`]'s, re-exported here so
+//! that `typecheck`'s surface carries it.
 
 pub use crate::mode::{ModeVar, PipeMode, PipeSpec};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Type variables
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Unification variable for value types.
 #[derive(
@@ -27,7 +14,7 @@ pub use crate::mode::{ModeVar, PipeMode, PipeSpec};
 )]
 pub struct TyVar(pub u32);
 
-/// Unification variable for row types (record tails).
+/// Unification variable for row tails, in records and in variants alike.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -39,19 +26,8 @@ pub struct RowVar(pub u32);
 )]
 pub struct CompTyVar(pub u32);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Value types  (A in CBPV)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Value types (A in CBPV).
-///
-/// Ground types (`Unit`, `Bool`, `Int`, `Float`, `String`, `Bytes`) are leaves.
-/// Compound types are `List`, `Map` (homogeneous, string-keyed), `Record`
-/// (row-polymorphic), `Variant` (row-polymorphic tagged sum, dual to
-/// `Record`), `Thunk` (suspended computation), and `Handle` (a running
-/// concurrent block parameterized by the type its body returns — `await` of a
-/// `Handle α` resolves to a record with a `value: α` field).  `Var` is a unification
-/// variable, eliminated during inference.
+/// Value types (`A` in CBPV).  `Var` is a unification variable, gone by the
+/// end of inference.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Ty {
     Unit,
@@ -61,27 +37,24 @@ pub enum Ty {
     Float,
     String,
     List(Box<Self>),
-    Map(Box<Self>), // String-keyed; values are homogeneous
-    Record(Row),    // row-typed record {l₁:A₁, …, lₙ:Aₙ | ρ}
-    /// Tagged sum: a value carrying one of `{`l₁: A₁, …, `lₙ: Aₙ | ρ}`.
-    /// Dual to `Record`; shares the `Row` data structure.  By convention
-    /// the labels in a `Variant` row are *tag* labels (begin with `` ` ``),
-    /// while a `Record` row's labels are *bare* (no leading backtick).  The
-    /// two alphabets do not unify.
+    Map(Box<Self>), // String-keyed
+    Record(Row),
+    /// Tagged sum, dual to `Record` and over the same `Row`.  Its labels carry
+    /// the leading `` ` `` that `syntax::tag` stamps on a tag, a `Record`'s do
+    /// not, and `Unifier::unify_row` refuses to unify across the two alphabets.
     Variant(Row),
-    Thunk(Box<CompTy>), // U B — suspended computation
-    Handle(Box<Self>),  // Handle α — await produces a record with `value: α`
+    Thunk(Box<CompTy>),
+    /// A running concurrent block; `await` of a `Handle α` gives a record with
+    /// a `value: α` field.
+    Handle(Box<Self>),
     Var(TyVar),
 }
 
-/// A row type: a finite sequence of labeled types with an optional tail.
+/// A finite sequence of labelled types, closed by `Empty` or left open by a
+/// tail variable.
 ///
-/// `Empty`          — closed row: no more fields permitted.
-/// `Extend(l, A, ρ)` — field l has type A; ρ is the rest of the row.
-/// `Var(ρ)`         — open tail: unknown remaining fields (unification variable).
-///
-/// Row unification uses the Rémy (1989) rewrite rule: two `Extend` nodes with
-/// different labels are swapped past each other into a shared fresh tail variable.
+/// `Unifier::unify_row` follows the Rémy (1989) rewrite: two `Extend` nodes
+/// with different labels are swapped past each other into a shared fresh tail.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Row {
     Empty,
@@ -89,21 +62,12 @@ pub enum Row {
     Var(RowVar),
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Computation types  (B in CBPV)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Computation types (B in CBPV).
-///
-/// `Return(spec, A)` — `F[I,O] A`: an effectful command with pipeline
-/// specification `spec` that produces a value of type `A`.
-/// `Fun(A, B)` — `A -> B`: a function taking a value and yielding a
-/// computation.  `Var` is a unification variable.
+/// Computation types (`B` in CBPV).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CompTy {
-    /// `F[I,O] A` — effectful command with pipeline modes and a return type.
+    /// `F[I,O] A` — an effectful command with pipeline modes, returning `A`.
     Return(PipeSpec, Box<Ty>),
-    /// `A -> B` — function from a value type to a computation type.
+    /// `A -> B`.
     Fun(Box<Ty>, Box<Self>),
     /// Unification variable.
     Var(CompTyVar),

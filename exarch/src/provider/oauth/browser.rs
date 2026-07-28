@@ -1,6 +1,5 @@
-//! Browser login: the authorize page is opened in the user's browser and
-//! redirects to a loopback HTTP listener that captures the authorization
-//! code, which is then exchanged for tokens.
+//! Browser login: the authorize page opens in the user's browser and redirects
+//! to a loopback listener here, whose captured code is exchanged for tokens.
 
 use super::{CLIENT_ID, ISSUER, LoginPhase, ORIGINATOR, SCOPE};
 use std::io::BufRead;
@@ -11,8 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-/// The loopback callback wait is bounded so an abandoned sign-in cannot hang
-/// the CLI forever; it mirrors the device flow's authorization-code expiry.
+/// Bounds an abandoned sign-in's wait; in step with `device`'s poll deadline.
 const MAX_WAIT: Duration = Duration::from_mins(15);
 
 /// Drive the browser flow to completion and return the issued tokens.
@@ -35,8 +33,7 @@ pub(super) async fn run(
     let opened = open_browser(&url);
     on_phase(LoginPhase::AwaitingBrowser { url, opened });
 
-    // `accept_callback` runs under `spawn_blocking`, which requires `'static`;
-    // the shared flag is cloned in (the caller keeps the original to trip it).
+    // Cloned because `spawn_blocking` needs `'static`; the caller keeps the flag it trips.
     let expected_state = state.clone();
     let cancel = Arc::clone(cancel);
     let code =
@@ -48,15 +45,12 @@ pub(super) async fn run(
     super::exchange_code(client, &redirect_uri, &code, &verifier).await
 }
 
-/// Bind the loopback callback listener, trying the primary port first and
-/// the fallback second.
 fn bind_listener() -> Result<TcpListener, String> {
     TcpListener::bind("127.0.0.1:1455")
         .or_else(|_| TcpListener::bind("127.0.0.1:1457"))
         .map_err(|e| format!("could not bind callback listener on 127.0.0.1:1455 or :1457: {e}"))
 }
 
-/// Build the authorize URL with all query parameters percent-encoded.
 fn authorize_url(redirect_uri: &str, challenge: &str, state: &str) -> Result<String, String> {
     let mut url = reqwest::Url::parse(&format!("{ISSUER}/oauth/authorize"))
         .map_err(|e| format!("could not build authorize URL: {e}"))?;
@@ -75,10 +69,8 @@ fn authorize_url(redirect_uri: &str, challenge: &str, state: &str) -> Result<Str
     Ok(url.into())
 }
 
-/// Open the authorize URL in the platform browser, returning whether it
-/// launched. On failure the URL is not printed here: the phase payload
-/// carries it either way, so the CLI adapter and the TUI overlay each show
-/// their own manual-open fallback from it.
+/// Open the authorize URL, returning whether it launched. The launch error is
+/// dropped: both renderers of `LoginPhase::AwaitingBrowser` print the URL instead.
 fn open_browser(url: &str) -> bool {
     launch_browser(url).is_ok()
 }
@@ -116,8 +108,7 @@ fn launch_browser(url: &str) -> Result<(), String> {
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
     let file = windows_shell_target(url);
-    // Avoid `cmd /C start`: cmd treats '&' in the OAuth query as command
-    // separators, truncating the URL before OpenAI receives the parameters.
+    // Not `cmd /C start`: cmd reads the query's '&' as a separator and truncates the URL.
     let status = unsafe {
         ShellExecuteW(
             ptr::null_mut(),
@@ -152,8 +143,6 @@ fn launch_browser(_url: &str) -> Result<(), String> {
     Err("opening a browser is not supported on this platform".to_string())
 }
 
-/// Accept one connection, parse the authorization code from the callback
-/// request, reply with a small confirmation page, and return the code.
 fn accept_callback(
     listener: &TcpListener,
     expected_state: &str,
@@ -185,8 +174,7 @@ fn accept_callback(
         write_page(&mut stream, "Sign-in failed. You can close this tab.");
         return Err(format!("sign-in failed: {error}"));
     }
-    // `state` is the CSRF guard on this public loopback listener: only a
-    // callback carrying the value minted for this flow is accepted.
+    // `state` guards an open loopback port: only this flow's minted value passes.
     if state.as_deref() != Some(expected_state) {
         write_page(&mut stream, "Sign-in failed. You can close this tab.");
         return Err("state mismatch".to_string());
@@ -197,11 +185,9 @@ fn accept_callback(
     Ok(code)
 }
 
-/// Accept one connection, giving up after `timeout` so an abandoned sign-in
-/// cannot block the CLI forever, or `cancel` so an abandoned *overlay* frees
-/// the listener within one 100 ms poll. Polls the listener in nonblocking
-/// mode rather than parking the spawn-blocking thread on `accept` with no way
-/// to time out, then hands back a blocking stream for the read/write below.
+/// Accept one connection, giving up on `timeout` or `cancel`; a blocking
+/// `accept` could honour neither, hence the poll. The stream handed back
+/// blocks again, for the read and write that follow.
 fn accept_within(
     listener: &TcpListener,
     timeout: Duration,
@@ -236,9 +222,8 @@ fn accept_within(
     }
 }
 
-/// Read the first request line — the only line that carries the callback's
-/// query. Bytes the reader buffers past it are discarded with it, which is
-/// fine: the request body is not needed before the response is written.
+/// The request line carries the callback's query; whatever the reader buffers
+/// past it dies with the reader, the rest of the request being of no interest.
 fn read_request_line(stream: &mut TcpStream) -> Result<String, String> {
     let mut line = String::new();
     std::io::BufReader::new(stream)
@@ -247,7 +232,6 @@ fn read_request_line(stream: &mut TcpStream) -> Result<String, String> {
     Ok(line.trim_end().to_string())
 }
 
-/// Write a minimal HTTP 200 response with an HTML body.
 fn write_page(stream: &mut TcpStream, message: &str) {
     let body = format!("<html><body>{message}</body></html>");
     let response = format!(

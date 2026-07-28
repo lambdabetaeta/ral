@@ -1,26 +1,14 @@
 //! Binary pinning and re-exec for the per-command OS sandbox.
 //!
-//! At [`crate::sandbox::early_init`] we capture an immutable handle on
-//! our own executable so a per-command sandbox launch can re-exec the
-//! same binary, immune to on-disk swaps (`cargo install` mid-session,
-//! package upgrades) that would re-exec a foreign build.
+//! `sandbox::early_init` pins our own executable, so a per-command sandbox
+//! launch re-execs the build we booted from and not whatever a mid-session
+//! `cargo install` left at the path.  Linux pins by fd and re-execs
+//! `/proc/self/fd/<N>`; macOS cannot — `execve` is refused on a devfs entry,
+//! which carries no X bit — so it re-stats `(dev, ino)` before each spawn,
+//! catching the inode flip an atomic-rename swap leaves behind; Windows,
+//! confining at the parent's spawn, has no self re-exec to guard.
 //!
-//! ## Platform strategies
-//!
-//! - **Linux**: open the file as `OwnedFd` (no `O_CLOEXEC`) and re-exec
-//!   via `/proc/self/fd/<N>`.  The kernel resolves through our fd table to
-//!   the original inode; protection is total.
-//! - **macOS / other Unix**: the kernel refuses `execve("/dev/fd/<N>", …)`
-//!   (devfs entries lack the X bit), so we snapshot `(dev, ino)` at boot
-//!   and verify immediately before each spawn.  An atomic-rename swap
-//!   (the cargo-install pattern) flips the inode, which we catch.
-//! - **Windows**: no swap guard. Confinement is the `AppContainer` token the
-//!   *parent* applies to `CreateProcessW` (`sandbox::windows::session`),
-//!   not a re-exec of this binary, so there is no parent-side self re-exec
-//!   for a swap check to protect (`Pin::Unguarded` below).
-//!
-//! `argv[0]` is the resolved on-disk path so the child sees a recognisable
-//! name regardless of exec mechanism.
+//! `argv[0]` is always the on-disk path, whichever mechanism carried it.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -32,23 +20,18 @@ use crate::types::Error;
 
 /// Our own executable, pinned at `early_init` time.
 pub(super) struct SandboxSelf {
-    /// Platform anchor binding `exec_path` to the boot inode.
     #[allow(dead_code)]
     pin: Pin,
-    /// Exec target passed to `Command::new` on Unix, and — on Windows —
-    /// the bundled-tool self-reexec image the `AppContainer` is granted RO
-    /// access to (see [`self_exec_path`]).
+    /// `/proc/self/fd/<N>` on Linux, the on-disk path everywhere else.
     exec_path: PathBuf,
-    /// `argv[0]` for the spawned child.  Read on Unix only.
     #[cfg_attr(windows, allow(dead_code))]
     arg0: PathBuf,
 }
 
 #[cfg(unix)]
 impl SandboxSelf {
-    /// Build a re-exec `Command` for this pinned binary: exec the pinned
-    /// path with the on-disk name as `argv[0]` so the child sees a
-    /// recognisable name regardless of the exec mechanism.
+    /// Re-exec the pinned binary under its on-disk name, which `exec_path`
+    /// on Linux is not.
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:silent:self-reexec] Builds the ral-re-exec Command for sandbox helper subprocesses (pipeline helper, bundled-tool multicall). Infrastructure spawn, not a model exec image — the model's exec surfaces at command::run, not here."
@@ -61,13 +44,9 @@ impl SandboxSelf {
     }
 }
 
-/// The pinned self `argv[0]` (on-disk path), or `current_exe()` when the
-/// binary was not pinned.  Used by the Linux bundled-tool re-exec, which
-/// hands bwrap the on-disk path (a `/proc/self/fd` target would neither
-/// bind nor resolve in bwrap's fresh `/proc`).
-///
-/// # Errors
-/// Returns `Err` if the binary was not pinned and `current_exe()` fails.
+/// The pinned `argv[0]`, or the live `current_exe()`.  The bundled-tool
+/// re-exec hands this to bwrap, which mounts a fresh `/proc` in which a
+/// `/proc/self/fd` target would neither bind nor resolve.
 #[cfg(target_os = "linux")]
 pub(super) fn self_arg0() -> std::io::Result<PathBuf> {
     match SANDBOX_SELF.get() {
@@ -76,9 +55,8 @@ pub(super) fn self_arg0() -> std::io::Result<PathBuf> {
     }
 }
 
-/// The pinned self exec path as a string, for the macOS Seatbelt
-/// `(literal …)` self-admit clause.  `None` when the binary was not
-/// pinned (sandbox-incapable).
+/// The pinned exec path for the Seatbelt `(literal …)` self-admit clause
+/// that lets a bundled-tool re-exec run under a restricted profile.
 #[cfg(target_os = "macos")]
 pub(super) fn self_exec_path_string() -> Option<String> {
     SANDBOX_SELF
@@ -86,11 +64,9 @@ pub(super) fn self_exec_path_string() -> Option<String> {
         .map(|s| s.exec_path.to_string_lossy().into_owned())
 }
 
-/// The pinned self exec path (Windows), for granting the `AppContainer` read
-/// access to the bundled-tool self-reexec image (`ral.exe`).  Falls back to
-/// the live `current_exe` when the binary was not pinned; `None` only if that
-/// also fails, in which case the image is left ungranted and its readability
-/// rests on the fs read projection.
+/// The exec path `windows::session::confine` stamps readable for the
+/// `AppContainer`, so the bundled-tool re-exec can load its own image.
+/// `None` leaves it ungranted, readable only if the fs projection covers it.
 #[cfg(windows)]
 pub(super) fn self_exec_path() -> Option<PathBuf> {
     if let Some(s) = SANDBOX_SELF.get() {
@@ -99,24 +75,16 @@ pub(super) fn self_exec_path() -> Option<PathBuf> {
     std::env::current_exe().ok()
 }
 
-/// How we keep `exec_path` bound to the binary we registered.
+/// How `exec_path` stays bound to the binary we registered.
 enum Pin {
-    /// Fd retained (never dropped) so it stays open for the process
-    /// lifetime; `/proc/self/fd/<N>` then resolves to the boot inode
-    /// regardless of what is at the on-disk path now.
+    /// Never dropped, so `/proc/self/fd/<N>` keeps naming the boot inode.
     #[cfg(target_os = "linux")]
     Fd(#[allow(dead_code)] std::os::fd::OwnedFd),
-    /// macOS / other-Unix fallback: snapshot checked before each spawn.
+    /// Compared against a fresh stat before each spawn.
     #[cfg(all(unix, not(target_os = "linux")))]
     Stat { dev: u64, ino: u64 },
-    /// Windows carries no swap guard: confinement applies the `AppContainer`
-    /// token to the parent's spawn rather than re-execing ral, so there is
-    /// no parent-side self re-exec for a swap check to protect (the
-    /// bundled-tool multicall uses the live `current_exe` and, being
-    /// short-lived, does not guard swaps — see
-    /// `runtime::pipeline::helper::self_reexec`). This variant carries no
-    /// payload; it exists only so `register_sandbox_self` has the same
-    /// `Option<(Pin, PathBuf)>` shape on every platform.
+    /// Nothing to guard where confinement happens at the parent's spawn; the
+    /// variant only gives `build_pin` one shape on every platform.
     #[cfg(windows)]
     Unguarded,
 }
@@ -125,8 +93,9 @@ pub(super) static SANDBOX_SELF: OnceLock<SandboxSelf> = OnceLock::new();
 
 /// Pin our own executable for the rest of the process's life.
 ///
-/// Idempotent; failures are silent — sandbox-capable becomes false and
-/// restrictive grants fall through to in-process evaluation.
+/// Idempotent, and silent on failure: unpinned we still sandbox, since
+/// `super::self_command` falls back to the live `current_exe`, but we lose
+/// swap protection and, on macOS, the Seatbelt self-admit clause.
 pub(super) fn register_sandbox_self() {
     if SANDBOX_SELF.get().is_some() {
         return;
@@ -144,9 +113,8 @@ pub(super) fn register_sandbox_self() {
     });
 }
 
-/// Open `arg0` and produce the `(pin, exec_path)` pair for binary-swap
-/// protection.  Returns `None` on any failure; the caller treats that as
-/// "binary not sandbox-capable."
+/// Open `arg0` and produce the `(pin, exec_path)` pair; `None` on any
+/// failure, which the caller reads as "leave this binary unpinned".
 #[cfg(target_os = "linux")]
 #[allow(
     clippy::disallowed_methods,
@@ -156,8 +124,8 @@ fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     use std::os::fd::{AsRawFd, OwnedFd};
 
     let exe: OwnedFd = std::fs::File::open(arg0).ok()?.into();
-    // Clear FD_CLOEXEC so the fd survives execve into the sandbox child,
-    // where `/proc/self/fd/<N>` needs to resolve.
+    // Rust opens with FD_CLOEXEC set; clear it, or the fd dies in the
+    // execve and `/proc/self/fd/<N>` has nothing to resolve to.
     let raw = exe.as_raw_fd();
     let _ = rustix::io::fcntl_setfd(&exe, rustix::io::FdFlags::empty());
     Some((Pin::Fd(exe), crate::path::proc_fd_path(raw)))
@@ -179,11 +147,10 @@ fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     Some((pin, arg0.to_path_buf()))
 }
 
-/// Windows pinning cannot fail because it does nothing: there is no fd to
-/// open and no inode to snapshot, only the path to carry (see
-/// [`Pin::Unguarded`]).  The `Option` is the shape [`register_sandbox_self`]
-/// shares with the Unix `build_pin`s, where opening or stat-ing the binary
-/// genuinely can fail; dropping it here would fork the one caller in two.
+/// Windows pinning cannot fail because it does nothing: no fd to open, no
+/// inode to snapshot, only the path to carry.  The `Option` is the shape
+/// `register_sandbox_self` shares with the Unix arms, which can genuinely
+/// fail.
 #[cfg(windows)]
 #[allow(
     clippy::unnecessary_wraps,
@@ -193,17 +160,13 @@ fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     Some((Pin::Unguarded, arg0.to_path_buf()))
 }
 
-/// Refuse to spawn if our executable on disk has been swapped since
-/// registration.  Called by the per-command self re-exec before spawning
-/// `--sandbox-projection` so a mid-session binary swap is caught rather
-/// than silently re-execing a foreign build.
+/// Refuse to spawn a foreign build: `sandbox::launch` calls this before
+/// every per-command `--sandbox-projection` re-exec, to catch an executable
+/// swapped on disk since registration.
 ///
-/// macOS-only: it is the lone platform with a parent-side per-command self
-/// re-exec (Seatbelt entry).  Linux re-execs through the fd-pinned
-/// `/proc/self/fd/N` so a swap is already irrelevant and bwrap is launched
-/// directly, never via this guard; Windows has no parent-side self re-exec.
-/// macOS pins via `(dev, ino)` ([`Pin::Stat`], the only variant compiled
-/// here), so the guard re-stats and compares.
+/// macOS-only, the lone platform with a parent-side self re-exec — Linux
+/// goes through the fd-pinned path, out of a swap's reach, and Windows never
+/// re-execs itself — so `Pin::Stat` is the only variant compiled here.
 #[cfg(target_os = "macos")]
 #[allow(
     clippy::disallowed_methods,
@@ -238,15 +201,8 @@ pub(super) fn verify_unswapped(s: &SandboxSelf) -> Result<(), Error> {
 // ── Process sandbox entry ────────────────────────────────────────────────
 
 /// Enter the OS sandbox for this process if a policy was supplied.
-/// Returns `Some(code)` when the process should exit immediately (Linux
-/// bwrap respawn path), `None` to continue normally.
-///
-/// On Windows there is no child re-entry: confinement is not something the
-/// child enters, it is the `LowBox` token the *parent* applies at spawn time
-/// via `Launch::security_capabilities` (see `sandbox::windows::session`). So
-/// `--sandbox-projection` is never passed to a Windows child by any
-/// legitimate caller — the separate `#[cfg(windows)]` arm below treats
-/// seeing one anyway as fail-closed, not a no-op.
+/// `Some(code)` means exit with it now: on Linux the respawn under bwrap has
+/// already run the real work in a child.
 #[cfg(unix)]
 pub(super) fn maybe_enter_process_sandbox(
     args_without_policy: &[String],
@@ -263,14 +219,10 @@ pub(super) fn maybe_enter_process_sandbox(
     _args_without_policy: &[String],
     policy: Option<&crate::types::SandboxProjection>,
 ) -> Result<Option<u8>, String> {
-    // The parent already confines this child's spawn with the AppContainer
-    // token before `CreateProcessW` runs, so there is no sandbox for the
-    // child itself to enter — every legitimate Windows caller
-    // (`sandboxed_command`'s windows arm, `launch.rs`) therefore never emits
-    // `--sandbox-projection`. Seeing one here means a caller regressed to
-    // the Unix shape or the flag was forged; fail closed rather than
-    // silently running the child unconfined, matching the pre-W1 stub's
-    // refusal on this same path.
+    // Confinement is the `AppContainer` token the parent stages via
+    // `Launch::security_capabilities` before `CreateProcessW`, so a child has
+    // nothing to enter and `sandbox::launch` never emits the flag.  Seeing
+    // one means a caller regressed to the Unix shape, or forged it.
     if policy.is_some() {
         return Err(
             "ral: --sandbox-projection is not valid on Windows (confinement is applied by the \

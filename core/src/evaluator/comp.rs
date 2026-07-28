@@ -1,15 +1,10 @@
-//! Computation-layer evaluator for the CBPV IR.
+//! Computation-layer evaluator for the CBPV IR: [`eval_comp`] dispatches on
+//! `CompKind`, one helper per operational rule.
 //!
-//! [`eval_comp`] dispatches on the `CompKind` of a computation;
-//! the per-rule helpers below implement each operational arm.
-//! [`with_scope`] brackets a body in a fresh lexical scope. Its
-//! callers are the selected `if`/`else` branch, each `?`-chain arm,
-//! the lambda call frame ([`apply_lambda_frame`](super::trampoline)),
-//! and the spawned/watch workers (`builtins::concurrency`).
-//!
-//! Tail-call signals escape via [`Raw<Value>`]; the public surface in
-//! the module root absorbs them through the trampoline before they
-//! reach user-visible callers.
+//! Tail position is granted, never ambient: an eliminator forwards `tail` to
+//! its one final sub-computation and hands [`Tail::No`] to the rest. So a
+//! `TailCall` escapes through [`Raw`], and an absorption point above
+//! ([`super::absorb_tail`]) must land it before a settled caller sees it.
 
 use crate::io::strip_trailing_newline;
 use crate::ir::{Comp, CompKind, IrPattern, ScopeOp, Val};
@@ -28,26 +23,10 @@ use crate::runtime::pipeline;
 
 /// Evaluates a computation term of the CBPV IR.
 ///
-/// Each `CompKind` variant is reduced by its operational rule:
-/// `Return` produces a value, `Force` eliminates a thunk, `App` and
-/// `Exec` enter call dispatch, `Bind` sequences a computation with a
-/// continuation under a value binding, and so on.
-///
 /// An error unwinding through this node picks up `comp.span` unless it
-/// already carries one, so a runtime error names the innermost node it
-/// broke on.
-///
-/// `tail` is the tail position of this computation — whether it sits
-/// under a trivial continuation. It is *granted*, never ambient: an
-/// eliminator forwards `tail` to a single final sub-computation (the
-/// selected `if`/`case` arm, the last chain arm, the final pipeline
-/// stage, a bind's continuation) and passes [`Tail::No`] to every
-/// other. Only the application and `case` eliminators consume
-/// [`Tail::Yes`], emitting a [`TailCall`] for the trampoline.
-///
-/// A [`TailCall`] may therefore escape via the [`Raw`] return type;
-/// the caller (or [`super::evaluate`]) must land it through the
-/// trampoline. The `pub(crate)` visibility matches `Raw`'s privacy.
+/// already carries one, so a runtime error names the innermost node it broke
+/// on. Of the eliminators, only application and `case` consume
+/// [`Tail::Yes`], emitting a `TailCall`.
 pub(crate) fn eval_comp(
     comp: &Arc<Comp>,
     mooring: &Mooring,
@@ -57,16 +36,10 @@ pub(crate) fn eval_comp(
     let result = match &comp.item {
         CompKind::Return(val) => eval_return(val, shell),
 
-        // CBPV: a bare `Lam` in computation position is the
-        // function-typed computation `λx. M`, which is stuck — no
-        // operational step applies until it appears as the head of
-        // an application. Well-typed code never reaches this arm:
-        // closures are born via `eval_val(Val::Thunk(Lam))` and
-        // consumed through `App` / `Force` dispatch. Reaching it
-        // indicates that the typechecker missed a function-typed
-        // thunk in non-application position; we surface a clean
-        // dynamic error so the command fails without crashing the
-        // REPL.
+        // A bare `Lam` is stuck: no step applies until it heads an
+        // application. Well-typed code never lands here — closures are born
+        // as `Val::Thunk(Lam)`, and a curried inner `Lam` is closed by
+        // `close_lam` in the trampoline rather than routed through this arm.
         CompKind::Lam { .. } => Err(shell
             .err_hint(
                 "tried to evaluate a bare lambda in computation position — a function value must be \
@@ -104,10 +77,8 @@ pub(crate) fn eval_comp(
             shell,
         ),
 
-        // `App` and `Exec` dispatch through `invoke` — the same call
-        // evaluator that pipelines use, here applied at the empty
-        // upstream.  The call sits in this computation's tail position,
-        // so `tail` flows through to the application eliminator.
+        // `invoke` is the call evaluator pipelines use; a pipeline stage
+        // enters it with the upstream value, a bare call with none.
         CompKind::App { .. } | CompKind::Exec(_) => call::invoke(comp, None, tail, mooring, shell),
 
         CompKind::Pipeline { stages, wires, .. } => {
@@ -125,15 +96,13 @@ pub(crate) fn eval_comp(
         }
 
         CompKind::Scope(op) => match op {
-            // `Redirect` installs fds around `body` and absorbs any
-            // tail call escaping the frame; it is dispatched through
-            // `invoke` so it shares the trampoline-absorption shape.
-            // The body sits in the redirect's tail position.
+            // `invoke` runs the body inside the fd frame and absorbs its
+            // tail call there: a tail callee that escaped would land after
+            // restoration, writing to the parent instead of the target.
             ScopeOp::Redirect { .. } => call::invoke(comp, None, tail, mooring, shell),
-            // The scope brackets apply their body thunk through the
-            // trampoline (`apply`), which absorbs any terminal tail
-            // call inside the `with_*` frame, so the body's tail-ness
-            // never escapes the bracket — these arms grant nothing.
+            // These brackets apply their body thunk through the trampoline,
+            // which absorbs the body's tail call inside the frame, so they
+            // have no tail position to grant.
             ScopeOp::Within { opts, body } => {
                 scope::eval_within(opts, body, comp.span, mooring, shell)
             }
@@ -160,55 +129,37 @@ pub(crate) fn eval_comp(
 
 // ── Per-rule helpers ─────────────────────────────────────────────────────
 
-/// `return V` — produce the value of `V`, updating `last_status` from
-/// the result via [`set_status_from_value`].
 fn eval_return(val: &Val, shell: &mut Shell) -> Raw<Value> {
     let v = eval_val(val, shell)?;
     set_status_from_value(&v, shell);
     Ok(v)
 }
 
-/// Update `last_status` from a Bool result (true → 0, false → 1),
-/// mirroring POSIX predicates like `test` that encode their result in
-/// the exit code. A non-Bool result leaves `last_status` untouched.
-/// Shared by [`eval_return`], [`step_force`], and [`eval_bind`] — the
-/// three sites where a computation's result becomes the visible
-/// status.
+/// A Bool result becomes `last_status` (true → 0), mirroring POSIX
+/// predicates like `test`; any other value leaves the status untouched.
 fn set_status_from_value(v: &Value, shell: &mut Shell) {
     if let Value::Bool(b) = v {
         shell.set_status_from_bool(*b);
     }
 }
 
-/// `letrec { x1 = λ…; …; xn = λ… } [in slot]` — simultaneous fixed
-/// point for mutually recursive functions.
-///
-/// Each binding is first installed as a self-referential thunk that
-/// re-enters `LetRec` with its own slot index; this is the CBPV
-/// fixpoint encoding, since mutual recursion requires the fixpoint
-/// to close over thunked references to its siblings. With
-/// `slot = None`, every RHS is resolved in the recursive
-/// environment, the temporary scope is popped, the resulting
-/// lambdas are reinstalled in the caller's scope, and `Unit` is
-/// returned. With `slot = Some(i)`, only binding `i` is resolved
-/// and its lambda returned — the per-slot re-entry that lets one
-/// sibling call another.
+/// Simultaneous fixed point for mutual recursion: each binding is installed
+/// as a thunk that re-enters `LetRec` at its own slot, so a sibling call
+/// resolves through this same rule. `slot = None` resolves the whole group
+/// into the caller's scope; `Some(i)` is that re-entry, yielding one lambda.
 fn eval_letrec(
     slot: Option<usize>,
     bindings: &Arc<Vec<(String, Val)>>,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    // A `slot = None` letrec installs the group into the caller's scope;
-    // guard against shadowing a PATH command before the fixpoint frame is
-    // pushed.  The per-slot re-entry (`Some`) reinstalls nothing.
+    // Only the group install reaches the caller's scope, where a name could
+    // shadow a PATH command; the per-slot re-entry installs nothing there.
     if slot.is_none() {
         for (name, _) in bindings.iter() {
             super::pattern::check_path_shadow(name, shell)?;
         }
     }
     let snap = shell.snapshot();
-    // Fixpoint encoding: install each binding as a self-referential
-    // thunk.
     let install = |shell: &mut Shell| {
         for (i, (name, _rhs)) in bindings.iter().enumerate() {
             shell.install_scope_binding(
@@ -253,17 +204,13 @@ fn eval_letrec(
     }
 }
 
-/// `force V` — eliminate a thunk.
-///
-/// A [`Value::Block`] is run through the evaluator; a
-/// [`Value::Lambda`] is itself a value (the function), so it is
-/// returned unchanged — the trampoline applies it when the call site
-/// supplies arguments. Other runtime types are a type error.
+/// `force V` — a [`Value::Block`] runs through the evaluator; a
+/// [`Value::Lambda`] is already a value, returned unchanged for the
+/// trampoline to apply once a call site supplies arguments.
 pub(crate) fn step_force(val: &Val, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
     let v = eval_val(val, shell)?;
     let result = match v {
-        // `!{ … }` eliminates a thunk to its value, which the caller
-        // threads onward — a non-trivial continuation, so `Tail::No`.
+        // Not a tail position: the caller threads this value onward.
         Value::Block { body, captured } => {
             super::eval_block(&body, &captured, Tail::No, mooring, shell)?
         }
@@ -282,10 +229,8 @@ pub(crate) fn step_force(val: &Val, mooring: &Mooring, shell: &mut Shell) -> Raw
     Ok(result)
 }
 
-/// String interpolation — fold each piece into a single string.
-///
-/// Effectful only because variable lookups inside pieces can fail;
-/// the join itself is pure concatenation via [`interpolate_piece`].
+/// Computation-typed only because a variable lookup inside a piece can
+/// fail; the join itself is pure concatenation.
 fn eval_interpolation(parts: &[Val], shell: &mut Shell) -> Raw<Value> {
     parts
         .iter()
@@ -297,11 +242,8 @@ fn eval_interpolation(parts: &[Val], shell: &mut Shell) -> Raw<Value> {
         .map_err(Into::into)
 }
 
-/// `V[k1][k2]…` — eliminate a collection value at a sequence of
-/// keys.
-///
-/// Computation-typed only because indexing can fail (key not found,
-/// out of bounds); the target and keys are themselves pure values.
+/// `V[k1][k2]…` — computation-typed only because indexing can fail (key
+/// not found, out of bounds); target and keys are pure values.
 fn eval_index(target: &Val, keys: &[Spanned<Val>], shell: &mut Shell) -> Raw<Value> {
     let mut v = eval_val(target, shell)?;
     for key in keys {
@@ -310,12 +252,9 @@ fn eval_index(target: &Val, keys: &[Spanned<Val>], shell: &mut Shell) -> Raw<Val
     Ok(v)
 }
 
-/// Right-hand side of a `Bind`: evaluated under a non-trivial
-/// continuation ([`Tail::No`]), since its value is bound and the
-/// continuation `rest` runs after it.  Captures stdout when the RHS is
-/// byte-mode so a command that writes bytes and returns `Unit` binds the
-/// decoded bytes.  Commands with a proper return value bind that value;
-/// non-final byte effects in a sequence are flushed by [`eval_seq`].
+/// The bound computation of a `Bind`, never in tail position since `rest`
+/// runs after it. A byte-mode RHS runs under capture, so a command that
+/// writes bytes and returns `Unit` binds the decoded bytes.
 fn eval_bind_rhs(
     m: &Arc<Comp>,
     rhs_output: ByteMode,
@@ -327,10 +266,9 @@ fn eval_bind_rhs(
     }
     let (result, mut bytes) =
         super::capture::with_capture(shell, |shell| eval_comp(m, mooring, shell, Tail::No));
-    // The RHS errored partway through: flush whatever it already wrote
-    // before propagating, so a partial write (`echo HALF; exit 3`) stays
-    // visible instead of vanishing with the buffer — matching `eval_seq`,
-    // whose non-final elements show their output the same way on success.
+    // Flush what the RHS already wrote before propagating its error, so a
+    // partial write (`echo HALF; exit 3`) stays visible instead of vanishing
+    // with the buffer.
     if result.is_err() && !bytes.is_empty() {
         shell
             .write_stdout(&bytes)
@@ -350,20 +288,11 @@ fn eval_bind_rhs(
     }
 }
 
-/// `M to x. N` — run `M`, destructure its result against `pattern`,
-/// then continue with `rest`.
+/// `M to x. N` — run `M`, destructure its result against `pattern`, then
+/// continue with `rest`, which inherits the bind's own tail position.
 ///
-/// CBPV Bind sequences a computation with a continuation under a
-/// value binding. The result also updates `last_status` via
-/// [`set_status_from_value`]. The RHS itself is evaluated by
-/// [`eval_bind_rhs`], which handles byte-mode capture per SPEC §4.3.
-/// The node's scheme — the checker's verdict for this bind — installs
-/// together with the value, so the next run's check is seeded from the
-/// live binding.
-///
-/// The bound computation `m` runs under a non-trivial continuation;
-/// the continuation `rest` inherits the bind's own tail position, so a
-/// tail call in `rest` is the whole expression's tail call.
+/// The checker's `scheme` for the node installs together with the value, so
+/// the next run's check is seeded from the live binding.
 #[allow(
     clippy::too_many_arguments,
     reason = "the bind rule's operands, threaded; grouping them would hide the rule's shape"
@@ -386,17 +315,10 @@ fn eval_bind(
     eval_comp(rest, mooring, shell, tail)
 }
 
-/// Pipeline: a typed dataflow edge selects the machine.
-///
-/// A pure value pipeline is a parent-side fold.  Any byte edge is a
-/// process-staged pipeline: stages run in child processes in one group,
-/// with byte pipes and/or typed value channels between neighbours.
-///
-/// A single-stage pipeline reduces to its inner computation, inheriting
-/// the pipeline's tail position; the multi-stage case delegates to
-/// [`pipeline::run_pipeline`], which grants the pipeline's tail-ness to
-/// the final stage alone (every earlier stage's value crosses a value
-/// edge, so its tail call must not discard downstream stages).
+/// A single-stage pipeline is just its inner computation, and inherits the
+/// pipeline's tail position; otherwise [`pipeline::run_pipeline`] grants
+/// that position to the final stage alone, since every earlier stage's
+/// value has to cross an edge into the next.
 fn eval_pipeline(
     stages: &[Arc<Comp>],
     wires: &[Wire],
@@ -410,22 +332,11 @@ fn eval_pipeline(
     pipeline::run_pipeline(stages, wires, tail, mooring, shell)
 }
 
-/// `a ? b ? c` — fallback chain.
-///
-/// Each arm is tried in order; the first success is returned,
-/// otherwise the last error, or `Unit` if the chain is empty. A
-/// failed arm sets `last_status` to its exit code, so subsequent
-/// checks see the most recent failure.
-///
-/// Only the final arm inherits the chain's tail position. A non-final
-/// arm runs under a non-trivial continuation ([`Tail::No`]): the chain
-/// must still observe its failure to run the next fallback, so its
-/// tail call must remain a catchable application rather than a
-/// [`TailCall`] that escapes the chain.
-///
-/// Each arm runs under its own [`with_scope`] bracket — the same one
-/// `eval_if` uses for its branches — so a `let` inside an arm's block
-/// cannot leak into the enclosing scope.
+/// `a ? b ? c` — the first arm to succeed wins, else the last error (`Unit`
+/// for an empty chain); a failed arm leaves its exit code in `last_status`.
+/// Only the final arm inherits the chain's tail position: the chain must
+/// observe a non-final arm's failure to run the next fallback, so that arm's
+/// call has to stay catchable rather than escape as a tail call.
 fn eval_chain(parts: &[Arc<Comp>], tail: Tail, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
     let mut last_err: Option<Error> = None;
     let last = parts.len().saturating_sub(1);
@@ -444,15 +355,10 @@ fn eval_chain(parts: &[Arc<Comp>], tail: Tail, mooring: &Mooring, shell: &mut Sh
     last_err.map_or(Ok(Value::Unit), |e| Err(e.into()))
 }
 
-/// `if V then M else N` — conditional on `V : Bool`.
-///
-/// CBPV Bind has scope-local binding semantics; ral's runtime keeps
-/// Bind-bound names in the surrounding scope so that REPL runs
-/// persist their `let`s. At `if` branches that is the wrong default:
-/// a `let` inside a branch should not leak. Pushing a fresh scope
-/// around the branch restores the CBPV reading without disturbing
-/// top-level Bind persistence. The selected branch inherits the
-/// `if`'s tail position — the unselected branch is never entered.
+/// `if V then M else N`, on `V : Bool`. ral keeps Bind-bound names in the
+/// surrounding scope so a REPL run's `let`s persist; inside a branch that is
+/// the wrong default, so the selected branch runs in a fresh scope — CBPV's
+/// scope-local reading, without disturbing top-level persistence.
 fn eval_if(
     cond: &Val,
     then: &Arc<Comp>,
@@ -478,13 +384,10 @@ fn eval_if(
     with_scope(shell, |shell| eval_comp(branch, mooring, shell, tail))
 }
 
-/// Sequence of computations — the last value is the result.
-///
-/// Only the final element inherits the sequence's tail position, so
-/// non-final computations run under a non-trivial continuation and
-/// never observe themselves as tail-called.  When a sequence runs under
-/// a capture, non-final bytes are effects: flush them to the visible
-/// outer stream so the sequence's value is still just its final value.
+/// Sequence of computations — the last value is the result, and only it
+/// inherits the sequence's tail position. Under a capture, a non-final
+/// element's bytes are an effect rather than the value, so flush them to the
+/// visible outer stream.
 fn eval_seq(comps: &[Arc<Comp>], tail: Tail, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
     let mut result = Value::Unit;
     let len = comps.len();
@@ -506,9 +409,9 @@ fn eval_seq(comps: &[Arc<Comp>], tail: Tail, mooring: &Mooring, shell: &mut Shel
 
 // ── Scope bracket ────────────────────────────────────────────────────────
 
-/// Runs `f` inside a fresh scope, popping it on return. Called by the
-/// selected `if`/`else` branch, each `?`-chain arm, the lambda call
-/// frame, and the spawned/watch workers.
+/// Runs `f` inside a fresh scope, popping it on return. Used by the
+/// selected `if` branch, each `?`-chain arm, the letrec fixpoint frame, and
+/// the thread workers in `builtins::concurrency`.
 pub(crate) fn with_scope<T>(shell: &mut Shell, f: impl FnOnce(&mut Shell) -> T) -> T {
     shell.mobile.scope.push_scope();
     let r = f(shell);
