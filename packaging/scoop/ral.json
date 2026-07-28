@@ -10,14 +10,14 @@
         "Does not include ral-sh: a POSIX login-shell shim with no Windows",
         "equivalent."
     ],
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "A shell grounded on algebraic effects",
     "homepage": "https://github.com/lambdabetaeta/ral",
     "license": "MIT OR Apache-2.0",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/lambdabetaeta/ral/releases/download/v0.1.0/ral-windows-allutils.exe#/ral.exe",
-            "hash": "186557f2ffcd2ca6b917c60abf62a73b19089fe0e06464f380461c30c3437d63"
+            "url": "https://github.com/lambdabetaeta/ral/releases/download/v0.2.0/ral-windows-allutils.exe#/ral.exe",
+            "hash": "bf99995e6876780bb54b114e5ad73328a587196155ccc78eb42739e6cc9d23bc"
         }
     },
     "bin": "ral.exe",

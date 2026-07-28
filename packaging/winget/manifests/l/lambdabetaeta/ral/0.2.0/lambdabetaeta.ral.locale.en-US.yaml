@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.10.0.schema.json
+PackageIdentifier: lambdabetaeta.ral
+PackageVersion: 0.2.0
+PackageLocale: en-US
+Publisher: lambdabetaeta
+PublisherUrl: https://github.com/lambdabetaeta
+PublisherSupportUrl: https://github.com/lambdabetaeta/ral/issues
+Author: G. A. Kavvos
+PackageName: ral
+PackageUrl: https://github.com/lambdabetaeta/ral
+License: MIT OR Apache-2.0
+LicenseUrl: https://github.com/lambdabetaeta/ral/blob/main/LICENSE-MIT
+ShortDescription: A shell grounded on algebraic effects
+Description: >-
+  ral is a shell built on one idea: running an external command is performing
+  an algebraic effect. Pipelines are typed (bytes vs. values), and authority
+  is scoped and can only shrink (grant). Every sandboxed command runs under
+  real OS-level confinement on every platform: an AppContainer LowBox token
+  on Windows, Seatbelt on macOS, bubblewrap on Linux. This package installs
+  ral.exe with the bundled coreutils, diffutils, grep and ripgrep subset,
+  since Windows has no system coreutils to fall back on; it does not include
+  ral-sh, which has no Windows equivalent.
+Moniker: ral
+Tags:
+  - shell
+  - cli
+  - sandbox
+ManifestType: defaultLocale
+ManifestVersion: 1.10.0

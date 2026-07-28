@@ -156,13 +156,13 @@ scoop install https://raw.githubusercontent.com/lambdabetaeta/ral/main/packaging
 
 A [winget](https://learn.microsoft.com/en-us/windows/package-manager/winget/)
 manifest lives at
-[`packaging/winget/`](packaging/winget/manifests/l/lambdabetaeta/ral/0.1.0),
+[`packaging/winget/`](packaging/winget/manifests/l/lambdabetaeta/ral/0.2.0),
 ready for submission to `microsoft/winget-pkgs`; until it lands there,
 install from the local manifest:
 
 ```powershell
 git clone https://github.com/lambdabetaeta/ral
-winget install --manifest ral/packaging/winget/manifests/l/lambdabetaeta/ral/0.1.0
+winget install --manifest ral/packaging/winget/manifests/l/lambdabetaeta/ral/0.2.0
 ```
 
 Or from source:

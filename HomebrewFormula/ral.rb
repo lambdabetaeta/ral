@@ -1,8 +1,8 @@
 class Ral < Formula
   desc "Shell based on algebraic effects"
   homepage "https://github.com/lambdabetaeta/ral"
-  url "https://github.com/lambdabetaeta/ral/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "8d35eaf2d31e85efbbc9fc1a8bdd50fabbc5b269780d30811ca140ad203432ca"
+  url "https://github.com/lambdabetaeta/ral/archive/refs/tags/v0.2.0.tar.gz"
+  sha256 "b0928718a43f968a60e35ae82f91803fa526c72b0cae33380f7fcaa45fb5abdd"
   license any_of: ["MIT", "Apache-2.0"]
   head "https://github.com/lambdabetaeta/ral.git", branch: "main"
 
