@@ -169,10 +169,16 @@ jobs:
   # separate package and has to be added to the same toolset before `wix
   # build` will resolve `ui:WixUI`.
   #
-  # 6.0.2 and not the newer 7.0.0, which is not ours to take unilaterally: v7
-  # refuses to run at all until the Open Source Maintenance Fee EULA is
-  # accepted (`error WIX7015`), and agreeing to a licence on this project's
-  # behalf is a decision for whoever owns it, not for a build file.
+  # v7 refuses to run until the Open Source Maintenance Fee EULA is accepted
+  # (`error WIX7015`), which `wix eula accept` below does.  That fee is not
+  # owed here: the EULA applies "only to Users that use the Software as part of
+  # revenue-generating activities *and* have an annual gross revenue greater
+  # than or equal to US$10,000", and ral is neither.  Should that ever change —
+  # donations, sponsorship, anything that makes this revenue-generating — the
+  # fee becomes payable at https://github.com/sponsors/wixtoolset and this
+  # comment is where to find that out.  Acceptance itself is local and free:
+  # no key, no account, no request to anyone.  Nothing in the EULA reaches the
+  # MSI we build with it.
   msi:
     name: ral-windows.msi
     needs: build
@@ -193,8 +199,12 @@ jobs:
           path: payload
       - name: Install WiX
         run: |
-          dotnet tool install --global wix --version 6.0.2
-          wix extension add -g WixToolset.UI.wixext/6.0.2
+          dotnet tool install --global wix --version 7.0.0
+          # Before `extension add`, which is gated too, not only `build`.
+          # Acceptance is a file under the runner's home directory, so a fresh
+          # runner needs it once and every wix command after it is free.
+          wix eula accept wix7
+          wix extension add -g WixToolset.UI.wixext/7.0.0
       - name: Build MSI
         shell: pwsh
         run: |
