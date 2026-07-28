@@ -58,7 +58,7 @@ impl Meet for bool {
 
 impl Join for bool {
     fn join(self, other: Self) -> Self {
-        self || other
+        self && other
     }
 }
 

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 463cc2b
+generated_at_commit: 635a1ae
 generated_at_date: 2026-07-28
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -45,7 +45,9 @@ everything `crate::types::*`.
 `capability.rs` holds the capability *types* the [[map/core/capabilities|grant]]
 decision layer interprets: `Capabilities`, `ExecPolicy`, `FsPolicy`,
 `EditorPolicy`, `ShellPolicy`, `GrantStack`, `SandboxProjection`, and the `Meet`
-/ `Join` lattice operations (tested in `capability/lattice_tests.rs`).
+/ `Join` lattice operations (tested in `capability/lattice_tests.rs`). `Meet`
+attenuates live frames; `Join` widens a base overlay, but Boolean `false`
+permissions remain sticky vetoes.
 
 ## Shell
 

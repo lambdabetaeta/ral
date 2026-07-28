@@ -852,6 +852,21 @@ fn join_none_is_identity() {
     assert_eq!(a.clone().join(Capabilities::default()), a);
     assert_eq!(Capabilities::default().join(a.clone()), a);
 }
+/// Boolean vetoes are floors under base extension: an extension may add an
+/// opinion where the base is silent, but may not turn a base `false` into `true`.
+#[test]
+fn join_boolean_vetoes_are_sticky() {
+    let joined = witness_a().join(witness_b());
+    let editor = joined.editor.unwrap();
+    let shell = joined.shell.unwrap();
+
+    assert_eq!(joined.net, Some(false));
+    assert_eq!(joined.detach, Some(false));
+    assert!(editor.read);
+    assert!(!editor.write);
+    assert!(!editor.tui);
+    assert!(!shell.chdir);
+}
 
 #[test]
 fn join_exec_widens_policies_and_unions_names() {

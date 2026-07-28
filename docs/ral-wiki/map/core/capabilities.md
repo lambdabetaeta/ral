@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 19d53bb
+generated_at_commit: 635a1ae
 generated_at_date: 2026-07-28
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -40,7 +40,9 @@ Submodules:
 - `exec.rs` — per-layer exec verdicts; the admitted arm carries `Admit`
   (`Any` / `Subcommands`), so a `Deny` cannot reach an allowed verdict; the
   literal comparison is case- and PATHEXT-insensitive under Windows path
-  semantics, so a bare `git` grant admits a resolved `GIT.EXE`;
+  semantics, so a bare `git` grant admits a resolved `GIT.EXE`; every
+  fold-equal key is met before the verdict, so a `git` deny still vetoes an
+  exact `GIT` allow;
 - `decode.rs` — `decode_capability_map`, which walks a `grant [...]` /
   `--capabilities` `Value` map into a frozen `Capabilities`, one dimension
   decoder per `exec` / `fs` / `net` / `detach` / `editor` / `shell` / `audit`

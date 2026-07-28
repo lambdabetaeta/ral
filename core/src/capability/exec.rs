@@ -141,24 +141,27 @@ fn match_literal_keys(
     Some(matched.fold(first, ExecPolicy::meet))
 }
 
-/// Exact match first — the only comparison off Windows.  Under Windows
-/// identity distinct keys can be fold-equal (`GIT` and `git` are one
-/// name to the OS) and a `BTreeMap` keeps both, so every fold-equal hit
-/// is meet-folded rather than taking whichever iteration order finds
-/// first: a `Deny` on one spelling must veto whatever the key order.
+/// Off Windows, lookup is exact.  Under Windows identity distinct keys can be
+/// fold-equal (`GIT` and `git` are one name to the OS), so every fold-equal hit
+/// is meet-folded: an exact `Allow` must not hide a `Deny` on another spelling.
 fn lookup_literal(literals: &BTreeMap<String, ExecPolicy>, name: &str) -> Option<ExecPolicy> {
-    if let Some(policy) = literals.get(name) {
-        return Some(policy.clone());
+    lookup_literal_on(literals, name, cfg!(windows))
+}
+
+fn lookup_literal_on(
+    literals: &BTreeMap<String, ExecPolicy>,
+    name: &str,
+    windows: bool,
+) -> Option<ExecPolicy> {
+    if !windows {
+        return literals.get(name).cloned();
     }
-    if cfg!(windows) {
-        let mut matches = literals
-            .iter()
-            .filter(|(key, _)| names_match(key, name, true))
-            .map(|(_, policy)| policy.clone());
-        let first = matches.next()?;
-        return Some(matches.fold(first, ExecPolicy::meet));
-    }
-    None
+    let mut matches = literals
+        .iter()
+        .filter(|(key, _)| names_match(key, name, true))
+        .map(|(_, policy)| policy.clone());
+    let first = matches.next()?;
+    Some(matches.fold(first, ExecPolicy::meet))
 }
 
 /// The default PATHEXT list [`path::which`] falls back to.  `.bat` and
@@ -368,19 +371,21 @@ mod tests {
         assert_eq!(hit.is_some(), cfg!(windows));
     }
 
-    /// `GIT` and `git` are fold-equal under Windows identity but two
-    /// `BTreeMap` entries, and `"GIT" < "git"` byte-wise: a first-match
-    /// scan would return the `Allow` and never see the `Deny`.
+    /// Windows identity folds distinct map keys.  Both a mixed spelling and an
+    /// exact `Allow` hit must still see the fold-equal `Deny`.
     #[test]
-    fn lookup_literal_meets_fold_equal_keys_deny_wins() {
+    fn lookup_literal_meets_windows_fold_equal_keys_deny_wins() {
         let literals = BTreeMap::from([
             ("GIT".to_string(), ExecPolicy::Allow),
             ("git".to_string(), ExecPolicy::Deny),
         ]);
-        let hit = lookup_literal(&literals, "Git.exe");
-        assert_eq!(hit.is_some(), cfg!(windows));
-        if cfg!(windows) {
-            assert_eq!(hit, Some(ExecPolicy::Deny));
-        }
+        assert_eq!(
+            lookup_literal_on(&literals, "Git.exe", true),
+            Some(ExecPolicy::Deny)
+        );
+        assert_eq!(
+            lookup_literal_on(&literals, "GIT", true),
+            Some(ExecPolicy::Deny)
+        );
     }
 }
