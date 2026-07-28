@@ -298,11 +298,13 @@ mod tests {
         let rotated = path.with_extension("jsonl.1");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&rotated);
+        // Sized before the ledger opens, through a write handle: an
+        // append-mode handle carries no write access on Windows, which
+        // refuses `set_len` against it.
+        std::fs::File::create(&path)
+            .and_then(|f| f.set_len(ROTATE_AT_BYTES))
+            .expect("oversized ledger");
         let log = AuditLog::at(&path).expect("test ledger");
-        {
-            let ledger = log.0.lock().unwrap();
-            ledger.file.set_len(ROTATE_AT_BYTES).unwrap();
-        }
         log.record(Record::Tunnel {
             host: "a.example",
             addr: None,
@@ -326,6 +328,11 @@ mod tests {
     /// across the cap boundary concurrently. The `flock` must serialise the
     /// check-size/rotate/write sequence between them so every record lands
     /// exactly once across the live file and its rotated `.1`.
+    ///
+    /// Unix-only because the lock is: [`RotationGuard`] is `cfg(unix)`,
+    /// so on Windows nothing serialises check-size/rotate/write between
+    /// processes and there is no guarantee here to assert.
+    #[cfg(unix)]
     #[test]
     fn rotation_under_cross_process_contention_loses_no_record() {
         let path = tmp_path("audit-race");

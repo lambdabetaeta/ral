@@ -118,9 +118,12 @@ fn pipeline_stage_2to1_routes_into_pipe() {
 fn pipeline_stage_redirect_to_file() {
     let tmp = common::fresh_tmp_path("win_pipe_stage_redir", "txt");
     let tmp_str = tmp.to_string_lossy().replace('\\', "/");
+    // Quoted: a Windows temp dir is often an 8.3 short path
+    // (`C:/Users/RUNNER~1/...`), and a bare word ends at the `~` that
+    // opens a `~user` path.
     let script = format!(
         r#"
-        cmd /c "echo redirected" > {tmp_str} | cmd /c rem
+        cmd /c "echo redirected" > '{tmp_str}' | cmd /c rem
         "#,
     );
     let out = run("win_pipe_stage_redir", &script);
