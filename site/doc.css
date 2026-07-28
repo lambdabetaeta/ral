@@ -24,7 +24,7 @@ html { scroll-behavior: smooth; scroll-padding-top: 5rem; }
 .doc h3 { margin: 1.6rem 0 0.5rem; font-size: 1.22rem; font-weight: 600; color: var(--cmd); }
 .doc h4 {
   margin: 1.4rem 0 0.45rem;
-  font-family: var(--ui);
+  font-family: var(--serif);
   font-size: 0.86rem;
   font-weight: 700;
   text-transform: uppercase;

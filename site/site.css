@@ -52,7 +52,6 @@
   --varc:        #3f3a72;   /* variables (darkslateblue)          */
   --sel:         #483d8b;
   --sel-ink:     #ffffff;
-  --ui:    'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif;
   --serif: 'IBM Plex Serif', 'Iowan Old Style', 'Palatino Linotype',
            Palatino, Georgia, serif;
   --mono:  'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
@@ -89,7 +88,7 @@
 
 html {
   color: var(--text);
-  font-family: var(--ui);
+  font-family: var(--serif);
   font-size: 18px;
   -webkit-text-size-adjust: 100%;
   -webkit-font-smoothing: antialiased;

@@ -1,0 +1,372 @@
+/* synod.css — the quiet-desk identity, taken from the application's own
+   window (synod/ui/index.html): warm paper by day, deep ink by night, and a
+   serif throughout, since this page is prose to be read rather than an
+   interface to be operated.  Mono is kept for the two things that are
+   literally typed — the wordmark and file names.  The app ships no web font
+   and neither does this page; the only shipped face anywhere is KaTeX's,
+   inside the window.  Everything here is for someone who does office work,
+   not code. */
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  /* warm paper */
+  --paper:      #f4efe6;
+  --raised:     #fffdf8;
+  --raised-2:   #faf5ec;
+  --ink:        #292420;
+  --ink-soft:   #6d6459;
+  --ink-faint:  #988d7e;
+  --line:       #e5ddce;
+  --line-strong:#d5cab6;
+  --accent:     #2f6d5c;
+  --accent-hover:#275c4d;
+  --accent-ink: #fbf8f1;
+  --caution:    #a5641c;
+  --caution-bg: #f7ecd9;
+  --caution-line:#e6cfa6;
+  --shadow-soft: 0 1px 2px rgba(60, 48, 32, 0.05);
+
+  --serif: ui-serif, 'Iowan Old Style', Georgia, 'Times New Roman', serif;
+  --mono:  ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+:root.dark {
+  /* deep ink */
+  --paper:      #1e1b18;
+  --raised:     #2a2521;
+  --raised-2:   #241f1c;
+  --ink:        #efe7db;
+  --ink-soft:   #aca194;
+  --ink-faint:  #7e7466;
+  --line:       #38322c;
+  --line-strong:#48413a;
+  --accent:     #74c3aa;
+  --accent-hover:#86cfb8;
+  --accent-ink: #17201c;
+  --caution:    #e0a85e;
+  --caution-bg: #34291a;
+  --caution-line:#5a4526;
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+html {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 17px;
+  min-height: 100%;
+  -webkit-text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  overflow-x: hidden;
+  /* A whisper of texture, so the paper is paper and not a flat fill. */
+  background-image:
+    radial-gradient(1200px 600px at 12% -8%, rgba(120, 150, 132, 0.06), transparent 60%),
+    radial-gradient(1000px 500px at 100% 0%, rgba(160, 120, 60, 0.05), transparent 55%);
+  background-attachment: fixed;
+}
+
+a { color: var(--accent); text-decoration: none; text-underline-offset: 0.18em; }
+a:hover { color: var(--accent-hover); text-decoration: underline; }
+
+/* ── menubar ── */
+.menubar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  padding: 0.4rem 0.9rem;
+  background: color-mix(in srgb, var(--paper) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+  line-height: 1.2;
+}
+.menubar .spacer { flex: 1 1 auto; }
+.menu-item {
+  display: flex;
+  align-items: center;
+  padding: 0.3rem 0.7rem;
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+  border-bottom: 2px solid transparent;
+}
+.menu-item:hover { color: var(--accent); text-decoration: none; }
+.menu-item.current { color: var(--ink); border-bottom-color: var(--accent); }
+.menu-item .ext { font-size: 0.66rem; opacity: 0.6; }
+
+.theme-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.7rem;
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  color: var(--ink-soft);
+  font-family: inherit;
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+.theme-toggle:hover { color: var(--accent); border-color: var(--accent); }
+.theme-toggle .glyph { font-size: 0.85rem; line-height: 1; }
+
+/* ── page rhythm ── */
+main { flex: 1 0 auto; }
+.column { max-width: 50rem; margin: 0 auto; padding: 0 1.3rem; }
+.section { padding: 3.4rem 0 0; }
+.section p { color: var(--ink-soft); font-size: 1.02rem; line-height: 1.62; }
+.section p + p { margin-top: 0.85rem; }
+.section strong { color: var(--ink); font-weight: 600; }
+
+.eyebrow {
+  font-family: var(--serif);
+  font-size: 1.42rem;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  margin-bottom: 0.9rem;
+}
+
+/* ── hero ── */
+.hero { padding: 3.6rem 1.3rem 0; text-align: center; }
+.hero-inner { max-width: 40rem; margin: 0 auto; }
+.wordmark {
+  /* Centred as one block, its lines left-aligned inside it: the letters keep
+     their alignment whether or not the source rows are padded to equal width. */
+  display: inline-block;
+  max-width: 100%;
+  margin: 0 0 1.5rem;
+  text-align: left;
+  font-family: var(--mono);
+  font-size: clamp(7px, 2.4vw, 13px);
+  line-height: 1;
+  white-space: pre;
+  overflow-x: auto;
+  user-select: none;
+  background: linear-gradient(175deg, var(--ink) 15%, var(--accent) 115%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  text-shadow: 0 2px 20px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.thesis {
+  font-family: var(--serif);
+  font-size: clamp(1.55rem, 4.6vw, 2.3rem);
+  font-weight: 600;
+  line-height: 1.16;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+}
+.hero .rule {
+  width: 3.2rem;
+  height: 2px;
+  margin: 1.5rem auto;
+  background: var(--accent);
+  opacity: 0.65;
+}
+.lede {
+  font-size: 1.06rem;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+
+/* ── the safety net: three steps ── */
+.steps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin-top: 1.6rem;
+}
+.step {
+  padding: 1.1rem 1.15rem 1.2rem;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow-soft);
+}
+.step .n {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  margin-bottom: 0.5rem;
+}
+.step h3 {
+  font-family: var(--serif);
+  font-size: 1.06rem;
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 0.4rem;
+}
+.step p { font-size: 0.93rem; line-height: 1.55; }
+
+/* ── the report, as the window shows it ── */
+.report {
+  margin-top: 1.6rem;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+.report-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.85rem 1.1rem;
+  background: var(--raised-2);
+  border-bottom: 1px solid var(--line);
+}
+.report-head b { font-family: var(--serif); font-size: 1rem; color: var(--ink); }
+.report-head span { font-size: 0.82rem; color: var(--ink-faint); }
+.change {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1.1rem;
+  border-bottom: 1px solid var(--line);
+}
+.change:last-child { border-bottom: 0; }
+.change .what {
+  flex: 0 0 auto;
+  min-width: 5.4rem;
+  font-size: 0.76rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.change .name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 0.86rem;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.change .undo {
+  flex: 0 0 auto;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+}
+.change.conflict { background: var(--caution-bg); }
+.change.conflict .what { color: var(--caution); }
+.change.conflict .undo { border-color: var(--caution-line); color: var(--caution); }
+.report-note {
+  padding: 0.7rem 1.1rem 0.85rem;
+  font-size: 0.85rem;
+  color: var(--ink-faint);
+  line-height: 1.5;
+}
+.report + p { margin-top: 1.1rem; }
+
+/* ── the machine: what is and is not inside ── */
+.facts { margin-top: 1.5rem; }
+.fact {
+  display: grid;
+  grid-template-columns: 11rem 1fr;
+  gap: 0.2rem 1.4rem;
+  padding: 0.9rem 0;
+  border-top: 1px solid var(--line);
+}
+.fact:last-child { border-bottom: 1px solid var(--line); }
+.fact dt {
+  font-family: var(--serif);
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+.fact dd { font-size: 0.95rem; line-height: 1.55; color: var(--ink-soft); }
+
+/* ── said plainly ── */
+.candid {
+  margin-top: 1.4rem;
+  border-left: 2px solid var(--caution);
+  padding-left: 1.2rem;
+  list-style: none;
+}
+.candid li { margin-bottom: 1rem; font-size: 0.98rem; line-height: 1.6; color: var(--ink-soft); }
+.candid li:last-child { margin-bottom: 0; }
+.candid b { display: block; font-family: var(--serif); font-weight: 600; color: var(--ink); }
+
+/* ── kin: the other two products ── */
+.kin {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+.kin-card {
+  display: block;
+  padding: 1.05rem 1.15rem;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--ink-soft);
+  box-shadow: var(--shadow-soft);
+}
+.kin-card:hover { border-color: var(--accent); text-decoration: none; color: var(--ink-soft); }
+.kin-card b {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  color: var(--accent);
+  margin-bottom: 0.35rem;
+}
+.kin-card span { font-size: 0.92rem; line-height: 1.5; }
+
+/* ── source ── */
+.links { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 1.4rem; }
+.link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.55rem 0.95rem;
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+.link-btn:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
+.link-btn svg { flex: 0 0 auto; }
+
+/* ── backer ── */
+.backer { padding: 3.4rem 0 0; text-align: center; }
+.backer p { font-size: 0.9rem; color: var(--ink-faint); }
+.backer-logo { display: inline-block; margin-top: 0.9rem; opacity: 0.85; }
+.backer-logo:hover { opacity: 1; }
+
+/* ── footer ── */
+.footer {
+  flex: 0 0 auto;
+  margin-top: 3.4rem;
+  padding: 1.2rem;
+  border-top: 1px solid var(--line);
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--ink-faint);
+}
+.footer a { color: var(--ink-soft); }
+.footer a:hover { color: var(--accent); }
+
+@media (max-width: 44rem) {
+  .steps, .kin { grid-template-columns: 1fr; }
+  .fact { grid-template-columns: 1fr; }
+  .change { flex-wrap: wrap; }
+}

@@ -21,13 +21,17 @@ pages open straight from the filesystem with no server.
   exarch/profiles.html  exarch/PROFILES.md rendered to HTML (single source of
                         truth, so the page can't drift from the docs)
 
+  synod/index.html      the synod landing — shared menubar injected into
+                        synod-index.template.html
+
 Every ral listing is highlighted through the project's own tree-sitter
 grammar, which decides what a keyword or a builtin is by parsing.  The CLI is
 therefore a hard requirement: a build that cannot reach it fails rather than
 publishing source coloured by a guess.
 
 The examples and doc pages share the doc_page() shell, which links doc.css.
-The exarch sub-site has its own chrome under exarch/ and is not styled here.
+Each product sub-site carries its own chrome — exarch/ and synod/ — and is not
+styled here.
 
 Run with `uv run scripts/render-site.py` so the markdown dependency above is
 resolved automatically.
@@ -52,6 +56,7 @@ EXAMPLES_DIR = ROOT / "examples"
 DOCS_DIR = ROOT / "docs"
 EXARCH_DIR = ROOT / "exarch"
 EXARCH_SITE = SITE / "exarch"
+SYNOD_SITE = SITE / "synod"
 
 GRAMMAR_DIR = ROOT / "editors" / "tree-sitter-ral"
 TS_CONFIG_DIR = GRAMMAR_DIR / ".tsconfig"
@@ -176,17 +181,25 @@ def front_panel(current: str, status: str) -> str:
 
 
 def menubar(current: str) -> str:
-    """The site nav, generated once so every page's menubar stays in step."""
+    """The site nav, generated once so every page's menubar stays in step.
+
+    The two product sub-sites hang off the end of it, each marked as leaving
+    this site's own chrome behind."""
     items = "\n".join(
         f'        <a class="menu-item{" current" if key == current else ""}" '
         f'href="{href}">{label}</a>'
         for href, label, key in NAV
     )
+    products = "\n".join(
+        f'        <a class="menu-item" href="{href}">{label}'
+        '<span class="ext"> &#8599;</span></a>'
+        for href, label in [("exarch/index.html", "exarch"),
+                            ("synod/index.html", "synod")]
+    )
     return (
         '      <nav class="menubar" aria-label="Site">\n'
         f'{items}\n'
-        '        <a class="menu-item" href="exarch/index.html">exarch'
-        '<span class="ext"> &#8599;</span></a>\n'
+        f'{products}\n'
         '        <span class="grow"></span>\n'
         '        <button class="btn" id="theme-toggle" type="button" aria-label="Switch theme">\n'
         '          <span id="theme-glyph">&#9788;</span><span id="theme-label">Workspace</span>\n'
@@ -632,13 +645,53 @@ def render_docs() -> None:
             encoding="utf-8")
 
 
-# ── exarch sub-site ─────────────────────────────────────────────────────────
+# ── product sub-sites ───────────────────────────────────────────────────────
 
-EXARCH_FOOTER = """<footer class="footer">
+# exarch and synod each have their own chrome, and share this nav shape and
+# this footer: two products over one engine, each linking to the other and
+# back to the shell they both run on.
+
+PRODUCT_FOOTER = """<footer class="footer">
     <a href="https://spdx.org/licenses/MIT">MIT</a>
     &middot; <a href="https://www.apache.org/licenses/LICENSE-2.0">Apache-2.0</a>
     &middot; &copy;&nbsp;<a href="https://www.lambdabetaeta.eu">Alex Kavvos</a>
   </footer>"""
+
+EXARCH_NAV = [
+    ("index.html", "exarch", "index", False),
+    ("profiles.html", "Profiles", "profiles", False),
+    ("../index.html", "ral", "ral", True),
+    ("../synod/index.html", "synod", "synod", True),
+    ("../wiki/index.html", "Wiki", "wiki", True),
+]
+
+SYNOD_NAV = [
+    ("index.html", "synod", "index", False),
+    ("../index.html", "ral", "ral", True),
+    ("../exarch/index.html", "exarch", "exarch", True),
+]
+
+
+def product_menubar(nav: list[tuple[str, str, str, bool]], current: str,
+                    site: str) -> str:
+    """A sub-site's nav; ``current`` is the active page key and ``site`` names
+    the sub-site for assistive technology.  Generated once so every page of a
+    sub-site — landing and documents alike — stays in step."""
+    ext = '<span class="ext"> &#8599;</span>'
+    items = "\n".join(
+        f'    <a class="menu-item{" current" if key == current else ""}" '
+        f'href="{href}">{label}{ext if leaves else ""}</a>'
+        for href, label, key, leaves in nav
+    )
+    return (
+        f'<nav class="menubar" aria-label="{site}">\n'
+        f'{items}\n'
+        '    <span class="spacer"></span>\n'
+        '    <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch theme">\n'
+        '      <span class="glyph" id="theme-glyph">&#9788;</span><span id="theme-label">light</span>\n'
+        '    </button>\n'
+        '  </nav>'
+    )
 
 
 def render_exarch_downloads(downloads: dict) -> str:
@@ -663,28 +716,6 @@ def render_exarch_downloads(downloads: dict) -> str:
         )
     lines.append("")
     return "\n".join(lines)
-
-
-def exarch_menubar(current: str) -> str:
-    """Shared nav for the exarch sub-site; ``current`` is the active page key
-    (``index`` or ``profiles``).  Generated once so both the landing template
-    and the profiles shell stay in step."""
-    def item(href: str, label: str, key: str, ext: bool = False) -> str:
-        cls = "menu-item current" if key == current else "menu-item"
-        tail = '<span class="ext"> &#8599;</span>' if ext else ""
-        return f'<a class="{cls}" href="{href}">{label}{tail}</a>'
-
-    return (
-        '<nav class="menubar" aria-label="exarch">\n'
-        f'    {item("index.html", "exarch", "index")}\n'
-        f'    {item("profiles.html", "Profiles", "profiles")}\n'
-        f'    {item("../index.html", "ral", "ral", ext=True)}\n'
-        '    <span class="spacer"></span>\n'
-        '    <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch theme">\n'
-        '      <span class="glyph" id="theme-glyph">&#9788;</span><span id="theme-label">light</span>\n'
-        '    </button>\n'
-        '  </nav>'
-    )
 
 
 def exarch_doc_page(title: str, body: str, titlebar: str) -> str:
@@ -712,7 +743,7 @@ def exarch_doc_page(title: str, body: str, titlebar: str) -> str:
   </script>
 </head>
 <body>
-  {exarch_menubar("profiles")}
+  {product_menubar(EXARCH_NAV, "profiles", "exarch")}
   <main>
     <div class="window">
       <div class="titlebar">
@@ -724,7 +755,7 @@ def exarch_doc_page(title: str, body: str, titlebar: str) -> str:
       </article>
     </div>
   </main>
-  {EXARCH_FOOTER}
+  {PRODUCT_FOOTER}
   <script>
     (function () {{
       var root  = document.documentElement;
@@ -759,20 +790,18 @@ def render_exarch() -> None:
     """
     template = (ROOT / "scripts" / "exarch-index.template.html").read_text(
         encoding="utf-8")
-    for placeholder in (
-        "{{MENUBAR}}",
-        "{{EXARCH_DOWNLOADS}}",
-        "{{EXARCH_FOOTER}}",
-    ):
-        if placeholder not in template:
-            raise SystemExit(
-                f"missing placeholder {placeholder} in exarch-index.template.html")
     downloads = json.loads(
         (EXARCH_SITE / "downloads.json").read_text(encoding="utf-8"))
-    rendered = template.replace("{{MENUBAR}}", exarch_menubar("index"))
-    rendered = rendered.replace(
-        "{{EXARCH_DOWNLOADS}}", render_exarch_downloads(downloads))
-    rendered = rendered.replace("{{EXARCH_FOOTER}}", EXARCH_FOOTER)
+    rendered = template
+    for placeholder, value in [
+        ("{{MENUBAR}}", product_menubar(EXARCH_NAV, "index", "exarch")),
+        ("{{EXARCH_DOWNLOADS}}", render_exarch_downloads(downloads)),
+        ("{{FOOTER}}", PRODUCT_FOOTER),
+    ]:
+        if placeholder not in rendered:
+            raise SystemExit(
+                f"missing placeholder {placeholder} in exarch-index.template.html")
+        rendered = rendered.replace(placeholder, value)
     (EXARCH_SITE / "index.html").write_text(rendered, encoding="utf-8")
 
     profiles_md = (EXARCH_DIR / "PROFILES.md").read_text(encoding="utf-8")
@@ -782,6 +811,29 @@ def render_exarch() -> None:
         encoding="utf-8")
 
 
+# ── synod sub-site ──────────────────────────────────────────────────────────
+
+def render_synod() -> None:
+    """Build the synod sub-site under site/synod/.
+
+    One bespoke landing, taking the shared menubar and footer.  Nothing here is
+    generated from a document and nothing is offered for download: synod is not
+    packaged yet, and the page says so rather than linking a file that does not
+    exist.
+    """
+    template = (ROOT / "scripts" / "synod-index.template.html").read_text(
+        encoding="utf-8")
+    for placeholder, value in [
+        ("{{MENUBAR}}", product_menubar(SYNOD_NAV, "index", "synod")),
+        ("{{FOOTER}}", PRODUCT_FOOTER),
+    ]:
+        if placeholder not in template:
+            raise SystemExit(
+                f"missing placeholder {placeholder} in synod-index.template.html")
+        template = template.replace(placeholder, value)
+    (SYNOD_SITE / "index.html").write_text(template, encoding="utf-8")
+
+
 def main() -> int:
     ensure_tree_sitter()
     examples = collect_examples()
@@ -789,7 +841,8 @@ def main() -> int:
     render_docs()
     render_examples(examples)
     render_exarch()
-    print(f"render-site: {len(examples)} examples, {len(NAV) + 1} pages")
+    render_synod()
+    print(f"render-site: {len(examples)} examples; ral, exarch, synod")
     return 0
 
 

@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>synod — an assistant for the work on your desk</title>
+  <meta name="description" content="Synod is an office-work assistant. You grant it one folder; it works there inside a virtual machine of its own, records the folder before it starts, reports what changed in plain language, and puts anything back.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="synod.css">
+  <script>
+    (function () {
+      var s = localStorage.getItem('ral-theme');
+      if (!s) s = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      if (s === 'dark') document.documentElement.classList.add('dark');
+    })();
+  </script>
+</head>
+<body>
+  {{MENUBAR}}
+
+  <main>
+
+    <!-- 1. the window's own first screen -->
+    <div class="hero">
+      <div class="hero-inner">
+        <pre class="wordmark" role="img" aria-label="Synod"> ██████   ██    ██  ██    ██   ██████   ██████
+██    ██  ██    ██  ███   ██  ██    ██  ██   ██
+██         ██  ██   ████  ██  ██    ██  ██    ██
+ ██████     ████    ██ ██ ██  ██    ██  ██    ██
+      ██     ██     ██  ████  ██    ██  ██    ██
+██    ██     ██     ██   ███  ██    ██  ██   ██
+ ██████      ██     ██    ██   ██████   ██████  </pre>
+        <p class="thesis">One folder. Plain language.<br>Everything it changes can be put back.</p>
+        <div class="rule"></div>
+        <p class="lede">Synod is an assistant for the work on your desk — the
+        spreadsheets, the letters, the scans. You give it one folder; it works
+        in that folder inside a virtual machine of its own, and the rest of your
+        computer is not in there with it.</p>
+      </div>
+    </div>
+
+    <!-- 2. what you can hand it -->
+    <section class="section">
+      <div class="column">
+        <p class="eyebrow">Describe the job the way you would to a colleague</p>
+        <p>Fill in a spreadsheet from a stack of forms. Draft the reminder
+        letters and prepare the mail merge. Pull the tables out of forty PDFs.
+        Rename and file a folder of scans. Convert the lot for the archive.</p>
+        <p>There is no command to learn and nothing to install inside the
+        folder. The window asks for a folder and a sentence, and what comes back
+        is written the same way — <strong>no version-control vocabulary appears
+        anywhere in it</strong>, because the person doing this work should not
+        have to learn one to keep their documents safe.</p>
+      </div>
+    </section>
+
+    <!-- 3. the safety net — the product's guarantee -->
+    <section class="section">
+      <div class="column">
+        <p class="eyebrow">Work, then review, then put back</p>
+        <p>The assistant works in your folder itself, not in a copy you have to
+        approve line by line. What makes that safe is a net with three parts,
+        all of them on your own computer.</p>
+        <div class="steps">
+          <div class="step">
+            <span class="n">BEFORE</span>
+            <h3>The folder is recorded</h3>
+            <p>Every file and every byte, into a private history on your
+            machine, before any work begins. That recording is what the job is
+            judged against, and what every undo returns to.</p>
+          </div>
+          <div class="step">
+            <span class="n">AFTER</span>
+            <h3>The changes are reported</h3>
+            <p>One card per file, in plain language — including when a job fails
+            partway. Before and after open in your own applications: Word,
+            Excel, Preview.</p>
+          </div>
+          <div class="step">
+            <span class="n">ANY TIME</span>
+            <h3>Anything can be put back</h3>
+            <p>One file, one folder, or the whole job. A rename undone by either
+            of its names undoes both sides, never half — and an undo is itself
+            recorded first, so it destroys nothing either.</p>
+          </div>
+        </div>
+
+        <div class="report">
+          <div class="report-head">
+            <b>What changed</b>
+            <span>4 files · enrolment-2026</span>
+          </div>
+          <div class="change">
+            <span class="what">Modified</span>
+            <span class="name">invoices-2026.xlsx</span>
+            <span class="undo">Put back</span>
+          </div>
+          <div class="change">
+            <span class="what">Created</span>
+            <span class="name">reminder-letters/</span>
+            <span class="undo">Put back</span>
+          </div>
+          <div class="change">
+            <span class="what">Renamed</span>
+            <span class="name">scan001.pdf &rarr; enrolment-form.pdf</span>
+            <span class="undo">Put back</span>
+          </div>
+          <div class="change conflict">
+            <span class="what">You edited</span>
+            <span class="name">covering-letter.docx</span>
+            <span class="undo">Put back anyway</span>
+          </div>
+          <p class="report-note">A file you changed yourself after the job is a
+          conflict, never a silent overwrite: your newer version is kept, and
+          replacing it is a separate, deliberate answer.</p>
+        </div>
+
+        <p>Anything the assistant says about its own work is shown as the
+        assistant's claim. The two versions of the file are the truth.</p>
+      </div>
+    </section>
+
+    <!-- 4. the machine -->
+    <section class="section">
+      <div class="column">
+        <p class="eyebrow">The granted folder is the only part of your computer inside</p>
+        <p>Every conversation boots a real virtual machine, and the assistant
+        works inside it. Your other documents, your home folder, and your saved
+        passwords are not kept out by a rule telling the assistant to leave them
+        alone. <strong>They are not in there to reach.</strong></p>
+        <p>One guest runs on both platforms — Virtualization.framework on macOS,
+        Hyper-V on Windows, where a system service the installer registers
+        creates the machine, so nobody has to be given a hypervisor's privilege
+        to run synod. There is no software-only mode: a synod that cannot put
+        hardware between the assistant and the rest of your computer refuses to
+        start rather than run in a weaker one.</p>
+        <dl class="facts">
+          <div class="fact">
+            <dt>Inside</dt>
+            <dd>Your folder, and a full office toolkit: LibreOffice, pandoc, OCR
+            with language packs, the Python document stack, a wide font set and
+            complete locales — so a converted letter renders in your own fonts.</dd>
+          </div>
+          <div class="fact">
+            <dt>Not inside</dt>
+            <dd>Everything else on the computer, and every credential. The model
+            is called from your machine, never from the guest, so no key or
+            account token ever goes in.</dd>
+          </div>
+          <div class="fact">
+            <dt>Forgotten</dt>
+            <dd>The machine's own disk is made fresh at every start. Nothing the
+            assistant installs survives a session, and nothing it leaves behind
+            accumulates.</dd>
+          </div>
+        </dl>
+      </div>
+    </section>
+
+    <!-- 5. egress -->
+    <section class="section">
+      <div class="column">
+        <p class="eyebrow">One road out, and we built it</p>
+        <p>The machine has no network adapter at all. Its only route out is a
+        program running on your own computer that speaks for it: a proxy that
+        accepts an exact list of names on the one secure port, looks each name
+        up itself, discards every address that is not public, and writes down
+        every connection it opened and how many bytes crossed in each
+        direction.</p>
+        <p>Outward actions draft; they do not send. Email and calendar, when
+        they arrive, will produce a draft in your own mail client — so an
+        outward action becomes real by your hand, in the place you already
+        review things. Nothing leaves on the assistant's authority.</p>
+      </div>
+    </section>
+
+    <!-- 6. the honest account -->
+    <section class="section">
+      <div class="column">
+        <p class="eyebrow">Said plainly</p>
+        <ul class="candid">
+          <li><b>Close your documents first.</b>
+          The assistant works in the folder itself, so a file left open in Word
+          while a job runs can be overwritten under you, mid-edit. Synod says so
+          before it starts. The recording bounds that to an undo — the
+          interruption is still real.</li>
+          <li><b>It can be wrong.</b>
+          An assistant that edits documents can write bad or mistaken content;
+          that is inherent to the job, not a gap left in this one. The report
+          and the undo are the answer, which is why they are the product rather
+          than a feature of it.</li>
+          <li><b>The list of names narrows where, not what.</b>
+          It says which destinations the machine may reach; it does not and
+          cannot limit what is sent once a connection is open. Nothing here
+          prevents information leaving through an allowed destination. What
+          narrows the risk is that the list is short, every connection is logged,
+          and the only data in reach is the folder you granted.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 7. kin -->
+    <section class="section">
+      <div class="column">
+        <p class="eyebrow">Built on ral, and on exarch</p>
+        <p>Synod is not a fork of exarch and not a mode of it: it uses exarch as
+        a library and supplies only what differs — the grant, the persona, the
+        safety net, the machine, and a surface with no jargon in it. Underneath,
+        both products run every action as a program in <code>ral</code>, inside
+        a boundary the model can work within but cannot edit.</p>
+        <div class="kin">
+          <a class="kin-card" href="../index.html">
+            <b>ral</b>
+            <span>The shell both products run on: a small typed language where
+            results are data, not text to re-split, and authority is granted in
+            the language itself.</span>
+          </a>
+          <a class="kin-card" href="../exarch/index.html">
+            <b>exarch</b>
+            <span>The sibling: a coding agent over a repository, under a
+            capability profile you choose and it cannot rewrite.</span>
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <!-- 8. source -->
+    <section class="section">
+      <div class="column">
+        <p class="eyebrow">Not packaged for download yet</p>
+        <p>Synod runs, and it is not yet something to hand someone as an
+        installer. The code is in the open, and so is the account of what is
+        finished and what is not.</p>
+        <div class="links">
+          <a class="link-btn" href="https://github.com/lambdabetaeta/ral/tree/main/synod">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+            The source
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <section class="backer">
+      <div class="column">
+        <p>Built with funding from the Advanced Research + Invention Agency (ARIA).</p>
+        <a class="backer-logo" href="https://aria.org.uk" target="_blank" rel="noopener noreferrer">
+          <img src="../assets/aria-logo.svg"
+               alt="ARIA — Advanced Research + Invention Agency" width="122" height="48">
+        </a>
+      </div>
+    </section>
+
+  </main>
+
+  {{FOOTER}}
+
+  <script>
+    (function () {
+      var root  = document.documentElement;
+      var btn   = document.getElementById('theme-toggle');
+      var glyph = document.getElementById('theme-glyph');
+      var label = document.getElementById('theme-label');
+      function syncToggle() {
+        var dark = root.classList.contains('dark');
+        glyph.textContent = dark ? '☾' : '☀';
+        label.textContent = dark ? 'dark' : 'light';
+      }
+      syncToggle();
+      btn.addEventListener('click', function () {
+        root.classList.toggle('dark');
+        localStorage.setItem('ral-theme', root.classList.contains('dark') ? 'dark' : 'light');
+        syncToggle();
+      });
+    })();
+  </script>
+</body>
+</html>
