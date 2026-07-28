@@ -318,6 +318,13 @@
 .foundations em { font-style: italic; color: var(--text); }
 .foundations code { font-family: var(--mono); font-size: 0.88em; }
 
+.backer { margin-top: 2.4rem; display: flex; flex-direction: column; align-items: center; gap: 1.1rem; text-align: center; }
+.backer-note { font-family: var(--serif); font-size: 0.95rem; color: var(--muted); margin: 0; }
+.backer-link { display: inline-block; }
+.backer-logo { height: clamp(5.2rem, 15vw, 10.5rem); width: auto; opacity: 0.8; transition: opacity 0.15s ease; }
+.backer-link:hover .backer-logo { opacity: 1; }
+:root.dark .backer-logo { filter: invert(1); }
+
 @media (max-width: 64rem) {
   .duality { grid-template-columns: 1fr; }
   .sandbox-body { grid-template-columns: 1fr; }

@@ -262,3 +262,5 @@ chapters, dated decision notes, and the invariants the implementation keeps.
 ## License
 
 Dual MIT / Apache-2.0.
+
+Funded by the Advanced Research + Invention Agency (ARIA).
