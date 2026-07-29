@@ -467,6 +467,40 @@ fn pipeline_byte_into_value_stage_is_mode_mismatch() {
     );
 }
 
+// A block stage's byte channels are the join over *all* its statements, not
+// just the last.  The output half was always joined; the input half was read
+// off the final statement alone, so a reader anywhere but last vanished from
+// the stage's type and its upstream was rejected as a `Bytes`→`∅` adjacency.
+
+#[test]
+fn block_stage_reading_bytes_before_its_last_statement_is_byte_input() {
+    ok("echo foo | within [env: [X: 'y']] { from-lines; return unit }");
+}
+
+/// A `let` captures its RHS's *output* into the bound value, but its demand on
+/// stdin belongs to the stage the binder shares that stdin with.
+#[test]
+fn bound_reader_before_the_last_statement_is_byte_input() {
+    ok("echo foo | within [env: [X: 'y']] { let s = !{from-lines}; stream-to-list $s }");
+}
+
+/// The join is one-sided: a block of pure statements stays a value stage, so a
+/// byte upstream is still the adjacency error it was.
+#[test]
+fn block_stage_of_pure_statements_stays_value_input() {
+    let errs = raw_errors("echo foo | within [env: [X: 'y']] { let n = 1; length $n }");
+    assert!(
+        errs.iter().any(|e| matches!(
+            e.kind,
+            ral_core::typecheck::TypeErrorKind::ModeMismatch { .. }
+        )),
+        "expected a ModeMismatch (T0012) feeding bytes to a pure block, got: {:?}",
+        errs.iter()
+            .map(|e| e.kind.render_message())
+            .collect::<Vec<_>>()
+    );
+}
+
 // ─── String interpolation ─────────────────────────────────────────────────────
 
 #[test]

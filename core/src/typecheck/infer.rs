@@ -801,6 +801,7 @@ impl Inferencer<'_> {
     ) -> CompTy {
         let mut last = CompTy::pure(empty);
         let mut emits_bytes = false;
+        let mut reads_bytes = false;
         for part in parts {
             let mut alias_already_typed = false;
             match alias_statement_shape(part) {
@@ -839,30 +840,32 @@ impl Inferencer<'_> {
             };
             let out = self.comp_output_mode(&last);
             emits_bytes |= self.ctx.unifier.resolve_mode(&out) == PipeMode::Bytes;
+            let inp = self.comp_input_mode(&last);
+            reads_bytes |= self.ctx.unifier.resolve_mode(&inp) == PipeMode::Bytes;
         }
-        self.lift_seq_output(last, emits_bytes)
+        self.lift_modes(last, reads_bytes, emits_bytes)
     }
 
-    /// A `Seq`'s stdout is everything its statements write, so its output mode
-    /// joins over the whole sequence, not just the last — a body that `echo`es
-    /// per line is byte-output.  Only that mode lifts, and a `Fun`-tailed
-    /// sequence yields a function, not a stage, so it keeps its shape.
-    fn lift_seq_output(&mut self, last: CompTy, emits_bytes: bool) -> CompTy {
-        if !emits_bytes {
+    /// A sequence's two channels are everything its statements read and write,
+    /// so each mode joins over the whole run, not just the last statement — a
+    /// body that `echo`es per line is byte-output, and one that reads stdin
+    /// before its final statement is byte-input.  Only those modes lift, and a
+    /// `Fun`-tailed sequence yields a function, not a stage, so it keeps its
+    /// shape.
+    fn lift_modes(&mut self, last: CompTy, reads_bytes: bool, emits_bytes: bool) -> CompTy {
+        if !(reads_bytes || emits_bytes)
+            || matches!(self.ctx.unifier.resolve_comp_ty(&last), CompTy::Fun(..))
+        {
             return last;
         }
-        if let CompTy::Fun(..) = self.ctx.unifier.resolve_comp_ty(&last) {
-            last
-        } else {
-            let (ret, input, _) = self.extract_return(&last);
-            CompTy::Return(
-                PipeSpec {
-                    input,
-                    output: PipeMode::Bytes,
-                },
-                Box::new(ret),
-            )
-        }
+        let (ret, input, output) = self.extract_return(&last);
+        CompTy::Return(
+            PipeSpec {
+                input: if reads_bytes { PipeMode::Bytes } else { input },
+                output: if emits_bytes { PipeMode::Bytes } else { output },
+            },
+            Box::new(ret),
+        )
     }
 
     /// `a ? b ? c` yields whichever arm succeeds, a union the type language
@@ -1536,13 +1539,21 @@ impl Inferencer<'_> {
                 // emits nothing, so its output is `∅`.  Anything else carries
                 // its own, and `observed_value_ty` then decides whether the
                 // bytes or the return value is what the name binds.
-                let (bound_ty, rhs_output) =
+                // Its bytes *out* may be captured into the bound value, but its
+                // bytes *in* are a demand on the one stdin the binder shares
+                // with `rest`, so they lift out of the capture.
+                let (bound_ty, rhs_output, rhs_reads) =
                     if let CompTy::Fun(..) = self.ctx.unifier.resolve_comp_ty(&inner_ty) {
-                        (Ty::Thunk(Box::new(inner_ty)), PipeMode::None)
+                        (Ty::Thunk(Box::new(inner_ty)), PipeMode::None, false)
                     } else {
-                        let (ty, _, _) = self.extract_return(&inner_ty);
+                        let (ty, input, _) = self.extract_return(&inner_ty);
+                        let reads = self.ctx.unifier.resolve_mode(&input) == PipeMode::Bytes;
                         let final_output = self.final_output_of_comp(inner, &inner_ty);
-                        (self.observed_value_ty(ty, final_output), final_output)
+                        (
+                            self.observed_value_ty(ty, final_output),
+                            final_output,
+                            reads,
+                        )
                     };
                 self.ctx
                     .bind_outputs
@@ -1561,7 +1572,8 @@ impl Inferencer<'_> {
                         self.bind_pattern(other, &concrete);
                     }
                 }
-                self.infer_comp(rest)
+                let rest_ty = self.infer_comp(rest);
+                self.lift_modes(rest_ty, rhs_reads, false)
             }
             CompKind::App { head, args } => {
                 let head_ty = self.infer_comp(head);
