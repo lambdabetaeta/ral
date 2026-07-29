@@ -294,6 +294,32 @@ pub fn is_dir(path: &str) -> bool {
     Path::new(path).is_dir()
 }
 
+/// What stands at a path, as the shapes a mount can be laid over.  A final
+/// symlink is its own shape rather than followed: the kernel refuses to mount
+/// over one at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathShape {
+    Dir,
+    /// A regular file, or any other non-directory inode — fifo, socket,
+    /// device — since they share the mount rule.
+    NonDir,
+    Symlink,
+    Absent,
+}
+
+/// The [`PathShape`] of `path`, from one `lstat`, so a caller choosing
+/// between mount kinds cannot race itself between two predicates.  An
+/// unstatable path reports [`PathShape::Absent`].
+#[allow(clippy::disallowed_methods)]
+pub fn shape(path: &str) -> PathShape {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => PathShape::Symlink,
+        Ok(meta) if meta.is_dir() => PathShape::Dir,
+        Ok(_) => PathShape::NonDir,
+        Err(_) => PathShape::Absent,
+    }
+}
+
 /// `Path::new(path).is_absolute()` — the *host's* rule, not the Windows one
 /// `is_windows_absolute` applies.
 #[allow(clippy::disallowed_methods)]

@@ -1677,12 +1677,19 @@ OS-level enforcement varies:
   device and process trees are not bound into the sandbox — with
   system directories (`/bin`, `/usr`, `/lib*`, `/sys`, and
   selected `/etc` files) bound read-only alongside the granted
-  prefixes.  A `deny` entry is masked by an empty, unwritable
-  directory bound over it rather than refused by a path rule, so a
-  directory on the path to it may be freely renamed or removed —
-  the mask travels with it, since the bind follows the directory
-  rather than the name that mounted it — and only the denied
-  entry's own name is immovable.
+  prefixes.  A `deny` entry guarantees three things: the body still
+  runs, every read and write of it fails with a permission error, and
+  none of its content is observable.  bwrap has no negative path
+  rule, so the mechanism is a mount laid over the entry after the
+  granted binds — an empty directory with no permission bits over a
+  directory or an absent name, an unopenable device node over
+  anything else, and, nothing mounting over a symlink, the resolved
+  target for a symlinked `deny`.  That mount is anchored to the inode
+  rather than the name that mounted it, so a directory on the path to
+  the entry may be freely renamed or removed and the mask travels
+  with it; only the entry's own name is immovable.  A denied path
+  therefore always *exists* inside the sandbox, unlike macOS — a mask
+  can add a name where a path rule cannot.
 - **Windows** — a projection-keyed AppContainer (LowBox token): the
   session registers one profile per *distinct fs projection* it
   confines, created lazily the first time that projection becomes

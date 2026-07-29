@@ -8,6 +8,7 @@
 //! bwrap has no endpoint filter — `--unshare-net` drops the network
 //! namespace whole — so `SandboxProjection::net` is a bit, not a list.
 
+use crate::path::PathShape;
 use crate::types::{FsProjection, SandboxProjection};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -85,26 +86,14 @@ pub(crate) fn make_command_with_policy(
             c.args(["--dev-bind", "/", "/"]);
         }
     }
-    // bwrap has no negative path rule, so each denied path gets an empty
-    // tmpfs laid over it after the binds: last mount wins, reads find an
-    // empty dir, writes land in throwaway memory.
-    //
-    // Deliberately not gated on existence.  `--tmpfs DEST` creates its own
-    // mount point (unlike `--bind SRC DEST`), and a guard here would leave
-    // a deny path that is absent at entry but under a writable bind
-    // unmasked — a child could then create and write it.
-    //
-    // `bind_spec.pinned_dirs` goes unused here on purpose: a `--tmpfs` mask
-    // is a mount bound to the denied path, not to the path string that named
-    // it at mount time, so a rename of an ancestor carries the mount — and
-    // the mask — along with it.  Only the denied path's own name resists
-    // rename or removal, with `EBUSY`: the pin macOS renders explicitly,
-    // Linux gets for free.
+    // Masks go on after every bind: last mount wins.  `pinned_dirs` goes
+    // unused because a mask is anchored to the inode, so a renamed ancestor
+    // carries it — the pin macOS renders explicitly, Linux gets for free.
     let mut denied_binds = bind_spec.deny_paths;
     denied_binds.sort();
     denied_binds.dedup();
     for bind in &denied_binds {
-        c.args(["--tmpfs", bind]);
+        DenyMask::over(bind).render(&mut c);
     }
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
@@ -116,6 +105,42 @@ pub(crate) fn make_command_with_policy(
     c.arg(name);
     c.args(args);
     c
+}
+
+/// The mount that masks one denied path, bwrap having no negative path rule.
+/// The target's shape forces which one, and getting it wrong costs the launch
+/// rather than the deny — `--tmpfs` over a regular file dies in `mkdir` before
+/// the body execs — so [`Self::over`] is the only constructor.
+enum DenyMask<'p> {
+    /// An empty directory with no permission bits, and the only mask that
+    /// brings its own mountpoint, hence the absent case too.
+    EmptyDir(&'p str),
+    /// A device node bound without `MS_DEV`: unopenable, `EACCES` either way.
+    UnopenableNode(&'p str),
+    /// Nothing — no mount lands on a symlink; the resolved twin holds it.
+    OnItsTarget,
+}
+
+impl<'p> DenyMask<'p> {
+    fn over(path: &'p str) -> Self {
+        match crate::path::shape(path) {
+            PathShape::Symlink => Self::OnItsTarget,
+            PathShape::NonDir => Self::UnopenableNode(path),
+            PathShape::Dir | PathShape::Absent => Self::EmptyDir(path),
+        }
+    }
+
+    fn render(self, c: &mut Command) {
+        match self {
+            Self::EmptyDir(path) => {
+                c.args(["--perms", "0000", "--tmpfs", path]);
+            }
+            Self::UnopenableNode(path) => {
+                c.args(["--ro-bind", "/dev/null", path]);
+            }
+            Self::OnItsTarget => {}
+        }
+    }
 }
 
 /// A seccomp-BPF program: kill on an ABI mismatch, kill each denied
@@ -331,85 +356,224 @@ fn default_ro_binds() -> Vec<String> {
 )]
 mod tests {
     use super::make_command_with_policy;
+    use crate::path::NormalizedPrefix;
+    use crate::sandbox::launch::Ownership;
     use crate::types::{FsPolicy, FsProjection, SandboxProjection};
+    use std::process::Stdio;
 
-    #[test]
-    fn denied_paths_are_overlaid_after_rw_binds() {
-        let dir = std::env::temp_dir().join(format!("ral-bwrap-deny-test-{}", std::process::id()));
-        let denied = dir.join(".exarch.toml");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&denied, "capabilities").unwrap();
-
-        let policy = SandboxProjection {
-            fs: FsProjection::Restricted(FsPolicy {
-                read_prefixes: Vec::new(),
-                write_prefixes: vec![dir.to_string_lossy().into_owned().into()],
-                deny_paths: vec![denied.to_string_lossy().into_owned().into()],
-            }),
-            net: true,
-            exec: crate::types::ExecProjection::default(),
-        };
-        let cmd = make_command_with_policy(
-            "/bin/true",
-            &[],
-            &policy,
-            None,
-            super::launch::Ownership::Kept,
-        );
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        let bind_pos = args
-            .windows(3)
-            .position(|w| w[0] == "--bind" && w[1] == dir.to_string_lossy());
-        let deny_pos = args
-            .windows(2)
-            .position(|w| w[0] == "--tmpfs" && w[1] == denied.to_string_lossy());
-
-        assert!(bind_pos.is_some(), "rw bind missing: {args:?}");
-        assert!(deny_pos.is_some(), "tmpfs deny overlay missing: {args:?}");
-        assert!(
-            bind_pos.unwrap() < deny_pos.unwrap(),
-            "deny overlay must win"
-        );
+    fn workdir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ral-bwrap-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create work dir");
+        dir
     }
 
-    /// A deny path absent at entry, yet under a writable bind, must still
-    /// be masked — or a child could create it.
-    #[test]
-    fn deny_overlay_is_emitted_for_a_nonexistent_path() {
-        let dir =
-            std::env::temp_dir().join(format!("ral-bwrap-deny-absent-{}", std::process::id()));
-        // Deliberately not created: the deny target must be absent.
-        let denied = dir.join("secret-not-yet-created");
-        let policy = SandboxProjection {
+    fn deny_within(dir: &std::path::Path, denied: &[&std::path::Path]) -> SandboxProjection {
+        SandboxProjection {
             fs: FsProjection::Restricted(FsPolicy {
                 read_prefixes: Vec::new(),
-                write_prefixes: vec![dir.to_string_lossy().into_owned().into()],
-                deny_paths: vec![denied.to_string_lossy().into_owned().into()],
+                write_prefixes: vec![NormalizedPrefix::from_surface(dir)],
+                deny_paths: denied.iter().map(NormalizedPrefix::from_surface).collect(),
             }),
             net: true,
             exec: crate::types::ExecProjection::default(),
-        };
-        let cmd = make_command_with_policy(
-            "/bin/true",
-            &[],
-            &policy,
-            None,
-            super::launch::Ownership::Kept,
-        );
-        let args: Vec<String> = cmd
+        }
+    }
+
+    fn argv(policy: &SandboxProjection) -> Vec<String> {
+        make_command_with_policy("/bin/true", &[], policy, None, Ownership::Kept)
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        let deny_pos = args
-            .windows(2)
-            .position(|w| w[0] == "--tmpfs" && w[1] == denied.to_string_lossy());
-        assert!(
-            deny_pos.is_some(),
-            "absent deny path must still be overlaid with --tmpfs: {args:?}"
+            .collect()
+    }
+
+    fn position_of(args: &[String], mask: &[&str]) -> Option<usize> {
+        args.windows(mask.len()).position(|w| w == mask)
+    }
+
+    #[test]
+    fn an_existing_file_is_masked_by_an_unopenable_node_after_its_bind() {
+        let dir = workdir("deny-file");
+        let denied = dir.join(".exarch.toml");
+        std::fs::write(&denied, "capabilities").unwrap();
+
+        let policy = deny_within(&dir, &[&denied]);
+        let args = argv(&policy);
+        let bind = position_of(&args, &["--bind", &dir.to_string_lossy()]);
+        let mask = position_of(
+            &args,
+            &["--ro-bind", "/dev/null", &denied.to_string_lossy()],
         );
+
+        assert!(bind.is_some(), "rw bind missing: {args:?}");
+        assert!(
+            mask.is_some(),
+            "node mask missing for an existing file: {args:?}"
+        );
+        assert!(bind.unwrap() < mask.unwrap(), "the mask must win");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without `--perms` the mask is writable and a child's write inside it
+    /// succeeds into throwaway memory — a lie rather than a deny.
+    #[test]
+    fn a_directory_is_masked_by_a_tmpfs_with_no_permission_bits() {
+        let dir = workdir("deny-dir");
+        let denied = dir.join(".git");
+        std::fs::create_dir_all(&denied).unwrap();
+
+        let args = argv(&deny_within(&dir, &[&denied]));
+        assert!(
+            position_of(
+                &args,
+                &["--perms", "0000", "--tmpfs", &denied.to_string_lossy()]
+            )
+            .is_some(),
+            "a denied directory needs an unwritable tmpfs mask: {args:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A deny absent at entry but under a writable bind must still be masked,
+    /// or a child creates it and writes it for real.
+    #[test]
+    fn an_absent_path_is_masked_so_a_child_cannot_create_it() {
+        let dir = workdir("deny-absent");
+        // Deliberately not created: the deny target must be absent.
+        let denied = dir.join("secret-not-yet-created");
+
+        let args = argv(&deny_within(&dir, &[&denied]));
+        assert!(
+            position_of(
+                &args,
+                &["--perms", "0000", "--tmpfs", &denied.to_string_lossy()]
+            )
+            .is_some(),
+            "an absent deny path must still be masked: {args:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Naming a symlink in argv costs the whole launch, so the mask goes on
+    /// the resolved twin the projection carries beside it.
+    #[test]
+    fn a_symlinked_deny_is_masked_at_its_target_and_never_at_the_link() {
+        let dir = workdir("deny-link");
+        let target = dir.join("id_rsa");
+        let link = dir.join("link-to-id_rsa");
+        std::fs::write(&target, "PRIVATE KEY").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let args = argv(&deny_within(&dir, &[&link, &target]));
+        assert!(
+            position_of(
+                &args,
+                &["--ro-bind", "/dev/null", &target.to_string_lossy()]
+            )
+            .is_some(),
+            "the resolved target must carry the mask: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| *a == link.to_string_lossy()),
+            "the link's own name must not be mounted over: {args:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn run_confined(policy: &SandboxProjection, script: &str) -> Option<std::process::Output> {
+        make_command_with_policy(
+            "/bin/sh",
+            &["-c".to_string(), script.to_string()],
+            policy,
+            None,
+            Ownership::Kept,
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()
+    }
+
+    /// No argv assertion can catch a mask that makes bwrap exit before it
+    /// execs anything, so this one spawns the envelope.  It skips where no
+    /// envelope can be built at all — bwrap absent, or user namespaces
+    /// unavailable — since that proves nothing either way.
+    #[test]
+    fn a_denied_path_refuses_every_access_while_the_body_still_runs() {
+        let dir = workdir("deny-spawn");
+        let key = dir.join("id_rsa");
+        let git = dir.join(".git");
+        let readable = dir.join("README");
+        std::fs::write(&key, "PRIVATE-KEY-BYTES").unwrap();
+        std::fs::create_dir_all(&git).unwrap();
+        std::fs::write(git.join("config"), "GIT-CONFIG-BYTES").unwrap();
+        std::fs::write(&readable, "README-BYTES").unwrap();
+
+        let open = deny_within(&dir, &[]);
+        let control = run_confined(&open, "echo READY");
+        let launched = control
+            .as_ref()
+            .is_some_and(|o| String::from_utf8_lossy(&o.stdout).contains("READY"));
+        if !launched {
+            let why = control.map_or_else(
+                || "bwrap not found".to_string(),
+                |o| String::from_utf8_lossy(&o.stderr).trim().to_string(),
+            );
+            eprintln!("skipping: this host cannot build a bwrap envelope: {why}");
+            return;
+        }
+
+        let script = format!(
+            "echo READY\n\
+             cat '{key}' 2>/dev/null || echo KEY-READ-REFUSED\n\
+             echo pwned > '{key}' 2>/dev/null || echo KEY-WRITE-REFUSED\n\
+             cat '{config}' 2>/dev/null || echo GIT-READ-REFUSED\n\
+             touch '{planted}' 2>/dev/null || echo GIT-WRITE-REFUSED\n\
+             cat '{readable}' 2>/dev/null\n",
+            key = key.display(),
+            config = git.join("config").display(),
+            planted = git.join("planted").display(),
+            readable = readable.display(),
+        );
+        let out = run_confined(&deny_within(&dir, &[&key, &git]), &script).expect("spawn bwrap");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        assert!(
+            stdout.contains("READY"),
+            "the deny masks stopped the envelope from launching, so nothing was confined: {stderr}"
+        );
+        assert!(
+            !stdout.contains("PRIVATE-KEY-BYTES"),
+            "a denied file's bytes reached the child: {stdout}"
+        );
+        assert!(
+            !stdout.contains("GIT-CONFIG-BYTES"),
+            "a denied directory's contents reached the child: {stdout}"
+        );
+        for refusal in [
+            "KEY-READ-REFUSED",
+            "KEY-WRITE-REFUSED",
+            "GIT-READ-REFUSED",
+            "GIT-WRITE-REFUSED",
+        ] {
+            assert!(stdout.contains(refusal), "missing {refusal}: {stdout}");
+        }
+        assert!(
+            stdout.contains("README-BYTES"),
+            "the grant's own writable prefix stopped being readable: {stdout}"
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&key).unwrap(),
+            "PRIVATE-KEY-BYTES",
+            "the denied file was overwritten on the host"
+        );
+        assert!(
+            !git.join("planted").exists(),
+            "a child planted a file inside a denied directory"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A kept child's envelope is tied to our death and a surrendered one's
@@ -418,7 +582,7 @@ mod tests {
     fn only_the_parent_death_tie_distinguishes_a_surrendered_launch() {
         let policy = SandboxProjection {
             fs: FsProjection::Restricted(FsPolicy {
-                read_prefixes: vec!["/usr".to_string().into()],
+                read_prefixes: vec![NormalizedPrefix::from_surface("/usr")],
                 write_prefixes: Vec::new(),
                 deny_paths: Vec::new(),
             }),
@@ -431,8 +595,8 @@ mod tests {
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
         };
-        let kept = argv(super::launch::Ownership::Kept);
-        let surrendered = argv(super::launch::Ownership::Surrendered);
+        let kept = argv(Ownership::Kept);
+        let surrendered = argv(Ownership::Surrendered);
 
         assert!(
             kept.contains(&"--die-with-parent".to_string()),

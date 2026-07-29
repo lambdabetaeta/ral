@@ -91,20 +91,30 @@ denies `.git/config` also refuses `mv .git .git.bak` and `rmdir .git`, since
 both `.git` and the repo root are pinned ancestors of the denied entry.
 
 **Linux renders no pin, and that is not an oversight.** bwrap realizes a
-`deny` as a `--tmpfs` overlay mounted at the literal denied path
-(`make_command_with_policy`, `core/src/sandbox/linux.rs`); a mount is bound to
-the directory it covers, not to the path string that named it at mount time,
-so renaming a non-mountpoint ancestor carries the mount along and the overlay
-keeps masking the real file at its new location, while renaming or removing
-the mountpoint itself fails with `EBUSY`. The invariant already holds by
-construction, so Linux pays a narrower price than macOS: only the denied
-path's own name is frozen, and every ancestor — the write prefix root
-included — stays freely renameable and removable. The two backends also fail
-differently: a denied read reports `EISDIR` or `ENOENT` on Linux (the tmpfs
-mask presents as an empty directory where a file was expected) against
-`EPERM` on macOS (Seatbelt's outright refusal), so a test of this invariant
-across platforms must assert that the real bytes are unreachable, never a
-specific errno.
+`deny` as a mount laid over the denied path (`DenyMask`,
+`core/src/sandbox/linux.rs`); a mount is anchored to the inode it covers, not
+to the path string that named it at mount time, so renaming a non-mountpoint
+ancestor carries the mask along and it keeps covering the real file at its new
+location, while renaming or removing the mountpoint itself fails with `EBUSY`.
+The invariant already holds by construction, so Linux pays a narrower price
+than macOS: only the denied path's own name is frozen, and every ancestor —
+the write prefix root included — stays freely renameable and removable.
+
+**The shape of the denied path forces which mount, and the cost of confusing
+them is the launch.** `--tmpfs` mkdirs its own mountpoint, so over an existing
+regular file it dies with `ENOTDIR` before bwrap execs anything — a deny that
+denies nothing because nothing runs. Hence `DenyMask::over` as the only
+constructor: an existing non-directory takes `--ro-bind /dev/null`, bound
+without `MS_DEV` and so unopenable either way; a directory or an absent name
+takes `--perms 0000 --tmpfs`, absent names included because a mask must occupy
+the name before the body runs or a child creates the file itself. Nothing
+mounts over a symlink, so a symlinked `deny` is masked at the resolved target
+`sandbox_projection` carries beside the surface spelling. Both masks refuse
+with `EACCES` against macOS's `EPERM`, so a cross-platform test should assert
+the bytes are unreachable rather than an errno — and because the failure mode
+is a sandbox that never launches, one test per backend must spawn the envelope
+for real
+(`sandbox::linux::tests::a_denied_path_refuses_every_access_while_the_body_still_runs`).
 
 **The sandbox is applied per external command, not by re-execing the grant
 body.** A `grant` is a *local* dynamic effect scope: its body evaluates in
