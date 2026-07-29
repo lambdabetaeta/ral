@@ -345,7 +345,6 @@ impl Drop for RedirectGuard {
 /// fd-0 file redirects belong to `shell.io.stdin` via
 /// [`install_stdin_redirect`]; `apply_redirects` here and `wire_stdin` in
 /// `stdio.rs` must both leave them alone.
-#[cfg(any(unix, windows))]
 fn is_stdin_file_redirect(r: &EvalRedirectV) -> bool {
     matches!(
         r,
@@ -525,16 +524,6 @@ pub(crate) fn apply_redirects(
         }
     }
     Ok(guard)
-}
-
-/// Stub so the redirect scaffolding compiles where neither the `dup2` nor the
-/// `SetStdHandle` path exists.
-#[cfg(not(any(unix, windows)))]
-pub(crate) fn apply_redirects(
-    _redirects: &[EvalRedirectV],
-    _shell: &mut Shell,
-) -> Settled<RedirectGuard> {
-    Ok(RedirectGuard { commits: vec![] })
 }
 
 /// Take the commits out before `guard` drops at the end of this call, since

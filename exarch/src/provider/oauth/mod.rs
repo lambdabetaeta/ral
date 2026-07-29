@@ -829,15 +829,6 @@ mod windows_dacl {
     }
 }
 
-#[cfg(not(any(unix, windows)))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:token-write-nonunix] oauth token store write with no owner-only mode available on this platform; credential persistence infrastructure, not turn-time model data I/O."
-)]
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

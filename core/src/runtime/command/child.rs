@@ -162,8 +162,6 @@ impl RunningChild {
                 let _ = child.kill();
             }
         }
-        #[cfg(not(any(unix, windows)))]
-        let _ = child.kill();
     }
 
     /// Poll for the leader until `deadline`, classifying a stop as `wait` does.

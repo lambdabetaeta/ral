@@ -118,10 +118,5 @@ impl ForegroundDecision {
         {
             ForegroundGuard::try_acquire(child_id.cast_signed(), lease)
         }
-        #[cfg(not(any(unix, windows)))]
-        {
-            let _ = (child_id, lease);
-            None
-        }
     }
 }

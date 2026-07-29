@@ -14,13 +14,7 @@ mod common;
 mod unix;
 #[cfg(windows)]
 mod windows;
-// Neither Unix nor Windows (wasm): the Windows backend's `windows_sys` /
-// `os_pipe` imports are `cfg(windows)`-only, so it cannot stand in here.
-#[cfg(not(any(unix, windows)))]
-mod fallback;
 
-#[cfg(not(any(unix, windows)))]
-use fallback as platform;
 #[cfg(unix)]
 use unix as platform;
 #[cfg(windows)]
@@ -31,11 +25,8 @@ pub(super) use common::{FrameReader, HelperProtocol, pipe_error};
 
 #[cfg(unix)]
 pub(super) use unix::{Channel as ValueChannel, pair as create_value_pair, pass};
-// Only `pass` goes unused off Unix: its one caller outside this module is
+// Only `pass` goes unused on Windows: its one caller outside this module is
 // the anchor process in `group.rs`, which is Unix-only.
-#[cfg(not(any(unix, windows)))]
-#[allow(unused_imports)]
-pub(super) use fallback::{Channel as ValueChannel, pair as create_value_pair, pass};
 #[cfg(windows)]
 #[allow(unused_imports)]
 pub(super) use windows::{Channel as ValueChannel, pair as create_value_pair, pass};

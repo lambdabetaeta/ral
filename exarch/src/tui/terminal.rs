@@ -187,11 +187,9 @@ pub struct TerminalGuard {
 }
 
 impl TerminalGuard {
-    #[cfg_attr(not(any(unix, windows)), allow(unused_variables))]
     pub fn enter(stderr_log: &Path) -> io::Result<Self> {
         install_panic_restore_hook();
         TUI_ACTIVE.store(true, Ordering::Release);
-        #[cfg(any(unix, windows))]
         let mut stderr_backup = Some(match redirect_stderr_to_file(stderr_log) {
             Ok(backup) => backup,
             Err(e) => {
@@ -204,7 +202,6 @@ impl TerminalGuard {
             Err(e) => {
                 restore_terminal_modes();
                 TUI_ACTIVE.store(false, Ordering::Release);
-                #[cfg(any(unix, windows))]
                 if let Some(backup) = stderr_backup.take() {
                     restore_stderr(backup);
                 }
@@ -213,7 +210,6 @@ impl TerminalGuard {
         };
         Ok(Self {
             term,
-            #[cfg(any(unix, windows))]
             stderr_backup,
         })
     }
@@ -229,7 +225,6 @@ impl Drop for TerminalGuard {
         TUI_ACTIVE.store(false, Ordering::Release);
         // stderr last: teardown's own stray diagnostics still belong in the
         // log, not on the freshly-restored prompt row.
-        #[cfg(any(unix, windows))]
         if let Some(backup) = self.stderr_backup.take() {
             restore_stderr(backup);
         }

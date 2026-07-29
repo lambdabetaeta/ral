@@ -8,6 +8,11 @@
 //! [`PgidPolicy`] and the poll point [`check`], lives here; `unix` and
 //! `windows` exist only on their own platform, so neither can be linked
 //! from this page.
+//!
+//! The two are exhaustive, here and throughout ral-core: `os_pipe` is an
+//! unconditional dependency and builds on Unix and Windows alone, so a
+//! third-platform arm is a branch no compiler ever reaches — scaffolding
+//! that can only rot.
 
 use std::num::NonZeroI32;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -139,11 +144,6 @@ impl ChildHandle {
                 ChildRepr::RawWindows(child) => child.wait_handling_stop(),
             }
         }
-        #[cfg(not(any(unix, windows)))]
-        {
-            let ChildRepr::Std(child) = &mut self.0;
-            wait_handling_stop(child, pgid, park_on_stop)
-        }
     }
 
     /// Non-blocking peer of [`Self::wait_handling_stop`]; `Ok(None)` when
@@ -167,11 +167,6 @@ impl ChildHandle {
                 ChildRepr::Std(child) => windows::try_wait_handling_stop(child, pgid, park_on_stop),
                 ChildRepr::RawWindows(child) => child.try_wait_handling_stop(),
             }
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            let ChildRepr::Std(child) = &mut self.0;
-            try_wait_handling_stop(child, pgid, park_on_stop)
         }
     }
 
@@ -224,8 +219,10 @@ pub fn check(mooring: &crate::types::Mooring) -> Result<(), crate::types::Break>
 }
 
 /// Reset the escalation ladder at an acknowledgment boundary — the REPL
-/// prompt, a Ctrl-C the line editor absorbed — so a signal already handled
-/// cooperatively does not creep the next one toward the force-exit.
+/// prompt, a Ctrl-C the line editor absorbed.
+///
+/// A signal already handled cooperatively thus does not creep the next one
+/// toward the force-exit.
 pub fn clear() {
     ESCALATION.store(0, Ordering::Relaxed);
 }
@@ -236,79 +233,6 @@ pub fn clear() {
 /// cancel path did, or deliberately did not, engage the ladder.
 pub fn escalation_pending() -> bool {
     ESCALATION.load(Ordering::Relaxed) >= 1
-}
-
-// ── Fallback platform stubs ────────────────────────────────────────────────
-//
-// Keep wasm and friends compiling without pretending to have process groups.
-
-#[cfg(not(any(unix, windows)))]
-pub fn install_handlers() {}
-
-#[cfg(not(any(unix, windows)))]
-pub fn reset_child_signals() {}
-
-#[cfg(not(any(unix, windows)))]
-pub fn spawn_with_pgid(
-    cmd: &mut std::process::Command,
-    _pgid: PgidPolicy,
-) -> std::io::Result<(std::process::Child, Option<Pgid>)> {
-    let child = cmd.spawn()?;
-    Ok((child, None))
-}
-
-#[cfg(not(any(unix, windows)))]
-pub fn spawn_with_pgid_after<F>(
-    cmd: &mut std::process::Command,
-    pgid: PgidPolicy,
-    _after: F,
-) -> std::io::Result<(std::process::Child, Option<Pgid>)>
-where
-    F: Fn() -> std::io::Result<()> + Send + Sync + 'static,
-{
-    spawn_with_pgid(cmd, pgid)
-}
-
-// Without job control there is no stop to park on and no group to signal, so
-// the bare `Child` calls are the whole of the contract here.  They stay private,
-// as their `unix` and `windows` peers are: `ChildHandle` is the only caller.
-
-#[cfg(not(any(unix, windows)))]
-fn wait_handling_stop(
-    child: &mut std::process::Child,
-    _pgid: Option<Pgid>,
-    _park_on_stop: bool,
-) -> std::io::Result<WaitOutcome> {
-    child.wait().map(WaitOutcome::from_exit_status)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn try_wait_handling_stop(
-    child: &mut std::process::Child,
-    _pgid: Option<Pgid>,
-    _park_on_stop: bool,
-) -> std::io::Result<Option<WaitOutcome>> {
-    Ok(child.try_wait()?.map(WaitOutcome::from_exit_status))
-}
-
-#[cfg(not(any(unix, windows)))]
-pub struct PipelineRelay;
-
-#[cfg(not(any(unix, windows)))]
-impl PipelineRelay {
-    pub fn install(_pgid: i32) -> Option<Self> {
-        None
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-pub struct ForegroundGuard;
-
-#[cfg(not(any(unix, windows)))]
-impl ForegroundGuard {
-    pub fn try_acquire(_target: i32, _lease: &crate::process::TerminalLease) -> Option<Self> {
-        None
-    }
 }
 
 // ── Process-group placement (data) ─────────────────────────────────────────

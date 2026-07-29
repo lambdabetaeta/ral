@@ -58,10 +58,7 @@ pub(crate) fn run(
     // `run_uutils_in_process` wires no `> file` plumbing.  Every other
     // bundled call falls through to the spawn path below as an ordinary
     // `ral --ral-bundled-tool <tool> …` child.
-    #[cfg(all(
-        any(unix, windows),
-        any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
-    ))]
+    #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
     if let ExecImage::BundledTool { tool } = &rc.image
         && redirects.is_empty()
         && uutils::can_run_uutils_in_process(shell)

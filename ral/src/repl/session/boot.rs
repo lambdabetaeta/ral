@@ -173,7 +173,6 @@ pub(super) fn setup_panic_hook() {
 /// Crash-log directory (`$XDG_STATE_HOME/ral`), resolved at hook-install
 /// time so an unset or changed `HOME` mid-session cannot redirect the
 /// crash log.
-#[cfg(any(unix, windows))]
 fn crash_log_dir() -> std::path::PathBuf {
     let home = crate::platform::home_dir();
     ral_core::path::basedir::resolve_xdg(ral_core::path::basedir::XdgKind::State, &home).join("ral")
@@ -184,7 +183,6 @@ fn crash_log_dir() -> std::path::PathBuf {
 /// terminal/console has already been restored by the caller.  Every write
 /// (including the stderr notice) ignores errors — a panic hook must not
 /// panic.
-#[cfg(any(unix, windows))]
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:crashlog-write] panic hook creates the state dir and writes a crash log; not turn-time model I/O"

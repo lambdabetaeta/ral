@@ -135,9 +135,11 @@ fn raise(cause: CancelCause) {
 }
 
 /// The trunk-only half of Esc/Ctrl-C: `Interrupt` on the published token, then
-/// [`deliver_interrupt`] to unwind the exchange.  Any other focused tab goes
-/// through [`crate::fleet::registry::AgentRegistry::interrupt`] instead, which
-/// reaches that agent's own token rather than the slot.
+/// [`deliver_interrupt`] to unwind the exchange.
+///
+/// Any other focused tab goes through
+/// [`crate::fleet::registry::AgentRegistry::interrupt`] instead, which reaches
+/// that agent's own token rather than the slot.
 pub fn raise_interrupt() {
     raise(CancelCause::Interrupt);
     deliver_interrupt();
@@ -160,9 +162,6 @@ pub fn install() {
         libc::signal(libc::SIGHUP, chained as *const () as libc::sighandler_t);
     }
 }
-
-#[cfg(not(any(unix, windows)))]
-pub fn install() {}
 
 #[cfg(unix)]
 extern "C" fn chained(sig: libc::c_int) {
@@ -198,9 +197,6 @@ fn deliver_interrupt() {
 fn deliver_interrupt() {
     ral_core::process::relay_interrupt();
 }
-
-#[cfg(not(any(unix, windows)))]
-fn deliver_interrupt() {}
 
 /// Whether a delivered Windows console-control event is an exchange-cancel
 /// gesture — Ctrl-C or Ctrl-Break — that exarch's handler fully handles itself.

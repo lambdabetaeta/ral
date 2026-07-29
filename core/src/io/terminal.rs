@@ -248,10 +248,6 @@ fn probe_isatty() -> (bool, bool, bool) {
             is_console(STD_ERROR_HANDLE),
         )
     }
-    #[cfg(not(any(unix, windows)))]
-    {
-        (false, false, false)
-    }
 }
 
 /// `tcgetpgrp(stdin) == getpgrp()`, and `false` whenever stdin is not a tty.

@@ -250,11 +250,6 @@ pub(super) fn wire_stderr(
                 };
                 command.stderr(stdio);
             }
-            #[cfg(not(any(unix, windows)))]
-            {
-                let _ = (inherit_tty, stdout_file_dup);
-                command.stderr(crate::process::StdioSpec::inherit());
-            }
             Ok(false)
         }
         Some(StderrRoute::File(path, mode)) => {

@@ -92,7 +92,6 @@ fn read_env_optional<T>(
 
 /// All that separates the two backends: the descriptor type and five
 /// primitives, so `serve_from_env` performs one dance on both.
-#[cfg(any(unix, windows))]
 trait HelperTransport {
     /// An fd on Unix, a Win32 `HANDLE` on Windows.
     type Desc: Copy;
@@ -111,7 +110,6 @@ trait HelperTransport {
     fn writer(desc: Self::Desc) -> Box<dyn std::io::Write>;
 }
 
-#[cfg(any(unix, windows))]
 fn serve_from_env<P: HelperTransport>() -> u8 {
     let outcome: Result<u8, ()> = (|| {
         let job = P::read(P::JOB).map_err(report_helper_env_err)?;
@@ -421,12 +419,6 @@ pub fn try_run_pipeline_stage_helper() -> Option<u8> {
             }
             _ => None,
         }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = mode;
-        eprintln!("ral: pipeline helpers are only available on Unix and Windows");
-        Some(2)
     }
 }
 

@@ -181,10 +181,6 @@ pub fn use_color() -> bool {
     {
         crate::io::is_console(crate::io::STD_ERROR_HANDLE)
     }
-    #[cfg(not(any(unix, windows)))]
-    {
-        false
-    }
 }
 
 /// Whether stdout — REPL value output, help — may carry color.

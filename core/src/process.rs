@@ -47,6 +47,3 @@ pub use signal::{
     kill_pipeline_group, relay_interrupt, release_win_group, reset_child_signals,
     set_active_process_limit, try_reap_leader, wait_leader_blocking,
 };
-
-#[cfg(not(any(unix, windows)))]
-pub use signal::{ForegroundGuard, PipelineRelay, install_handlers, reset_child_signals};

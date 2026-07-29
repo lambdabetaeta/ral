@@ -20,8 +20,10 @@ pub fn resolve_in_path(name: &str, path: &str, cwd: Option<&Path>) -> Option<Str
 
 /// Resolve a command head to its executable on disk: a separator-bearing
 /// name is a path anchored against `cwd`, a bare name is walked against
-/// `path_value`.  `Some` only for a regular file carrying the executable
-/// bit — the check the OS would apply at spawn.
+/// `path_value`.
+///
+/// `Some` only for a regular file carrying the executable bit — the check
+/// the OS would apply at spawn.
 pub fn locate(name: &str, path_value: Option<&str>, cwd: Option<&Path>) -> Option<PathBuf> {
     if name_has_separator(name) {
         let candidate = anchor_to_cwd(PathBuf::from(name), cwd);
@@ -48,14 +50,18 @@ fn name_has_separator(name: &str) -> bool {
     name.contains(std::path::MAIN_SEPARATOR) || name.contains('/') || name.contains('\\')
 }
 
+/// Anchor a relative entry to `cwd`, folding `.` and `..` out of the join.
+///
+/// The fold is not cosmetic: a resolved path travels on to the OS sandbox
+/// profile via [`capability::sandbox`](crate::capability::sandbox), which
+/// matches literally, and the `/work/./bin/git` an unfolded `./bin` yields
+/// is covered by no `/work/bin/` the profile names.
 fn anchor_to_cwd(p: PathBuf, cwd: Option<&Path>) -> PathBuf {
-    if p.is_absolute() {
-        return p;
-    }
-    match cwd {
-        Some(c) => c.join(p),
-        None => p,
-    }
+    let joined = match cwd {
+        Some(c) if !p.is_absolute() => c.join(p),
+        _ => p,
+    };
+    super::lex::fold_dots(&joined)
 }
 
 /// The one directory list behind [`locate`], [`commands_on_path`], and
@@ -86,8 +92,10 @@ fn is_executable_file(p: &Path) -> bool {
 }
 
 /// Names of the executables reachable through `path_value`, in `PATH`
-/// order; unreadable entries are skipped.  Unsorted, and a name repeats
-/// once per directory holding it — completion sorts and dedupes its own.
+/// order; unreadable entries are skipped.
+///
+/// Unsorted, and a name repeats once per directory holding it — completion
+/// sorts and dedupes its own.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:which-readdir] `which`/completion probe: enumerates each PATH directory to list executable names; an executable-probe scan, not turn-time model data I/O, raises no surface card."
@@ -210,6 +218,26 @@ mod tests {
             std::fs::canonicalize(&hit).unwrap(),
             std::fs::canonicalize(bin.join("runme")).unwrap(),
         );
+    }
+
+    #[test]
+    fn locate_folds_the_dots_out_of_an_anchored_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        touch(&tmp.path().join("runme"), 0o755);
+        // Folded, not merely joined: the answer is what the OS sandbox
+        // profile matches literally, and `/tmp/x/./runme` is not `/tmp/x/runme`.
+        let hit = locate("./runme", None, Some(tmp.path())).unwrap();
+        assert_eq!(hit, tmp.path().join("runme"));
+    }
+
+    #[test]
+    fn resolve_in_path_folds_the_dots_out_of_a_relative_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        touch(&bin.join("runme"), 0o755);
+        let hit = resolve_in_path("runme", "./bin", Some(tmp.path())).unwrap();
+        assert_eq!(hit, bin.join("runme").to_str().unwrap());
     }
 
     #[test]

@@ -76,11 +76,6 @@ pub(super) fn query_cursor_col() -> Option<usize> {
     }
 }
 
-#[cfg(not(any(unix, windows)))]
-pub(super) fn query_cursor_col() -> Option<usize> {
-    None
-}
-
 /// If the cursor is not at column 1, print a reverse-video `%` marker and
 /// move to a fresh line (zsh `PROMPT_SP` style), preserving partial output.
 pub(super) fn partial_line_marker() {

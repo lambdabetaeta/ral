@@ -6,19 +6,13 @@
 //! `apply_env` can hand that child the env and cwd overrides instead of this
 //! thread mutating the process's own.
 
-#[cfg(all(
-    any(unix, windows),
-    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
-))]
+#[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
 use {
     crate::types::{Break, Error, Mooring, Settled, Shell, Value},
     std::io::Write,
 };
 
-#[cfg(all(
-    any(unix, windows),
-    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
-))]
+#[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
 /// Is in-process `uumain` safe right now?
 ///
 /// `uumain` reads fd 0, writes fd 1/2 and consults `std::env` / `current_dir`
@@ -48,10 +42,7 @@ pub(crate) fn can_run_uutils_in_process(shell: &Shell) -> bool {
 /// the REPL thread and a `spawn` / `watch` / `par` worker.  It guards that cell
 /// and nothing else — fd, env and cwd stay thread-local because the gate above
 /// excludes them, never because this lock would make mutating them safe.
-#[cfg(all(
-    any(unix, windows),
-    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
-))]
+#[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
 static INLINE_UUTILS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Call `uumain` for `tool` in this process; a panicking tool surfaces as a
@@ -62,10 +53,7 @@ static INLINE_UUTILS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// and wires no `> file` / `2>&1` plumbing.  The exit-code protocol lives in
 /// `invoke_bundled` in `crate::builtins::uutils`; this placement adds cell
 /// serialisation, cwd save/restore and panic isolation around it.
-#[cfg(all(
-    any(unix, windows),
-    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
-))]
+#[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
 pub(crate) fn run_uutils_in_process(
     tool: &str,
     arg_strs: &[String],
@@ -140,7 +128,6 @@ pub(crate) fn run_uutils_in_process(
 
 #[cfg(all(
     test,
-    any(unix, windows),
     any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
 ))]
 mod tests {
