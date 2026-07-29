@@ -32,8 +32,6 @@ rustyline  = "=18.0.0"
 ratatui    = { version = "0.30", optional = true }
 ansi-to-tui = { version = "8.0.1", optional = true }
 prompt-editor = { path = "../prompt-editor", optional = true }
-# Fuzzy matcher (the Helix team's) behind the shared completion engine; every
-# frontend ranks completions fuzzily through it.
 nucleo-matcher = "0.3"
 serde_json = { workspace = true }
 clap       = { workspace = true }
