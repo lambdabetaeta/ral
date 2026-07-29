@@ -389,10 +389,7 @@ mod tests {
             notice.contains("[w2] spawn { still_going }"),
             "got: {notice}"
         );
-        assert!(
-            notice.contains("[w9] service { daemon }"),
-            "got: {notice}"
-        );
+        assert!(notice.contains("[w9] service { daemon }"), "got: {notice}");
         assert!(!notice.contains("[w1]"), "the settled worker is not named");
     }
 

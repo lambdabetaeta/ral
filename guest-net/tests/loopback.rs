@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 //! A second `smoltcp` stack playing the guest, talking to `guest_net::run`'s
 //! host stack over a `UnixStream` pair — the same frame codec and
 //! [`device::Wire`] abstraction both ends of the real link use. `GuestSide`

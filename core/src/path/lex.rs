@@ -319,7 +319,10 @@ pub enum PathShape {
 /// The [`PathShape`] of `path`, from one `lstat`, so a caller choosing
 /// between mount kinds cannot race itself between two predicates.  An
 /// unstatable path reports [`PathShape::Absent`].
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:mount-shape] sandbox mount probe: one `lstat` picking a mount kind for a denied path; a shape predicate, not model data I/O, raises no surface card."
+)]
 pub fn shape(path: &str) -> PathShape {
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => PathShape::Symlink,

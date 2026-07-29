@@ -240,13 +240,10 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ),
     (
         "exarch/src/provider/oauth/mod.rs",
-        "io-door:silent:token-write-nonunix",
-    ),
-    (
-        "exarch/src/provider/oauth/mod.rs",
         "io-door:silent:token-write-windows",
     ),
     ("core/src/path/git.rs", "io-door:silent:git-dir-discovery"),
+    ("core/src/path/lex.rs", "io-door:silent:mount-shape"),
     ("exarch/src/prompt.rs", "io-door:silent:system-prompt-files"),
     (
         "exarch/src/shell_eval/skill.rs",

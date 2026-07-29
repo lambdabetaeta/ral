@@ -35,7 +35,11 @@ fn nothing_survives(tail: &str) {
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&fixture, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(
+        &fixture,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
 
     let out = run(
         "ral_worker_teardown",

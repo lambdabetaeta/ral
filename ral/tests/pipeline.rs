@@ -813,18 +813,18 @@ fn bwrap_functional() -> bool {
 
 #[cfg(target_os = "macos")]
 fn macos_sandbox_functional() -> bool {
+    // Entering Seatbelt is what may be unavailable, and a failed entry aborts
+    // the confined child — so run the smallest real grant through the public
+    // surface and require both a clean exit and the body's own output.
     Command::new(ral_bin())
         .args([
-            "--sandbox-projection",
-            r#"{"fs":{"read_prefixes":[],"write_prefixes":[]},"connect_prefixes":null,"bind_prefixes":null}"#,
             "--norc",
             "-c",
-            "return unit",
+            "grant [exec: ['/bin/echo': 'allow'], fs: [read: ['/tmp']]] { /bin/echo probe }",
         ])
         .stderr(Stdio::null())
-        .stdout(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+        .output()
+        .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "probe")
 }
 
 #[test]
@@ -1251,9 +1251,11 @@ mod pty_helper {
     /// `TIOCSCTTY` is typed differently across platforms (`Ioctl` on
     /// Linux, `c_uint` on Apple, `c_ulong` on the BSDs); the `as _`
     /// cast lets the request argument coerce to whatever `ioctl`
-    /// expects on the target.
+    /// expects on the target.  `.into()` would be `useless_conversion`
+    /// on Linux, so the cast lint is the one waived.
+    #[allow(clippy::cast_lossless, reason = "per-platform request type")]
     pub unsafe fn become_controlling(fd: RawFd) -> std::io::Result<()> {
-        if unsafe { libc::ioctl(fd, libc::TIOCSCTTY.into(), 0) } < 0 {
+        if unsafe { libc::ioctl(fd, libc::TIOCSCTTY as _, 0) } < 0 {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
