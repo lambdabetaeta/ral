@@ -78,7 +78,6 @@ pub enum ProviderErrorRecord {
         status: Option<u16>,
         model: String,
         message: String,
-        url: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         body: Option<serde_json::Value>,
     },
@@ -103,7 +102,7 @@ impl From<&ProviderError> for ProviderErrorRecord {
             } => Self::Transient {
                 cause: cause.clone(),
                 attempts: *attempts,
-                body: body.clone(),
+                body: body.as_deref().cloned(),
             },
             ProviderError::RateLimited {
                 retry_after,
@@ -112,20 +111,18 @@ impl From<&ProviderError> for ProviderErrorRecord {
             } => Self::RateLimited {
                 retry_after_secs: retry_after.map(|d| d.as_secs()),
                 cause: cause.clone(),
-                body: body.clone(),
+                body: body.as_deref().cloned(),
             },
             ProviderError::Api {
                 status,
                 model,
                 message,
-                url,
                 body,
             } => Self::Api {
                 status: *status,
                 model: model.clone(),
                 message: message.clone(),
-                url: url.clone(),
-                body: body.clone(),
+                body: body.as_deref().cloned(),
             },
             ProviderError::Truncated { reason } => Self::Truncated {
                 reason: reason.clone(),

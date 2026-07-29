@@ -22,7 +22,7 @@ mod transport;
 mod usage;
 
 pub use error::ProviderError;
-pub(crate) use error::error_object;
+pub(crate) use error::{error_object, extract_url};
 pub(crate) use identity::provider_label;
 pub use identity::{ChatGptAccount, CustomProvider, ProviderId, ProviderKind, Subscription};
 pub use request::{EFFORT_LADDER, Tuning, default_effort_label, effort_by_label, effort_label};

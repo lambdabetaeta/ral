@@ -200,6 +200,10 @@ impl BusSender {
     ///
     /// # Errors
     /// Returns `Err(SendError(ev))` when the receiver has been dropped.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the Err payload is the undelivered Event itself — handing it back is the contract, and its width is Event's, not an error type's"
+    )]
     pub fn send(&self, ev: Event) -> Result<(), SendError<Event>> {
         if !self.0.receiver_alive.load(Ordering::Acquire) {
             return Err(SendError(ev));

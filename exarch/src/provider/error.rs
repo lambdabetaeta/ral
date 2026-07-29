@@ -11,6 +11,11 @@ use reqwest::header::HeaderMap;
 use std::fmt;
 use std::time::Duration;
 
+/// A provider's JSON error frame, boxed: `genai` turns on `serde_json`'s
+/// `preserve_order`, so a `Value` is 72 bytes here, and three variants carry
+/// one — the width every provider call's success path pays for.
+type Body = Box<serde_json::Value>;
+
 /// Structured failure at the provider boundary.  The variant alone tells the
 /// retry loop whether to back off, so misclassifying one is expensive.
 #[derive(Debug, Clone)]
@@ -25,7 +30,7 @@ pub enum ProviderError {
         attempts: u32,
         /// The provider's JSON error frame when it sent one; `None` leaves
         /// the renderer only `cause`.
-        body: Option<serde_json::Value>,
+        body: Option<Body>,
     },
     /// HTTP 429.  `retry_after` is the server's own explicit wait, when it
     /// asked for one; `retry.rs` gives this variant a longer leash than a
@@ -33,16 +38,18 @@ pub enum ProviderError {
     RateLimited {
         retry_after: Option<Duration>,
         cause: String,
-        body: Option<serde_json::Value>,
+        body: Option<Body>,
     },
     /// A non-success status that is neither 429 nor 5xx: auth, bad request,
     /// model not found.  Never retried — the user has to change something.
+    ///
+    /// The failing endpoint is [`extract_url`] of `message`, not a field — a
+    /// stored copy could disagree with the message beside it.
     Api {
         status: Option<u16>,
         model: String,
         message: String,
-        url: Option<String>,
-        body: Option<serde_json::Value>,
+        body: Option<Body>,
     },
     /// The turn was cut off short of the model finishing — output cap or
     /// mid-stream stall ([`crate::provider::CutShort`]).  Raised by
@@ -87,8 +94,7 @@ impl ProviderError {
             Fault::Status { status, body, .. } => Self::Api {
                 status: Some(status.as_u16()),
                 model: model.to_string(),
-                message: msg.clone(),
-                url: extract_url(&msg),
+                message: msg,
                 body,
             },
             Fault::Transport => Self::Transient {
@@ -113,7 +119,7 @@ enum Fault<'a> {
     Status {
         status: StatusCode,
         headers: Option<&'a HeaderMap>,
-        body: Option<serde_json::Value>,
+        body: Option<Body>,
     },
     /// A `reqwest` fault that never reached a status — connect, timeout, a
     /// body that dropped or would not decode.  Retryable.
@@ -135,7 +141,7 @@ impl<'a> Fault<'a> {
                 .map_or(Fault::Terminal, |status| Fault::Status {
                     status,
                     headers: None,
-                    body: Some(body.clone()),
+                    body: Some(Box::new(body.clone())),
                 }),
             _ => Fault::Terminal,
         }
@@ -184,15 +190,9 @@ impl<'a> Fault<'a> {
         Fault::Status {
             status,
             headers,
-            body: parse_json_body(body),
+            body: serde_json::from_str(body).ok(),
         }
     }
-}
-
-/// Best-effort: a non-JSON body (an HTML 5xx page) yields `None`, leaving the
-/// caller only the textual `cause`.
-fn parse_json_body(s: &str) -> Option<serde_json::Value> {
-    serde_json::from_str(s).ok()
 }
 
 /// The error-detail object inside a provider JSON body.  Providers wrap
@@ -238,8 +238,8 @@ impl ProviderError {
     pub fn summary(&self) -> String {
         match self {
             Self::Cancelled(where_) => format!("cancelled {where_}"),
-            Self::Transient { body, .. } => with_body_message("web stream failed", body.as_ref()),
-            Self::RateLimited { body, .. } => with_body_message("rate limited", body.as_ref()),
+            Self::Transient { body, .. } => with_body_message("web stream failed", body.as_deref()),
+            Self::RateLimited { body, .. } => with_body_message("rate limited", body.as_deref()),
             Self::Api {
                 status,
                 message,
@@ -247,7 +247,7 @@ impl ProviderError {
                 ..
             } => {
                 let detail = body
-                    .as_ref()
+                    .as_deref()
                     .and_then(body_message)
                     .unwrap_or_else(|| first_line(message).to_string());
                 match status {
@@ -341,7 +341,7 @@ fn parse_retry_after(msg: &str) -> Option<Duration> {
 /// The first `https?://…` in `msg`, so the renderer can label the endpoint that
 /// failed.  A trailing `)` or `,` is trimmed, so genai's `for url (https://…)`
 /// shape gives back the bare URL.
-fn extract_url(msg: &str) -> Option<String> {
+pub(crate) fn extract_url(msg: &str) -> Option<String> {
     let i = msg.find("http://").or_else(|| msg.find("https://"))?;
     let tail = &msg[i..];
     let end = tail
@@ -456,13 +456,13 @@ mod tests {
                     Cause: HTTP error.\nStatus: 429 Too Many Requests\nBody:\n  \
                     {\"error\":{\"message\":\"Weekly usage limit reached. Resets in 4 days.\"}}"
                 .into(),
-            body: Some(serde_json::json!({
+            body: Some(Box::new(serde_json::json!({
                 "type": "error",
                 "error": {
                     "type": "GoUsageLimitError",
                     "message": "Weekly usage limit reached. Resets in 4 days.",
                 },
-            })),
+            }))),
         };
         let s = e.summary();
         assert_eq!(

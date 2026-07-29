@@ -1200,7 +1200,6 @@ fn error_fields(e: &ProviderErrorRecord) -> Vec<FieldRow> {
             status,
             model,
             message,
-            url,
             body,
         } => {
             let mut fs = Vec::new();
@@ -1208,8 +1207,8 @@ fn error_fields(e: &ProviderErrorRecord) -> Vec<FieldRow> {
                 fs.push(text_field("status", s.to_string()));
             }
             fs.push(text_field("model", model.clone()));
-            if let Some(u) = url {
-                fs.push(text_field("url", u.clone()));
+            if let Some(u) = provider::extract_url(message) {
+                fs.push(text_field("url", u));
             }
             match body {
                 Some(b) => fs.extend(body_fields(b, &[])),
