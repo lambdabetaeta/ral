@@ -161,6 +161,13 @@ impl Shell {
     /// run restores the [`Mobile`](crate::types::Mobile) checkpointed at entry,
     /// so the shell rolls itself back and no snapshot crosses the host seam.
     pub fn run(&mut self, req: RunRequest<'_>) -> RunReport {
+        // A run is the extent of ral's picture of `PATH`: whatever happened to
+        // the filesystem between runs is admitted here, and within a run a
+        // walk is paid once per name.  Here and not in `enter` or `dispatch`,
+        // because a nested run lives *inside* an outer run's extent —
+        // forgetting there would throw the memo away for exactly the scripts
+        // whose bodies enter builtins, which is where it pays most.
+        crate::path::forget_located_commands();
         let anchor = self.session.anchor.clone();
         self.enter(&anchor, req)
     }

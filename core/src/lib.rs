@@ -38,9 +38,7 @@ pub mod stream;
 pub(crate) mod subprocess;
 pub(crate) mod subprocess_codec;
 pub mod syntax;
-// Unix-gated because every consumer of its env-mutation helpers is a
-// `#[cfg(unix)]` test.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) mod test_env;
 pub mod test_helper;
 pub mod text;

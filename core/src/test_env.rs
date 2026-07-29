@@ -34,6 +34,8 @@ pub(crate) fn with_var<R>(key: &str, val: Option<&str>, f: impl FnOnce() -> R) -
 }
 
 /// Runs `f` under [`env_guard`] with every var in `keys` removed, restoring them after.
+// Unix-gated with its callers: the XDG defaults it clears are asserted only there.
+#[cfg(unix)]
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:test] serialised env mutation for tests, guarded by env_guard"
