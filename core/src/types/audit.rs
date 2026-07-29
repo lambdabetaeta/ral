@@ -45,7 +45,9 @@ pub struct AuditTrail {
 
 /// Nodes detached from a trail — a sandbox child, a pipeline helper, or a
 /// closed lexical scope hands one up, and the receiving side merges it into
-/// the surrounding scope.  Same shape as [`AuditTrail`], but in transit.
+/// the surrounding scope.
+///
+/// Same shape as [`AuditTrail`], but in transit.
 #[derive(Default, Debug, Clone)]
 pub struct AuditFragment {
     nodes: Vec<ExecNode>,

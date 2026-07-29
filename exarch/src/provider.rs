@@ -1,7 +1,9 @@
 //! The LLM boundary: one resolved model selection over a credential-bound
-//! transport. History lives in the transcript the caller renders, not here;
-//! transport, request shaping, retry, streaming, and usage each keep their
-//! own sibling module.
+//! transport.
+//!
+//! History lives in the transcript the caller renders, not here; transport,
+//! request shaping, retry, streaming, and usage each keep their own sibling
+//! module.
 
 pub mod credential;
 mod error;

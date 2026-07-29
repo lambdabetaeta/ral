@@ -1,7 +1,8 @@
 //! Per-session canonical event log: one session's event vector and the
-//! `events.json` it is appended to.  This is the model view; `tui::viewport`
-//! writes the rendered `user.log` beside it, `agent::transcript` the
-//! operational `transcript.jsonl`.
+//! `events.json` it is appended to.
+//!
+//! This is the model view; `tui::viewport` writes the rendered `user.log`
+//! beside it, `agent::transcript` the operational `transcript.jsonl`.
 //!
 //! `events.json` is a whitespace-separated stream of pretty-printed JSON
 //! values — no array, no line per event — so appending closes no bracket and
@@ -50,8 +51,10 @@ impl From<Usage> for UsageDelta {
 }
 
 /// Serialisable mirror of [`ProviderError`], flattening its `&'static str` and
-/// `Duration` fields to owned strings and whole seconds.  `tui::line` renders
-/// from this shape, so `events.json` reconstructs the on-screen block.
+/// `Duration` fields to owned strings and whole seconds.
+///
+/// `tui::line` renders from this shape, so `events.json` reconstructs the
+/// on-screen block.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProviderErrorRecord {

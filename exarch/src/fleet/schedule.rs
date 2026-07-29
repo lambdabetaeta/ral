@@ -1,6 +1,8 @@
-//! Scheduled wakeups: a five-field cron grammar, parsed here rather than
-//! taken from a `chrono`-based crate that would drag a second datetime tree
-//! in beside `jiff`, plus a one-shot relative `after <dur>`.
+//! Scheduled wakeups: a five-field cron grammar, plus a one-shot relative
+//! `after <dur>`.
+//!
+//! The grammar is parsed here rather than taken from a `chrono`-based crate
+//! that would drag a second datetime tree in beside `jiff`.
 //!
 //! Cron is wall-clock, the reaper monotonic.  Every fire recomputes the next
 //! absolute occurrence in the host timezone and arms the reaper with the
@@ -328,6 +330,7 @@ pub struct ScheduleInfo {
 
 /// What [`ScheduleRegistry::schedule`] answers: the resolved label — the
 /// caller's own, or the minted default — and the delay to the first fire.
+///
 /// Model-facing, a schedule is known by its label and nothing else.
 #[derive(Debug)]
 pub struct ScheduleReceipt {

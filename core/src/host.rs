@@ -1,5 +1,6 @@
 //! What machine ral is running on: OS, architecture and family, current
 //! directory, user and home, git working-tree state, wall-clock time.
+//!
 //! [`crate::boot`] boots a `Shell` *in* a host process; this only reports
 //! on one.  The live probes ([`git`], [`now`]) yield `None` rather than
 //! erroring, so a caller stitching them into a prompt or an `$ENV`

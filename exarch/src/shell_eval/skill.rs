@@ -29,9 +29,11 @@ pub(crate) fn skill_roots(cwd: &Path, config_dir: &Path) -> [PathBuf; 2] {
     ]
 }
 
-/// Every skill directory under both roots as `(name, dir)`, the name being the
-/// basename; on a collision the cwd root shadows the config one.  Reads no file
-/// contents, so callers gate their own frontmatter and body reads.
+/// Every skill directory under both roots as `(name, dir)`, the name being
+/// the basename; on a collision the cwd root shadows the config one.
+///
+/// Reads no file contents, so callers gate their own frontmatter and body
+/// reads.
 pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
     let mut seen = HashSet::new();
     let mut skills = Vec::new();
@@ -45,9 +47,10 @@ pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
     skills
 }
 
-/// Frontmatter for every readable skill, for the prompt's Skills section.  Runs
-/// once at boot, before a `Shell` exists, so it filters against the static
-/// `caps` where `skill-list` and `skill` use `Shell::check_fs_read`.
+/// Frontmatter for every readable skill, for the prompt's Skills section.
+///
+/// Runs once at boot, before a `Shell` exists, so it filters against the
+/// static `caps` where `skill-list` and `skill` use `Shell::check_fs_read`.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:skill-metadata] reads SKILL.md frontmatter at prompt assembly to build the Skills section; pre-run, gated by caps"

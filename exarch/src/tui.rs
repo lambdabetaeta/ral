@@ -1,8 +1,9 @@
 //! Full-screen TUI frontend: [`run`] holds the terminal — raw mode, alternate
 //! screen, bracketed paste, mouse capture — and the REPL loop the user types
-//! into, while the agent core sees only a [`crate::bus::Emitter`] channel.
+//! into.
 //!
-//! It is deliberately not a [`crate::bus::Sink`]: it drains the same bus on its
+//! The agent core sees only a [`crate::bus::Emitter`] channel. The frontend
+//! is deliberately not a [`crate::bus::Sink`]: it drains the same bus on its
 //! render cadence instead, and owns its scrollback rather than the host
 //! terminal's, redrawing the whole screen each tick.
 

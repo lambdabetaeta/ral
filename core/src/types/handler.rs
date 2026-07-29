@@ -126,10 +126,12 @@ impl HandlerRole {
     }
 }
 
-/// Check that `value` is a lambda of exactly `arity` arguments — the gate at
-/// every install boundary (`alias`, `within [handlers: …]`, `within [handler:
-/// …]`), a handler's calling convention being fixed by its surface form.
-/// `context` names the offending install site in the message.
+/// Check that `value` is a lambda of exactly `arity` arguments.
+///
+/// This is the gate at every install boundary (`alias`, `within [handlers:
+/// …]`, `within [handler: …]`), a handler's calling convention being fixed
+/// by its surface form. `context` names the offending install site in the
+/// message.
 ///
 /// # Errors
 /// `value` is not a lambda, or its curry-chain arity is not `arity`.

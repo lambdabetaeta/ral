@@ -1,6 +1,8 @@
 //! The uniform agent node: canonical event log, persistent shell, capability
-//! set, hot-swappable provider, and the attend loop every node runs.  A run is
-//! a tree of these; [`Fleet`](crate::fleet::Fleet) holds what they share.
+//! set, hot-swappable provider, and the attend loop every node runs.
+//!
+//! A run is a tree of these; [`Fleet`](crate::fleet::Fleet) holds what they
+//! share.
 //!
 //! No node is privileged by special-case code — the distinctions reduce to
 //! *position*.  The parent-less trunk publishes its cancel token for the
@@ -157,8 +159,10 @@ pub(crate) const SPAWN_FUEL: u32 = 3;
 
 /// A shared, swappable handle to the active provider: live replacement across
 /// the UI / attend thread boundary needs a cell, not an `Arc` the worker owns
-/// privately.  A peer wraps a *snapshot* taken at spawn, so a later root
-/// `/model` never disturbs a running child.
+/// privately.
+///
+/// A peer wraps a *snapshot* taken at spawn, so a later root `/model` never
+/// disturbs a running child.
 #[derive(Clone)]
 pub struct ProviderHandle(Arc<Mutex<Arc<Provider>>>);
 

@@ -115,9 +115,11 @@ fn arm(action: Action, after: Duration) -> Deadline {
     Deadline { armed, keep: false }
 }
 
-/// A handle to an armed deadline.  Dropping it disarms the entry, so work that
-/// completes before its ceiling is never cancelled; call [`Deadline::keep`]
-/// when the effect must outlive the call that armed it.
+/// A handle to an armed deadline.
+///
+/// Dropping it disarms the entry, so work that completes before its ceiling
+/// is never cancelled; call [`Deadline::keep`] when the effect must outlive
+/// the call that armed it.
 #[must_use]
 pub struct Deadline {
     armed: Arc<AtomicBool>,

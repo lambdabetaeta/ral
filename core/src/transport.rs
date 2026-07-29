@@ -152,8 +152,9 @@ pub enum Event {
 }
 
 /// What crosses when an enquiry is refused or its handler fails: message *and*
-/// status, so a refusal raises the same error under both transports. Not
-/// `crate::types::Error`, whose `span` resolves against an engine-side
+/// status, so a refusal raises the same error under both transports.
+///
+/// Not `crate::types::Error`, whose `span` resolves against an engine-side
 /// `SourceDb`; the location is stamped at the enquiring builtin instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnquiryError {
@@ -827,9 +828,11 @@ impl SessionLock {
     }
 }
 
-/// The in-process transport: one kernel, one address space. `dispatch` runs the
-/// engine door synchronously on the calling thread, and a control frame raises
-/// the ambient foreground interrupt rather than crossing anything.
+/// The in-process transport: one kernel, one address space.
+///
+/// `dispatch` runs the engine door synchronously on the calling thread, and
+/// a control frame raises the ambient foreground interrupt rather than
+/// crossing anything.
 pub struct IdentityTransport {
     /// Behind a poison-free [`SessionLock`] so `dispatch` can take `&self`.
     engine: SessionLock,

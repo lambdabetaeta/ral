@@ -10,15 +10,19 @@ use ral_core::types::Capabilities;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
-/// The stand-in system prompt for `--chat`, which assembles none.  A bare
-/// period: the Codex/Responses adapter rejects an empty system prompt and
-/// Anthropic a whitespace-only one, and chat does not branch on the adapter.
+/// The stand-in system prompt for `--chat`, which assembles none.
+///
+/// A bare period: the Codex/Responses adapter rejects an empty system prompt
+/// and Anthropic a whitespace-only one, and chat does not branch on the
+/// adapter.
 pub const CHAT_SYSTEM: &str = ".";
 
-/// Build the ordered `(heading, body)` sections [`render`] walks.  Every
-/// section but Builtins is agent-invariant and stands as baked here; Builtins
-/// holds only [`BUILTIN_INDEX_PLACEHOLDER`], the prompt being assembled once
-/// at boot.  The closing Agent/Surfacing section goes last, for its recency.
+/// Build the ordered `(heading, body)` sections [`render`] walks.
+///
+/// Every section but Builtins is agent-invariant and stands as baked here;
+/// Builtins holds only [`BUILTIN_INDEX_PLACEHOLDER`], the prompt being
+/// assembled once at boot. The closing Agent/Surfacing section goes last, for
+/// its recency.
 ///
 /// # Errors
 /// If reading a `--system` file or a discovered `AGENTS.md` fails.
@@ -208,6 +212,7 @@ fn read_files(files: &[PathBuf]) -> Result<String, String> {
 }
 
 /// Join the sections one blank line apart, headed ones under a `# heading`.
+///
 /// Bodies are `trim_end`ed first so that gap stays exactly one line however
 /// many blank lines a section's own source happened to end with.
 pub fn render(sections: &[(Option<&str>, String)]) -> String {
@@ -223,10 +228,11 @@ pub fn render(sections: &[(Option<&str>, String)]) -> String {
 }
 
 /// The `Host` section: where the agent stands and when "now" is, then the
-/// authority it holds.  Every line is a *host* truth, which is why the
-/// composition is exarch's alone — synod's engine lives in a guest VM where
-/// none of them hold, so it builds its own around the shared
-/// [`grant_summary`].
+/// authority it holds.
+///
+/// Every line is a *host* truth, which is why the composition is exarch's
+/// alone — synod's engine lives in a guest VM where none of them hold, so it
+/// builds its own around the shared [`grant_summary`].
 pub fn host_section(caps: &Capabilities, scratch: &crate::bootstrap::Scratch) -> String {
     let state = scratch
         .app()
@@ -239,8 +245,10 @@ pub fn host_section(caps: &Capabilities, scratch: &crate::bootstrap::Scratch) ->
     )
 }
 /// The live grant: a static legend teaching the notation and the runtime
-/// denial string, then one effect per line.  `None` is "unrestricted" — no
-/// attenuation at this layer — and an empty container "(none)".
+/// denial string, then one effect per line.
+///
+/// `None` is "unrestricted" — no attenuation at this layer — and an empty
+/// container "(none)".
 ///
 /// `scratch_line` is the right-hand side of the `- scratch:` bullet, left to
 /// the caller because exarch names a seeded env var and host path where synod

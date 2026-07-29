@@ -1,7 +1,9 @@
 //! The agent / frontend boundary, in two halves: inbound, producers post
-//! typed messages into a session's `Inbox` (`post`, `inbox`); outbound,
-//! workers stamp events through an `Emitter` and those ride a coalescing
-//! `channel` to a `Sink` (`event`, `channel`, `emitter`, `sink`, `card`).
+//! typed messages into a session's `Inbox` (`post`, `inbox`).
+//!
+//! Outbound, workers stamp events through an `Emitter` and those ride a
+//! coalescing `channel` to a `Sink` (`event`, `channel`, `emitter`, `sink`,
+//! `card`).
 
 pub mod card;
 mod channel;

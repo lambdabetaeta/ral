@@ -80,9 +80,11 @@ pub(crate) fn is_uutils_tool(name: &str) -> bool {
     false
 }
 
-/// Restore SIGPIPE to `SIG_DFL`, once per binary at startup.  Rust's runtime
-/// ignores it before `main`, so a uucore write to a closed pipe returns EPIPE
-/// and exits 1 — indistinguishable from real failure in `yes | head`.
+/// Restore SIGPIPE to `SIG_DFL`, once per binary at startup.
+///
+/// Rust's runtime ignores it before `main`, so a uucore write to a closed
+/// pipe returns EPIPE and exits 1 — indistinguishable from real failure in
+/// `yes | head`.
 #[cfg(unix)]
 pub fn init_signal_dispositions() {
     unsafe {

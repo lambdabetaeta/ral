@@ -36,9 +36,11 @@ pub enum HandleState {
 }
 
 /// A finished block's outcome, cached on completion: bytes drained from the
-/// handle's buffers exactly once, paired with its result.  Every eliminator
-/// (`await`, `race`, `poll`) projects this rather than re-reading the live
-/// buffers, so repeat observations agree and a failed block's bytes survive.
+/// handle's buffers exactly once, paired with its result.
+///
+/// Every eliminator (`await`, `race`, `poll`) projects this rather than
+/// re-reading the live buffers, so repeat observations agree and a failed
+/// block's bytes survive.
 #[derive(Debug, Clone)]
 pub struct CompletedHandle {
     pub stdout: Vec<u8>,
@@ -50,9 +52,10 @@ pub struct CompletedHandle {
 }
 
 /// Bounded buffer of the structured events a *detached* worker defers rather
-/// than emitting live, its spawning run having possibly ended.  The bound
-/// lives in `builtins::concurrency`'s `DeferredSurface`, so a runaway emitter
-/// cannot grow this without limit.
+/// than emitting live, its spawning run having possibly ended.
+///
+/// The bound lives in `builtins::concurrency`'s `DeferredSurface`, so a
+/// runaway emitter cannot grow this without limit.
 pub type SurfaceBuffer = Arc<Mutex<Vec<crate::serial::FOValue>>>;
 
 /// Shared handle to a spawned computation.

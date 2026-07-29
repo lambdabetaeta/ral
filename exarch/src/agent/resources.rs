@@ -20,10 +20,12 @@ use std::path::Path;
 use std::time::Duration;
 
 /// One probed accumulator, one row per figure: what the fold renders and
-/// `transcript.jsonl` records. `policy` comes from a closed vocabulary —
-/// `"coalesce"`, `"reject"`, `"evict"`, `"reap"`, `"warn"`, `"none
-/// (unbounded)"` — and is stated even where the enforcement lands later,
-/// the row then carrying `cap: None` and a note saying so.
+/// `transcript.jsonl` records.
+///
+/// `policy` comes from a closed vocabulary — `"coalesce"`, `"reject"`,
+/// `"evict"`, `"reap"`, `"warn"`, `"none (unbounded)"` — and is stated even
+/// where the enforcement lands later, the row then carrying `cap: None` and a
+/// note saying so.
 #[derive(Clone, Debug, Serialize)]
 pub struct ProbeRow {
     pub name: String,
@@ -133,10 +135,12 @@ pub struct ViewFigures {
     pub agents: u64,
 }
 
-/// The presentation bus's two probe figures. Neither carries a cap: the
-/// transport's one enforced number is a *per-entry* text cap
-/// (`bus::MERGE_TEXT_CAP`), a different axis from either aggregate, so it is
-/// named in `bus.bytes`'s note rather than faked into `cap`.
+/// The presentation bus's two probe figures.
+///
+/// Neither carries a cap: the transport's one enforced number is a
+/// *per-entry* text cap (`bus::MERGE_TEXT_CAP`), a different axis from either
+/// aggregate, so it is named in `bus.bytes`'s note rather than faked into
+/// `cap`.
 #[derive(Clone, Copy)]
 pub struct BusFigures {
     /// Queue entries — a merged run and a reserved kind each count as one.
@@ -146,9 +150,11 @@ pub struct BusFigures {
     pub bytes: u64,
 }
 
-/// The rows for the accumulators the frontend owns. Pure in its figures so
-/// the row shapes are unit-testable without a terminal: the TUI's
-/// `Kind::Resources` arm reads them off the tabs/viewport/bus it holds.
+/// The rows for the accumulators the frontend owns.
+///
+/// Pure in its figures so the row shapes are unit-testable without a
+/// terminal: the TUI's `Kind::Resources` arm reads them off the
+/// tabs/viewport/bus it holds.
 pub fn frontend_rows(
     viewport: ViewportFigures,
     views: ViewFigures,
@@ -237,10 +243,12 @@ pub fn terse_duration(d: Duration) -> String {
 
 /// Total bytes of every regular file under `root`, recursively; symlinks are
 /// not followed (their target may leave the probed tree) and an unreadable
-/// entry counts zero rather than failing the fold. Sizes come per-path from
-/// `symlink_metadata`, not the `DirEntry`: on Windows the enumeration figure
-/// is the directory's *cached* size, which NTFS refreshes only when the last
-/// writer closes, so a live, still-open log file would probe as 0.
+/// entry counts zero rather than failing the fold.
+///
+/// Sizes come per-path from `symlink_metadata`, not the `DirEntry`: on
+/// Windows the enumeration figure is the directory's *cached* size, which
+/// NTFS refreshes only when the last writer closes, so a live, still-open log
+/// file would probe as 0.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:resources-disk-probe] the /resources disk figure: a read-only metadata walk of the session's own log/scratch dirs, priced at invocation; operator diagnostics, not turn-time model I/O"

@@ -1,8 +1,11 @@
 //! Format [`ral_core::host`]'s probes into the markdown snapshot opening
-//! exarch's `Host` section — host truths, which is why synod, whose agent
-//! lives in a guest VM where none hold, composes its own section instead.
+//! exarch's `Host` section — host truths.
+//!
+//! That is why synod, whose agent lives in a guest VM where none hold,
+//! composes its own section instead.
 
 /// Markdown list: `os`, `now`, `cwd`, `user`, `home`, `git`, `exarch logs`.
+///
 /// An empty probe drops its line rather than erroring, so bare and exotic
 /// hosts still yield a well-formed prompt; baked once at boot with the rest
 /// of the prompt, so `now` names boot time.

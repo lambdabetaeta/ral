@@ -1,8 +1,9 @@
 //! `dup2` onto a process-global fd slot: the shell's redirect engine
 //! (`install_dup2` in `core/src/runtime/command/redirect.rs`) and exarch's
-//! TUI stderr-to-log redirect both come through here.  Code between fork and
-//! exec does not — a `pre_exec` hook calls `libc::dup2` itself, since only
-//! async-signal-safe work may run there.
+//! TUI stderr-to-log redirect both come through here.
+//!
+//! Code between fork and exec does not — a `pre_exec` hook calls
+//! `libc::dup2` itself, since only async-signal-safe work may run there.
 
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 

@@ -122,13 +122,13 @@ fn fold_lines_from_stdin() {
 
 #[test]
 fn mixed_pipeline_internal_byte_stage_buffers_output_cleanly() {
-    let script = r#"
+    let script = r"
 let s = !{printf 'a\nb\n' | map-lines { |x| return $x } | from-lines}
 let lines = !{stream-to-list $s}
 echo !{length $lines}
 echo $lines[0]
 echo $lines[1]
-"#;
+";
     let o = run_pipe(script);
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     let out: Vec<&str> = o.stdout.lines().collect();

@@ -14,9 +14,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-/// Host-stated per-agent policy: a leased name expires after `idle_calls`
-/// epochs without use, an epoch being the shell's committed-run clock
-/// ([`Shell::run`](super::Shell::run)'s source-arm tick), never wall time.
+/// Host-stated per-agent policy.
+///
+/// A leased name expires after `idle_calls` epochs without use, an epoch
+/// being the shell's committed-run clock ([`Shell::run`](super::Shell::run)'s
+/// source-arm tick), never wall time.
 ///
 /// `large_binding_bytes` is an orthogonal axis — residency, not lifetime:
 /// an install whose
@@ -39,9 +41,10 @@ pub struct BindingPruneNotice {
 }
 
 /// The transcript facts of one session-scope install whose shallow-size
-/// estimate met [`BindingLease::large_binding_bytes`] as it was written — a
-/// residency nudge that leaves the binding wholly untouched, re-queued by
-/// every rebind still over the threshold.
+/// estimate met [`BindingLease::large_binding_bytes`] as it was written.
+///
+/// This is a residency nudge that leaves the binding wholly untouched,
+/// re-queued by every rebind still over the threshold.
 #[derive(Clone, Debug)]
 pub struct LargeBindingNotice {
     pub name: String,

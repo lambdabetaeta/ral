@@ -1,7 +1,9 @@
-//! The guest process jail.  [`GuestJail::plan`] decides who a spawned command
-//! becomes — a fresh unprivileged uid/gid, a fresh transient cgroup — off an
-//! atomic counter and nothing else, touching no syscall; the `linux` submodule
-//! is the only place a decision reaches the kernel.
+//! The guest process jail.
+//!
+//! [`GuestJail::plan`] decides who a spawned command becomes — a fresh
+//! unprivileged uid/gid, a fresh transient cgroup — off an atomic counter
+//! and nothing else, touching no syscall; the `linux` submodule is the only
+//! place a decision reaches the kernel.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

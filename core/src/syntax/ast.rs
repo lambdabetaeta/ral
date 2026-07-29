@@ -209,6 +209,7 @@ pub enum MapEntry {
 
 /// Static record key. Both `host` and `'host'` parse to [`MapKey::Bare`];
 /// `` `host `` parses to [`MapKey::Tag`] carrying the label without its sigil.
+///
 /// Holding the alphabet on the variant spares every reader from sniffing the
 /// leading character of a stringly-typed key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,10 +257,12 @@ pub enum Expr {
     Or(Box<Self>, Box<Self>),
 }
 
-/// Binary primitive on values: arithmetic, ordering, equality. The flat enum is
-/// what crosses the wire, parser to IR to IPC; a caller that wants to dispatch
-/// on category projects it through [`BinaryOp::kind`] into [`BinaryOpKind`],
-/// whose sub-enums let each handler match exhaustively without a wildcard arm.
+/// Binary primitive on values: arithmetic, ordering, equality.
+///
+/// The flat enum is what crosses the wire, parser to IR to IPC; a caller that
+/// wants to dispatch on category projects it through [`BinaryOp::kind`] into
+/// [`BinaryOpKind`], whose sub-enums let each handler match exhaustively
+/// without a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinaryOp {
     Add,
@@ -372,9 +375,11 @@ pub enum ScopeAst {
     Audit { body: Box<Ast> },
 }
 
-/// Everything the parser needs for one control-operator keyword: the surface
-/// name, the operand arity, a description of the operands for the
-/// arity-mismatch message, and a constructor from the validated operand vector.
+/// Everything the parser needs for one control-operator keyword.
+///
+/// The surface name, the operand arity, a description of the operands for
+/// the arity-mismatch message, and a constructor from the validated operand
+/// vector.
 pub struct ScopeKeyword {
     pub name: &'static str,
     pub arity: usize,
@@ -457,9 +462,11 @@ impl ScopeAst {
 // ── Utilities ────────────────────────────────────────────────────────────
 
 /// The value-literal shape of a bare word: the one answer to "literal or
-/// command name?", read by the parser to skip the [`Ast::Call`] wrapper and by
-/// elaboration through [`crate::ir::Val::from_word`]. A float wants an embedded
-/// `.`, so `1e5`, which merely happens to f64-parse, stays a string.
+/// command name?", read by the parser to skip the [`Ast::Call`] wrapper and
+/// by elaboration through [`crate::ir::Val::from_word`].
+///
+/// A float wants an embedded `.`, so `1e5`, which merely happens to
+/// f64-parse, stays a string.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WordLiteral {
     Bool(bool),

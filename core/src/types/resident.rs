@@ -8,8 +8,10 @@
 //! `Job`.
 
 /// One resident's signature, projected from whatever representation its own
-/// chapter keeps. Every method takes `&self`: a fold reads these facets off the
-/// listing entry it already holds, never by threading back a registry and an id.
+/// chapter keeps.
+///
+/// Every method takes `&self`: a fold reads these facets off the listing
+/// entry it already holds, never by threading back a registry and an id.
 pub trait Resident {
     /// This resident's id as shown to a human, unbracketed — a fold adds the
     /// `[...]`, so no two chapters can disagree on the bracketing.

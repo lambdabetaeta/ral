@@ -1,7 +1,8 @@
 //! CBPV evaluation verbs: the top-level run, the bare in-session run, and
-//! the block.  Each funnels its result through [`absorb_tail`], the one seam
-//! that lands an escaping [`TailCall`], so `Tail` never leaves this module
-//! tree.
+//! the block.
+//!
+//! Each funnels its result through [`absorb_tail`], the one seam that lands
+//! an escaping [`TailCall`], so `Tail` never leaves this module tree.
 
 pub mod audit;
 pub(crate) mod call;
@@ -41,10 +42,12 @@ pub(crate) fn absorb_tail(
 }
 
 /// Tail-absorbed run of `comp` in place — no mobile install or discard, no
-/// scope frame, no transport dispatch.  For callers already inside a session
-/// (prelude bootstrap, module loading, REPL prompt and config), where a run
-/// boundary would round-trip a mobile they never wanted snapshotted.
-/// [`Tail::No`], since the caller has obligations beyond `comp`.
+/// scope frame, no transport dispatch.
+///
+/// For callers already inside a session (prelude bootstrap, module loading,
+/// REPL prompt and config), where a run boundary would round-trip a mobile
+/// they never wanted snapshotted. [`Tail::No`], since the caller has
+/// obligations beyond `comp`.
 ///
 /// # Errors
 /// A `Break` from `comp` — a recoverable error, or an escape such as `exit`.

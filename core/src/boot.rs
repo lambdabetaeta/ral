@@ -1,7 +1,8 @@
 //! Booting a `Shell` in a host process — the interactive `ral` REPL,
-//! `exarch`, a test binary.  Probing the host *machine* (OS, cwd, git
-//! state) is [`crate::host`]; evaluating on the booted shell is
-//! [`crate::run`].
+//! `exarch`, a test binary.
+//!
+//! Probing the host *machine* (OS, cwd, git state) is [`crate::host`];
+//! evaluating on the booted shell is [`crate::run`].
 //!
 //! The prelude arrives baked: a host's build script calls
 //! [`bake_prelude_to_out_dir`], and the host embeds the blobs it wrote with
@@ -149,9 +150,11 @@ pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude, surface: &Hos
     shell
 }
 
-/// The build-script half of the bake: write the two postcard blobs into the
-/// calling host's `OUT_DIR`, and name every file that shapes them in a
-/// rerun-if-changed line — absolutely, since the script runs in the host.
+/// The build-script half of the bake: write the two postcard blobs into
+/// the calling host's `OUT_DIR`.
+///
+/// Name every file that shapes them in a rerun-if-changed line —
+/// absolutely, since the script runs in the host.
 ///
 /// postcard carries no schema, so a field added to
 /// [`CompKind`](crate::ir::CompKind), [`Val`](crate::ir::Val),

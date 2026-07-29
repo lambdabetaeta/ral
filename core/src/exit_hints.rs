@@ -1,6 +1,8 @@
-//! A table from (command basename, exit status) to a short explanation, read by
-//! `Error::from_command_failure`.  Finding the file is the host's job; parse the
-//! text here and install with `Shell::set_exit_hints`.
+//! A table from (command basename, exit status) to a short explanation, read
+//! by `Error::from_command_failure`.
+//!
+//! Finding the file is the host's job; parse the text here and install with
+//! `Shell::set_exit_hints`.
 //!
 //! One entry per line, `<command> <status> <hint text>`; `*` matches any command,
 //! and `#` lines and blanks are ignored.

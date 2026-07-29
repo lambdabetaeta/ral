@@ -226,12 +226,14 @@ fn child_pid(child: &std::process::Child) -> i32 {
     child.id() as i32
 }
 
-/// Spawn `cmd` under the one canonical pre-exec discipline: apply `pgid` then
-/// [`reset_child_signals`] in the child, and mirror the `setpgid` in the parent
-/// so the placement holds whichever side wins the race.  `NewSession` has no
-/// mirror — only a process can `setsid` itself — and rests on its `pre_exec`.
-/// The returned leader pgid (`None` only for `Inherit`) is the whole
-/// registration: callers keep it for a later wait or for the pipeline group.
+/// Spawn `cmd` under the one canonical pre-exec discipline.
+///
+/// Apply `pgid` then [`reset_child_signals`] in the child, and mirror the
+/// `setpgid` in the parent so the placement holds whichever side wins the
+/// race.  `NewSession` has no mirror — only a process can `setsid` itself —
+/// and rests on its `pre_exec`.  The returned leader pgid (`None` only for
+/// `Inherit`) is the whole registration: callers keep it for a later wait
+/// or for the pipeline group.
 ///
 /// `pre_exec` closures run in registration order, so a caller's own hook
 /// (sandbox `RLIMIT`, `2>&1` dup2) runs *before* this one — deliberately, since
@@ -247,9 +249,11 @@ pub fn spawn_with_pgid(
     spawn_with_pgid_after(cmd, pgid, || Ok(()))
 }
 
-/// [`spawn_with_pgid`] plus one caller hook, run in the child after the signal
-/// reset and before `execve` — so it must keep to async-signal-safe work such
-/// as `read`, `close`, or `dup2` on already-open fds.
+/// [`spawn_with_pgid`] plus one caller hook, run in the child after the
+/// signal reset and before `execve`.
+///
+/// The hook must therefore keep to async-signal-safe work such as `read`,
+/// `close`, or `dup2` on already-open fds.
 ///
 /// # Errors
 /// Returns `Err` if the child's `setpgid` / `setsid` fails, if `after` returns

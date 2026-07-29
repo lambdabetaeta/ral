@@ -375,9 +375,9 @@ mod tests {
         );
     }
 
-    /// Apple spawns its real binaries from CommandLineTools (or Xcode.app), so
-    /// those dirs must fold into the combined rule: otherwise `gcc → cc1 → as
-    /// → ld` dies at the first descendant exec even with `/usr/bin/` in
+    /// Apple spawns its real binaries from `CommandLineTools` (or Xcode.app),
+    /// so those dirs must fold into the combined rule: otherwise `gcc → cc1 →
+    /// as → ld` dies at the first descendant exec even with `/usr/bin/` in
     /// `[exec]`.
     #[test]
     fn mac_profile_folds_toolchain_into_combined_exec_rule_when_restricted() {

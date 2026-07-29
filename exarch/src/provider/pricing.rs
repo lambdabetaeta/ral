@@ -82,9 +82,11 @@ impl ModelCaps {
 static CATALOG: OnceCell<Snapshot> = OnceCell::const_new();
 
 /// Fetch the catalog, once per process; concurrent callers share the one
-/// fetch.  A failed fetch caches an *empty* snapshot rather than retrying, so
-/// every lookup stays `None` for the life of the process: `Usage::parts`
-/// prints `—` for cost and the status line drops its ctx segment.
+/// fetch.
+///
+/// A failed fetch caches an *empty* snapshot rather than retrying, so every
+/// lookup stays `None` for the life of the process: `Usage::parts` prints `—`
+/// for cost and the status line drops its ctx segment.
 pub async fn ensure_loaded() {
     CATALOG
         .get_or_init(|| async { fetch().await.unwrap_or_default() })
@@ -186,15 +188,19 @@ pub fn caps(model: &str) -> Option<ModelCaps> {
 }
 
 /// [`caps`], defaulting on a miss — an unlisted model, or a call before the
-/// catalog loads.  A native id is not a miss: `add_bare_aliases` bridges it to
-/// the OR-fronted entry for the same model, which carries the same card.
+/// catalog loads.
+///
+/// A native id is not a miss: `add_bare_aliases` bridges it to the
+/// OR-fronted entry for the same model, which carries the same card.
 pub fn caps_or_default(model: &str) -> ModelCaps {
     caps(model).unwrap_or_default()
 }
 
 /// The context window for `model`, skipping the [`ModelCaps`] clone [`caps`]
-/// makes — `agent::deliberate` reads this one field at every turn boundary to
-/// decide whether to compact, and falls back to its byte heuristic on `None`.
+/// makes.
+///
+/// `agent::deliberate` reads this one field at every turn boundary to decide
+/// whether to compact, and falls back to its byte heuristic on `None`.
 pub fn context_window(model: &str) -> Option<u64> {
     CATALOG.get()?.caps.get(model)?.context_window
 }

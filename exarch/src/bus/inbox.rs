@@ -184,9 +184,11 @@ impl Shared {
 const PARK_POLL: Duration = Duration::from_millis(100);
 
 /// The cloneable **sender** side of a session's inbox — producers hold this,
-/// never the [`Inbox`].  The fleet registry holds each peer's, so the frontend
-/// can steer a focused tab and the `message` tool can reach a live agent
-/// without exposing raw senders to model code.
+/// never the [`Inbox`].
+///
+/// The fleet registry holds each peer's, so the frontend can steer a focused
+/// tab and the `message` tool can reach a live agent without exposing raw
+/// senders to model code.
 #[derive(Clone)]
 pub struct Mailbox {
     shared: Arc<Shared>,

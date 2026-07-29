@@ -1,7 +1,10 @@
 //! The active model selection, persisted as JSON in the project's state
 //! directory ([`crate::bootstrap::App::project_dir`]) beside that project's
-//! session logs — keyed by where exarch was launched, and outside cwd, so the
-//! sandboxed agent has no path to it and needs no deny-list entry.
+//! session logs.
+//!
+//! That directory is keyed by where exarch was launched, and sits outside
+//! cwd, so the sandboxed agent has no path to it and needs no deny-list
+//! entry.
 
 use crate::provider::{ProviderId, ReasoningEffort, Tuning};
 use serde::{Deserialize, Serialize};

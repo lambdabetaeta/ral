@@ -1,6 +1,8 @@
-//! Outbound HTTPS for every client exarch builds: trust anchored in a bundled
-//! root store rather than the host's, and the liveness bounds that turn a
-//! silent or black-holed connection into a retryable error.
+//! Outbound HTTPS for every client exarch builds.
+//!
+//! Trust is anchored in a bundled root store rather than the host's, and the
+//! liveness bounds here turn a silent or black-holed connection into a
+//! retryable error.
 
 use std::time::Duration;
 

@@ -39,10 +39,12 @@ pub(crate) const DETACHED_WORKER_BACKSTOP: Duration = Duration::from_hours(24);
 /// lingering under retention does not.
 pub(crate) const LIVE_WORKER_CAP: usize = 64;
 
-/// Birth budget on `detach` per session shell.  Deliberately not
-/// [`LIVE_WORKER_CAP`]: a detach occupies no seat, so a cap counting live work
-/// cannot bound it, and it needs a bound of its own precisely because nothing
-/// later reclaims it.  Reset by `/clear`, which reboots the shell.
+/// Birth budget on `detach` per session shell.
+///
+/// Deliberately not [`LIVE_WORKER_CAP`]: a detach occupies no seat, so a cap
+/// counting live work cannot bound it, and it needs a bound of its own
+/// precisely because nothing later reclaims it.  Reset by `/clear`, which
+/// reboots the shell.
 pub const DETACH_BIRTH_BUDGET: u64 = 16;
 
 /// Retention bound, in ral calls, on a settled worker's unclaimed result,
@@ -95,10 +97,11 @@ impl PinDigest {
 }
 
 /// A shared, session-owned register of pinned-state digests, written as
-/// `` `pin ``/`` `unpin `` flow past the live surface sink.  Pins otherwise
-/// flow straight through the session to the frontend, so this mirror is the
-/// only way the boundary nudge can name them; `None` (tests, any path with no
-/// nudge layer) disables it.
+/// `` `pin ``/`` `unpin `` flow past the live surface sink.
+///
+/// Pins otherwise flow straight through the session to the frontend, so
+/// this mirror is the only way the boundary nudge can name them; `None`
+/// (tests, any path with no nudge layer) disables it.
 pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, PinDigest>>>;
 
 /// Reserved register key for the durable-service ledger — one card listing

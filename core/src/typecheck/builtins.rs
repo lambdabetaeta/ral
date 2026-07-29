@@ -1,7 +1,9 @@
-//! Type-checker side of the builtin registry: the typing rule each
-//! `builtin_registry!` entry in `core/src/builtins.rs` selects through its
-//! `ty:` field, the scheme factories it picks from, and the record shapes the
-//! record-valued builtins share.
+//! Type-checker side of the builtin registry.
+//!
+//! Here live the typing rule each `builtin_registry!` entry in
+//! `core/src/builtins.rs` selects through its `ty:` field, the scheme
+//! factories it picks from, and the record shapes the record-valued builtins
+//! share.
 //!
 //! A scheme factory allocates its unifier vars fresh, so the scheme it returns
 //! needs no renaming pass; a [`BuiltinSig`] is inert data, interpreted by the
@@ -15,9 +17,11 @@ use super::ty::{CompTy, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar};
 use super::unify::Unifier;
 use crate::types::BuiltinTable;
 
-/// How the type checker handles a call to a registered builtin: an ordinary
-/// first-class polytype, or a command signature that describes argv shape and
-/// result directly, short-circuiting command-name classification.
+/// How the type checker handles a call to a registered builtin.
+///
+/// Either an ordinary first-class polytype, or a command signature that
+/// describes argv shape and result directly, short-circuiting command-name
+/// classification.
 #[derive(Clone, Copy)]
 pub enum BuiltinTypeRule {
     /// Standard polytype.  `arity` is the registry entry's declared `arity:`,
@@ -399,8 +403,10 @@ pub mod sig {
 
     /// `detach`: any argv, and a `{pid, desc}` receipt the checker leaves as a
     /// fresh variable — the template vocabulary has no record former, and one
-    /// builtin does not earn it.  Command-only, because a partially applied
-    /// value must not promise a process that outlives the session.
+    /// builtin does not earn it.
+    ///
+    /// Command-only, because a partially applied value must not promise a
+    /// process that outlives the session.
     pub const DETACH: BuiltinSig = command(ArgSig::Any, pure(TyTemplate::Any), None);
 
     pub const INT_TO_UNIT: BuiltinSig =
@@ -874,8 +880,9 @@ pub mod scheme {
     }
 
     /// `service :: ∀α μ₀ μ₁. String → U(F[μ₀,μ₁] α) → F (Handle α)` — `watch`'s
-    /// scheme, the leading `String` being the mandatory birth description.  The
-    /// durable lease class is a runtime fact, invisible to the types.
+    /// scheme, the leading `String` being the mandatory birth description.
+    ///
+    /// The durable lease class is a runtime fact, invisible to the types.
     pub fn service(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
@@ -947,9 +954,11 @@ pub mod scheme {
 
     /// `fail :: ∀α ρ. [status: Int | ρ] → F α` — always diverges, so the result
     /// is unconstrained, and the open row lets a caught error record be
-    /// re-raised verbatim.  Only the value form `$fail` enforces this shape: in
-    /// command position `sig::FAIL` takes one `Any`, so `fail 0` defers to the
-    /// runtime and only the literal `fail [status: 0]` is caught here, by
+    /// re-raised verbatim.
+    ///
+    /// Only the value form `$fail` enforces this shape: in command position
+    /// `sig::FAIL` takes one `Any`, so `fail 0` defers to the runtime and
+    /// only the literal `fail [status: 0]` is caught here, by
     /// [`super::fail_status_is_zero_literal`].
     pub fn fail_op(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
@@ -1001,8 +1010,10 @@ pub mod scheme {
 }
 
 /// A builtin's first-class polytype, or `None` when `table` does not know the
-/// name or the entry has no value form.  Resolution runs against `table`, the
-/// checked session's own surface, so a name means what that session evaluates.
+/// name or the entry has no value form.
+///
+/// Resolution runs against `table`, the checked session's own surface, so a
+/// name means what that session evaluates.
 pub fn builtin_scheme(table: &BuiltinTable, name: &str, u: &mut Unifier) -> Option<Scheme> {
     match table.get(name)?.type_rule {
         BuiltinTypeRule::Scheme(_, factory) => Some(factory(u)),
@@ -1017,12 +1028,14 @@ pub fn builtin_type_hint(table: &BuiltinTable, name: &str) -> Option<String> {
     Some(fmt_scheme(&scheme))
 }
 
-/// The entry's own [`crate::types::BuiltinEntry::fixed_arity`], guarded in debug
-/// builds by [`check_arity_consistency`] — `builtin_registry!` const-asserts a
-/// declared `arity:` against a `Sig`'s structural arity at build time, but
-/// cannot see through a `Scheme` factory, which needs a `Unifier` to
-/// instantiate.  The `registry_and_scheme_arity_agree` test calls this for every
-/// name to close that gap.
+/// The entry's own [`crate::types::BuiltinEntry::fixed_arity`], guarded in
+/// debug builds by [`check_arity_consistency`].
+///
+/// `builtin_registry!` const-asserts a declared `arity:` against a `Sig`'s
+/// structural arity at build time, but cannot see through a `Scheme`
+/// factory, which needs a `Unifier` to instantiate.  The
+/// `registry_and_scheme_arity_agree` test calls this for every name to
+/// close that gap.
 pub fn builtin_arity(table: &BuiltinTable, name: &str) -> Option<usize> {
     let arity = table.get(name).and_then(|e| e.fixed_arity());
     debug_assert!(
@@ -1076,7 +1089,9 @@ pub fn plugin_entry_field_ty(key: &str, u: &mut Unifier) -> Option<Ty> {
 
 /// Detect the literal `fail [status: 0, …]` shape, so the nonzero-status rule
 /// `builtins::misc::builtin_fail` enforces at runtime can be diagnosed at
-/// typecheck time.  Computed statuses and spreads still defer to the runtime.
+/// typecheck time.
+///
+/// Computed statuses and spreads still defer to the runtime.
 pub fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
     let Some(positional) = crate::ir::args::positional(args) else {
         return false;

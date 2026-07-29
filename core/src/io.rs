@@ -1,6 +1,8 @@
-//! Unified stream plumbing: [`Io`], the per-`Shell` bundle of byte streams and
-//! terminal state, over the [`source`] / [`sink`] / [`terminal`] submodules
-//! whose public items are re-exported here as `crate::io::*`.
+//! Unified stream plumbing: [`Io`], the per-`Shell` bundle of byte streams
+//! and terminal state.
+//!
+//! It sits over the [`source`] / [`sink`] / [`terminal`] submodules, whose
+//! public items are re-exported here as `crate::io::*`.
 
 mod sink;
 mod source;

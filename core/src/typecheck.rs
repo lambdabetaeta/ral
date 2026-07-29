@@ -1,6 +1,7 @@
-//! Hindley-Milner inference over the CBPV IR: value types on `Val`, computation
-//! types on `Comp`, polymorphism by let-generalisation.  Seeding and entry points
-//! live here; the inference rules live in `infer`.
+//! Hindley-Milner inference over the CBPV IR: value types on `Val`,
+//! computation types on `Comp`, polymorphism by let-generalisation.
+//!
+//! Seeding and entry points live here; the inference rules live in `infer`.
 
 mod annotate;
 pub mod builtins;
@@ -26,7 +27,9 @@ pub use self::unify::Unifier;
 use self::generalize::generalize;
 use crate::ir::{Comp, CompKind, IrPattern};
 
-/// The seed of a run's check, read off the live session by `Shell::session_schemes`.
+/// The seed of a run's check, read off the live session by
+/// `Shell::session_schemes`.
+///
 /// A binding with no scheme came from an unchecked path — a `source`d file, a
 /// plugin — and infers at a fresh variable per use site.
 #[derive(Debug, Clone)]
@@ -86,11 +89,13 @@ fn seed_env(env: &mut TyEnv, schemes: SessionSchemes) {
     }
 }
 
-/// Type-check `comp`, seeding from the live session.  The verdict rides back on
-/// the returned comp: `annotate` writes each top-level bind's generalised scheme
-/// onto its `Bind` node.  Only closed schemes leave — a run's unifier dies with
-/// the run and its variable ids restart at zero, so an open scheme from run *N*
-/// would alias run *N+1*'s fresh variables.
+/// Type-check `comp`, seeding from the live session.
+///
+/// The verdict rides back on the returned comp: `annotate` writes each
+/// top-level bind's generalised scheme onto its `Bind` node.  Only closed
+/// schemes leave — a run's unifier dies with the run and its variable ids
+/// restart at zero, so an open scheme from run *N* would alias run *N+1*'s
+/// fresh variables.
 ///
 /// # Errors
 /// Every diagnostic the inference pass collected, whenever that list is non-empty.
@@ -135,12 +140,14 @@ fn harvest_into(comp: &Comp, out: &mut Vec<(String, Scheme)>) {
     }
 }
 
-/// Type-check the prelude IR, returning the annotated comp and the schemes on its
-/// top-level `Bind` nodes.  Callers — `boot::bake_prelude_to_out_dir`, from each
-/// host's build script — serialise the *annotated* prelude, so the comp blob and
-/// the scheme blob come out of one checked pass and evaluating the prelude installs
-/// each binding's scheme beside its value.  Builtin names are filtered out: the
-/// table owns them, not the prelude.
+/// Type-check the prelude IR, returning the annotated comp and the schemes
+/// on its top-level `Bind` nodes.
+///
+/// Callers — `boot::bake_prelude_to_out_dir`, from each host's build script
+/// — serialise the *annotated* prelude, so the comp blob and the scheme
+/// blob come out of one checked pass and evaluating the prelude installs
+/// each binding's scheme beside its value.  Builtin names are filtered out:
+/// the table owns them, not the prelude.
 ///
 /// # Panics
 /// If the prelude fails to type-check, reporting the errors.
@@ -161,13 +168,15 @@ pub fn bake_prelude(comp: &Comp) -> (Comp, Vec<(String, Scheme)>) {
     (annotated, schemes)
 }
 
-/// The scheme for a handler arm, computed by `HandlerEntry::vet` at install and
-/// persisted only on alias frames, which outlive their run.  The arm is inferred
-/// under the runtime handler calling convention — a lambda arm receives the argv
-/// list — and closed against its own unifier so a later run's check can be seeded
-/// with it.  Pinning constrains only the arm's `PipeSpec`, leaving its value type
-/// free: to the head's handler scheme when one is in scope, otherwise to a fresh
-/// `F[μ, ν]` the arm itself pins down.
+/// The scheme for a handler arm, computed by `HandlerEntry::vet` at install
+/// and persisted only on alias frames, which outlive their run.
+///
+/// The arm is inferred under the runtime handler calling convention — a
+/// lambda arm receives the argv list — and closed against its own unifier
+/// so a later run's check can be seeded with it.  Pinning constrains only
+/// the arm's `PipeSpec`, leaving its value type free: to the head's handler
+/// scheme when one is in scope, otherwise to a fresh `F[μ, ν]` the arm
+/// itself pins down.
 ///
 /// # Errors
 /// The lone rejection: a ground mode clash, a value-output body under a
@@ -198,10 +207,12 @@ pub fn alias_arm_scheme(
 }
 
 /// The scheme for a value binding (`Shell::bind_value`, `Shell::register_hook`),
-/// inferred under the ordinary value/function-application convention: a lambda is
-/// a `Fun(param, body)` whose parameter binds an independent value type, not the
-/// argv list an alias arm is forced onto.  Closed against its own unifier; with no
-/// head to pin to, the scheme comes back directly.
+/// inferred under the ordinary value/function-application convention.
+///
+/// A lambda is a `Fun(param, body)` whose parameter binds an independent
+/// value type, not the argv list an alias arm is forced onto.  Closed
+/// against its own unifier; with no head to pin to, the scheme comes back
+/// directly.
 pub fn binding_value_scheme(
     param: Option<&crate::ir::IrPattern>,
     body: &Comp,

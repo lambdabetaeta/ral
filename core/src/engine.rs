@@ -24,8 +24,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 
 /// One compiled-in boot recipe the engine can be told, at `Attach`, to become.
-/// Each front-end binary — the REPL, exarch — re-execs itself as its own engine
-/// and passes its own table; only the tag crosses the wire, never the function.
+///
+/// Each front-end binary — the REPL, exarch — re-execs itself as its own
+/// engine and passes its own table; only the tag crosses the wire, never
+/// the function.
 pub struct EngineInstaller {
     pub tag: &'static str,
     /// Prelude, host surface, libraries, env seeding, ledger arming — at
@@ -182,8 +184,9 @@ fn write_report(writer: &Mutex<WireChannel>, id: DispatchId, report: Report) {
         .write_frame(&Frame::Event(id, Event::Report(report)));
 }
 
-/// Adopt the socket the front-end left on fd 3 and run the engine on it. Only
-/// the adoption and the final `exit` live here; the protocol itself is
+/// Adopt the socket the front-end left on fd 3 and run the engine on it.
+///
+/// Only the adoption and the final `exit` live here; the protocol itself is
 /// [`engine_session`], separated so a test can drive a real engine over a
 /// [`WireChannel`] pair without leaving the process.
 ///

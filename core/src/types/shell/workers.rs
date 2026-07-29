@@ -24,8 +24,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 /// Stable identifier for a registered worker, minted from a process-global
-/// counter rather than a per-registry one, so ids never collide across shells
-/// — a fleet listing folds several agents' registries together.
+/// counter rather than a per-registry one, so ids never collide across
+/// shells.
+///
+/// A fleet listing folds several agents' registries together.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WorkerId(pub u64);
 
@@ -75,8 +77,10 @@ pub enum ReapCause {
 }
 
 /// What a reap leaves for the transcript event, minus the handle it
-/// deliberately does not keep alive. Recorded only for an entry present at
-/// reap time, so a worker an eliminator observed away first leaves none.
+/// deliberately does not keep alive.
+///
+/// Recorded only for an entry present at reap time, so a worker an
+/// eliminator observed away first leaves none.
 #[derive(Clone, Debug)]
 pub struct ReapNotice {
     pub id: WorkerId,
@@ -86,9 +90,11 @@ pub struct ReapNotice {
 }
 
 /// One registered worker, paired with the handle a caller observes or cancels
-/// it through. Storing the handle rather than a second by-id control plane
-/// keeps `poll`, `await`, `race`, and `cancel` the only verbs that touch a
-/// worker: rediscovery is list, then take the handle back.
+/// it through.
+///
+/// Storing the handle rather than a second by-id control plane keeps `poll`,
+/// `await`, `race`, and `cancel` the only verbs that touch a worker:
+/// rediscovery is list, then take the handle back.
 #[derive(Clone, Debug)]
 pub struct WorkerEntry {
     pub id: WorkerId,

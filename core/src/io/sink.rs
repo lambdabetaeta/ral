@@ -15,8 +15,10 @@ const SINK_BUFFER_TRUNC_MARKER: &[u8] =
     b"\n[ral: buffer exceeded 16 MiB; remaining output dropped]\n";
 
 /// Frontend-provided byte writer — the REPL installs rustyline's
-/// `ExternalPrinter` here so bytes land above the active prompt instead of over
-/// it.  `Send + Sync` because one `External` sink is cloned into every watcher
+/// `ExternalPrinter` here so bytes land above the active prompt instead of
+/// over it.
+///
+/// `Send + Sync` because one `External` sink is cloned into every watcher
 /// and pump thread.
 pub trait ExternalWrite: Send + Sync {
     /// Implementors must serialise whole calls — `LineFramed` leans on that for
@@ -31,9 +33,11 @@ pub trait ExternalWrite: Send + Sync {
 /// on pump and worker threads, the reader on the eval thread after they join.
 pub type ByteBuffer = Arc<Mutex<Vec<u8>>>;
 
-/// One child stream's routing, stdout or stderr.  `pump: None` means the child
-/// writes the destination itself; `Some(sink)` means the kernel piped it and the
-/// caller must hand the child's fd to [`Sink::pump`] after spawn.
+/// One child stream's routing, stdout or stderr.
+///
+/// `pump: None` means the child writes the destination itself; `Some(sink)`
+/// means the kernel piped it and the caller must hand the child's fd to
+/// [`Sink::pump`] after spawn.
 ///
 /// Only [`Sink::child_stdout`] and [`Sink::child_stderr`] decide which, so no
 /// caller reasons about "inherit, pipe, pump, tee" on its own.

@@ -1,6 +1,8 @@
 //! The IT-set network policy and the durable trail behind every CONNECT
 //! tunnel: opened once per front-end process, host side, and inherited
-//! verbatim by every child. `guest-net`'s proxy is the only writer of records.
+//! verbatim by every child.
+//!
+//! `guest-net`'s proxy is the only writer of records.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};

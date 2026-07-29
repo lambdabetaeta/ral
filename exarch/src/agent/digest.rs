@@ -27,8 +27,9 @@ pub const AGENT_REPLY_CAP: usize = 16_000;
 
 /// Fallback compaction trigger, in serialised model-view bytes, for
 /// `Agent::compact` — used only when the model's context window is unknown
-/// (a native provider with no fetched catalog); a known window goes through
-/// [`compaction_due`] instead.
+/// (a native provider with no fetched catalog).
+///
+/// A known window goes through [`compaction_due`] instead.
 pub const COMPACT_THRESHOLD: usize = 500 * 1024;
 
 /// Summary output cap when the window is unknown.  Generous on purpose: a
@@ -51,8 +52,10 @@ pub fn compaction_due(used: u64, window: u64) -> bool {
 }
 
 /// Summary output cap for a known `window`: four-fifths of the reserve,
-/// clamped at both ends.  A compaction keeps its recent suffix verbatim
-/// ([`suffix_keep_budget`]), so the summary covers only the dropped prefix.
+/// clamped at both ends.
+///
+/// A compaction keeps its recent suffix verbatim ([`suffix_keep_budget`]), so
+/// the summary covers only the dropped prefix.
 pub fn summary_cap_tokens(window: u64) -> u32 {
     const MIN: u64 = 4_096;
     const MAX: u64 = 32_768;
@@ -60,8 +63,10 @@ pub fn summary_cap_tokens(window: u64) -> u32 {
 }
 
 /// Byte budget for the verbatim suffix kept across a compaction: half the
-/// model-view bytes, the older half being what gets summarised.  Window-
-/// agnostic — it splits whatever is in context, which the trigger bounds.
+/// model-view bytes, the older half being what gets summarised.
+///
+/// Window-agnostic — it splits whatever is in context, which the trigger
+/// bounds.
 pub fn suffix_keep_budget(history_bytes: usize) -> usize {
     history_bytes / 2
 }

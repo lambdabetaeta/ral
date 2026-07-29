@@ -329,10 +329,11 @@ pub fn format_runtime_error_ariadne(
     )
 }
 
-/// Compact only when the error stayed inside `compact_root`'s file — the id of
-/// an input that compiled to a single command.  Shape alone will not do: `boom`
-/// at the prompt is one command, but as an alias its error lives in the rc,
-/// where only a caret can point.
+/// Compact only when the error stayed inside `compact_root`'s file — the id
+/// of an input that compiled to a single command.
+///
+/// Shape alone will not do: `boom` at the prompt is one command, but as an
+/// alias its error lives in the rc, where only a caret can point.
 pub fn format_runtime_error_auto(
     db: &SourceDb,
     err: &crate::types::Error,

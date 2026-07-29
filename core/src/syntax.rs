@@ -12,10 +12,12 @@ pub mod tag;
 pub use quote::{is_bare_word, quote_word, quote_word_if_needed};
 
 /// True when `word` is a ral keyword: control flow, or a control operator from
-/// [`ast::ScopeAst::KEYWORDS`].  Sole source of the vocabulary — the parser's
-/// `is_reserved` and exarch's syntax highlighter both consult it, so the two
-/// cannot drift.  Value literals (`true`, `false`, `unit`) are not keywords;
-/// they classify through [`ast::WordLiteral`].
+/// [`ast::ScopeAst::KEYWORDS`].
+///
+/// Sole source of the vocabulary — the parser's `is_reserved` and exarch's
+/// syntax highlighter both consult it, so the two cannot drift.  Value
+/// literals (`true`, `false`, `unit`) are not keywords; they classify through
+/// [`ast::WordLiteral`].
 pub fn is_keyword(word: &str) -> bool {
     ast::ScopeAst::lookup_keyword(word).is_some()
         || matches!(word, "if" | "elsif" | "else" | "let" | "return" | "case")

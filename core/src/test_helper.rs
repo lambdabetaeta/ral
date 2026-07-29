@@ -1,10 +1,12 @@
 //! Hidden multicall flags that let a test drive ral as a pipeline stage and
 //! observe runtime state (process group, controlling terminal) without
-//! shipping a helper binary.  Every one is consumed before clap, so `--help`
-//! never names them.
+//! shipping a helper binary.
+//!
+//! Every one is consumed before clap, so `--help` never names them.
 
 /// Serve a re-exec of `current_exe()` — under `cargo test`, the test binary
 /// itself — so a hidden tail flag never reaches libtest's argv parser.
+///
 /// `Some(code)` means this process was such a re-exec and must exit now.
 ///
 /// Every test binary calls this from a `#[ctor]`; the integration binaries
@@ -86,8 +88,10 @@ pub(crate) const PGID_CHECK_FLAG: &str = "--ral-test-pgid-check";
 
 /// Serve `--ral-test-pgid-check <tag>`: write `pgid:<tag>=<getpgrp()>` to
 /// stderr — plus `tcpgrp:<tag>=<tcgetpgrp(2)>` when stderr is a tty — and
-/// exit 0, so a test can confirm a stage joined the pgid its parent set.
-/// `None` falls through to the normal CLI.
+/// exit 0.
+///
+/// A test can thus confirm a stage joined the pgid its parent set. `None`
+/// falls through to the normal CLI.
 ///
 /// The `ral` and `exarch` binaries dispatch this from `main`, because the
 /// tests spawn a real `ral` as a pipeline stage.  Stderr is the probe: a

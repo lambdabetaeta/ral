@@ -98,6 +98,7 @@ pub enum ValMapEntry {
 }
 
 /// Positional arguments to a call ([`CompKind::App`] or [`CompKind::Exec`]).
+///
 /// Each span covers a whole argument slot, the `...` of a spread included,
 /// so a unification failure underlines one argument, not the whole call.
 pub type Args = Vec<Spanned<ValListElem>>;
@@ -217,7 +218,7 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
             walk_val(b, out);
         }
         CompKind::Force(v) | CompKind::Return(v) | CompKind::Negate(v) | CompKind::Not(v) => {
-            walk_val(v, out)
+            walk_val(v, out);
         }
         CompKind::Index { target, keys } => {
             walk_val(target, out);

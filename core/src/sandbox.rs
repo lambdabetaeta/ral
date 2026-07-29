@@ -1,6 +1,7 @@
-//! OS-level confinement for the children a `grant` block spawns: platform
-//! backends (`linux`, `macos`, `windows`), the per-command launcher
-//! (`launch`), binary pinning and re-exec (`reexec`), kernel-denial
+//! OS-level confinement for the children a `grant` block spawns.
+//!
+//! Platform backends (`linux`, `macos`, `windows`), the per-command
+//! launcher (`launch`), binary pinning and re-exec (`reexec`), kernel-denial
 //! diagnostics (`diag`).
 //!
 //! Exec is gated in-process everywhere by `capability::check_exec_args`.
@@ -204,10 +205,12 @@ pub(crate) fn self_command() -> std::io::Result<Command> {
 }
 
 /// All sandbox startup work, returning argv stripped of
-/// `--sandbox-projection`.  Pins this binary and, on Unix, enters the OS
-/// process sandbox when a projection was supplied; Windows instead confines
-/// the child from the parent at spawn time.  A returned code means we are the
-/// bwrap respawn parent and should exit with it.
+/// `--sandbox-projection`.
+///
+/// Pins this binary and, on Unix, enters the OS process sandbox when a
+/// projection was supplied; Windows instead confines the child from the
+/// parent at spawn time.  A returned code means we are the bwrap respawn
+/// parent and should exit with it.
 ///
 /// # Errors
 /// A malformed `--sandbox-projection`, or a failure to enter the sandbox.
@@ -246,9 +249,11 @@ pub fn teardown_session() {
     windows::session::teardown();
 }
 
-/// The whole pre-`main` sandbox stage as one `Option<u8>`, for exarch and the
-/// test ctors: [`early_init`], then the per-command re-exec tails on the argv
-/// it leaves — the `--ral-bundled-tool` multicall via
+/// The whole pre-`main` sandbox stage as one `Option<u8>`, for exarch and
+/// the test ctors.
+///
+/// First [`early_init`], then the per-command re-exec tails on the argv it
+/// leaves — the `--ral-bundled-tool` multicall via
 /// [`crate::try_run_bundled_tool`], and on macOS the host `execve` via
 /// [`serve_sandbox_exec`].  That order is the point: a `--sandbox-projection`
 /// child is confined before its tail runs.  The stripped argv is discarded, so

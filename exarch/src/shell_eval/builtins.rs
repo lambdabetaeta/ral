@@ -30,10 +30,12 @@ const AGENT_SOURCE: &str = include_str!("../../data/agent.ral");
 pub const INSTALLER_TAG: &str = "exarch-agent";
 
 /// The agent host's builtin surface over core's `CORE_BUILTINS`: exarch's own
-/// sets plus core's [`ral_core::builtins::SERVICE_BUILTIN`], which core withholds
-/// from `CORE_BUILTINS` so `service` reaches only a host under whose worker lease
-/// a durable birth means anything.  The prompt's builtin index ([`crate::prompt`])
-/// reads the booted shell's names back off this, so the two cannot drift.
+/// sets plus core's [`ral_core::builtins::SERVICE_BUILTIN`].
+///
+/// Core withholds it from `CORE_BUILTINS` so `service` reaches only a host
+/// under whose worker lease a durable birth means anything.  The prompt's
+/// builtin index ([`crate::prompt`]) reads the booted shell's names back off
+/// this, so the two cannot drift.
 pub fn host_surface() -> HostSurface {
     HostSurface {
         statics: vec![

@@ -1,7 +1,8 @@
 //! Audit recording: `with_scope` wraps a structural scope arm (`grant`,
-//! `within`, `guard`) so its body's nodes become the wrapper's children, and
-//! `frame_call` brackets every other node — builtins, externals, stages — in
-//! the `start` / `finish_command` lifecycle.
+//! `within`, `guard`) so its body's nodes become the wrapper's children.
+//!
+//! `frame_call` brackets every other node — builtins, externals, stages —
+//! in the `start` / `finish_command` lifecycle.
 //!
 //! With `shell.local.audit.active()` false the recorders are no-ops, so the
 //! dispatcher can call them unconditionally; `record_scope` is the exception,

@@ -210,10 +210,11 @@ fn macos_sandboxed_command(
 }
 
 /// macOS: `execve` the host program carried in the `--ral-sandbox-exec` tail,
-/// now that `early_init` has entered Seatbelt.  `args` is the post-`early_init`
-/// argv, and `None` — the sentinel absent — lets normal dispatch continue.
-/// On success `execve` never returns; a failure surfaces as 127, the POSIX
-/// "cannot exec" code.
+/// now that `early_init` has entered Seatbelt.
+///
+/// `args` is the post-`early_init` argv, and `None` — the sentinel absent —
+/// lets normal dispatch continue.  On success `execve` never returns; a
+/// failure surfaces as 127, the POSIX "cannot exec" code.
 #[cfg(target_os = "macos")]
 pub fn serve_sandbox_exec(args: &[String]) -> Option<u8> {
     use std::os::unix::process::CommandExt;

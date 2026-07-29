@@ -1,6 +1,8 @@
 //! Session boot: the shell every exarch seat starts from, the scratch and XDG
-//! directories around it, and the time/slug helpers those share.  Nothing here
-//! runs per exchange — per-session disk state is [`crate::agent::event::AgentLog`].
+//! directories around it, and the time/slug helpers those share.
+//!
+//! Nothing here runs per exchange — per-session disk state is
+//! [`crate::agent::event::AgentLog`].
 
 use crate::agent::cancel;
 use crate::shell_eval;
@@ -53,8 +55,10 @@ pub(crate) fn exarch_shell(terminal: TerminalState) -> Shell {
 
 /// The wire engine's `EngineInstaller::boot`, run in the engine process at
 /// Attach: [`exarch_shell`] plus an engine-local [`Scratch`] and the identity
-/// ceremony's ledgers, but no signal ceremony (a cancel arrives as a `Control`
-/// frame) and no terminal probe (that state is conveyed at Attach).
+/// ceremony's ledgers.
+///
+/// It carries no signal ceremony (a cancel arrives as a `Control` frame) and
+/// no terminal probe (that state is conveyed at Attach).
 ///
 /// # Panics
 /// Panics if the agent library or the engine-local scratch cannot be set up.
@@ -86,9 +90,11 @@ pub(crate) fn seed_no_color(shell: &mut Shell) {
 }
 
 /// Per-session scratch directory, named to the agent under its own [`App`] —
-/// `$EXARCH_SCRATCH`, `$SYNOD_SCRATCH`.  Everything ephemeral the agent
-/// scribbles belongs here, because `reasonable` denies writes to the user's real
-/// cache dirs.  Left on disk at session end: this is OS-managed temp space.
+/// `$EXARCH_SCRATCH`, `$SYNOD_SCRATCH`.
+///
+/// Everything ephemeral the agent scribbles belongs here, because
+/// `reasonable` denies writes to the user's real cache dirs.  Left on disk
+/// at session end: this is OS-managed temp space.
 pub struct Scratch {
     app: App,
     dir: PathBuf,
@@ -178,10 +184,11 @@ impl Scratch {
     }
 }
 
-/// Which product's directories these are.  Exarch and synod are two
-/// applications over one engine, and neither may reach into the other's logs or
-/// persisted model selection; the name is the only thing that varies, so it is
-/// the whole type.
+/// Which product's directories these are.
+///
+/// Exarch and synod are two applications over one engine, and neither may
+/// reach into the other's logs or persisted model selection; the name is
+/// the only thing that varies, so it is the whole type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct App(&'static str);
 

@@ -12,9 +12,10 @@ use std::path::Path;
 use crate::types::{Break, Capabilities, Mooring, Settled, Shell, sig};
 
 /// Evaluate `source` and decode its terminal value into a frozen
-/// [`Capabilities`], resolving sigils against `ctx`.  `virtual_path` names the
-/// file in errors and keys the cycle stack — synthetic (`<built-in:NAME>`) for
-/// embedded profiles.
+/// [`Capabilities`], resolving sigils against `ctx`.
+///
+/// `virtual_path` names the file in errors and keys the cycle stack —
+/// synthetic (`<built-in:NAME>`) for embedded profiles.
 ///
 /// # Errors
 /// A compile, runtime, or decode failure, named with `virtual_path`; an escape

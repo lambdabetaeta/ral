@@ -26,6 +26,7 @@ pub trait Meet {
 }
 
 /// Widen a base ceiling with an extension, before any attenuation runs.
+///
 /// Not the order-dual of [`Meet`]: vetoes survive from either side, so a deny
 /// is lifted by choosing a different base, never by composing over it.
 pub trait Join {
@@ -81,9 +82,11 @@ pub enum ExecPolicy {
 
 /// Exec authority partitioned by key kind: `literals` carry the full
 /// three-valued [`ExecPolicy`], while a directory can only admit or deny the
-/// binaries resolving inside it — so the two-valued half *is* the partition,
-/// and [`Meet`]/[`Join`] just intersect the allows and union the denies.
-/// Literals beat dirs where both cover a candidate; among dirs, the deepest wins.
+/// binaries resolving inside it.
+///
+/// The two-valued half *is* the partition, so [`Meet`]/[`Join`] just
+/// intersect the allows and union the denies. Literals beat dirs where both
+/// cover a candidate; among dirs, the deepest wins.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecMap {
     #[serde(default)]
@@ -113,10 +116,12 @@ pub struct FsPolicy {
     pub deny_paths: Vec<NormalizedPrefix>,
 }
 
-/// OS-renderable view of the meet-folded fs policy.  `Unrestricted` is the
-/// lattice top — no layer attenuated fs, so the profile passes it through with
-/// broad `file-read*`/`file-write*` on macOS, `--dev-bind / /` on Linux.  An
-/// empty `Restricted` is the other extreme: fs was attenuated to nothing.
+/// OS-renderable view of the meet-folded fs policy.
+///
+/// `Unrestricted` is the lattice top — no layer attenuated fs, so the profile
+/// passes it through with broad `file-read*`/`file-write*` on macOS,
+/// `--dev-bind / /` on Linux. An empty `Restricted` is the other extreme: fs
+/// was attenuated to nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "kind", content = "policy", rename_all = "snake_case")]
 pub enum FsProjection {
@@ -137,11 +142,13 @@ impl FsProjection {
     }
 }
 
-/// OS-renderable view of the meet-folded exec policy.  Under `Unrestricted`
-/// the in-ral gate is the only check; `Restricted` closes the OS layer around
-/// the same admits, shutting the `sh -c "PATH=…; cmd"` route by which a
-/// sandboxed child re-execs binaries the gate never sees.  An empty
-/// `Restricted` admits nothing and the deny-default kills every spawn.
+/// OS-renderable view of the meet-folded exec policy.
+///
+/// Under `Unrestricted` the in-ral gate is the only check; `Restricted`
+/// closes the OS layer around the same admits, shutting the `sh -c
+/// "PATH=…; cmd"` route by which a sandboxed child re-execs binaries the
+/// gate never sees. An empty `Restricted` admits nothing and the
+/// deny-default kills every spawn.
 ///
 /// The three deny dimensions mirror the three shapes of the in-ral veto, so the
 /// profile denies exactly what the gate would.  `deny_basenames` renders as a
@@ -166,10 +173,12 @@ pub enum ExecProjection {
 
 /// The OS-renderable projection of the effective grant, produced by
 /// `sandbox_projection` in `core/src/capability/sandbox.rs` after meet-folding
-/// the whole stack.  The platform backends `sandbox::linux` and
-/// `sandbox::macos` render it, and it rides the internal
-/// `--sandbox-projection` flag to a re-exec'd child.  Unlike a
-/// [`Capabilities`] frame, no further composition can widen it.
+/// the whole stack.
+///
+/// The platform backends `sandbox::linux` and `sandbox::macos` render it,
+/// and it rides the internal `--sandbox-projection` flag to a re-exec'd
+/// child. Unlike a [`Capabilities`] frame, no further composition can widen
+/// it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxProjection {
     #[serde(default)]
@@ -238,9 +247,11 @@ impl SandboxProjection {
     }
 }
 
-/// Gates the `_ed-*` builtins.  `deny_unknown_fields` is structural: TOML
-/// attaches every key after a header to that header, so a stray top-level key
-/// drifting into `[editor]` must error rather than be silently dropped.
+/// Gates the `_ed-*` builtins.
+///
+/// `deny_unknown_fields` is structural: TOML attaches every key after a
+/// header to that header, so a stray top-level key drifting into `[editor]`
+/// must error rather than be silently dropped.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EditorPolicy {
@@ -289,9 +300,11 @@ pub struct Capabilities {
 }
 
 /// The dynamic stack of capability layers: ambient root at index 0, innermost
-/// `grant { ... }` on top.  A newtype so the folds over it live together rather
-/// than being respelled as `iter().any(...)` at each call site; `transparent`
-/// serde keeps it free at every boundary.
+/// `grant { ... }` on top.
+///
+/// A newtype so the folds over it live together rather than being respelled
+/// as `iter().any(...)` at each call site; `transparent` serde keeps it free
+/// at every boundary.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct GrantStack(Vec<Capabilities>);

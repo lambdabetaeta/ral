@@ -61,7 +61,7 @@ impl CancelCause {
 
     /// The status paired with [`message`](Self::message): 130 (`128 + SIGINT`)
     /// for every interactive-shaped cancellation, 143 (`128 + SIGTERM`) for a
-    /// shutdown request — what a supervisor that SIGTERMed us reads back.
+    /// shutdown request — what a supervisor that sent `SIGTERM` reads back.
     pub fn exit_code(self) -> i32 {
         match self {
             Self::Terminate => 143,
@@ -96,8 +96,9 @@ static STAMPED: [AtomicU64; CancelCause::RootAbort as usize] =
     [const { AtomicU64::new(0) }; CancelCause::RootAbort as usize];
 
 /// Raise `cause` on the interrupt watermark, reaching the foreground of every
-/// run already in flight and of none born after this instant.  Async-signal-
-/// safe: two atomic read-modify-writes, no allocation, no lock.
+/// run already in flight and of none born after this instant.
+///
+/// Async-signal-safe: two atomic read-modify-writes, no allocation, no lock.
 pub fn request_foreground_cancel(cause: CancelCause) {
     let now = CLOCK.fetch_add(1, Ordering::Relaxed) + 1;
     STAMPED[cause as usize - 1].fetch_max(now, Ordering::Release);

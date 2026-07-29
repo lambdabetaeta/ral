@@ -31,10 +31,12 @@ use std::sync::Arc;
 use tui::SessionInfo;
 
 /// Pre-`main` trampoline shared by the binary and every test binary: dress a
-/// sandbox-IPC child's fresh shell with exarch's host builtins, then serve any
-/// helper re-exec.  A pipeline stage re-execs the running binary, which under
-/// `cargo test` is the libtest harness, so the flag must be served before
-/// libtest sees argv and rejects it.
+/// sandbox-IPC child's fresh shell with exarch's host builtins, then serve
+/// any helper re-exec.
+///
+/// A pipeline stage re-execs the running binary, which under `cargo test` is
+/// the libtest harness, so the flag must be served before libtest sees argv
+/// and rejects it.
 pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
     ral_core::sandbox::set_child_shell_extension(shell_eval::builtins::host_surface);
     #[cfg(unix)]
@@ -54,8 +56,9 @@ pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
 }
 
 /// The full pre-`main` dispatch — helper re-execs, then the OS-sandbox stage —
-/// shared by the binary's `main` and every test `#[ctor]`.  `Some(code)` means
-/// this process is a re-exec child that should exit now.
+/// shared by the binary's `main` and every test `#[ctor]`.
+///
+/// `Some(code)` means this process is a re-exec child that should exit now.
 pub fn dispatch_pre_main() -> Option<u8> {
     install_child_hooks_and_serve_helpers().or_else(ral_core::sandbox::serve_sandbox_early_init)
 }
@@ -79,8 +82,10 @@ macro_rules! pre_main_ctor {
 pre_main_ctor!();
 
 /// The binary's entry point, lifted into the library so integration tests can
-/// link the whole crate: parse the CLI, compose the capability lattice, build an
-/// [`Agent`] + [`Provider`], hand off to a frontend.
+/// link the whole crate.
+///
+/// It parses the CLI, composes the capability lattice, builds an [`Agent`] +
+/// [`Provider`], and hands off to a frontend.
 ///
 /// # Errors
 /// Returns `Err` if the CLI is misused, if no provider is available, or if

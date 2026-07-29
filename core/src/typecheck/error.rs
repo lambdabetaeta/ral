@@ -22,9 +22,11 @@ pub enum CompDiff {
     },
 }
 
-/// Why the inferencer demanded that two types agree.  Present exactly on
-/// constraint failures; a direct diagnosis stands alone with `reason: None`.
-/// Data only — the sentence each turns into is composed in `explain.rs`.
+/// Why the inferencer demanded that two types agree.
+///
+/// Present exactly on constraint failures; a direct diagnosis stands alone
+/// with `reason: None`.  Data only — the sentence each turns into is
+/// composed in `explain.rs`.
 #[derive(Debug, Clone)]
 pub enum Reason {
     ListPattern,

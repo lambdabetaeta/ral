@@ -1,7 +1,9 @@
 //! The authority to `tcsetpgrp` a child into the foreground, reified as an
-//! unforgeable value: no public constructor, neither `Clone` nor `Copy`, so a
-//! host can ask core for a run whose terminal policy makes the borrow
-//! reachable, but never mint the authority itself.
+//! unforgeable value.
+//!
+//! No public constructor, neither `Clone` nor `Copy`, so a host can ask
+//! core for a run whose terminal policy makes the borrow reachable, but
+//! never mint the authority itself.
 
 /// The session's single witness that ral owns the controlling terminal's
 /// foreground and may hand it to a child.

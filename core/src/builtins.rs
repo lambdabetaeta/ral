@@ -380,8 +380,9 @@ builtin_registry! {
         call: |_args, _mooring, _shell| Ok(Value::Bool(crate::ansi::use_ui_color())), },
 }
 
-/// A [`BuiltinTable`](crate::types::BuiltinTable) of [`CORE_BUILTINS`] alone —
-/// what a checker with no live shell
+/// A [`BuiltinTable`](crate::types::BuiltinTable) of [`CORE_BUILTINS`] alone.
+///
+/// This is what a checker with no live shell
 /// ([`SessionSchemes`](crate::typecheck::SessionSchemes)'s `Default`) types
 /// against, absent any host dressing.
 pub fn core_builtin_table() -> crate::types::BuiltinTable {
@@ -443,11 +444,12 @@ pub static DETACH_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
 
 /// Synthesise the first-class thunk a `$name` reference resolves to: an n-ary
 /// lambda over a name-dispatched [`crate::ir::CompKind::Exec`], where `n` is the
-/// entry's fixed arity.  `None` for builtins with no value form.
+/// entry's fixed arity.
 ///
-/// The body dispatches by [`crate::ir::CommandWord::Name`] rather than calling
-/// the entry's thunk, so a `within [handlers: …]` frame installed later still
-/// intercepts the reified primitive when the lambda is applied.
+/// `None` for builtins with no value form. The body dispatches by
+/// [`crate::ir::CommandWord::Name`] rather than calling the entry's thunk, so
+/// a `within [handlers: …]` frame installed later still intercepts the
+/// reified primitive when the lambda is applied.
 pub fn synthesize_builtin_value(entry: &BuiltinEntry) -> Option<Value> {
     use crate::ir::{CommandName, CommandWord, CompKind, Exec, IrPattern, Val};
     use crate::source::Spanned;
@@ -548,7 +550,9 @@ pub fn register(shell: &mut Shell, prelude_comp: &Arc<crate::ir::Comp>) {
 pub use print::{PrintParams, REPL_PRINT_PARAMS, pretty_print};
 
 /// Apply a thunk (`Block` or `Lambda`) to `args`, with a run frame already
-/// installed: builtins that take function arguments call this, as does the run
+/// installed.
+///
+/// Builtins that take function arguments call this, as does the run
 /// door's hook arm ([`crate::Shell::run`]), which establishes that frame first.
 ///
 /// # Errors

@@ -1,7 +1,8 @@
 //! Tilde paths: the `~`/`~user`/`~/sub` shape the lexer hands to the parser,
-//! AST, IR and typechecker, and the one expansion of it — `path::sigil`, `cd`,
-//! command identity and REPL completion all resolve through
-//! [`expand_tilde_path`], so the rule is one-and-the-same.
+//! AST, IR and typechecker, and the one expansion of it.
+//!
+//! `path::sigil`, `cd`, command identity and REPL completion all resolve
+//! through [`expand_tilde_path`], so the rule is one-and-the-same.
 //!
 //! A *named* user has no answer off Unix (no `getpwnam(3)` analogue), so
 //! [`get_user_home`] returns `None` rather than fabricate `/home/<name>` and
@@ -84,9 +85,10 @@ pub fn expand_tilde_path(user: Option<&str>, suffix: Option<&str>, home: &str) -
 }
 
 /// Fold a leading `home` prefix to `~` for display, inverting
-/// [`expand_tilde_path`]'s `~` case.  The match is on component boundaries, so
-/// home `/home/al` leaves `/home/alex` alone where a `starts_with` on the raw
-/// string would clip it.
+/// [`expand_tilde_path`]'s `~` case.
+///
+/// The match is on component boundaries, so home `/home/al` leaves
+/// `/home/alex` alone where a `starts_with` on the raw string would clip it.
 pub fn abbreviate_home(path: &std::path::Path, home: &str) -> String {
     if home.is_empty() {
         return path.to_string_lossy().into_owned();

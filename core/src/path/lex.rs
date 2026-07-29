@@ -1,8 +1,9 @@
-//! Lexical path resolution — a sigil-expanded string becomes an absolute,
-//! `.`/`..`-free path against a scoped cwd, with no filesystem access — and
-//! the alias-aware containment the grant matcher folds over the result.
-//! The firmlink table both sides share lives in [`super::canon`], so matcher
-//! and canonicaliser can never see different aliases.
+//! Lexical path resolution: a sigil-expanded string becomes an absolute,
+//! `.`/`..`-free path against a scoped cwd, with no filesystem access.
+//!
+//! The alias-aware containment the grant matcher folds over the result lives
+//! here too.  The firmlink table both sides share lives in [`super::canon`],
+//! so matcher and canonicaliser can never see different aliases.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -22,9 +23,10 @@ pub fn path_aliases(p: &Path) -> Vec<PathBuf> {
 
 /// True iff some alias of `path` starts with some alias of `prefix`: `path`
 /// lies inside `prefix` modulo firmlinks and, on Windows, modulo the path
-/// identity [`starts_with_identity`] applies.  The runtime grant gate
-/// (`capability::enforce`) and the prefix intersector (`super::prefix_set`)
-/// both decide containment through it.
+/// identity [`starts_with_identity`] applies.
+///
+/// The runtime grant gate (`capability::enforce`) and the prefix intersector
+/// (`super::prefix_set`) both decide containment through it.
 pub fn path_within(path: &Path, prefix: &Path) -> bool {
     let ps = path_aliases(path);
     let qs = path_aliases(prefix);
@@ -240,17 +242,20 @@ pub(crate) fn identity_depth(dir: &str, windows: bool) -> usize {
     }
 }
 
-/// True if `script` names an actual compiled source — not the REPL, not `-c`,
-/// not a synthetic `<...>` source.  The one rule
-/// [`resolve_relative_to_script`] and the elaborator's `$SCRIPT` bake share,
-/// rather than two enumerations free to drift.
+/// True if `script` names an actual compiled source — not the REPL, not
+/// `-c`, not a synthetic `<...>` source.
+///
+/// The one rule [`resolve_relative_to_script`] and the elaborator's
+/// `$SCRIPT` bake share, rather than two enumerations free to drift.
 pub fn has_script_identity(script: &str) -> bool {
     !script.is_empty() && !script.starts_with('<') && script != "-c"
 }
 
-/// Resolve `path` against the directory holding `script` — the third anchor
-/// after cwd-relative and HOME-relative, so a module importing a sibling file
-/// resolves against *its own* directory, not its caller's.
+/// Resolve `path` against the directory holding `script`.
+///
+/// This is the third anchor after cwd-relative and HOME-relative, so a
+/// module importing a sibling file resolves against *its own* directory,
+/// not its caller's.
 ///
 /// Returned unchanged when `path` is absolute or `script` has no
 /// [script identity](has_script_identity), leaving the caller its cwd
@@ -268,9 +273,11 @@ pub fn resolve_relative_to_script(path: &str, script: &str) -> PathBuf {
     base.join(input)
 }
 
-/// `path.parent()`, or `.` when that is absent or empty, so callers feeding
-/// the result to a `*_in(parent)` API (`tempfile::Builder::tempfile_in`,
-/// opening the directory to fsync it) don't choke on a bare filename.
+/// `path.parent()`, or `.` when that is absent or empty.
+///
+/// Callers feeding the result to a `*_in(parent)` API
+/// (`tempfile::Builder::tempfile_in`, opening the directory to fsync it)
+/// therefore don't choke on a bare filename.
 #[allow(clippy::disallowed_methods)]
 pub fn parent_or_cwd(path: &Path) -> &Path {
     path.parent()
@@ -286,9 +293,11 @@ pub fn exists(path: &str) -> bool {
 }
 
 /// `Path::new(path).is_dir()`, the companion of [`exists`] for callers that
-/// must tell a directory from a file — exec grants spell their two kinds of
-/// path key apart by trailing slash, and `capability::decode` checks that
-/// spelling against disk.  Follows symlinks; `false` for a missing path.
+/// must tell a directory from a file.
+///
+/// Exec grants spell their two kinds of path key apart by trailing slash,
+/// and `capability::decode` checks that spelling against disk.  Follows
+/// symlinks; `false` for a missing path.
 #[allow(clippy::disallowed_methods)]
 pub fn is_dir(path: &str) -> bool {
     Path::new(path).is_dir()

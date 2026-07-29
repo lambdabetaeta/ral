@@ -19,9 +19,11 @@ use clap::ValueEnum;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-/// The inert bearer bound to a keyless custom provider. Ollama and its kin
-/// ignore `Authorization` entirely, but `genai`'s `OpenAI` adapter always
-/// attaches one; `pub` so `tests/credential_env.rs` can name it.
+/// The inert bearer bound to a keyless custom provider.
+///
+/// Ollama and its kin ignore `Authorization` entirely, but `genai`'s `OpenAI`
+/// adapter always attaches one; `pub` so `tests/credential_env.rs` can name
+/// it.
 pub const NO_AUTH_PLACEHOLDER: &str = "no-auth";
 
 /// A resolved credential — what a provider's requests authenticate with.

@@ -251,6 +251,7 @@ pub(super) fn builtin_to_lines(args: &[Value], shell: &mut Shell) -> Settled<Val
 
 /// Encode `v` as JSON, refusing whatever has no faithful JSON form rather
 /// than erasing it; Bytes become the integer array `to-bytes` accepts back.
+///
 /// [`super::util::value_to_json_lossy_bytes`] is the total counterpart, where
 /// legibility outranks fidelity.
 ///

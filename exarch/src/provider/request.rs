@@ -28,10 +28,12 @@ impl Tuning {
 }
 
 /// The effort ladder, ascending: `auto` sends no option, then genai's keyword
-/// rungs from `zero` (explicit opt-out) up to `max`. Exarch's `/model` picker
-/// indexes into it and draws a glyph per rung, so the order is load-bearing;
-/// synod serves the same labels flat. `Budget` (a raw token count, unorderable)
-/// and `Minimal` (legacy pre-gpt-5) stay off it.
+/// rungs from `zero` (explicit opt-out) up to `max`.
+///
+/// Exarch's `/model` picker indexes into it and draws a glyph per rung, so
+/// the order is load-bearing; synod serves the same labels flat. `Budget` (a
+/// raw token count, unorderable) and `Minimal` (legacy pre-gpt-5) stay off
+/// it.
 pub const EFFORT_LADDER: &[(&str, Option<ReasoningEffort>)] = &[
     ("auto", None),
     ("zero", Some(ReasoningEffort::Zero)),

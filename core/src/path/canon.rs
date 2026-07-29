@@ -1,9 +1,11 @@
 //! Stage 3 of path resolution: `realpath(3)`, in two flavours named by what
-//! they do when the path does not exist — [`canonicalise_strict`] errors,
-//! [`canonicalise_lenient`] resolves the longest existing ancestor and
-//! re-appends the tail.  Every module needing canonicalisation comes through
-//! one of them, so the choice is visible at the call site.  [`match_variants`]
-//! is the sandbox-side companion: the several names one VFS object answers to.
+//! they do when the path does not exist.
+//!
+//! [`canonicalise_strict`] errors, [`canonicalise_lenient`] resolves the
+//! longest existing ancestor and re-appends the tail.  Every module needing
+//! canonicalisation comes through one of them, so the choice is visible at
+//! the call site.  [`match_variants`] is the sandbox-side companion: the
+//! several names one VFS object answers to.
 
 use std::path::{Path, PathBuf};
 
@@ -98,10 +100,11 @@ pub(crate) fn match_variants(p: &Path) -> Vec<PathBuf> {
 
 /// [`match_variants`] over a list, deduped and rendered to the strings the
 /// macOS Seatbelt profile builder splices into subpath rules — a grant for
-/// `/tmp/work` yields `[/tmp/work, /private/tmp/work]`.  Takes grant-side
-/// [`NormalizedPrefix`](super::NormalizedPrefix)es and the renderer's bare
-/// strings alike; both are backed by `String`, so the inputs are always valid
-/// UTF-8 even when the expansions are not.
+/// `/tmp/work` yields `[/tmp/work, /private/tmp/work]`.
+///
+/// Takes grant-side [`NormalizedPrefix`](super::NormalizedPrefix)es and the
+/// renderer's bare strings alike; both are backed by `String`, so the inputs
+/// are always valid UTF-8 even when the expansions are not.
 ///
 /// # Errors
 ///

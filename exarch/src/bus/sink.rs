@@ -62,10 +62,12 @@ pub(crate) fn drain_pass(
     }
 }
 
-/// One presentation surface. The default [`Self::drive`] — headless and the
-/// tests — blocks between [`drain_pass`] passes; the TUI is not a `Sink`, but
-/// its `ui_loop` drains the same [`drain_pass`] on its render cadence, so
-/// completion is identical on both.
+/// One presentation surface.
+///
+/// The default [`Self::drive`] — headless and the tests — blocks between
+/// [`drain_pass`] passes; the TUI is not a `Sink`, but its `ui_loop` drains
+/// the same [`drain_pass`] on its render cadence, so completion is identical
+/// on both.
 pub trait Sink {
     fn handle(&mut self, e: Event);
 

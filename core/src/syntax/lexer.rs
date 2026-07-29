@@ -197,10 +197,12 @@ impl fmt::Display for StringForm {
     }
 }
 
-/// Structured lexer error.  The named arms let `needs_continuation` in
-/// `core/src/syntax/parser.rs` and the ariadne renderer say *what* was left
-/// open and *where* it opened — each carries its opener's [`Span`], with
-/// line and column recovered at render time.
+/// Structured lexer error.
+///
+/// The named arms let `needs_continuation` in `core/src/syntax/parser.rs`
+/// and the ariadne renderer say *what* was left open and *where* it opened
+/// — each carries its opener's [`Span`], with line and column recovered at
+/// render time.
 #[derive(Debug, Clone)]
 pub enum LexErrorKind {
     /// A string hit EOF before its close.  `inner` carries a nested failure

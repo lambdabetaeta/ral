@@ -1,7 +1,9 @@
 //! The render document the `surface` builtin carries: an ordered stack of marks
 //! a ral kit composes, decoded once by [`value_to_card`] and interpreted by
-//! `tui::line::render_card`.  Cards are open — compose marks in ral, zero Rust
-//! per card — but the mark set is closed, so the renderer is total.
+//! `tui::line::render_card`.
+//!
+//! Cards are open — compose marks in ral, zero Rust per card — but the mark
+//! set is closed, so the renderer is total.
 //!
 //! The kit declares data and its level of measurement, never its appearance: a
 //! [`Span`] names a nominal [`Role`], a [`Measure`] or [`Mark::Diff`] carries a
@@ -142,9 +144,11 @@ pub struct Field {
 }
 
 /// One mark on the plane — closed and small so the renderer is total, stacked
-/// openly into a [`Card`] in ral.  A kit may surface every variant but
-/// `Listing`, the host-composed gutter-numbered head of a freshly-written file;
-/// `Raw` is pre-formed bytes appended verbatim.
+/// openly into a [`Card`] in ral.
+///
+/// A kit may surface every variant but `Listing`, the host-composed
+/// gutter-numbered head of a freshly-written file; `Raw` is pre-formed bytes
+/// appended verbatim.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "mark", rename_all = "snake_case")]
 pub enum Mark {

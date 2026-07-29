@@ -1,7 +1,9 @@
-//! The single XDG base-directory resolver: everything that asks where the user
-//! keeps their config/data/… goes through [`resolve_xdg`], so the `xdg:` grant
-//! sigil in [`crate::path::sigil`] and the loaders in [`crate::path::config`]
-//! cannot drift apart.
+//! The single XDG base-directory resolver.
+//!
+//! Everything that asks where the user keeps their config/data/… goes
+//! through [`resolve_xdg`], so the `xdg:` grant sigil in
+//! [`crate::path::sigil`] and the loaders in [`crate::path::config`] cannot
+//! drift apart.
 //!
 //! XDG everywhere: the Linux defaults (`.config`, `.local/share`, …) apply on
 //! every platform, macOS included.  An `$XDG_*_HOME` override counts only when

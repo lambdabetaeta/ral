@@ -229,9 +229,11 @@ impl Source {
     }
 }
 
-/// Every source text the session has loaded, keyed by [`FileId`].  The
-/// renderer resolves a span's id here, so a `source`d module's error draws its
-/// caret into the module's own bytes rather than the top-level script's.
+/// Every source text the session has loaded, keyed by [`FileId`].
+///
+/// The renderer resolves a span's id here, so a `source`d module's error
+/// draws its caret into the module's own bytes rather than the top-level
+/// script's.
 ///
 /// Append-only for the session's whole life: a nested run
 /// ([`Shell::run_nested`](crate::Shell::run_nested)) shares the registry with

@@ -88,8 +88,10 @@ pub fn parse(source: &str) -> Result<Vec<Stmt>, ParseError> {
 }
 
 /// Returns `true` when `input` is incomplete and the user's next line should
-/// be joined to it before parsing.  Runs the real parser and reads its own
-/// [`Incompleteness`] verdict rather than guessing from the raw text.
+/// be joined to it before parsing.
+///
+/// Runs the real parser and reads its own [`Incompleteness`] verdict rather
+/// than guessing from the raw text.
 pub fn needs_continuation(input: &str) -> bool {
     matches!(
         parse(input),

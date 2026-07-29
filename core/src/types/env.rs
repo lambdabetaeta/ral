@@ -199,6 +199,7 @@ impl Default for Env {
 }
 
 /// Persistent string→string map of env-var overrides, cheap to clone.
+///
 /// `Serialize` / `Deserialize` are required because
 /// [`crate::subprocess::WireContext`] embeds this type and round-trips it as
 /// JSON across IPC boundaries.

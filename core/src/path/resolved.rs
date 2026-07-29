@@ -20,9 +20,10 @@ use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
 /// A lexically-resolved path: absolute, `.`/`..`-collapsed, anchored
-/// against the logical cwd.  Reified so that canonicalisation can only
-/// follow resolution — there is no way to `realpath` a path that has not
-/// first been anchored.
+/// against the logical cwd.
+///
+/// Reified so that canonicalisation can only follow resolution — there is
+/// no way to `realpath` a path that has not first been anchored.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedPath(PathBuf);
 
@@ -99,8 +100,9 @@ pub enum Namespace {
 }
 
 /// A frozen grant prefix: `surface` as the author wrote it (absolute and
-/// `.`/`..`-collapsed, the normal form a [`ResolvedPath`] also carries)
-/// and `resolved`, that same path with symlinks followed in `namespace`.
+/// `.`/`..`-collapsed, the normal form a [`ResolvedPath`] also carries).
+///
+/// `resolved` is that same path with symlinks followed in `namespace`.
 ///
 /// Field order is load-bearing: the derived `Ord` sorts by `surface`
 /// first, so a `BTreeSet` dedups two spellings of one directory by the

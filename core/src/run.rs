@@ -62,11 +62,12 @@ pub enum RunIo {
     Capture,
 }
 
-/// Whether a run may hand the controlling terminal to a child: the host states
-/// it, and [`Shell::terminal_lease`] decides whether the session's
-/// [`TerminalLease`](crate::process::TerminalLease) is reachable from it.
-/// `ExplicitLoan` is absent because no host can seed it — only a within-run
-/// loan token raises it.
+/// Whether a run may hand the controlling terminal to a child.
+///
+/// The host states it, and [`Shell::terminal_lease`] decides whether the
+/// session's [`TerminalLease`](crate::process::TerminalLease) is reachable
+/// from it.  `ExplicitLoan` is absent because no host can seed it — only a
+/// within-run loan token raises it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RequestedTerminalAccess {
     Denied,
@@ -74,8 +75,10 @@ pub enum RequestedTerminalAccess {
 }
 
 /// The byte source a run's stdin reads from — orthogonal to [`RunIo`] (the
-/// *output* regime) and to [`RequestedTerminalAccess`] (foreground authority):
-/// a piped `ral -c` is `Denied` yet still reads its inherited pipe.
+/// *output* regime) and to [`RequestedTerminalAccess`] (foreground
+/// authority).
+///
+/// A piped `ral -c` is `Denied` yet still reads its inherited pipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunStdin {
     /// The inherited fd 0 — a terminal, a pipe, or a redirected file.
@@ -86,8 +89,10 @@ pub enum RunStdin {
 }
 
 /// The engine door for one run: the protocol [`Run`] plus the live,
-/// non-transportable handles the host lends it. Composition, not mirroring — a
-/// field added to [`Run`] reaches the engine in one declaration.
+/// non-transportable handles the host lends it.
+///
+/// Composition, not mirroring — a field added to [`Run`] reaches the engine
+/// in one declaration.
 pub struct RunRequest<'a> {
     pub run: Run,
     /// Run-local sink for structured events; `None` is the identity.
@@ -131,10 +136,10 @@ pub enum RunReport {
 /// Bind the host's requested `wall` to this run's foreground scope, so the
 /// deadline reaches every frame nested under it.
 fn arm_wall(
-    wall: Option<std::time::Duration>,
+    wall: std::time::Duration,
     foreground: &crate::process::ForegroundScope,
-) -> Option<crate::process::Deadline> {
-    wall.map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d))
+) -> crate::process::Deadline {
+    crate::process::arm_lifetime(foreground.as_scope().clone(), wall)
 }
 
 /// The message of a recovered panic payload, for either string shape.
@@ -203,7 +208,7 @@ impl Shell {
                 // the signal escalation count, never the reaper. The guard
                 // disarms on drop, so an early `Static` return leaves no entry.
                 let foreground = self.durable_root().foreground(under);
-                let wall = arm_wall(req.run.wall, &foreground);
+                let wall = req.run.wall.map(|d| arm_wall(d, &foreground));
 
                 let (comp, single_command, root) =
                     match compile_run(self, src, &req.run.script_name) {
@@ -238,7 +243,7 @@ impl Shell {
                 let args: Vec<Value> = args.iter().cloned().map(Value::from).collect();
 
                 let foreground = self.durable_root().foreground(under);
-                let wall = arm_wall(req.run.wall, &foreground);
+                let wall = req.run.wall.map(|d| arm_wall(d, &foreground));
 
                 // Capture and terminal authority are the registered hook's to
                 // decide, not the dispatching host's.

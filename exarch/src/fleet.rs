@@ -1,7 +1,9 @@
 //! The fleet: what every agent node of a run shares — one agent registry, one
-//! event bus, one transport engine.  It drives no exchange of its own; the
-//! trunk and each child attend to themselves, and the fleet is only where the
-//! frontend reads "all live agents" and the bus to drain.
+//! event bus, one transport engine.
+//!
+//! It drives no exchange of its own; the trunk and each child attend to
+//! themselves, and the fleet is only where the frontend reads "all live
+//! agents" and the bus to drain.
 //!
 //! The frontend ([`crate::tui::run`] / [`crate::headless::run`]) builds it over
 //! the trunk's own registry and inbox and the engine every provider is built

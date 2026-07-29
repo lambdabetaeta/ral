@@ -33,9 +33,11 @@ pub enum Verdict {
 }
 
 /// The frontend hook the attend loop calls for an [`Item::Command`] drained at
-/// the exchange boundary.  A command routes here rather than staying
-/// frontend-side only when it mutates the session, which the attend thread
-/// owns; view-only ones and `/model` (a swap of the shared
+/// the exchange boundary.
+///
+/// A command routes here rather than staying frontend-side only when it
+/// mutates the session, which the attend thread owns; view-only ones and
+/// `/model` (a swap of the shared
 /// [`ProviderHandle`](crate::agent::ProviderHandle)) stay on the UI thread.
 pub trait Control {
     /// Run the slash-command line `raw` against the agent the loop owns.

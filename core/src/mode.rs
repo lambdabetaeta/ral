@@ -97,10 +97,11 @@ impl Wire {
     }
 }
 
-/// A `None`/`Bytes` clash raised by `Unifier::unify_mode`, which each caller
-/// maps onto its own diagnostic: the checker's
-/// [`crate::typecheck::TypeErrorKind::ModeMismatch`], or a rejected handler arm
-/// in `typecheck::alias_arm_scheme`.
+/// A `None`/`Bytes` clash raised by `Unifier::unify_mode`.
+///
+/// Each caller maps it onto its own diagnostic: the checker's
+/// [`crate::typecheck::TypeErrorKind::ModeMismatch`], or a rejected handler
+/// arm in `typecheck::alias_arm_scheme`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModeMismatch {
     pub left: PipeMode,

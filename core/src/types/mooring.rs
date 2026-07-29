@@ -10,9 +10,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// A sink for structured host events: the value-typed dual of the byte
-/// [`Io`](crate::io::Io) sinks.  `Send + Sync` so a same-thread thunk body may
-/// share it with the rest of the child subtree; a deferred worker never gets
-/// the live sink, only a bounded buffering one it replays on `await`.
+/// [`Io`](crate::io::Io) sinks.
+///
+/// `Send + Sync` so a same-thread thunk body may share it with the rest of
+/// the child subtree; a deferred worker never gets the live sink, only a
+/// bounded buffering one it replays on `await`.
 pub trait EventSink: Send + Sync {
     fn emit(&self, ev: &crate::serial::FOValue);
 }
@@ -23,10 +25,11 @@ impl EventSink for () {
     fn emit(&self, _ev: &crate::serial::FOValue) {}
 }
 
-/// Shared handle to the run-local structured-event sink: installed only by a
-/// run door ([`Shell::run`](crate::Shell::run)), never a persistent `Shell`
-/// capability, and holding no liveness role — a clone cannot decide a run is
-/// over.
+/// Shared handle to the run-local structured-event sink.
+///
+/// Installed only by a run door ([`Shell::run`](crate::Shell::run)), never a
+/// persistent `Shell` capability, and holding no liveness role — a clone
+/// cannot decide a run is over.
 pub type SurfaceSink = Arc<dyn EventSink>;
 
 /// The host's answer desk for the engine→host answered channel.  `enquire` is
@@ -108,10 +111,11 @@ impl Nursery {
 }
 
 /// Host-installed destination for a deferred worker's surface batch, delivered
-/// when the worker settles.  Session-lived, unlike [`SurfaceSink`], and cloned
-/// into spawned workers so a nested `spawn` delivers at its own completion.
-/// `None` outside an agent host, where the batch reaches a sink only through
-/// `await`/`race`.
+/// when the worker settles.
+///
+/// Session-lived, unlike [`SurfaceSink`], and cloned into spawned workers so a
+/// nested `spawn` delivers at its own completion. `None` outside an agent
+/// host, where the batch reaches a sink only through `await`/`race`.
 pub trait DeferredSink: Send + Sync {
     /// Deliver a settled worker's surfaced values as one batch.
     ///

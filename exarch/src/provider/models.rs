@@ -58,8 +58,9 @@ pub trait ModelSource {
 }
 
 /// The live source: genai's `all_model_names` over the in-memory credentials.
-/// `Clone` is cheap, which is what lets the picker hand a copy to a background
-/// fetch thread without sharing the catalog's caches.
+///
+/// `Clone` is cheap, which is what lets the picker hand a copy to a
+/// background fetch thread without sharing the catalog's caches.
 #[derive(Clone)]
 pub struct LiveSource {
     /// Cloned out of the store so a listing thread needs neither the store nor
@@ -428,7 +429,9 @@ fn read_cache(path: &PathBuf) -> Option<CacheFile> {
 
 /// Resolve a `--model` name to the provider that should serve it: the
 /// available provider whose live list holds it, failing that a name-shape
-/// match. Fetches on a cache miss, so it runs only for an explicit `--model`.
+/// match.
+///
+/// Fetches on a cache miss, so it runs only for an explicit `--model`.
 ///
 /// # Errors
 /// Returns `Err` if no provider is available, or if no available provider

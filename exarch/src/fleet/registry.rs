@@ -1,8 +1,9 @@
 //! The fleet's live agents — the trunk and every forked child alike — keyed by
-//! [`AgentId`].  Each entry names its parent, so this map is the spawn *tree*,
-//! and the fleet is alive exactly while it is non-empty.  Entries are
-//! ephemeral: a child's result goes to its parent's inbox, never collected
-//! here.
+//! [`AgentId`].
+//!
+//! Each entry names its parent, so this map is the spawn *tree*, and the
+//! fleet is alive exactly while it is non-empty.  Entries are ephemeral: a
+//! child's result goes to its parent's inbox, never collected here.
 //!
 //! Two cancel motions run over that tree and must not be confused.  *Terminate*
 //! ends an agent and cascades to its subtree, tripping both the cooperative
@@ -79,8 +80,10 @@ impl EvalReach {
 }
 
 /// A child's idle lease: the span since its last human exchange (birth is the
-/// epoch) before its whole subtree is reaped.  Only a human message renews the
-/// clock, so a never-renewed lease fires exactly this long after birth.
+/// epoch) before its whole subtree is reaped.
+///
+/// Only a human message renews the clock, so a never-renewed lease fires
+/// exactly this long after birth.
 pub const AGENT_LEASE_IDLE: Duration = Duration::from_hours(1);
 
 /// How long a leased child may sit idle-and-parked before the frontend demotes
@@ -114,9 +117,11 @@ pub struct Registration {
     pub provider: ProviderHandle,
 }
 
-/// The fleet's live agents.  Every clone shares the one map, so the trunk, each
-/// forked child, and the frontend hold the same registry — and a detached
-/// worker keeps a handle it can settle through after its exchange has ended.
+/// The fleet's live agents.
+///
+/// Every clone shares the one map, so the trunk, each forked child, and the
+/// frontend hold the same registry — and a detached worker keeps a handle it
+/// can settle through after its exchange has ended.
 #[derive(Clone)]
 pub struct AgentRegistry {
     inner: Arc<Mutex<Inner>>,

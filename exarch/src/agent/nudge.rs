@@ -1,6 +1,8 @@
-//! Inter-attempt nudges: after each deliberation, either accept the outcome —
-//! surfacing any attached provider error — or hand back a synthetic prompt for
-//! the attend loop to post to itself as a `Post::Nudge`.
+//! Inter-attempt nudges.
+//!
+//! After each deliberation, either accept the outcome — surfacing any
+//! attached provider error — or hand back a synthetic prompt for the attend
+//! loop to post to itself as a `Post::Nudge`.
 //!
 //! The registry is per-session because the attend loop runs one
 //! `Agent::deliberate` per inbox item, not one per exchange, so this state must

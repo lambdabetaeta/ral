@@ -1,7 +1,8 @@
 //! Path-prefix sigils: `~[user][/sub]`, `xdg:NAME[/sub]`, `cwd:[/sub]`,
-//! `tempdir:[/sub]`, and `gitdir:[/sub]` at the head of a grant path, so a
-//! policy names no host's home, XDG layout, or working directory.  Anything
-//! else passes through unchanged.
+//! `tempdir:[/sub]`, and `gitdir:[/sub]` at the head of a grant path.
+//!
+//! A policy thus names no host's home, XDG layout, or working directory.
+//! Anything else passes through unchanged.
 //!
 //! `~` and `xdg:` expand both at runtime (stage 1 of [`crate::path::Resolver`])
 //! and at policy freeze; the other three are freeze-only, and resolve exactly
@@ -258,9 +259,11 @@ pub fn system_tool_roots() -> Vec<String> {
 }
 
 /// `/usr/bin` and `/bin` unconditionally, plus whichever Homebrew prefix
-/// `exists` reports — `/opt/homebrew` as `sandbox::macos` admits for `Exec`,
-/// `/home/linuxbrew/.linuxbrew` as `sandbox::linux` lists, mirrored here for the
-/// capability layer's separate exec-admission concern.
+/// `exists` reports.
+///
+/// That is `/opt/homebrew` as `sandbox::macos` admits for `Exec` and
+/// `/home/linuxbrew/.linuxbrew` as `sandbox::linux` lists, mirrored here for
+/// the capability layer's separate exec-admission concern.
 pub fn unix_tool_roots(exists: impl Fn(&str) -> bool) -> Vec<String> {
     let mut roots = vec!["/usr/bin".to_string(), "/bin".to_string()];
     for brew in ["/opt/homebrew", "/home/linuxbrew/.linuxbrew"] {
@@ -272,9 +275,10 @@ pub fn unix_tool_roots(exists: impl Fn(&str) -> bool) -> Vec<String> {
 }
 
 /// `%SystemRoot%\System32` and the bundled Windows PowerShell home — falling
-/// back to the conventional `C:\Windows` when `system_root` is empty — plus a
-/// Git-for-Windows `usr\bin` under whichever `program_files_dirs` entry `exists`
-/// reports.
+/// back to the conventional `C:\Windows` when `system_root` is empty.
+///
+/// A Git-for-Windows `usr\bin` joins them, under whichever
+/// `program_files_dirs` entry `exists` reports.
 pub fn windows_tool_roots(
     system_root: &str,
     program_files_dirs: &[&str],
