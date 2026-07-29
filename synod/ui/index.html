@@ -205,18 +205,59 @@
       color: var(--ink-soft);
       margin-bottom: 6px;
     }
+    /* The two pickers are pills: the platform's own control chrome is taken
+       off so the shape is ours all the way round, and the shell it sits in
+       carries the chevron the platform used to draw — a bare CSS corner, so
+       it takes the ink colour of whichever theme is up without a second
+       asset. The list the pill opens is still the platform's own. */
+    .select-shell { position: relative; display: block; }
+    .select-shell::after {
+      content: "";
+      position: absolute;
+      right: 18px;
+      top: 50%;
+      width: 7px;
+      height: 7px;
+      margin-top: -6px;
+      border-right: 1.6px solid var(--ink-soft);
+      border-bottom: 1.6px solid var(--ink-soft);
+      border-radius: 0 0 2px 0;
+      transform: rotate(45deg);
+      pointer-events: none;
+      transition: border-color 0.16s ease, transform 0.16s ease;
+    }
+    .select-shell:hover::after {
+      border-color: var(--accent);
+      transform: rotate(45deg) translate(1px, 1px);
+    }
+    .select-shell:has(select:disabled)::after { opacity: 0.5; }
     #assistant-select, #effort-select {
+      appearance: none;
+      -webkit-appearance: none;
+      display: block;
       width: 100%;
       font-family: var(--sans);
       font-size: 14.5px;
+      font-weight: 550;
       color: var(--ink);
-      background: var(--raised);
+      background: linear-gradient(180deg, var(--raised), color-mix(in srgb, var(--raised) 88%, var(--paper)));
       border: 1px solid var(--line-strong);
-      border-radius: 11px;
-      padding: 10px 14px;
+      border-radius: 999px;
+      padding: 12px 42px 12px 18px;
       cursor: pointer;
+      text-overflow: ellipsis;
+      box-shadow: var(--shadow-soft), inset 0 1px 0 color-mix(in srgb, #fff 7%, transparent);
+      transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.08s ease;
     }
-    #assistant-select:hover, #effort-select:hover { border-color: var(--accent); }
+    #assistant-select:not(:disabled):hover, #effort-select:not(:disabled):hover {
+      border-color: var(--accent);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 16%, transparent),
+                  inset 0 1px 0 color-mix(in srgb, #fff 7%, transparent);
+    }
+    #assistant-select:active, #effort-select:active { transform: translateY(0); }
+    /* The focus ring follows the pill rather than the shared 8px corner. */
+    #assistant-select:focus-visible, #effort-select:focus-visible { border-radius: 999px; }
     #effort-select:disabled { cursor: default; opacity: 0.5; }
 
     /* The two ways in: choose a folder, or sign in first. Only one of them
@@ -1019,11 +1060,11 @@
           changes files inside it, and everything it does can be put back.</p>
         <div class="field" id="assistant-field" style="display: none;">
           <label for="assistant-select" class="field-label">Assistant</label>
-          <select id="assistant-select"></select>
+          <span class="select-shell"><select id="assistant-select"></select></span>
         </div>
         <div class="field" id="effort-field" style="display: none;">
           <label for="effort-select" class="field-label">Thinking</label>
-          <select id="effort-select"></select>
+          <span class="select-shell"><select id="effort-select"></select></span>
         </div>
         <p id="no-account">No assistant account is set up on this computer yet.
           Sign in with your ChatGPT plan to begin.</p>
