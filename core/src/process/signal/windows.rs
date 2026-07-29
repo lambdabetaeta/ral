@@ -667,9 +667,10 @@ mod win_groups {
     }
 }
 
-/// Windows analogue of the Unix `PipelineRelay`, holding nothing:
-/// `win_groups::GROUPS` already *is* the live-group set, so `install` exists only
-/// to keep its caller in `runtime::pipeline::group` free of cfg gates.
+/// Windows analogue of the Unix `PipelineRelay`, holding nothing.
+///
+/// `win_groups::GROUPS` already *is* the live-group set, so `install` exists
+/// only to keep its caller in `runtime::pipeline::group` free of cfg gates.
 pub struct PipelineRelay;
 
 impl PipelineRelay {
@@ -678,16 +679,20 @@ impl PipelineRelay {
     }
 }
 
-/// Release the Job Object backing the group led by `leader`; surviving members
-/// die with it.  Idempotent, and needs to be — `PipelineGroup::Drop`,
-/// `JobTable::cleanup` and a standalone `RunningChild` all reach for it.
+/// Release the Job Object backing the group led by `leader`.
+///
+/// Surviving members die with it.  Idempotent, and needs to be —
+/// `PipelineGroup::Drop`, `JobTable::cleanup` and a standalone `RunningChild`
+/// all reach for it.
 pub fn release_win_group(leader: i32) {
     win_groups::release(leader);
 }
 
-/// Cap the active-process count of the pipeline group's Job Object, for
-/// `sandbox::apply_child_limits_in_pipeline`: a child inside a pipeline cannot
-/// join a second job, so a grant's limit lands on the one it is already in.
+/// Cap the active-process count of the pipeline group's Job Object.
+///
+/// For `sandbox::apply_child_limits_in_pipeline`: a child inside a pipeline
+/// cannot join a second job, so a grant's limit lands on the one it is
+/// already in.
 pub fn apply_group_active_process_limit(leader: i32, limit: u32) -> bool {
     win_groups::apply_active_process_limit(leader, limit)
 }

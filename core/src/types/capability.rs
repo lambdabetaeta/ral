@@ -323,11 +323,7 @@ impl SandboxProjection<String> {
             }) => {
                 let write_prefixes = ordered(write_prefixes);
                 let deny_paths = ordered(deny_paths);
-                let pinned_dirs: Vec<String> =
-                    proper_ancestors(deny_paths.iter().map(String::as_str))
-                        .into_iter()
-                        .filter(|dir| write_prefixes.iter().any(|w| path_within_str(dir, w)))
-                        .collect();
+                let pinned_dirs = derive_pins(&deny_paths, &write_prefixes);
                 FsProjection::Restricted(FsRules {
                     read_prefixes: f(&ordered(read_prefixes))?,
                     write_prefixes: f(&write_prefixes)?,
@@ -788,6 +784,20 @@ fn join_literal_exec(
     out
 }
 
+/// The directories a deny needs kept traversable to be reachable at all:
+/// every proper ancestor of a deny path that lies within some write prefix.
+///
+/// Surface space, before any host expansion.  Containment here is the same
+/// lexical judgment the fold already made, and an ancestor chain is a property
+/// of the name rather than of the object — so expanding first would only ask
+/// the question once per spelling and get the same answer each time.
+fn derive_pins(deny_paths: &[String], write_prefixes: &[String]) -> Vec<String> {
+    proper_ancestors(deny_paths.iter().map(String::as_str))
+        .into_iter()
+        .filter(|dir| write_prefixes.iter().any(|w| path_within_str(dir, w)))
+        .collect()
+}
+
 fn union_prefixes(a: Vec<NormalizedPrefix>, b: Vec<NormalizedPrefix>) -> Vec<NormalizedPrefix> {
     a.into_iter()
         .chain(b)
@@ -803,31 +813,17 @@ mod lattice_tests;
 mod traverse_tests {
     use super::*;
 
-    /// The pins the traversal derives, spelled back out.  Rendering is the
-    /// naming under test's own concern; what is asserted here is which
-    /// ancestors the derivation picks, on names that exist nowhere and so
-    /// expand to themselves.
-    fn pinned(write: &[&str], read: &[&str], deny: &[&str]) -> Vec<String> {
-        let strings = |ps: &[&str]| ps.iter().copied().map(str::to_string).collect();
-        SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
-                read_prefixes: strings(read),
-                write_prefixes: strings(write),
-                deny_paths: strings(deny),
-                pinned_dirs: Vec::new(),
-            }),
-            net: true,
-            exec: ExecProjection::default(),
-        }
-        .rendered()
-        .expect("ASCII paths render")
-        .fs
-        .rules()
-        .expect("restricted in, restricted out")
-        .pinned_dirs
-        .iter()
-        .map(|d| d.as_str().to_string())
-        .collect()
+    /// The pins the traversal derives, in the surface space it derives them in.
+    ///
+    /// Deliberately short of the renderer: which ancestors the derivation picks
+    /// is this module's concern, while how many names each one answers to is
+    /// the host's.  Asserting on rendered output would conflate the two and
+    /// make the expected value a property of the machine — on Windows a
+    /// nonexistent `/repo` expands to the drive-qualified `\\?\C:\repo`
+    /// alongside itself, where on Unix it expands to only itself.
+    fn pinned(write: &[&str], deny: &[&str]) -> Vec<String> {
+        let strings = |ps: &[&str]| ps.iter().copied().map(str::to_string).collect::<Vec<_>>();
+        derive_pins(&strings(deny), &strings(write))
     }
 
     /// The write prefix root is itself a proper ancestor of a deep-enough
@@ -836,19 +832,21 @@ mod traverse_tests {
     #[test]
     fn pins_every_ancestor_within_the_write_prefix_including_its_root() {
         assert_eq!(
-            pinned(&["/repo"], &[], &["/repo/a/b/secret"]),
+            pinned(&["/repo"], &["/repo/a/b/secret"]),
             ["/repo", "/repo/a", "/repo/a/b"]
         );
     }
 
+    /// A read prefix is not a write prefix: only the latter can widen a deny's
+    /// chain, so a read-only `/repo` pins nothing.
     #[test]
     fn pins_nothing_when_no_write_prefix_covers_the_denys_chain() {
-        assert!(pinned(&[], &["/repo"], &["/repo/.ssh/id_rsa"]).is_empty());
+        assert!(pinned(&[], &["/repo/.ssh/id_rsa"]).is_empty());
     }
 
     #[test]
     fn pins_nothing_for_a_deny_outside_every_prefix() {
-        assert!(pinned(&["/repo"], &[], &["/etc/secret"]).is_empty());
+        assert!(pinned(&["/repo"], &["/etc/secret"]).is_empty());
     }
 
     /// A supplied pin is not authority: the traversal recomputes the set from
@@ -875,7 +873,16 @@ mod traverse_tests {
             .iter()
             .map(Rendered::as_str)
             .collect();
-        assert_eq!(dirs, ["/repo", "/repo/a"]);
+        // Containment, not equality: this goes through the real renderer, which
+        // is entitled to add spellings — see [`pinned`].  What is asserted is
+        // that the derived pins are present and the forged one reached neither
+        // the output nor, under any spelling, the rule set.
+        assert!(dirs.contains(&"/repo"), "got {dirs:?}");
+        assert!(dirs.contains(&"/repo/a"), "got {dirs:?}");
+        assert!(
+            !dirs.iter().any(|d| d.contains("somewhere")),
+            "a carried pin survived rendering: {dirs:?}"
+        );
     }
 
     /// Bare names are not paths: they pass the traversal untouched, never
