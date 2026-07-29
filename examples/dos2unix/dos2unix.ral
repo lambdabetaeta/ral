@@ -1,12 +1,20 @@
 #!/usr/bin/env ral
-# Footgun: `sed -i 's/\r$//'` truncates then rewrites — a crash mid-write
-# loses the file; `-i` even differs GNU vs BSD (`-i` vs `-i ''`); and `\r$`
-# misses lone/embedded CRs and a final line with no newline.  Here `\r`
-# strips every carriage return, and `>` is rename-on-close: a reader sees
-# the old file or the new, never a torn write.
+# Footgun: the obvious `tr -d '\r' < "$f" > "$f.tmp" && mv "$f.tmp" "$f"` exits 0 while
+# a 755 script comes back 644, a 640 secret comes back world-readable, a `bashrc`
+# symlink becomes a detached file with the dotfiles copy still CRLF, and an existing
+# `notes.txt.tmp` is destroyed.  Bash needs mktemp+trap, cp -p, readlink -f, LC_ALL=C
+# and `--`, every time; ral's `>` keeps the mode and resolves the link by construction.
 
-let [path] = $ARGS
+let scan = { |path|
+    let body  = from-string < $path
+    let clean = re-replace-all '\r' '' $body
+    return [text: $clean, removed: $[!{length $body} - !{length $clean}]]
+}
 
-let body = from-string < $path
-
-to-string !{re-replace-all '\r' '' $body} > $path
+for $ARGS { |path|
+    let [text: text, removed: removed] = !{$scan $path}
+    if $[$removed > 0] {
+        to-string $text > $path
+        echo "$path: $removed CRs removed"
+    }
+}

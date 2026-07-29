@@ -1,18 +1,13 @@
 #!/usr/bin/env ral
-# Footgun: `awk -F, '$3 > t'` tests a column by position, so inserting a
-# column upstream silently retargets the comparison to the wrong field.
-# Here the column is a named record field and the threshold test is a
-# genuine Float `>`.
+# Footgun: bash has no CSV parser, so the idiom is `awk -F,` — to which a
+# quote is just a byte.  On `bolt,"in stock, loose",100` the fields shift;
+# on a quoted `"100"` awk's `>` degrades to a string compare and `"100" > 10`
+# is false.  Both silently drop every row and exit 0.  Here `from-csv` gives
+# real records and `float` is an explicit coercion that fails on a non-number.
 
-let [path, col, threshold] = $ARGS
+let [path, field, threshold] = $ARGS
 
-let [hdr, ...rows] = !{from-lines-list $path}
-let header = re-split ',' $hdr
-let records = map { |line|
-    fold { |m p| let k = $p[0]; return [...$m, $k: $p[1]] } [:] !{zip $header !{re-split ',' $line}}
-} $rows
+let limit = !{float $threshold}
+let rows = !{from-csv < $path}
 
-let keep = filter { |r| return $[!{float $r[$col]} > !{float $threshold}] } $records
-
-echo $hdr
-for $keep { |r| echo !{intercalate ',' !{map { |c| return $r[$c] } $header}} }
+to-csv !{filter { |r| return $[!{float $r[$field]} > $limit] } $rows}

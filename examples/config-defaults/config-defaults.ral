@@ -1,11 +1,18 @@
 #!/usr/bin/env ral
-# Footgun: jq's `*` is a *deep* merge, so a nested object the user
-# meant to replace wholesale instead inherits stray default keys.
-# `union` is a flat "present wins", which is exactly what "fill the
-# missing top-level keys" means — the loaded config overrides, and
-# any key it omits falls back to the default.
+# Footgun: jq applies its filter once per input value in a stream, so the
+# answer's arity need not be one.  `-e` turns zero inputs (an empty config
+# file) into exit 4, but nothing catches two: a file holding two JSON
+# objects prints two merged configs and exits 0.  Here `from-json` decodes
+# a single value or raises, so both files are a hard error.
 
 let [path] = $ARGS
-let defaults = to-string '{"host": "localhost", "port": 8080, "verbose": false}' | from-json
+
+let default-config = to-string #'{"host": "localhost", "port": 8080, "tls": {"enabled": false, "ca": ""}}'# | from-json
 let config = from-json < $path
-to-json !{union $defaults $config}
+
+let unknown = keys !{difference $config $default-config}
+if !{is-empty $unknown} {
+    to-json !{union $default-config $config}
+} else {
+    fail [status: 1, message: "unknown config keys: !{intercalate ', ' $unknown}"]
+}

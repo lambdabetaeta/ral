@@ -1,20 +1,26 @@
 #!/usr/bin/env ral
-# Footgun: `sed 's/,/\t/g'` rewrites every comma, including the ones
-# *inside* a quoted field — `"Doe, Jane",42` becomes three columns, not
-# two, and the corruption is silent.  Here a line is parsed into fields
-# that respect quotes, so a comma within a field never splits it.
+# Footgun: `awk -F,` is not a CSV reader: on `"Doe, Jane",42,Bristol` it finds
+# four fields under a three-column header, so the row shifts, `Bristol` falls
+# off the end and the quote bytes stay, at exit 0.  Correctness costs a hand-rolled
+# RFC-4180 scanner, LC_ALL=C for the column sort, and a temp file so a refusal
+# leaves no half TSV — every time.  Here from-csv reads; the check runs first.
 
-let fields-of = { |line|
-    let chars = filter { |c| $[not !{equal $c ''}] } !{re-split '' $line}
-    let end = fold { |s c|
-        let q   = $s[q]
-        let cur = $s[cur]
-        let out = $s[out]
-        if !{equal $c '"'} { return [q: $[not $q], cur: $cur, out: $out] }
-        elsif $[!{equal $c ','} && not $q] { return [q: $q, cur: '', out: [...$out, $cur]] }
-        else { return [q: $q, cur: "$cur$c", out: $out] }
-    } [q: false, cur: '', out: []] $chars
-    return [...$end[out], $end[cur]]
+if $[!{length $ARGS} != 1] {
+    echo 'usage: csv-to-tsv.ral FILE' 1>&2
+    exit 2
+}
+let [path] = $ARGS
+
+let rows = from-csv < $path
+if !{is-empty $rows} {
+    fail [status: 1, message: "$path: no data rows to convert"]
 }
 
-map-lines { |l| intercalate "\t" !{fields-of $l} }
+let cols = keys $rows[0]
+let cells = flat-map { |r| return !{values $r} } $rows
+if !{re-match '[\t\n\r]' !{intercalate '' [...$cols, ...$cells]}} {
+    fail [status: 1, message: "$path: a column name or field holds a tab, carriage return, or newline, which TSV cannot escape"]
+}
+
+to-line !{intercalate "\t" $cols}
+for $rows { |r| to-line !{intercalate "\t" !{values $r}} }

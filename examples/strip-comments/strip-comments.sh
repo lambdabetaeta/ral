@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Strip full-line # comments and blank lines from a config file.
+# Print a config file with blank lines and full-line # comments removed.
 set -euo pipefail
 
-grep -v '^#' "$1"
+grep -Ev '^[[:space:]]*(#|$)' -- "$1" || true

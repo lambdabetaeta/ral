@@ -1,11 +1,33 @@
 #!/usr/bin/env ral
-# Footgun: backgrounding `curl -o /dev/null -w '%{http_code}'` per URL and
-# `wait`-ing yields a heap of bare status numbers with no URL attached,
-# and `wait`'s single exit code hides which probe errored. `par` pairs
-# each URL with its code in input order.
+# Footgun: the obvious script pairs each URL with its status by interpolating the
+# URL into curl's `--write-out` mini-language, so `?path=C:\newest.log` reports the
+# URL cut at `C:`, a stray `ewest.log` row, and a class `exx` no server served, at
+# exit 0.  Correct bash keeps data out of `-w`, holds each row against `set -e`, and
+# orders per-job files by index, every time.  A ral worker returns a url/code record.
 
-let results = par { |u|
-    let code = curl -s -o /dev/null -w '%{http_code}' --max-time 15 $u | from-string
+if !{is-empty $ARGS} {
+    fail [status: 2, message: 'usage: http-status URL...']
+} else {
+    return unit
+}
+
+let probe = { |u|
+    let code = try {
+        curl -s -o /dev/null -w '%{http_code}' --max-time 15 -- $u | from-string
+    } { |_| return '000' }
     return [url: $u, code: $code]
-} $ARGS $NPROC
-for $results { |r| echo "$r[code]  $r[url]" }
+}
+
+let results = par $probe $ARGS $NPROC
+
+for $results { |r| echo "$r[code] $r[url]" }
+
+let classes = group-by { |r|
+    if !{equal $r[code] '000'} { return 'unreachable' } else { return "$[!{slice $r[code] 0 1}]xx" }
+} $results
+for !{keys $classes} { |c| echo "$c: $[!{length $classes[$c]}]" }
+
+let dead = filter { |r| equal $r[code] '000' } $results
+if !{is-empty $dead} { return unit } else {
+    fail [status: 1, message: "unreachable: $[!{intercalate ', ' !{map { |r| return $r[url] } $dead}}]"]
+}

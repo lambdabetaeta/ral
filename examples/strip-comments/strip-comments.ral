@@ -1,9 +1,9 @@
 #!/usr/bin/env ral
-# Footgun: `grep -v '^#'` keeps INDENTED comments (`   # note`) and blank
-# lines; the tempting `sed 's/#.*//'` instead mangles a `#` inside a value
-# (`color=#fff`, `url=host/path#frag`) — silent data corruption.  Here a
-# line survives only if its first non-blank char is not `#`, so indented
-# comments and blanks go while a `#` inside a value is never touched.
+# Footgun: `grep -Ev '^[[:space:]]*(#|$)'` exits 1 when nothing survives, so
+# under `set -euo pipefail` an all-comments config aborts the script; the usual
+# `|| true` repair then also swallows grep's exit 2 — a missing or unreadable
+# file prints nothing and exits 0, so callers read the failure as "empty
+# config".  Here an empty result is a list, and an unreadable path still fails.
 
 let [path] = $ARGS
 

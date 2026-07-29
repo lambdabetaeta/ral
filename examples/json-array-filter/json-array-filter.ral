@@ -1,10 +1,17 @@
 #!/usr/bin/env ral
-# Footgun: the field name and the wanted value are spliced straight
-# into jq's program string, so a value with a quote breaks the filter
-# and one with jq syntax runs as code.  Here both are data: we index
-# each element by the field name and compare values as strings.
+# Footgun: bash can only hand jq a *program string*, so `--arg` parameterises
+# the wanted value but the field name is still spliced into jq syntax: the
+# ordinary key `a.b` becomes the nested path `.a.b` and silently selects the
+# wrong elements, while `user-name` parses as subtraction and jq refuses to
+# compile.  Here it indexes a record: there is no program text to splice into.
 
 let [path, field, want] = $ARGS
+
 let rows = from-json < $path
-let kept = filter { |row| return !{equal !{str $row[$field]} $want} } $rows
-to-json $kept
+
+let matching = { |row|
+    if !{has $row $field} { return !{equal !{str $row[$field]} $want} }
+    else { return false }
+}
+
+to-json !{filter $matching $rows}

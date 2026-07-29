@@ -1,23 +1,26 @@
 #!/usr/bin/env ral
-# Footgun: `timeout 30 make -C dir` reports exit 124 on timeout, but that
-# same 124 is indistinguishable from make's own failure at second 29 — a
-# slow build and a broken build look identical. Counting down against
-# `is-done` makes the timeout its own branch, with `cancel` reaping the
-# runaway job explicitly.
+# Footgun: `timeout 2 ./run-tests` returns 124 for the deadline, and 124 is
+# also what the harness returns when 124 tests fail — the careful `rc=$?`
+# comparison then reports a timeout for a suite that ran to completion, and
+# `--preserve-status` only moves the collision to 143.  Racing the job against
+# a sleeper makes the deadline a value, `expired, that no exit code can forge.
 
 let [secs, target] = $ARGS
-let job = spawn { make -C $target }
-let wait = { |left|
-    if !{is-done $job} {
-        let r = await $job
-        echo $r[stdout]
-    } elsif $[$left <= 0] {
+
+let job = watch "tests" { within [dir: $target] { ./run-tests } ; return `finished }
+let alarm = spawn { sleep !{int $secs} ; return `expired }
+
+let outcome = try { return !{race [$job, $alarm]}[value] } { |e| return `failed $e[status] }
+
+case $outcome [
+    `finished: { |_| echo "tests passed" },
+    `expired:  { |_|
         cancel $job
-        echo "timed out: $target exceeded its $(secs)-second deadline" 1>&2
+        echo "tests exceeded the $(secs)s deadline" 1>&2
         exit 1
-    } else {
-        sleep 1
-        wait $[$left - 1]
-    }
-}
-wait !{int $secs}
+    },
+    `failed: { |st|
+        echo "tests failed (exit $st)" 1>&2
+        exit 1
+    },
+]

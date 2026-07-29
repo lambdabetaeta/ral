@@ -1,10 +1,19 @@
 #!/usr/bin/env ral
-# Footgun: `jq keys[]` prints each key quoted unless you remember
-# `-r`, and pointed at a JSON array it silently lists numeric indices
-# instead of failing.  `keys` here is typed — it accepts only a map —
-# so an array or scalar is a loud error, and it returns real String
-# keys, sorted, that echo emits raw.
+# Footgun: `jq -r 'keys[]'` on a JSON array prints 0, 1, 2 — indices,
+# not keys — so a list-shaped file quietly reports three keys it has
+# none of, and a key holding a newline lands as two keys on stdout.
+# Here `keys` is typed `Map → [Str]`: an array or scalar fails loudly,
+# and each key stays one value all the way through the comparison.
 
-let [path] = $ARGS
-let doc = from-json < $path
-for !{keys $doc} { |key| echo $key }
+let docs = map { |p| return [file: $p, keys: !{keys !{from-json < $p}}] } $ARGS
+let every-key = sort-list !{nub !{flat-map { |d| return $d[keys] } $docs}}
+
+for $docs { |d|
+    echo $d[file]
+    for $d[keys] { |k| echo "  $k" }
+    let missing = filter { |k| return $[not !{contains $d[keys] $k}] } $every-key
+    if $[not !{is-empty $missing}] {
+        let named = !{intercalate ',' $missing}
+        echo "  missing: $named"
+    }
+}

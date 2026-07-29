@@ -1,20 +1,30 @@
 #!/usr/bin/env ral
-# Footgun: `awk -F, '{s[$1]+=$2} END{for(k in s)print k,s[k]}'` addresses
-# both columns by position and emits groups in awk's unspecified hash
-# order.  Here `group-by` keys on the named category and the keys come
-# out sorted.
+# Footgun: awk's `cell[r,c] += $v` coerces a non-numeric field to 0 — an `n/a`
+# vanishes from its total and an empty field manufactures a 0 cell, while the
+# script still exits 0.  A non-integral total is then concatenated into the
+# output line through CONVFMT `%.6g`, so 1234567.89 prints as 1.23457e+06.
+# Here `float` refuses such a field before a single row is printed.
 
-let [path, category, val] = $ARGS
+let [path, rowkey, colkey, valcol] = $ARGS
 
-let [hdr, ...rows] = !{from-lines-list $path}
-let header = re-split ',' $hdr
-let records = map { |line|
-    fold { |m p| let k = $p[0]; return [...$m, $k: $p[1]] } [:] !{zip $header !{re-split ',' $line}}
-} $rows
+let rows = from-csv < $path
 
-let buckets = group-by { |r| return $r[$category] } $records
+let row-keys = nub !{map { |r| return $r[$rowkey] } $rows}
+let col-keys = nub !{map { |r| return $r[$colkey] } $rows}
+let by-row = group-by { |r| return $r[$rowkey] } $rows
 
-echo "$category\tsum($val)"
-for !{keys $buckets} { |k|
-    echo "$k\t!{fold { |acc r| return $[$acc + !{float $r[$val]}] } 0.0 $buckets[$k]}"
-}
+let header = !{intercalate "\t" [$rowkey, ...$col-keys]}
+
+let body = map { |rk|
+    let by-col = group-by { |r| return $r[$colkey] } $by-row[$rk]
+    let cells = map { |c|
+        if !{has $by-col $c} {
+            return !{str !{fold { |acc r| return $[$acc + !{float $r[$valcol]}] } 0.0 $by-col[$c]}}
+        } else {
+            return ''
+        }
+    } $col-keys
+    return !{intercalate "\t" [$rk, ...$cells]}
+} $row-keys
+
+echo !{intercalate "\n" [$header, ...$body]}

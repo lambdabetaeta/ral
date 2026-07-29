@@ -2,4 +2,8 @@
 # Keep JSON array elements whose field equals a value: filter users.json role admin
 set -euo pipefail
 
-jq "[.[] | select(.$2 == \"$3\")]" "$1"
+file="$1"
+field="$2"
+want="$3"
+
+jq --arg want "$want" "[.[] | select(.$field == \$want)]" -- "$file"

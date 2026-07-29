@@ -1,19 +1,24 @@
 #!/usr/bin/env ral
-# Footgun: `until nc -z host port; do sleep 1; done` has no cap — if the
-# service never binds, it spins forever and wedges the pipeline. A
-# bounded recursion over `succeeds` caps the attempts and exits nonzero
-# on timeout, so the wait can never hang.
+# Footgun: `until nc -z -w 1 …; do <deadline check>; sleep 1; done` gives up on
+# time only if the probe returns.  Against a host that drops the SYN (192.0.2.1)
+# `-w` bounds an idle connection, not connect — `-G` does that — so a 5s budget
+# runs 75s.  Then the deadline needs re-testing before the sleep as well, and the
+# bare `((…))` guarding lest a false one exit under set -e.  A race just holds.
 
-let [host, port, tries] = $ARGS
-let probe = { |left|
-    if !{succeeds { nc -z $host $port }} {
-        echo "$host:$port is accepting connections"
-    } elsif $[$left <= 0] {
-        echo "$host:$port never came up" 1>&2
-        exit 1
-    } else {
-        sleep 1
-        probe $[$left - 1]
-    }
+let [target, port, secs] = $ARGS
+
+let probe = { |interval|
+    if !{succeeds { nc -z -G 1 -w 1 -- $target $port 2> /dev/null }} { return `up }
+    else { sleep $interval ; probe $interval }
 }
-probe !{int $tries}
+
+let waiter = spawn { probe 1 }
+let alarm = spawn { sleep !{int $secs} ; return `late }
+
+case !{race [$waiter, $alarm]}[value] [
+    `up:   { |_| echo "$target:$port is up" },
+    `late: { |_|
+        echo "$target:$port never came up within $(secs)s" 1>&2
+        exit 1
+    },
+]

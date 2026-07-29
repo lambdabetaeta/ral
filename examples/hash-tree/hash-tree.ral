@@ -1,20 +1,22 @@
 #!/usr/bin/env ral
-# Footgun: `find | xargs -P8 sha256sum` needs the `-print0`/`-0` NUL dance
-# only because filenames are shell tokens xargs re-splits on whitespace —
-# drop it and a spaced path hashes as two bogus files.  Here a path is a
-# value, `par` distributes values, and hashes come back in input order.
+# Footgun: `xargs -P8` gives parallelism by handing N children one pipe, and
+# each flushes its stdout buffer wherever the buffer filled — mid-line.  Once
+# the tree is big enough to need a second child, lines come back spliced —
+# half a hash onto half a path, a dozen per 6000 files — and `wc -l` still
+# counts 6000.  `par` distributes and collects values: no stream to tear.
 
 let [root, ...rest] = $ARGS
-let jobs = if !{is-empty $rest} { return 8 } else { return !{int $rest[0]} }
+let workers = if !{is-empty $rest} { return 8 } else { return !{int $rest[0]} }
 
-let files = filter { |p| is-file $p } !{glob "$root/**/*"}
-
-let results = par { |p|
-    let line  = !{sha256sum $p | from-string}
-    let parts = words $line
-    return [hash: $parts[0], path: $p]
-} $files $jobs
-
-for !{sort-list-by { |r| return $r[path] } $results} { |r|
-    echo "$r[hash]  $r[path]"
+let walk = { |dir|
+    let by-type = group-by { |e| return $e[type] } !{list-dir $dir}
+    let here = map { |e| return "$dir/$e[name]" } !{get $by-type 'file' []}
+    let below = flat-map { |e| walk "$dir/$e[name]" } !{get $by-type 'dir' []}
+    return [...$here, ...$below]
 }
+
+let manifest = par { |p|
+    return [hash: !{words !{sha256sum -- $p | from-string}}[0], path: $p]
+} !{sort-list !{walk $root}} $workers
+
+for $manifest { |r| echo "$r[hash]  $r[path]" }

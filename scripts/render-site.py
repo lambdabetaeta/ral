@@ -63,7 +63,7 @@ TS_CONFIG_DIR = GRAMMAR_DIR / ".tsconfig"
 
 # The tour opens on these; everything else follows alphabetically.
 CURATED_ORDER = [
-    "hello", "wc", "dedup", "rename-extension", "find-large", "du-by-ext",
+    "hello", "dedup", "rename-extension", "find-large", "du-by-ext",
     "kv-to-json", "csv-summary", "atomic-update", "hash-tree", "fanout-fetch",
     "tail-multi", "safe-eval",
 ]

@@ -1,18 +1,36 @@
 #!/usr/bin/env ral
-# Footgun: the bash loop recomputes with `sha256sum "$file"` under
-# `set -e`, so the first missing or unreadable entry aborts the whole
-# run — a crash, not a FAILED line.  Here the hash is split off the front
-# (the rest is the filename, spaces and all) and computed in a `try`, so
-# one bad entry is one FAILED row and the report continues.
+# Footgun: `while read -r want file` mangles real sha256sums manifests — a
+# binary-mode line (`hash *a.txt`, what `sha256sum -b` and `shasum -b` write)
+# keeps the `*` in the name, so an intact file reports FAILED, and a manifest
+# with no final newline loses its last entry unverified.  Here the lines are a
+# list and the hash/name split is explicit, so neither happens.
 
 let [manifest] = $ARGS
 let base = dirname $manifest
 
-for !{from-lines-list $manifest} { |line|
-    let want = re-find-match '^[0-9a-f]+' $line
-    let file = re-replace '^[0-9a-f]+[ *]+' '' $line
-    let ok = try {
-        return !{equal $want !{words !{sha256sum "$base/$file" | from-string}}[0]}
-    } { |_| return false }
+let entries = map { |line|
+    return [
+        want: !{re-find-match '^[0-9a-f]+' $line},
+        file: !{re-replace '^[0-9a-f]+[ *]+' '' $line},
+    ]
+} !{from-lines-list $manifest}
+
+let checked = par { |[want: want, file: file]|
+    let got = try {
+        return !{words !{sha256sum -- "$base/$file" | from-string}}[0]
+    } { |_| return '' }
+    return [file: $file, ok: !{equal $want $got}]
+} $entries $NPROC
+
+for $checked { |[file: file, ok: ok]|
     echo "!{if $ok { return 'OK' } else { return 'FAILED' }}  $file"
+}
+
+let total = length $checked
+let bad = length !{filter { |[ok: ok]| return $[not $ok] } $checked}
+
+if $[$bad > 0] {
+    fail [status: 1, message: "$bad of $total entries failed"]
+} else {
+    echo "$total entries verified"
 }

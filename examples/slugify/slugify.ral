@@ -1,9 +1,23 @@
 #!/usr/bin/env ral
-# Footgun: `echo "$title"` silently eats a title beginning `-n` or `-e`
-# as an echo flag, and `tr [:upper:] [:lower:]` folds case by the current
-# locale.  Here `lower` and `re-replace-all` act on the String value
-# itself — no subprocess, no argv/flag confusion, no locale surprise.
+# Footgun: `tr [:upper:]` reads LC_CTYPE and sed's `a-z` range reads
+# LC_COLLATE, so the same titles file slugs differently per locale: under
+# en_US.ISO8859-1 `tr` folds a byte *inside* a UTF-8 sequence and sed's
+# widened range then admits it, so "Éclair Ñoño" slugs to bytes that are not
+# valid UTF-8.  Here `lower`/`re-replace-all` fold Strings in-process.
 
-let [title] = $ARGS
-let dashed = re-replace-all '[^a-z0-9]+' '-' !{lower $title}
-echo !{re-replace-all '^-+|-+$' '' $dashed}
+let [path] = $ARGS
+
+let slug = { |title|
+    let dashed = re-replace-all '[^a-z0-9]+' '-' !{lower $title}
+    return !{re-replace-all '^-+|-+$' '' $dashed}
+}
+
+let titles = filter { |t| return $[!{length $t} > 0] } !{lines !{from-string < $path}}
+let slugs = map $slug $titles
+
+for $slugs { |s| echo $s }
+
+let buckets = group-by $id $slugs
+for !{filter { |s| return $[!{length $buckets[$s]} > 1] } !{keys $buckets}} { |s|
+    echo "clash: $s"
+}

@@ -1,35 +1,38 @@
 #!/usr/bin/env ral
-# Footgun: the bash splits each pair with `IFS='='` into an array, so a value
-# holding '=' is truncated at the next one, and its `printf '%b' "${v//%/\\x}"`
-# leaves '+' untouched while mangling stray backslashes.  Here re-split keeps
-# the key at the first '=' and rejoins the rest as the value, then '+' and
-# every %XX decode through the byte channel.
+# Footgun: `printf '%b' "${v//%/\\x}"`, the pure-bash urldecode idiom, feeds
+# the data through printf's escape interpreter: `C%3A\temp` decodes to
+# `C:<TAB>emp`, `a%2` to `a` plus byte 0x02, and `%00` to a NUL that `$( )`
+# then drops — all silent.  Here an escape run becomes a byte list that
+# `from-string` decodes; the data never reaches a format string.
 
 let [query] = $ARGS
-let hd = '0123456789ABCDEF'
+let digits = re-find-matches '.' '0123456789abcdef'
 
-let hex-val = { |c|
-    fold { |acc i| if !{equal !{upper $c} !{slice $hd $i 1}} { return $i } else { return $acc } } 0 !{range 0 16}
+let nybble = { |c|
+    let hit = first { |d| equal $d[item] !{lower $c} } !{enumerate $digits}
+    return !{option-or [index: 0] $hit}[index]
 }
 
-let decode = { |s0|
-    let s = re-replace-all '\+' ' ' $s0
-    let go = { |i acc|
-        if $[$i >= !{length $s}] { return $acc } else {
-            let c = slice $s $i 1
-            if !{equal $c '%'} {
-                let n  = $[!{hex-val !{slice $s $[$i + 1] 1}} * 16 + !{hex-val !{slice $s $[$i + 2] 1}}]
-                let ch = to-bytes [$n] | from-string
-                return !{go $[$i + 3] "$acc$ch"}
-            } else { return !{go $[$i + 1] "$acc$c"} }
-        }
+let byte = { |pair|
+    fold { |acc c| return $[$acc * 16 + !{nybble $c}] } 0 !{re-find-matches '.' $pair}
+}
+
+let decode = { |s|
+    let part = { |tok|
+        if !{re-match '^%' $tok} {
+            if !{re-match '^(?:%[0-9A-Fa-f]{2})+$' $tok} {
+                let ns = map $byte !{re-find-matches '[0-9A-Fa-f]{2}' $tok}
+                to-bytes $ns | from-string
+            } else { fail [status: 2, message: "malformed percent-escape in '$s'"] }
+        } else { return $tok }
     }
-    go 0 ''
+    let toks = re-find-matches '(?:%[0-9A-Fa-f]{2})+|[^%]+|%' !{re-replace-all '\+' ' ' $s}
+    intercalate '' !{map $part $toks}
 }
 
-let pairs = map { |p|
-    let parts = re-split '=' $p
-    return [key: !{decode $parts[0]}, value: !{decode !{intercalate '=' !{drop 1 $parts}}}]
+let fields = map { |p|
+    let [k, ...rest] = re-split '=' $p
+    return [key: !{decode $k}, value: !{decode !{intercalate '=' $rest}}]
 } !{re-split '&' $query}
 
-to-json $pairs
+for $fields { |f| echo "$f[key]=$f[value]" }

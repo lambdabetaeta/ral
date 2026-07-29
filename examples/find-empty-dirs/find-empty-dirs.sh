@@ -4,8 +4,8 @@ set -euo pipefail
 
 root="$1"
 
-find "$root" -type d | while read -r d; do
+while IFS= read -r -d '' d; do
     if [ -z "$(find "$d" -type f -print -quit)" ]; then
-        echo "$d"
+        printf '%s\n' "$d"
     fi
-done
+done < <(find "$root" -type d -print0)

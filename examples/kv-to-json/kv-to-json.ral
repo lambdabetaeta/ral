@@ -1,23 +1,26 @@
 #!/usr/bin/env ral
-# Footgun: the bash habit is `source app.env`, which runs the config file
-# as shell — any command substitution or side effect in it executes on the
-# way in.  Configuration is data; reading it should not run it.  Here it
-# stays data: lines are split, never evaluated.
+# Footgun: the obvious reader for key=value config is `source app.env`, which
+# executes it — `LOG=$(rm -rf "$HOME/tmp")` deletes on read, `path=…` clobbers
+# the script's own variable, `WIN=C:\Users\me` loses backslashes.  Hand-parsing
+# costs `read -r`, `|| [[ -n $line ]]`, `${pairs[@]+…}` and a jq fold (jq's
+# $ARGS.named keeps the first dup key) — every time.  ral only ever parses it.
 
 let [path] = $ARGS
 
-let kv-of = { |line|
-    let parts = re-split '=' $line
-    let key   = $parts[0]
-    let val   = intercalate '=' !{drop 1 $parts}
-    return [$key: $val]
+let lines = if !{is-file $path} { return !{from-lines-list $path} } else {
+    fail [status: 1, message: "kv-to-json: !{$path}: not a file"]
 }
 
-let result = fold { |acc line|
-    let l = re-replace-all '^\s+|\s+$' '' $line
-    if $[!{equal $l ''} || !{re-match '^#' $l}] { return $acc } else {
-        return !{union $acc !{kv-of $l}}
-    }
-} [:] !{from-lines-list $path}
+let quoted = #'^"((?s:.*))"$|^'((?s:.*))'$'#
+let trim = { |s| re-replace-all #'^\s+|\s+$'# '' $s }
+let unquote = { |v|
+    if !{re-match $quoted $v} { return !{re-replace $quoted '${1}${2}' $v} } else { return $v }
+}
 
-echo !{to-json $result | from-string}
+let settings = fold { |acc line|
+    let key = !{trim !{re-find-match #'^[^=]*'# $line}}
+    let value = !{trim !{re-replace #'^[^=]*='# '' $line}}
+    return !{union $acc [$key: !{unquote $value}]}
+} [:] !{filter { |l| re-match #'^\s*[^#=\s][^=]*='# $l } $lines}
+
+to-line !{to-json $settings}

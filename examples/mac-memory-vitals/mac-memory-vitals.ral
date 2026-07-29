@@ -1,0 +1,32 @@
+#!/usr/bin/env ral
+# Footgun: `ps -Aco … -m | head -n 7` plus the recommended `set -euo
+# pipefail` — `head` exits, `ps` takes SIGPIPE, pipefail surfaces 141, `set
+# -e` aborts.  With 700-odd processes to list, the .sh dies before its first
+# `printf`: no output, nothing on stderr, 19 runs in 20.  Here the capture is
+# one value and `take 6` a list operation, so no pipe shuts early.
+
+let [m1, m5, m15] = re-find-matches '[0-9]+\.[0-9]+' !{sysctl -n vm.loadavg}
+let [swap-total, swap-used, _] = re-find-matches '[0-9]+\.[0-9]+' !{sysctl vm.swapusage}
+
+let hog = { |row|
+    let cols = words $row
+    return [
+        pmem:   $cols[1],
+        rss-mb: $[!{int $cols[2]} / 1024],
+        name:   !{intercalate ' ' !{drop 3 $cols}},
+    ]
+}
+
+let vitals = [
+    ram-gb:   $[!{int !{sysctl -n hw.memsize}} / 1073741824],
+    load:     [m1: $m1, m5: $m5, m15: $m15],
+    swap-mb:  [used: $swap-used, total: $swap-total],
+    free-pct: !{int !{re-find-match '[0-9]+' !{last !{lines !{memory_pressure}}}}},
+    hogs:     !{map $hog !{take 6 !{drop 1 !{lines !{ps -Aco pid,pmem,rss,comm -m}}}}},
+]
+
+echo "ram-gb $vitals[ram-gb]"
+echo "load $vitals[load][m1] $vitals[load][m5] $vitals[load][m15]"
+echo "swap-mb $vitals[swap-mb][used] used of $vitals[swap-mb][total]"
+echo "free-pct $vitals[free-pct]"
+for $vitals[hogs] { |h| echo "hog $h[pmem] $h[rss-mb] $h[name]" }

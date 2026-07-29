@@ -1,15 +1,42 @@
 #!/usr/bin/env ral
-# Footgun: piping `find -type d` into `while read -r d` strips leading and
-# trailing whitespace from each name and breaks on embedded newlines, so an
-# oddly-named directory is probed under the wrong path.  Here each directory
-# is a path value, empty exactly when `glob "$d/**/*"` yields no file beneath.
+# Footgun: `[ -z "$(find "$d" -type f -print -quit)" ]` calls a directory empty
+# whenever the inner `find` cannot read it — a mode-000 subdirectory full of
+# files gets its parent printed as empty, exit status still 0, because `set -e`
+# is exempt inside a condition's command substitution.  Here `list-dir` raises
+# on an unreadable directory, so it is reported as undecided, never as empty.
 
 let [root] = $ARGS
 
-let dirs = filter { |p| is-dir $p } !{glob "$root/**/*"}
+let scan = { |dir|
+    let listing = try { return `ok !{list-dir $dir} } { |_| return `denied unit }
+    case $listing [
+        `denied: { |_| return [verdict: `unknown, rows: [[path: $dir, verdict: `unknown]]] },
+        `ok: { |items|
+            let by-type = group-by { |e| return $e[type] } $items
+            let kids = map { |e| scan "$dir/$e[name]" } !{get $by-type 'dir' []}
+            let evidence = if !{is-empty !{get $by-type 'file' []}} {
+                return !{map { |k| return $k[verdict] } $kids}
+            } else {
+                return [`files]
+            }
+            let verdict = if !{contains $evidence `files} { return `files }
+                elsif !{contains $evidence `unknown} { return `unknown }
+                else { return `empty }
+            return [
+                verdict: $verdict,
+                rows: [[path: $dir, verdict: $verdict], ...!{flat-map { |k| return $k[rows] } $kids}],
+            ]
+        }
+    ]
+}
 
-let empties = filter { |d|
-    is-empty !{filter { |p| is-file $p } !{glob "$d/**/*"}}
-} $dirs
+let rows = !{scan $root}[rows]
 
-for $empties { |d| echo $d }
+let undecided = filter { |r| return !{equal $r[verdict] `unknown} } $rows
+if $[not !{is-empty $undecided}] {
+    for $undecided { |r| echo "cannot read, so cannot judge: $r[path]" 1>&2 }
+    let n = length $undecided
+    fail [status: 1, message: "$n directories could not be read"]
+}
+
+for !{filter { |r| return !{equal $r[verdict] `empty} } $rows} { |r| echo $r[path] }

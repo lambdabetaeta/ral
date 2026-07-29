@@ -1,9 +1,26 @@
 #!/usr/bin/env ral
-# Footgun: `xargs -P4` re-splits its input on whitespace, so "my log.txt"
-# reaches gzip as two nonexistent files; and any one gzip's failure is
-# swallowed into xargs's lumped exit 123, naming nothing. `par` maps over
-# path *values* — no splitting — with a fixed worker count, returning one
-# result per file in input order.
+# Footgun: `xargs -P4 -I{}` reads its input as text, not as paths:
+# "it's here.txt" aborts the run mid-way with `xargs: unterminated quote`,
+# and `back\slash.txt` reaches gzip as backslash.txt.  A failing child also
+# lumps into one xargs exit status naming no file.  `par` maps a block over
+# path *values*, four at a time, one result per file in input order.
 
-let done = par { |f| gzip -kf $f; return $f } $ARGS 4
-echo "gzipped !{length $done} files"
+let outcome = par { |f|
+    return [path: $f, ok: !{succeeds { gzip -kf -- $f }}]
+} $ARGS 4
+
+let by = group-by { |r|
+    if $r[ok] { return 'gzipped' } else { return 'failed' }
+} $outcome
+
+let gzipped = get $by 'gzipped' []
+let failed = map { |r| return $r[path] } !{get $by 'failed' []}
+
+if $[!{length $failed} > 0] {
+    fail [
+        status: 1,
+        message: "gzipped !{length $gzipped} files; failed: !{intercalate ', ' $failed}",
+    ]
+} else {
+    echo "gzipped !{length $gzipped} files"
+}

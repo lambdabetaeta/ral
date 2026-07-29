@@ -1,14 +1,13 @@
 #!/usr/bin/env ral
-# Footgun: `tr -cs A-Za-z` and `sort` both consult the locale — the
-# character ranges and the collation shift with $LANG — so the same text
-# ranks differently on two machines.  Here words fold into a count map and
-# sort by a projection: deterministic, and free of any locale at all.
+# Footgun: `tr`'s `[:alpha:]` and case classes are locale-defined, so the
+# report depends on the ambient locale: under LC_ALL=C — a cron job, a bare
+# container — "naïve" splits into "na" and "ve" and "café" loses its tail,
+# so one file yields different words and counts than under a UTF-8 locale.
+# Here a word is a `\p{L}+` match folded by `lower`, and no locale is read.
 
 let [path, n] = $ARGS
-let counts = fold { |m w|
-    return [...$m, $w: $[!{get $m $w 0} + 1]]
-} [:] !{map $lower !{words !{from-string < $path}}}
 
-let ranked = reverse !{sort-list-by { |k| return $counts[$k] } !{keys $counts}}
+let counted = group-by $id !{map $lower !{re-find-matches #'\p{L}+'# !{from-string < $path}}}
+let ranked = reverse !{sort-list-by { |w| return !{length $counted[$w]} } !{keys $counted}}
 
-for !{take !{int $n} $ranked} { |w| echo "$counts[$w]\t$w" }
+for !{take !{int $n} $ranked} { |w| echo "!{length $counted[$w]}\t$w" }

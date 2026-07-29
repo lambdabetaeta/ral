@@ -1,15 +1,13 @@
 #!/usr/bin/env ral
-# Footgun: `uniq` only collapses *adjacent* duplicates, so it is meaningless
-# without the leading `sort`; drop it and every count silently reads 1.
-# Here the tally is a fold into a map keyed by the line itself — order of
-# arrival is irrelevant, so there is nothing to forget to sort.
+# Footgun: `uniq -c` counts only *adjacent* runs and nothing checks its
+# input is grouped — reached through a pipeline sorted by another key,
+# every count silently reads 1 — and the `sort` that satisfies it discards
+# input order and hands equal counts to locale collation.  Here the tally
+# is a map keyed by the line, and ties break by codepoint in every locale.
 
-let counts = fold-lines { |acc l|
-    return [...$acc, $l: $[!{get $acc $l 0} + 1]]
-} [:]
+let counts = group-by $id !{from-lines | stream-to-list}
+let tally = map { |l| return [line: $l, n: !{length $counts[$l]}] } !{keys $counts}
 
-let rows = map { |k| return [line: $k, n: $counts[$k]] } !{keys $counts}
-
-for !{reverse !{sort-list-by { |r| return $r[n] } $rows}} { |r|
+for !{reverse !{sort-list-by { |r| return $r[n] } $tally}} { |r|
     echo "$r[n]\t$r[line]"
 }

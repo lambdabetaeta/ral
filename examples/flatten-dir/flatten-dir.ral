@@ -1,18 +1,24 @@
 #!/usr/bin/env ral
-# Footgun: `find src -exec cp {} dst \;` silently clobbers when two
-# nested files share a basename — the second copy overwrites the first
-# and data is lost with no warning.  Here a `fold` threads the set of
-# seen names, so a clash is copied under a numbered prefix instead.
+# Footgun: `while … done < <(find …)` discards find's exit status — an
+# unreadable subdirectory makes find warn and exit 1, yet the script exits 0
+# with a plausible count, so `flatten-dir src out && rm -rf src` deletes files
+# that were never copied.  Piping into the loop catches the status but scopes
+# the counters to a subshell.  Here `glob` fails, and `fold` threads a value.
 
-let [src, dst] = $ARGS
+let [root, dst] = $ARGS
 mkdir -p $dst
 
-let files = filter { |p| is-file $p } !{glob "$src/**/*"}
+let files = filter { |p| is-file $p } !{glob "$root/**/*"}
 
-fold { |seen p|
+let tally = fold { |acc p|
     let name = !{file-info $p}[name]
-    let n    = get $seen $name 0
+    let n    = get $acc[seen] $name 0
     let dest = if $[$n == 0] { return "$dst/$name" } else { return "$dst/$(n)-$name" }
     cp $p $dest
-    return [...$seen, $name: $[$n + 1]]
-} [:] $files
+    return [
+        seen:    [...$acc[seen], $name: $[$n + 1]],
+        renamed: $[$acc[renamed] + !{if $[$n == 0] { return 0 } else { return 1 }}],
+    ]
+} [seen: [:], renamed: 0] $files
+
+echo "flattened" !{length $files} "files into $dst ($tally[renamed] renamed)"

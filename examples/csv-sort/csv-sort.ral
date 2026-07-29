@@ -1,18 +1,15 @@
 #!/usr/bin/env ral
-# Footgun: `sort -t, -k3 -rn` counts the key column by position, so a
-# column inserted upstream silently sorts on the wrong field — the `3`
-# names a place, not a value.  Here the sort key is `float` of a named
-# field: addressed by name, immune to a column moving.
+# Footgun: `sort -t, -k3,3 -rn` names the key by ordinal, so a column
+# inserted upstream sorts a different field and still exits 0; and `-n`
+# is data-blind, silently reading `n/a` or an empty cell as 0.  Here the
+# key is `float` of a named column: a column that moved is still found,
+# a column that is gone and a cell that is not a number both fail loudly.
 
-let [path, col] = $ARGS
+let [path, field] = $ARGS
 
-let [hdr, ...rows] = !{from-lines-list $path}
-let header = re-split ',' $hdr
-let records = map { |line|
-    fold { |m p| let k = $p[0]; return [...$m, $k: $p[1]] } [:] !{zip $header !{re-split ',' $line}}
-} $rows
+let rows = from-csv < $path
 
-let sorted = reverse !{sort-list-by { |r| return !{float $r[$col]} } $records}
+if !{is-empty $rows} { fail [status: 1, message: "$path has no data rows"] }
+if $[not !{has $rows[0] $field}] { fail [status: 1, message: "$path has no column $field"] }
 
-echo $hdr
-for $sorted { |r| echo !{intercalate ',' !{map { |c| return $r[$c] } $header}} }
+to-csv !{reverse !{sort-list-by { |r| return !{float $r[$field]} } $rows}}

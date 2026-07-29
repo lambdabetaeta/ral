@@ -1,16 +1,18 @@
 #!/usr/bin/env ral
-# Footgun: `cut -d, -f2,4` addresses columns by number and always emits
-# them in file order — it cannot reorder, and the numbers must be
-# recounted whenever a column moves.  Here columns are named record
-# fields, selected in exactly the requested order.
+# Footgun: `cut -f` takes a *set* of fields, not a sequence — asking for
+# 3,1 silently returns columns 1,3, and 1,1 returns one column instead of
+# two.  Exit 0 both times, no diagnostic.  Here the requested names are a
+# list mapped over each record, so the projection comes back in the order
+# asked for, repeats included.
 
 let [path, ...cols] = $ARGS
 
-let [hdr, ...rows] = !{from-lines-list $path}
-let header = re-split ',' $hdr
-let records = map { |line|
-    fold { |m p| let k = $p[0]; return [...$m, $k: $p[1]] } [:] !{zip $header !{re-split ',' $line}}
-} $rows
+let rows = from-csv < $path
+
+let unknown = flat-map { |r| filter { |c| return $[not !{has $r $c}] } $cols } !{take 1 $rows}
+if $[not !{is-empty $unknown}] {
+    fail [status: 1, message: "no such column: !{intercalate ', ' $unknown}"]
+}
 
 echo !{intercalate ',' $cols}
-for $records { |r| echo !{intercalate ',' !{map { |c| return $r[$c] } $cols}} }
+for $rows { |r| echo !{intercalate ',' !{map { |c| return $r[$c] } $cols}} }

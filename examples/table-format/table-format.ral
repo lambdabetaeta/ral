@@ -1,22 +1,26 @@
 #!/usr/bin/env ral
-# Footgun: `column -t` splits every row on runs of whitespace, so a field with
-# an embedded space becomes two columns and every row after it slides out of
-# alignment.  Here each row is split on the tab delimiter into a typed field
-# list, and the widths are measured over those lists — a space in a field never
-# fractures it, and the split that measures is the split that prints.
+# Footgun: `awk -F,` is not a CSV parser.  A quoted field holding a comma —
+# `"Smith, Jane"` — shifts every later field left: that row prints `Boston`
+# under `role`, `lead` under `amount`, and drops the amount, silently, status 0.
+# Here `from-csv` decodes RFC 4180, so the quoted comma stays one field and the
+# columns are picked by name out of the typed records.
 
-let rows = from-lines | stream-to-list
-let cells = map { |r| re-split '\t' $r } $rows
+let [path, ...cols] = $ARGS
 
-let ncols = fold { |m r| if $[!{length $r} > $m] { return !{length $r} } else { return $m } } 0 $cells
-let at = { |r c| if $[$c < !{length $r}] { return $r[$c] } else { return '' } }
-let pad = { |s w| return "$s!{fold { |a _| return "$a " } '' !{range !{length $s} $w}}" }
+let rows = from-csv < $path
+let widest = { |ns| fold { |m n| if $[$n > $m] { return $n } else { return $m } } 0 $ns }
+let spaces = { |n| intercalate '' !{map { |_| return ' ' } !{range 0 $n}} }
 
 let widths = map { |c|
-    fold { |w r| let n = !{length !{at $r $c}} ; if $[$n > $w] { return $n } else { return $w } } 0 $cells
-} !{range 0 $ncols}
+    widest [!{length $c}, ...!{map { |r| return !{length $r[$c]} } $rows}]
+} $cols
 
-for $cells { |r|
-    let line = intercalate '  ' !{map { |c| return !{pad !{at $r $c} $widths[$c]} } !{range 0 $ncols}}
-    echo !{re-replace-all '\s+$' '' $line}
+let render = { |cells|
+    let padded = map { |i|
+        return "$cells[$i]!{spaces $[$widths[$i] - !{length $cells[$i]}]}"
+    } !{range 0 !{length $cols}}
+    echo !{re-replace-all ' +$' '' !{intercalate '  ' $padded}}
 }
+
+render $cols
+for $rows { |r| render !{map { |c| return $r[$c] } $cols} }

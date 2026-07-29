@@ -1,14 +1,15 @@
 #!/usr/bin/env ral
-# Footgun: `mtime=$(stat -c %Y "$f")` uses GNU's `-c` syntax (BSD wants
-# `-f %m`), and if it yields nothing the arithmetic `(( now - mtime ))`
-# treats the blank as 0 and prints a bogus 50-year age.  Here `mtime`
-# is a typed Int from `file-info`; a bad file fails loudly instead.
+# Footgun: epoch mtime has no portable spelling — GNU stat wants `-c %Y`, BSD
+# `-f %m` — so a careful script probes for the flag and feeds the tool's text
+# into `(( ))`.  Worse, `done < <(find …)` hides find's exit status from
+# `set -euo pipefail`: an unreadable directory prints no rows and exits 0.
+# Here one `list-dir` yields `mtime` as an Int, and a bad directory raises.
 
 let [root] = $ARGS
 let now = int !{date +%s | from-line}
 
-for !{filter { |p| is-file $p } !{glob "$root/*"}} { |f|
-    let mtime = !{file-info $f}[mtime]
-    let days  = $[($now - $mtime) / 86400]
-    echo "$days\t$f"
+let files = filter { |e| equal $e[type] 'file' } !{list-dir $root}
+
+for $files { |[name: name, mtime: mtime]|
+    echo "$[($now - $mtime) / 86400]\t$root/$name"
 }

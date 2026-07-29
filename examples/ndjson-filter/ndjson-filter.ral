@@ -1,14 +1,17 @@
 #!/usr/bin/env ral
-# Footgun: `grep "\"$field\":\"$want\""` tests a substring of raw text, so
-# it matches the value under a different field, a partial token ("admin"
-# inside "administrator"), or misses it when the writer added spaces —
-# and the per-line loop forks grep for every record.  Here each line is
-# decoded once and the real field value is compared as data.
+# Footgun: `jq --arg want 8080 'select(.[$f]==$want)'` prints nothing, exits 0:
+# `--arg` binds a string, `==` is type-strict, and `--argjson` rejects `admin`.
+# Correct needs `|tostring`, `has($f)`, and a slurped pre-pass — jq's status
+# reports only the last record, so one non-object line errors on stderr and
+# still exits 0.  Here one `has` does both, and omitting it raises, not lies.
 
 let [path, field, want] = $ARGS
 
-let kept = filter { |r|
-    return $[!{has $r $field} && !{equal !{str $r[$field]} $want}]
-} !{stream-to-list !{from-jsonl < $path}}
+let matches = { |r|
+    if !{has $r $field} { return !{equal !{str $r[$field]} $want} }
+    else { return false }
+}
 
-to-jsonl $kept
+let records = stream-to-list !{from-jsonl < $path}
+
+to-jsonl !{filter $matches $records}

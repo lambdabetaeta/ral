@@ -1,15 +1,27 @@
 #!/usr/bin/env ral
-# Footgun: to deny a build step the network in bash you reach for `unshare -rn`
-# or a transient firewall rule — a separate, privileged tool, easy to invert so
-# the "deny" silently no-ops.  `grant [net: false]` is one in-language clause;
-# the fetch is refused and the failure is catchable, right where the code lives.
+# Footgun: `if unshare -rn curl …` reads the enforcer's own failure as the
+# denial it meant to impose: a missing unshare, or curl's 22 on a mistyped
+# URL, prints "network denied" and pins the stale vendored versions, exit 0.
+# Bash needs a probe, `rc=$?` not `if`, only 6/7 admitted, no `< <(…)`, every
+# time.  A `grant` refuses to spawn where it cannot confine: nothing to check.
 
-let deps = temp-file
-grant [net: false] {
-    echo 'building offline (network denied)...'
-    try { curl -s https://registry.example.com/latest > $deps ; echo 'fetched remote deps' } { |_|
-        echo 'network denied by grant — falling back to vendored deps'
-    }
-    echo "compiled at !{date +%s}"
+let [registry, lockfile] = $ARGS
+let no-network = [6, 7]
+
+let resolved = grant [net: false] {
+    return !{try {
+        let remote = !{curl -fsS "$registry/latest" | from-csv}
+        echo 'resolved from the registry'
+        return $remote
+    } { |err|
+        if !{contains $no-network $err[status]} {
+            echo 'network denied — resolved from the vendored lockfile'
+            return !{from-csv < $lockfile}
+        } else { fail $err }
+    }}
 }
-rm -f $deps
+
+for !{sort-list-by { |d| return $d[name] } $resolved} { |d|
+    echo "  $d[name] $d[version]"
+}
+echo "!{length $resolved} deps pinned"

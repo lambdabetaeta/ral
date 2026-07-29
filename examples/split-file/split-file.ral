@@ -1,27 +1,27 @@
 #!/usr/bin/env ral
-# Footgun: `split -d` uses two-digit numeric suffixes by default, so a
-# file that needs 100 or more chunks aborts with "output file suffixes
-# exhausted", and split reports nothing.  Here suffixes grow as needed
-# and each chunk announces its line count.
+# Footgun: `split -l N -d` numbers chunks with a fixed two-digit suffix.  BSD
+# split (macOS) dies on the 101st chunk ("split: too many files", exit 65) with
+# part00..part99 already written, aborting half-done and leaving the debris;
+# GNU split silently widens, so correctness depends on which split is installed.
+# Here the suffix width is derived from the chunk count: no capacity to exhaust.
 
-let [src, n] = $ARGS
+let [input, n] = $ARGS
 
-let pad = { |x|
-    let go = { |s| if $[!{length $s} >= 4] { return $s } else { return !{go "0$s"} } }
-    return !{go !{str $x}}
+let per-chunk = int $n
+let chunks = group-by { |e| return !{str $[$e[index] / $per-chunk]} } !{enumerate !{from-lines-list $input}}
+let count = length $chunks
+
+let digits = length !{str $[$count - 1]}
+let width = if $[$digits > 2] { return $digits } else { return 2 }
+let zeros = intercalate '' !{map { |_| return '0' } !{range 0 $width}}
+let suffix = { |i|
+    let s = "$zeros!{str $i}"
+    return !{slice $s $[!{length $s} - $width] $width}
 }
 
-let chunk = { |size xs|
-    if !{is-empty $xs} { return [] } else {
-        return [!{take $size $xs}, ...!{chunk $size !{drop $size $xs}}]
-    }
-}
-
-let parts = chunk !{int $n} !{from-lines-list $src}
-
-for !{enumerate $parts} { |g|
-    let part = "$src.!{pad $[$g[index] + 1]}"
-    let body = intercalate "\n" $g[item]
+for !{range 0 $count} { |i|
+    let part = "$input.part!{suffix $i}"
+    let body = intercalate "\n" !{map { |e| return $e[item] } $chunks[!{str $i}]}
     to-string "$body\n" > $part
-    echo "$part (!{length $g[item]} lines)"
+    echo $part
 }

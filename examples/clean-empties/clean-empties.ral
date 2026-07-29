@@ -1,15 +1,23 @@
 #!/usr/bin/env ral
-# Footgun: `for f in $(find . -type f -empty)` — the classic when you
-# want to log each removal — word-splits the command substitution, so a
-# zero-byte file named "old log" is deleted as two nonexistent paths.
-# Here each empty file is a value, filtered by its `size` and removed whole.
+# Footgun: `while … < <(find … | sort -z)` discards that pipeline's status, find's
+# with it: one unreadable subfolder makes find exit 1, yet the sweep prints its
+# tally and exits 0 with the skipped subtree still dirty.  Bash must spool the walk
+# to a mktemp file and check it before any rm, and recall -mindepth 1 and printf's
+# one-NUL empty list every time.  Here the walk is one expression, raising first.
 
 let [root] = $ARGS
+let dir = !{resolve-path $root}
 
-let files   = filter { |p| is-file $p } !{glob "$root/**/*"}
+let found   = filter { |p| is-file $p } !{glob "$dir/**/*"}
+let files   = filter { |p| equal $p !{resolve-path $p} } $found
 let empties = filter { |p| file-empty $p } $files
 
 for $empties { |p|
     echo "removing $p"
     rm $p
 }
+
+let folders = sort-list !{nub !{map { |p| re-replace '/[^/]+$' '' $p } $empties}}
+
+echo "removed !{length $empties} empty files in !{length $folders} folders"
+for $folders { |d| echo "  $d" }

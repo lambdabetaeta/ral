@@ -1,15 +1,17 @@
 #!/usr/bin/env ral
-# Footgun: `for l in $(find . -type l); do [ -e "$l" ] || echo "$l"; done`
-# word-splits the substitution, so a symlink whose name holds a space is
-# tested and reported as two broken fragments.  Here each link is a value;
-# a dangling one is exactly a link that resolves to neither file nor dir.
+# Footgun: bash has no CSV codec.  The waiver list is read with
+# `IFS=, read -r link _`, so a quoted field holding a comma
+# ("Q3, final.pdf") splits at that comma, its waiver matches no link,
+# and the link is reported broken anyway — then printf writes that same
+# name back unquoted, as two fields.  `from-csv`/`to-csv` quote for you.
 
-let [root] = $ARGS
+let [root, waivers] = $ARGS
 
+let waived = map { |r| return $r[link] } !{from-csv < $waivers}
 let links  = filter { |p| is-link $p } !{glob "$root/**/*"}
-let broken = filter { |p| $[not !{is-file $p} && not !{is-dir $p}] } $links
 
-for $broken { |p|
-    let target = !{file-info $p}[target]
-    echo "$p -> $target"
-}
+let broken = filter { |p|
+    $[not !{succeeds { resolve-path $p }} && not !{contains $waived $p}]
+} $links
+
+to-csv !{map { |p| return [link: $p, target: !{file-info $p}[target]] } $broken}

@@ -1,23 +1,28 @@
 #!/usr/bin/env ral
-# Footgun: `cp -u` is a GNU extension — BSD/macOS `cp` rejects `-u`, so
-# the "portable" script dies elsewhere — and even where it works it
-# copies silently, telling you nothing about whether it acted.  Here
-# the mtime test is explicit over typed records, and each branch says
-# what it did.
+# Footgun: `cp -u` is GNU-only (macOS `/bin/cp`: "illegal option -- u") and
+# exits 0 whether it copied or skipped, so a script that reports hand-rolls
+# `[[ $src -nt $dst ]]` — and bash's file tests are total: a missing or
+# unreadable source answers false, printing "up to date" and exiting 0 with
+# the destination left stale.  Here a stat that fails raises its errno.
 
-let [src, dst] = $ARGS
+let [from, dest] = $ARGS
 
-let newer = if !{is-file $dst} {
-    let s = !{file-info $src}[mtime]
-    let d = !{file-info $dst}[mtime]
-    return $[$s > $d]
+let info = !{file-info !{resolve-path $from}}
+
+let existing = if !{exists $dest} {
+    return `just !{file-info !{resolve-path $dest}}
 } else {
-    return true
+    return `none
 }
 
-if $newer {
-    cp $src $dst
-    echo "copied $src -> $dst"
+let stale = case $existing [
+    `none: { |_| return true },
+    `just: { |d| return $[$info[mtime] > $d[mtime]] }
+]
+
+if $stale {
+    cp $from $dest
+    echo "copied $from -> $dest ($info[size] bytes)"
 } else {
-    echo "up to date: $dst"
+    echo "up to date: $dest"
 }

@@ -1,13 +1,18 @@
 #!/usr/bin/env ral
-# Footgun: `grep -c` exits 1 when a file has zero matches, so under
-# `set -e` the `$(grep -c …)` substitution kills the whole run on the
-# first file that happens to match nothing — a count of 0 read as an
-# error.  Here matching is a Bool predicate; the count is `length` of a
-# filtered list, and 0 is just 0.
+# Footgun: `grep -c` exits 1 on zero matches, so under `set -e` the count
+# has to be written `n=$(grep -c -- "$pat" "$f") || n=0` — and that clause
+# also catches grep's exit 2, so `count-matches zzz have.txt gone.txt` counts
+# the missing file as zero, drops it from the report, and exits 0.  Here the
+# count is `length` of a filtered list, and an unreadable file raises.
 
 let [pat, ...files] = $ARGS
 
-for $files { |f|
-    let n = length !{filter { |l| re-match $pat $l } !{from-lines-list $f}}
-    echo "$f:$n"
-}
+let counted = filter { |c| return $[$c[n] > 0] } !{map { |f|
+    return [file: $f, n: !{length !{filter { |l| re-match $pat $l } !{from-lines-list $f}}}]
+} $files}
+
+for $counted { |c| echo "$c[file]:$c[n]" }
+
+let total = sum !{map { |c| return $c[n] } $counted}
+
+echo "total:$total"

@@ -1,8 +1,12 @@
 #!/usr/bin/env ral
-# Footgun: the hand-rolled `for i in {1..5}; do … done` retry ends in a
-# bare `exit 1`, discarding curl's real status and error — you learn it
-# failed, not why. `retry n { }` re-runs on failure and, once attempts
-# run out, re-raises the last error verbatim (status, message, line).
+# Footgun: the loop can only end in a hard-coded `exit 1`. `if curl …; then
+# exit 0; fi` *succeeds* when curl fails — no branch ran — so the obvious
+# `status=$?` after it reads 0 after five failures, and a caller of the
+# wrapper cannot tell 22 (HTTP 4xx) from 28 (timeout) from 6 (DNS).
+# `retry` re-raises the last error verbatim: curl's status becomes ral's.
 
 let [url] = $ARGS
-retry 5 { curl -fsS --max-time 10 $url }
+
+let fetch = { curl -fsS --max-time 10 -- $url }
+
+try { !$fetch } { |_| retry 4 { sleep 2 ; !$fetch } }

@@ -1,0 +1,59 @@
+#!/usr/bin/env ral
+# Footgun: `ps -Ao comm=` prints paths, so `grep -i Slack` counts a `watcher`
+# under slack-helpers/ that `pkill -i Slack` never signals, pkill kills an
+# unnamed `Slackbot`, `pgrep -i Slack | wc -l` still reports 0 alive, exit 0:
+# count, kill and check are three matchers.  Hardening means a pid census in
+# awk, killed by pid, recalled every time; ral counts and kills one typed list.
+
+if !{is-empty $ARGS} {
+    echo 'usage: mac-memory-reap.ral APP...' 1>&2
+    exit 2
+}
+
+let census = {
+    return !{map { |l|
+        let [pid, rss] = take 2 !{words $l}
+        return [
+            pid:  !{int $pid},
+            rss:  !{int $rss},
+            comm: !{re-replace '^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+' '' $l},
+        ]
+    } !{lines !{ps -Aco pid=,rss=,comm=}}}
+}
+
+let free-pct = {
+    let field = re-find-match 'free percentage: [0-9]+' !{memory_pressure}
+    return !{int !{re-find-match '[0-9]+' $field}}
+}
+
+let matching = { |snapshot app|
+    let needle = lower $app
+    return !{filter { |p| equal !{lower $p[comm]} $needle } $snapshot}
+}
+
+let before = !$free-pct
+echo "free before: $before%"
+
+let snapshot = !$census
+
+let counted = !{map { |app|
+    let procs = matching $snapshot $app
+    return [app: $app, procs: $procs, kb: !{sum !{map { |p| $p[rss] } $procs}}]
+} $ARGS}
+
+for $counted { |c| echo "$c[app]: !{length $c[procs]} procs, $[$c[kb] / 1024] MB" }
+
+let doomed = !{nub !{flat-map { |c| $c[procs] } $counted}}
+echo "reaped $[!{sum !{map { |p| $p[rss] } $doomed}} / 1024] MB total"
+
+for $doomed { |p| attempt { kill -TERM !{str $p[pid]} } }
+sleep 1
+
+let survivors = !{map { |p| $p[pid] } !$census}
+for $counted { |c|
+    let want = !{map { |p| $p[pid] } $c[procs]}
+    echo "$c[app]: !{length !{filter { |pid| contains $want $pid } $survivors}} still alive"
+}
+
+let after = !$free-pct
+echo "free after: $after%"

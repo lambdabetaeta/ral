@@ -1,15 +1,42 @@
 #!/usr/bin/env bash
-# Run a build step with the network denied, falling back to vendored deps.
+# Resolve a build's dependencies with the network denied, falling back to the
+# vendored lockfile.
 set -euo pipefail
 
-deps="$(mktemp)"
-trap 'rm -f "$deps"' EXIT
+registry="$1"
+lockfile="$2"
 
-echo 'building offline (network denied)...'
-# Drop into a fresh network namespace with no interfaces (needs unshare + userns).
-if unshare -rn bash -c 'curl -s https://registry.example.com/latest' > "$deps" 2>/dev/null; then
-    echo 'fetched remote deps'
-else
-    echo 'network denied — falling back to vendored deps'
+work="$(mktemp -d)"
+trap 'rm -rf -- "$work"' EXIT
+
+if ! unshare -rn true; then
+    echo 'cannot deny the network: unshare -rn is unavailable here' >&2
+    exit 1
 fi
-echo "compiled at $(date +%s)"
+
+rc=0
+unshare -rn curl -fsS -o "$work/fetched.csv" -- "$registry/latest" || rc=$?
+case "$rc" in
+    0)
+        echo 'resolved from the registry'
+        deps="$work/fetched.csv"
+        ;;
+    6 | 7)
+        echo 'network denied — resolved from the vendored lockfile'
+        deps="$lockfile"
+        ;;
+    *)
+        printf 'resolve step failed with status %s\n' "$rc" >&2
+        exit "$rc"
+        ;;
+esac
+
+tail -n +2 -- "$deps" > "$work/body.csv"
+LC_ALL=C sort -t, -k1,1 -- "$work/body.csv" > "$work/sorted.csv"
+
+pinned=0
+while IFS=, read -r name version; do
+    printf '  %s %s\n' "$name" "$version"
+    pinned=$(( pinned + 1 ))
+done < "$work/sorted.csv"
+printf '%s deps pinned\n' "$pinned"

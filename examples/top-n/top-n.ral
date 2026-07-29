@@ -1,17 +1,13 @@
 #!/usr/bin/env ral
-# Footgun: `sort -t, -k2 -rn | head -n N` keys by column position, so a
-# column inserted upstream silently ranks on the wrong field.  Here the
-# ordering key is `float` of a named field and `take` bounds the result.
+# Footgun: `sort … | head -n N` under `set -euo pipefail` — head leaves once
+# it has N lines, sort dies of SIGPIPE, and pipefail makes 141 the script's
+# status: right answer, failing exit, only once the input outgrows a pipe
+# buffer.  `sort -rn` on a non-numeric column scores every key 0 and exits 0.
+# Here `take` bounds the list with no pipe, and `float` refuses that column.
 
-let [path, col, n] = $ARGS
+let [path, field, n] = $ARGS
 
-let [hdr, ...rows] = !{from-lines-list $path}
-let header = re-split ',' $hdr
-let records = map { |line|
-    fold { |m p| let k = $p[0]; return [...$m, $k: $p[1]] } [:] !{zip $header !{re-split ',' $line}}
-} $rows
+let rows = !{from-csv < $path}
+let ranked = reverse !{sort-list-by { |r| return !{float $r[$field]} } $rows}
 
-let ranked = reverse !{sort-list-by { |r| return !{float $r[$col]} } $records}
-
-echo $hdr
-for !{take !{int $n} $ranked} { |r| echo !{intercalate ',' !{map { |c| return $r[$c] } $header}} }
+to-csv !{take !{int $n} $ranked}
