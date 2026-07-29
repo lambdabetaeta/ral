@@ -15,11 +15,11 @@
 //! - **`ComputeTopology`** — the processors and memory the grant asked for.
 //!   `AllowOvercommit` lets the host back the guest's memory lazily, so a
 //!   4 GiB session does not take 4 GiB of the user's RAM to sit idle.
-//! - **`Devices.Scsi`** — the two disks of `dev/docs/VM/SYNOD.md` §7, in the
-//!   order the guest's initramfs expects: the read-only rootfs at LUN 0, the
-//!   read-write session disk at LUN 1.  Hyper-V has no virtio, so these arrive
-//!   as SCSI devices (`/dev/sda`, `/dev/sdb`) rather than `/dev/vda`,
-//!   `/dev/vdb`, and both must be VHDs — [`super::vhd`] is why.
+//! - **`Devices.Scsi`** — the two disks, in the order the guest's initramfs
+//!   expects: the read-only rootfs at LUN 0, the read-write session disk at
+//!   LUN 1.  Hyper-V has no virtio, so these arrive as SCSI devices
+//!   (`/dev/sda`, `/dev/sdb`) rather than `/dev/vda`, `/dev/vdb`, and both
+//!   must be VHDs — [`super::vhd`] is why.
 //! - **`Devices.Plan9`** — the granted folder.  Hyper-V has no virtiofs, so the
 //!   folder is exported as a 9p2000.L share that the *host* serves on a vsock
 //!   port; the guest dials that port and mounts it at `/work`.  This is the
@@ -27,7 +27,7 @@
 //!   for every host path, so it is neither exotic nor synod's invention.
 //! - **`Devices.HvSocket`** — the control plane and the net wire, the guest's
 //!   only two ways out of the machine.  There is **no network adapter at
-//!   all** (§6): not a disabled one, not a filtered one — absent, so there is
+//!   all**: not a disabled one, not a filtered one — absent, so there is
 //!   nothing to misconfigure.  The net wire is a second `HvSocketService`
 //!   entry in the same table, dialled by the guest exactly as the control
 //!   plane is, and carries only IPv4 frames to the host's own user-mode
@@ -426,10 +426,9 @@ mod tests {
     /// The document carries exactly the machine the design describes: two
     /// disks in the guest's own order, one share, two socket services — the
     /// control plane and the net wire — one console, and, the load-bearing
-    /// absence, no network adapter at all (`dev/docs/VM/SYNOD.md` §6): the
-    /// net wire is a second `HvSocket` service, not a NIC.  This is the
-    /// Windows twin of the macOS backend's
-    /// `the_configuration_is_the_machine_the_design_describes`.
+    /// absence, no network adapter at all: the net wire is a second
+    /// `HvSocket` service, not a NIC.  This is the Windows twin of the macOS
+    /// backend's `the_configuration_is_the_machine_the_design_describes`.
     #[test]
     fn the_document_is_the_machine_the_design_describes() {
         let doc = json();

@@ -68,7 +68,7 @@ const BASE: &[(&str, &str)] = &[
     ("TERM", "dumb"),
     // The sole channel by which `core::engine::run_engine` (the same
     // multicall binary run here) learns it is running inside a guest, so
-    // it can install the process jail (§5) onto the shell it boots.
+    // it can install the process jail onto the shell it boots.
     ("RAL_GUEST", "1"),
 ];
 

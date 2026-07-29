@@ -1,11 +1,11 @@
 //! Disk images Hyper-V will open: raw bytes plus one 512-byte footer.
 //!
-//! `dev/docs/VM/SYNOD.md` §7's images are raw ext4 — a filesystem written to a
-//! file, nothing more — and Virtualization.framework attaches exactly that.
-//! Hyper-V will not: a `VirtualDisk` attachment must be a VHD or VHDX, and a
-//! raw image is refused at machine creation.  §2 anticipated this ("the same
-//! images wrapped as VHDX at install time"); what this module does is the
-//! cheaper half of that promise, and the honest one.
+//! The guest's images are raw ext4 — a filesystem written to a file, nothing
+//! more — and Virtualization.framework attaches exactly that.  Hyper-V will
+//! not: a `VirtualDisk` attachment must be a VHD or VHDX, and a raw image is
+//! refused at machine creation.  Wrapping the same images at install time was
+//! always the plan for Windows; what this module does is the cheaper half of
+//! that promise, and the honest one.
 //!
 //! # Why a *fixed* VHD, and why that is not a conversion
 //!
@@ -72,7 +72,7 @@ const VHD_EPOCH_OFFSET: u64 = 946_684_800;
 /// What it costs is what the session writes into it, because the disk is dynamic
 /// ([`create_session_vhd`]); what it declares is large because the guest's whole
 /// writable world lives on it — the overlay upper for every rootfs write, plus
-/// scratch (§7).
+/// scratch.
 pub(super) const SESSION_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// The rootfs as a path Hyper-V can attach, wrapping the shipped image into

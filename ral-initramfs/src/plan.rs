@@ -100,13 +100,13 @@ pub struct Disks {
 /// Every pair of device names a ral guest's disks may arrive under, in the
 /// order they are tried.
 ///
-/// One initramfs boots under both hypervisors of `dev/docs/VM/SYNOD.md` §2,
-/// and the axis they differ on is the *device model*, not the ISA: a
-/// Virtualization.framework machine attaches the two images as virtio-blk
-/// devices (`/dev/vda`, `/dev/vdb`), a Hyper-V machine as LUN 0 and LUN 1 of
-/// a SCSI controller (`/dev/sda`, `/dev/sdb`). Switching on the architecture
-/// at compile time would encode the wrong distinction and would still be a
-/// guess; asking the kernel what is actually there is neither.
+/// One initramfs boots under both hypervisors, and the axis they differ on is
+/// the *device model*, not the ISA: a Virtualization.framework machine
+/// attaches the two images as virtio-blk devices (`/dev/vda`, `/dev/vdb`), a
+/// Hyper-V machine as LUN 0 and LUN 1 of a SCSI controller (`/dev/sda`,
+/// `/dev/sdb`). Switching on the architecture at compile time would encode
+/// the wrong distinction and would still be a guess; asking the kernel what
+/// is actually there is neither.
 ///
 /// The order is a *preference*, not an exclusion: it says which pair wins if
 /// a machine somehow presents both, and nothing more.  virtio comes first
@@ -196,8 +196,7 @@ pub fn disk_mounts(disks: Disks) -> [Mount; 2] {
     ]
 }
 
-/// The overlay root itself: `dev/docs/VM/SYNOD.md` §7's composition, RO
-/// rootfs lower plus RW session upper.
+/// The overlay root itself: RO rootfs lower plus RW session upper.
 ///
 /// Mounted only once both disks above are up, which is why it is not part of
 /// [`disk_mounts`]. It names the two *mount points*, never the devices, so

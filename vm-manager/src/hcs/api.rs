@@ -2,9 +2,8 @@
 //!
 //! HCS is the interface Windows offers for creating a virtual machine without
 //! going through Hyper-V Manager: `computecore.dll` is what WSL 2 and Docker's
-//! Linux containers are built on, and `dev/docs/VM/SYNOD.md` §2 names it as
-//! synod's Windows route for exactly that reason — it is the road with traffic
-//! on it.
+//! Linux containers are built on, and it is synod's Windows route for exactly
+//! that reason — it is the road with traffic on it.
 //!
 //! # Why every entry point is resolved at runtime
 //!

@@ -7,14 +7,13 @@
 //! is no second place where authority is widened, so reading this file
 //! is reading the entire answer to "what can synod touch?".
 //!
-//! The answer is deliberately small.  `SYNOD.md` §8 lists eight security
-//! layers; the grant is layer 2, *topology as policy* — credentials,
-//! `$HOME`, and the user's other folders are out of reach by absence, not
-//! by a rule that could be argued with.  The network is the one axis
-//! topology cannot settle alone: §6 gives the guest a wire, and what it may
-//! say on it is a host-side allowlist, checked one layer out from this
-//! module (`design/two-enforcers`).  This module is the typed statement of
-//! the rest.
+//! The answer is deliberately small.  The grant is *topology as policy* —
+//! credentials, `$HOME`, and the user's other folders are out of reach by
+//! absence, not by a rule that could be argued with.  The network is the
+//! one axis topology cannot settle alone: the guest has a wire, and what
+//! it may say on it is a host-side allowlist, checked one layer out from
+//! this module (`design/two-enforcers`).  This module is the typed
+//! statement of the rest.
 //!
 //! ## Namespace
 //!
@@ -34,8 +33,8 @@ use ral_core::types::{Capabilities, EditorPolicy, ExecMap, ExecPolicy, FsPolicy,
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-/// The office toolbox of `SYNOD.md` §7, as an allowlist of *literal
-/// command names* — `ExecMap::allow_dirs`/`deny_dirs` stay empty.
+/// The image's office toolbox, as an allowlist of *literal command
+/// names* — `ExecMap::allow_dirs`/`deny_dirs` stay empty.
 ///
 /// [`ExecMap`] admits either bare-name literals or directory prefixes,
 /// and exarch's profiles lean hard on the directory half because a
@@ -43,27 +42,27 @@ use std::path::{Path, PathBuf};
 /// nvm and pyenv install binaries nobody can enumerate in advance, so
 /// the honest grant is "whatever lives under these roots".
 ///
-/// Synod's toolbox is the opposite shape.  §7 makes the image the
-/// package manager — anything installed mid-session is forgotten at the
-/// next reboot, so what the agent may *rely* on is exactly the rootfs:
-/// fixed, finite, and known before the user ever opens the app.  A directory
+/// Synod's toolbox is the opposite shape.  The image is the package
+/// manager — anything installed mid-session is forgotten at the next
+/// reboot, so what the agent may *rely* on is exactly the rootfs: fixed,
+/// finite, and known before the user ever opens the app.  A directory
 /// grant on `/usr/bin` would therefore hand the agent every package the
 /// *next* image build happens to add, silently widening the grant each
 /// time the rootfs is repackaged, and it would quietly re-admit exactly
-/// the compilers and build systems §7 cuts on purpose.  Naming each tool
-/// keeps the image and the grant two independent reviews, and leaves a
-/// policy a person can read start to finish.
+/// the compilers and build systems the image cuts on purpose.  Naming
+/// each tool keeps the image and the grant two independent reviews, and
+/// leaves a policy a person can read start to finish.
 ///
 /// Two things this list is not.  It is not a security boundary: `python3`
 /// is on it, and a Python process can spawn whatever the image contains,
 /// as can `find -exec`, so the map launders nothing.  The boundary is the
-/// VM wall and the absence of a network (§1, §8); the map is a statement
-/// of the *job*, and a tripwire when the agent wanders off it.  And it is
-/// not a shell: `sh`, `bash`, `env` and `xargs` are absent because ral is
-/// the shell here — the agent loops and pipes in ral, so a shell-out
-/// would buy nothing that ral does not already do.  That keeps the
-/// *common* path legible; it does not seal the map, and nothing here
-/// pretends it does.
+/// VM wall and the host process the guest's whole network runs in; the
+/// map is a statement of the *job*, and a tripwire when the agent wanders
+/// off it.  And it is not a shell: `sh`, `bash`, `env` and `xargs` are
+/// absent because ral is the shell here — the agent loops and pipes in
+/// ral, so a shell-out would buy nothing that ral does not already do.
+/// That keeps the *common* path legible; it does not seal the map, and
+/// nothing here pretends it does.
 const TOOLBOX: &[&str] = &[
     // Microsoft formats, end to end: read, write, convert.
     "soffice",
@@ -100,10 +99,10 @@ const TOOLBOX: &[&str] = &[
     "csvstat",
     // The language the document libraries live in (pandas, openpyxl,
     // python-docx, python-pptx, pypdf, Pillow — all preinstalled), and its
-    // package installer: a model-spawned `apt` fails outright on §5's
-    // fresh-UID jail, so `pip3 install --user` is the one install path the
-    // network's allowlist actually admits. `curl` rides beside it for
-    // whatever `pip3` cannot reach directly.
+    // package installer: a model-spawned `apt` fails outright on the fresh
+    // UID every spawn runs under, so `pip3 install --user` is the one
+    // install path the network's allowlist actually admits. `curl` rides
+    // beside it for whatever `pip3` cannot reach directly.
     "python3",
     "pip3",
     "curl",
@@ -311,18 +310,16 @@ impl Grant {
     ///   configuration so `git` and `cargo` behave, an office session has
     ///   no configuration to find; every byte it needs is in the folder it
     ///   was handed.
-    /// - **net** — on.  §6 gives the guest a `tun` whose only peer is a
-    ///   user-mode TCP/IP stack in the host, which terminates every
-    ///   connection and checks it against an allowlist before a byte
-    ///   crosses.  ral's `net` is a flat boolean with no endpoint
-    ///   vocabulary of its own, so the real narrowing is stated one layer
-    ///   out, in that host policy — `design/two-enforcers` applied
-    ///   outward, not reproduced here.  `Some(false)` would strip the
-    ///   network from every command this grant spawns
-    ///   (`core/src/sandbox/linux.rs`'s `bwrap --unshare-net`), silently
-    ///   deleting the capability §6 built — this is a correctness bit,
-    ///   not prose.
-    /// - **exec** — the toolbox of §7 and nothing else.  See [`TOOLBOX`]
+    /// - **net** — on.  The guest's `tun` has exactly one peer, a user-mode
+    ///   TCP/IP stack in the host, which terminates every connection and
+    ///   checks it against an allowlist before a byte crosses.  ral's `net`
+    ///   is a flat boolean with no endpoint vocabulary of its own, so the
+    ///   real narrowing is stated one layer out, in that host policy —
+    ///   `design/two-enforcers` applied outward, not reproduced here.
+    ///   `Some(false)` would strip the network from every command this grant
+    ///   spawns (`core/src/sandbox/linux.rs`'s `bwrap --unshare-net`),
+    ///   silently deleting that wire — this is a correctness bit, not prose.
+    /// - **exec** — the image's toolbox and nothing else.  See [`TOOLBOX`]
     ///   for why it is a list of names rather than of directories.
     /// - **editor / shell** — the ral editor is off in every mode: this
     ///   session has no terminal and no one at it who wants one.  `chdir`
@@ -335,8 +332,8 @@ impl Grant {
     /// root.  Synod's grant overlaps nothing: it is the user's documents,
     /// all of which the user handed over on purpose.  Carving a subtree
     /// back out would make the grant say something other than what the
-    /// user was shown, and the real control on *changes* is §4's safety
-    /// net — checkpoint, report, undo — not a hidden read barrier.
+    /// user was shown, and the real control on *changes* is the host-side
+    /// safety net — checkpoint, report, undo — not a hidden read barrier.
     ///
     /// `audit` is on: synod's entire product is a review surface, and a
     /// reported change is easier to trust beside the record of what the
@@ -544,7 +541,7 @@ mod tests {
     }
 
     /// The user's home is outside the grant even when the grant is a
-    /// folder inside it — the case §8's "topology as policy" is about.
+    /// folder inside it: unreachable by absence, not by a rule.
     #[test]
     fn the_home_folder_is_unreachable_from_inside_a_grant() {
         let (dir, grant) = granted("grant-home-unreachable");
@@ -574,8 +571,9 @@ mod tests {
                 sh.check_exec_args(tool, &[tool], &[])
                     .unwrap_or_else(|_| panic!("the office toolbox must admit {tool}"));
             }
-            // §7 cuts these on purpose: they exist to install software,
-            // and a network-less guest has nothing to install from.
+            // The image cuts these on purpose: what has to be built from
+            // source on a machine that forgets it at reboot is a delay,
+            // not a capability.
             for cut in ["cc", "gcc", "make", "cargo", "sh", "bash", "apt"] {
                 let path = format!("/usr/bin/{cut}");
                 assert!(
@@ -593,7 +591,7 @@ mod tests {
         assert_eq!(
             grant.capabilities().net,
             Some(true),
-            "SYNOD.md §6: the guest has a wire; `core/src/sandbox/linux.rs` turns \
+            "the guest has a wire; `core/src/sandbox/linux.rs` turns \
              Some(false) into `bwrap --unshare-net`, which would strip it back off"
         );
         let _ = std::fs::remove_dir_all(&dir);

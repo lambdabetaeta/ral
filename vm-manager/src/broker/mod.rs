@@ -66,8 +66,8 @@
 //! client; when the client asks it to stop, or exits, or crashes, the thread
 //! drops it and the machine is torn down with its session disk. Nothing has to
 //! be reaped later, and no bookkeeping outlives the process that owns it —
-//! which is the same law `dev/docs/VM/SYNOD.md` §3 gives the engine's own wire,
-//! applied one layer down.
+//! which is the same law the engine's own wire runs under, applied one layer
+//! down.
 
 use serde::{Deserialize, Serialize};
 
@@ -85,8 +85,8 @@ pub const PIPE: &str = r"\\.\pipe\synod-machine-broker";
 /// An installed service and a freshly built synod can differ in age — the MSI
 /// installs both, but a developer runs one from `target\debug` against the
 /// other from `Program Files` — so a mismatch has to be refused loudly rather
-/// than discovered as a strange field later. The same law
-/// `dev/docs/VM/SYNOD.md` §3 puts on the engine's own `Attach`.
+/// than discovered as a strange field later. The same law the engine's own
+/// `Attach` handshake runs under.
 ///
 /// 2, since [`Reply::Booted`] grew a second socket description: an installed
 /// service still speaking 1 would answer a boot with one wire, and a client

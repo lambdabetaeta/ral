@@ -13,9 +13,8 @@
 //!
 //! The second mode is not a lesser one: it is how a maintainer sees a boot fail.
 //! A service's `stdout` goes nowhere, so the guest's own console — the thing
-//! that says *why* a kernel did not come up (`dev/docs/VM/SYNOD.md` §1) — is
-//! invisible in the mode users run. Run it in a console to watch a machine, and
-//! as a service to serve one.
+//! that says *why* a kernel did not come up — is invisible in the mode users
+//! run. Run it in a console to watch a machine, and as a service to serve one.
 
 use std::ffi::c_void;
 

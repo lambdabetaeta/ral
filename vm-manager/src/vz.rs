@@ -10,9 +10,8 @@
 //! # The binding
 //!
 //! Virtualization.framework is an Objective-C API, so a Rust backend needs a
-//! binding.  `dev/docs/VM/SYNOD.md` §9 said to decide between a Swift shim and
-//! the `vz` crate "by trying".  Both candidates were tried on paper and one
-//! survives:
+//! binding.  The two candidates — a Swift shim and the `vz` crate — were to
+//! be decided between by trying.  Both were tried on paper and one survives:
 //!
 //! - **`objc2-virtualization`** (chosen) — part of the maintained `objc2`
 //!   framework-crate family, generated from the SDK headers.  It exposes every
@@ -40,22 +39,20 @@
 //!   from the [`BootArtifact`], with a command line that names the console
 //!   (`console=hvc0`, the virtio serial port below) and the guest-side session
 //!   settings `ral-daemon` reads: the virtiofs `WORKSPACE_TAG`, the
-//!   control-plane `CONTROL_PORT`, and the host's wall clock
-//!   (`dev/docs/VM/SYNOD.md` §7);
+//!   control-plane `CONTROL_PORT`, and the host's wall clock;
 //! - two `VZVirtioBlockDeviceConfiguration`s — the read-only rootfs image
 //!   first (the guest's `/dev/vda`) and the read-write session image second
-//!   (`/dev/vdb`), which the guest's initramfs stacks into the overlay root
-//!   `dev/docs/VM/SYNOD.md` §7 describes;
+//!   (`/dev/vdb`), which the guest's initramfs stacks into the overlay root;
 //! - a `VZVirtioFileSystemDeviceConfiguration` sharing the granted folder
 //!   under `WORKSPACE_TAG`, built from a `VZSingleDirectoryShare` over a
 //!   `VZSharedDirectory` carrying the spec's `read_only` flag, so read-only
 //!   is the mount's law and not a matter of policy;
 //! - a `VZVirtioSocketDevice` multiplexing both wires — `CONTROL_PORT` and
 //!   `NET_PORT` — and **no network device at all**: the guest's only way off
-//!   the machine is that one socket, port-routed (`dev/docs/VM/SYNOD.md` §6);
+//!   the machine is that one socket, port-routed;
 //! - a `VZVirtioConsoleDeviceSerialPortConfiguration` writing the guest's
 //!   console to the host's standard output, which is where the daemon's log
-//!   lines surface (`dev/docs/VM/SYNOD.md` §1);
+//!   lines surface;
 //! - `CPUCount` and `memorySize` from the spec, each clamped into the range
 //!   `VZVirtualMachineConfiguration` permits.
 //!
@@ -88,11 +85,10 @@
 //! connections are proof the guest booted far enough to run its init and open
 //! its net wire; only then does [`Vz::boot`] return.  Neither accepted
 //! connection is spent on the readiness signal and discarded — each *is* a
-//! stream a later stage speaks over (the control-plane frame protocol of
-//! `dev/docs/VM/SYNOD.md` §3, and the net wire of §6), so each host end is
-//! duplicated out of the framework's connection object and carried back to
-//! the caller on the [`Guest`]'s [`Wires`](crate::Wires), to outlive the
-//! object VZ may close.
+//! stream a later stage speaks over (the control-plane frame protocol, and
+//! the net wire's packet stream), so each host end is duplicated out of the
+//! framework's connection object and carried back to the caller on the
+//! [`Guest`]'s [`Wires`](crate::Wires), to outlive the object VZ may close.
 //!
 //! # Entitlement and signing — what fails without them, and how
 //!
@@ -167,8 +163,7 @@ const CONTROL_PORT: u32 = 1729;
 /// The size of the per-session read-write disk, in bytes (8 GiB, sparse).
 ///
 /// The image is created empty and grows on demand; the guest's initramfs
-/// formats it and uses it as the overlay upper layer plus scratch
-/// (`dev/docs/VM/SYNOD.md` §7).
+/// formats it and uses it as the overlay upper layer plus scratch.
 const SESSION_IMAGE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// How long [`Vz::boot`] waits for the guest to dial the control plane before
@@ -399,7 +394,7 @@ fn build_configuration(plan: &Plan) -> Result<Retained<VZVirtualMachineConfigura
         let socket = VZVirtioSocketDeviceConfiguration::new();
         config.setSocketDevices(&NSArray::from_slice(&[&**socket]));
         // Network devices are left empty on purpose: the guest has no way out
-        // but the socket above (`dev/docs/VM/SYNOD.md` §6).
+        // but the socket above.
 
         // The guest console, piped to the host's stdout where the daemon's
         // log lines belong.
@@ -671,8 +666,8 @@ fn run(plan: &Plan, ready: &SyncSender<Result<crate::Wires, Error>>, commands: &
 /// guest to dial both wires.
 ///
 /// On success this yields the host ends of the guest's control-plane and net
-/// connections — the streams `dev/docs/VM/SYNOD.md` §3 and §6 describe — for
-/// the caller to keep.
+/// connections — the frame protocol's stream and the packet pump's — for the
+/// caller to keep.
 ///
 /// # Errors
 /// Returns macOS's start error, or a sentence naming whichever wire never
@@ -918,9 +913,9 @@ define_class!(
             _device: &VZVirtioSocketDevice,
         ) -> bool {
             // The accepted `VZVirtioSocketConnection` is the stream the
-            // control-plane frame protocol (`dev/docs/VM/SYNOD.md` §3) runs
-            // over, so its descriptor is duplicated before anything else:
-            // VZ may close the connection object once this delegate returns.
+            // control-plane frame protocol runs over, so its descriptor is
+            // duplicated before anything else: VZ may close the connection
+            // object once this delegate returns.
             //
             // SAFETY: `fileDescriptor` reads the connection's live descriptor,
             // valid for the duration of this delegate call; `borrow_raw`

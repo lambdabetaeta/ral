@@ -1,8 +1,8 @@
 //! The control plane: one `AF_HYPERV` socket, and who is allowed to use it.
 //!
-//! `dev/docs/VM/SYNOD.md` §2 fixes the arrangement: a Hyper-V socket on the
-//! host, an ordinary `AF_VSOCK` socket in the guest, and the `hv_sock` driver
-//! joining them.  The guest side of that is already written and unchanged —
+//! The arrangement is fixed: a Hyper-V socket on the host, an ordinary
+//! `AF_VSOCK` socket in the guest, and the `hv_sock` driver joining them.
+//! The guest side of that is already written and unchanged —
 //! `ral-daemon` dials `VMADDR_CID_HOST` on the port the kernel command line
 //! named, exactly as it does under Virtualization.framework, because the Linux
 //! vsock API does not vary with the hypervisor underneath.  What differs is

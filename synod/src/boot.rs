@@ -1,5 +1,5 @@
 //! The boot media this build of synod ships, and the one-time work of
-//! readying it (`dev/docs/VM/SYNOD.md` §7).
+//! readying it.
 //!
 //! The kernel and initramfs ship uncompressed and boot in place.  The
 //! rootfs — a two-gigabyte read-only Ubuntu userland — ships as a zstd

@@ -1,4 +1,4 @@
-//! The one guest-wide kernel setting the engine's jail (§5) depends on:
+//! The one guest-wide kernel setting the engine's spawn jail depends on:
 //! unprivileged user namespaces off.
 //!
 //! The jail drops a spawned command to a fresh, unprivileged uid inside

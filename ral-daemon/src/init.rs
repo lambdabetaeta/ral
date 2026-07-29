@@ -96,8 +96,8 @@ pub fn serve() -> Result<Infallible, String> {
         filesystem.apply()?;
     }
     // Which of the two the host chose is worth one line in its own log: it is
-    // the difference between the two hypervisors of §2, and the first thing
-    // to know when the workspace misbehaves.
+    // the difference between the two hypervisors, and the first thing to know
+    // when the workspace misbehaves.
     let export = match &boot.workspace {
         Export::Virtiofs { tag } => format!("virtiofs tag `{tag}`"),
         Export::Plan9 { name, port } => {
@@ -295,8 +295,8 @@ fn halt(engine: Option<Pid>, pump: Option<Pid>, why: &str) -> Result<Infallible,
 
 /// Say what the kernel actually handed us as `/`.
 ///
-/// §7 asks the stage before this one to stack a read-only rootfs image under
-/// a per-session upper layer; whether it did is not something an init should
+/// The stage before this one stacks a read-only rootfs image under a
+/// per-session upper layer; whether it did is not something an init should
 /// silently assume, and not something it should refuse to boot over either
 /// — the engine still has its workspace, and refusing would be a policy
 /// judgement this daemon does not make.  So it is reported, at second zero,
@@ -306,11 +306,11 @@ fn announce_root() {
         Err(err) => eprintln!("ral-daemon: could not read /proc/mounts: {err}"),
         Ok(table) => match mounts::root_filesystem(&table) {
             Some(root) if root.is_session_overlay() => {
-                eprintln!("ral-daemon: / is the session overlay, writable as §7 expects");
+                eprintln!("ral-daemon: / is the session overlay, writable as it should be");
             }
             Some(root) => eprintln!(
-                "ral-daemon: / is {} and {}, not the session overlay §7 asks the boot stage to \
-                 assemble; writes outside {} will fail or vanish with the machine",
+                "ral-daemon: / is {} and {}, not the session overlay the boot stage should have \
+                 assembled; writes outside {} will fail or vanish with the machine",
                 root.fstype,
                 if root.writable {
                     "writable"

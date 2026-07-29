@@ -9,12 +9,11 @@
 //!
 //! # What this crate does, stated plainly
 //!
-//! `dev/docs/VM/SYNOD.md` §4 has the agent work in the granted folder
-//! itself — shared into a guest under a hardware boundary — with a
-//! checkpoint before the job and conflict-checked undo after it.  That
-//! safety net is host-side product code (`synod::workspace`), and none of
-//! this crate's business: a machine here only *places* the folder and
-//! starts the guest around it.
+//! The agent works in the granted folder itself — shared into a guest
+//! under a hardware boundary — with a checkpoint before the job and
+//! conflict-checked undo after it.  That safety net is host-side product
+//! code (`synod::workspace`), and none of this crate's business: a machine
+//! here only *places* the folder and starts the guest around it.
 //!
 //! # A wall, not a policy
 //!
@@ -163,9 +162,9 @@ impl MachineSpec {
 /// Not part of a [`MachineSpec`] — a spec says *what folder, how much
 /// machine*, not *which image* — and not this crate's to find: the media
 /// ships with the application, so the application hands it to [`detect`].
-/// The kernel and initramfs are `boot.img` of `dev/docs/VM/SYNOD.md` §7,
-/// versioned with the application; the rootfs is the pinned, read-only
-/// Ubuntu userland, downloaded and checksummed.
+/// The kernel and initramfs are `boot.img`, versioned with the application;
+/// the rootfs is the pinned, read-only Ubuntu userland, downloaded and
+/// checksummed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BootArtifact {
     /// The Linux kernel to boot directly.
@@ -267,9 +266,9 @@ pub struct GuestLink {
 
 /// The host ends of a machine's two wires.
 ///
-/// [`Wires::control`] is the control-plane stream the frame protocol of
-/// `dev/docs/VM/SYNOD.md` §3 runs over; [`Wires::net`] is the guest's peer
-/// for the net wire's user-mode TCP/IP stack.
+/// [`Wires::control`] is the control-plane stream the engine's frame
+/// protocol runs over; [`Wires::net`] is the guest's peer for the net
+/// wire's user-mode TCP/IP stack.
 ///
 /// One struct rather than two fields on [`Machine`] because a machine hands
 /// both over at once, from the same accepted-at-boot pair, and a caller that

@@ -1,6 +1,5 @@
 //! The guest's one network interface — a `tun` whose only peer is the host
-//! stack on the other end of the net vsock wire (`crate::packet`,
-//! `dev/docs/VM/SYNOD.md` §6).
+//! stack on the other end of the net vsock wire (`crate::packet`).
 //!
 //! Same split as [`crate::sysctl`] and [`crate::mounts`]: [`plan`] turns the
 //! host's [`boot::Net`] into an [`Interface`], a pure fact checkable without

@@ -1,11 +1,10 @@
 //! ral-daemon — PID 1 inside a synod or exarch guest.
 //!
-//! The design record (`dev/docs/VM/SYNOD.md` §1) gives this program one
-//! line: *"Tiny init: mount, clock sync, spawn/supervise the engine, reap
-//! zombies, console→host log. Not in the data path."*  Its boringness is the
-//! design.  It holds no ral semantics and no authority policy; it decides
-//! nothing about what the agent may do, only that there is a Linux userland
-//! for the engine to run in and somebody to bury the dead.
+//! One line of job: mount, clock sync, spawn/supervise the engine, reap
+//! zombies, console→host log — and never in the protocol's data path.  Its
+//! boringness is the design.  It holds no ral semantics and no authority
+//! policy; it decides nothing about what the agent may do, only that there is
+//! a Linux userland for the engine to run in and somebody to bury the dead.
 //!
 //! ## The boot narrative
 //!
@@ -16,9 +15,10 @@
 //!    configuration is read from `/proc/cmdline`.
 //! 3. **Read the kernel command line** into a [`boot::Boot`] — the only
 //!    thing the host has told the guest at this point.
-//! 4. **Report what `/` actually is.**  The root overlay of §7 is assembled
-//!    by the stage before this one (see `mounts`); the daemon names what
-//!    it was handed rather than assuming.
+//! 4. **Report what `/` actually is.**  The root — a read-only rootfs image
+//!    under a per-session upper layer — is assembled by the stage before
+//!    this one (see `mounts`); the daemon names what it was handed rather
+//!    than assuming.
 //! 5. **Take the host's time.**  The guest has no real-time clock worth
 //!    trusting; the host wrote its own on the command line and the daemon
 //!    applies it to `CLOCK_REALTIME`.  It is set once, at boot: there is no
@@ -28,10 +28,10 @@
 //!    second clock authority down here.
 //! 6. **Mount everything else**, in the order `mounts::plan` fixes — which,
 //!    where the host runs a hypervisor with no virtiofs, includes dialling
-//!    the host for the workspace's own 9p transport (§2).  Whether it does is
-//!    a fact the command line carried, not one the guest guesses at.
-//! 7. **Apply the guest-wide sysctls** (`sysctl::plan`) the engine's jail
-//!    (§5) depends on — user namespaces off — before any external code gets
+//!    the host for the workspace's own 9p transport.  Whether it does is a
+//!    fact the command line carried, not one the guest guesses at.
+//! 7. **Apply the guest-wide sysctls** (`sysctl::plan`) the engine's spawn
+//!    jail depends on — user namespaces off — before any external code gets
 //!    a chance to run.
 //! 8. **Listen for the end.**  PID 1 has no default signal dispositions, so
 //!    the handlers for "the host wants this machine off" are installed by

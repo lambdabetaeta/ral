@@ -1,6 +1,6 @@
 //! The guest's console, on a named pipe.
 //!
-//! `dev/docs/VM/SYNOD.md` §1 gives the daemon a console→host log, and that log
+//! The daemon's one reporting channel is a console→host log, and that log
 //! is the only thing that speaks during the seconds before a guest can speak
 //! for itself.  Without it a boot that fails — a kernel that cannot find its
 //! disks, an initramfs that refuses, a daemon that will not accept the command

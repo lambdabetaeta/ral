@@ -129,7 +129,7 @@ let indent = { |n s|
     intercalate "\n" $indented
 }
 
-# Error handling — `try` itself is a control-operator keyword (§10.1).
+# Error handling — `try` itself is a control-operator keyword, not a builtin.
 ## Retry body up to n times on failure.
 let retry = { |n body|
     try $body { |err|

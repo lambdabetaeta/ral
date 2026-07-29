@@ -19,15 +19,14 @@
 //!
 //! ## Why the guest is told how its workspace arrives
 //!
-//! `dev/docs/VM/SYNOD.md` §2 gives synod two lifecycle backends over one
-//! guest, and they do not agree about shared filesystems.  A
-//! Virtualization.framework machine can hand a live directory to the guest,
-//! so the granted folder arrives as a virtiofs export and the guest mounts
-//! it by the tag the host published.  A Hyper-V machine has no virtiofs at
-//! all, so the host runs a 9p (9p2000.L) server and the guest reaches it by
-//! opening an `AF_VSOCK` stream to the host on a port the host names — the
-//! same arrangement Microsoft's own LCOW guest agent uses
-//! (`microsoft/hcsshim`, `internal/guest/storage/plan9`).
+//! Synod runs two lifecycle backends over one guest, and they do not agree
+//! about shared filesystems.  A Virtualization.framework machine can hand a
+//! live directory to the guest, so the granted folder arrives as a virtiofs
+//! export and the guest mounts it by the tag the host published.  A Hyper-V
+//! machine has no virtiofs at all, so the host runs a 9p (9p2000.L) server
+//! and the guest reaches it by opening an `AF_VSOCK` stream to the host on a
+//! port the host names — the same arrangement Microsoft's own LCOW guest
+//! agent uses (`microsoft/hcsshim`, `internal/guest/storage/plan9`).
 //!
 //! Which of the two is in force is therefore a property of the *hypervisor
 //! the host chose*, and the host is the only party that knows it before the
@@ -40,14 +39,13 @@
 //! ## Three vsock ports, which are not the same port
 //!
 //! [`Boot::port`] is the *control plane*: where the daemon dials the host to
-//! get the engine's protocol socket (`dev/docs/VM/SYNOD.md` §3).  The port
-//! inside [`Export::Plan9`] is the *workspace transport*: where the host's
-//! 9p server answers.  The port inside [`Boot::net`] is the *net wire*:
-//! where the host's user-mode TCP/IP stack answers.  They are written by the
-//! same host, all three are host-side `AF_VSOCK` ports, and confusing any
-//! two of them yields a boot in which one plane speaks another's protocol at
-//! it — so they are named apart everywhere, `ral.port`, `ral.plan9`, and
-//! `ral.net`.
+//! get the engine's protocol socket.  The port inside [`Export::Plan9`] is
+//! the *workspace transport*: where the host's 9p server answers.  The port
+//! inside [`Boot::net`] is the *net wire*: where the host's user-mode TCP/IP
+//! stack answers.  They are written by the same host, all three are
+//! host-side `AF_VSOCK` ports, and confusing any two of them yields a boot in
+//! which one plane speaks another's protocol at it — so they are named apart
+//! everywhere, `ral.port`, `ral.plan9`, and `ral.net`.
 
 use std::net::Ipv4Addr;
 

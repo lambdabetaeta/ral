@@ -6,7 +6,8 @@
 //! reuses exarch's provider transport, agent exchange driver, and card bus
 //! wholesale, and differs in exactly five places:
 //!
-//! - **the grant** ([`grant`]) — one folder, nothing else, no network;
+//! - **the grant** ([`grant`]) — one folder, nothing else, and a network the
+//!   host terminates and filters;
 //! - **the prompt** ([`prompt`]) — an office persona over an office toolbox;
 //! - **the safety net** ([`workspace`]) — the folder is recorded before a
 //!   job, the changes reported after it, and anything can be put back;

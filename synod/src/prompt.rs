@@ -49,8 +49,8 @@ const HOUSE_RULES: &str = "house-rules.md";
 ///    speak of it.  The host path appears nowhere: a model handed one
 ///    will use it in programs, and inside the guest it names nothing.
 ///    Edits land in the user's real documents at
-///    once; `SYNOD.md` §4 has no accept gate by design, and its safety net
-///    — checkpoint before, undo after — is the host's business, never the
+///    once; there is no accept gate by design, and the safety net —
+///    checkpoint before, undo after — is the host's business, never the
 ///    model's.  So this section must never suggest a change is pending
 ///    review or reversible: a model that believes in a gate is a model
 ///    that overwrites originals cheerfully.
@@ -154,11 +154,11 @@ mod tests {
     ];
 
     /// Wording that would tell the model its work is staged behind a review
-    /// step.  `SYNOD.md` §4 deliberately has no such gate — the safety net
-    /// is the host's, and a model that believes its work is staged or
-    /// reversible will overwrite an original expecting someone to catch the
-    /// mistake.  This list is the guard: the prompt is written so that none
-    /// of these phrases can appear in it.
+    /// step.  There deliberately is no such gate — the safety net is the
+    /// host's, and a model that believes its work is staged or reversible
+    /// will overwrite an original expecting someone to catch the mistake.
+    /// This list is the guard: the prompt is written so that none of these
+    /// phrases can appear in it.
     const GATE_CLAIMS: [&str; 6] = [
         "tracked change",
         "accept the change",

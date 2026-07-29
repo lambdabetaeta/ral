@@ -15,12 +15,12 @@
 //!
 //! ## What is *not* here: the root filesystem
 //!
-//! §7 of the design record composes the guest's root from a read-only rootfs
-//! image (the lower layer) and the per-session disk (the upper layer).  That
-//! composition is deliberately absent from this daemon.  Assembling the root
-//! is, by construction, the work of the stage that runs *before* a final root
-//! exists — the initramfs, which mounts the two images, stacks the overlay,
-//! and `switch_root`s into it.  A PID 1 that did it itself would have to
+//! The guest's root is composed from a read-only rootfs image (the lower
+//! layer) and the per-session disk (the upper layer).  That composition is
+//! deliberately absent from this daemon.  Assembling the root is, by
+//! construction, the work of the stage that runs *before* a final root exists
+//! — the initramfs, which mounts the two images, stacks the overlay, and
+//! `switch_root`s into it.  A PID 1 that did it itself would have to
 //! change root from under its own feet, carrying its `/proc`, its open
 //! descriptors, and the path to the engine binary across the move: precisely
 //! the sort of cleverness an init must not contain.
@@ -33,13 +33,12 @@
 //!
 //! ## The workspace, whose shape the hypervisor decides
 //!
-//! Everything above is the same under either backend of
-//! `dev/docs/VM/SYNOD.md` §2; the granted folder is not.  It arrives either
-//! as a virtiofs export the guest mounts by tag, or — where there is no
-//! virtiofs — as a 9p share the host serves on a vsock port, and
-//! [`crate::boot::Export`] is how the guest learns which.  Both end as one
-//! mount at [`WORK`], with the same flags, so the difference is confined to
-//! the mount's *options*: that is what [`Options`] is for.
+//! Everything above is the same under either hypervisor backend; the granted
+//! folder is not.  It arrives either as a virtiofs export the guest mounts by
+//! tag, or — where there is no virtiofs — as a 9p share the host serves on a
+//! vsock port, and [`crate::boot::Export`] is how the guest learns which.
+//! Both end as one mount at [`WORK`], with the same flags, so the difference
+//! is confined to the mount's *options*: that is what [`Options`] is for.
 //!
 //! The 9p form is the one place where a mount cannot be fully written down
 //! in advance, because its options must name a file descriptor that does not
@@ -257,7 +256,7 @@ pub fn procfs() -> Mount {
 /// hold no programs.  `/tmp` and `/work` stay executable on purpose: office
 /// and build tooling writes a script and runs it, and a guest that forbade
 /// that would be lying about being a Linux userland.  Confining what a
-/// *spawned* process may do is the engine's jail (§5), not a mount flag.
+/// *spawned* process may do is the engine's jail, not a mount flag.
 pub fn plan(boot: &Boot) -> Vec<Mount> {
     let kernel = MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC;
     let scratch = MountFlags::NOSUID | MountFlags::NODEV;
@@ -365,8 +364,8 @@ pub struct Root {
 
 impl Root {
     /// True when the root is the writable overlay the boot stage was
-    /// supposed to assemble (§7): a read-only rootfs image under a
-    /// per-session upper layer.
+    /// supposed to assemble: a read-only rootfs image under a per-session
+    /// upper layer.
     pub fn is_session_overlay(&self) -> bool {
         self.fstype == "overlay" && self.writable
     }
@@ -587,8 +586,8 @@ mod tests {
         assert_eq!(root.fstype, "ext4");
     }
 
-    /// A writable root that is not an overlay is still not the arrangement
-    /// §7 asks for: rootfs writes would land on the image, not the session.
+    /// A writable root that is not an overlay is still the wrong
+    /// arrangement: rootfs writes would land on the image, not the session.
     #[test]
     fn a_writable_non_overlay_root_is_not_a_session_overlay() {
         let root = root_filesystem("/dev/vda / ext4 rw,relatime 0 0\n").expect("a root");

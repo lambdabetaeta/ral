@@ -1,17 +1,20 @@
 //! The guest's one way off the machine, and the only `socket`/`connect` in
 //! this daemon.
 //!
-//! The guest has no network device at all (`dev/docs/VM/SYNOD.md` §6): every
-//! channel it has is an `AF_VSOCK` stream to `VMADDR_CID_HOST` on a port the
-//! host named on the kernel command line.  Two of them exist, and they are
-//! alike in everything except what happens to the connection afterwards:
+//! Neither hypervisor gives this guest a network adapter: every channel it
+//! has is an `AF_VSOCK` stream to `VMADDR_CID_HOST` on a port the host named
+//! on the kernel command line.  Three of them exist, and they are alike in
+//! everything except what happens to the connection afterwards:
 //!
 //! - the **control plane** ([`crate::engine::control_plane`]) hands its
-//!   connection to the engine as file descriptor 3, where the frame protocol
-//!   of `dev/docs/VM/SYNOD.md` §3 runs over it;
+//!   connection to the engine as file descriptor 3, where the host's typed
+//!   frame protocol runs over it;
 //! - the **workspace transport** ([`crate::mounts::Options::Plan9Dial`],
 //!   when the host is a Hyper-V one with no virtiofs) hands its connection to
-//!   the kernel, as the `trans=fd` transport of a 9p mount.
+//!   the kernel, as the `trans=fd` transport of a 9p mount;
+//! - the **net wire** ([`crate::pump`]) keeps its connection in the packet
+//!   pump, which carries the `tun`'s IP to and from the user-mode TCP/IP
+//!   stack that is the guest's entire network.
 //!
 //! In both cases the *guest* dials and the host listens, never the reverse.
 //! That asymmetry is worth stating because it is what makes the daemon so
@@ -19,7 +22,7 @@
 //! there is no accept loop, no readiness handshake, and no listening port
 //! inside the guest for anything to reach.
 //!
-//! The one thing here is therefore [`dial_host`], factored out of the two
+//! The one thing here is therefore [`dial_host`], factored out of the three
 //! callers so that the unsafe pair of syscalls is written once and read once.
 
 use std::io;

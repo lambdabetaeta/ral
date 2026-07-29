@@ -1,8 +1,8 @@
 //! Hyper-V through the Host Compute System API — the Windows hardware backend.
 //!
-//! This is the Windows half of `dev/docs/VM/SYNOD.md` §2's two-backend design,
-//! and it is deliberately the same *machine* as `vm-manager/src/vz.rs`'s, assembled out
-//! of the parts Windows has instead of the parts macOS has:
+//! This is the Windows half of the two-backend design, and it is deliberately
+//! the same *machine* as `vm-manager/src/vz.rs`'s, assembled out of the parts
+//! Windows has instead of the parts macOS has:
 //!
 //! | The guest needs | macOS gives it | Windows gives it |
 //! |---|---|---|
@@ -15,7 +15,7 @@
 //!
 //! Neither backend configures a network adapter: the net wire is a second
 //! socket, not a NIC, and the guest's TCP/IP stack lives entirely on the
-//! host side of it (`dev/docs/VM/SYNOD.md` §6).
+//! host side of it.
 //!
 //! The guest cannot tell the difference, and that is the point: the same
 //! `ral-daemon` and the same engine boot under both, because every difference
@@ -27,9 +27,9 @@
 //! Nothing here needs administrative rights at *run* time, but HCS itself is
 //! gated: the compute service serves only administrators and members of the
 //! **Hyper-V Administrators** group.  That is a deployment fact, not a bug —
-//! §6 already has the university's IT department administering synod's policy —
-//! and it is checked before a folder is granted rather than discovered halfway
-//! into a session, which is what [`available`] is for.
+//! a managed fleet already has its IT department deploying synod's policy file
+//! by Group Policy — and it is checked before a folder is granted rather than
+//! discovered halfway into a session, which is what [`available`] is for.
 //!
 //! # Why there is no worker thread here
 //!
@@ -529,8 +529,8 @@ impl Drop for Guest {
 /// its own means, and a verbatim prefix there is at best redundant and at worst
 /// a path with four characters too many.  So it is stripped: `\\?\C:\x` becomes
 /// `C:\x`, and a verbatim UNC path (`\\?\UNC\server\share`, which is what a
-/// granted folder on a departmental file share canonicalises to —
-/// `dev/docs/VM/SYNOD.md` §4 expects those) becomes `\\server\share` again.
+/// granted folder on a departmental file share canonicalises to, and those are
+/// as common as folders on local disk) becomes `\\server\share` again.
 /// Anything else is already plain and passes through untouched.
 fn plain(path: PathBuf) -> PathBuf {
     let text = path.to_string_lossy();
