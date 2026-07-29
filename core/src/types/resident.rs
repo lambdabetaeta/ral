@@ -1,6 +1,6 @@
 //! The resident signature: the chapter-agnostic interface every session-lived,
 //! capability-reachable thing answers, so a fold over them — the REPL's `jobs`
-//! listing, its exit-time survivor warning — is written once rather than once
+//! listing, its exit-time teardown notice — is written once rather than once
 //! per chapter. Each chapter answers through its own representation, never
 //! restructuring to match a shared one; capabilities especially stay
 //! unflattened, [`Resident::capability_kind`] naming a kind and never a value.

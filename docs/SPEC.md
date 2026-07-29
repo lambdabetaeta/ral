@@ -2045,14 +2045,13 @@ bound is legibility, not time.  The description is mandatory,
 non-empty, and single-line, and becomes the entry's command label in
 listings.  A service still counts toward the cap (live work is live
 work) and dies by `cancel`, by the host discarding its session
-context, or with the process.  The first two are designed edges and
-hold; the third is *designed intent, not a guarantee*.  Host teardown
-raises the cancel flag and the worker signals its child when it next
-observes it, which races the exiting process — so a service may
-briefly outlive the host, and a caller must not read either outcome
-as specified.  `service` is durable *within* a session and cannot be
-made durable beyond one: work whose survival must not depend on that
-race, in either direction, is `detach` (§13.7).
+context, or with the process.  All three hold: teardown raises the
+cancel flag and then waits, bounded, for the worker to act on it —
+signalling its child, which is what kills the tree — so a service
+does not outlive the host, and a wedged one that ignores the whole
+window is the only exception a caller may meet.  `service` is durable
+*within* a session and cannot be made durable beyond one: work that
+must survive the host is `detach` (§13.7).
 
 Availability mirrors `watch` (§13.5)
 host-wise: an agent host, whose lease would otherwise reap long work,
@@ -2723,11 +2722,13 @@ WUNTRACED)`.  `bg [N]` resumes a stopped job in the background.
 shell exit, surviving jobs are sent SIGTERM, given five seconds, then
 SIGKILLed.  `fg`, `bg`, and `disown` are pgid-only: naming a worker's
 `wN` fails, with the error pointing at the worker analogues — `await`
-is a worker's `fg`, `cancel` its kill.  A still-running worker has no
-pgid to sweep and dies with the process, so before the exit sweep the
-REPL names the survivors once on stderr (`ral: N workers still
-running and will not survive this exit: …`); the warning never gates
-or delays exit.
+is a worker's `fg`, `cancel` its kill.  A still-running worker is
+cancelled as the session's shell drops, which then waits — briefly,
+and bounded — for each worker to act on it, so a worker's external
+child and its grandchildren die with the session rather than
+reparenting to PID 1.  The REPL names those workers once on stderr
+first (`ral: taking down N still-running workers: …`); the notice
+never gates or delays exit.
 
 What ral deliberately does *not* do, contrary to bash:
 

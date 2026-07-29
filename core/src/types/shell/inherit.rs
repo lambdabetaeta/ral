@@ -231,6 +231,7 @@ impl Shell {
         let detach = self.local.detach.clone();
         let mooring = Mooring::for_worker(parent, &root, surface);
         let worker_cancel = mooring.cancel.as_scope().clone();
+        let live = self.local.workers.live_ticket();
         let handle = std::thread::spawn(move || {
             let mut child = Self::from_captured(&scopes);
             child.mobile.context = context;
@@ -245,7 +246,12 @@ impl Shell {
             // Shared, not owned: this worker's shell dropping must not cancel
             // the parent's whole registry.
             child.local.workers_owned = false;
-            f(&mooring, &mut child)
+            let out = f(&mooring, &mut child);
+            // The ticket goes last, after the body and its shell, so a
+            // teardown's drain outlasts this frame's children rather than
+            // merely seeing the cancel land.
+            drop((child, live));
+            out
         });
         (handle, worker_cancel)
     }

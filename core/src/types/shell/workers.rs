@@ -23,6 +23,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+/// How long a teardown waits for cancelled workers to die. A child's wait loop
+/// sees a cancel within 100ms and grants its group a 500ms SIGTERM grace before
+/// SIGKILL (`runtime::command::child`), so anything that will die dies well
+/// inside this; expiry means a wedged worker, and exiting anyway is the lesser
+/// harm.
+const TEARDOWN_GRACE: Duration = Duration::from_millis(1500);
+
 /// Stable identifier for a registered worker, minted from a process-global
 /// counter rather than a per-registry one, so ids never collide across
 /// shells.
@@ -110,7 +117,7 @@ pub struct WorkerEntry {
 }
 
 /// The worker chapter's [`Resident`] facets, which the REPL's `jobs` fold and
-/// its exit-time survivor warning read rather than hand-formatting a
+/// its exit-time teardown notice read rather than hand-formatting a
 /// `WorkerEntry` themselves.
 impl Resident for WorkerEntry {
     fn designator(&self) -> String {
@@ -170,6 +177,12 @@ struct RegistryInner {
     /// The armed settled-entry retention, in ral calls. `None` — no host armed
     /// it, as in the REPL — retains settled entries indefinitely.
     retention: Option<u64>,
+    /// One clone per live worker thread, each held by the thread itself for its
+    /// whole life; the strong count is therefore the session's live-thread
+    /// census and the only thing [`WorkerRegistry::drain`] can honestly wait on.
+    /// The roster cannot serve: `cancel` takes an entry out the instant it
+    /// signals, while the thread it signalled is still tearing its child down.
+    live: Arc<()>,
 }
 
 /// Cheap-clonable, per-[`Shell`](super::Shell) directory of every worker
@@ -350,11 +363,34 @@ impl WorkerRegistry {
         self.0.lock().unwrap().entries.len()
     }
 
-    /// `/clear`'s arm: cancel every entry's scope and reset the roster,
-    /// pending notices included, so a rebuilt context carries neither stale
-    /// workers nor stale reap events. Explicit destruction outranks every
-    /// lease, the durable class included, so nothing here consults
-    /// [`LeaseClass`]. The cancels fire only after the guard drops.
+    /// A live-thread ticket, held by the worker thread's own frame for as long
+    /// as it runs. [`Shell::spawn_thread`](super::Shell::spawn_thread) takes one
+    /// per worker, so no spawn site can forget to.
+    pub(crate) fn live_ticket(&self) -> Arc<()> {
+        self.0.lock().unwrap().live.clone()
+    }
+
+    /// Wait, up to [`TEARDOWN_GRACE`], for every live worker thread to end. A
+    /// cancel lands at the worker's next observation point, and a host that
+    /// exits in the same breath outruns it — orphaning the child under PID 1.
+    fn drain(&self) {
+        let deadline = std::time::Instant::now() + TEARDOWN_GRACE;
+        while std::time::Instant::now() < deadline {
+            if Arc::strong_count(&self.0.lock().unwrap().live) == 1 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Destruction — `/clear`'s arm and the session teardown's: cancel every
+    /// entry's scope, reset the roster, pending notices included, then wait for
+    /// the cancels to land. Explicit destruction outranks every lease, the
+    /// durable class included, so nothing here consults [`LeaseClass`]. The
+    /// cancels fire only after the guard drops.
+    ///
+    /// An empty roster still drains: a worker `cancel`led moments ago left the
+    /// roster when it was signalled, not when its child died.
     pub(crate) fn cancel_all(&self) -> usize {
         let (entries, _notices) = {
             let mut inner = self.0.lock().unwrap();
@@ -371,6 +407,7 @@ impl WorkerRegistry {
                 .cancel
                 .cancel(crate::process::CancelCause::Explicit);
         }
+        self.drain();
         entries.len()
     }
 }

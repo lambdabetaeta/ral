@@ -265,16 +265,15 @@ impl Drop for Session {
     /// `Session`, so a crash mid-iteration neither orphans a stopped process
     /// group nor drops the session's history.
     ///
-    /// Warn, then sweep: a still-running worker handle has no pgid to sweep —
-    /// it dies with the process — so it is named here, once, before the pgid
-    /// groups are taken down.  Naming never gates or delays the exit it
-    /// announces.
+    /// Name, then sweep: a still-running worker is announced here, once, and
+    /// taken down — external children and all — when the transport's shell
+    /// drops.  Naming never gates or delays the exit it announces.
     fn drop(&mut self) {
         self.transport.detach();
         self.frontend.save_history();
         let workers = self.transport.shell_mut().shell.workers();
-        if let Some(warning) = super::host_handlers::survivor_warning(&workers) {
-            eprintln!("{warning}");
+        if let Some(notice) = super::host_handlers::teardown_notice(&workers) {
+            eprintln!("{notice}");
         }
         // A panic that poisons the JobTable still leaves it structurally
         // valid for a best-effort SIGTERM/SIGKILL sweep; recover the guard

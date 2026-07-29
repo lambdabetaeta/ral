@@ -101,13 +101,11 @@ fn render_jobs(jt: &crate::jobs::JobTable, workers: &[WorkerEntry]) -> Vec<Strin
     lines
 }
 
-/// Compose the shell-exit survivor warning: one compact line naming every
-/// worker handle still `Running` when the REPL tears down, or `None` when none
-/// are — POSIX's "you have stopped jobs" register for the population that dies
-/// with the process rather than surviving an exit sweep. Called before
-/// [`crate::jobs::JobTable::cleanup`] so a worker is named first, swept (with
-/// the pgid groups) second; never gates or delays exit.
-pub(crate) fn survivor_warning(workers: &[WorkerEntry]) -> Option<String> {
+/// Compose the shell-exit notice: one compact line naming every worker handle
+/// still `Running` when the REPL tears down, or `None` when none are — POSIX's
+/// "you have stopped jobs" register for the worker population. It announces the
+/// sweep the session's shell performs as it drops, never performs one itself.
+pub(crate) fn teardown_notice(workers: &[WorkerEntry]) -> Option<String> {
     let running: Vec<String> = workers
         .iter()
         .filter(|entry| *entry.handle.state.lock().unwrap() == HandleState::Running)
@@ -117,7 +115,7 @@ pub(crate) fn survivor_warning(workers: &[WorkerEntry]) -> Option<String> {
         return None;
     }
     Some(format!(
-        "ral: {} worker{} still running and will not survive this exit: {}",
+        "ral: taking down {} still-running worker{}: {}",
         running.len(),
         if running.len() == 1 { "" } else { "s" },
         running.join(", ")
@@ -306,7 +304,7 @@ mod tests {
 
     /// A minimal registered-worker fixture, `running` toggling
     /// [`HandleState::Running`] vs [`HandleState::Completed`] — enough to
-    /// exercise [`render_jobs`] and [`survivor_warning`] without a real
+    /// exercise [`render_jobs`] and [`teardown_notice`] without a real
     /// `spawn`.  Building `HandleInner` field by field is legitimate here:
     /// core's representation is sealed against exarch, not against a sibling
     /// crate, and core's own concurrency tests construct it the same way.
@@ -363,21 +361,21 @@ mod tests {
         );
     }
 
-    /// `survivor_warning` names every still-running worker in one line and is
+    /// `teardown_notice` names every still-running worker in one line and is
     /// `None` when the registry holds none.
     #[test]
-    fn survivor_warning_names_running_workers_only() {
+    fn teardown_notice_names_running_workers_only() {
         assert_eq!(
-            survivor_warning(&[]),
+            teardown_notice(&[]),
             None,
-            "nothing running, nothing to warn"
+            "nothing running, nothing to announce"
         );
 
         let settled_only = vec![fake_worker(1, "spawn { done }", false)];
         assert_eq!(
-            survivor_warning(&settled_only),
+            teardown_notice(&settled_only),
             None,
-            "a settled-but-unclaimed worker is not a survivor"
+            "a settled-but-unclaimed worker is nothing to take down"
         );
 
         let mixed = vec![
@@ -385,17 +383,17 @@ mod tests {
             fake_worker(9, "service { daemon }", true),
             fake_worker(1, "spawn { done }", false),
         ];
-        let warning = survivor_warning(&mixed).expect("two running workers must be named");
-        assert!(warning.contains("2 workers"), "got: {warning}");
+        let notice = teardown_notice(&mixed).expect("two running workers must be named");
+        assert!(notice.contains("2 still-running workers"), "got: {notice}");
         assert!(
-            warning.contains("[w2] spawn { still_going }"),
-            "got: {warning}"
+            notice.contains("[w2] spawn { still_going }"),
+            "got: {notice}"
         );
         assert!(
-            warning.contains("[w9] service { daemon }"),
-            "got: {warning}"
+            notice.contains("[w9] service { daemon }"),
+            "got: {notice}"
         );
-        assert!(!warning.contains("[w1]"), "the settled worker is not named");
+        assert!(!notice.contains("[w1]"), "the settled worker is not named");
     }
 
     /// `fg`/`bg`/`disown` are strictly pgid-typed: an id that resolves no

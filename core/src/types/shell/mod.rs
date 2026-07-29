@@ -199,9 +199,11 @@ impl Default for LocalState {
     }
 }
 
-/// A session's workers die with the session's shell.  Cancelling on drop
-/// covers every teardown path — an agent's ordinary end, a `/clear`'s shell
-/// replacement, a wire session's detach — without a host call site.
+/// A session's workers die with the session's shell, external children and
+/// their grandchildren included: [`WorkerRegistry::cancel_all`] cancels, then
+/// waits for the kills to land.  Dropping covers every teardown path — an
+/// agent's ordinary end, a `/clear`'s shell replacement, a wire session's
+/// detach, a batch script's last line — without a host call site.
 impl Drop for LocalState {
     fn drop(&mut self) {
         if self.workers_owned {
