@@ -13,7 +13,7 @@ pub use shell::repl::ReplScratch;
 mod capability;
 pub use capability::{
     Capabilities, EditorPolicy, ExecMap, ExecPolicy, ExecProjection, FsPolicy, FsProjection,
-    GrantStack, Join, Meet, SandboxBindSpec, SandboxProjection, ShellPolicy,
+    FsRules, GrantStack, Join, Meet, SandboxProjection, ShellPolicy,
 };
 
 mod value;

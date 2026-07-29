@@ -10,8 +10,8 @@
 //! Seatbelt has no per-address network rules, so `SandboxProjection::net` is
 //! one allow/deny bit rather than an endpoint list.
 
-use crate::path::{match_variants_list, proper_ancestors};
-use crate::types::{ExecProjection, FsProjection, SandboxBindSpec, SandboxProjection};
+use crate::path::{Rendered, render_paths, rendered_ancestors};
+use crate::types::{ExecProjection, FsProjection, FsRules, SandboxProjection};
 use std::ffi::{CStr, CString};
 use std::fmt::Write;
 use std::os::raw::{c_char, c_int};
@@ -64,25 +64,29 @@ const BASE_PROFILE: &str = include_str!("macos-base.sbpl");
 
 pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String> {
     let mut lines: Vec<String> = vec![BASE_PROFILE.to_string()];
-    let bind_spec = policy.bind_spec();
-    let deny_paths = match &policy.fs {
-        FsProjection::Restricted(_) => emit_fs_restricted(&mut lines, &bind_spec)?,
+    let rendered = policy.rendered()?;
+    match &rendered.fs {
+        FsProjection::Restricted(rules) => emit_fs_restricted(&mut lines, rules)?,
         FsProjection::Unrestricted => {
             // Pass fs through, so an exec-only grant can enter the sandbox
             // for exec gating without clamping the agent's cwd or HOME.
             lines.push("(allow file-read*)".to_string());
             lines.push("(allow file-write*)".to_string());
-            Vec::new()
         }
-    };
+    }
 
-    emit_exec_rules(&mut lines, &policy.exec)?;
+    emit_exec_rules(&mut lines, &rendered.exec)?;
 
     // After the broad allows: Seatbelt is last-match-wins.  `subpath` so a
     // denied directory covers everything under it; `file-link` (Seatbelt
     // has no `file-link*`) blocks `link(2)` against the source, closing the
     // hole where a second name elsewhere would let writes bypass the deny.
-    for path in &deny_paths {
+    for path in rendered
+        .fs
+        .rules()
+        .map(|r| r.deny_paths.as_slice())
+        .unwrap_or_default()
+    {
         let escaped = escape_path(path);
         lines.push(format!("(deny file-read* (subpath \"{escaped}\"))"));
         lines.push(format!("(deny file-write* (subpath \"{escaped}\"))"));
@@ -93,10 +97,15 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
     // unlinking every entry inside it.  Unconditional on existence, like the
     // deny paths above: an ancestor absent now can be created later under the
     // write prefix that covers it.
-    for dir in match_variants_list(&bind_spec.pinned_dirs)? {
+    for dir in rendered
+        .fs
+        .rules()
+        .map(|r| r.pinned_dirs.as_slice())
+        .unwrap_or_default()
+    {
         lines.push(format!(
             "(deny file-write-unlink (literal \"{}\"))",
-            escape_path(&dir)
+            escape_path(dir)
         ));
     }
     if policy.net {
@@ -107,39 +116,31 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
 }
 
 /// Emit the allow rules and ancestor-metadata carve-outs for a restricted fs
-/// bind spec, returning the expanded `deny_paths` for the caller to layer
-/// after every allow (Seatbelt is last-match-wins).
+/// projection.  The denies the caller layers after them are its own to emit —
+/// Seatbelt is last-match-wins, so they must follow every allow in the
+/// profile, not just these.
 ///
-/// `Err` when a prefix's firmlink expansion is not valid UTF-8, which
-/// [`crate::path::match_variants_list`] refuses rather than approximates.
-fn emit_fs_restricted(
-    lines: &mut Vec<String>,
-    bind_spec: &SandboxBindSpec,
-) -> Result<Vec<String>, String> {
-    let read_prefixes = match_variants_list(&bind_spec.read_prefixes)?;
-    let write_prefixes = match_variants_list(&bind_spec.write_prefixes)?;
-    let deny_paths = match_variants_list(&bind_spec.deny_paths)?;
+/// `Err` when the system paths' own name-class expansion is not valid UTF-8,
+/// which [`render_paths`] refuses rather than approximates.
+fn emit_fs_restricted(lines: &mut Vec<String>, rules: &FsRules<Rendered>) -> Result<(), String> {
     let system_read_paths = existing_system_read_paths()?;
-    emit_ancestor_metadata(lines, system_read_paths.iter().map(String::as_str));
-    emit_read_subpaths(lines, system_read_paths.iter().map(String::as_str));
+    emit_ancestor_metadata(lines, &system_read_paths);
+    emit_read_subpaths(lines, &system_read_paths);
     // Seatbelt checks parent metadata during lookup; without these, traversal
     // and posix_spawn report ENOENT even where the final subpath is allowed.
     emit_ancestor_metadata(
         lines,
-        read_prefixes
-            .iter()
-            .chain(write_prefixes.iter())
-            .map(String::as_str),
+        rules.read_prefixes.iter().chain(&rules.write_prefixes),
     );
-    emit_read_subpaths(lines, read_prefixes.iter().map(String::as_str));
-    emit_read_subpaths(lines, write_prefixes.iter().map(String::as_str));
-    for prefix in &write_prefixes {
+    emit_read_subpaths(lines, &rules.read_prefixes);
+    emit_read_subpaths(lines, &rules.write_prefixes);
+    for prefix in &rules.write_prefixes {
         lines.push(format!(
             "(allow file-write* (subpath \"{}\"))",
             escape_path(prefix)
         ));
     }
-    Ok(deny_paths)
+    Ok(())
 }
 
 /// Render the `process-exec` rules.  `Unrestricted` emits a wildcard so an
@@ -155,7 +156,11 @@ fn emit_fs_restricted(
 /// what lies *outside* the granted dirs.  `deny_basenames` still vetoes a name
 /// inside one, so a denied command cannot be re-execed through the covering
 /// subpath by an interpreter the gate never sees.
-fn emit_exec_rules(lines: &mut Vec<String>, exec: &ExecProjection) -> Result<(), String> {
+///
+/// `Err` when the platform base's or the self-exec path's own name-class
+/// expansion is not valid UTF-8, which [`render_paths`] refuses rather than
+/// approximates; the projection's own sets arrive already rendered.
+fn emit_exec_rules(lines: &mut Vec<String>, exec: &ExecProjection<Rendered>) -> Result<(), String> {
     match exec {
         ExecProjection::Unrestricted => {
             lines.push("(allow process-exec)".to_string());
@@ -171,20 +176,21 @@ fn emit_exec_rules(lines: &mut Vec<String>, exec: &ExecProjection) -> Result<(),
             // Apple's real binaries live under CommandLineTools / Xcode, so a
             // chain like `gcc → cc1 → as → ld` would die at the first
             // descendant exec when `[exec]` names only `/usr/bin/`.
-            let user_dirs = match_variants_list(allow_dirs)?;
             let system_dirs = existing_system_exec_paths()?;
-            let deny_dirs = match_variants_list(deny_dirs)?;
             // Bundled tools dispatch through `--ral-bundled-tool`, which
             // re-execs the running binary.  Admitting our own path
             // unconditionally spares every policy from naming wherever the
             // embedding binary lives; the per-tool admission gate is `vet` in
-            // `core/src/runtime/command/vet.rs`.
-            let self_exec = super::reexec::self_exec_path_string();
+            // `core/src/runtime/command/vet.rs`.  It renders like everything
+            // else: it is a path outside the projection, so nothing has
+            // expanded it, and execve would present `/tmp/x` as
+            // `/private/tmp/x` against a literal that named only the former.
+            let self_exec = render_paths(super::reexec::self_exec_path_string().as_slice())?;
             let mut clauses = String::new();
-            for path in allow_paths.iter().chain(self_exec.as_ref()) {
+            for path in allow_paths.iter().chain(&self_exec) {
                 let _ = write!(clauses, "\n  (literal \"{}\")", escape_path(path));
             }
-            for dir in user_dirs.iter().chain(system_dirs.iter()) {
+            for dir in allow_dirs.iter().chain(&system_dirs) {
                 let _ = write!(clauses, "\n  (subpath \"{}\")", escape_path(dir));
             }
             // An operand-less `(allow file-read* process-exec)` is an
@@ -195,13 +201,7 @@ fn emit_exec_rules(lines: &mut Vec<String>, exec: &ExecProjection) -> Result<(),
             }
             // posix_spawn walks the parent directories and Seatbelt gates
             // each lookup independently of the allow on the binary itself.
-            emit_ancestor_metadata(
-                lines,
-                allow_paths
-                    .iter()
-                    .map(String::as_str)
-                    .chain(self_exec.as_deref()),
-            );
+            emit_ancestor_metadata(lines, allow_paths.iter().chain(&self_exec));
             // After the broad allow: last-match-wins.  Both ops are denied —
             // read alone would let the exec through to fail later, exec
             // alone would leave the binary readable.
@@ -210,7 +210,7 @@ fn emit_exec_rules(lines: &mut Vec<String>, exec: &ExecProjection) -> Result<(),
                 lines.push(format!("(deny file-read* (literal \"{escaped}\"))"));
                 lines.push(format!("(deny process-exec (literal \"{escaped}\"))"));
             }
-            for dir in &deny_dirs {
+            for dir in deny_dirs {
                 let escaped = escape_path(dir);
                 lines.push(format!("(deny file-read* (subpath \"{escaped}\"))"));
                 lines.push(format!("(deny process-exec (subpath \"{escaped}\"))"));
@@ -269,14 +269,14 @@ fn system_paths() -> &'static [(&'static str, SystemAccess)] {
 /// Host-existing system paths admitted for read — every entry, since `Exec`
 /// implies read.  Each expands to its firmlink-equivalent forms (`/private/etc`
 /// → `[/etc, /private/etc]`), matching whichever spelling Seatbelt presents.
-fn existing_system_read_paths() -> Result<Vec<String>, String> {
-    match_variants_list(&filter_existing(system_paths().iter().map(|(p, _)| *p)))
+fn existing_system_read_paths() -> Result<Vec<Rendered>, String> {
+    render_paths(&filter_existing(system_paths().iter().map(|(p, _)| *p)))
 }
 
 /// The `Exec`-tagged subset, folded into the combined exec rule alongside
 /// the user's admits when exec is `Restricted`.
-fn existing_system_exec_paths() -> Result<Vec<String>, String> {
-    match_variants_list(&filter_existing(
+fn existing_system_exec_paths() -> Result<Vec<Rendered>, String> {
+    render_paths(&filter_existing(
         system_paths()
             .iter()
             .filter(|(_, k)| *k == SystemAccess::Exec)
@@ -292,7 +292,7 @@ fn filter_existing<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> 
         .collect()
 }
 
-fn emit_read_subpaths<'a>(lines: &mut Vec<String>, paths: impl IntoIterator<Item = &'a str>) {
+fn emit_read_subpaths<'a>(lines: &mut Vec<String>, paths: impl IntoIterator<Item = &'a Rendered>) {
     for path in paths {
         lines.push(format!(
             "(allow file-read* (subpath \"{}\"))",
@@ -301,8 +301,18 @@ fn emit_read_subpaths<'a>(lines: &mut Vec<String>, paths: impl IntoIterator<Item
     }
 }
 
-fn emit_ancestor_metadata<'a>(lines: &mut Vec<String>, paths: impl IntoIterator<Item = &'a str>) {
-    for ancestor in proper_ancestors(paths) {
+/// Expand-then-ancestors, and deliberately not the ancestors-then-expand of
+/// `FsRules::pinned_dirs`: these are read-metadata allowances for the lookup
+/// chains Seatbelt actually walks, so they are owed to the *rendered* names —
+/// including the system paths and the self-exec literal, which the projection
+/// never carried and so `traverse` never saw.  A pin is the other thing
+/// entirely, a write veto derived in surface space; folding the two would
+/// conflate them.
+fn emit_ancestor_metadata<'a>(
+    lines: &mut Vec<String>,
+    paths: impl IntoIterator<Item = &'a Rendered>,
+) {
+    for ancestor in rendered_ancestors(paths) {
         lines.push(format!(
             "(allow file-read-metadata (literal \"{}\"))",
             escape_path(&ancestor)
@@ -310,8 +320,13 @@ fn emit_ancestor_metadata<'a>(lines: &mut Vec<String>, paths: impl IntoIterator<
     }
 }
 
-fn escape_path(path: &str) -> String {
-    path.replace('\\', "\\\\").replace('"', "\\\"")
+/// Quote a rendered name for an SBPL string literal.  Taking [`Rendered`] and
+/// not `&str` is what makes it impossible to splice a path into a rule without
+/// first passing it through [`render_paths`]: every emitter in this file
+/// funnels here, so the only `&str` items left are the denied basenames, which
+/// are final components rather than paths and go to [`escape_regex`].
+fn escape_path(path: &Rendered) -> String {
+    path.as_str().replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Escape a command name for an SBPL `(regex …)` pattern, so a name like
@@ -340,7 +355,7 @@ unsafe extern "C" {
 mod tests {
     use super::build_profile;
     use crate::path::proper_ancestors;
-    use crate::types::{ExecProjection, FsPolicy, FsProjection, SandboxProjection};
+    use crate::types::{ExecProjection, FsProjection, FsRules, SandboxProjection};
 
     #[test]
     fn mac_shell_profile_allows_general_exec_when_unrestricted() {
@@ -495,6 +510,77 @@ mod tests {
         );
     }
 
+    /// `/tmp` firmlinks to `/private/tmp`, and execve names the canonical
+    /// spelling: a literal exec rule left raw would gate a path the kernel
+    /// never presents, so both admit and veto expand like the dir rules do.
+    #[test]
+    fn mac_profile_expands_firmlinks_in_literal_exec_rules() {
+        let policy = SandboxProjection {
+            exec: ExecProjection::Restricted {
+                allow_paths: vec!["/tmp/tool".into()],
+                allow_dirs: Vec::new(),
+                deny_paths: vec!["/tmp/evil".into()],
+                deny_dirs: Vec::new(),
+                deny_basenames: Vec::new(),
+            },
+            ..SandboxProjection::default()
+        };
+        let profile = build_profile(&policy).unwrap();
+        for form in ["/tmp/tool", "/private/tmp/tool"] {
+            assert!(
+                profile.contains(&format!("(literal \"{form}\")")),
+                "admit for {form} missing:\n{profile}"
+            );
+        }
+        for form in ["/tmp/evil", "/private/tmp/evil"] {
+            assert!(
+                profile.contains(&format!("(deny process-exec (literal \"{form}\"))")),
+                "exec deny for {form} missing:\n{profile}"
+            );
+            assert!(
+                profile.contains(&format!("(deny file-read* (literal \"{form}\"))")),
+                "read deny for {form} missing:\n{profile}"
+            );
+        }
+    }
+
+    /// The self-exec admit is the one exec path the projection never carries,
+    /// so it was the one literal chained on *after* expansion and emitted raw:
+    /// a ral binary running from `/tmp/…` was admitted under a spelling execve
+    /// never presents, and its own bundled-tool re-exec died under a
+    /// restricted profile.  It now comes through the same door as everything
+    /// else, so every form of it must appear.
+    ///
+    /// `register_sandbox_self` pins this test binary, which is the only handle
+    /// on what the profile will name; where that path touches no firmlink and
+    /// no symlink its class is a singleton and the loop degenerates to "the
+    /// literal is present".  The compile-time guarantee — `escape_path` takes
+    /// only [`Rendered`] — is what holds on such a host.
+    #[test]
+    fn mac_profile_expands_firmlinks_in_self_exec_literal() {
+        super::super::reexec::register_sandbox_self();
+        let self_exec = super::super::reexec::self_exec_path_string()
+            .expect("registration pins this test binary");
+        let policy = SandboxProjection {
+            exec: ExecProjection::Restricted {
+                allow_paths: Vec::new(),
+                allow_dirs: Vec::new(),
+                deny_paths: Vec::new(),
+                deny_dirs: Vec::new(),
+                deny_basenames: Vec::new(),
+            },
+            ..SandboxProjection::default()
+        };
+        let profile = build_profile(&policy).unwrap();
+        for form in crate::path::render_paths(&[self_exec]).unwrap() {
+            assert!(
+                profile.contains(&format!("(literal \"{}\")", form.as_str())),
+                "self-exec admit for {} missing:\n{profile}",
+                form.as_str()
+            );
+        }
+    }
+
     #[test]
     fn mac_profile_denies_network_when_disabled() {
         let profile = build_profile(&SandboxProjection {
@@ -557,7 +643,7 @@ mod tests {
         // System read paths are emitted explicitly only when fs is
         // Restricted; otherwise the wildcard `(allow file-read*)` covers them.
         let policy = SandboxProjection {
-            fs: FsProjection::Restricted(FsPolicy::default()),
+            fs: FsProjection::Restricted(FsRules::default()),
             ..SandboxProjection::default()
         };
         let profile = build_profile(&policy).unwrap();
@@ -578,16 +664,13 @@ mod tests {
 
     #[test]
     fn mac_profile_emits_deny_rules_for_deny_paths() {
-        use crate::types::FsPolicy;
         // /tmp firmlinks to /private/tmp, so both spellings must appear, and
         // each of the three denies must follow its covering allow.
         let policy = SandboxProjection {
-            fs: FsProjection::Restricted(FsPolicy {
-                read_prefixes: Vec::new(),
-                write_prefixes: vec![crate::path::NormalizedPrefix::from_surface("/tmp/work")],
-                deny_paths: vec![crate::path::NormalizedPrefix::from_surface(
-                    "/tmp/work/.exarch.toml",
-                )],
+            fs: FsProjection::Restricted(FsRules {
+                write_prefixes: vec!["/tmp/work".into()],
+                deny_paths: vec!["/tmp/work/.exarch.toml".into()],
+                ..FsRules::default()
             }),
             net: true,
             exec: ExecProjection::default(),
@@ -616,12 +699,10 @@ mod tests {
     #[test]
     fn mac_profile_emits_pin_rules_for_deny_ancestors() {
         let policy = SandboxProjection {
-            fs: FsProjection::Restricted(FsPolicy {
-                read_prefixes: Vec::new(),
-                write_prefixes: vec![crate::path::NormalizedPrefix::from_surface("/tmp/work")],
-                deny_paths: vec![crate::path::NormalizedPrefix::from_surface(
-                    "/tmp/work/.ssh/id_rsa",
-                )],
+            fs: FsProjection::Restricted(FsRules {
+                write_prefixes: vec!["/tmp/work".into()],
+                deny_paths: vec!["/tmp/work/.ssh/id_rsa".into()],
+                ..FsRules::default()
             }),
             net: true,
             exec: ExecProjection::default(),

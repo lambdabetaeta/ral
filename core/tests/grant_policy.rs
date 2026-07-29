@@ -224,7 +224,12 @@ fn sandbox_projection_intersects_path_components() {
     let projection = shell.with_capabilities(outer, |shell| {
         shell.with_capabilities(inner, |shell| shell.sandbox_projection().unwrap())
     });
-    assert!(projection.bind_spec().read_prefixes.is_empty());
+    assert!(
+        projection
+            .fs
+            .rules()
+            .is_some_and(|r| r.read_prefixes.is_empty())
+    );
 }
 
 #[cfg(unix)]
@@ -262,17 +267,9 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
     let projection = shell.with_capabilities(outer, |shell| {
         shell.with_capabilities(inner, |shell| shell.sandbox_projection().unwrap())
     });
-    let bind_spec = projection.bind_spec();
-    assert!(
-        !bind_spec
-            .read_prefixes
-            .contains(&link.to_string_lossy().into_owned())
-    );
-    assert!(
-        bind_spec
-            .read_prefixes
-            .contains(&inner_dir.to_string_lossy().into_owned())
-    );
+    let read = &projection.fs.rules().expect("fs restricted").read_prefixes;
+    assert!(!read.contains(&link.to_string_lossy().into_owned()));
+    assert!(read.contains(&inner_dir.to_string_lossy().into_owned()));
 }
 
 /// The bare/absolute identity duality is closed on the veto side: a

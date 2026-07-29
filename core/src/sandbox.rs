@@ -112,19 +112,23 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
     }
     #[cfg(target_os = "linux")]
     {
-        let cmd = linux::make_command_with_policy(
+        match linux::make_command_with_policy(
             "/bin/true",
             &[],
             policy,
             None,
             launch::Ownership::Kept,
-        );
-        let mut line = String::from("bwrap");
-        for arg in cmd.get_args() {
-            line.push(' ');
-            line.push_str(&arg.to_string_lossy());
+        ) {
+            Ok(cmd) => {
+                let mut line = String::from("bwrap");
+                for arg in cmd.get_args() {
+                    line.push(' ');
+                    line.push_str(&arg.to_string_lossy());
+                }
+                eprintln!("--- bwrap argv ---\n{line}\n--- end bwrap argv ---");
+            }
+            Err(e) => eprintln!("--- bwrap argv error ---\n{e}"),
         }
-        eprintln!("--- bwrap argv ---\n{line}\n--- end bwrap argv ---");
     }
     #[cfg(windows)]
     {
@@ -389,7 +393,7 @@ mod tests {
     fn strip_policy_arg_extracts_json_and_preserves_other_args() {
         let (policy, args) = strip_policy_arg(&[
             "--sandbox-projection".into(),
-            r#"{"fs":{"kind":"restricted","policy":{"read_prefixes":[{"surface":"/tmp","resolved":"/tmp","namespace":"Host"}],"write_prefixes":[]}},"net":true}"#.into(),
+            r#"{"fs":{"kind":"restricted","rules":{"read_prefixes":["/tmp"]}},"net":true}"#.into(),
             "-c".into(),
             "echo hi".into(),
         ])
@@ -397,18 +401,9 @@ mod tests {
         assert_eq!(
             policy,
             Some(SandboxProjection {
-                fs: crate::types::FsProjection::Restricted(crate::types::FsPolicy {
-                    // The wire deserialises verbatim, without re-folding, so
-                    // mint the expectation the same way: `from_surface` would
-                    // fold `/tmp` to `\tmp` on Windows.
-                    read_prefixes: vec![
-                        serde_json::from_str::<crate::path::NormalizedPrefix>(
-                            r#"{"surface":"/tmp","resolved":"/tmp","namespace":"Host"}"#,
-                        )
-                        .unwrap(),
-                    ],
-                    write_prefixes: Vec::new(),
-                    deny_paths: Vec::new(),
+                fs: crate::types::FsProjection::Restricted(crate::types::FsRules {
+                    read_prefixes: vec!["/tmp".to_string()],
+                    ..crate::types::FsRules::default()
                 }),
                 net: true,
                 exec: crate::types::ExecProjection::default(),

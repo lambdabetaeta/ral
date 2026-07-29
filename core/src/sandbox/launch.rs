@@ -139,13 +139,14 @@ fn linux_sandboxed_command(
 ) -> Settled<Command> {
     let cwd = shell.cwd().to_string_lossy().into_owned();
     match target {
-        LaunchTarget::Host { program } => Ok(super::linux::make_command_with_policy(
+        LaunchTarget::Host { program } => super::linux::make_command_with_policy(
             program,
             args,
             projection,
             Some(cwd.as_str()),
             ownership,
-        )),
+        )
+        .map_err(|e| Break::Error(Error::new(e, 1))),
         LaunchTarget::BundledTool { tool } => {
             let self_path = super::reexec::self_arg0().map_err(|e| {
                 Break::Error(Error::new(
@@ -157,13 +158,14 @@ fn linux_sandboxed_command(
             tool_args.push(crate::runtime::pipeline::helper::BUNDLED_TOOL_FLAG.to_string());
             tool_args.push(tool.to_string());
             tool_args.extend_from_slice(args);
-            Ok(super::linux::make_command_with_policy(
+            super::linux::make_command_with_policy(
                 &self_path.to_string_lossy(),
                 &tool_args,
                 projection,
                 Some(cwd.as_str()),
                 ownership,
-            ))
+            )
+            .map_err(|e| Break::Error(Error::new(e, 1)))
         }
     }
 }
@@ -262,15 +264,16 @@ mod tests {
     // Needed only by the per-platform argv-shape tests; elsewhere the sentinel
     // decline is the only test, and it needs no scaffolding.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    use crate::types::{FsPolicy, FsProjection, SandboxProjection};
+    use crate::types::{FsProjection, FsRules, SandboxProjection};
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn restrictive() -> SandboxProjection {
         SandboxProjection {
-            fs: FsProjection::Restricted(FsPolicy {
-                read_prefixes: vec![crate::path::NormalizedPrefix::from_surface("/tmp")],
-                write_prefixes: vec![crate::path::NormalizedPrefix::from_surface("/tmp")],
-                deny_paths: vec![crate::path::NormalizedPrefix::from_surface("/etc")],
+            fs: FsProjection::Restricted(FsRules {
+                read_prefixes: vec!["/tmp".into()],
+                write_prefixes: vec!["/tmp".into()],
+                deny_paths: vec!["/etc".into()],
+                pinned_dirs: Vec::new(),
             }),
             net: true,
             exec: crate::types::ExecProjection::default(),
@@ -337,10 +340,11 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn write_confined_to(write_dir: &str) -> SandboxProjection {
         SandboxProjection {
-            fs: FsProjection::Restricted(FsPolicy {
-                read_prefixes: vec![crate::path::NormalizedPrefix::from_surface(write_dir)],
-                write_prefixes: vec![crate::path::NormalizedPrefix::from_surface(write_dir)],
-                deny_paths: vec![],
+            fs: FsProjection::Restricted(FsRules {
+                read_prefixes: vec![write_dir.to_string()],
+                write_prefixes: vec![write_dir.to_string()],
+                deny_paths: Vec::new(),
+                pinned_dirs: Vec::new(),
             }),
             net: true,
             exec: crate::types::ExecProjection::default(),

@@ -98,31 +98,15 @@ pub(crate) fn match_variants(p: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// [`match_variants`] over a list, deduped and rendered to the strings the
-/// macOS Seatbelt profile builder splices into subpath rules — a grant for
-/// `/tmp/work` yields `[/tmp/work, /private/tmp/work]`.
-///
-/// Takes grant-side [`NormalizedPrefix`](super::NormalizedPrefix)es and the
-/// renderer's bare strings alike; both are backed by `String`, so the inputs
-/// are always valid UTF-8 even when the expansions are not.
-///
-/// # Errors
-///
-/// `realpath(3)` can surface a symlink target or mount whose name is not valid
-/// Unicode.  A Seatbelt rule is a string literal, so a lossy rendering would
-/// name a different inode; a grant the renderer cannot express faithfully is
-/// refused, not approximated.
-#[allow(clippy::disallowed_methods)]
-pub fn match_variants_list<S: AsRef<str>>(paths: &[S]) -> Result<Vec<String>, String> {
-    match_variants_paths(paths.iter().map(|p| Path::new(p.as_ref())))
-}
-
-/// Engine behind [`match_variants_list`].  Dedup keys on the exact path bytes,
-/// never a lossy rendering: two distinct non-UTF-8 paths decode to the same
-/// U+FFFD string, and collapsing them would attribute one path's grant to the
-/// other.  Separate from [`match_variants_list`] because that function's
-/// `S: AsRef<str>` bound means a test can never hand it a non-UTF-8 [`Path`].
-fn match_variants_paths<'a>(paths: impl Iterator<Item = &'a Path>) -> Result<Vec<String>, String> {
+/// Engine behind [`render_paths`](super::render_paths).  Dedup keys on the
+/// exact path bytes, never a lossy rendering: two distinct non-UTF-8 paths
+/// decode to the same U+FFFD string, and collapsing them would attribute one
+/// path's grant to the other.  Separate from `render_paths` because that
+/// function's `S: AsRef<str>` bound means a test can never hand it a
+/// non-UTF-8 [`Path`].
+pub(crate) fn match_variants_paths<'a>(
+    paths: impl Iterator<Item = &'a Path>,
+) -> Result<Vec<String>, String> {
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     for p in paths {
@@ -306,12 +290,5 @@ mod tests {
         let err = match_variants_paths([p.as_path()].into_iter())
             .expect_err("non-UTF-8 grant path must be refused, not lossily rendered");
         assert!(err.contains("not valid UTF-8"), "got {err:?}");
-    }
-
-    /// The fail-closed path must not fire on the common case.
-    #[test]
-    fn match_variants_list_ok_on_ascii_paths() {
-        let v = match_variants_list(&["/some/non/existent/path"]).expect("ASCII path must be Ok");
-        assert!(v.iter().any(|p| p == "/some/non/existent/path"));
     }
 }

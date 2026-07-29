@@ -5,9 +5,9 @@
 //! narrowed `grant` — or a subagent forked with narrowed permissions — hashes
 //! to a different key and spawns under a SID never granted the wider paths:
 //! attenuation is enforced at the kernel, and stamping is paid once per
-//! distinct projection rather than per command. Identity is
-//! [`SandboxProjection::bind_spec`]'s deduplicated, sorted prefix lists, so
-//! equal keys mean equal projections, not equal spelling; names are unique by
+//! distinct projection rather than per command. Identity is the projection's
+//! own fs prefix lists, which the grant fold leaves sorted and deduplicated,
+//! so equal keys mean equal projections, not equal spelling; names are unique by
 //! construction rather than content-hashed, since a collision would silently
 //! merge two projections' authority under one SID.
 //!
@@ -36,8 +36,9 @@ enum GrantKind {
     Deny,
 }
 
-/// One fs projection's identity, as [`SandboxProjection::bind_spec`] renders
-/// it. `net` is absent on purpose: network authority rides per-spawn on
+/// One fs projection's identity, as [`FsRules`](crate::types::FsRules)
+/// carries it. `net` is absent
+/// on purpose: network authority rides per-spawn on
 /// capability SIDs, never stamped on disk, so it needs no SID of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ProjectionKey {
@@ -182,11 +183,14 @@ pub(crate) fn confine(
     }
     let sandbox = guard.as_mut().expect("session created above");
 
-    let spec = projection.bind_spec();
+    // Empty when fs is `Unrestricted`: an AppContainer is deny-by-default, so
+    // an unattenuated projection stamps nothing and rests on the ambient
+    // ALL APPLICATION PACKAGES grants.
+    let rules = projection.fs.rules().cloned().unwrap_or_default();
     let key = ProjectionKey {
-        read: spec.read_prefixes.clone(),
-        write: spec.write_prefixes.clone(),
-        deny: spec.deny_paths.clone(),
+        read: rules.read_prefixes.clone(),
+        write: rules.write_prefixes.clone(),
+        deny: rules.deny_paths.clone(),
     };
     sandbox.ensure_projection(&key)?;
     let SessionSandbox {
@@ -202,11 +206,11 @@ pub(crate) fn confine(
         .sid_string()
         .map_err(|e| io_break("sandbox: AppContainer SID string", &e))?;
 
-    let readwrite: Vec<PathBuf> = spec.write_prefixes.iter().map(PathBuf::from).collect();
-    let mut readonly: Vec<PathBuf> = spec
+    let readwrite: Vec<PathBuf> = rules.write_prefixes.iter().map(PathBuf::from).collect();
+    let mut readonly: Vec<PathBuf> = rules
         .read_prefixes
         .iter()
-        .filter(|p| !spec.write_prefixes.contains(*p))
+        .filter(|p| !rules.write_prefixes.contains(*p))
         .map(PathBuf::from)
         .collect();
     if let Some(image) = program_image {
@@ -234,7 +238,7 @@ pub(crate) fn confine(
     // Denies skip the effective-access filter: it answers whether the
     // `AppContainer` already *has* this access, which says nothing about
     // whether subtracting it needs a stamp.
-    let deny: Vec<PathBuf> = spec.deny_paths.iter().map(PathBuf::from).collect();
+    let deny: Vec<PathBuf> = rules.deny_paths.iter().map(PathBuf::from).collect();
     let deny = filter_out_granted(&proj.granted, deny, GrantKind::Deny);
     let deny = existing_paths(deny);
     if !deny.is_empty() {

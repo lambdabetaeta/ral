@@ -126,7 +126,7 @@ fn seed_secret(dir: &std::path::Path) {
     std::fs::write(ssh.join("id_rsa"), DENY_PIN_SENTINEL).unwrap();
 }
 
-// A Seatbelt deny names a path, so `SandboxBindSpec::pinned_dirs` pins every
+// A Seatbelt deny names a path, so `FsRules::pinned_dirs` pins every
 // ancestor of a deny that lies within a write prefix, and the macOS backend
 // renders each as a `file-write-unlink` deny.  Only that backend needs it:
 // bwrap's deny is an object-anchored mount, which survives the same rename

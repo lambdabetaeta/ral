@@ -9,7 +9,9 @@
 //! backends render; `detach` gates a verb instead of an OS rule, so it is folded
 //! at the call by [`GrantStack::permits_detach`] and reaches no projection.
 
-use crate::path::{NormalizedPrefix, meet_prefixes, path_within_str, proper_ancestors};
+use crate::path::{
+    NormalizedPrefix, Rendered, meet_prefixes, path_within_str, proper_ancestors, render_paths,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -116,28 +118,90 @@ pub struct FsPolicy {
     pub deny_paths: Vec<NormalizedPrefix>,
 }
 
+/// The fs half of a projection, its paths named in `N`.
+///
+/// Not [`FsPolicy`]: that is the grant-layer lattice element, whose
+/// [`NormalizedPrefix`]es carry the `resolved` and `namespace` forms the meet
+/// keys on.  Nothing below the fold reads those, so the projection holds plain
+/// surface spellings and each backend widens them into its own name class at
+/// render time — which is exactly what `N` is.  Flattening away `namespace`
+/// forecloses a projection that distinguishes guest prefixes from host ones;
+/// no backend ever saw that distinction, so enforcement is unchanged.
+///
+/// `pinned_dirs` is `serde(skip)` because it is *derived*, never authored:
+/// [`SandboxProjection::traverse`] mints it from `deny_paths` and
+/// `write_prefixes`, so a forged `--sandbox-projection` can neither fabricate
+/// a pin nor drop one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Spelled out because the skipped field would otherwise drag an `N: Default`
+// bound onto the impl, which a name minted only by expansion cannot meet.
+#[serde(deny_unknown_fields, bound(deserialize = "N: Deserialize<'de>"))]
+pub struct FsRules<N> {
+    #[serde(default)]
+    pub read_prefixes: Vec<N>,
+    #[serde(default)]
+    pub write_prefixes: Vec<N>,
+    #[serde(default)]
+    pub deny_paths: Vec<N>,
+    /// Every proper ancestor of a `deny_paths` entry that lies within some
+    /// write prefix.  The macOS backend pins each against rename and unlink,
+    /// or a confined child relocates the ancestor directory itself
+    /// (`mv /repo/.ssh /repo/x`, or `mv /repo /scratch/r` when the write
+    /// prefix root is the ancestor) and the denied bytes resurface at a name
+    /// no deny rule covers.  `deny_paths` already carries both a deny's
+    /// surface spelling and its symlink-resolved target
+    /// (`sandbox_projection` in `capability::sandbox`), so taking ancestors
+    /// of it pins both chains — closing a symlink swapped in after sandbox
+    /// entry too.
+    #[serde(skip)]
+    pub pinned_dirs: Vec<N>,
+}
+
+/// Empty under any naming: rules over no paths, the shape a backend falls back
+/// to at the unrestricted top.  Hand-written for the same reason as the serde
+/// bound above — the derive would demand `N: Default`, which a name minted only
+/// by expansion cannot meet.
+impl<N> Default for FsRules<N> {
+    fn default() -> Self {
+        Self {
+            read_prefixes: Vec::new(),
+            write_prefixes: Vec::new(),
+            deny_paths: Vec::new(),
+            pinned_dirs: Vec::new(),
+        }
+    }
+}
+
 /// OS-renderable view of the meet-folded fs policy.
 ///
 /// `Unrestricted` is the lattice top — no layer attenuated fs, so the profile
 /// passes it through with broad `file-read*`/`file-write*` on macOS,
 /// `--dev-bind / /` on Linux. An empty `Restricted` is the other extreme: fs
 /// was attenuated to nothing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(tag = "kind", content = "policy", rename_all = "snake_case")]
-pub enum FsProjection {
-    #[default]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "rules", rename_all = "snake_case")]
+pub enum FsProjection<N = String> {
     Unrestricted,
-    Restricted(FsPolicy),
+    Restricted(FsRules<N>),
 }
 
-impl FsProjection {
-    /// The policy when restricted, `None` at the unrestricted top.  Renderers
+/// Hand-written so the top is reachable for any naming, `Rendered` included:
+/// the derive would demand `N: Default`, which a name minted only by
+/// expansion cannot satisfy.
+impl<N> Default for FsProjection<N> {
+    fn default() -> Self {
+        Self::Unrestricted
+    }
+}
+
+impl<N> FsProjection<N> {
+    /// The rules when restricted, `None` at the unrestricted top.  Renderers
     /// wanting only the prefixes match on this; the macOS profile builder
     /// branches on the variant, since the two emit different SBPL shapes.
-    pub fn as_policy(&self) -> Option<&FsPolicy> {
+    pub fn rules(&self) -> Option<&FsRules<N>> {
         match self {
             Self::Unrestricted => None,
-            Self::Restricted(p) => Some(p),
+            Self::Restricted(r) => Some(r),
         }
     }
 }
@@ -154,21 +218,32 @@ impl FsProjection {
 /// profile denies exactly what the gate would.  `deny_basenames` renders as a
 /// final-path-component match: a bare-name deny must hold wherever the name
 /// resolves, and must not be dodged by reaching it through an admitted dir.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+///
+/// `deny_basenames` stays `Vec<String>` while every path set is `Vec<N>`, and
+/// that asymmetry is load-bearing: a bare name is not a path, so under a
+/// rendered naming expanding it — or sliding it into a path set — stops
+/// typechecking rather than quietly emitting a rule for `/git`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ExecProjection {
-    #[default]
+pub enum ExecProjection<N = String> {
     Unrestricted,
     Restricted {
-        allow_paths: Vec<String>,
-        allow_dirs: Vec<String>,
+        allow_paths: Vec<N>,
+        allow_dirs: Vec<N>,
         #[serde(default)]
-        deny_paths: Vec<String>,
+        deny_paths: Vec<N>,
         #[serde(default)]
-        deny_dirs: Vec<String>,
+        deny_dirs: Vec<N>,
         #[serde(default)]
         deny_basenames: Vec<String>,
     },
+}
+
+/// Hand-written for the same reason as [`FsProjection`]'s.
+impl<N> Default for ExecProjection<N> {
+    fn default() -> Self {
+        Self::Unrestricted
+    }
 }
 
 /// The OS-renderable projection of the effective grant, produced by
@@ -179,16 +254,22 @@ pub enum ExecProjection {
 /// and it rides the internal `--sandbox-projection` flag to a re-exec'd
 /// child. Unlike a [`Capabilities`] frame, no further composition can widen
 /// it.
+///
+/// `N` is how the projection *names* the objects it rules over.  Only the
+/// surface instance crosses the wire, and structurally so: the derives
+/// generate `impl<N: Serialize>` bounds while [`Rendered`] implements neither
+/// serde trait, so shipping one host's expansion of one host's filesystem into
+/// another's rules does not compile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SandboxProjection {
+pub struct SandboxProjection<N = String> {
     #[serde(default)]
-    pub fs: FsProjection,
+    pub fs: FsProjection<N>,
     pub net: bool,
     #[serde(default)]
-    pub exec: ExecProjection,
+    pub exec: ExecProjection<N>,
 }
 
-impl Default for SandboxProjection {
+impl<N> Default for SandboxProjection<N> {
     fn default() -> Self {
         Self {
             fs: FsProjection::default(),
@@ -198,52 +279,97 @@ impl Default for SandboxProjection {
     }
 }
 
-/// Lexical view of the projection — prefixes as written, for the Seatbelt and
-/// bwrap profile renderers.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SandboxBindSpec {
-    pub read_prefixes: Vec<String>,
-    pub write_prefixes: Vec<String>,
-    pub deny_paths: Vec<String>,
-    /// Every proper ancestor of a `deny_paths` entry that lies within some
-    /// write prefix.  The macOS backend pins each against rename and unlink,
-    /// or a confined child relocates the ancestor directory itself
-    /// (`mv /repo/.ssh /repo/x`, or `mv /repo /scratch/r` when the write
-    /// prefix root is the ancestor) and the denied bytes resurface at a name
-    /// no deny rule covers.  `deny_paths` already carries both a deny's
-    /// surface spelling and its symlink-resolved target
-    /// (`sandbox_projection` in `capability::sandbox`), so taking ancestors
-    /// of it pins both chains — closing a symlink swapped in after sandbox
-    /// entry too.
-    pub pinned_dirs: Vec<String>,
-}
-
-impl SandboxProjection {
-    /// Empty when fs is `Unrestricted`: there the renderer emits broad allows,
-    /// not per-prefix rules.
-    pub fn bind_spec(&self) -> SandboxBindSpec {
-        let Some(fs) = self.fs.as_policy() else {
-            return SandboxBindSpec::default();
-        };
-        let dedup = |ps: &[NormalizedPrefix]| -> Vec<String> {
+impl SandboxProjection<String> {
+    /// Rename every path in the projection through `f`, ordering and deduping
+    /// each set once on the way and deriving `pinned_dirs` from the result.
+    ///
+    /// The completeness guarantee is structural, not promised: the input is
+    /// destructured exhaustively, the output constructed exhaustively, and the
+    /// only way to obtain a `Vec<Rendered>` is to call `f`.  A path set added
+    /// later therefore fails to compile until it too is threaded — which is
+    /// the point, since every under-enforcement of this class has been someone
+    /// forgetting to expand one new list.
+    ///
+    /// Pins are derived here rather than carried because they are a *function*
+    /// of the deny paths and the write prefixes, taken in surface space where
+    /// containment is the same lexical judgment the fold already made, and
+    /// only then handed to `f` alongside the sets they came from.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `f` refuses; [`render_paths`] refuses a name whose expansion
+    /// it cannot spell faithfully.
+    pub fn traverse(
+        &self,
+        f: impl Fn(&[String]) -> Result<Vec<Rendered>, String>,
+    ) -> Result<SandboxProjection<Rendered>, String> {
+        let Self { fs, net, exec } = self;
+        let ordered = |ps: &[String]| -> Vec<String> {
             ps.iter()
-                .map(|p| p.as_str().to_string())
+                .cloned()
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect()
         };
-        let write_prefixes = dedup(&fs.write_prefixes);
-        let deny_paths = dedup(&fs.deny_paths);
-        let pinned_dirs = proper_ancestors(deny_paths.iter().map(String::as_str))
-            .into_iter()
-            .filter(|dir| write_prefixes.iter().any(|w| path_within_str(dir, w)))
-            .collect();
-        SandboxBindSpec {
-            read_prefixes: dedup(&fs.read_prefixes),
-            write_prefixes,
-            deny_paths,
-            pinned_dirs,
-        }
+        let fs = match fs {
+            FsProjection::Unrestricted => FsProjection::Unrestricted,
+            FsProjection::Restricted(FsRules {
+                read_prefixes,
+                write_prefixes,
+                deny_paths,
+                // Derived below, so nothing a caller or the wire supplied is
+                // authority — see [`FsRules::pinned_dirs`].
+                pinned_dirs: _,
+            }) => {
+                let write_prefixes = ordered(write_prefixes);
+                let deny_paths = ordered(deny_paths);
+                let pinned_dirs: Vec<String> =
+                    proper_ancestors(deny_paths.iter().map(String::as_str))
+                        .into_iter()
+                        .filter(|dir| write_prefixes.iter().any(|w| path_within_str(dir, w)))
+                        .collect();
+                FsProjection::Restricted(FsRules {
+                    read_prefixes: f(&ordered(read_prefixes))?,
+                    write_prefixes: f(&write_prefixes)?,
+                    deny_paths: f(&deny_paths)?,
+                    pinned_dirs: f(&pinned_dirs)?,
+                })
+            }
+        };
+        let exec = match exec {
+            ExecProjection::Unrestricted => ExecProjection::Unrestricted,
+            ExecProjection::Restricted {
+                allow_paths,
+                allow_dirs,
+                deny_paths,
+                deny_dirs,
+                deny_basenames,
+            } => ExecProjection::Restricted {
+                allow_paths: f(&ordered(allow_paths))?,
+                allow_dirs: f(&ordered(allow_dirs))?,
+                deny_paths: f(&ordered(deny_paths))?,
+                deny_dirs: f(&ordered(deny_dirs))?,
+                // A bare name reaches no expansion, and the differing types
+                // make that a compile-time fact rather than a convention.
+                deny_basenames: ordered(deny_basenames),
+            },
+        };
+        Ok(SandboxProjection {
+            fs,
+            net: *net,
+            exec,
+        })
+    }
+
+    /// [`traverse`](Self::traverse) under this host's own name-class
+    /// expansion — the one call a backend makes, after which no rule it emits
+    /// can name a spelling the kernel will not present.
+    ///
+    /// # Errors
+    ///
+    /// As [`render_paths`].
+    pub fn rendered(&self) -> Result<SandboxProjection<Rendered>, String> {
+        self.traverse(render_paths)
     }
 }
 
@@ -674,25 +800,34 @@ fn union_prefixes(a: Vec<NormalizedPrefix>, b: Vec<NormalizedPrefix>) -> Vec<Nor
 mod lattice_tests;
 
 #[cfg(test)]
-mod pinned_dirs_tests {
+mod traverse_tests {
     use super::*;
-    use crate::path::Namespace;
 
-    fn prefix(surface: &str) -> NormalizedPrefix {
-        NormalizedPrefix::for_test(surface, surface, Namespace::Host)
-    }
-
-    fn spec(write: &[&str], read: &[&str], deny: &[&str]) -> SandboxBindSpec {
+    /// The pins the traversal derives, spelled back out.  Rendering is the
+    /// naming under test's own concern; what is asserted here is which
+    /// ancestors the derivation picks, on names that exist nowhere and so
+    /// expand to themselves.
+    fn pinned(write: &[&str], read: &[&str], deny: &[&str]) -> Vec<String> {
+        let strings = |ps: &[&str]| ps.iter().copied().map(str::to_string).collect();
         SandboxProjection {
-            fs: FsProjection::Restricted(FsPolicy {
-                read_prefixes: read.iter().copied().map(prefix).collect(),
-                write_prefixes: write.iter().copied().map(prefix).collect(),
-                deny_paths: deny.iter().copied().map(prefix).collect(),
+            fs: FsProjection::Restricted(FsRules {
+                read_prefixes: strings(read),
+                write_prefixes: strings(write),
+                deny_paths: strings(deny),
+                pinned_dirs: Vec::new(),
             }),
             net: true,
             exec: ExecProjection::default(),
         }
-        .bind_spec()
+        .rendered()
+        .expect("ASCII paths render")
+        .fs
+        .rules()
+        .expect("restricted in, restricted out")
+        .pinned_dirs
+        .iter()
+        .map(|d| d.as_str().to_string())
+        .collect()
     }
 
     /// The write prefix root is itself a proper ancestor of a deep-enough
@@ -700,26 +835,68 @@ mod pinned_dirs_tests {
     /// the case that closes `mv /repo /scratch/r`.
     #[test]
     fn pins_every_ancestor_within_the_write_prefix_including_its_root() {
-        let pinned = spec(&["/repo"], &[], &["/repo/a/b/secret"]).pinned_dirs;
         assert_eq!(
-            pinned,
-            [
-                "/repo".to_string(),
-                "/repo/a".to_string(),
-                "/repo/a/b".to_string()
-            ]
+            pinned(&["/repo"], &[], &["/repo/a/b/secret"]),
+            ["/repo", "/repo/a", "/repo/a/b"]
         );
     }
 
     #[test]
     fn pins_nothing_when_no_write_prefix_covers_the_denys_chain() {
-        let pinned = spec(&[], &["/repo"], &["/repo/.ssh/id_rsa"]).pinned_dirs;
-        assert!(pinned.is_empty());
+        assert!(pinned(&[], &["/repo"], &["/repo/.ssh/id_rsa"]).is_empty());
     }
 
     #[test]
     fn pins_nothing_for_a_deny_outside_every_prefix() {
-        let pinned = spec(&["/repo"], &[], &["/etc/secret"]).pinned_dirs;
-        assert!(pinned.is_empty());
+        assert!(pinned(&["/repo"], &[], &["/etc/secret"]).is_empty());
+    }
+
+    /// A supplied pin is not authority: the traversal recomputes the set from
+    /// the denies and write prefixes, so a forged wire value neither survives
+    /// nor suppresses the real one.
+    #[test]
+    fn a_carried_pin_is_replaced_by_the_derived_one() {
+        let forged = SandboxProjection {
+            fs: FsProjection::Restricted(FsRules {
+                read_prefixes: Vec::new(),
+                write_prefixes: vec!["/repo".to_string()],
+                deny_paths: vec!["/repo/a/secret".to_string()],
+                pinned_dirs: vec!["/somewhere/else".to_string()],
+            }),
+            net: true,
+            exec: ExecProjection::default(),
+        };
+        let out = forged.rendered().expect("ASCII paths render");
+        let dirs: Vec<&str> = out
+            .fs
+            .rules()
+            .expect("restricted in, restricted out")
+            .pinned_dirs
+            .iter()
+            .map(Rendered::as_str)
+            .collect();
+        assert_eq!(dirs, ["/repo", "/repo/a"]);
+    }
+
+    /// Bare names are not paths: they pass the traversal untouched, never
+    /// gaining the extra spellings a path would.
+    #[test]
+    fn a_denied_basename_is_carried_across_unexpanded() {
+        let out = SandboxProjection {
+            exec: ExecProjection::Restricted {
+                allow_paths: Vec::new(),
+                allow_dirs: Vec::new(),
+                deny_paths: Vec::new(),
+                deny_dirs: Vec::new(),
+                deny_basenames: vec!["git".to_string()],
+            },
+            ..SandboxProjection::default()
+        }
+        .rendered()
+        .expect("no paths to render");
+        assert!(matches!(
+            out.exec,
+            ExecProjection::Restricted { deny_basenames, .. } if deny_basenames == ["git"]
+        ));
     }
 }

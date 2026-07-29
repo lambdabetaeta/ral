@@ -16,6 +16,7 @@ pub mod git;
 pub mod lex;
 pub mod prefix_set;
 pub mod ral_path;
+pub mod render;
 pub mod resolved;
 pub mod resolver;
 pub mod sigil;
@@ -26,7 +27,6 @@ pub use tilde::{
     abbreviate_home, home, home_from_env, home_from_env_or_dot, user_name, user_name_from_env,
 };
 
-pub use canon::match_variants_list;
 pub use git::{discover_git_dir, find_git_entry};
 pub use lex::{
     PathShape, basename, exists, is_absolute, is_dir, parent_or_cwd, path_aliases, path_within,
@@ -34,6 +34,9 @@ pub use lex::{
     shape,
 };
 pub use prefix_set::{PrefixSet, covers, meet_prefixes};
+#[cfg(target_os = "macos")]
+pub(crate) use render::rendered_ancestors;
+pub use render::{Rendered, render_paths};
 pub use resolved::{Namespace, NormalizedPrefix, ResolvedPath};
 pub use resolver::Resolver;
 pub use which::{commands_on_path, file_exists_on_path, locate, resolve_in_path};

@@ -9,7 +9,7 @@
 use super::exec::{ExecNames, ExecVerdict, evaluate_exec};
 use crate::path::{NormalizedPrefix, PrefixSet, Resolver};
 use crate::types::{
-    ExecPolicy, ExecProjection, FsPolicy, FsProjection, GrantStack, Meet, SandboxProjection,
+    ExecPolicy, ExecProjection, FsProjection, FsRules, GrantStack, Meet, SandboxProjection,
 };
 use std::collections::BTreeSet;
 
@@ -35,12 +35,7 @@ pub(crate) fn sandbox_projection(
         read_prefixes = read_prefixes.meet(Some(PrefixSet::resolve(resolver, &fs.read_prefixes)));
         write_prefixes =
             write_prefixes.meet(Some(PrefixSet::resolve(resolver, &fs.write_prefixes)));
-        for p in &fs.deny_paths {
-            // Both spellings, or a backend that masks the literal path
-            // (bwrap's tmpfs overlay) misses a symlinked deny target.
-            deny_paths.push(p.clone());
-            deny_paths.push(NormalizedPrefix::from_surface(resolver.check(p.as_str())));
-        }
+        deny_paths.extend(fs.deny_paths.iter().cloned());
     }
     for net in grants.net() {
         saw_net = true;
@@ -60,15 +55,26 @@ pub(crate) fn sandbox_projection(
         return None;
     }
 
+    // The projection is lexical: `resolved`/`namespace` have no reader below
+    // this fold, so each prefix flattens to its surface spelling here, once,
+    // and every backend widens that into its own name class at render time.
+    let surface_strings = |set: PrefixSet| -> Vec<String> {
+        set.surface()
+            .into_iter()
+            .map(NormalizedPrefix::into_string)
+            .collect()
+    };
     let fs = if saw_fs {
-        FsProjection::Restricted(FsPolicy {
-            read_prefixes: read_prefixes.unwrap_or_default().surface(),
-            write_prefixes: write_prefixes.unwrap_or_default().surface(),
+        FsProjection::Restricted(FsRules {
+            read_prefixes: surface_strings(read_prefixes.unwrap_or_default()),
+            write_prefixes: surface_strings(write_prefixes.unwrap_or_default()),
             deny_paths: deny_paths
                 .into_iter()
+                .map(NormalizedPrefix::into_string)
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect(),
+            pinned_dirs: Vec::new(),
         })
     } else {
         FsProjection::Unrestricted

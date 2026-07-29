@@ -8,7 +8,7 @@
 //! bwrap has no endpoint filter — `--unshare-net` drops the network
 //! namespace whole — so `SandboxProjection::net` is a bit, not a list.
 
-use crate::path::PathShape;
+use crate::path::{PathShape, Rendered, render_paths};
 use crate::types::{FsProjection, SandboxProjection};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -16,6 +16,12 @@ use std::process::{Command, Stdio};
 
 /// Build the [`Command`] that runs `name` under `bwrap` for `policy`: binds
 /// derived from the policy prefixes, `deny_paths` overlaid last.
+///
+/// Every name is taken from `policy.rendered()`, so a rule lands on each
+/// spelling the kernel might present rather than on the one the grant author
+/// happened to write — a deny naming a symlink masks the target the resolved
+/// twin names.  `policy.exec` has no counterpart here: bwrap filters mounts
+/// and syscalls, not exec by path, so the in-ral gate is the only check.
 ///
 /// `chdir` is the in-sandbox cwd — bwrap starts the child in its
 /// mount-namespace root — so a per-command launch passes the target's
@@ -37,21 +43,24 @@ pub(crate) fn make_command_with_policy(
     policy: &SandboxProjection,
     chdir: Option<&str>,
     ownership: super::launch::Ownership,
-) -> Command {
+) -> Result<Command, String> {
+    let rendered = policy.rendered()?;
     let mut c = Command::new("bwrap");
-    let bind_spec = policy.bind_spec();
-    let mut ro_binds = default_ro_binds();
-    ro_binds.extend(bind_spec.read_prefixes.iter().cloned());
+    // Empty when fs is `Unrestricted`: there the envelope binds `/` wholesale
+    // below rather than per prefix.
+    let rules = rendered.fs.rules().cloned().unwrap_or_default();
+    let mut ro_binds = render_paths(&default_ro_binds())?;
+    ro_binds.extend(rules.read_prefixes);
     // bwrap cannot `execvp` what it cannot see, and the default prefixes
     // miss Nix store paths, ~/.cargo/bin and the like — an unbound exe
     // fails with ENOENT inside the sandbox.  Bind the file, not its parent:
     // siblings stay under whatever the caller's `fs:` capability declared.
     if crate::path::is_absolute(name) {
-        ro_binds.push(name.to_string());
+        ro_binds.extend(render_paths(&[name])?);
     }
     ro_binds.sort();
     ro_binds.dedup();
-    let mut rw_binds = bind_spec.write_prefixes;
+    let mut rw_binds = rules.write_prefixes;
     rw_binds.sort();
     rw_binds.dedup();
 
@@ -65,17 +74,17 @@ pub(crate) fn make_command_with_policy(
     if let Some(dir) = chdir {
         c.args(["--chdir", dir]);
     }
-    match &policy.fs {
+    match &rendered.fs {
         FsProjection::Restricted(_) => {
             c.args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]);
-            for bind in ro_binds {
-                if crate::path::exists(&bind) && !rw_binds.iter().any(|w| w == &bind) {
-                    c.args(["--ro-bind", &bind, &bind]);
+            for bind in &ro_binds {
+                if crate::path::exists(bind.as_str()) && !rw_binds.contains(bind) {
+                    c.args(["--ro-bind", bind.as_str(), bind.as_str()]);
                 }
             }
             for bind in &rw_binds {
-                if crate::path::exists(bind) {
-                    c.args(["--bind", bind, bind]);
+                if crate::path::exists(bind.as_str()) {
+                    c.args(["--bind", bind.as_str(), bind.as_str()]);
                 }
             }
         }
@@ -89,7 +98,7 @@ pub(crate) fn make_command_with_policy(
     // Masks go on after every bind: last mount wins.  `pinned_dirs` goes
     // unused because a mask is anchored to the inode, so a renamed ancestor
     // carries it — the pin macOS renders explicitly, Linux gets for free.
-    let mut denied_binds = bind_spec.deny_paths;
+    let mut denied_binds = rules.deny_paths;
     denied_binds.sort();
     denied_binds.dedup();
     for bind in &denied_binds {
@@ -104,7 +113,7 @@ pub(crate) fn make_command_with_policy(
     c.arg("--");
     c.arg(name);
     c.args(args);
-    c
+    Ok(c)
 }
 
 /// The mount that masks one denied path, bwrap having no negative path rule.
@@ -122,11 +131,11 @@ enum DenyMask<'p> {
 }
 
 impl<'p> DenyMask<'p> {
-    fn over(path: &'p str) -> Self {
-        match crate::path::shape(path) {
+    fn over(path: &'p Rendered) -> Self {
+        match crate::path::shape(path.as_str()) {
             PathShape::Symlink => Self::OnItsTarget,
-            PathShape::NonDir => Self::UnopenableNode(path),
-            PathShape::Dir | PathShape::Absent => Self::EmptyDir(path),
+            PathShape::NonDir => Self::UnopenableNode(path.as_str()),
+            PathShape::Dir | PathShape::Absent => Self::EmptyDir(path.as_str()),
         }
     }
 
@@ -288,7 +297,7 @@ pub(super) fn respawn_under_bwrap(
         policy,
         None,
         super::launch::Ownership::Kept,
-    );
+    )?;
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -356,9 +365,8 @@ fn default_ro_binds() -> Vec<String> {
 )]
 mod tests {
     use super::make_command_with_policy;
-    use crate::path::NormalizedPrefix;
     use crate::sandbox::launch::Ownership;
-    use crate::types::{FsPolicy, FsProjection, SandboxProjection};
+    use crate::types::{FsProjection, FsRules, SandboxProjection};
     use std::process::Stdio;
 
     fn workdir(tag: &str) -> std::path::PathBuf {
@@ -370,10 +378,13 @@ mod tests {
 
     fn deny_within(dir: &std::path::Path, denied: &[&std::path::Path]) -> SandboxProjection {
         SandboxProjection {
-            fs: FsProjection::Restricted(FsPolicy {
-                read_prefixes: Vec::new(),
-                write_prefixes: vec![NormalizedPrefix::from_surface(dir)],
-                deny_paths: denied.iter().map(NormalizedPrefix::from_surface).collect(),
+            fs: FsProjection::Restricted(FsRules {
+                write_prefixes: vec![dir.to_string_lossy().into_owned()],
+                deny_paths: denied
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect(),
+                ..FsRules::default()
             }),
             net: true,
             exec: crate::types::ExecProjection::default(),
@@ -382,6 +393,7 @@ mod tests {
 
     fn argv(policy: &SandboxProjection) -> Vec<String> {
         make_command_with_policy("/bin/true", &[], policy, None, Ownership::Kept)
+            .expect("ASCII paths render")
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
@@ -455,7 +467,8 @@ mod tests {
     }
 
     /// Naming a symlink in argv costs the whole launch, so the mask goes on
-    /// the resolved twin the projection carries beside it.
+    /// the resolved twin — which the backend derives at render time, the
+    /// projection naming only the link.
     #[test]
     fn a_symlinked_deny_is_masked_at_its_target_and_never_at_the_link() {
         let dir = workdir("deny-link");
@@ -464,7 +477,7 @@ mod tests {
         std::fs::write(&target, "PRIVATE KEY").unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let args = argv(&deny_within(&dir, &[&link, &target]));
+        let args = argv(&deny_within(&dir, &[&link]));
         assert!(
             position_of(
                 &args,
@@ -488,6 +501,7 @@ mod tests {
             None,
             Ownership::Kept,
         )
+        .expect("ASCII paths render")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -581,16 +595,16 @@ mod tests {
     #[test]
     fn only_the_parent_death_tie_distinguishes_a_surrendered_launch() {
         let policy = SandboxProjection {
-            fs: FsProjection::Restricted(FsPolicy {
-                read_prefixes: vec![NormalizedPrefix::from_surface("/usr")],
-                write_prefixes: Vec::new(),
-                deny_paths: Vec::new(),
+            fs: FsProjection::Restricted(FsRules {
+                read_prefixes: vec!["/usr".to_string()],
+                ..FsRules::default()
             }),
             net: false,
             exec: crate::types::ExecProjection::default(),
         };
         let argv = |ownership| {
             make_command_with_policy("/bin/true", &[], &policy, None, ownership)
+                .expect("ASCII paths render")
                 .get_args()
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()

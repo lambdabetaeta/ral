@@ -74,17 +74,17 @@ pub(super) fn dump_profile_for_windows(policy: &SandboxProjection) -> String {
              \x20     bind of the program path\n",
     );
     out.push_str("  fs allow-ACEs (SID = the profile's AppContainer SID):\n");
-    if let Some(fs) = policy.fs.as_policy() {
+    if let Some(fs) = policy.fs.rules() {
         out.push_str("    read-write (FILE_GENERIC_READ|WRITE|EXECUTE|DELETE):\n");
         for p in &fs.write_prefixes {
-            let _ = writeln!(out, "      {}", p.as_str());
+            let _ = writeln!(out, "      {p}");
         }
         out.push_str("    read-only (FILE_GENERIC_READ|EXECUTE):\n");
         for p in &fs.read_prefixes {
             if fs.write_prefixes.iter().any(|w| w == p) {
                 continue;
             }
-            let _ = writeln!(out, "      {}", p.as_str());
+            let _ = writeln!(out, "      {p}");
         }
         if !fs.deny_paths.is_empty() {
             out.push_str(
@@ -96,7 +96,7 @@ pub(super) fn dump_profile_for_windows(policy: &SandboxProjection) -> String {
                      \x20     exist, or this session already denied it):\n",
             );
             for p in &fs.deny_paths {
-                let _ = writeln!(out, "      {}", p.as_str());
+                let _ = writeln!(out, "      {p}");
             }
         }
     } else {
