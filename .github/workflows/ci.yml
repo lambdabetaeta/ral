@@ -1,12 +1,15 @@
 name: CI
-# Smoke checks: format, lint, build, test.  Manual only — run from the
-# Actions tab or `gh workflow run ci.yml`.  Kept deliberately lean
-# (single Linux runner, no cross-targets) so it stays cheap in Actions
-# minutes.  Cross-target builds live in build-binaries.yml (v* tags or
-# manual dispatch).  The Windows job lives in windows.yml instead,
-# where it auto-runs on push to main — it is the one job no local
-# machine covers.
+# Smoke checks: lint, build, test, site, examples.  Runs on a `v*` tag and on
+# manual dispatch — not on every push, so it stays cheap in Actions
+# minutes; the day-to-day Linux gate is `just linux-ci`, which runs these
+# same steps in dev/podman's container, the only place a macOS host
+# compiles `#[cfg(target_os = "linux")]` code at all.  Cross-target builds
+# live in build-binaries.yml (same `v*` tags).  The Windows job lives in
+# windows.yml, where it auto-runs on push to main.
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 env:
@@ -37,17 +40,21 @@ jobs:
       # also override the vendored ral-ripgrep-core's `all = "allow"` opt-out).
       # The closed-door-set meta-test (core/tests/io_door_set.rs) runs under
       # `cargo test` below and pins the reviewed allow set.
+      # synod is excluded from all three: its tauri dependency links the
+      # GTK/WebKit stack, whose dev packages this runner does not carry, and
+      # synod ships on macOS and Windows only.  `just linux-ci` excludes it
+      # for the same reason, so both Linux gates cover the same crates.
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --exclude synod --all-targets
 
       - name: cargo build
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace --exclude synod --all-targets
 
       # Integration tests in ral/tests/ invoke the `ral` binary as a
       # subprocess, so `cargo build` above is load-bearing — `cargo test`
       # alone does not reliably refresh that binary.
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude synod
 
       - uses: astral-sh/setup-uv@v9.0.0
 

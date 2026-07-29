@@ -47,11 +47,13 @@ check:
 # compiles C against Windows system headers, impossible from a Unix
 # host, so exarch's Windows drift is gated by windows-check CI instead.
 # synod sits atop exarch and inherits the same wall.
+# Cross-check the workspace against the shipping Windows ABI.
 check-windows:
     CC_x86_64_pc_windows_msvc=cc-absent-use-blake3-pure-fallback RUSTFLAGS='-D warnings' cargo check --workspace --exclude exarch --exclude synod --all-targets --target x86_64-pc-windows-msvc
 
 # Run the workspace test suite.  The `ral-core/test-util` feature pulls
 # in the sandbox integration test that needs the confinement-token seam.
+# Run the workspace test suite.
 test:
     cargo test --workspace --features ral-core/test-util
 
@@ -66,12 +68,34 @@ fmt:
 # and using one would wrongly override the vendored ral-ripgrep-core's
 # deliberate `[lints.clippy] all = "allow"` opt-out.  CI runs this exact
 # command (.github/workflows/ci.yml).
+# Clippy across the workspace.
 lint:
     cargo clippy --workspace --all-targets
 
-# Replay the Linux CI job locally (mirrors .github/workflows/ci.yml).
+# Mirrors .github/workflows/ci.yml on whatever host you are on.  On macOS
+# that leaves the Linux sandbox backend untouched — `core/src/sandbox.rs`
+# gates `mod linux` out there — so this recipe passing says nothing about
+# it; `linux-ci` is the one that does.
+# Replay CI on this host.
 ci:
     cargo run -p ral --quiet -- scripts/ci-local.ral
+
+# The same clippy/build/test steps in a Linux container, which is the only
+# place a macOS host compiles `#[cfg(target_os = "linux")]` code at all.
+# synod is excluded (tauri wants the GTK/WebKit dev stack, and it ships on
+# macOS and Windows only).  A Unix-host recipe by design: the script drives
+# podman, and passes --privileged so bubblewrap can mount devpts instead of
+# the sandbox tests skipping.
+# Replay the Linux half of CI in a container.
+linux-ci:
+    cargo run -p ral --quiet -- scripts/linux-ci.ral
+
+# Reads scripts/linux-box.Dockerfile, with scripts/ as the build context so
+# the 40+GB target/ never becomes one.  Needed once, and again when that
+# file's apt list changes — Cargo deps do not require a rebuild.
+# Build the container `linux-ci` runs in.
+linux-box:
+    podman build -t ral-linux-box -f scripts/linux-box.Dockerfile scripts
 
 # Render the static site into site/.
 site:
@@ -188,6 +212,7 @@ broker-uninstall:
 # virtualization entitlement, so the .app creates VMs locally with no
 # Apple Developer account; distributing it to other Macs additionally
 # needs a Developer ID signature and notarization.
+# Bundle synod into a macOS .app.
 [working-directory('synod')]
 synod-app:
     cargo tauri build
@@ -241,6 +266,7 @@ synod-app:
 # the undo — and a machine to do the work inside.  It needs Hyper-V available
 # on the machine, which means Windows Pro, Education, or Enterprise (the
 # university fleet's editions); Home has no Hyper-V and is unsupported (§2).
+# Bundle synod into a Windows .msi installer.
 [working-directory('synod')]
 synod-msi:
     cargo build --release -p vm-manager --bin synod-machine-broker
