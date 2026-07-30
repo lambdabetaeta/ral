@@ -344,7 +344,9 @@ mod memo_tests {
 
     /// Take the lock and start from a known generation.
     fn cache_guard() -> MutexGuard<'static, ()> {
-        let guard = CACHE_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         forget_located_commands();
         guard
     }
