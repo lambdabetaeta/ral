@@ -1,7 +1,7 @@
 ---
 verified_at_commit: ce6a3ba
 verified_at_date: 2026-07-30
-anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant]
+anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -64,6 +64,11 @@ spawned process does on its own.**
 - *Filesystem* — gated in-process too (`check_fs_op`, read and write), and
   backed by an OS sandbox that confines a spawned child's own reads and writes:
   Seatbelt on macOS, bwrap on Linux, an AppContainer LowBox token on Windows.
+  Gate and profile read *one* fold (`capability/fs.rs`: `allow_region` meets a
+  region across layers, `deny_region` unions it), so here the conservatism
+  invariant needs no differential test — the two cannot disagree. All that
+  separates them is when the fold runs: afresh on every check for the gate,
+  once at spawn for the profile, because that is when the profile is written.
 - *Network* — no in-process gate at all, since ral dispatches no network
   operation itself, so the OS sandbox is the sole enforcer; on Windows the
   enforcement is the withheld network capability SIDs — a LowBox token

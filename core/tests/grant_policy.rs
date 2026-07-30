@@ -529,9 +529,16 @@ fn sandbox_projection_admits_literal_covered_by_sibling_dir() {
 /// differentially over adversarial two-layer stacks, each probed with a
 /// spread of resolved paths.  Absolute deny literals keep the check
 /// hermetic (no PATH resolution needed).
+///
+/// Exec only, and that is the point: exec is the one dimension where gate
+/// and projection still decide directory coverage by different rules — the
+/// gate ranks a layer's dirs by depth with deny winning ties, the
+/// projection meets allow dirs and unions deny dirs across layers.  The fs
+/// dimension needs no such test, because both sides read one fold
+/// (`capability::fs`).
 #[cfg(unix)]
 #[test]
-fn sandbox_projection_never_out_permits_live_gate() {
+fn exec_projection_never_out_permits_live_gate() {
     let allow_dir = |d: &str| ExecMap {
         literals: BTreeMap::new(),
         allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface(d)]),

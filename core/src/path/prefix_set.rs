@@ -9,10 +9,11 @@
 //! [`NormalizedPrefix::from_surface`] — and that is rendering for the
 //! sandbox projection, not composition.
 
-use super::lex::path_within_str;
+use super::lex::{path_within, path_within_str};
 use super::resolved::NormalizedPrefix;
 use super::resolver::Resolver;
 use crate::types::Meet;
+use std::path::Path;
 
 /// The one containment judgment: does `a` cover `b`?  Same namespace, `b`'s
 /// resolved form within `a`'s — never the surface spelling.
@@ -63,6 +64,23 @@ impl PrefixSet {
         self
     }
 
+    /// The deepest prefix whose region contains `path`, if any — the
+    /// containment question the runtime gate asks, decided against the same
+    /// `resolved` forms [`covers`] keys on and through the same alias-aware
+    /// [`path_within`].
+    ///
+    /// Deepest by [`identity_depth`](super::lex::identity_depth), as
+    /// `capability::exec::longest_dir_match` ranks directories: the answer
+    /// names the narrowest authority the path fell under, which is what the
+    /// audit record wants, and a set that has been through
+    /// [`meet`](Meet::meet) has no order left to prefer instead.
+    pub fn covering(&self, path: &Path) -> Option<&NormalizedPrefix> {
+        self.0
+            .iter()
+            .filter(|prefix| path_within(path, prefix.resolved_path()))
+            .max_by_key(|prefix| super::lex::identity_depth(prefix.resolved(), cfg!(windows)))
+    }
+
     /// The surface forms, sorted and unique, re-minted through
     /// [`NormalizedPrefix::from_surface`] so the rendered `FsPolicy` carries
     /// the same normal form the grant side does.
@@ -94,6 +112,10 @@ impl Meet for PrefixSet {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test fixtures build the access-side path from a literal already in normal form"
+)]
 mod tests {
     use super::*;
     use crate::path::resolved::Namespace;
@@ -184,6 +206,48 @@ mod tests {
             vec![np("/a/sub")],
             "a genuinely-nested deeper grant must survive the intersection"
         );
+    }
+
+    /// `covering` answers the question the runtime gate asks, so it decides
+    /// on the *resolved* form: a prefix that spells as an ancestor of the
+    /// access path but resolves elsewhere covers nothing.
+    #[test]
+    fn covering_matches_the_resolved_form_not_the_surface() {
+        let s = set(&[p("/a", "/elsewhere")]);
+        assert!(s.covering(Path::new("/a/file")).is_none());
+        assert_eq!(
+            set(&[p("/link", "/a")]).covering(Path::new("/a/file")),
+            Some(&p("/link", "/a")),
+            "a prefix resolving onto the access path covers it whatever it spells"
+        );
+    }
+
+    /// Nested prefixes both cover; the answer is the narrowest authority the
+    /// path fell under, which is what the gate's audit record reports.
+    #[test]
+    fn covering_returns_the_deepest_match() {
+        let s = set(&[lit("/a"), lit("/a/b"), lit("/a/b/c"), lit("/other")]);
+        assert_eq!(s.covering(Path::new("/a/b/x")), Some(&lit("/a/b")));
+        assert_eq!(s.covering(Path::new("/a/y")), Some(&lit("/a")));
+        assert_eq!(s.covering(Path::new("/z")), None);
+    }
+
+    /// The empty set is the fail-closed meet, so it must cover nothing —
+    /// this is what turns a collapsed intersection into a gate denial.
+    #[test]
+    fn the_empty_set_covers_nothing() {
+        assert_eq!(PrefixSet::default().covering(Path::new("/a")), None);
+    }
+
+    /// Depth is counted in components of the alias-folded form, as
+    /// `capability::exec::longest_dir_match` counts it: `/private/tmp` is an
+    /// alias of the one-deep `/tmp` yet spells longer, so a character count
+    /// would rank it above the genuinely deeper `/tmp/a`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn covering_ranks_depth_by_components_not_characters() {
+        let s = set(&[lit("/private/tmp"), lit("/tmp/a")]);
+        assert_eq!(s.covering(Path::new("/tmp/a/f")), Some(&lit("/tmp/a")));
     }
 
     /// Gated because the case- and separator-folding branch of

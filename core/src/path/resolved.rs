@@ -181,6 +181,16 @@ impl NormalizedPrefix {
         &self.surface
     }
 
+    /// The symlink-followed form as a `Path`, for containment matching
+    /// against an access path that has itself been canonicalised.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "lexical Path::new over a resolved form already in normal form — no I/O behind it"
+    )]
+    pub fn resolved_path(&self) -> &Path {
+        Path::new(&self.resolved)
+    }
+
     /// The symlink-followed form, for composition overlap.
     pub fn resolved(&self) -> &str {
         &self.resolved

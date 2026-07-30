@@ -3,10 +3,15 @@
 //! [`sandbox_projection`] meet-folds the whole dynamic
 //! [`GrantStack`](crate::types::GrantStack) into the
 //! [`SandboxProjection`] the sandbox backends render.  The point-of-use
-//! gates over that same authority live in the sibling
-//! [`super::enforce`].
+//! gates over that same authority live in the sibling [`super::enforce`],
+//! and consume the same per-dimension folds this module renders —
+//! [`super::fs::allow_region`] and [`super::exec::evaluate_exec`] — so gate
+//! and profile cannot disagree about what the stack permits.  All that
+//! separates them is when the fold runs: here once, because the OS profile
+//! is written once at spawn; there afresh on every check.
 
 use super::exec::{ExecNames, ExecVerdict, evaluate_exec};
+use super::fs::{FsOp, allow_region, deny_region};
 use crate::path::{NormalizedPrefix, PrefixSet, Resolver};
 use crate::types::{
     ExecPolicy, ExecProjection, FsProjection, FsRules, GrantStack, Meet, SandboxProjection,
@@ -28,20 +33,13 @@ pub(crate) fn sandbox_projection(
     // literal exec key walks `PATH`, so its cost tracks the host's fs latency
     // and is paid again on each rebuild.
     let t_fold = std::time::Instant::now();
-    let mut read_prefixes: Option<PrefixSet> = None;
-    let mut write_prefixes: Option<PrefixSet> = None;
-    let mut deny_paths: Vec<NormalizedPrefix> = Vec::new();
+    // Zipped because the two allow regions are `Some` on the same condition —
+    // some layer held an `fs` opinion — so there is no mixed case to weigh.
+    let read = allow_region(grants, resolver, &FsOp::Read);
+    let write = allow_region(grants, resolver, &FsOp::Write);
+    let regions = read.zip(write);
     let mut net_allowed = true;
-    let mut saw_fs = false;
     let mut saw_net = false;
-
-    for fs in grants.fs() {
-        saw_fs = true;
-        read_prefixes = read_prefixes.meet(Some(PrefixSet::resolve(resolver, &fs.read_prefixes)));
-        write_prefixes =
-            write_prefixes.meet(Some(PrefixSet::resolve(resolver, &fs.write_prefixes)));
-        deny_paths.extend(fs.deny_paths.iter().cloned());
-    }
     for net in grants.net() {
         saw_net = true;
         net_allowed &= net;
@@ -56,7 +54,7 @@ pub(crate) fn sandbox_projection(
     #[cfg(not(target_os = "macos"))]
     let exec_triggers_sandbox = false;
 
-    if !saw_fs && (!saw_net || net_allowed) && !exec_triggers_sandbox {
+    if regions.is_none() && (!saw_net || net_allowed) && !exec_triggers_sandbox {
         crate::dbg_trace!(
             "sandbox-proj",
             "fold unrestricted in {:?} (no OS sandbox needed)",
@@ -74,20 +72,14 @@ pub(crate) fn sandbox_projection(
             .map(NormalizedPrefix::into_string)
             .collect()
     };
-    let fs = if saw_fs {
-        FsProjection::Restricted(FsRules {
-            read_prefixes: surface_strings(read_prefixes.unwrap_or_default()),
-            write_prefixes: surface_strings(write_prefixes.unwrap_or_default()),
-            deny_paths: deny_paths
-                .into_iter()
-                .map(NormalizedPrefix::into_string)
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
+    let fs = match regions {
+        Some((read, write)) => FsProjection::Restricted(FsRules {
+            read_prefixes: surface_strings(read),
+            write_prefixes: surface_strings(write),
+            deny_paths: surface_strings(deny_region(grants, resolver)),
             pinned_dirs: Vec::new(),
-        })
-    } else {
-        FsProjection::Unrestricted
+        }),
+        None => FsProjection::Unrestricted,
     };
     let projection = SandboxProjection {
         fs,

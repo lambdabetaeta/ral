@@ -5,13 +5,17 @@
 //! — folds the whole dynamic [`GrantStack`], so a verdict is authority
 //! intersected across every layer, never one frame.  Only the exec and fs
 //! gates reach a real OS resource, and only they audit.  The sibling
-//! [`super::sandbox`] projects the same authority onto the OS sandbox.
+//! [`super::sandbox`] projects the same authority onto the OS sandbox, and
+//! does so off the same per-dimension folds this module tests against —
+//! [`super::fs::allow_region`] and [`super::exec::evaluate_exec`] — so the
+//! two cannot drift.
 
 use super::exec::{Admit, ExecNames, ExecVerdict, evaluate_exec};
-use crate::path::{NormalizedPrefix, Resolver, path_within};
+use super::fs::{FsOp, allow_region, deny_region};
+use crate::path::Resolver;
 use crate::types::{
-    Audit, CallSite, Capabilities, Context, ExecNode, FsPolicy, GrantStack, Map, Settled, Value,
-    sig, sig_hint,
+    Audit, CallSite, Capabilities, Context, ExecNode, GrantStack, Map, Settled, Value, sig,
+    sig_hint,
 };
 
 /// Gate a command and its argv against the stack's exec opinions.  Audits
@@ -77,28 +81,6 @@ pub(crate) fn check_exec_args(
     result
 }
 
-/// Which fs region a check consults: the read or the write prefix set.
-pub(crate) enum FsOp {
-    Read,
-    Write,
-}
-
-impl FsOp {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Read => "read",
-            Self::Write => "write",
-        }
-    }
-
-    fn prefixes<'a>(&self, fs: &'a FsPolicy) -> &'a [NormalizedPrefix] {
-        match self {
-            Self::Read => &fs.read_prefixes,
-            Self::Write => &fs.write_prefixes,
-        }
-    }
-}
-
 /// The pure half of [`check_fs_op`]'s decision: does the stack admit `op`
 /// on the resolved path, and under which prefix?  `Unrestricted` exactly
 /// when no layer held an `fs` opinion, so there is nothing to audit.
@@ -109,44 +91,31 @@ pub(super) enum FsVerdict {
     Denied,
 }
 
-/// Fold the stack's `fs` opinions over a resolved path: it passes when, at
-/// every opining layer, the path lies inside some prefix of the op's region
-/// and outside every `deny_paths` entry — one deny region per layer covers
-/// both reads and writes.  Membership is region containment,
-/// alias-aware, via [`path_within`].
+/// Test the resolved path against the regions [`super::fs`] folds: it passes
+/// when the path lies inside `op`'s allow region and outside the deny
+/// region.  Membership is region containment, alias-aware, via
+/// [`PrefixSet::covering`](crate::path::PrefixSet::covering).
 ///
-/// Prefixes are re-resolved against the live disk on every check rather
-/// than read off the frozen policy: composition is a statement about the
-/// policy, enforcement one about the world.
+/// The fold runs against a live [`Resolver`] on every check, so the regions
+/// this decides against are the ones the disk describes now — where the
+/// sibling [`super::sandbox`] folds once, at spawn, because that is when the
+/// OS profile is written.  That freshness is the whole difference between
+/// the two consumers of the fold.
 pub(super) fn fs_verdict(
     grants: &GrantStack,
     resolver: &Resolver,
     resolved: &std::path::Path,
     op: &FsOp,
 ) -> FsVerdict {
-    let mut granted: Option<String> = None;
-    let mut saw = false;
-    for fs in grants.fs() {
-        saw = true;
-        let in_deny = fs
-            .deny_paths
-            .iter()
-            .any(|d| path_within(resolved, &resolver.check(d.as_str())));
-        if in_deny {
-            return FsVerdict::Denied;
-        }
-        match op
-            .prefixes(fs)
-            .iter()
-            .find(|prefix| path_within(resolved, &resolver.check(prefix.as_str())))
-        {
-            Some(prefix) => granted = Some(prefix.as_str().to_string()),
-            None => return FsVerdict::Denied,
-        }
+    let Some(allowed) = allow_region(grants, resolver, op) else {
+        return FsVerdict::Unrestricted;
+    };
+    if deny_region(grants, resolver).covering(resolved).is_some() {
+        return FsVerdict::Denied;
     }
-    match (saw, granted) {
-        (true, Some(prefix)) => FsVerdict::Granted(prefix),
-        _ => FsVerdict::Unrestricted,
+    match allowed.covering(resolved) {
+        Some(prefix) => FsVerdict::Granted(prefix.as_str().to_string()),
+        None => FsVerdict::Denied,
     }
 }
 
