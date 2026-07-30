@@ -48,7 +48,7 @@ use super::super::prompt::PromptText;
 use super::{EditBuffer, Frontend, History, Read};
 #[cfg(unix)]
 use crate::jobs::JobTable;
-use crate::repl::completion::{self, Sources};
+use crate::repl::completion::{self, SourceCache};
 use crate::repl::highlight_style::style_ratatui;
 use crate::repl::keybinding::{KeybindingOutcome, dispatch_keybinding};
 use crate::repl::plugin::{
@@ -103,6 +103,11 @@ pub(in crate::repl) struct StructuralFrontend {
     /// and prompt bindings — so the worksheet shows only what the user has
     /// since defined.  Captured lazily because `new` has no shell.
     baseline: Option<HashSet<String>>,
+    /// The completion candidate sources, the same type the line editor's helper
+    /// holds, so the two surfaces cannot drift on when a `PATH` enumeration is
+    /// taken or dropped.  A field rather than a per-compose local because the
+    /// enumeration is meant to outlive one prompt.
+    sources: SourceCache,
     /// Whether the user asked for vi keys (`edit_mode: vi` in their ralrc).
     /// Reduced from `rustyline::config::EditMode` at construction so the rest
     /// of this frontend never sees rustyline's type.
@@ -132,6 +137,7 @@ impl StructuralFrontend {
         Ok(Self {
             history: History::load(),
             baseline: None,
+            sources: SourceCache::new(),
             vi: matches!(edit_mode, rustyline::config::EditMode::Vi),
             runtime,
         })
@@ -148,6 +154,11 @@ impl StructuralFrontend {
         #[cfg(unix)] jobs: &Arc<Mutex<JobTable>>,
         worksheet: &Worksheet,
     ) -> io::Result<Read> {
+        // Completion state, refreshed once here and read per Tab below.  Only
+        // the cheap half: the `PATH` enumeration behind it waits for a Tab, so
+        // entering the editor reads no directories.
+        self.sources.refresh(shell);
+
         // The worksheet and matrix read the env, which does not change while
         // the user composes (no evaluation happens here), so build them once.
         // Both project the same user bindings, so fold the scope once and
@@ -195,14 +206,12 @@ impl StructuralFrontend {
         }
         let mut hist_pos: Option<usize> = None;
         let mut draft = String::new();
-        // Lazily-built completion candidate snapshot, and the open menu (if
-        // any).  The snapshot is built on the first Tab and reused for the rest
-        // of this compose — no evaluation happens while composing, so the
-        // commands/variables/cwd it captures cannot change underfoot.
-        let mut sources: Option<Sources> = None;
+        // The open completion menu, if any.  Its candidate sources live on the
+        // frontend and were refreshed above; no evaluation happens while
+        // composing, so they cannot change underfoot.
         let mut menu: Option<Menu> = None;
-        // The keybinding router, snapshot on the first keypress (like
-        // `sources`): the table cannot change while composing.
+        // The keybinding router, snapshot on the first keypress: the table
+        // cannot change while composing.
         let mut router: Option<KeyRouter> = None;
 
         enable_raw_mode()?;
@@ -361,18 +370,21 @@ impl StructuralFrontend {
                             }
                         }
                         KeyCode::Tab => {
-                            // Build the candidate snapshot once, then complete the
-                            // token under the cursor.  A unique match is applied in
-                            // place; several open the menu; none is a no-op.
+                            // Complete the token under the cursor, paying for a
+                            // `PATH` enumeration here if one is owed — a Tab is
+                            // a request the user made, unlike a prompt.  A unique
+                            // match is applied in place; several open the menu;
+                            // none is a no-op.
                             let row = prompt.row();
                             let col = prompt.col();
                             let Some(line) = prompt.line(row) else {
                                 prompt.handle_key(k);
                                 continue;
                             };
-                            let src = sources.get_or_insert_with(|| Sources::from_shell(shell));
+                            let src = self.sources.sources();
                             let cursor_byte = char_to_byte(&line, col);
-                            let (start, candidates) = completion::complete(&line, cursor_byte, src);
+                            let (start, candidates) =
+                                completion::complete(&line, cursor_byte, &src);
                             match candidates.as_slice() {
                                 [] => {}
                                 [only] => {

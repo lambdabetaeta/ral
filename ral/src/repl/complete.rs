@@ -3,11 +3,17 @@
 //!
 //! [`RalHelper`] implements rustyline's `Completer`, `Hinter`, and
 //! `Highlighter`.  Completion itself is the frontend-neutral
-//! [`super::completion`] engine; this type only holds the per-prompt
-//! [`Sources`] snapshot and adapts the engine's
+//! [`super::completion`] engine; this type only holds the [`SourceCache`] the
+//! engine ranks against and adapts the engine's
 //! [`Candidate`](super::completion::Candidate)s to rustyline `Pair`s.
 //! Highlighting and ghost text come from plugin buffer-change hooks recorded
 //! in [`super::plugin::PluginRuntime`].
+//!
+//! Of the traits this helper implements, only `Completer` reads the cache, and
+//! that is load-bearing: the cache enumerates `PATH` on first use, while
+//! `Hinter` and `Highlighter` run on every keystroke.  A future hint or
+//! highlight rule wanting a command list must not reach for `sources()`, or it
+//! puts a disk walk between a keypress and the character appearing.
 
 use ral_core::Shell;
 use ral_core::ansi;
@@ -19,34 +25,37 @@ use rustyline::{Context, Helper};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
-use super::completion::{self, Sources};
+use super::completion::{self, SourceCache};
 use super::highlight_style::apply_highlights;
 use super::plugin::{PluginRuntime, lock, run_buffer_change_hooks};
 
 // ── RalHelper ────────────────────────────────────────────────────────────
 
 pub(super) struct RalHelper {
-    /// The per-prompt snapshot of command/variable names and cwd the
-    /// completion engine ranks against, rebuilt by [`RalHelper::refresh`].
-    sources: Sources,
+    /// The command/variable names and cwd the completion engine ranks
+    /// against, kept across prompts and aged by [`RalHelper::refresh`].
+    sources: SourceCache,
     pub(super) plugin_runtime: Arc<Mutex<PluginRuntime>>,
     pub(super) terminal: ral_core::io::TerminalState,
 }
 
 impl RalHelper {
+    /// Starts with a cold cache, so constructing the line editor reads no
+    /// directories; the first Tab pays for what it needs.
     pub(super) fn new(shell: &Shell, plugin_runtime: Arc<Mutex<PluginRuntime>>) -> Self {
         Self {
-            sources: Sources::from_shell(shell),
+            sources: SourceCache::new(),
             plugin_runtime,
             terminal: shell.terminal(),
         }
     }
 
-    /// Rebuild completion state from the live shell.  Called once per prompt
+    /// Refresh completion state from the live shell.  Called once per prompt
     /// so new `let` bindings, `within [shell: PATH=…]` overrides, and
-    /// `cd`-tracked cwd changes appear immediately.
+    /// `cd`-tracked cwd changes appear immediately — and cheaply enough that
+    /// the prompt is not held up by it.
     pub(super) fn refresh(&mut self, shell: &Shell) {
-        self.sources = Sources::from_shell(shell);
+        self.sources.refresh(shell);
         self.terminal = shell.terminal();
     }
 }
@@ -60,7 +69,7 @@ impl Completer for RalHelper {
         pos: usize,
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        let (start, candidates) = completion::complete(line, pos, &self.sources);
+        let (start, candidates) = completion::complete(line, pos, &self.sources.sources());
         let pairs = candidates
             .into_iter()
             .map(|c| Pair {

@@ -159,7 +159,9 @@ impl Frontend for RustylineFrontend {
         #[cfg(feature = "structural")] _worksheet: &crate::repl::worksheet::Worksheet,
     ) -> Read {
         // Pre-readline housekeeping: partial-line marker, plugin sync,
-        // helper command refresh, history snapshot, hook env prep.
+        // helper refresh (cheap shell state only — the `PATH` enumeration waits
+        // for the first Tab, so nothing here delays the prompt), history
+        // snapshot, hook env prep.
         if shell.terminal().ui_round_trips_ok() {
             super::super::cursor::partial_line_marker();
         }
