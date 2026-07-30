@@ -22,6 +22,7 @@ use std::sync::{Mutex, OnceLock};
 use windows_sys::Win32::Security::{PSID, SID_AND_ATTRIBUTES};
 
 use crate::process::Launch;
+use crate::process::cancel::CancelScope;
 use crate::types::{Break, Error, SandboxProjection, Settled};
 
 use super::appcontainer::{AppContainerProfile, CapabilitySids};
@@ -169,7 +170,12 @@ pub(crate) fn confine(
     launch: &mut Launch,
     projection: &SandboxProjection,
     program_image: Option<&Path>,
+    cancel: &CancelScope,
 ) -> Settled<()> {
+    // Traced in three parts, because each is a different kind of cost and only
+    // the middle one is per-path kernel work: minting the profile, the
+    // effective-access filter, and the stamp itself.
+    let t_confine = std::time::Instant::now();
     // One critical section on purpose: minting a profile, stamping its ACEs
     // and reading back its SIDs must not interleave with another thread
     // confining the same session — and `sandbox`/`proj` borrow out of the
@@ -193,6 +199,14 @@ pub(crate) fn confine(
         deny: rules.deny_paths.clone(),
     };
     sandbox.ensure_projection(&key)?;
+    crate::dbg_trace!(
+        "sandbox-win",
+        "confine: profile ensured in {:?} (read={} write={} deny={})",
+        t_confine.elapsed(),
+        key.read.len(),
+        key.write.len(),
+        key.deny.len(),
+    );
     let SessionSandbox {
         dacl,
         network_caps,
@@ -223,15 +237,34 @@ pub(crate) fn confine(
     // Cheapest filter first: the memo, then existence, then the well-known-SID
     // effective-access check, which is a real `GetNamedSecurityInfoW` and DACL
     // walk per path.
+    let t_filter = std::time::Instant::now();
+    let (offered_rw, offered_ro) = (readwrite.len(), readonly.len());
     let readwrite = filter_out_granted(&proj.granted, readwrite, GrantKind::ReadWrite);
     let readonly = filter_out_granted(&proj.granted, readonly, GrantKind::ReadOnly);
     let readwrite = existing_paths(readwrite);
     let readonly = existing_paths(readonly);
     let readwrite = dacl::filter_paths_needing_grant(readwrite, dacl::RW_MASK);
     let readonly = dacl::filter_paths_needing_grant(readonly, dacl::RO_MASK);
+    crate::dbg_trace!(
+        "sandbox-win",
+        "confine: access filter kept rw {}/{}, ro {}/{} in {:?}",
+        readwrite.len(),
+        offered_rw,
+        readonly.len(),
+        offered_ro,
+        t_filter.elapsed(),
+    );
 
-    dacl.grant_appcontainer_access(&sid_str, &readwrite, &readonly)
+    let t_stamp = std::time::Instant::now();
+    dacl.grant_appcontainer_access(&sid_str, &readwrite, &readonly, cancel)
         .map_err(|e| dacl_break(&e))?;
+    crate::dbg_trace!(
+        "sandbox-win",
+        "confine: stamped {} rw + {} ro ACEs in {:?}",
+        readwrite.len(),
+        readonly.len(),
+        t_stamp.elapsed(),
+    );
     proj.mark_granted(&readwrite, GrantKind::ReadWrite);
     proj.mark_granted(&readonly, GrantKind::ReadOnly);
 
@@ -242,7 +275,7 @@ pub(crate) fn confine(
     let deny = filter_out_granted(&proj.granted, deny, GrantKind::Deny);
     let deny = existing_paths(deny);
     if !deny.is_empty() {
-        dacl.add_deny_aces(&sid_str, &deny)
+        dacl.add_deny_aces(&sid_str, &deny, cancel)
             .map_err(|e| dacl_break(&e))?;
         proj.mark_granted(&deny, GrantKind::Deny);
     }
@@ -254,6 +287,7 @@ pub(crate) fn confine(
         &[]
     };
     launch.security_capabilities(profile_sid, capabilities);
+    crate::dbg_trace!("sandbox-win", "confine: total {:?}", t_confine.elapsed());
     Ok(())
 }
 
@@ -295,17 +329,26 @@ pub(crate) fn teardown() {
     else {
         return;
     };
+    // Traced separately from `confine`: the restore walks every ACE the session
+    // stamped, so an exit that looks like a hang is usually this.
+    let t_teardown = std::time::Instant::now();
     let SessionSandbox {
         mut dacl,
         network_caps: _,
         mut projections,
         next_profile_index: _,
     } = sandbox;
+    let t_restore = std::time::Instant::now();
     if let Err(e) = dacl.restore() {
         crate::diagnostic::shell_warning(&format!(
             "sandbox session teardown: DACL restore failed: {e}"
         ));
     }
+    crate::dbg_trace!(
+        "sandbox-win",
+        "teardown: DACL restore in {:?}",
+        t_restore.elapsed()
+    );
     // Per-entry restore failures accumulate here rather than surfacing as
     // `Err` above.
     for w in dacl.warnings() {
@@ -329,6 +372,7 @@ pub(crate) fn teardown() {
             }
         }
     }
+    crate::dbg_trace!("sandbox-win", "teardown: total {:?}", t_teardown.elapsed());
 }
 
 /// Drop paths that are not on disk: `WRITE_DAC` needs an object to apply to.
@@ -360,7 +404,13 @@ fn io_break(context: &str, e: &std::io::Error) -> Break {
     Break::Error(Error::new(format!("{context}: {e}"), 1))
 }
 
+/// A cancel mid-stamp is not a sandbox failure, so it surfaces as the cause's
+/// own word and status — the same pair every other poll point raises
+/// ([`crate::process::check`]) — and never as `sandbox: fs grant failed`.
 fn dacl_break(e: &DaclError) -> Break {
+    if let DaclError::Cancelled(cause) = e {
+        return Break::Error(Error::new(cause.message(), cause.exit_code()));
+    }
     Break::Error(Error::new(format!("sandbox: fs grant failed: {e}"), 1))
 }
 

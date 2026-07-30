@@ -55,7 +55,13 @@ pub(crate) fn sandboxed_command(
     args: &[String],
     ownership: Ownership,
     shell: &Shell,
+    cancel: &crate::process::cancel::CancelScope,
 ) -> Settled<crate::process::Launch> {
+    // Only the Windows backend does work here a cancel could interrupt: bwrap
+    // and Seatbelt render a profile in memory, while an `AppContainer` stamps
+    // the projection's prefixes onto the filesystem before the child exists.
+    #[cfg(not(windows))]
+    let _ = cancel;
     #[cfg(target_os = "linux")]
     {
         linux_sandboxed_command(projection, target, args, ownership, shell)
@@ -67,7 +73,7 @@ pub(crate) fn sandboxed_command(
     }
     #[cfg(windows)]
     {
-        windows_sandboxed_command(projection, target, args)
+        windows_sandboxed_command(projection, target, args, cancel)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
@@ -90,6 +96,7 @@ fn windows_sandboxed_command(
     projection: &crate::types::SandboxProjection,
     target: LaunchTarget,
     args: &[String],
+    cancel: &crate::process::cancel::CancelScope,
 ) -> Settled<crate::process::Launch> {
     // The LowBox token reads only the ALL APPLICATION PACKAGES system paths,
     // so a user-installed image needs `session::confine` to stamp its path RO,
@@ -120,7 +127,7 @@ fn windows_sandboxed_command(
             (launch, image)
         }
     };
-    super::windows::session::confine(&mut launch, projection, image.as_deref())?;
+    super::windows::session::confine(&mut launch, projection, image.as_deref(), cancel)?;
     Ok(launch)
 }
 

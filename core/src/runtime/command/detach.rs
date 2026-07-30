@@ -89,7 +89,15 @@ pub(crate) fn detach(
         )));
     }
 
-    let mut launch = build_command(&plan, crate::sandbox::Ownership::Surrendered, shell)?;
+    // The survivor outlives this run, but confining it happens here, under this
+    // run's scope: a cancel during the stamp abandons the birth, which is the
+    // one moment it still can.
+    let mut launch = build_command(
+        &plan,
+        crate::sandbox::Ownership::Surrendered,
+        shell,
+        mooring.cancel.as_scope(),
+    )?;
     launch.stdin(StdioSpec::null());
     launch.stdout(StdioSpec::null());
     launch.stderr(StdioSpec::null());

@@ -16,6 +16,7 @@ pub(crate) fn build_command(
     plan: &SpawnPlan,
     ownership: crate::sandbox::Ownership,
     shell: &Shell,
+    cancel: &crate::process::cancel::CancelScope,
 ) -> Settled<crate::process::Launch> {
     // A guest jail is already the guest's sandbox: bwrap needs unprivileged
     // user namespaces and the guest boots with `user.max_user_namespaces = 0`.
@@ -36,7 +37,14 @@ pub(crate) fn build_command(
             ExecImage::Host(program) => crate::sandbox::LaunchTarget::Host { program },
             ExecImage::BundledTool { tool } => crate::sandbox::LaunchTarget::BundledTool { tool },
         };
-        crate::sandbox::sandboxed_command(&projection, target, &plan.args, ownership, shell)?
+        crate::sandbox::sandboxed_command(
+            &projection,
+            target,
+            &plan.args,
+            ownership,
+            shell,
+            cancel,
+        )?
     } else {
         match &plan.image {
             ExecImage::Host(path) => {

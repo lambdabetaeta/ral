@@ -350,7 +350,15 @@ fn launch_external_stage_direct(
     debug_assert!(route.value_in.is_none() && route.value_out.is_none());
 
     let rc = command::vet(&ext.id, &ext.args, shell)?;
-    let mut cmd = command::build_command(&rc, crate::sandbox::Ownership::Kept, shell)?;
+    let mut cmd = command::build_command(
+        &rc,
+        crate::sandbox::Ownership::Kept,
+        shell,
+        mooring.cancel.as_scope(),
+    )?;
+    // `spawn_all_stages` polled before this stage; confining it may have taken
+    // seconds, so poll again rather than spawn into an expired wall.
+    crate::process::check(mooring)?;
 
     // Nor a redirect, so `ext` carries none and there is no file to open.
     let plumbing = wire_stage_stdio(&mut cmd, route.stdin, route.stdout, group, shell)?;

@@ -40,6 +40,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::process::cancel::{CancelCause, CancelScope};
+
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_SUCCESS, FILETIME, HANDLE, WAIT_ABANDONED, WAIT_FAILED,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -117,12 +119,25 @@ const INHERITED_ACE_FLAG: u8 = INHERITED_ACE as u8;
 pub enum DaclError {
     NetworkPathRejected(PathBuf),
     PathNotFound(PathBuf),
-    WriteDacDenied { path: PathBuf, reason: String },
-    Win32 { path: PathBuf, reason: String },
+    WriteDacDenied {
+        path: PathBuf,
+        reason: String,
+    },
+    Win32 {
+        path: PathBuf,
+        reason: String,
+    },
     LedgerIo(io::Error),
     LedgerParse(String),
     InvalidSid(String),
-    MutexTimeout { path: PathBuf, timeout_ms: u32 },
+    MutexTimeout {
+        path: PathBuf,
+        timeout_ms: u32,
+    },
+    /// A cancel landed between two paths' stamps.  Not a failure: the ACEs
+    /// already applied are on the ledger, so `restore` — or the next boot's
+    /// sweep — takes them off exactly as it would after a completed grant.
+    Cancelled(CancelCause),
 }
 
 impl std::fmt::Display for DaclError {
@@ -148,6 +163,7 @@ impl std::fmt::Display for DaclError {
                 "timed out acquiring DACL mutex on {} after {timeout_ms} ms",
                 path.display()
             ),
+            Self::Cancelled(cause) => write!(f, "{}", cause.message()),
         }
     }
 }
@@ -157,6 +173,15 @@ impl std::error::Error for DaclError {}
 impl From<io::Error> for DaclError {
     fn from(e: io::Error) -> Self {
         Self::LedgerIo(e)
+    }
+}
+
+/// The stamp loops' poll point: a chain of atomic loads, so it costs nothing
+/// against the `SetNamedSecurityInfoW` it guards.
+fn cancelled(cancel: &CancelScope) -> Result<(), DaclError> {
+    match cancel.cause() {
+        Some(cause) => Err(DaclError::Cancelled(cause)),
+        None => Ok(()),
     }
 }
 
@@ -289,16 +314,26 @@ impl DaclManager {
     }
 
     /// Stamp an allow-ACE for `sid_str` on every prefix given.
+    ///
+    /// `cancel` is polled between paths, which is as fine-grained as this gets:
+    /// one path is a single `SetNamedSecurityInfoW`, which propagates the
+    /// inheritable ACE into every existing descendant before returning —
+    /// seconds on a build tree, and not interruptible from here.
+    /// `TreeSetNamedSecurityInfoW` takes a progress callback that *can* abort
+    /// mid-walk, and is the way to make this promptly preemptible.
     pub fn grant_appcontainer_access(
         &mut self,
         sid_str: &str,
         readwrite: &[PathBuf],
         readonly: &[PathBuf],
+        cancel: &CancelScope,
     ) -> Result<(), DaclError> {
         for p in readwrite {
+            cancelled(cancel)?;
             self.apply_one(sid_str, p, RW_MASK, AceType::Allow)?;
         }
         for p in readonly {
+            cancelled(cancel)?;
             self.apply_one(sid_str, p, RO_MASK, AceType::Allow)?;
         }
         Ok(())
@@ -311,10 +346,16 @@ impl DaclManager {
     /// including ones outside every grant: an `AppContainer` token still
     /// carries `Everyone` and the system-wide `ALL APPLICATION PACKAGES`
     /// grants, so "outside our grants" is not the same as unreachable.
-    pub fn add_deny_aces(&mut self, sid_str: &str, denied: &[PathBuf]) -> Result<(), DaclError> {
+    pub fn add_deny_aces(
+        &mut self,
+        sid_str: &str,
+        denied: &[PathBuf],
+        cancel: &CancelScope,
+    ) -> Result<(), DaclError> {
         // FILE_ALL_ACCESS = STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x1FF.
         let deny_mask: u32 = 0x001F_01FF;
         for p in denied {
+            cancelled(cancel)?;
             self.apply_one(sid_str, p, deny_mask, AceType::Deny)?;
         }
         Ok(())
@@ -1612,6 +1653,12 @@ fn process_creation_filetime() -> Result<u64, DaclError> {
 mod tests {
     use super::*;
 
+    /// An uncancelled scope: every test here exercises the stamp itself, while
+    /// the cancel path has its own test below.
+    fn live() -> CancelScope {
+        CancelScope::default()
+    }
+
     #[test]
     fn ledger_roundtrip() {
         let l = Ledger {
@@ -1861,10 +1908,33 @@ mod tests {
         with_scoped_state_dir(|| {
             let td = tempfile::tempdir().unwrap();
             let mut m = DaclManager::new().unwrap();
-            m.grant_appcontainer_access("S-1-1-0", &[td.path().to_path_buf()], &[])
+            m.grant_appcontainer_access("S-1-1-0", &[td.path().to_path_buf()], &[], &live())
                 .unwrap();
             m.restore().unwrap();
             assert!(m.applied.is_empty());
+        });
+    }
+
+    /// A wall or an Esc must be able to end the stamp, and end it having
+    /// touched nothing.
+    #[test]
+    fn a_cancel_in_force_stops_the_stamp_before_it_applies() {
+        with_scoped_state_dir(|| {
+            let td = tempfile::tempdir().unwrap();
+            let cancel = CancelScope::default();
+            cancel.cancel(CancelCause::Deadline);
+
+            let mut m = DaclManager::new().unwrap();
+            let err =
+                m.grant_appcontainer_access("S-1-1-0", &[td.path().to_path_buf()], &[], &cancel);
+            assert!(
+                matches!(err, Err(DaclError::Cancelled(CancelCause::Deadline))),
+                "the poll must report the cause it saw, not a grant failure"
+            );
+            assert!(
+                m.applied.is_empty(),
+                "a cancel read before the first path leaves no ACE to restore"
+            );
         });
     }
 
@@ -1880,12 +1950,12 @@ mod tests {
             // the prior_state it captured.
             let mut outer = DaclManager::new().unwrap();
             outer
-                .grant_appcontainer_access(everyone, &[], std::slice::from_ref(&target))
+                .grant_appcontainer_access(everyone, &[], std::slice::from_ref(&target), &live())
                 .unwrap();
 
             let mut inner = DaclManager::new().unwrap();
             inner
-                .grant_appcontainer_access(everyone, std::slice::from_ref(&target), &[])
+                .grant_appcontainer_access(everyone, std::slice::from_ref(&target), &[], &live())
                 .unwrap();
 
             let captured = &inner.applied.last().unwrap().prior_state;
@@ -1907,7 +1977,7 @@ mod tests {
             std::fs::create_dir(&sub).unwrap();
             std::fs::write(sub.join("file.txt"), b"x").unwrap();
             let mut m = DaclManager::new().unwrap();
-            m.grant_appcontainer_access("S-1-1-0", &[td.path().to_path_buf()], &[])
+            m.grant_appcontainer_access("S-1-1-0", &[td.path().to_path_buf()], &[], &live())
                 .unwrap();
             m.restore().unwrap();
         });
@@ -1919,7 +1989,7 @@ mod tests {
             let td = tempfile::tempdir().unwrap();
             {
                 let mut m = DaclManager::new().unwrap();
-                m.grant_appcontainer_access("S-1-1-0", &[td.path().to_path_buf()], &[])
+                m.grant_appcontainer_access("S-1-1-0", &[td.path().to_path_buf()], &[], &live())
                     .unwrap();
                 // No explicit restore — Drop should clean up.
             }
@@ -1934,6 +2004,7 @@ mod tests {
                 "S-1-1-0",
                 &[PathBuf::from(r"C:\__definitely_not_a_real_path__\xyzzy")],
                 &[],
+                &live(),
             );
             assert!(matches!(err, Err(DaclError::PathNotFound(_))));
         });
@@ -1947,6 +2018,7 @@ mod tests {
                 "S-1-1-0",
                 &[PathBuf::from(r"\\someserver\share\foo")],
                 &[],
+                &live(),
             );
             // Which variant depends on how the host resolves an unreachable
             // server name; all three mean "never silently succeeded". The
@@ -1972,7 +2044,7 @@ mod tests {
             std::fs::create_dir(&target).unwrap();
             {
                 let mut m = DaclManager::new().unwrap();
-                m.grant_appcontainer_access("S-1-1-0", std::slice::from_ref(&target), &[])
+                m.grant_appcontainer_access("S-1-1-0", std::slice::from_ref(&target), &[], &live())
                     .unwrap();
                 // Forge a dead-PID ledger for recovery to find, then empty
                 // this manager so only the recovery path does the undoing.
@@ -2148,9 +2220,10 @@ mod tests {
             let sid = "S-1-1-0";
 
             let mut m = DaclManager::new().unwrap();
-            m.grant_appcontainer_access(sid, std::slice::from_ref(&parent), &[])
+            m.grant_appcontainer_access(sid, std::slice::from_ref(&parent), &[], &live())
                 .unwrap();
-            m.add_deny_aces(sid, std::slice::from_ref(&child)).unwrap();
+            m.add_deny_aces(sid, std::slice::from_ref(&child), &live())
+                .unwrap();
 
             let explicit = scan_explicit_aces_for_sid(&child, sid).unwrap();
             assert_eq!(explicit.len(), 1, "one explicit ACE expected: {explicit:?}");
@@ -2185,9 +2258,10 @@ mod tests {
             let sid = "S-1-1-0";
 
             let mut m = DaclManager::new().unwrap();
-            m.grant_appcontainer_access(sid, std::slice::from_ref(&parent), &[])
+            m.grant_appcontainer_access(sid, std::slice::from_ref(&parent), &[], &live())
                 .unwrap();
-            m.add_deny_aces(sid, std::slice::from_ref(&child)).unwrap();
+            m.add_deny_aces(sid, std::slice::from_ref(&child), &live())
+                .unwrap();
 
             assert!(
                 m.applied.iter().any(|a| a.ace_type == AceType::Deny),
@@ -2217,6 +2291,7 @@ mod tests {
                 "S-1-1-0",
                 std::slice::from_ref(&td_grant.path().to_path_buf()),
                 &[],
+                &live(),
             )
             .unwrap();
 

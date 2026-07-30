@@ -67,7 +67,16 @@ pub(crate) fn run(
             .map_err(crate::types::Control::from);
     }
 
-    let mut command = build_command(&rc, crate::sandbox::Ownership::Kept, shell)?;
+    // Confinement can run for minutes on Windows, so the run's scope goes in
+    // with it and is read again on the way out: a wall that expired mid-stamp
+    // must not be discovered only once the child is already running.
+    let mut command = build_command(
+        &rc,
+        crate::sandbox::Ownership::Kept,
+        shell,
+        mooring.cancel.as_scope(),
+    )?;
+    crate::process::check(mooring)?;
 
     let plan = classify_redirects(redirects)?;
     command.stdin(wire_stdin(shell).into_stdio());

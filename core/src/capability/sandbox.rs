@@ -23,6 +23,11 @@ pub(crate) fn sandbox_projection(
     resolver: &Resolver,
     path_env: &str,
 ) -> Option<SandboxProjection> {
+    // Traced because this fold is not the pure reduction it reads as: every
+    // `PrefixSet::resolve` canonicalises against the filesystem and every
+    // literal exec key walks `PATH`, so its cost tracks the host's fs latency
+    // and is paid again on each rebuild.
+    let t_fold = std::time::Instant::now();
     let mut read_prefixes: Option<PrefixSet> = None;
     let mut write_prefixes: Option<PrefixSet> = None;
     let mut deny_paths: Vec<NormalizedPrefix> = Vec::new();
@@ -52,6 +57,11 @@ pub(crate) fn sandbox_projection(
     let exec_triggers_sandbox = false;
 
     if !saw_fs && (!saw_net || net_allowed) && !exec_triggers_sandbox {
+        crate::dbg_trace!(
+            "sandbox-proj",
+            "fold unrestricted in {:?} (no OS sandbox needed)",
+            t_fold.elapsed()
+        );
         return None;
     }
 
@@ -79,11 +89,13 @@ pub(crate) fn sandbox_projection(
     } else {
         FsProjection::Unrestricted
     };
-    Some(SandboxProjection {
+    let projection = SandboxProjection {
         fs,
         net: net_allowed,
         exec,
-    })
+    };
+    crate::dbg_trace!("sandbox-proj", "fold restricted in {:?}", t_fold.elapsed());
+    Some(projection)
 }
 
 /// Reduce the exec component of the stack into an [`ExecProjection`],
@@ -163,9 +175,12 @@ fn admitted_literal_paths(
     resolver: &Resolver,
     path_env: &str,
 ) -> Vec<String> {
+    let t_resolve = std::time::Instant::now();
+    let mut unresolved = 0usize;
     let mut allowed = BTreeSet::new();
     for name in names {
         let Some(resolved) = resolve_literal(name, resolver, path_env) else {
+            unresolved += 1;
             crate::dbg_trace!(
                 "sandbox-exec",
                 "exec '{}' not on PATH at projection time; OS gate cannot pin it",
@@ -197,5 +212,15 @@ fn admitted_literal_paths(
             allowed.insert(resolved);
         }
     }
+    // A name that resolves stops at its first PATH hit; one that does not walk
+    // every entry, so the unresolved count is the load-bearing figure here.
+    crate::dbg_trace!(
+        "sandbox-exec",
+        "resolved {} of {} literal exec keys ({} unresolved) in {:?}",
+        allowed.len(),
+        names.len(),
+        unresolved,
+        t_resolve.elapsed()
+    );
     allowed.into_iter().collect()
 }
