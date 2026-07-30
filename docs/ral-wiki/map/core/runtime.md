@@ -133,8 +133,9 @@ guards
   `command::build_command` obtains a confined `process::Launch` via
   `projection_enforceable` / `sandboxed_command` — per-command Seatbelt /
   bwrap confinement on Unix; on Windows the LowBox token of the
-  projection's own AppContainer profile
-  ([[decisions/260713_projection-keyed-appcontainer|projection-keyed]]) —
+  projection's own AppContainer profile, carrying the per-path fs
+  capability SIDs its projection names
+  ([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]) —
   and net/fs fail-closed fires when a child is
   actually spawned, not at grant-body entry
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).

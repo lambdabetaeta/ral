@@ -61,8 +61,9 @@ the structured primitives, closing the bypass.
 The grant body evaluates locally. RAL-owned filesystem effects are checked in
 process by `check_fs_op` before the syscall; each external or bundled child the
 body spawns is confined under the effective projection — per-command Seatbelt
-on macOS and bwrap on Linux, the projection's own AppContainer on Windows
-([[decisions/260713_projection-keyed-appcontainer|projection-keyed-appcontainer]]).
+on macOS and bwrap on Linux, the projection's own AppContainer on Windows,
+whose token carries a capability SID per granted path
+([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]).
 A survivor `detach` births inside the body is confined the same way and then
 keeps that confinement for life: the projection is frozen at birth, since no
 later frame can name the process to widen it. Only the envelope's tie to this

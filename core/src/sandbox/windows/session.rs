@@ -1,41 +1,43 @@
 //! Session-scoped `AppContainer` confinement: one profile per distinct fs
 //! projection the session confines, minted lazily and held until teardown.
 //!
-//! Each profile's SID is stamped with exactly its own projection's paths, so a
-//! narrowed `grant` — or a subagent forked with narrowed permissions — hashes
-//! to a different key and spawns under a SID never granted the wider paths:
-//! attenuation is enforced at the kernel, and stamping is paid once per
-//! distinct projection rather than per command. Identity is the projection's
-//! own fs prefix lists, which the grant fold leaves sorted and deduplicated,
-//! so equal keys mean equal projections, not equal spelling; names are unique by
-//! construction rather than content-hashed, since a collision would silently
-//! merge two projections' authority under one SID.
+//! A projection's own profile buys it a deny-by-default token and a private
+//! named-object namespace; its *filesystem* reach rides elsewhere. Every
+//! `(path, kind)` a projection grants names a capability SID (`dacl` derives
+//! the name from the canonical path), whose ACE is stamped on the prefix once
+//! ever and left there, and a spawn reaches the path only because this session
+//! minted that capability into its token. So attenuation stays kernel-enforced
+//! for the same reason as before, by a cheaper mechanism: a narrowed `grant` —
+//! or a subagent forked with narrowed permissions — hashes to a different key
+//! and spawns under a token whose capability set simply omits the wider paths.
+//! Identity is the projection's own fs prefix lists, which the grant fold
+//! leaves sorted and deduplicated, so equal keys mean equal projections, not
+//! equal spelling; profile names are unique by construction rather than
+//! content-hashed, since a collision would merge two projections' namespaces.
 //!
-//! Grant frames deliberately revert nothing: a detached worker may outlive its
-//! frame under the SID it was born with, and a SID no live child holds is
-//! inert. ACEs come off at [`teardown`], or at the next [`boot_recover`].
+//! Nothing here reverts anything. Grant frames do not, because a detached
+//! worker may outlive its frame under the token it was born with; and
+//! [`teardown`] does not either, because a stamped ACE no live token names is
+//! inert — the `AppContainer` pass of the access check intersects the user's own,
+//! so an unnamed capability grants nobody anything. That is the point of the
+//! scheme: the expensive part, propagating an inheritable ACE through a whole
+//! tree, is paid once per `(path, kind)` across every session that ever asks.
+//! Teardown is left with only the profiles to give back.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use windows_sys::Win32::Security::{PSID, SID_AND_ATTRIBUTES};
+use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 
 use crate::process::Launch;
 use crate::process::cancel::CancelScope;
 use crate::types::{Break, Error, SandboxProjection, Settled};
 
-use super::appcontainer::{AppContainerProfile, CapabilitySids};
-use super::dacl::{self, DaclError, DaclManager};
-
-/// The three access levels [`confine`] stamps, and half the memo key: a repeat
-/// `(path, kind)` is skipped whichever fs list it arrived through.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum GrantKind {
-    ReadWrite,
-    ReadOnly,
-    Deny,
-}
+use super::appcontainer::{AppContainerProfile, CapabilitySids, OwnedCapabilitySid};
+use super::dacl::{self, DaclError, DaclManager, GrantKind};
 
 /// One fs projection's identity, as [`FsRules`](crate::types::FsRules)
 /// carries it. `net` is absent
@@ -48,38 +50,47 @@ struct ProjectionKey {
     deny: Vec<String>,
 }
 
-/// One projection's profile, plus the `(path, kind)` pairs already stamped
-/// for its SID.
+/// One projection's profile, the `(path, kind)` pairs already ensured for it,
+/// and the capability names those pairs resolved to — the exact set
+/// [`confine`] mints into every token it builds for this projection.
 struct ProjectionSandbox {
     profile: AppContainerProfile,
     granted: HashSet<(PathBuf, GrantKind)>,
+    /// In first-grant order, without repeats. A path the filters dropped —
+    /// already covered by the well-known `AppContainer` SIDs, or not on disk —
+    /// contributes no capability, since there is no stamp for one to name.
+    fs_caps: Vec<String>,
 }
 
-impl ProjectionSandbox {
-    fn mark_granted(&mut self, paths: &[PathBuf], kind: GrantKind) {
-        self.granted
-            .extend(paths.iter().cloned().map(|p| (p, kind)));
-    }
+/// One capability SID this session has derived, with its string spelling
+/// cached beside it: both the derivation and the `S-1-…` rendering are pure
+/// functions of the name, so each is paid once per name per session.
+struct FsCap {
+    sid: OwnedCapabilitySid,
+    sid_string: String,
 }
 
 /// One shell session's confinement state: one DACL guard for the whole
-/// session, one sandbox per fs projection.
+/// session, one sandbox per fs projection, and one derived SID per capability
+/// name any of them reached for.
 struct SessionSandbox {
     dacl: DaclManager,
     network_caps: Option<CapabilitySids>,
+    fs_cap_sids: HashMap<String, FsCap>,
     projections: HashMap<ProjectionKey, ProjectionSandbox>,
     next_profile_index: u32,
 }
 
 // SAFETY: the raw SIDs held here (each profile's SID, the network capability
-// SIDs) point at process-global OS-owned memory, not thread-local state, and
-// live until `teardown` frees them. Every access to the struct is serialized
-// by `cell`'s mutex; the only lock-free reads are the raw pointer *values*
+// SIDs, and the `LocalAlloc`'d fs capability SIDs in `fs_cap_sids`) point at
+// process-global OS-owned memory, not thread-local state, and live until
+// `teardown` frees them. Every access to the struct is serialized by `cell`'s
+// mutex; the only lock-free reads are the raw pointer *values*
 // `Launch::security_capabilities` copies, and teardown runs at session
 // shutdown, never concurrently with a spawn.
 #[allow(
     clippy::non_send_fields_in_send_ty,
-    reason = "the fields the lint names (`network_caps`, `projections`) are exactly the raw SIDs the SAFETY note above argues about: OS-owned process-global memory, not thread-affine state, reached only under [`cell`]'s mutex. The lint can see that a `PSID` is not `Send`; it cannot read the argument for why these ones are."
+    reason = "the fields the lint names (`network_caps`, `fs_cap_sids`, `projections`) are exactly the raw SIDs the SAFETY note above argues about: OS-owned process-global memory, not thread-affine state, reached only under [`cell`]'s mutex. The lint can see that a `PSID` is not `Send`; it cannot read the argument for why these ones are."
 )]
 unsafe impl Send for SessionSandbox {}
 
@@ -94,6 +105,7 @@ impl SessionSandbox {
         Ok(Self {
             dacl,
             network_caps: None,
+            fs_cap_sids: HashMap::new(),
             projections: HashMap::new(),
             next_profile_index: 0,
         })
@@ -121,6 +133,7 @@ impl SessionSandbox {
             ProjectionSandbox {
                 profile,
                 granted: HashSet::new(),
+                fs_caps: Vec::new(),
             },
         );
         Ok(())
@@ -147,21 +160,29 @@ fn profile_name(index: u32) -> String {
 }
 
 /// Confine `launch` under its projection's `AppContainer`: resolve the
-/// projection to this session's profile for it, stamp the projection's fs
-/// prefixes for that profile's SID, and attach the `SECURITY_CAPABILITIES`
-/// the spawn boundary threads into `CreateProcessW`.
+/// projection to this session's profile for it, make sure each of its fs
+/// prefixes carries the persistent ACE for its `(path, kind)` capability, and
+/// attach the `SECURITY_CAPABILITIES` — profile SID plus exactly those
+/// capabilities — that the spawn boundary threads into `CreateProcessW`.
+///
+/// The stamps are idempotent and shared: a prefix some earlier session already
+/// stamped costs a witness check, not another tree walk, and nothing here ever
+/// takes one back. What makes this token narrower than another is only which
+/// capabilities it names.
 ///
 /// `program_image` is granted read+execute so the `LowBox` token can load the
 /// child's binary, mirroring the Linux backend's RO bind of the program path;
 /// `None` (a bare name the caller could not resolve) leaves that to the read
 /// projection and the `ALL APPLICATION PACKAGES` system paths. An
-/// `Unrestricted` projection stamps no prefixes at all and shares the one
+/// `Unrestricted` projection asks for no capability at all and shares the one
 /// empty-key profile — the `AppContainer` is deny-by-default regardless.
 ///
-/// Every `deny_path` is stamped unconditionally: an `AppContainer` token
-/// retains the `Everyone` SID and `ALL APPLICATION PACKAGES` grants are
-/// system-wide, so a path outside this projection's own grants is still
-/// reachable through whatever ambient grant the token already carries.
+/// Every `deny_path` gets its own capability, minted into this projection's
+/// tokens and no others: an `AppContainer` token retains the `Everyone` SID and
+/// `ALL APPLICATION PACKAGES` grants are system-wide, so a path outside this
+/// projection's own grants is still reachable through whatever ambient grant
+/// the token already carries — and a deny that were ambient would subtract from
+/// every projection, not just this one.
 #[allow(
     clippy::significant_drop_tightening,
     reason = "the session lock is deliberately held for the whole of `confine` — see the comment at the guard"
@@ -176,8 +197,8 @@ pub(crate) fn confine(
     // the middle one is per-path kernel work: minting the profile, the
     // effective-access filter, and the stamp itself.
     let t_confine = std::time::Instant::now();
-    // One critical section on purpose: minting a profile, stamping its ACEs
-    // and reading back its SIDs must not interleave with another thread
+    // One critical section on purpose: minting a profile, stamping capability
+    // ACEs and reading back the SIDs must not interleave with another thread
     // confining the same session — and `sandbox`/`proj` borrow out of the
     // guard until `security_capabilities`, so an early `drop` would not
     // compile.
@@ -190,7 +211,7 @@ pub(crate) fn confine(
     let sandbox = guard.as_mut().expect("session created above");
 
     // Empty when fs is `Unrestricted`: an AppContainer is deny-by-default, so
-    // an unattenuated projection stamps nothing and rests on the ambient
+    // an unattenuated projection asks for nothing and rests on the ambient
     // ALL APPLICATION PACKAGES grants.
     let rules = projection.fs.rules().cloned().unwrap_or_default();
     let key = ProjectionKey {
@@ -208,17 +229,12 @@ pub(crate) fn confine(
         key.deny.len(),
     );
     let SessionSandbox {
-        dacl,
         network_caps,
+        fs_cap_sids,
         projections,
         ..
     } = sandbox;
     let proj = projections.get_mut(&key).expect("projection ensured above");
-
-    let sid_str = proj
-        .profile
-        .sid_string()
-        .map_err(|e| io_break("sandbox: AppContainer SID string", &e))?;
 
     let readwrite: Vec<PathBuf> = rules.write_prefixes.iter().map(PathBuf::from).collect();
     let mut readonly: Vec<PathBuf> = rules
@@ -255,39 +271,84 @@ pub(crate) fn confine(
         t_filter.elapsed(),
     );
 
-    let t_stamp = std::time::Instant::now();
-    dacl.grant_appcontainer_access(&sid_str, &readwrite, &readonly, cancel)
-        .map_err(|e| dacl_break(&e))?;
-    crate::dbg_trace!(
-        "sandbox-win",
-        "confine: stamped {} rw + {} ro ACEs in {:?}",
-        readwrite.len(),
-        readonly.len(),
-        t_stamp.elapsed(),
-    );
-    proj.mark_granted(&readwrite, GrantKind::ReadWrite);
-    proj.mark_granted(&readonly, GrantKind::ReadOnly);
-
     // Denies skip the effective-access filter: it answers whether the
     // `AppContainer` already *has* this access, which says nothing about
     // whether subtracting it needs a stamp.
     let deny: Vec<PathBuf> = rules.deny_paths.iter().map(PathBuf::from).collect();
     let deny = filter_out_granted(&proj.granted, deny, GrantKind::Deny);
     let deny = existing_paths(deny);
-    if !deny.is_empty() {
-        dacl.add_deny_aces(&sid_str, &deny, cancel)
-            .map_err(|e| dacl_break(&e))?;
-        proj.mark_granted(&deny, GrantKind::Deny);
-    }
+
+    // Each of these is a witness check on a path already stamped, and a whole
+    // tree propagation on one that is not — once ever, for every session.
+    let t_stamp = std::time::Instant::now();
+    let (kept_rw, kept_ro, kept_deny) = (readwrite.len(), readonly.len(), deny.len());
+    ensure_grants(proj, fs_cap_sids, readwrite, GrantKind::ReadWrite, cancel)?;
+    ensure_grants(proj, fs_cap_sids, readonly, GrantKind::ReadOnly, cancel)?;
+    ensure_grants(proj, fs_cap_sids, deny, GrantKind::Deny, cancel)?;
+    crate::dbg_trace!(
+        "sandbox-win",
+        "confine: ensured {kept_rw} rw + {kept_ro} ro + {kept_deny} deny capability ACEs in {:?} \
+         ({} capability/ies on this projection's tokens)",
+        t_stamp.elapsed(),
+        proj.fs_caps.len(),
+    );
 
     let profile_sid: PSID = proj.profile.sid();
-    let capabilities: &[SID_AND_ATTRIBUTES] = if projection.net {
-        ensure_network_caps(network_caps)?
-    } else {
-        &[]
-    };
-    launch.security_capabilities(profile_sid, capabilities);
+    // Copied out of the session's caches: `security_capabilities` copies the
+    // slice, but the SIDs it points at stay owned here until teardown.
+    let mut capabilities: Vec<SID_AND_ATTRIBUTES> = Vec::new();
+    if projection.net {
+        capabilities.extend_from_slice(ensure_network_caps(network_caps)?);
+    }
+    for name in &proj.fs_caps {
+        let cap = fs_cap_sids
+            .get(name)
+            .expect("every name in fs_caps was derived when its grant was ensured");
+        capabilities.push(SID_AND_ATTRIBUTES {
+            Sid: cap.sid.sid(),
+            Attributes: SE_GROUP_ENABLED as u32,
+        });
+    }
+    launch.security_capabilities(profile_sid, &capabilities);
     crate::dbg_trace!("sandbox-win", "confine: total {:?}", t_confine.elapsed());
+    Ok(())
+}
+
+/// Ensure one kind's grants: canonicalize each path, derive the capability its
+/// `(path, kind)` names — once per name per session — stamp the ACE if no
+/// witness says it is already there, and remember both the memo entry and the
+/// capability the projection's tokens must now carry. Ordered and deduplicated,
+/// so a token's capability list reads as the projection's grant history.
+fn ensure_grants(
+    proj: &mut ProjectionSandbox,
+    fs_cap_sids: &mut HashMap<String, FsCap>,
+    paths: Vec<PathBuf>,
+    kind: GrantKind,
+    cancel: &CancelScope,
+) -> Settled<()> {
+    for p in paths {
+        let canonical = dacl::canonicalize_grant_target(&p).map_err(|e| dacl_break(&e))?;
+        let name = dacl::fs_capability_name(&canonical, kind);
+        let cap = match fs_cap_sids.entry(name.clone()) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(v) => {
+                let sid = OwnedCapabilitySid::from_capability_name(&name)
+                    .map_err(|e| io_break("sandbox: derive fs capability SID", &e))?;
+                let sid_string = sid
+                    .sid_string()
+                    .map_err(|e| io_break("sandbox: fs capability SID string", &e))?;
+                v.insert(FsCap { sid, sid_string })
+            }
+        };
+        dacl::ensure_fs_grant(&canonical, &cap.sid_string, kind, cancel)
+            .map_err(|e| dacl_break(&e))?;
+        // Memoized under the path as spelled, not as canonicalized: that is
+        // what the next `confine` will hand us.
+        proj.granted.insert((p, kind));
+        if !proj.fs_caps.contains(&name) {
+            proj.fs_caps.push(name);
+        }
+    }
     Ok(())
 }
 
@@ -317,10 +378,12 @@ pub(crate) fn boot_recover() {
     }
 }
 
-/// Revert every stamped ACE, then delete every projection's profile.
-/// Idempotent, and the explicit path because the process-global's `Drop` is
-/// not guaranteed at exit; a session that never reaches here leaves its ledger
-/// for the next boot's sweep.
+/// Delete every projection's profile. The capability ACEs stay: they are
+/// persistent by design, and one no live token names grants nobody anything, so
+/// there is nothing here to revert — only the OS-level registrations this
+/// session made. Idempotent, and the explicit path because the process-global's
+/// `Drop` is not guaranteed at exit; a session that never reaches here leaves
+/// its ledger for the next boot's sweep.
 pub(crate) fn teardown() {
     let Some(sandbox) = cell()
         .lock()
@@ -329,31 +392,16 @@ pub(crate) fn teardown() {
     else {
         return;
     };
-    // Traced separately from `confine`: the restore walks every ACE the session
-    // stamped, so an exit that looks like a hang is usually this.
+    // Traced separately from `confine`: one profile delete per projection, and
+    // no ACE work at all — an exit that looks like a hang is no longer this.
     let t_teardown = std::time::Instant::now();
     let SessionSandbox {
         mut dacl,
         network_caps: _,
+        fs_cap_sids: _,
         mut projections,
         next_profile_index: _,
     } = sandbox;
-    let t_restore = std::time::Instant::now();
-    if let Err(e) = dacl.restore() {
-        crate::diagnostic::shell_warning(&format!(
-            "sandbox session teardown: DACL restore failed: {e}"
-        ));
-    }
-    crate::dbg_trace!(
-        "sandbox-win",
-        "teardown: DACL restore in {:?}",
-        t_restore.elapsed()
-    );
-    // Per-entry restore failures accumulate here rather than surfacing as
-    // `Err` above.
-    for w in dacl.warnings() {
-        crate::diagnostic::shell_warning(&format!("sandbox session teardown: {w}"));
-    }
     for (_, proj) in projections.drain() {
         let name = proj.profile.name().to_string();
         match proj.profile.delete() {
@@ -372,7 +420,11 @@ pub(crate) fn teardown() {
             }
         }
     }
-    crate::dbg_trace!("sandbox-win", "teardown: total {:?}", t_teardown.elapsed());
+    crate::dbg_trace!(
+        "sandbox-win",
+        "teardown: profiles deleted in {:?}",
+        t_teardown.elapsed()
+    );
 }
 
 /// Drop paths that are not on disk: `WRITE_DAC` needs an object to apply to.
@@ -486,6 +538,74 @@ mod tests {
         assert_eq!(a, same);
         assert_ne!(a, narrower);
         assert_ne!(a, denied);
+    }
+
+    /// End-to-end proof that the kernel honors a *private, derived*
+    /// capability SID: `CreateProcessW` must accept it inside
+    /// `SECURITY_CAPABILITIES`, the stamped allow-ACE must admit a write
+    /// inside the granted prefix (the positive control, load-bearing against
+    /// a vacuous denial), and deny-by-default must hold a write outside it.
+    ///
+    /// Runs against the real user state dir on purpose: scoping
+    /// `XDG_STATE_HOME` here would race `dacl`'s env-scoped tests in this
+    /// multithreaded harness. What it leaves behind is one stamp-store key
+    /// naming a tempdir that no longer exists — inert by construction.
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:test] e2e sandbox spawn scaffolding"
+    )]
+    fn confined_child_writes_inside_the_grant_and_not_outside() {
+        use crate::process::cancel::CancelScope;
+        use crate::process::{Launch, PgidPolicy, StdioSpec};
+        use crate::types::{ExecProjection, FsProjection, FsRules, SandboxProjection};
+        use std::path::Path;
+
+        let granted = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let projection = SandboxProjection {
+            fs: FsProjection::Restricted(FsRules {
+                read_prefixes: vec![granted.path().to_string_lossy().into_owned()],
+                write_prefixes: vec![granted.path().to_string_lossy().into_owned()],
+                deny_paths: Vec::new(),
+                pinned_dirs: Vec::new(),
+            }),
+            net: false,
+            exec: ExecProjection::default(),
+        };
+
+        // `cmd.exe` loads via the ALL APPLICATION PACKAGES system grants, so
+        // the only authority under test is the derived capability's.
+        let cmd = Path::new(r"C:\Windows\System32\cmd.exe");
+        let run_copy_to = |dest: &Path| -> bool {
+            let mut launch = Launch::new(cmd);
+            launch.args(["/c", "copy", "NUL", &dest.to_string_lossy()]);
+            launch.current_dir(granted.path());
+            launch.stdin(StdioSpec::null());
+            launch.stdout(StdioSpec::null());
+            launch.stderr(StdioSpec::null());
+            super::confine(&mut launch, &projection, Some(cmd), &CancelScope::default())
+                .expect("confine under a derived capability SID");
+            let (mut child, pgid, _) = launch
+                .spawn(PgidPolicy::Inherit)
+                .expect("CreateProcessW must accept the derived capability SIDs");
+            child
+                .wait_handling_stop(pgid, false)
+                .expect("wait for the confined child");
+            dest.exists()
+        };
+
+        assert!(
+            run_copy_to(&granted.path().join("ok.txt")),
+            "write inside the granted prefix must land — the stamped \
+             capability ACE failed to grant"
+        );
+        assert!(
+            !run_copy_to(&outside.path().join("nope.txt")),
+            "write outside the grant must be held by deny-by-default"
+        );
+
+        super::teardown();
     }
 
     #[test]

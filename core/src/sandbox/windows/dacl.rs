@@ -3,35 +3,52 @@
 //
 // A port of `filesystem_dacl.rs` from Microsoft's mxc at 0e7c3dd — the
 // `DaclManager` apply/restore engine — respelled for ral's error types and
-// `windows-sys` bindings. Names match upstream's unless a comment says
-// otherwise, so a unit here diffs against the one it was taken from.
+// `windows-sys` bindings, then rekeyed onto path-derived capability SIDs, so
+// only the crash-recovery sweep still restores. Ported units keep upstream's
+// names so each diffs against the one it was taken from.
 
-//! Crash-safe grant-ACE apply/restore for the `AppContainer` sandbox backend.
+//! Persistent capability-ACE stamping for the `AppContainer` sandbox backend.
 //!
-//! `DaclManager` stamps allow-ACEs for an `AppContainer` SID onto host
-//! filesystem prefixes so a LowBox-token child can reach them, and reverts
-//! every stamp it made. `session` holds exactly one manager per shell session
-//! and its `teardown` is what finally restores; authority, though, is
-//! projection-keyed — one SID per distinct fs projection, so a child's
-//! kernel-enforced reach is its own projection, never the union of what the
-//! session stamped. ACEs consequently outlive the grant frame that asked for
-//! them: a detached worker keeps the authority it was born with, and a SID no
-//! live child holds is inert, since only this session's spawns can mint one.
+//! Authority here is path-keyed, not session-keyed. Every `(path, kind)` a
+//! projection grants names a capability SID derived from the canonical path
+//! ([`fs_capability_name`]); [`ensure_fs_grant`] stamps that SID's ACE onto
+//! the prefix, and a child reaches the path only if `session` put the
+//! capability in its `LowBox` token. The stamp is the expensive part — one
+//! `SetNamedSecurityInfoW`, whose inheritable ACE Windows propagates into
+//! every existing descendant before returning, seconds on a build tree — so
+//! it is paid once per `(path, kind)` *ever*, across sessions and
+//! projections, and never reverted. Leaving it is safe: a capability SID is
+//! matched only in the `AppContainer` pass of the access check, whose result
+//! intersects the normal pass, so an ACE no live token names is inert and can
+//! never widen any process's reach beyond the owning user's own.
 //!
-//! Per grant the ordering is: take the path's named mutex, scan the explicit
-//! ACEs our SID already holds, **persist the ledger, then** apply. A process
-//! that dies mid-sequence leaves in the XDG state directory everything needed
-//! to undo an apply that may or may not have landed; `recover_orphaned_state`
-//! sweeps those ledgers at the next session's boot. A restore that fails keeps
-//! its entry, in memory and on disk, so a later attempt retries it.
+//! Two witnesses must agree before a stamp is skipped: the stamp store (a
+//! grow-only set beside the ledgers) says the propagation ran to completion,
+//! and a probe of the root's own DACL says the tree it completed on is still
+//! this one. A crash mid-propagation leaves no store entry, so the next grant
+//! re-stamps; a granted root deleted and recreated fails the probe, same
+//! outcome; and in either interim the child fails closed.
 //!
-//! Two concurrent stampers must never share an `AppContainer` SID — the
-//! merge-then-restore dance below defends only against *sequential*
-//! overlapping grants on one path. `session` guarantees it by naming profiles
-//! from its pid plus a per-session counter, and serializing all stamping under
-//! its lock.
+//! The honest limit of the primitive: an ACE lives on the NTFS *object*, so
+//! authority is prefix-shaped at stamp time and object-sticky after. A file
+//! renamed into a granted tree (same volume) keeps its old descriptor and
+//! stays dark — fail-closed; one renamed *out* carries the inherited grant
+//! with it — fail-open, for exactly the tokens that already held the tree.
+//! Both drifts exist under session-scoped stamping too, since Windows never
+//! re-inherits on rename; persistence extends the second in time rather than
+//! creating it. The trade is recorded, with the mitigations weighed, in
+//! `docs/ral-wiki/decisions/260730_path-derived-capability-sids.md`.
+//!
+//! What still needs undoing is the profile. `DaclManager` ledgers
+//! `AppContainer` profile registrations before the OS-level create, and
+//! [`recover_orphaned_state`] sweeps a crashed session's ledger at the next
+//! boot — deleting its profiles, and restoring any ACEs a pre-capability
+//! ledger still records for per-session SIDs, which a recycled pid's profile
+//! name could otherwise resurrect.
 
+use std::collections::BTreeSet;
 use std::ffi::c_void;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Write};
 use std::os::windows::ffi::OsStrExt;
@@ -78,6 +95,48 @@ pub(crate) const RW_MASK: u32 =
 /// `FILE_TRAVERSE` reason as [`RW_MASK`].
 pub(crate) const RO_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
 
+/// Rights a deny stamp subtracts: the whole `FILE_ALL_ACCESS` surface
+/// (`STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x1FF`). Explicit deny precedes
+/// inherited allow in canonical ACL order, so a deny nested inside a granted
+/// prefix beats the enclosing grant.
+pub(crate) const DENY_MASK: u32 = 0x001F_01FF;
+
+/// The three access shapes a grant stamps. Each keys its own capability name
+/// and its own stamp-store entry, so read-only coverage never satisfies a
+/// read-write request, and a deny is opted into per token rather than shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum GrantKind {
+    ReadWrite,
+    ReadOnly,
+    Deny,
+}
+
+impl GrantKind {
+    fn mask(self) -> u32 {
+        match self {
+            Self::ReadWrite => RW_MASK,
+            Self::ReadOnly => RO_MASK,
+            Self::Deny => DENY_MASK,
+        }
+    }
+
+    fn ace_type(self) -> AceType {
+        match self {
+            Self::ReadWrite | Self::ReadOnly => AceType::Allow,
+            Self::Deny => AceType::Deny,
+        }
+    }
+
+    /// The capability-name segment, doubling as the stamp-store key prefix.
+    fn tag(self) -> &'static str {
+        match self {
+            Self::ReadWrite => "rw",
+            Self::ReadOnly => "ro",
+            Self::Deny => "deny",
+        }
+    }
+}
+
 const _: () = {
     assert!(RW_MASK == FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE);
     assert!(RO_MASK == FILE_GENERIC_READ | FILE_GENERIC_EXECUTE);
@@ -114,6 +173,14 @@ const ACL_CB: u32 = std::mem::size_of::<ACL>() as u32;
 )]
 const INHERITED_ACE_FLAG: u8 = INHERITED_ACE as u8;
 
+/// `OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE` as the `u8` an `ACE_HEADER`'s
+/// `AceFlags` field is, for the same reason as [`INHERITED_ACE_FLAG`].
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "OI|CI is 0x3, and AceFlags — the field it is tested against — is a single byte"
+)]
+const OICI_ACE_FLAGS: u8 = (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8;
+
 /// Errors returned by [`DaclManager`] and [`recover_orphaned_state`].
 #[derive(Debug)]
 pub enum DaclError {
@@ -134,9 +201,9 @@ pub enum DaclError {
         path: PathBuf,
         timeout_ms: u32,
     },
-    /// A cancel landed between two paths' stamps.  Not a failure: the ACEs
-    /// already applied are on the ledger, so `restore` — or the next boot's
-    /// sweep — takes them off exactly as it would after a completed grant.
+    /// A cancel landed between two paths' stamps.  Not a failure: stamps
+    /// already applied are persistent by design, and one interrupted before
+    /// its apply left no witness, so the next grant simply re-runs it.
     Cancelled(CancelCause),
 }
 
@@ -248,17 +315,16 @@ pub struct RecoveryReport {
     pub errors: Vec<String>,
 }
 
-/// Crash-safe guard for filesystem DACL grants: grant into it under each
-/// projection's own SID, then [`restore`](Self::restore) or just drop it.
-/// `session` keeps one per shell session, never one per spawn, and ledgers
-/// its `AppContainer` profile registrations here as well.
+/// Crash-safe ledger of what a session registers with the OS and must give
+/// back: its `AppContainer` profiles. `session` keeps one per shell session.
+/// Filesystem stamps stopped being ledgered when they became persistent —
+/// [`ensure_fs_grant`] is a free function — but the `applied` list survives
+/// in [`Ledger`] so the boot sweep can still undo a pre-capability session's.
 #[derive(Debug)]
 pub struct DaclManager {
     run_id: String,
     ledger_path: PathBuf,
-    applied: Vec<AppliedAce>,
     profiles: Vec<String>,
-    warnings: Vec<String>,
     process_start_filetime: u64,
 }
 
@@ -273,9 +339,7 @@ impl DaclManager {
         Ok(Self {
             run_id,
             ledger_path,
-            applied: Vec::new(),
             profiles: Vec::new(),
-            warnings: Vec::new(),
             process_start_filetime,
         })
     }
@@ -301,142 +365,12 @@ impl DaclManager {
     }
 
     fn checkpoint(&self) -> Result<(), DaclError> {
-        if self.applied.is_empty() && self.profiles.is_empty() {
+        if self.profiles.is_empty() {
             remove_ledger_best_effort(&self.ledger_path);
             Ok(())
         } else {
             self.persist_ledger()
         }
-    }
-
-    pub fn warnings(&self) -> &[String] {
-        &self.warnings
-    }
-
-    /// Stamp an allow-ACE for `sid_str` on every prefix given.
-    ///
-    /// `cancel` is polled between paths, which is as fine-grained as this gets:
-    /// one path is a single `SetNamedSecurityInfoW`, which propagates the
-    /// inheritable ACE into every existing descendant before returning —
-    /// seconds on a build tree, and not interruptible from here.
-    /// `TreeSetNamedSecurityInfoW` takes a progress callback that *can* abort
-    /// mid-walk, and is the way to make this promptly preemptible.
-    pub fn grant_appcontainer_access(
-        &mut self,
-        sid_str: &str,
-        readwrite: &[PathBuf],
-        readonly: &[PathBuf],
-        cancel: &CancelScope,
-    ) -> Result<(), DaclError> {
-        for p in readwrite {
-            cancelled(cancel)?;
-            self.apply_one(sid_str, p, RW_MASK, AceType::Allow)?;
-        }
-        for p in readonly {
-            cancelled(cancel)?;
-            self.apply_one(sid_str, p, RO_MASK, AceType::Allow)?;
-        }
-        Ok(())
-    }
-
-    /// Stamp an explicit deny-ACE for `sid_str` over the whole
-    /// `FILE_ALL_ACCESS` surface. Explicit deny precedes inherited allow in
-    /// canonical ACL order, so a deny nested inside a granted prefix beats the
-    /// enclosing grant. `session::confine` stamps every declared deny path,
-    /// including ones outside every grant: an `AppContainer` token still
-    /// carries `Everyone` and the system-wide `ALL APPLICATION PACKAGES`
-    /// grants, so "outside our grants" is not the same as unreachable.
-    pub fn add_deny_aces(
-        &mut self,
-        sid_str: &str,
-        denied: &[PathBuf],
-        cancel: &CancelScope,
-    ) -> Result<(), DaclError> {
-        // FILE_ALL_ACCESS = STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x1FF.
-        let deny_mask: u32 = 0x001F_01FF;
-        for p in denied {
-            cancelled(cancel)?;
-            self.apply_one(sid_str, p, deny_mask, AceType::Deny)?;
-        }
-        Ok(())
-    }
-
-    /// Idempotently remove every ACE this manager applied. A failure on one
-    /// path blocks none of the others: it lands in
-    /// [`warnings`](Self::warnings) and its entry is kept, in memory and on
-    /// the ledger, for a later `restore` or the next boot's sweep to retry.
-    /// Only ledger I/O is fatal enough to surface as `Err`.
-    pub fn restore(&mut self) -> Result<(), DaclError> {
-        // Tail-first: the last ACE applied is the first removed.
-        let mut remaining: Vec<AppliedAce> = Vec::new();
-        while let Some(entry) = self.applied.pop() {
-            match restore_one(&entry) {
-                Ok(()) => {}
-                Err(e) => {
-                    self.warnings.push(format!(
-                        "restore failed for {} (entry retained for retry): {e}",
-                        entry.canonical_path.display(),
-                    ));
-                    remaining.push(entry);
-                }
-            }
-        }
-        // Pushed newest-first; reverse back to apply order so a retry again
-        // goes tail-first.
-        remaining.reverse();
-        self.applied = remaining;
-        self.checkpoint()
-    }
-
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[io-door:silent:dacl-apply] Stats the grant target to choose OI|CI inheritance before stamping the allow-ACE. Sandbox grant-application infrastructure, not model data I/O — raises no surface card."
-    )]
-    fn apply_one(
-        &mut self,
-        sid_str: &str,
-        path: &Path,
-        mask: u32,
-        ace_type: AceType,
-    ) -> Result<(), DaclError> {
-        let canonical = canonicalize_local(path)?;
-        let inheritable = fs::metadata(&canonical)
-            .map_err(|e| DaclError::Win32 {
-                path: canonical.clone(),
-                reason: format!("metadata: {e}"),
-            })?
-            .is_dir();
-
-        // Held for the whole scan-persist-apply sequence, so no other ral
-        // session's stamper interleaves with it.
-        let _guard = PathMutexGuard::acquire(&canonical)?;
-
-        let prior_state = scan_explicit_aces_for_sid(&canonical, sid_str)?;
-
-        let entry = AppliedAce {
-            canonical_path: canonical,
-            sid_string: sid_str.to_string(),
-            access_mask: mask,
-            ace_type,
-            inheritable,
-            prior_state,
-        };
-
-        // Ledger before apply: dying right here must still leave recovery
-        // able to undo a Win32 call that may or may not have run.
-        self.applied.push(entry.clone());
-        if let Err(e) = self.persist_ledger() {
-            self.applied.pop();
-            return Err(e);
-        }
-
-        apply_explicit_ace(
-            &entry.canonical_path,
-            &entry.sid_string,
-            entry.access_mask,
-            entry.inheritable,
-            entry.ace_type,
-        )
     }
 
     fn persist_ledger(&self) -> Result<(), DaclError> {
@@ -445,21 +379,162 @@ impl DaclManager {
             pid: std::process::id(),
             image_name: current_image_basename(),
             started_at_filetime: self.process_start_filetime,
-            applied: self.applied.clone(),
+            // Always empty since stamps became persistent; kept on the wire
+            // so the sweep still reads pre-capability ledgers.
+            applied: Vec::new(),
             profiles: self.profiles.clone(),
         };
         write_ledger(&self.ledger_path, &ledger)
     }
 }
 
-impl Drop for DaclManager {
-    fn drop(&mut self) {
-        if let Err(e) = self.restore() {
-            crate::diagnostic::shell_warning(&format!(
-                "sandbox DACL guard: restore on drop failed: {e}"
-            ));
-        }
+/// Canonicalize a grant target the way stamps and capability names key it:
+/// `canonicalise_strict`, then local-only — a UNC path has no DACL we may
+/// write and no volume the marker could witness.
+pub(crate) fn canonicalize_grant_target(path: &Path) -> Result<PathBuf, DaclError> {
+    canonicalize_local(path)
+}
+
+/// The capability name whose derived SID carries one `(path, kind)` grant.
+/// Deterministic across sessions and machines — that is what lets a stamp be
+/// paid once and matched forever — and collision-resistant, since two paths
+/// sharing a name would silently merge their authority: the name embeds 128
+/// bits of the canonical path's SHA-256, short enough to stay well inside any
+/// capability-name length the OS might enforce. The canonical spelling is
+/// hashed as-is, not case-folded: canonicalisation already yields one
+/// spelling per object, and folding would merge two genuinely distinct names
+/// in an NTFS case-sensitive directory into one authority.
+pub(crate) fn fs_capability_name(canonical: &Path, kind: GrantKind) -> String {
+    let key = canonical.to_string_lossy();
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(key.as_bytes());
+    let mut name = format!("ral.fs.{}.", kind.tag());
+    for b in &digest[..16] {
+        let _ = write!(name, "{b:02x}");
     }
+    name
+}
+
+/// Ensure the persistent ACE for `(canonical, kind)` under `sid_str` — the
+/// SID [`fs_capability_name`] derives to. Skipped only when both witnesses
+/// hold: the stamp store records a completed propagation, and the root's own
+/// DACL still carries the ACE. `cancel` is polled at entry, which is as
+/// fine-grained as this gets: the stamp is a single `SetNamedSecurityInfoW`,
+/// not interruptible from here — but under this scheme it runs once per
+/// `(path, kind)` ever, not once per projection.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:dacl-apply] Stats the grant target to choose OI|CI inheritance before stamping the capability ACE. Sandbox grant-application infrastructure, not model data I/O — raises no surface card."
+)]
+pub(crate) fn ensure_fs_grant(
+    canonical: &Path,
+    sid_str: &str,
+    kind: GrantKind,
+    cancel: &CancelScope,
+) -> Result<(), DaclError> {
+    cancelled(cancel)?;
+    let inheritable = fs::metadata(canonical)
+        .map_err(|e| DaclError::Win32 {
+            path: canonical.to_path_buf(),
+            reason: format!("metadata: {e}"),
+        })?
+        .is_dir();
+    let key = stamp_key(canonical, kind);
+    if stamp_recorded(&key) && capability_ace_present(canonical, sid_str, kind, inheritable) {
+        return Ok(());
+    }
+    // Held across apply and record, so another ral session stamping the same
+    // path cannot interleave its read-merge-write of the DACL with ours.
+    let _guard = PathMutexGuard::acquire(canonical)?;
+    apply_explicit_ace(
+        canonical,
+        sid_str,
+        kind.mask(),
+        inheritable,
+        kind.ace_type(),
+    )?;
+    // Apply, then record: dying between the two leaves no witness, and the
+    // next grant re-runs a propagation that is idempotent by construction.
+    record_stamp(&key)
+}
+
+/// Whether `canonical`'s own DACL already carries the stamp: an explicit ACE
+/// for `sid_str` of `kind`'s type, covering `kind`'s whole mask, inheritable
+/// when the target is a directory. An unreadable DACL answers `false` —
+/// attempt the real grant and let it fail loudly, the same posture as
+/// [`appcontainer_already_grants`].
+fn capability_ace_present(
+    canonical: &Path,
+    sid_str: &str,
+    kind: GrantKind,
+    inheritable: bool,
+) -> bool {
+    match scan_explicit_aces_for_sid(canonical, sid_str) {
+        Ok(aces) => aces.iter().any(|a| {
+            a.ace_type == kind.ace_type()
+                && (a.access_mask & kind.mask()) == kind.mask()
+                && (!inheritable || (a.inherit_flags & OICI_ACE_FLAGS) == OICI_ACE_FLAGS)
+        }),
+        Err(_) => false,
+    }
+}
+
+/// The stamp store: the grow-only completion witness for [`ensure_fs_grant`],
+/// one [`stamp_key`] entry per propagation that ran to the end. No upstream
+/// counterpart — mxc restores its stamps, so completion never needs
+/// witnessing across sessions.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct StampStore {
+    #[serde(default)]
+    stamps: BTreeSet<String>,
+}
+
+/// Keyed on the canonical spelling exactly as [`fs_capability_name`] is, and
+/// unfolded for the same case-sensitive-directory reason.
+fn stamp_key(canonical: &Path, kind: GrantKind) -> String {
+    format!("{}|{}", kind.tag(), canonical.to_string_lossy())
+}
+
+fn stamp_store_path() -> PathBuf {
+    ledger_dir().join("stamps.json")
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:dacl-stamp-read] Reads the persistent stamp-store witness deciding whether a grant's propagation already ran. Sandbox infrastructure, not model data I/O."
+)]
+fn read_stamp_store_bytes() -> io::Result<Vec<u8>> {
+    fs::read(stamp_store_path())
+}
+
+/// Missing or unreadable reads as "not recorded": the cost of a false no is
+/// one redundant — idempotent — propagation, whose record then rewrites the
+/// store whole.
+fn stamp_recorded(key: &str) -> bool {
+    let Ok(bytes) = read_stamp_store_bytes() else {
+        return false;
+    };
+    serde_json::from_slice::<StampStore>(&bytes).is_ok_and(|s| s.stamps.contains(key))
+}
+
+/// Read-merge-write under the store's own path mutex, so two sessions
+/// recording different stamps never drop each other's. A corrupt store parses
+/// as empty and is rewritten — entries lost that way cost redundant restamps,
+/// never authority.
+fn record_stamp(key: &str) -> Result<(), DaclError> {
+    let path = stamp_store_path();
+    let _guard = PathMutexGuard::acquire(&path)?;
+    let mut store: StampStore = match read_stamp_store_bytes() {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => StampStore::default(),
+        Err(e) => return Err(DaclError::LedgerIo(e)),
+    };
+    if !store.stamps.insert(key.to_string()) {
+        return Ok(());
+    }
+    ensure_ledger_dir()?;
+    let json = serde_json::to_vec_pretty(&store)
+        .map_err(|e| DaclError::LedgerParse(format!("serialize stamp store: {e}")))?;
+    write_bytes_atomic(&path, &json)
 }
 
 /// Reap every ledger whose owning process is gone, restoring the DACL state
@@ -584,16 +659,20 @@ fn ensure_ledger_dir() -> Result<PathBuf, DaclError> {
     Ok(dir)
 }
 
-/// Stage to `<path>.tmp`, `fsync`, then rename over the destination, so the
-/// next boot's sweep sees either the previous complete ledger or this one,
-/// never a half-written file.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:dacl-ledger-write] Atomic ledger write for the DACL crash-safety protocol: stage to <path>.tmp, fsync, rename over the destination. Sandbox infrastructure, not model data I/O."
-)]
 fn write_ledger(path: &Path, ledger: &Ledger) -> Result<(), DaclError> {
     let json = serde_json::to_vec_pretty(ledger)
         .map_err(|e| DaclError::LedgerParse(format!("serialize: {e}")))?;
+    write_bytes_atomic(path, &json)
+}
+
+/// Stage to `<path>.tmp`, `fsync`, then rename over the destination, so a
+/// reader — the next boot's sweep, another session's stamp check — sees
+/// either the previous complete file or this one, never a half-written one.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:dacl-ledger-write] Atomic write for the DACL crash-safety state (ledgers, stamp store): stage to <path>.tmp, fsync, rename over the destination. Sandbox infrastructure, not model data I/O."
+)]
+fn write_bytes_atomic(path: &Path, json: &[u8]) -> Result<(), DaclError> {
     let tmp = tmp_path_for(path);
     // A tmp left by a crashed write would fail `create_new` below with
     // ERROR_FILE_EXISTS; clearing it is best-effort.
@@ -611,7 +690,7 @@ fn write_ledger(path: &Path, ledger: &Ledger) -> Result<(), DaclError> {
             .create_new(true)
             .write(true)
             .open(&tmp)?;
-        f.write_all(&json)?;
+        f.write_all(json)?;
         f.sync_all()?;
     }
     if let Err(e) = fs::rename(&tmp, path) {
@@ -1038,8 +1117,10 @@ fn restore_one(entry: &AppliedAce) -> Result<(), DaclError> {
     replace_explicit_aces_for_sid(&entry.canonical_path, &entry.sid_string, &entry.prior_state)
 }
 
-/// Every explicit (non-inherited) ACE on `canonical` for `sid_str`. Runs under
-/// the path mutex, so what it sees still holds when the apply lands.
+/// Every explicit (non-inherited) ACE on `canonical` for `sid_str`. The
+/// stamp-probe reads it lock-free — a stale answer there costs one redundant
+/// stamp — while the sweep's restore runs it under the path mutex, so what it
+/// sees still holds when the rebuild lands.
 fn scan_explicit_aces_for_sid(canonical: &Path, sid_str: &str) -> Result<Vec<PriorAce>, DaclError> {
     let sid = OwnedSid::parse(sid_str)?;
     let path_w = wide(canonical);
@@ -1659,6 +1740,10 @@ mod tests {
         CancelScope::default()
     }
 
+    /// A syntactically valid capability SID no real token carries: stamps for
+    /// it are inert, which is exactly the persistence story under test.
+    const CAP_SID: &str = "S-1-15-3-1024-1-2-3-4-5-6-7-8";
+
     #[test]
     fn ledger_roundtrip() {
         let l = Ledger {
@@ -1904,14 +1989,24 @@ mod tests {
     }
 
     #[test]
-    fn apply_allow_then_restore_temp_dir() {
+    fn ensure_grant_stamps_the_ace_and_records_the_witness() {
         with_scoped_state_dir(|| {
             let td = tempfile::tempdir().unwrap();
-            let mut m = DaclManager::new().unwrap();
-            m.grant_appcontainer_access("S-1-1-0", &[td.path().to_path_buf()], &[], &live())
-                .unwrap();
-            m.restore().unwrap();
-            assert!(m.applied.is_empty());
+            let canonical = canonicalize_grant_target(td.path()).unwrap();
+            assert!(!capability_ace_present(
+                &canonical,
+                CAP_SID,
+                GrantKind::ReadWrite,
+                true
+            ));
+            ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
+            assert!(capability_ace_present(
+                &canonical,
+                CAP_SID,
+                GrantKind::ReadWrite,
+                true
+            ));
+            assert!(stamp_recorded(&stamp_key(&canonical, GrantKind::ReadWrite)));
         });
     }
 
@@ -1921,51 +2016,75 @@ mod tests {
     fn a_cancel_in_force_stops_the_stamp_before_it_applies() {
         with_scoped_state_dir(|| {
             let td = tempfile::tempdir().unwrap();
+            let canonical = canonicalize_grant_target(td.path()).unwrap();
             let cancel = CancelScope::default();
             cancel.cancel(CancelCause::Deadline);
 
-            let mut m = DaclManager::new().unwrap();
-            let err =
-                m.grant_appcontainer_access("S-1-1-0", &[td.path().to_path_buf()], &[], &cancel);
+            let err = ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadWrite, &cancel);
             assert!(
                 matches!(err, Err(DaclError::Cancelled(CancelCause::Deadline))),
                 "the poll must report the cause it saw, not a grant failure"
             );
             assert!(
-                m.applied.is_empty(),
-                "a cancel read before the first path leaves no ACE to restore"
+                !stamp_recorded(&stamp_key(&canonical, GrantKind::ReadWrite)),
+                "a cancel read before the apply leaves no witness behind"
             );
         });
     }
 
     #[test]
-    fn apply_overlapping_then_restore_does_not_leak_rights() {
+    fn a_read_only_stamp_does_not_satisfy_a_read_write_probe() {
         with_scoped_state_dir(|| {
             let td = tempfile::tempdir().unwrap();
-            let target = td.path().to_path_buf();
-            let everyone = "S-1-1-0";
-
-            // RO, then RW from a separate manager. Same trustee, so the two
-            // merge into one ACE and the second manager can only unwind via
-            // the prior_state it captured.
-            let mut outer = DaclManager::new().unwrap();
-            outer
-                .grant_appcontainer_access(everyone, &[], std::slice::from_ref(&target), &live())
-                .unwrap();
-
-            let mut inner = DaclManager::new().unwrap();
-            inner
-                .grant_appcontainer_access(everyone, std::slice::from_ref(&target), &[], &live())
-                .unwrap();
-
-            let captured = &inner.applied.last().unwrap().prior_state;
+            let canonical = canonicalize_grant_target(td.path()).unwrap();
+            ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadOnly, &live()).unwrap();
+            assert!(capability_ace_present(
+                &canonical,
+                CAP_SID,
+                GrantKind::ReadOnly,
+                true
+            ));
             assert!(
-                !captured.is_empty(),
-                "inner.prior_state should contain outer's ACE: {captured:?}"
+                !capability_ace_present(&canonical, CAP_SID, GrantKind::ReadWrite, true),
+                "RO_MASK must not cover a read-write probe"
             );
+            assert!(!stamp_recorded(&stamp_key(
+                &canonical,
+                GrantKind::ReadWrite
+            )));
+        });
+    }
 
-            inner.restore().unwrap();
-            outer.restore().unwrap();
+    /// The self-healing loop: a granted root deleted and recreated keeps its
+    /// stamp-store witness but fails the DACL probe, so the next grant
+    /// re-stamps rather than trusting the stale record.
+    #[test]
+    fn a_recreated_root_fails_the_probe_and_is_restamped() {
+        with_scoped_state_dir(|| {
+            let td = tempfile::tempdir().unwrap();
+            let root = td.path().join("project");
+            std::fs::create_dir(&root).unwrap();
+            let canonical = canonicalize_grant_target(&root).unwrap();
+            ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
+
+            std::fs::remove_dir_all(&root).unwrap();
+            std::fs::create_dir(&root).unwrap();
+            let canonical = canonicalize_grant_target(&root).unwrap();
+            assert!(stamp_recorded(&stamp_key(&canonical, GrantKind::ReadWrite)));
+            assert!(!capability_ace_present(
+                &canonical,
+                CAP_SID,
+                GrantKind::ReadWrite,
+                true
+            ));
+
+            ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
+            assert!(capability_ace_present(
+                &canonical,
+                CAP_SID,
+                GrantKind::ReadWrite,
+                true
+            ));
         });
     }
 
@@ -1976,50 +2095,21 @@ mod tests {
             let sub = td.path().join("sub");
             std::fs::create_dir(&sub).unwrap();
             std::fs::write(sub.join("file.txt"), b"x").unwrap();
-            let mut m = DaclManager::new().unwrap();
-            m.grant_appcontainer_access("S-1-1-0", &[td.path().to_path_buf()], &[], &live())
-                .unwrap();
-            m.restore().unwrap();
-        });
-    }
-
-    #[test]
-    fn drop_calls_restore() {
-        with_scoped_state_dir(|| {
-            let td = tempfile::tempdir().unwrap();
-            {
-                let mut m = DaclManager::new().unwrap();
-                m.grant_appcontainer_access("S-1-1-0", &[td.path().to_path_buf()], &[], &live())
-                    .unwrap();
-                // No explicit restore — Drop should clean up.
-            }
+            let canonical = canonicalize_grant_target(td.path()).unwrap();
+            ensure_fs_grant(&canonical, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
         });
     }
 
     #[test]
     fn nonexistent_path_errors_cleanly() {
-        with_scoped_state_dir(|| {
-            let mut m = DaclManager::new().unwrap();
-            let err = m.grant_appcontainer_access(
-                "S-1-1-0",
-                &[PathBuf::from(r"C:\__definitely_not_a_real_path__\xyzzy")],
-                &[],
-                &live(),
-            );
-            assert!(matches!(err, Err(DaclError::PathNotFound(_))));
-        });
+        let err = canonicalize_grant_target(Path::new(r"C:\__definitely_not_a_real_path__\xyzzy"));
+        assert!(matches!(err, Err(DaclError::PathNotFound(_))));
     }
 
     #[test]
     fn network_path_rejected_e2e() {
         with_scoped_state_dir(|| {
-            let mut m = DaclManager::new().unwrap();
-            let err = m.grant_appcontainer_access(
-                "S-1-1-0",
-                &[PathBuf::from(r"\\someserver\share\foo")],
-                &[],
-                &live(),
-            );
+            let err = canonicalize_grant_target(Path::new(r"\\someserver\share\foo"));
             // Which variant depends on how the host resolves an unreachable
             // server name; all three mean "never silently succeeded". The
             // unit tests above pin the classification deterministically.
@@ -2036,33 +2126,51 @@ mod tests {
         });
     }
 
+    /// A pre-capability session's ledger still records per-session ACEs; the
+    /// sweep must keep restoring those, since a recycled pid's profile name
+    /// could otherwise resurrect them.
     #[test]
-    fn crash_recovery_synthetic_dead_pid() {
+    fn crash_recovery_restores_a_legacy_ledgered_ace() {
         with_scoped_state_dir(|| {
             let td = tempfile::tempdir().unwrap();
             let target = td.path().join("victim");
             std::fs::create_dir(&target).unwrap();
-            {
-                let mut m = DaclManager::new().unwrap();
-                m.grant_appcontainer_access("S-1-1-0", std::slice::from_ref(&target), &[], &live())
-                    .unwrap();
-                // Forge a dead-PID ledger for recovery to find, then empty
-                // this manager so only the recovery path does the undoing.
-                let dir = ensure_ledger_dir().unwrap();
-                let synthetic = dir.join("pid-2147483646-orphan.json");
-                let l = Ledger {
-                    run_id: "pid-2147483646-orphan".into(),
-                    pid: 0x7FFF_FFFE,
-                    image_name: "ral.exe".into(),
-                    started_at_filetime: 0,
-                    applied: m.applied.clone(),
-                    profiles: Vec::new(),
-                };
-                write_ledger(&synthetic, &l).unwrap();
-                m.applied.clear();
-            }
+            let canonical = canonicalize_grant_target(&target).unwrap();
+            apply_explicit_ace(&canonical, CAP_SID, RW_MASK, true, AceType::Allow).unwrap();
+            assert!(
+                !scan_explicit_aces_for_sid(&canonical, CAP_SID)
+                    .unwrap()
+                    .is_empty()
+            );
+
+            let dir = ensure_ledger_dir().unwrap();
+            let synthetic = dir.join("pid-2147483646-orphan.json");
+            let l = Ledger {
+                run_id: "pid-2147483646-orphan".into(),
+                pid: 0x7FFF_FFFE,
+                image_name: "ral.exe".into(),
+                started_at_filetime: 0,
+                applied: vec![AppliedAce {
+                    canonical_path: canonical.clone(),
+                    sid_string: CAP_SID.into(),
+                    access_mask: RW_MASK,
+                    ace_type: AceType::Allow,
+                    inheritable: true,
+                    prior_state: Vec::new(),
+                }],
+                profiles: Vec::new(),
+            };
+            write_ledger(&synthetic, &l).unwrap();
+
             let report = recover_orphaned_state().unwrap();
             assert!(report.files_processed >= 1);
+            assert!(report.aces_restored >= 1, "{report:?}");
+            assert!(
+                scan_explicit_aces_for_sid(&canonical, CAP_SID)
+                    .unwrap()
+                    .is_empty(),
+                "the sweep must take the legacy ACE back off"
+            );
         });
     }
 
@@ -2210,26 +2318,28 @@ mod tests {
         out
     }
 
+    /// The property a token relies on when it carries both a grant's and a
+    /// deny's capability: canonical order puts the explicit deny ahead of the
+    /// allow inherited from the enclosing grant, whoever the trustees are —
+    /// here one SID plays both so a single scan sees the whole sequence.
     #[test]
-    fn deny_nested_in_grant_overrides_inherited_allow_and_reverts() {
+    fn deny_nested_in_grant_precedes_the_inherited_allow() {
         with_scoped_state_dir(|| {
             let td = tempfile::tempdir().unwrap();
-            let parent = td.path().to_path_buf();
-            let child = parent.join("cred");
+            let parent = canonicalize_grant_target(td.path()).unwrap();
+            let child = td.path().join("cred");
             std::fs::create_dir(&child).unwrap();
-            let sid = "S-1-1-0";
+            let child = canonicalize_grant_target(&child).unwrap();
 
-            let mut m = DaclManager::new().unwrap();
-            m.grant_appcontainer_access(sid, std::slice::from_ref(&parent), &[], &live())
-                .unwrap();
-            m.add_deny_aces(sid, std::slice::from_ref(&child), &live())
-                .unwrap();
+            ensure_fs_grant(&parent, CAP_SID, GrantKind::ReadWrite, &live()).unwrap();
+            ensure_fs_grant(&child, CAP_SID, GrantKind::Deny, &live()).unwrap();
 
-            let explicit = scan_explicit_aces_for_sid(&child, sid).unwrap();
+            let explicit = scan_explicit_aces_for_sid(&child, CAP_SID).unwrap();
             assert_eq!(explicit.len(), 1, "one explicit ACE expected: {explicit:?}");
             assert_eq!(explicit[0].ace_type, AceType::Deny);
+            assert!(stamp_recorded(&stamp_key(&child, GrantKind::Deny)));
 
-            let seq = sid_ace_sequence(&child, sid);
+            let seq = sid_ace_sequence(&child, CAP_SID);
             let deny_idx = seq
                 .iter()
                 .position(|(t, inh)| *t == 0x01 && !*inh)
@@ -2237,46 +2347,6 @@ mod tests {
             if let Some(allow_idx) = seq.iter().position(|(t, _)| *t == 0x00) {
                 assert!(deny_idx < allow_idx, "deny must precede allow: {seq:?}");
             }
-
-            m.restore().unwrap();
-            assert!(m.applied.is_empty());
-            let after = scan_explicit_aces_for_sid(&child, sid).unwrap();
-            assert!(
-                after.is_empty(),
-                "restore must remove our explicit deny: {after:?}"
-            );
-        });
-    }
-
-    #[test]
-    fn deny_ace_recorded_in_ledger() {
-        with_scoped_state_dir(|| {
-            let td = tempfile::tempdir().unwrap();
-            let parent = td.path().to_path_buf();
-            let child = parent.join("secret");
-            std::fs::create_dir(&child).unwrap();
-            let sid = "S-1-1-0";
-
-            let mut m = DaclManager::new().unwrap();
-            m.grant_appcontainer_access(sid, std::slice::from_ref(&parent), &[], &live())
-                .unwrap();
-            m.add_deny_aces(sid, std::slice::from_ref(&child), &live())
-                .unwrap();
-
-            assert!(
-                m.applied.iter().any(|a| a.ace_type == AceType::Deny),
-                "in-memory ledger must record the deny stamp"
-            );
-            let persisted = read_ledger(&m.ledger_path).unwrap();
-            assert!(
-                persisted
-                    .applied
-                    .iter()
-                    .any(|a| a.ace_type == AceType::Deny),
-                "on-disk ledger must record the deny stamp"
-            );
-
-            m.restore().unwrap();
         });
     }
 
@@ -2286,14 +2356,10 @@ mod tests {
             let td_grant = tempfile::tempdir().unwrap();
             let td_no_grant = tempfile::tempdir().unwrap();
 
-            let mut mgr = DaclManager::new().unwrap();
-            mgr.grant_appcontainer_access(
-                "S-1-1-0",
-                std::slice::from_ref(&td_grant.path().to_path_buf()),
-                &[],
-                &live(),
-            )
-            .unwrap();
+            // Everyone is one of the well-known AC SIDs, so a grant for it is
+            // exactly what the filter must recognize as already covering.
+            let granted = canonicalize_grant_target(td_grant.path()).unwrap();
+            ensure_fs_grant(&granted, "S-1-1-0", GrantKind::ReadWrite, &live()).unwrap();
 
             let input = vec![
                 td_grant.path().to_path_buf(),
@@ -2308,8 +2374,56 @@ mod tests {
                 kept.iter().any(|p| p == td_no_grant.path()),
                 "non-granted path should survive the filter: kept={kept:?}"
             );
+        });
+    }
 
-            mgr.restore().unwrap();
+    #[test]
+    fn capability_name_is_deterministic_kind_and_path_keyed() {
+        let a = Path::new(r"\\?\C:\Work\Proj");
+        let a_case = Path::new(r"\\?\c:\work\proj");
+        let b = Path::new(r"\\?\C:\Work\Other");
+        assert_eq!(
+            fs_capability_name(a, GrantKind::ReadWrite),
+            fs_capability_name(a, GrantKind::ReadWrite),
+            "one spelling, one name"
+        );
+        assert_ne!(
+            fs_capability_name(a, GrantKind::ReadWrite),
+            fs_capability_name(a_case, GrantKind::ReadWrite),
+            "case variants are distinct names: canonicalisation unifies the \
+             spellings of one object, and an NTFS case-sensitive directory \
+             really does hold two"
+        );
+        assert_ne!(
+            fs_capability_name(a, GrantKind::ReadWrite),
+            fs_capability_name(a, GrantKind::ReadOnly)
+        );
+        assert_ne!(
+            fs_capability_name(a, GrantKind::ReadWrite),
+            fs_capability_name(b, GrantKind::ReadWrite)
+        );
+        for kind in [GrantKind::ReadWrite, GrantKind::ReadOnly, GrantKind::Deny] {
+            let name = fs_capability_name(a, kind);
+            assert!(name.starts_with("ral.fs."));
+            assert!(
+                name.encode_utf16().count() <= 64,
+                "stay inside the most conservative name cap: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn stamp_store_roundtrip_and_merge() {
+        with_scoped_state_dir(|| {
+            let key_a = "rw|\\\\?\\c:\\work\\a";
+            let key_b = "ro|\\\\?\\c:\\work\\b";
+            assert!(!stamp_recorded(key_a));
+            record_stamp(key_a).unwrap();
+            record_stamp(key_b).unwrap();
+            record_stamp(key_a).unwrap(); // idempotent
+            assert!(stamp_recorded(key_a));
+            assert!(stamp_recorded(key_b));
+            assert!(!stamp_recorded("deny|\\\\?\\c:\\work\\a"));
         });
     }
 

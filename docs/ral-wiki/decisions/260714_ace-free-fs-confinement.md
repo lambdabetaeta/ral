@@ -1,8 +1,17 @@
 ---
-status: open
+status: superseded
 ---
 
 # Windows grant confinement scales with the working tree, not the projection
+
+> Superseded (2026-07-30) by
+> [[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]:
+> the propagation cost is removed by rekeying fs grants from the container SID to
+> a deterministic per-path capability SID stamped once ever and never reverted —
+> a variant of option H that keeps default-deny reads, which the survey below
+> judged impossible. The measurements, the tier findings, and the rejected
+> options remain the record of the design space, and tiers A (BFS) and B
+> (BaseContainer) remain the destination.
 
 **The Windows DACL tier stamps an *inheritable* allow-ACE per fs-projection
 prefix, and `SetNamedSecurityInfoW` propagates it synchronously to every

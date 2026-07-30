@@ -1,9 +1,10 @@
 //! Windows sandbox: the fork-bomb Job Object, and the profile dump.
 //!
 //! Confinement proper lives in the submodules — `appcontainer` (profile
-//! lifecycle and `LowBox` spawn capabilities), `dacl` (grant-ACE apply and
-//! restore), and `session`, which composes them into one profile per distinct
-//! fs projection, held until session teardown.
+//! lifecycle and `LowBox` spawn capabilities), `dacl` (persistent
+//! capability-ACE stamping), and `session`, which composes them: one profile
+//! per distinct fs projection, and a token whose capability SIDs are exactly
+//! the projection's stamped `(path, kind)` grants.
 
 pub(crate) mod appcontainer;
 pub(crate) mod dacl;
@@ -51,11 +52,12 @@ pub(super) fn dump_profile_for_windows(policy: &SandboxProjection) -> String {
     out.push_str("AppContainer (LowBox token) profile:\n");
     out.push_str(
         "  profile: one per distinct fs projection of the session\n\
-         \x20     (name ral.sandbox.s<pid>.p<n>); this projection's SID sees\n\
-         \x20     only the ACEs stamped below, never another projection's\n",
+         \x20     (name ral.sandbox.s<pid>.p<n>); fs authority rides the\n\
+         \x20     per-path capability SIDs minted into this spawn's token,\n\
+         \x20     never another projection's\n",
     );
     out.push_str("  fs: deny-by-default; the ALL APPLICATION PACKAGES group's\n");
-    out.push_str("      system-path reads plus the allow-ACEs stamped below\n");
+    out.push_str("      system-path reads plus the capability ACEs stamped below\n");
     let _ = writeln!(
         out,
         "  net: {} -- {}",
@@ -73,7 +75,11 @@ pub(super) fn dump_profile_for_windows(policy: &SandboxProjection) -> String {
              \x20     read projection / ALL APPLICATION PACKAGES) -- mirrors the Linux\n\
              \x20     bind of the program path\n",
     );
-    out.push_str("  fs allow-ACEs (SID = the profile's AppContainer SID):\n");
+    out.push_str(
+        "  fs allow-ACEs (SID = a capability SID derived from each canonical\n\
+         \x20     path and access kind; stamped once ever, persistent, and inert\n\
+         \x20     for any token not carrying it):\n",
+    );
     if let Some(fs) = policy.fs.rules() {
         out.push_str("    read-write (FILE_GENERIC_READ|WRITE|EXECUTE|DELETE):\n");
         for p in &fs.write_prefixes {
@@ -89,11 +95,11 @@ pub(super) fn dump_profile_for_windows(policy: &SandboxProjection) -> String {
         if !fs.deny_paths.is_empty() {
             out.push_str(
                 "    deny_paths: every one gets an explicit deny-ACE (deny\n\
-                     \x20     FILE_ALL_ACCESS), unconditionally -- an AppContainer token\n\
-                     \x20     retains Everyone and ALL APPLICATION PACKAGES grants are\n\
-                     \x20     system-wide, so a path outside this projection's own grants\n\
-                     \x20     is not actually unreachable (skipped only if it does not\n\
-                     \x20     exist, or this session already denied it):\n",
+                     \x20     FILE_ALL_ACCESS) under its own deny capability, which this\n\
+                     \x20     token opts into -- an AppContainer token retains Everyone and\n\
+                     \x20     ALL APPLICATION PACKAGES grants are system-wide, so a path\n\
+                     \x20     outside this projection's own grants is not actually\n\
+                     \x20     unreachable (skipped only if it does not exist):\n",
             );
             for p in &fs.deny_paths {
                 let _ = writeln!(out, "      {p}");

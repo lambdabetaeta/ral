@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 635a1ae
-generated_at_date: 2026-07-28
+generated_at_commit: ce6a3ba
+generated_at_date: 2026-07-30
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -136,7 +136,8 @@ device for `net` to govern; the in-process gates apply unchanged
   `SANDBOX_SELF`, on Unix enters the OS sandbox for a per-command
   `--sandbox-projection` child (`maybe_enter_process_sandbox`), and on Windows
   runs the boot-time orphan sweep (`windows::session::boot_recover`) that
-  reclaims DACL grants a crashed prior session left stamped. A test binary is
+  deletes a crashed prior session's AppContainer profiles and restores the
+  per-session ACEs of any legacy pre-capability ledger. A test binary is
   the same [[invariants/single-binary|multicall executable]] a confined child
   re-execs, so it must serve these flags from its own pre-`main` `#[ctor]` (it
   reaches `main` only through libtest); `serve_sandbox_early_init` is the shared
@@ -191,29 +192,44 @@ device for `net` to govern; the in-process gates apply unchanged
 - Backends: `macos.rs` (Seatbelt, `macos-base.sbpl`), `linux.rs` (bwrap), and
   `windows.rs` (Job Objects capping the child tree at 512 processes, plus the
   AppContainer backend in three submodules — `appcontainer.rs`, the profile
-  lifecycle and LowBox `SECURITY_CAPABILITIES` construction; `dacl.rs`,
-  the crash-safe grant/deny ACE apply/restore engine with a durably persisted
-  ledger, per-path named mutexes, and boot-time orphan recovery; `session.rs`,
-  the projection-keyed session state the two compose into). The module docs of
-  those three files carry the full protocol; the shape is imitated from MXC's
-  Tier-3 processcontainer backend, breadcrumbed per unit
-  ([[decisions/260713_projection-keyed-appcontainer|projection-keyed-appcontainer]]).
+  lifecycle and LowBox `SECURITY_CAPABILITIES` construction; `dacl.rs`, the
+  path-derived capability-SID engine (`fs_capability_name`, `ensure_fs_grant`)
+  over a durably persisted stamp store, per-path named mutexes, and boot-time
+  orphan recovery; `session.rs`, the session state the two compose into). The
+  module docs of those three files carry the full protocol; the shape is
+  imitated from MXC's Tier-3 processcontainer backend, breadcrumbed per unit.
 
-The Windows backend is **projection-keyed**: one `DaclManager` per shell
-session, one AppContainer profile per *distinct fs projection* (`SessionSandbox`
-maps `bind_spec` identity to profile), so the ACEs behind a SID are exactly its
-own projection's paths and a confined child's kernel-checked authority is the
-projection its command declared — a narrowed grant or subagent gets a narrower
-SID. Stamps persist until `teardown_session` (a detached worker keeps its
-birth authority; a SID with no live child is inert); profile registrations are
-ledgered before the OS create so the boot sweep deletes a crashed session's
-profiles ([[decisions/260713_projection-keyed-appcontainer|projection-keyed-appcontainer]]).
-Within that shape: `deny_paths` nested inside a grant are stamped
-unconditionally as explicit deny-ACEs, which canonical ACL ordering places
-ahead of any allow; the child's program image is granted read-only so a
-user-installed binary or the bundled-tool self image can load at all; and
-`net: false` is enforced by withholding the network capability SIDs — a LowBox
-token without them cannot open a socket, so `net_enforced()` holds on Windows.
+The Windows backend is **path-keyed**: each `(canonical path, kind)` grant —
+kind ∈ {rw, ro, deny} — derives a deterministic capability name
+`ral.fs.<kind>.<128-bit-truncated SHA-256 of the canonical path>` — hashed as-is,
+never case-folded, so a case-sensitive directory's two distinct names cannot
+merge into one authority — and thence a capability SID via
+`DeriveCapabilitySidsFromName` (`dacl::fs_capability_name`).
+`dacl::ensure_fs_grant` stamps that SID's
+inheritable ACE once and never reverts it; two witnesses gate skipping a stamp —
+the grow-only stamp store (`stamps.json`, atomic tmp+rename, per-path
+named-mutex merge) recording completed propagations, and a probe of the root's
+own DACL confirming the tree was not deleted and recreated. Recording follows
+the apply, so a crash mid-propagation leaves no witness and the next grant
+re-stamps idempotently while a child in the interim fails closed. A spawn's
+kernel-checked reach is then exactly the capability SIDs `session::confine`
+mints into its token, so attenuation shrinks-only: a narrowed grant or subagent
+gets a token lacking the wider paths' capabilities. An ACE lives on the NTFS
+object and Windows does not re-inherit on a same-volume rename, so stamped
+authority is object-sticky where a grant rule is path-based — `dacl.rs`'s module
+header records the resulting drift in both directions
+([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]).
+Within that shape: an AppContainer profile is still minted per *distinct fs
+projection* (`SessionSandbox` maps `bind_spec` identity to profile) for the
+deny-by-default token and named-object namespace separation, carrying no fs
+authority, and `DaclManager` is the profile ledger — teardown deletes profiles
+but restores no ACEs; a `deny_paths` entry is its own per-path deny capability
+the token opts into, which canonical ACL ordering places ahead of any allow, so
+projection-specific denies coexist on a shared path; the child's program image
+is granted read-only so a user-installed binary or the bundled-tool self image
+can load at all; and `net: false` is enforced by withholding the network
+capability SIDs — a LowBox token without them cannot open a socket, so
+`net_enforced()` holds on Windows.
 
 `macos-base.sbpl` is the policy-independent Seatbelt base every rendered macOS
 profile inherits: deny-default, libSystem/dyld startup allowances, common device
@@ -259,7 +275,8 @@ Every `fs`/process constructor in this layer is a closed *I/O door*: the
 workspace bans the raw constructors via clippy `disallowed_methods`, so each call
 site carries an `#[allow(… reason = "[io-door:…]")]` classifying it as a surfaced
 exec image (`make_command`), silent infrastructure (the self re-exec, the
-`ps` denial sampler, the boot-time binary pin, the DACL ledger lifecycle), or
+`ps` denial sampler, the boot-time binary pin, the stamp-store and profile-ledger
+lifecycle), or
 test scaffolding. The door
 shapes and their rail rendering live in [[map/exarch/io-surface|io-surface]]; here
 the doors are only declared and accounted, with `core/tests/io_door_set.rs`

@@ -1,8 +1,16 @@
 ---
-status: active
+status: superseded
 ---
 
 # Projection-keyed AppContainer SIDs
+
+> Superseded (2026-07-30) by
+> [[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]:
+> fs authority no longer rides the AppContainer SID at all — a grant derives its
+> own capability SID from the path it covers, and a token selects. The
+> per-projection profile survives for the deny-by-default LowBox token and
+> named-object separation, carrying no fs authority; the attenuation argument
+> below is what the capability-SID token set now realises.
 
 **The Windows OS sandbox mints one AppContainer SID per *distinct fs
 projection* a session confines, so a child's kernel-checked filesystem

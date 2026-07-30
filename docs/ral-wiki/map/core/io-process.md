@@ -135,7 +135,8 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   Windows owns the raw `CreateProcessW` boundary, including command-line/env
   rendering, explicit helper-handle allow lists, the `SECURITY_CAPABILITIES`
   attribute a confined spawn attaches (its projection's AppContainer SID and
-  the capability SIDs — [[map/core/capabilities|capabilities]]), the launch mutex,
+  the per-path fs and network capability SIDs —
+  [[map/core/capabilities|capabilities]]), the launch mutex,
   suspended create → Job Object assignment → resume, and the widened
   `ChildHandle` raw process wrapper
   ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).

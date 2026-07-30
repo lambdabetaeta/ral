@@ -8,12 +8,17 @@
 //! `AppContainer` profile lifecycle and `LowBox` spawn capabilities.
 //!
 //! One profile per distinct fs projection a shell session confines. `session`
-//! owns the keying, naming and lifetime, `dacl` owns the ACE stamping that
-//! gives a profile's SID its filesystem reach, and this module builds only the
-//! profile and the `SECURITY_CAPABILITIES` a confined spawn hands to
-//! `Launch::security_capabilities`. Withholding the network capabilities is
-//! the whole of `net: false`: an `AppContainer` holding neither
-//! `internetClient` nor `privateNetworkClientServer` cannot open a socket.
+//! owns the keying, naming and lifetime; this module mints the profile and
+//! derives every SID a confined spawn's `SECURITY_CAPABILITIES` names.
+//!
+//! The profile SID keys the `AppContainer` itself — deny-by-default token, own
+//! named-object namespace — and no longer carries any filesystem reach: that
+//! rides per-`(path, kind)` capability SIDs, derived here by
+//! [`OwnedCapabilitySid::from_capability_name`] from the names `dacl` mints and
+//! stamps persistently. So a token's reach is exactly the capability set
+//! `session` mints into it. Withholding the network capabilities is the whole
+//! of `net: false`: an `AppContainer` holding neither `internetClient` nor
+//! `privateNetworkClientServer` cannot open a socket.
 //!
 //! Upstream can opt a child out of `ALL APPLICATION PACKAGES` grants (LPAC)
 //! and disable Win32k syscalls; we do neither. Both assume a known, packaged,
@@ -172,8 +177,14 @@ impl AppContainerProfile {
         &self.name
     }
 
-    /// The SID in `S-1-15-…` string form — the spelling `dacl` targets ACEs
-    /// at and records in its ledger.
+    /// The SID in `S-1-15-2-…` string form. No ACE names it any more — fs reach
+    /// moved to the capability SIDs below — so this is now the profile's
+    /// identity witness: the tests read it to show that a name and its SID
+    /// determine each other across delete and re-create.
+    #[allow(
+        dead_code,
+        reason = "the profile SID's string form has no caller left in the lib now that stamps target capability SIDs; the round-trip test reads it, and it is the natural spelling of a profile's identity should one be needed again"
+    )]
     pub(crate) fn sid_string(&self) -> io::Result<String> {
         sid_to_string(self.sid.0)
     }
@@ -205,13 +216,17 @@ pub(crate) fn delete_profile_by_name(name: &str) -> io::Result<()> {
 // after mxc appcontainer_runner.rs::OwnedCapabilitySid
 /// Owned capability `PSID`: `DeriveCapabilitySidsFromName` `LocalAlloc`s its
 /// SIDs, so this one takes `LocalFree`, not the `FreeSid` above.
-struct OwnedCapabilitySid(PSID);
+pub(crate) struct OwnedCapabilitySid(PSID);
 
 impl OwnedCapabilitySid {
-    /// Derive the capability SID for `name` (e.g. `internetClient`), freeing
-    /// what else the call returns: the group SIDs, and any capability SIDs
-    /// past the first — a name may map to several; we keep the first.
-    fn from_capability_name(name: &str) -> io::Result<Self> {
+    /// Derive the capability SID for `name` — a well-known Windows capability
+    /// like `internetClient`, or one of `dacl`'s path-derived `ral.fs.…` names
+    /// — freeing what else the call returns: the group SIDs, and any capability
+    /// SIDs past the first (a name may map to several; we keep the first).
+    /// Derivation is a pure function of the name, so the same grant resolves to
+    /// the same SID in every session, which is what lets a stamp outlive the
+    /// session that paid for it.
+    pub(crate) fn from_capability_name(name: &str) -> io::Result<Self> {
         let wide_name = to_wide(name);
 
         let mut capability_sids: *mut PSID = ptr::null_mut();
@@ -256,6 +271,18 @@ impl OwnedCapabilitySid {
 
             Ok(Self(result_sid))
         }
+    }
+
+    /// The capability's `PSID`, valid only while `self` lives — a
+    /// `SID_AND_ATTRIBUTES` built from it must not outlive the owner.
+    pub(crate) fn sid(&self) -> PSID {
+        self.0
+    }
+
+    /// The SID in `S-1-15-3-…` string form: the spelling `dacl` writes into an
+    /// ACE.
+    pub(crate) fn sid_string(&self) -> io::Result<String> {
+        sid_to_string(self.0)
     }
 }
 

@@ -45,9 +45,8 @@ binding-edge / effect-verdict model the structural surface projects.
   `exit` code so `run` breaks cleanly.
 - Teardown — transport detach, history flush, the
   [[map/repl/jobs|survivor warning]], `JobTable::cleanup`, and
-  `ral_core::sandbox::teardown_session` (reverts the session's AppContainer
-  grant ACEs and deletes its per-projection profiles on Windows; a no-op
-  elsewhere) — lives in
+  `ral_core::sandbox::teardown_session` (deletes the session's per-projection
+  AppContainer profiles on Windows; a no-op elsewhere) — lives in
   `Drop for Session`, so it covers a panic unwinding through the owned
   `Session` as well as the orderly exit; a crash mid-iteration neither
   orphans a stopped group nor loses history.

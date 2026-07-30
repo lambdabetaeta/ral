@@ -223,7 +223,9 @@ pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> 
     // So a per-command `--sandbox-projection` child re-execs this binary and
     // not whatever the on-disk path holds by then.
     reexec::register_sandbox_self();
-    // Reclaim DACL grants a crashed prior session left stamped.  Only a primary
+    // Reclaim what a crashed prior session left registered — its AppContainer
+    // profiles, and any per-session grant ACEs a pre-capability ledger still
+    // records.  Only a primary
     // session sweeps: a confined re-exec child could not reach the ledger from
     // inside its AppContainer anyway.
     #[cfg(windows)]
@@ -242,7 +244,8 @@ pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> 
     Ok((stripped, None))
 }
 
-/// Revert this session's grant ACEs and delete its `AppContainer` profiles.
+/// Delete this session's `AppContainer` profiles.  Grant ACEs stay: they are
+/// capability-keyed and persistent, inert for any token no ral spawn carries.
 ///
 /// Windows only, and idempotent, so the portable shutdown seams that call it
 /// (`ral`'s `Drop for Session`, `exarch`'s `main`) cost nothing elsewhere.  A

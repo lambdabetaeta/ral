@@ -1,7 +1,7 @@
 ---
-verified_at_commit: f7cf93a
-verified_at_date: 2026-07-25
-anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox]
+verified_at_commit: ce6a3ba
+verified_at_date: 2026-07-30
+anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -137,15 +137,23 @@ child:
   (`windows::session::confine`), so the parent's spawn is the confinement
   point — no re-exec child.
 
-On Windows filesystem authority is projection-keyed: the session mints one
-AppContainer SID per distinct fs projection, the ACEs behind a SID are exactly
-that projection's paths, and the kernel-level check therefore enforces the
-same projection the in-process gate judges — a narrowed grant or a subagent's
-narrowed permissions hold at the OS layer, because the wider paths were never
-granted to the narrower SID. Stamps persist until session teardown rather
-than frame exit (a detached worker keeps the authority it was born with; a
-SID with no live child is inert)
-([[decisions/260713_projection-keyed-appcontainer|projection-keyed-appcontainer]]).
+On Windows filesystem authority is *path*-keyed, and the token selects. Each
+`(canonical path, kind)` grant derives a deterministic capability SID from a
+hash of the canonical path; its ACE is stamped once, ever, and never reverted,
+and `session::confine` mints into the child's token exactly the capability SIDs
+its projection names. The kernel-level check therefore enforces the same
+projection the in-process gate judges — a narrowed grant or a subagent's
+narrowed permissions hold at the OS layer, because the narrower token does not
+carry the wider paths' capabilities. Persistence is safe because a capability
+SID is evaluated only in the AppContainer pass of the access check, whose result
+intersects the normal user pass: an ACE no live token names is inert and can
+never widen a process's reach past the owning user's own. A detached worker
+therefore keeps the authority it was born with by construction. The residual is
+that an ACE lives on the NTFS object while a grant rule names a path, and
+Windows does not re-inherit on a same-volume rename: a file moved into a granted
+tree stays dark, and one moved out of an rw tree keeps that tree's capability, so
+path-based rules and object-sticky stamps agree only while the tree is still
+([[decisions/260730_path-derived-capability-sids|path-derived-capability-sids]]).
 
 The launcher pins the *current binary* (`SANDBOX_SELF`, fixed at `early_init`) so
 an on-disk swap cannot subvert it. Because confinement is per-command, the gate

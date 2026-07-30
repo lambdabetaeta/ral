@@ -170,6 +170,10 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ),
     (
         "core/src/sandbox/windows/dacl.rs",
+        "io-door:silent:dacl-stamp-read",
+    ),
+    (
+        "core/src/sandbox/windows/dacl.rs",
         "io-door:silent:dacl-state-dir",
     ),
     ("core/src/subprocess_codec.rs", "io-door:silent:frame-dump"),
