@@ -1,5 +1,5 @@
 ---
-verified_at_commit: ce6a3ba
+verified_at_commit: 74e7a46
 verified_at_date: 2026-07-30
 anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant]
 ---
