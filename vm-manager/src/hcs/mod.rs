@@ -75,6 +75,35 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 /// How often the stop path looks to see whether the machine has come to rest.
 const STOP_PULSE: Duration = Duration::from_millis(50);
 
+/// How long [`remove`] keeps asking for a session disk that will not go.
+///
+/// A machine reporting `Stopped` is not a machine whose files are free: the
+/// compute service reports the state, and the virtual-machine worker process
+/// (`vmwp`) that actually held the disk open exits a moment later, on its own
+/// schedule.  Delete in that moment and Windows answers with a sharing
+/// violation, which is how six orphaned session disks came to sit in one
+/// person's cache.  So the delete waits the worker out — but only this long,
+/// because teardown is on a person's own time and a handle that has not closed
+/// in two seconds is one that is not closing.
+const REMOVE_GRACE: Duration = Duration::from_secs(2);
+
+/// How often [`remove`] asks again while the worker is still letting go.
+///
+/// Slower than [`STOP_PULSE`], because each attempt here is a filesystem call
+/// on a file another process still holds rather than a cheap state read, and
+/// the thing being waited for is a process exit rather than a state change.
+const REMOVE_PULSE: Duration = Duration::from_millis(100);
+
+/// How old a session disk found in the cache must be before a starting backend
+/// will sweep it up ([`sweep_orphans`]).
+///
+/// The window is not about the disk: it is about the sliver of time in which
+/// *another* synod on this computer has written a session disk and not yet
+/// handed it to the compute service, so nothing holds it open and nothing but
+/// its age says it is alive.  An hour is far longer than that sliver and far
+/// shorter than the leak it clears.
+const ORPHAN_AGE: Duration = Duration::from_hours(1);
+
 /// The backend's name, as a person should see it.
 const HYPERVISOR: &str = "Hyper-V";
 
@@ -130,11 +159,15 @@ pub struct Hyperv {
 impl Hyperv {
     /// A backend that boots `artifact`, keeping the disks it has to make or
     /// wrap under `cache`.
+    ///
+    /// Constructing one also sweeps the cache ([`sweep_orphans`]): this is the
+    /// moment at which a backend is known to exist and no session of its own is
+    /// running, and a leak that only ever grows deserves a place where it can
+    /// shrink again.
     pub fn new(artifact: BootArtifact, cache: impl Into<PathBuf>) -> Self {
-        Self {
-            artifact,
-            cache: cache.into(),
-        }
+        let cache = cache.into();
+        sweep_orphans(&cache);
+        Self { artifact, cache }
     }
 
     /// Where a machine's own files live: the wrapped rootfs, which outlives
@@ -202,9 +235,17 @@ impl Hypervisor for Hyperv {
         // From here on every early return must take the session disk with it:
         // it is this session's alone, and a machine that never started has no
         // teardown of its own to release it.
-        let outcome = assemble(api, spec, &artifact, &folder, &rootfs, &session);
+        let outcome = assemble(
+            api,
+            spec,
+            &artifact,
+            &folder,
+            &rootfs,
+            &session,
+            &self.cache,
+        );
         if outcome.is_err() {
-            let _ = remove(&session);
+            release(&session);
         }
         outcome
     }
@@ -223,14 +264,18 @@ fn assemble(
     folder: &Path,
     rootfs: &Path,
     session: &Path,
+    cache: &Path,
 ) -> Result<Box<dyn Machine>, Error> {
     let machine_id = hvsock::fresh_machine_id();
     let id = hvsock::format_guid(&machine_id);
 
     // The console first: the machine's document names this pipe, and the
     // service dials it when the machine starts.  A console is a diagnostic,
-    // so failing to get one costs its output, not the session.
-    let console = match console::Console::create(&id) {
+    // so failing to get one costs its output, not the session.  Its log goes
+    // into the same cache the disks do, because that is the one directory this
+    // backend is entitled to write in and the one a `LocalSystem` service can
+    // reach at all.
+    let console = match console::Console::create(&id, cache) {
         Ok(console) => Some(console),
         Err(why) => {
             eprintln!("synod: the guest's console could not be opened: {why}");
@@ -294,6 +339,7 @@ fn assemble(
         mount_path: spec.workspace.guest_path.clone(),
         wires: None,
         console,
+        dialled: false,
         session: session.to_path_buf(),
         granted: Vec::new(),
     };
@@ -349,22 +395,76 @@ fn assemble(
         .accept_within(deadline.saturating_duration_since(Instant::now()))
         .map_err(|cause| {
             unavailable(&format!(
-                "the guest did not dial the control plane within {}s of starting: {cause}. The \
-                 guest's own console output above says why, if it got far enough to say anything",
-                BOOT_TIMEOUT.as_secs()
+                "the guest did not dial the control plane within {}s of starting: {cause}. {}",
+                BOOT_TIMEOUT.as_secs(),
+                console_says(guest.console.as_ref())
             ))
         })?;
     let net = net_listener
         .accept_within(deadline.saturating_duration_since(Instant::now()))
         .map_err(|cause| {
             unavailable(&format!(
-                "the guest did not dial the net wire within {}s of starting: {cause}. The \
-                 guest's own console output above says why, if it got far enough to say anything",
-                BOOT_TIMEOUT.as_secs()
+                "the guest did not dial the net wire within {}s of starting: {cause}. {}",
+                BOOT_TIMEOUT.as_secs(),
+                console_says(guest.console.as_ref())
             ))
         })?;
     guest.wires = Some(Wires { control, net });
+    // Both dials are in, so this boot has nothing left to explain and its
+    // console log may go when the machine does.
+    guest.dialled = true;
     Ok(Box::new(guest))
+}
+
+/// What a guest that would not dial has to say for itself, as the second half
+/// of the boot failure's sentence.
+///
+/// The message this replaces told the reader the console was "above", which on
+/// an installed synod it never was: the broker is a `LocalSystem` service and
+/// its standard output goes nowhere, so the one line explaining the refusal was
+/// written and thrown away.  Three answers are possible and each leaves the
+/// reader somewhere different:
+///
+/// - the guest **spoke**, and its last words are quoted here, which is usually
+///   the whole diagnosis;
+/// - the guest **said nothing**, which is itself the finding — a machine that
+///   started and never reached a kernel message — so the log is named for
+///   whoever wants to confirm the emptiness;
+/// - there was **no console**, so the diagnostic was lost before the machine
+///   existed, and saying so is better than implying the guest was silent.
+fn console_says(console: Option<&console::Console>) -> String {
+    let Some(console) = console else {
+        return "Synod could not open a console for this machine, so the guest has no words to \
+                quote — and that is a fault in synod, not in the guest"
+            .to_string();
+    };
+    let kept = console.log().map_or_else(
+        || "and its console could not be kept on disk either".to_string(),
+        |path| format!("and its whole console log is at {}", path.display()),
+    );
+    let lines = console.tail();
+    if lines.is_empty() {
+        format!(
+            "The guest said nothing at all on its console, so it never got as far as a first \
+             message — {kept}"
+        )
+    } else {
+        format!(
+            "The guest's last words on its console were {} — {kept}",
+            quoted(&lines)
+        )
+    }
+}
+
+/// Console lines as one quotation: oldest first, each in its own quotes and
+/// separated by a slash, so a reader can see where one line ended and the next
+/// began without the error becoming a dump.
+fn quoted(lines: &[String]) -> String {
+    lines
+        .iter()
+        .map(|line| format!("\u{201c}{}\u{201d}", line.trim()))
+        .collect::<Vec<_>>()
+        .join(" / ")
 }
 
 /// A booted guest, and the four things that have to be released when it stops:
@@ -387,6 +487,15 @@ pub struct Guest {
     /// [`stop`]: Guest::stop
     wires: Option<Wires>,
     console: Option<console::Console>,
+    /// Whether the guest ever dialled — and so whether its console log is
+    /// still owed to a reader.
+    ///
+    /// A boot that failed names its log in the sentence it failed with, so that
+    /// file has a reader still to come and must survive the teardown; a boot
+    /// that worked has explained itself by working, and its log is litter from
+    /// the moment the machine stops.  One bool is what tells the two teardowns
+    /// apart, since they are otherwise the same one.
+    dialled: bool,
     session: PathBuf,
     /// The files this machine was given access to, to be taken away again when
     /// it stops.
@@ -443,8 +552,13 @@ impl Guest {
         // The pump may still be waiting for a machine that never connected.
         if let Some(console) = &self.console {
             console.wake();
+            // See the `dialled` field: only a boot that succeeded is allowed to
+            // take its console log with it.
+            if self.dialled {
+                console.discard();
+            }
         }
-        let _ = remove(&self.session);
+        release(&self.session);
 
         if forced {
             return Err(unavailable(
@@ -532,7 +646,9 @@ impl Drop for Guest {
 /// granted folder on a departmental file share canonicalises to, and those are
 /// as common as folders on local disk) becomes `\\server\share` again.
 /// Anything else is already plain and passes through untouched.
-fn plain(path: PathBuf) -> PathBuf {
+/// `pub(crate)` for the broker, which spells a client's canonicalised folder
+/// this way in the one sentence a refused boot sends back.
+pub(crate) fn plain(path: PathBuf) -> PathBuf {
     let text = path.to_string_lossy();
     if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
         return PathBuf::from(format!(r"\\{unc}"));
@@ -570,14 +686,149 @@ fn unix_seconds() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// Release a session disk, best-effort.
+/// Release a session disk, and say so on stderr if it will not go.
+///
+/// Not an error, and the reason is worth writing down.  A leaked disk deserves
+/// to be *heard about* — it is a person's disk filling up — but it is not a
+/// failure of the session, and [`Guest::stop`]'s `Result` is not a channel that
+/// would carry it: the same `stop` is called from [`Drop`], where the error is
+/// discarded by construction, so promoting this to an `Error` would make it
+/// quieter in the common path rather than louder.  Worse, it would be
+/// indistinguishable to the caller from "the guest had to be stopped for", which
+/// is a claim about the *user's work* — that something they wrote may be
+/// missing — and must not be raised over a stale file.  So: stderr, once, only
+/// when there is something to say, naming the file and what will eventually
+/// happen to it.
+fn release(session: &Path) {
+    if let Err(why) = remove(session) {
+        eprintln!(
+            "synod: the session disk {} could not be deleted after {}s — {why}. It is {} MiB that \
+             nothing will ever read again; the next synod to start on this computer sweeps up disks \
+             like it once they are an hour old, or you may delete it yourself",
+            session.display(),
+            REMOVE_GRACE.as_secs(),
+            mebibytes(session),
+        );
+    }
+}
+
+/// Release a session disk, waiting out the worker process that may still hold
+/// it.
+///
+/// The retry is the whole point: see [`REMOVE_GRACE`] for whose lag is being
+/// waited on.  A file that is already gone counts as released, so calling this
+/// twice is as harmless as calling it once.
+///
+/// # Errors
+/// Returns the last refusal Windows gave if the disk is still there when
+/// [`REMOVE_GRACE`] runs out.
 #[allow(
     clippy::disallowed_methods,
     reason = "REASONED-SILENT: releasing the per-session disk after power-off. Infrastructure \
               teardown, not a model's turn-time write; no Shell, no run, no card."
 )]
 fn remove(path: &Path) -> std::io::Result<()> {
-    std::fs::remove_file(path)
+    let deadline = Instant::now() + REMOVE_GRACE;
+    loop {
+        match std::fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            // The deadline is read after the attempt, never before it, so the
+            // disk is always asked for at least once however late this is
+            // called.
+            Err(why) if Instant::now() >= deadline => return Err(why),
+            Err(_) => std::thread::sleep(REMOVE_PULSE),
+        }
+    }
+}
+
+/// How big a file is, in whole mebibytes, for a sentence to quote — nought if
+/// it cannot be measured, which is not worth a second complaint inside the
+/// first.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "REASONED-SILENT: measuring a file synod itself made, to say how much of someone's \
+              disk it is holding. No shell, no run, no card."
+)]
+fn mebibytes(path: &Path) -> u64 {
+    std::fs::metadata(path).map_or(0, |file| file.len() / (1024 * 1024))
+}
+
+/// Delete session disks left in `cache` by earlier runs, and say how much came
+/// back.
+///
+/// Before this existed, every disk that lost the race with `vmwp` stayed
+/// forever: the cache is under `%LOCALAPPDATA%`, nothing else ever reads it, and
+/// no synod ever looked at what was in it — six of them, three hundred
+/// megabytes, is what that came to on one real machine.  A sweep at start is the
+/// honest place for the cure, because a backend that has just been constructed
+/// owns no session disk of its own, so everything of that shape it finds belongs
+/// to a run that is over — with one exception, which is another synod running
+/// beside this one, and which two things guard against.  Its live disk is held
+/// open by the worker process, so Windows refuses the delete and the file
+/// stays; and a disk too young to have been abandoned ([`ORPHAN_AGE`]) is not
+/// even asked for, which covers the moment between a disk being written and the
+/// machine being given it.
+///
+/// Only names of the session's own shape are considered — `synod-session-<pid>-
+/// <epoch>.vhd`, as [`vhd::create_session_vhd`] spells them.  The wrapped
+/// rootfs, its marker, and the part file of a wrap in progress therefore cannot
+/// be swept by accident: they are not session disks, and this cannot name what
+/// it does not recognise.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "REASONED-SILENT: reading synod's own machine cache and deleting the session disks it \
+              leaked there. Host-side housekeeping before any guest exists; no shell, no run, no \
+              card."
+)]
+fn sweep_orphans(cache: &Path) {
+    let Ok(entries) = std::fs::read_dir(cache) else {
+        // No cache yet, or none this user may read: either way there is nothing
+        // to reclaim and nothing to report.
+        return;
+    };
+    let now = unix_seconds();
+    let (mut swept, mut reclaimed) = (0usize, 0u64);
+    for entry in entries.flatten() {
+        let Some(born) = session_disk_epoch(&entry.file_name().to_string_lossy()) else {
+            continue;
+        };
+        if now.saturating_sub(born) < ORPHAN_AGE.as_secs() {
+            continue;
+        }
+        let path = entry.path();
+        let bytes = entry.metadata().map_or(0, |file| file.len());
+        if std::fs::remove_file(&path).is_ok() {
+            swept += 1;
+            reclaimed += bytes;
+        }
+    }
+    if swept > 0 {
+        eprintln!(
+            "synod: {swept} session disk(s) from earlier runs were still in {} — deleted, {} MiB \
+             back",
+            cache.display(),
+            reclaimed / (1024 * 1024),
+        );
+    }
+}
+
+/// The Unix second a session disk's *name* says it was made, if the name is a
+/// session disk's at all.
+///
+/// The name is the only witness worth trusting here: a modification time is
+/// whatever the filesystem last did to the file, while the epoch was written by
+/// the process that made it ([`vhd::create_session_vhd`]).  A name that does not
+/// parse is answered `None` and left alone — an unrecognised file in synod's
+/// cache is somebody else's, and a sweep that guesses is a sweep that deletes
+/// the wrong thing.
+fn session_disk_epoch(name: &str) -> Option<u64> {
+    let (pid, epoch) = name
+        .strip_prefix("synod-session-")?
+        .strip_suffix(".vhd")?
+        .split_once('-')?;
+    pid.parse::<u32>().ok()?;
+    epoch.parse().ok()
 }
 
 #[cfg(test)]
@@ -677,6 +928,128 @@ mod tests {
         if let Some(local) = std::env::var_os("LOCALAPPDATA") {
             assert!(cache.starts_with(PathBuf::from(local)));
         }
+    }
+
+    /// A session disk the worker process still holds is not lost to a single
+    /// failed delete: the release keeps asking, and takes the file the moment
+    /// the handle closes.
+    ///
+    /// The share mode is the point of the fixture — read and write shared,
+    /// *delete* not — because that is how `vmwp` holds a disk, and it is exactly
+    /// what the one-attempt delete this replaced used to lose to.
+    #[test]
+    fn a_held_session_disk_is_released_once_the_handle_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("synod-session-4-1000.vhd");
+        std::fs::write(&disk, b"a disk").unwrap();
+        let held = locked(&disk);
+        assert!(
+            std::fs::remove_file(&disk).is_err(),
+            "the handle must actually bite, or this test proves nothing"
+        );
+
+        std::thread::spawn(move || {
+            std::thread::sleep(REMOVE_PULSE * 3);
+            drop(held);
+        });
+        remove(&disk).expect("the disk goes once the worker does");
+        assert!(!disk.exists());
+
+        // And a disk already gone is a disk released: teardown may run twice.
+        remove(&disk).expect("a file that is not there needs no deleting");
+    }
+
+    /// The sweep takes what earlier runs abandoned and nothing else: an old
+    /// session disk goes, one too young to be abandoned stays (it may be a
+    /// concurrent synod's), and the wrapped rootfs, its marker, and a wrap in
+    /// progress are not session disks at all — two gigabytes that must survive
+    /// every sweep there will ever be.
+    #[test]
+    fn the_sweep_takes_orphaned_session_disks_and_spares_the_rootfs() {
+        let dir = tempfile::tempdir().unwrap();
+        let make = |name: String| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"bytes").unwrap();
+            path
+        };
+        let orphan = make("synod-session-1234-0.vhd".to_string());
+        let fresh = make(format!("synod-session-{}-{}.vhd", 5678, unix_seconds()));
+        let rootfs = make("rootfs.vhd".to_string());
+        let marker = make("rootfs.vhd.wrapped".to_string());
+        let part = make("rootfs.vhd.part".to_string());
+
+        sweep_orphans(dir.path());
+
+        assert!(!orphan.exists(), "an abandoned session disk stayed");
+        for spared in [&fresh, &rootfs, &marker, &part] {
+            assert!(spared.exists(), "swept what it must not: {spared:?}");
+        }
+
+        // The name is what decides, so it is checked in its own right: only the
+        // session's own shape, with both of its numbers, is a candidate.
+        assert_eq!(session_disk_epoch("synod-session-1234-99.vhd"), Some(99));
+        for other in [
+            "rootfs.vhd",
+            "rootfs.vhd.wrapped",
+            "synod-session-1234-99.vhd.part",
+            "synod-session-1234.vhd",
+            "synod-session-abc-99.vhd",
+            "synod-session-1234-later.vhd",
+        ] {
+            assert_eq!(session_disk_epoch(other), None, "would have swept {other}");
+        }
+    }
+
+    /// A file opened the way the virtual-machine worker opens a session disk:
+    /// shared for reading and writing, but not for deletion.
+    fn locked(path: &Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ)
+            .open(path)
+            .expect("the fixture's own file opens")
+    }
+
+    /// A guest that will not dial is quoted, not pointed at: the failure
+    /// carries the console's last lines, oldest first, each in its own quotes.
+    /// This is the invariant that makes the error useful where it used to say
+    /// the output was "above" — under a service there is no above.
+    #[test]
+    fn a_failing_boot_quotes_the_guest() {
+        let said = quoted(&[
+            "  EXT4-fs (sda): mounted filesystem  ".to_string(),
+            "ral-daemon: no ral.port on the command line".to_string(),
+        ]);
+        assert_eq!(
+            said,
+            "\u{201c}EXT4-fs (sda): mounted filesystem\u{201d} / \u{201c}ral-daemon: no ral.port \
+             on the command line\u{201d}"
+        );
+    }
+
+    /// A guest that said nothing is said to have said nothing, and its log is
+    /// named so a reader can confirm the silence rather than being told to look
+    /// "above" at output a service never wrote anywhere.  A session with no
+    /// console at all admits the loss is synod's.
+    #[test]
+    fn a_silent_guest_and_a_missing_console_are_different_sentences() {
+        let dir = tempfile::tempdir().expect("a cache");
+        let console = console::Console::create("0000-mute", dir.path()).expect("a console");
+        let silence = console_says(Some(&console));
+        assert!(silence.contains("said nothing at all"), "{silence}");
+        assert!(
+            silence.contains("synod-console-0000-mute.log"),
+            "the log must be named for a reader to open: {silence}"
+        );
+        console.wake();
+
+        let lost = console_says(None);
+        assert!(lost.contains("could not open a console"), "{lost}");
+        assert!(
+            !lost.contains("above"),
+            "nothing may point at output a service never wrote: {lost}"
+        );
     }
 
     /// Whatever this computer answers about hosting a guest, it answers in a

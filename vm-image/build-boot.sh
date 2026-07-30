@@ -47,7 +47,8 @@
 #   initramfs.img           cpio.gz: /init, ral-daemon, exarch, kernel
 #                           modules, vendored mke2fs
 #   kernel.sha256, initramfs.img.sha256
-#   boot-manifest.txt       arch, kernel package version, built git commit
+#   boot-manifest.txt       arch, kernel package version, built git commit,
+#                           boot contract version
 #   kernel-config-check.txt real CONFIG_* values behind the module set
 #   verify.txt              static-link / arch / cpio manifest spot-checks
 #   build.log               full build transcript
@@ -317,6 +318,31 @@ for b in ral-daemon exarch ral-initramfs; do
   is_guest_binary "$BIN/$b" \
     || { echo "error: $b is not a static $BIN_FORMAT binary: $(file -b "$BIN/$b")" >&2; exit 1; }
 done
+
+# The boot contract version this media will speak (ral-daemon's
+# `boot::CONTRACT`), for boot-manifest.txt — so that a host built against a
+# newer set of `ral.` keys refuses to package this media rather than boot a
+# guest that will refuse the command line and dial nothing.
+#
+# Compiled, not read.  A grep of the source, or a number kept by hand, could
+# record exactly the drift the number exists to catch; the tiny
+# `boot-contract` example links the very library that is about to become
+# /ral-daemon in the initramfs and prints the constant, so the recording
+# cannot be stale unless the compiler is. It runs here for the same reason
+# verify.txt's probes do: the container is $ARCH, asserted above, so a musl
+# guest binary executes natively.
+echo ">> [container] reading the boot contract out of the daemon it just built"
+( cd /ral && cargo build --release --locked --target "$RUST_TARGET" \
+    -p ral-daemon --example boot-contract )
+BOOT_CONTRACT=$("$BIN/examples/boot-contract")
+case "$BOOT_CONTRACT" in
+  '' | *[!0-9]*)
+    printf 'error: ral-daemon reported `%s` as its boot contract, which is not a version.\n' \
+      "$BOOT_CONTRACT" >&2
+    echo "ral-daemon/examples/boot-contract.rs prints boot::CONTRACT and nothing else." >&2
+    exit 1 ;;
+esac
+echo ">> [container] boot contract $BOOT_CONTRACT"
 
 # --- 2. Extract the pinned suite's kernel + modules --------------------------
 # ubuntu:24.04's own apt sources point at noble; add the pinned suite as an
@@ -612,6 +638,10 @@ cat /out/verify.txt
   echo "kernel_version=$KVER"
   echo "suite=$SUITE arch=$ARCH mirror=$MIRROR"
   echo "ral_git_hash=$GIT_HASH"
+  # The one line a *host* build reads back (synod/build.rs, via
+  # ral_daemon::boot::check_media): which generation of `ral.` settings the
+  # ral-daemon inside initramfs.img understands.
+  echo "boot_contract=$BOOT_CONTRACT"
   echo "rust_target=$RUST_TARGET"
   echo "modules_shipped=${NEEDED_MODULES[*]:-none}"
 } > /out/boot-manifest.txt

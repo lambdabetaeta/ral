@@ -52,6 +52,37 @@ use std::net::Ipv4Addr;
 /// The prefix every setting meant for this daemon carries.
 pub const PREFIX: &str = "ral.";
 
+/// This boot contract's version.
+///
+/// The contract is the set of `ral.` keys together with the grammar of their
+/// values, taken as one indivisible agreement between the host that writes the
+/// command line and the guest that reads it.
+///
+/// **Bump this whenever that set or that grammar changes** — a key added, a
+/// key retired, a value spelled a new way.  It is at 2 because of `ral.net`:
+/// a host that had learned to write it met a guest image built five days
+/// earlier, whose [`Boot::read`] knew only the five keys before it and so
+/// refused the whole command line, exactly as the module docs above say it
+/// must.  The refusal was right and loud; but it was heard in the guest, and
+/// what a person watching the host saw was a sixty-second "the guest did not
+/// dial the control plane" timeout with nothing in it to suggest the image
+/// was stale.
+///
+/// The cure is not a softer refusal — it is a number the *build* can compare.
+/// `vm-image/build-boot.sh` does not read this constant, it *compiles* it —
+/// from the same checkout that becomes the initramfs, so the number cannot lag
+/// the daemon beside it — and records it under [`MANIFEST_KEY`] in the media's
+/// own manifest; synod's `build.rs` then puts that recording to
+/// [`check_media`] and refuses to package media the host has outgrown.  The
+/// number lives here, beside the only reader and the only writer of the
+/// command line, so that a new key and its version cannot be added in two
+/// different commits.
+pub const CONTRACT: u32 = 2;
+
+/// The key `vm-image/build-boot.sh` records [`CONTRACT`] under in the boot
+/// media's own manifest, `vm-image/out/boot/boot-manifest.txt`.
+pub const MANIFEST_KEY: &str = "boot_contract";
+
 /// Where the engine binary lives in the boot artifact, when the command
 /// line does not say otherwise.  It is a property of the image, not of the
 /// session, so unlike every other setting it has a default.
@@ -259,6 +290,65 @@ pub fn command_line(boot: &Boot, console: &str) -> String {
         );
     }
     line
+}
+
+/// Judge a piece of guest media fit to be packaged beside this host: the
+/// contract its manifest records must be the [`CONTRACT`] this build speaks.
+///
+/// The comparison belongs to the build and to nothing else.  By run time it
+/// is already too late — the host writes a line the guest is right to refuse,
+/// and the only thing a person on the host's side can see is a control plane
+/// that was never dialled.  So this is called from synod's `build.rs`, whose
+/// failure is a failure to *produce an installer*, which is the last moment
+/// at which a stale `vm-image/out/` is still cheap.
+///
+/// `manifest` is the whole text of `boot-manifest.txt` — `key=value` a line,
+/// and, as on the kernel command line, a key written twice takes its last
+/// value — and `path` is where it was read from, quoted back so the refusal
+/// names the file the reader must go and rebuild.
+///
+/// # Errors
+/// Returns a sentence naming both numbers, the manifest, and the remedy when
+/// the two contracts differ; a different one when the manifest carries no
+/// [`MANIFEST_KEY`] line at all, which means media older than this mechanism
+/// and so of unknowable vintage; and a third when the line is there but is
+/// not a number.
+pub fn check_media(manifest: &str, path: &str) -> Result<(), String> {
+    const REMEDY: &str = "Rebuild the media from this checkout — `just guest-boot amd64` for the \
+                          Windows guest, `just guest-boot` for the Mac's — and package again.";
+
+    let recorded = manifest
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(MANIFEST_KEY)?.strip_prefix('='))
+        .next_back();
+
+    let Some(recorded) = recorded else {
+        return Err(format!(
+            "the guest media described by {path} carries no `{MANIFEST_KEY}=` line, so it was \
+             built before the boot contract had a version at all. Nothing here can tell whether \
+             its ral-daemon understands the `{PREFIX}` settings this host now writes, and a guest \
+             that does not will refuse its command line and never dial the control plane. {REMEDY}"
+        ));
+    };
+    let recorded = recorded.trim();
+    let recorded: u32 = recorded.parse().map_err(|err| {
+        format!(
+            "{path} records `{MANIFEST_KEY}={recorded}`, which is not a boot contract version: \
+             {err}. The value is the whole number `{PREFIX}`-key generation the media's \
+             ral-daemon was built from."
+        )
+    })?;
+
+    if recorded != CONTRACT {
+        return Err(format!(
+            "the guest media was built for boot contract {recorded}, and this host speaks \
+             contract {CONTRACT} ({path} records `{MANIFEST_KEY}={recorded}`). The `{PREFIX}` \
+             settings the two ends agree on are therefore not the same set: this host would \
+             write a kernel command line that guest refuses outright, and the only symptom \
+             would be a sixty-second wait for a control plane nobody ever dialled. {REMEDY}"
+        ));
+    }
+    Ok(())
 }
 
 /// Accept the workspace's name: a non-empty, path-free word the host and
@@ -668,5 +758,52 @@ mod tests {
             let read_back = Boot::read(&rendered).expect("a rendered command line must parse");
             assert_eq!(read_back, boot, "{rendered}");
         }
+    }
+
+    /// A manifest as `build-boot.sh` writes it for media built from this
+    /// source: the contract line is found among the others, by its key rather
+    /// than by its position, and media that agrees is packaged in silence.
+    #[test]
+    fn media_recording_this_contract_is_fit_to_package() {
+        let manifest = format!(
+            "arch=amd64\nkernel_version=7.0.0-14-generic\n{MANIFEST_KEY}={CONTRACT}\n\
+             rust_target=x86_64-unknown-linux-musl\n"
+        );
+        check_media(&manifest, "out/boot/boot-manifest.txt").expect("matching media must pass");
+    }
+
+    /// The skew this whole mechanism exists for: media a contract behind the
+    /// host. The refusal must name *both* numbers and the manifest, because a
+    /// reader who cannot see which side is old learns nothing from it.
+    #[test]
+    fn media_a_contract_behind_the_host_names_both_numbers() {
+        let stale = format!("arch=amd64\n{MANIFEST_KEY}={}\n", CONTRACT - 1);
+        let err = check_media(&stale, "vm-image/out/boot/boot-manifest.txt")
+            .expect_err("media from an older contract must not be packaged");
+        assert!(err.contains(&format!("contract {}", CONTRACT - 1)), "{err}");
+        assert!(err.contains(&format!("contract {CONTRACT}")), "{err}");
+        assert!(err.contains("vm-image/out/boot/boot-manifest.txt"), "{err}");
+        assert!(err.contains("just guest-boot amd64"), "{err}");
+    }
+
+    /// Media older than the mechanism itself records nothing at all, and that
+    /// is its own sentence: there is no number to compare, so the refusal
+    /// says what is absent rather than blaming a version it cannot know.
+    #[test]
+    fn media_predating_the_contract_line_gets_its_own_sentence() {
+        let ancient = "arch=amd64\nral_git_hash=37fe06b\n";
+        let err = check_media(ancient, "out/boot/boot-manifest.txt")
+            .expect_err("a manifest with no contract line must not be packaged");
+        assert!(err.contains(&format!("no `{MANIFEST_KEY}=` line")), "{err}");
+        assert!(err.contains("just guest-boot"), "{err}");
+    }
+
+    /// A contract line that is not a whole number is a broken manifest, not a
+    /// mismatch, and is refused as one rather than silently read as zero.
+    #[test]
+    fn a_contract_line_that_is_not_a_number_is_refused_as_such() {
+        let err = check_media(&format!("{MANIFEST_KEY}=two\n"), "m.txt")
+            .expect_err("an unparsable contract version must be refused");
+        assert!(err.contains("not a boot contract version"), "{err}");
     }
 }

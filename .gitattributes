@@ -3,3 +3,16 @@
 # leaves them staged-looking with no content change at all.  Pinning the
 # checkout to LF makes a rebuild a no-op there, as it already is elsewhere.
 synod/gen/schemas/*.json text eol=lf
+
+# A shell script is read by an interpreter, not by a text editor, and every
+# interpreter that reads ours treats a carriage return as part of the word it
+# ends: `set -o pipefail\r` is not an option bash has, and `#!/usr/bin/env
+# bash\r` names no program.  A Windows clone with `core.autocrlf=true` — the
+# default a Git for Windows installer offers — therefore checks out a
+# vm-image/build-boot.sh that cannot run at all, which is how a Windows
+# developer building the guest media their own machine will boot met
+# `$'\r': command not found` on line 62.  The scripts are run from WSL, from
+# CI, and from `curl | sh` on the site, and not one of those readers wants
+# CRLF, so the checkout is pinned to LF regardless of what the clone was
+# configured to prefer.
+*.sh text eol=lf

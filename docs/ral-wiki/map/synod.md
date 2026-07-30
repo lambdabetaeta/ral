@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: 7c1c8ae6
+generated_at_date: 2026-07-30
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/transport.rs]
 ---
 
@@ -38,6 +38,14 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
 ## synod/ — the library
 
 - `lib.rs` — the crate doc names the five differences from exarch.
+- `build.rs` — the Tauri build, plus the one thing the bundle cannot check for
+  itself: `boot_contract` reads `vm-image/out/boot/boot-manifest.txt` at the
+  resource map's own path and puts it to `ral_daemon::boot::check_media`, so
+  media whose boot contract is not this host's fails the *build* rather than
+  the guest's own reading of its command line
+  ([[decisions/260730_boot-contract-is-versioned|boot-contract-is-versioned]]).
+  `ral-daemon` is a build dependency for exactly this; absent media is not a
+  failure here, since the bundle is where Tauri names a missing resource.
 - `boot.rs` — the media this build ships, found and readied once.
   `boot_media()` looks in three places, each simply *a place a file might be*
   rather than a `#[cfg]` branch: a macOS bundle's `Contents/Resources/boot/`,
@@ -205,7 +213,17 @@ blocking I/O.
   them as its own virtual account. `Guest::stop` closes the wire first, so the
   guest powers itself off from inside, then revokes every access entry it
   granted, so none naming a dead per-machine identity is left on anyone's
-  folder; `Drop` shares that path.
+  folder; `Drop` shares that path. Three constants carry the teardown's own
+  patience — `REMOVE_GRACE`/`REMOVE_PULSE`, over which `remove` waits out the
+  worker process that holds the session disk past `Stopped`, and `ORPHAN_AGE`,
+  above which `Hyperv::new`'s `sweep_orphans` reclaims what earlier runs left;
+  `session_disk_epoch` is what makes that sweep incapable of naming anything but
+  a session disk
+  ([[decisions/260730_session-disk-outlives-its-machine|session-disk-outlives-its-machine]]).
+  Both dial timeouts end in `console_says`, which quotes the guest's own last
+  lines and names its log, and `Guest::dialled` is what decides whether that log
+  survives the teardown
+  ([[decisions/260730_guest-console-outlives-stdout|guest-console-outlives-stdout]]).
 - `api.rs` — the entry points, resolved with `LoadLibraryW`/`GetProcAddress`
   rather than statically imported, so a Windows without the feature gets a
   sentence instead of a process that will not start. `Api::settle` holds the
@@ -250,10 +268,15 @@ blocking I/O.
   Hyper-V refuses a virtual disk whose *file* is sparse (`0xC03A001A`), so
   growth has to be the format's business rather than the filesystem's.
 - `console.rs` — the guest's `ttyS0` on a named pipe the compute service dials
-  as a client, pumped onto synod's own output, because without it a boot that
-  failed and a boot that is merely slow are the same timeout. `Console::wake`
-  connects to its own pipe to release a pump parked on a machine that never
-  started.
+  as a client, because without it a boot that failed and a boot that is merely
+  slow are the same timeout. The pump *tees*: `stdout`, a per-machine
+  `synod-console-<id>.log` in the same cache the disks live in, and `Tail`, a
+  ring of the last lines the boot failure quotes. `RETAINED_LINES`, `LINE_LIMIT`,
+  `LOG_LIMIT` and `LOG_LIFETIME` are the four bounds that keep the diagnostic
+  from becoming litter, and `discard` is what a boot that dialled calls on its
+  own log ([[decisions/260730_guest-console-outlives-stdout|guest-console-outlives-stdout]]).
+  `Console::wake` connects to its own pipe to release a pump parked on a machine
+  that never started.
 
 ## vm-manager/src/broker/ — the privileged half, on Windows
 
@@ -325,6 +348,14 @@ server* — the daemon dials, sizes the socket's buffers, and mounts
 `ral.plan9` and `ral.port` are two sockets for two jobs and are read by name,
 never by order.
 
+The `ral.` key set and its value grammar are one versioned agreement, and
+`boot.rs` is where the version lives, beside the command line's only writer and
+only reader: `boot::CONTRACT`, `MANIFEST_KEY`, and `check_media`, the judgment a
+*host* build runs over the media it is about to package
+([[decisions/260730_boot-contract-is-versioned|boot-contract-is-versioned]]).
+`ral-daemon/examples/boot-contract.rs` prints that constant and nothing else, so
+the media's manifest records a number it compiled rather than one it read.
+
 ## vm-image/ and ral-initramfs/ — the boot media
 
 The design record's §7 built, and `ARCH`-parametric over synod's two guests:
@@ -335,7 +366,8 @@ pinned **Ubuntu 26.04 LTS (resolute)** office userland (LibreOffice headless,
 the Python document stack, pandoc, OCR, wide fonts, full locales, no
 toolchain) via mmdebstrap → ext4 → zstd in a native container, checksummed and
 version-manifested. `build-boot.sh` builds the boot pair, stamping the git hash
-into `boot-manifest.txt`, and the kernel is where the two guests part: arm64
+and `boot_contract=` into `boot-manifest.txt` — the one line a host build reads
+back — and the kernel is where the two guests part: arm64
 takes Ubuntu's generic kernel apart to the raw Image `VZLinuxBootLoader` wants,
 amd64 keeps that same `vmlinuz` verbatim, because it already *is* the bzImage
 `LinuxKernelDirect` loads. So do the module sets — virtio on arm64; on amd64
@@ -359,15 +391,18 @@ and refuses by naming every candidate it looked for.
 Two things about the Windows machine, neither of them settled by the code
 compiling:
 
-- **No guest's own boot is verified yet.** A machine is created and started
-  through the broker, and the path is compiled, clippy- and rustdoc-clean, and
-  unit-tested wherever a test can reach without a machine — the document's
-  shape, the VHD footer's checksum and geometry, the port→service-GUID mapping,
-  the socket's own descriptor, the pipe's — but whether a kernel comes up and
-  the daemon dials is still being established.
-  `vm-manager/examples/boot-smoke.rs` and `synod/examples/boot-run.rs` are the
-  vehicles for that, and the guest console on its named pipe is there so the
-  first failure says why.
+- **A completed guest boot is not witnessed yet.** What is: a machine created
+  and started through the broker, booting a kernel and an initramfs that formats
+  the session disk and reaches the daemon — known because the daemon refused a
+  command line carrying a `ral.` key its own build predated, and said so on its
+  own console. What is not: a guest that finishes booting and dials, since the
+  media rebuilt against this host's boot contract has not been booted yet. The
+  path is otherwise compiled, clippy- and rustdoc-clean, and unit-tested wherever
+  a test can reach without a machine — the document's shape, the VHD footer's
+  checksum and geometry, the port→service-GUID mapping, the socket's own
+  descriptor, the pipe's, the console ring's line bookkeeping, the release of a
+  disk another process holds. `vm-manager/examples/boot-smoke.rs` and
+  `synod/examples/boot-run.rs` are the vehicles for the rest.
 - **Whether the host's 9p server can read the granted folder unaided is
   untested.** `HcsGrantVmAccess` is called on the four boot files, which a
   worker process really does open as its own virtual account, and deliberately
@@ -403,6 +438,15 @@ exarch's cross-by-copy position.
 - [[decisions/260725_windows-machine-broker|windows-machine-broker]] — why a
   `LocalSystem` service creates it, what the Hyper-V Administrators group would
   have cost every user, and what keeps the service's surface narrow.
+- [[decisions/260730_boot-contract-is-versioned|boot-contract-is-versioned]] —
+  why the kernel command line carries a version, and why the build rather than
+  the boot is where a host/guest mismatch is caught.
+- [[decisions/260730_guest-console-outlives-stdout|guest-console-outlives-stdout]]
+  — why the guest's console is teed to a log and quoted in the failure, and why
+  the broker protocol did not have to change to carry it.
+- [[decisions/260730_session-disk-outlives-its-machine|session-disk-outlives-its-machine]]
+  — why teardown waits out the worker process, and why a starting backend sweeps
+  the cache.
 - [[map/core/transport|core / transport]] — the framed seam the control plane
   rides, whose stream type is std's owner for a connected socket and not a claim
   about the address family.

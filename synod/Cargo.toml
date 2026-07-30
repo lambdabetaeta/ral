@@ -18,6 +18,11 @@ path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# The boot contract, at build time, from the crate that defines it: `build.rs`
+# compares the number the guest media recorded against the one this host is
+# being built with.  A build dependency rather than a normal one because the
+# comparison is the *build's* business — synod's own code never asks.
+ral-daemon = { path = "../ral-daemon" }
 
 [dependencies]
 ral-core   = { path = "../core" }

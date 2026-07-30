@@ -41,7 +41,7 @@ use windows_sys::Win32::System::Pipes::{
 };
 
 use super::{PIPE, Reply, Request, VERSION, frame};
-use crate::{BootArtifact, Hypervisor, Machine, MachineSpec};
+use crate::{BootArtifact, Error, Hypervisor, Machine, MachineSpec};
 
 /// Who may talk to the broker.
 ///
@@ -319,6 +319,34 @@ struct Booted {
 /// Every check the broker makes is here, in order: the folder must be one the
 /// *caller* can read; the media is this installation's; the spec is constructed,
 /// never received.
+/// How a refused boot is worded for the client: the backend's own reason, and
+/// the folder it was asked about, spelled plainly.
+///
+/// Only what this side knows and the client does not may travel, and the
+/// hypervisor's name is not it.  [`Error::Unavailable`] renders as "Hyper-V
+/// could not start a machine: …", and `client::Brokered` wraps whatever arrives
+/// here in an `Unavailable` of its own — it has to, since a refusal that never
+/// reached a backend must still name the machine layer that refused.  So
+/// sending the rendered error said the same sentence twice, either side of a
+/// third "could not start a machine for …" added here: one failure wearing
+/// three subjects, which is what a person actually read off a stale guest
+/// image.  The reason alone crosses the pipe, and the client supplies the
+/// subject exactly once.
+fn refused_over(folder: &Path) -> impl FnOnce(Error) -> String {
+    // Verbatim (`\\?\C:\…`) is how a canonicalised path arrives from a client,
+    // and it is a convention of the Win32 call layer rather than anything a
+    // reader of an error message should be shown.
+    let folder = crate::hcs::plain(folder.to_path_buf());
+    move |error| match error {
+        Error::Unavailable { why, .. } => {
+            format!("{why} (the folder asked for was {})", folder.display())
+        }
+        // Every other variant is already a sentence about the request, and each
+        // one names the path it is about.
+        named => named.to_string(),
+    }
+}
+
 fn boot_for(pipe: HANDLE, folder: &Path, read_only: bool) -> Result<Booted, String> {
     // SAFETY: `pipe` is the connected server end this thread owns.
     unsafe { readable_by_client(pipe, folder) }?;
@@ -328,9 +356,7 @@ fn boot_for(pipe: HANDLE, folder: &Path, read_only: bool) -> Result<Booted, Stri
     spec.workspace.read_only = read_only;
 
     let hypervisor = crate::hcs::Hyperv::new(artifact, cache());
-    let mut machine = hypervisor
-        .boot(&spec)
-        .map_err(|e| format!("could not start a machine for {}: {e}", folder.display()))?;
+    let mut machine = hypervisor.boot(&spec).map_err(refused_over(folder))?;
     let workspace = machine.workspace_path().to_path_buf();
 
     let client = client_process(pipe)?;

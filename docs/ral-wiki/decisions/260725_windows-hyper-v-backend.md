@@ -14,6 +14,17 @@ status: active
 > gains the service's own remedies (not answering, or a version mismatch), and
 > the direct path this page describes remains the maintainer's, in a checkout.
 
+> Amended by
+> [[decisions/260730_boot-contract-is-versioned|the boot contract has a version]]
+> and
+> [[decisions/260730_guest-console-outlives-stdout|a service-hosted guest's console is teed to disk]]:
+> the first open question below is partly answered, and its two halves are now
+> separately owned. The kernel command line the machine carries is one *versioned*
+> agreement, compared against the media at package time; and the guest's console
+> is no longer only on the host's standard output, which under the broker service
+> goes nowhere. Nothing about the document, the devices, or the boot order
+> changes.
+
 **Synod boots its own virtual machine on Windows by handing one JSON document to
 the Host Compute System API, and every part of that document is chosen so the
 guest cannot tell which hypervisor booted it.** `dev/docs/VM/SYNOD.md` §2 named
@@ -211,13 +222,20 @@ networkless machine.
 
 ## Open questions
 
-- **The guest's own boot is not yet verified.** A machine is created and started
-  — through the broker, on an account with no special membership — and that much
-  the document, the disks, and the socket are now witnessed by. Whether a kernel
-  comes up and the daemon dials the control plane is still being established.
-  `vm-manager/examples/boot-smoke.rs` and `synod/examples/boot-run.rs` are the
-  vehicles for it, and the guest console on its named pipe is there so the first
-  failure says why.
+- **The guest's own boot is partly witnessed, and no further.** A machine is
+  created and started — through the broker, on an account with no special
+  membership — and it boots a kernel and an initramfs that formats the session
+  disk and reaches the daemon, which is known because the daemon refused a command
+  line carrying a key its own build predated, in its own words, on its own
+  console. What is *not* yet witnessed is a guest that completes a boot and dials
+  the control plane: the media rebuilt against the host's contract has not been
+  booted at the time of writing. `vm-manager/examples/boot-smoke.rs` and
+  `synod/examples/boot-run.rs` remain the vehicles.
+  [[decisions/260730_boot-contract-is-versioned|boot-contract-is-versioned]] is
+  why that particular skew cannot recur past a build, and
+  [[decisions/260730_guest-console-outlives-stdout|guest-console-outlives-stdout]]
+  is why the next failure of any kind will say why on an installed synod and not
+  only in a checkout.
 - **Whether the host's 9p server can read the granted folder without an
   explicit access grant is untested.** `HcsGrantVmAccess` is called on the four
   boot files, since a virtual-machine worker process really does open those as
@@ -230,6 +248,12 @@ networkless machine.
 [[map/synod|synod]] (where the backend lives),
 [[decisions/260725_windows-machine-broker|windows-machine-broker]] (who creates
 the machine, and why it is not the user),
+[[decisions/260730_boot-contract-is-versioned|boot-contract-is-versioned]] (the
+command line as a versioned agreement, checked at package time),
+[[decisions/260730_guest-console-outlives-stdout|guest-console-outlives-stdout]]
+(how a boot failure reaches a reader),
+[[decisions/260730_session-disk-outlives-its-machine|session-disk-outlives-its-machine]]
+(what teardown leaves behind, and the sweep that reclaims it),
 [[decisions/260721_synod-is-a-second-product|synod-is-a-second-product]] (the
 product this machine serves, and the no-speculative-generality principle applied
 here to VHDX and to WMI),

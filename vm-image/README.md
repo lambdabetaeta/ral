@@ -69,6 +69,14 @@ encode the architecture in any path — `synod/src/boot.rs` and the bundles'
 resource maps look in the one fixed place. `out/boot/boot-manifest.txt`'s
 leading `arch=` line is how you know which guest is currently sitting there.
 
+That same manifest carries a `boot_contract=` line — the generation of `ral.`
+kernel-command-line settings the `ral-daemon` inside `initramfs.img`
+understands (`ral_daemon::boot::CONTRACT`, compiled and printed by
+`ral-daemon/examples/boot-contract.rs` rather than copied). `synod/build.rs`
+compares it against the host it is building and fails the build when they
+differ, because a guest that has not heard of a key the host writes refuses the
+whole command line and the host sees only a control plane nobody dialled.
+
 ## Contents
 
 | File | What it is |
@@ -461,7 +469,8 @@ The products are `kernel`, `initramfs.img`, a `.sha256` for each,
 `boot-manifest.txt` (the architecture, on its own leading line, plus the kernel
 package version and the git commit hash of the ral-daemon/exarch source built in
 — recording the hash only here, not in a `build.rs`, is the whole of the
-version-stamping decision), `kernel-config-check.txt` (the real `CONFIG_*`
+version-stamping decision — and `boot_contract=`, the one line a *host* build
+reads back), `kernel-config-check.txt` (the real `CONFIG_*`
 values the config-grep pass found), `verify.txt` (which asserts the kernel's
 format, the three binaries' architecture and static linkage, and lists the
 shipped modules in load order), and `build.log`.
