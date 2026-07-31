@@ -215,16 +215,20 @@ impl SourceCache {
     /// this is the first request since the scan was dropped.
     ///
     /// The enumeration mirrors `locate`'s rules — relative entries anchored
-    /// against the shell's cwd, the executable bit required.  Dispatch still
-    /// goes through the fresh `locate`, so a scan gone stale can only misinform
-    /// a menu, never misdirect a spawn.
+    /// against the shell's cwd, the executable bit required, and an empty
+    /// `PATH` element dropped rather than read as the cwd, so a trailing `;`
+    /// does not offer every file of the current directory as a command.
+    /// Dispatch still goes through the fresh `locate`, so a scan gone stale can
+    /// only misinform a menu, never misdirect a spawn.
     pub(super) fn sources(&self) -> Sources<'_> {
         let scan = self.scan.get_or_init(|| PathScan {
             names: self
                 .key
                 .path
                 .as_deref()
-                .map(|path| ral_core::path::commands_on_path(path, Some(&self.cwd)))
+                .map(|path| {
+                    ral_core::path::commands_on_path(path, ral_core::path::SearchCwd::of(&self.cwd))
+                })
                 .unwrap_or_default(),
             taken: Instant::now(),
         });
@@ -254,9 +258,10 @@ impl SourceCache {
 pub(super) fn complete(line: &str, pos: usize, sources: &Sources<'_>) -> (usize, Vec<Candidate>) {
     let (start, kind) = CompletionKind::classify(&line[..pos]);
     match kind {
-        CompletionKind::Variable { prefix } => {
-            (start, rank_names(sources.variables.iter().collect(), prefix))
-        }
+        CompletionKind::Variable { prefix } => (
+            start,
+            rank_names(sources.variables.iter().collect(), prefix),
+        ),
         CompletionKind::Command { prefix } => (start, rank_names(sources.command_names(), prefix)),
         CompletionKind::Path { token } => complete_path(token, start, sources.cwd),
     }
@@ -705,7 +710,10 @@ mod tests {
         assert!(cache.has_scanned(), "inside the TTL the scan stands");
         // Past it, `cargo install foo` becomes offerable without a restart.
         cache.refresh_at(&shell, taken + SCAN_TTL);
-        assert!(!cache.has_scanned(), "past the TTL the next request re-walks");
+        assert!(
+            !cache.has_scanned(),
+            "past the TTL the next request re-walks"
+        );
     }
 
     /// The two halves dedup against each other, not merely within.

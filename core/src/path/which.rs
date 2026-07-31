@@ -16,10 +16,45 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+/// The directory a `PATH` walk anchors its relative entries to.
+///
+/// A newtype rather than an `Option<&Path>` because "here" is a
+/// *precedence* — the `within [dir: …]` override, else the `cd`-mutated cwd —
+/// and a loose option lets each call site re-derive it.  Two walks that
+/// answered the same question against two anchors is how a bare name in a
+/// `cd`'d directory once earned "permission denied" from a walk that had
+/// resolved nothing.  The constructors are therefore few and named for their
+/// provenance: `Context::search_cwd` and [`Resolver::search_cwd`] carry the
+/// precedence, [`SearchCwd::of`] serves a front end already holding it, and
+/// [`SearchCwd::nowhere`] says outright that there is none.
+///
+/// [`Resolver::search_cwd`]: super::Resolver::search_cwd
+#[derive(Clone, Copy)]
+pub struct SearchCwd<'a>(Option<&'a Path>);
+
+impl<'a> SearchCwd<'a> {
+    /// For a caller already holding the shell's effective cwd — `Shell::cwd`,
+    /// which adds the process-cwd fallback, and the REPL's completion scan.
+    /// Core runtime code goes through `Context::search_cwd` instead, so the
+    /// override-vs-`cd` precedence cannot be re-chosen a third way.
+    #[must_use]
+    pub fn of(cwd: &'a Path) -> Self {
+        Self(Some(cwd))
+    }
+
+    /// No anchor: a shell-less caller, or a test that names absolute entries.
+    /// What it costs is that a relative `PATH` entry stats against the
+    /// *process* cwd, which no `cd` of ral's ever moves.
+    #[must_use]
+    pub fn nowhere() -> Self {
+        Self(None)
+    }
+}
+
 /// First executable named `name` on the colon-separated `path`, with
 /// relative `PATH` entries anchored to `cwd`; `None` when `name` bears a
 /// separator, which is a path, not `PATH`'s business.
-pub fn resolve_in_path(name: &str, path: &str, cwd: Option<&Path>) -> Option<String> {
+pub fn resolve_in_path(name: &str, path: &str, cwd: SearchCwd<'_>) -> Option<String> {
     if name_has_separator(name) {
         return None;
     }
@@ -33,7 +68,7 @@ pub fn resolve_in_path(name: &str, path: &str, cwd: Option<&Path>) -> Option<Str
 /// `Some` only for a regular file carrying the executable bit — the check
 /// the OS would apply at spawn.  A bare name's answer is memoised for the
 /// current run ([`LOCATED`]).
-pub fn locate(name: &str, path_value: Option<&str>, cwd: Option<&Path>) -> Option<PathBuf> {
+pub fn locate(name: &str, path_value: Option<&str>, cwd: SearchCwd<'_>) -> Option<PathBuf> {
     locate_at(name, path_value, cwd, Instant::now())
 }
 
@@ -42,7 +77,7 @@ pub fn locate(name: &str, path_value: Option<&str>, cwd: Option<&Path>) -> Optio
 fn locate_at(
     name: &str,
     path_value: Option<&str>,
-    cwd: Option<&Path>,
+    cwd: SearchCwd<'_>,
     now: Instant,
 ) -> Option<PathBuf> {
     // Answered before the memo is touched: one join and one stat is no
@@ -58,7 +93,7 @@ fn locate_at(
     let key = LocateKey {
         name: name.to_owned(),
         path_value: path_value.to_owned(),
-        cwd: cwd.map(Path::to_path_buf),
+        cwd: cwd.0.map(Path::to_path_buf),
         #[cfg(windows)]
         pathext: suffixes.join(";"),
     };
@@ -141,8 +176,8 @@ thread_local! {
     /// table.  Within a run a `None` older than [`NEGATIVE_TTL`] is re-probed
     /// while positives ride the generation alone, because a stale miss is a
     /// wrong answer where a stale hit is a spawn that fails with the OS's own
-    /// ENOENT and sends `runtime::command::vet` back to the uncached
-    /// [`file_exists_on_path`] to choose between 126 and 127.  Misses are also
+    /// ENOENT, and whose miss sends [`search`] on to its uncached presence
+    /// half to choose between 126 and 127.  Misses are also
     /// the case worth caching: `evaluator::pattern`'s shadow check walks the
     /// whole list to the end for every binding name.
     static LOCATED: RefCell<LocateCache> = RefCell::new(LocateCache {
@@ -211,8 +246,8 @@ fn name_has_separator(name: &str) -> bool {
 /// profile via [`capability::sandbox`](crate::capability::sandbox), which
 /// matches literally, and the `/work/./bin/git` an unfolded `./bin` yields
 /// is covered by no `/work/bin/` the profile names.
-fn anchor_to_cwd(p: PathBuf, cwd: Option<&Path>) -> PathBuf {
-    let joined = match cwd {
+fn anchor_to_cwd(p: PathBuf, cwd: SearchCwd<'_>) -> PathBuf {
+    let joined = match cwd.0 {
         Some(c) if !p.is_absolute() => c.join(p),
         _ => p,
     };
@@ -220,9 +255,19 @@ fn anchor_to_cwd(p: PathBuf, cwd: Option<&Path>) -> PathBuf {
 }
 
 /// The one directory list behind [`locate`], [`commands_on_path`], and
-/// [`file_exists_on_path`]; relative entries (`./bin`) anchor to `cwd`.
-fn path_dirs(path_value: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
+/// [`search`]; relative entries (`./bin`) anchor to `cwd`.
+///
+/// An **empty element is dropped, on every platform**.  POSIX reads one as the
+/// cwd — the forty-year-old implicit-`.`-on-`PATH` foot-gun — and on Windows a
+/// trailing `;` is ubiquitous noise, so honouring it would put every file of
+/// every directory the user `cd`s into on the search list; off Unix, where
+/// [`is_executable_file`] calls any file executable, that is every file
+/// outright.  A user who wants the cwd searched writes `.`, which
+/// [`anchor_to_cwd`] honours deliberately.  The filter runs on the element as
+/// written, before anchoring turns `""` into the cwd itself.
+fn path_dirs(path_value: &str, cwd: SearchCwd<'_>) -> Vec<PathBuf> {
     std::env::split_paths(&std::ffi::OsString::from(path_value))
+        .filter(|dir| !dir.as_os_str().is_empty())
         .map(|dir| anchor_to_cwd(dir, cwd))
         .collect()
 }
@@ -255,7 +300,7 @@ fn is_executable_file(p: &Path) -> bool {
     clippy::disallowed_methods,
     reason = "[io-door:silent:which-readdir] `which`/completion probe: enumerates each PATH directory to list executable names; an executable-probe scan, not turn-time model data I/O, raises no surface card."
 )]
-pub fn commands_on_path(path_value: &str, cwd: Option<&Path>) -> Vec<String> {
+pub fn commands_on_path(path_value: &str, cwd: SearchCwd<'_>) -> Vec<String> {
     let mut out = Vec::new();
     for dir in path_dirs(path_value, cwd) {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -274,17 +319,58 @@ pub fn commands_on_path(path_value: &str, cwd: Option<&Path>) -> Vec<String> {
     out
 }
 
-/// A regular file named `name` on `PATH`, executable bit ignored, so
-/// `runtime::command::vet` can answer 126 (permission denied) where a
-/// plain miss would answer 127.
-pub fn file_exists_on_path(name: &str, path: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+/// What one walk of `PATH` found, in the three states `runtime::command::vet`
+/// must tell apart.
+///
+/// Three, because the 126/127 split is a property *of the walk*: a verdict
+/// computed by a second, independent traversal can disagree with the first
+/// about the anchor, the search list, or the moment — and a disagreement in
+/// that shape reads exactly like "on `PATH` but lacking `+x`".  Carrying the
+/// verdict out of the traversal that produced the resolution leaves nothing
+/// for the two to disagree about.
+#[derive(Clone, Debug)]
+pub(crate) enum PathSearch {
+    /// A regular file carrying the executable bit: what the OS would spawn.
+    Executable(PathBuf),
+    /// A file of that name is there, but the walk would not spawn it — 126.
+    FoundNotExecutable(PathBuf),
+    /// No file of that name anywhere on the list — 127.
+    Missing,
+}
+
+/// Walk `PATH` for `name` once and report all three outcomes.
+///
+/// The executable half is [`locate`], memo and TTL unchanged.  The
+/// presence half runs only when that misses — the error path, and bundled
+/// names whose `PATH` holds no host twin — and stays uncached, for the reason
+/// [`LOCATED`] gives: a stale *hit* costs a spawn that fails with the OS's own
+/// ENOENT, but a stale answer here is the difference between two exit codes a
+/// user reads as different diagnoses.  It walks the same [`path_dirs`] list as
+/// the executable half, so no empty entry, no anchor and no suffix rule can
+/// differ between them.
+///
+/// A separator-bearing name is [`PathSearch::Missing`] outright, as in
+/// [`resolve_in_path`]: it is a path, not `PATH`'s business, and the kernel
+/// gives the better diagnosis at spawn.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:which-stat] `which`/PATH probe: stats a candidate to tell an unexecutable file from an absent one; an executable-probe predicate, not turn-time model data I/O, raises no surface card."
+)]
+pub(crate) fn search(name: &str, path_value: Option<&str>, cwd: SearchCwd<'_>) -> PathSearch {
     if name_has_separator(name) {
-        return None;
+        return PathSearch::Missing;
     }
-    path_dirs(path, cwd)
+    if let Some(hit) = locate(name, path_value, cwd) {
+        return PathSearch::Executable(hit);
+    }
+    let Some(path_value) = path_value else {
+        return PathSearch::Missing;
+    };
+    path_dirs(path_value, cwd)
         .into_iter()
         .map(|dir| dir.join(name))
         .find(|candidate| candidate.is_file())
+        .map_or(PathSearch::Missing, PathSearch::FoundNotExecutable)
 }
 
 /// The Windows resolver's `%PATHEXT%` suffixes, leading dots stripped, with
@@ -316,14 +402,37 @@ fn windows_pathext_suffixes() -> Vec<String> {
 /// Mirror the Windows resolver's `%PATHEXT%` fallback, so
 /// `locate("python")` finds `python.exe`.  `capability::exec` keeps its
 /// own copy of the default list to strip suffixes off grant keys.
+///
+/// The resolver *appends* each suffix; it never substitutes one.  Building the
+/// candidates with `Path::with_extension` — which replaces — resolved a bare
+/// `build.ps1` to whatever `build.exe` sat first on `PATH`, a different program
+/// than the user named.  Appending to the literal as written (`build.ps1.EXE`)
+/// is what `cmd.exe` itself does, and is pinned by
+/// `windows_tests::pathext_appends_never_replaces`.
 #[cfg(windows)]
 fn windows_command_candidates(base: &Path, suffixes: &[String]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if base.extension().is_some() {
         out.push(base.to_path_buf());
     }
-    out.extend(suffixes.iter().map(|ext| base.with_extension(ext)));
+    out.extend(
+        suffixes
+            .iter()
+            .map(|ext| with_appended_suffix(base, ext.as_str())),
+    );
     out
+}
+
+/// `base` with `.ext` appended: `build.ps1` + `EXE` is `build.ps1.EXE`.
+///
+/// Spelled by concatenation on the `OsStr`, so there is no `with_extension`
+/// left in the candidate builder for a later reading to flip back.
+#[cfg(windows)]
+fn with_appended_suffix(base: &Path, ext: &str) -> PathBuf {
+    let mut name = base.as_os_str().to_os_string();
+    name.push(".");
+    name.push(ext);
+    PathBuf::from(name)
 }
 
 /// The memo's tests, on every platform — separate from the walk's `tests`
@@ -343,7 +452,7 @@ mod memo_tests {
     static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// Take the lock and start from a known generation.
-    fn cache_guard() -> MutexGuard<'static, ()> {
+    pub(super) fn cache_guard() -> MutexGuard<'static, ()> {
         let guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -388,10 +497,14 @@ mod memo_tests {
         let planted = plant(tmp.path(), "runme");
         let path_value = as_path_value(tmp.path());
 
-        let first = locate("runme", Some(&path_value), None).expect("planted binary must resolve");
+        let first = locate("runme", Some(&path_value), SearchCwd::nowhere())
+            .expect("planted binary must resolve");
         std::fs::remove_file(&planted).unwrap();
         // The file is gone, so a second walk could only answer `None`.
-        assert_eq!(locate("runme", Some(&path_value), None), Some(first));
+        assert_eq!(
+            locate("runme", Some(&path_value), SearchCwd::nowhere()),
+            Some(first)
+        );
     }
 
     #[test]
@@ -401,10 +514,13 @@ mod memo_tests {
         let planted = plant(tmp.path(), "runme");
         let path_value = as_path_value(tmp.path());
 
-        assert!(locate("runme", Some(&path_value), None).is_some());
+        assert!(locate("runme", Some(&path_value), SearchCwd::nowhere()).is_some());
         std::fs::remove_file(&planted).unwrap();
         forget_located_commands();
-        assert_eq!(locate("runme", Some(&path_value), None), None);
+        assert_eq!(
+            locate("runme", Some(&path_value), SearchCwd::nowhere()),
+            None
+        );
     }
 
     #[test]
@@ -415,10 +531,13 @@ mod memo_tests {
 
         // A remembered miss must not outlive the run door's forget, or
         // `cargo install foo` then `foo` still says "not found".
-        assert_eq!(locate("runme", Some(&path_value), None), None);
+        assert_eq!(
+            locate("runme", Some(&path_value), SearchCwd::nowhere()),
+            None
+        );
         plant(tmp.path(), "runme");
         forget_located_commands();
-        assert!(locate("runme", Some(&path_value), None).is_some());
+        assert!(locate("runme", Some(&path_value), SearchCwd::nowhere()).is_some());
     }
 
     #[test]
@@ -428,15 +547,24 @@ mod memo_tests {
         let path_value = as_path_value(tmp.path());
         let probed = Instant::now();
 
-        assert_eq!(locate_at("runme", Some(&path_value), None, probed), None);
+        assert_eq!(
+            locate_at("runme", Some(&path_value), SearchCwd::nowhere(), probed),
+            None
+        );
         plant(tmp.path(), "runme");
         assert_eq!(
-            locate_at("runme", Some(&path_value), None, probed),
+            locate_at("runme", Some(&path_value), SearchCwd::nowhere(), probed),
             None,
             "inside the TTL the remembered miss stands"
         );
         assert!(
-            locate_at("runme", Some(&path_value), None, probed + NEGATIVE_TTL).is_some(),
+            locate_at(
+                "runme",
+                Some(&path_value),
+                SearchCwd::nowhere(),
+                probed + NEGATIVE_TTL
+            )
+            .is_some(),
             "past it the walk runs again"
         );
     }
@@ -449,8 +577,18 @@ mod memo_tests {
         plant(a.path(), "runme");
         plant(b.path(), "runme");
 
-        let from_a = locate("runme", Some(&as_path_value(a.path())), None).unwrap();
-        let from_b = locate("runme", Some(&as_path_value(b.path())), None).unwrap();
+        let from_a = locate(
+            "runme",
+            Some(&as_path_value(a.path())),
+            SearchCwd::nowhere(),
+        )
+        .unwrap();
+        let from_b = locate(
+            "runme",
+            Some(&as_path_value(b.path())),
+            SearchCwd::nowhere(),
+        )
+        .unwrap();
         assert!(from_a.starts_with(a.path()), "got {from_a:?}");
         // A `within [shell: PATH=…]` block cannot be handed the enclosing
         // scope's answer.
@@ -466,9 +604,12 @@ mod memo_tests {
         std::fs::create_dir(&bin).unwrap();
         plant(&bin, "runme");
 
-        assert!(locate("runme", Some("./bin"), Some(a.path())).is_some());
+        assert!(locate("runme", Some("./bin"), SearchCwd::of(a.path())).is_some());
         // Same name and same `PATH`; only the anchor differs.
-        assert_eq!(locate("runme", Some("./bin"), Some(b.path())), None);
+        assert_eq!(
+            locate("runme", Some("./bin"), SearchCwd::of(b.path())),
+            None
+        );
     }
 
     #[cfg(windows)]
@@ -481,10 +622,10 @@ mod memo_tests {
 
         // No `forget` between the two: `%PATHEXT%` is in the key itself.
         let without = crate::test_env::with_var("PATHEXT", Some(".EXE"), || {
-            locate("runme", Some(&path_value), None)
+            locate("runme", Some(&path_value), SearchCwd::nowhere())
         });
         let with = crate::test_env::with_var("PATHEXT", Some(".BAT"), || {
-            locate("runme", Some(&path_value), None)
+            locate("runme", Some(&path_value), SearchCwd::nowhere())
         });
         assert_eq!(without, None);
         assert!(with.is_some(), "got {with:?}");
@@ -497,10 +638,106 @@ mod memo_tests {
         let planted = tmp.path().join("runme");
         make_executable(&planted);
 
-        assert!(locate("./runme", None, Some(tmp.path())).is_some());
+        assert!(locate("./runme", None, SearchCwd::of(tmp.path())).is_some());
         std::fs::remove_file(&planted).unwrap();
         // No `forget`, and still a fresh answer.
-        assert_eq!(locate("./runme", None, Some(tmp.path())), None);
+        assert_eq!(locate("./runme", None, SearchCwd::of(tmp.path())), None);
+    }
+
+    /// `PATH` with a trailing separator, so the split yields an empty element.
+    fn with_trailing_separator(dir: &Path) -> String {
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        format!("{}{sep}", as_path_value(dir))
+    }
+
+    #[test]
+    fn an_empty_path_entry_never_means_the_cwd() {
+        let _guard = cache_guard();
+        let here = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        plant(here.path(), "runme");
+        let path_value = with_trailing_separator(elsewhere.path());
+
+        // The trailing separator is the user's `PATH` ending in `;` — noise,
+        // not a request to search wherever they happen to stand.
+        assert_eq!(
+            locate("runme", Some(&path_value), SearchCwd::of(here.path())),
+            None,
+        );
+    }
+
+    #[test]
+    fn search_misses_the_cwd_through_an_empty_entry() {
+        let _guard = cache_guard();
+        let here = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        plant(here.path(), "runme");
+        let path_value = with_trailing_separator(elsewhere.path());
+
+        // The presence half walks the same list, so it cannot see a file the
+        // executable half was never offered — which is what a spurious 126 is.
+        assert!(matches!(
+            search("runme", Some(&path_value), SearchCwd::of(here.path())),
+            PathSearch::Missing,
+        ));
+    }
+
+    #[test]
+    fn commands_on_path_ignores_empty_entries() {
+        let _guard = cache_guard();
+        let here = tempfile::tempdir().unwrap();
+        plant(here.path(), "runme");
+
+        let names = commands_on_path("", SearchCwd::of(here.path()));
+        assert!(names.is_empty(), "got {names:?}");
+    }
+}
+
+/// The Windows resolver's own rules: `%PATHEXT%` suffixes append to the name
+/// the user wrote, and never stand in for one they did.
+#[cfg(test)]
+#[cfg(windows)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs/process scaffolding"
+)]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn pathext_appends_never_replaces() {
+        let suffixes = ["EXE".to_owned(), "BAT".to_owned()];
+        let got = windows_command_candidates(Path::new("build.ps1"), &suffixes);
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from("build.ps1"),
+                PathBuf::from("build.ps1.EXE"),
+                PathBuf::from("build.ps1.BAT"),
+            ],
+        );
+        assert!(
+            !got.contains(&PathBuf::from("build.exe")),
+            "a suffixed name must never become a sibling extension: {got:?}",
+        );
+    }
+
+    #[test]
+    fn a_suffixed_name_does_not_resolve_to_a_sibling_extension() {
+        let _guard = super::memo_tests::cache_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("build.exe"), b"MZ").unwrap();
+        let path_value = tmp.path().to_str().unwrap().to_owned();
+
+        crate::test_env::with_var("PATHEXT", Some(".EXE"), || {
+            assert_eq!(
+                locate("build.ps1", Some(&path_value), SearchCwd::nowhere()),
+                None,
+                "`build.ps1` names a PowerShell script, not whatever build.exe is first on PATH",
+            );
+            forget_located_commands();
+            assert!(locate("build", Some(&path_value), SearchCwd::nowhere()).is_some());
+        });
     }
 }
 
@@ -525,7 +762,7 @@ mod tests {
     fn commands_on_path_finds_executables() {
         let tmp = tempfile::tempdir().unwrap();
         touch(&tmp.path().join("runme"), 0o755);
-        let names = commands_on_path(tmp.path().to_str().unwrap(), None);
+        let names = commands_on_path(tmp.path().to_str().unwrap(), SearchCwd::nowhere());
         assert!(names.contains(&"runme".to_string()), "got {names:?}");
     }
 
@@ -533,7 +770,7 @@ mod tests {
     fn commands_on_path_skips_non_executable_files() {
         let tmp = tempfile::tempdir().unwrap();
         touch(&tmp.path().join("noexec"), 0o644);
-        let names = commands_on_path(tmp.path().to_str().unwrap(), None);
+        let names = commands_on_path(tmp.path().to_str().unwrap(), SearchCwd::nowhere());
         assert!(!names.contains(&"noexec".to_string()), "got {names:?}");
     }
 
@@ -545,7 +782,7 @@ mod tests {
         touch(&bin.join("runme"), 0o755);
         // Against the supplied cwd, not the process cwd: otherwise the
         // prompt stops reflecting the shell's notion of "here".
-        let names = commands_on_path("./bin", Some(tmp.path()));
+        let names = commands_on_path("./bin", SearchCwd::of(tmp.path()));
         assert!(names.contains(&"runme".to_string()), "got {names:?}");
     }
 
@@ -557,7 +794,7 @@ mod tests {
         touch(&bin.join("runme"), 0o755);
         // Against the supplied cwd, not the process cwd: dispatch and the
         // exec gate must land on the binary the shell's own `./bin` names.
-        let hit = resolve_in_path("runme", "./bin", Some(tmp.path())).unwrap();
+        let hit = resolve_in_path("runme", "./bin", SearchCwd::of(tmp.path())).unwrap();
         assert_eq!(
             std::fs::canonicalize(&hit).unwrap(),
             std::fs::canonicalize(bin.join("runme")).unwrap(),
@@ -570,7 +807,7 @@ mod tests {
         touch(&tmp.path().join("runme"), 0o755);
         // Folded, not merely joined: the answer is what the OS sandbox
         // profile matches literally, and `/tmp/x/./runme` is not `/tmp/x/runme`.
-        let hit = locate("./runme", None, Some(tmp.path())).unwrap();
+        let hit = locate("./runme", None, SearchCwd::of(tmp.path())).unwrap();
         assert_eq!(hit, tmp.path().join("runme"));
     }
 
@@ -580,15 +817,34 @@ mod tests {
         let bin = tmp.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         touch(&bin.join("runme"), 0o755);
-        let hit = resolve_in_path("runme", "./bin", Some(tmp.path())).unwrap();
+        let hit = resolve_in_path("runme", "./bin", SearchCwd::of(tmp.path())).unwrap();
         assert_eq!(hit, bin.join("runme").to_str().unwrap());
+    }
+
+    /// The 126 case, and the only platform that has one: the presence half
+    /// answers where the executable half declined, off the same walk.
+    #[test]
+    fn search_reports_found_not_executable_on_the_same_walk() {
+        let _guard = super::memo_tests::cache_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        touch(&tmp.path().join("noexec"), 0o644);
+        let path_value = tmp.path().to_str().unwrap();
+
+        assert_eq!(
+            locate("noexec", Some(path_value), SearchCwd::nowhere()),
+            None
+        );
+        match search("noexec", Some(path_value), SearchCwd::nowhere()) {
+            PathSearch::FoundNotExecutable(p) => assert_eq!(p, tmp.path().join("noexec")),
+            other => panic!("expected FoundNotExecutable, got {other:?}"),
+        }
     }
 
     #[test]
     fn commands_on_path_skips_missing_dirs() {
         let tmp = tempfile::tempdir().unwrap();
         let absent = tmp.path().join("does-not-exist");
-        let names = commands_on_path(absent.to_str().unwrap(), None);
+        let names = commands_on_path(absent.to_str().unwrap(), SearchCwd::nowhere());
         assert!(names.is_empty(), "got {names:?}");
     }
 }

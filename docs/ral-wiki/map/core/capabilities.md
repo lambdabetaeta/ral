@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ce6a3ba
-generated_at_date: 2026-07-30
+generated_at_commit: 28270e2
+generated_at_date: 2026-07-31
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -88,6 +88,24 @@ sigil-expansion-then-lex: the ordering is in the types, not convention.
 
 (`ral_path.rs` in the same directory owns `RAL_PATH` module search, used by `use`
 and the plugin loader, not by grant matching.)
+
+`which.rs` is the one `PATH` walk. **Its anchor is a `SearchCwd`, minted only
+from a named provenance — `Context::search_cwd`, `Resolver::search_cwd`,
+`SearchCwd::of` for a front end already holding the shell's cwd, or
+`SearchCwd::nowhere` — so no call site can choose "here" for itself**
+([[decisions/260731_one-walk-one-anchor|one-walk-one-anchor]]).
+
+- `path_dirs` is the sole directory list behind `locate`, `commands_on_path` and
+  `search`; it **drops empty `PATH` elements on every platform**, so a trailing
+  `;` or `:` never means the cwd. `.` and `./bin` are honoured, as written.
+- `search` returns `PathSearch::{Executable, FoundNotExecutable, Missing}` from
+  one traversal — the executable half memoised, the presence half not — so
+  `runtime::command::vet` reads a verdict rather than taking a second walk.
+- On Windows, `%PATHEXT%` suffixes **append**: `build.ps1` yields
+  `build.ps1`, `build.ps1.EXE`, …, never `build.exe`.
+- `capability::sandbox::resolve_literal` anchors its exec-key resolution through
+  `Resolver::search_cwd`, so the OS profile and the in-ral gate name the same
+  binary.
 
 A `NormalizedPrefix` (`resolved.rs`) carries its `surface` form (lexical —
 what the OS profile emits, since the sandbox matcher works lexically), its

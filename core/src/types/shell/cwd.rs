@@ -116,6 +116,10 @@ impl Shell {
     pub fn locate_command(&self, name: &str) -> Option<PathBuf> {
         let env_path = self.mobile.context.env_overrides.get_or_host("PATH");
         let cwd = self.cwd();
-        crate::path::locate(name, env_path.as_deref(), Some(cwd.as_path()))
+        crate::path::locate(
+            name,
+            env_path.as_deref(),
+            crate::path::SearchCwd::of(cwd.as_path()),
+        )
     }
 }

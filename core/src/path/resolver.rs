@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{ResolvedPath, lex, sigil};
+use super::{ResolvedPath, SearchCwd, lex, sigil};
 
 /// The `HOME` and logical cwd one resolution runs against.
 pub struct Resolver<'a> {
@@ -24,6 +24,17 @@ impl Resolver<'_> {
             home: String::new(),
             cwd: None,
         }
+    }
+
+    /// This resolver's cwd as a `PATH`-walk anchor.
+    ///
+    /// A resolver is already minted from one context's effective cwd, so a
+    /// consumer that also walks `PATH` — the OS sandbox's exec projection —
+    /// asks for the anchor here rather than reaching past the resolver for a
+    /// cwd of its own.
+    #[must_use]
+    pub fn search_cwd(&self) -> SearchCwd<'_> {
+        self.cwd.map_or_else(SearchCwd::nowhere, SearchCwd::of)
     }
 
     /// Stages 1 and 2: expand `~`/`xdg:`, then anchor and fold against `cwd`.

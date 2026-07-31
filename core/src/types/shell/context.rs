@@ -6,7 +6,7 @@
 //! `env_overrides`; the canonical pair lives on `context.cwd`.
 
 use super::Context;
-use crate::path::Resolver;
+use crate::path::{Resolver, SearchCwd};
 use crate::types::{Audit, EnvVars};
 use std::path::Path;
 
@@ -62,6 +62,18 @@ impl Context {
     /// and [`Shell::cwd`](super::Shell::cwd), which adds the process-cwd fallback.
     pub(crate) fn cwd_chain(&self) -> Option<&Path> {
         self.dir.as_deref().or(self.cwd.current.as_deref())
+    }
+
+    /// The anchor a `PATH` walk made from this context runs against.
+    ///
+    /// The effective cwd is a precedence with exactly one home,
+    /// [`Self::cwd_chain`]; a walk that re-derives it from `self.dir` alone
+    /// anchors relative entries to nothing in a plain REPL and disagrees with
+    /// every other consumer of "here" — which is how a walk and its 126/127
+    /// probe once told different stories about the same name.
+    pub(crate) fn search_cwd(&self) -> SearchCwd<'_> {
+        self.cwd_chain()
+            .map_or_else(SearchCwd::nowhere, SearchCwd::of)
     }
 
     /// A [`Resolver`] bound to this layer's home and effective cwd — grant-prefix

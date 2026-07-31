@@ -4,10 +4,15 @@
 //! spelling we show and the PATH-walked form we exec — and is threaded
 //! down to launch, so classification and spawn cannot disagree and PATH
 //! is walked once.  Resolution is total: a bare name that misses on PATH
-//! keeps `resolved == shown`, leaving the 127/126 verdict to `super::vet`.
+//! keeps `resolved == shown`.
+//!
+//! The module invariant: **`resolved` and `search` are two projections of one
+//! walk, and `super::vet` may not walk again.**  The 126/127 verdict is a
+//! pattern match on the [`PathSearch`] this walk recorded, not a second probe
+//! that could answer against another anchor.
 
 use crate::ir::CommandName;
-use crate::path::tilde::expand_tilde_path;
+use crate::path::{PathSearch, tilde::expand_tilde_path};
 use crate::types::Context;
 
 #[derive(Clone, Debug)]
@@ -15,17 +20,22 @@ pub(crate) struct CommandIdentity {
     pub(crate) name: CommandName,
     pub(crate) shown: String,
     pub(crate) resolved: String,
+    /// What the walk that produced `resolved` saw, for a `Bare` head; `None`
+    /// for a path or tilde head, which `PATH` never searched and whose absence
+    /// the kernel reports at spawn.
+    pub(crate) search: Option<PathSearch>,
 }
 
 impl CommandIdentity {
     /// Render and PATH-resolve `name` against `ctx`.
     pub(crate) fn resolve(name: CommandName, ctx: &Context) -> Self {
         let shown = render(&name, ctx);
-        let resolved = walk_path(&name, ctx);
+        let (resolved, search) = walk_path(&name, ctx);
         Self {
             name,
             shown,
             resolved,
+            search,
         }
     }
 
@@ -38,6 +48,13 @@ impl CommandIdentity {
     /// bare name cannot admit a binary planted on a temporary search path.  A
     /// `Path` head gains the cwd-joined absolute form, because `allow_dirs` and
     /// `deny_dirs` only match absolute candidates.
+    ///
+    /// The baseline walk asks a genuinely different question — the *host*
+    /// `PATH` rather than the effective one — so it is its own traversal; but
+    /// it anchors where [`walk_path`] anchors, `Context::search_cwd`.  A
+    /// baseline taken against a different "here" compares two resolutions of
+    /// two commands, and the grant gate would then judge an identity vet never
+    /// saw.
     pub(crate) fn policy_names(&self, ctx: &Context) -> Vec<String> {
         let mut names = Vec::new();
         let mut include_rendered = true;
@@ -50,7 +67,7 @@ impl CommandIdentity {
             let effective_path = ctx.env_overrides().get_or_host("PATH");
             if host_path != effective_path {
                 let baseline = host_path.as_deref().and_then(|path| {
-                    crate::path::resolve_in_path(&self.shown, path, ctx.dir.as_deref())
+                    crate::path::resolve_in_path(&self.shown, path, ctx.search_cwd())
                 });
                 if baseline.as_deref() != Some(self.resolved.as_str())
                     && self.resolved != self.shown
@@ -117,32 +134,45 @@ fn render(name: &CommandName, ctx: &Context) -> String {
     }
 }
 
-/// PATH walk for bare names against ral's effective `PATH`.
+/// PATH walk for bare names against ral's effective `PATH`, returning both of
+/// the walk's projections: the form to exec, and what the walk saw.
 ///
 /// A `within [env: [PATH: …]]` override rewrites the search list for the
 /// block, so resolving here and handing `Command::new` an absolute path
 /// keeps ral's view authoritative over `posix_spawnp(3)`'s own parent-PATH
 /// search.  A miss falls through as input, leaving the OS to produce its
-/// "not found" at spawn time.
-fn walk_path(name: &CommandName, ctx: &Context) -> String {
+/// "not found" at spawn time — and leaving `super::vet` a verdict from *this*
+/// traversal to read rather than a probe of its own to take.
+///
+/// The verdict's presence half costs one stat per `PATH` entry, and only when
+/// the executable walk missed: the error path, and bare names of bundled tools
+/// whose host `PATH` holds no twin.
+fn walk_path(name: &CommandName, ctx: &Context) -> (String, Option<PathSearch>) {
     let rendered = render(name, ctx);
-    if let CommandName::Bare(_) = name {
-        let path = ctx.env_overrides().get_or_host("PATH").unwrap_or_default();
-        if let Some(resolved) = crate::path::resolve_in_path(&rendered, &path, ctx.dir.as_deref()) {
-            return resolved;
-        }
-    }
-    rendered
+    let CommandName::Bare(_) = name else {
+        return (rendered, None);
+    };
+    let path = ctx.env_overrides().get_or_host("PATH").unwrap_or_default();
+    let search = crate::path::search(&rendered, Some(&path), ctx.search_cwd());
+    let resolved = match &search {
+        PathSearch::Executable(hit) => hit.to_string_lossy().into_owned(),
+        PathSearch::FoundNotExecutable(_) | PathSearch::Missing => rendered,
+    };
+    (resolved, Some(search))
 }
 
 /// Lexically resolve a relative path against ral's effective cwd, folding
 /// `.` and `..`.  `None` when `s` is already absolute — the caller needs no
 /// second candidate then.
+///
+/// "Effective" is `Context::cwd_chain`, the same precedence the walk anchors
+/// to: a policy name absolutised against `self.dir` alone would name a
+/// different file than the one a `cd`'d shell is about to spawn.
 fn absolutize(s: &str, ctx: &Context) -> Option<String> {
     if crate::path::is_absolute(s) {
         return None;
     }
-    let cwd = ctx.dir.as_deref();
+    let cwd = ctx.cwd_chain();
     Some(
         crate::path::resolve_path(cwd, s)
             .to_string_lossy()
@@ -160,6 +190,7 @@ mod tests {
     use crate::types::Shell;
     #[cfg(unix)]
     use std::collections::{BTreeMap, BTreeSet};
+    use std::path::Path;
 
     #[test]
     fn render_expands_tilde_against_env_home() {
@@ -320,6 +351,90 @@ mod tests {
         assert!(
             !admits_for_test(&ctx.grants, &deny_refs, &allow_refs),
             "bare rg: allow must not admit a Path-invoked /tmp/evil/rg",
+        );
+    }
+
+    /// An executable a *bare-name* walk finds in `dir`: off Unix a bare name
+    /// only resolves through `%PATHEXT%`, so the file needs a suffix from it.
+    fn plant(dir: &Path, stem: &str) -> String {
+        let name = if cfg!(windows) {
+            format!("{stem}.bat")
+        } else {
+            stem.to_owned()
+        };
+        std::fs::write(dir.join(&name), b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let p = dir.join(&name);
+            let mut perms = std::fs::metadata(&p).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&p, perms).unwrap();
+        }
+        name
+    }
+
+    /// A `./bin` on `PATH` must follow the shell, and in a plain REPL "the
+    /// shell's here" is `cwd.current` — `ctx.dir` is bound only inside
+    /// `within [dir: …]`, so a walk reading it alone anchors to nothing.
+    #[test]
+    fn walk_anchors_relative_path_entries_to_the_cd_cwd() {
+        crate::path::forget_located_commands();
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let name = plant(&bin, "zzwalk");
+
+        let mut shell = Shell::default();
+        shell.mobile.context.cwd.current = Some(tmp.path().to_path_buf());
+        shell.mobile.context.set_env_var("PATH", "./bin");
+
+        let id = CommandIdentity::resolve(CommandName::Bare(name.clone()), &shell.mobile.context);
+        assert_eq!(id.resolved, bin.join(&name).to_string_lossy());
+    }
+
+    /// The `within [dir: …]` override outranks the `cd`-mutated cwd, and the
+    /// walk must read the same precedence every other consumer of "here" does.
+    #[test]
+    fn dir_override_outranks_the_cd_cwd_for_the_walk() {
+        crate::path::forget_located_commands();
+        let overridden = tempfile::tempdir().unwrap();
+        let cd_to = tempfile::tempdir().unwrap();
+        let name = {
+            for root in [overridden.path(), cd_to.path()] {
+                std::fs::create_dir(root.join("bin")).unwrap();
+            }
+            plant(&cd_to.path().join("bin"), "zzboth");
+            plant(&overridden.path().join("bin"), "zzboth")
+        };
+
+        let mut shell = Shell::default();
+        shell.mobile.context.cwd.current = Some(cd_to.path().to_path_buf());
+        shell.mobile.context.dir = Some(overridden.path().to_path_buf());
+        shell.mobile.context.set_env_var("PATH", "./bin");
+
+        let id = CommandIdentity::resolve(CommandName::Bare(name.clone()), &shell.mobile.context);
+        assert_eq!(
+            id.resolved,
+            overridden.path().join("bin").join(&name).to_string_lossy(),
+        );
+    }
+
+    /// The `absolutize` half of the same precedence: a relative `Path` head's
+    /// policy name is joined to the effective cwd, `cd`-mutated or not.
+    #[cfg(unix)]
+    #[test]
+    fn policy_absolute_uses_the_cd_cwd() {
+        let mut shell = Shell::default();
+        shell.mobile.context.cwd.current = Some("/tmp/jq_src/jq-1.7".into());
+        let names = CommandIdentity::resolve(
+            CommandName::Path("./configure".into()),
+            &shell.mobile.context,
+        )
+        .policy_names(&shell.mobile.context);
+        assert!(
+            names.iter().any(|n| n == "/tmp/jq_src/jq-1.7/configure"),
+            "got {names:?}",
         );
     }
 

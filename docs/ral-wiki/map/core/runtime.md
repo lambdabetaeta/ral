@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: 28270e2
+generated_at_date: 2026-07-31
 covers_paths: [core/src/runtime.rs, core/src/runtime/, core/src/child_eval.rs]
 ---
 
@@ -32,6 +32,14 @@ guards
   `stdio.rs`, `redirect.rs`, `foreground.rs`, `io_event.rs`, `detach.rs`, plus
   `uutils.rs`
   for [[map/core/builtins|bundled coreutils]].
+  - **`resolved` and the 126/127 verdict are two projections of one `PATH`
+    walk.** `identity::walk_path` calls `path::search` once, storing the
+    `PathSearch` on the identity; `vet::check_existence` pattern-matches it and
+    never probes the disk itself, so walk and verdict cannot disagree. Both that
+    walk and `policy_names`' host-`PATH` baseline anchor through
+    `Context::search_cwd` — the `within [dir: …]` override, else the `cd`-mutated
+    cwd — so the grant gate judges the identity vet saw
+    ([[decisions/260731_one-walk-one-anchor|one-walk-one-anchor]]).
   - `detach.rs` is that same machinery — `CommandIdentity`, `vet`,
     `build_command` — up to the one act that differs: the child is born by
     `Launch::spawn_detached` ([[map/core/io-process|io-process]]), so its

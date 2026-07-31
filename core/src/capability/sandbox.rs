@@ -148,7 +148,7 @@ fn resolve_literal(name: &str, resolver: &Resolver, path_env: &str) -> Option<St
     if crate::path::is_absolute(name) {
         Some(name.to_string())
     } else {
-        crate::path::resolve_in_path(name, path_env, resolver.cwd)
+        crate::path::resolve_in_path(name, path_env, resolver.search_cwd())
     }
 }
 

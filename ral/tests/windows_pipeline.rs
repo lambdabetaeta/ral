@@ -24,7 +24,38 @@
 
 mod common;
 
-use common::run;
+use common::{run, run_with_env};
+
+/// A file in the directory the user just `cd`'d into is not on `PATH`, and a
+/// `PATH` ending in `;` — the ubiquitous Windows spelling — does not put it
+/// there.  Naming it bare is "command not found", 127; never a synthesised
+/// "permission denied" about a program no walk ever resolved.
+#[test]
+fn bare_cwd_file_reports_command_not_found() {
+    let dir = common::fresh_tmp_path("win_cwd_bare", "d");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("zzcmd.bat"), "@echo IT-RAN\r\n").unwrap();
+    let inherited = std::env::var("PATH").unwrap_or_default();
+
+    let out = run_with_env(
+        "win_cwd_bare",
+        &[("PATH", &format!("{inherited};"))],
+        &format!("cd '{}'\nzzcmd.bat\n", dir.display()),
+    );
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(out.status, 127, "stderr={}", out.stderr);
+    assert!(
+        !out.stderr.to_lowercase().contains("permission denied"),
+        "stderr={}",
+        out.stderr,
+    );
+    assert!(
+        out.stderr.contains("command not found"),
+        "stderr={}",
+        out.stderr,
+    );
+}
 
 /// External-only byte pipeline.  `cmd /c echo hi | findstr hi` is the
 /// canonical "two externals chained by stdout" check; ral's launcher

@@ -70,6 +70,32 @@ pub fn run(prefix: &str, script: &str) -> Output {
     }
 }
 
+/// Like [`run`], but with `envs` overlaid on the inherited environment — for
+/// the tests whose subject *is* a variable the runner also sets, `PATH` above
+/// all.
+pub fn run_with_env(prefix: &str, envs: &[(&str, &str)], script: &str) -> Output {
+    let tmp = fresh_tmp_path(prefix, "ral");
+    std::fs::write(&tmp, script).unwrap();
+
+    let mut cmd = Command::new(ral_bin());
+    cmd.arg(&tmp)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+
+    let out = cmd.spawn().expect("spawn ral").wait_with_output().unwrap();
+    std::fs::remove_file(&tmp).ok();
+
+    Output {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        status: out.status.code().unwrap_or(1),
+    }
+}
+
 /// Like [`run`], but feeds `stdin_data` to the child instead of an empty
 /// stdin.
 pub fn run_with_stdin(prefix: &str, script: &str, stdin_data: &[u8]) -> Output {
