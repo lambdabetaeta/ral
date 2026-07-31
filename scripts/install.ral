@@ -18,6 +18,13 @@ let cargo_home = try { return $ENV[CARGO_HOME] } { |_| return "$ENV[HOME]/.cargo
 let ral_bin    = "$cargo_home/bin/ral"
 let kernel     = uname -s
 
-if $[!{equal $kernel 'Darwin'} && !{is-file $ral_bin}] {
-    attempt { codesign -s - $ral_bin }
+# Ad-hoc signing is a macOS ritual, so this step is a no-op everywhere else,
+# and `attempt` is what keeps that no-op quiet.  A script ends with the status
+# of its last statement, and an `if` whose condition was false ran nothing and
+# so has no status of its own to report — unwrapped, the gate below would end
+# every Windows and Linux `just install` in a failure the install did not have.
+attempt {
+    if $[!{equal $kernel 'Darwin'} && !{is-file $ral_bin}] {
+        codesign -s - $ral_bin
+    }
 }
