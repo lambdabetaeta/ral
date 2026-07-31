@@ -159,8 +159,8 @@ fn direct_spawnable(
 
 /// Freeze one stage's launch decision.  A value-edge bundled stage fails
 /// `direct_spawnable` and so runs in a helper: data-last application
-/// (`x | f = f !{x}`) is evaluator work, and the bundled tool's in-process path
-/// still fires from command dispatch inside that child, so bundled-first holds.
+/// (`x | f = f !{x}`) is evaluator work, and command dispatch inside that
+/// child still resolves the bundled image, so bundled-first holds.
 fn resolve_launch(
     i: usize,
     n: usize,

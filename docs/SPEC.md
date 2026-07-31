@@ -2592,12 +2592,10 @@ the canonical way to perform mutations: there are no `copy-file` /
 structured values, so wrapping them buys nothing.
 
 A bundled command is an *executable image*, not a path-rewriting
-wrapper (§ "Bundled tools are executable images").  A clean-terminal
-call may run `uumain` in-process under a tiny uucore-global lock; every
-other invocation — redirects, capture/audit, an env/cwd mismatch, a
-byte pipeline stage, or any active sandbox projection — spawns ral
-itself as `ral --ral-bundled-tool <tool> <args…>`.  That child gets its
-cwd, env, and stdio from the ordinary command-spawn plumbing
+wrapper (§ "Bundled tools are executable images").  Every invocation
+spawns ral itself as `ral --ral-bundled-tool <tool> <args…>`.  That
+child gets its cwd, env, and stdio from the ordinary command-spawn
+plumbing
 (`apply_env` installs the scoped CWD and env; the child's `Command`
 owns fd 0/1/2), so the parent never temporarily rewires its own process
 state to make a library call look like an exec.  Under an
@@ -2616,8 +2614,8 @@ the `grep` feature enables the regex-backed builtins `re-match`,
 builtins are present but raise at runtime; for byte-stream `grep`,
 fall back to the system one on `PATH`.  The `ripgrep` feature bundles
 an external-style `rg` command on the same exec-image path: a bundled
-`rg` runs in-process on the clean-terminal fast path, otherwise as a
-`ral --ral-bundled-tool rg` child carrying a vendored ripgrep core.
+`rg` runs as a `ral --ral-bundled-tool rg` child carrying a vendored
+ripgrep core.
 
 ## 17  Prelude
 

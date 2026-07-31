@@ -143,10 +143,9 @@ pub(crate) fn uutils_invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
 
 /// Run bundled `tool` here, combining `uumain`'s return with the exit-code
 /// cell.  Argv slot 0 carries the tool name for every tool; [`uutils_invoke`]'s
-/// `rg` arm drops it again.  Both placements share this much and no more: the
-/// inline one (`run_uutils_in_process`) adds cell serialisation, cwd
-/// save/restore and panic isolation, while the child (`try_run_bundled_tool`)
-/// inherits its execution context from the exec.
+/// `rg` arm drops it again.  The sole caller is the `ral --ral-bundled-tool`
+/// child entrypoint (`try_run_bundled_tool`), which inherits its execution
+/// context from the exec, so the process-global cell is this process's own.
 #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
 pub(crate) fn invoke_bundled(tool: &str, args: &[String]) -> i32 {
     let os_args: Vec<std::ffi::OsString> = std::iter::once(std::ffi::OsString::from(tool))
@@ -306,7 +305,7 @@ fn diff_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
 
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:diff-read] Internal byte-read of the bundled `diff` tool's compared file; the bundled exec is surfaced once at the exec door (run_uutils_in_process / command::run) and this internal shuffling rides that visible call, raising no separate read card."
+        reason = "[io-door:silent:diff-read] Internal byte-read of the bundled `diff` tool's compared file; the bundled exec is surfaced once at the exec door (command::run) and this internal shuffling rides that visible call, raising no separate read card."
     )]
     fn read_file_contents(filepath: &OsString) -> io::Result<Vec<u8>> {
         if filepath == "-" {

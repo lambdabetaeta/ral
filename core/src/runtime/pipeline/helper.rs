@@ -427,8 +427,7 @@ pub fn try_run_pipeline_stage_helper() -> Option<u8> {
 ///
 /// `args` is the post-`early_init` argv sans the binary name, so the OS
 /// sandbox is already entered and the tool runs confined.  The exit code
-/// comes from `invoke_bundled`, shared with the inline
-/// `run_uutils_in_process` placement.
+/// comes from `invoke_bundled`.
 #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
 pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
     use crate::builtins::uutils;

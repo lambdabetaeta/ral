@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 463cc2b
-generated_at_date: 2026-07-28
-covers_paths: [core/src/runtime/command/io_event.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/runtime/command/uutils.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/io.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/event.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/headless.rs, exarch/src/agent/transcript.rs, exarch/src/tui/surface.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
+generated_at_commit: 5ee3d0c
+generated_at_date: 2026-07-31
+covers_paths: [core/src/runtime/command/io_event.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/io.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/event.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/headless.rs, exarch/src/agent/transcript.rs, exarch/src/tui/surface.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
 ---
 
 # Map: exarch / io surface
@@ -57,17 +57,16 @@ builders and the `WriteOutcome` enum live in one place,
   plus the bounded content snapshots the write card previews and diffs from.
 - **Exec images** are hooked *after* resolution, at the completion doors, never
   at the call site (where the head may still resolve to a closure or builtin).
-  The external / spawned-bundled path emits in `command::run`
-  (`runtime/command.rs`) once `wait()` returns a status — `{io:"exec", argv:
-  [prog, …args], outcome:"ok"|"bad", status}` (`ok` iff status 0; a spawn
-  failure is `bad` with the synthesized 127/126/… code). The inline-bundled
-  fast path returns earlier, so it emits its own exec event in
-  `run_uutils_in_process` (`runtime/command/uutils.rs`) — exactly one event per
-  exec, no double-fire ([[decisions/260616_bundled-tools-as-exec-images|bundled
-  tools as exec images]]). `detach` (`runtime/command/detach.rs`) is the third
-  door, and the one that surfaces at the spawn rather than the wait: a
-  surrendered process is never waited for, so its event carries status `0`
-  meaning *exec'd*, not *succeeded*.
+  The external / bundled path — one door for both, since a bundled tool is a
+  `ral --ral-bundled-tool` child like any host executable
+  ([[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]])
+  — emits in `command::run` (`runtime/command.rs`) once `wait()` returns a
+  status — `{io:"exec", argv: [prog, …args], outcome:"ok"|"bad", status}` (`ok`
+  iff status 0; a spawn failure is `bad` with the synthesized 127/126/… code).
+  `detach` (`runtime/command/detach.rs`) is the second door, and the one that
+  surfaces at the spawn rather than the wait: a surrendered process is never
+  waited for, so its event carries status `0` meaning *exec'd*, not
+  *succeeded*.
 
 Not the capability gate (`audit_call`): it is the wrong granularity — it
 over-fires on `source`/`use`/`exists`/`list-dir` and under-fires on bundled

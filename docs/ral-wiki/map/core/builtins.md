@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: 5ee3d0c
+generated_at_date: 2026-07-31
 covers_paths: [core/src/builtins/, core/src/builtins.rs]
 ---
 
@@ -194,11 +194,10 @@ capability chokepoint with every other command — part of why ral is a
 backs the `re-*` regex string builtins.
 
 A bundled head is a resolved command *image*, not a builtin in `CORE_BUILTINS`:
-it runs `uutils_invoke` in-process only on the clean-terminal fast path, and is
-otherwise an ordinary `ral --ral-bundled-tool <tool>` child carrying process
-semantics ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]]).
-That dispatch — the `ExecImage::BundledTool` placement, the hidden entrypoint,
-and the inline gate — is the [[map/core/runtime|runtime]]'s
-(`command/uutils.rs`); this page owns only the registry of names, shims, and
-the in-binary `uutils_invoke` they converge on. `docs/SPEC.md` §21 covers the
-single-binary tool surface.
+it is always an ordinary `ral --ral-bundled-tool <tool>` child carrying process
+semantics ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]],
+[[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]]).
+That dispatch — the `ExecImage::BundledTool` placement and the hidden
+entrypoint — is the [[map/core/runtime|runtime]]'s; this page owns only the
+registry of names, shims, and the in-binary `uutils_invoke` they converge on.
+`docs/SPEC.md` §21 covers the single-binary tool surface.

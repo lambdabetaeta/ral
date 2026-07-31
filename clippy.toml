@@ -39,18 +39,12 @@
 # Reads (`std::env::current_dir`):
 #   * `crate::path::process_cwd` — the single accessor that returns
 #     the kernel value as a fallback for shell-less callers.
-#   * `crate::evaluator::exec::run_uutils_in_process` — defensive
-#     save/restore around a third-party tool that might internally
-#     `chdir`.
 #
 # Writes (`std::env::set_current_dir`):
 #   * `crate::evaluator::pipeline::helper::ProcessStateGuard` — the helper
 #     subprocess that re-installs the parent's `within [dir: …]`
 #     override into its own process cwd before invoking `uumain`.
 #     Helper-only; never run from the parent's evaluator.
-#   * `crate::evaluator::exec::run_uutils_in_process` — restores the
-#     pre-call cwd after a third-party tool that might internally
-#     `chdir`.
 # Basedir discipline: every XDG base directory (config/data/cache/state
 # /bin) is resolved by `crate::path::basedir::resolve_xdg`, which reads the
 # `XDG_*_HOME` override only when it is absolute (per the spec's
@@ -84,10 +78,10 @@
 #   * SURFACING door — the model's own turn-time I/O, fused with a
 #     surface card.  Redirect read/write in `runtime/command/redirect.rs`
 #     (`open_file`, `install_stdin_redirect`, the atomic-commit dir fsync
-#     and mode-preservation stat); external exec in `runtime/command.rs`
-#     (`build_command`); bundled exec in `runtime/command/uutils.rs`
-#     (`run_uutils_in_process`); grep + edit in `exarch/agent_builtins.rs`
-#     (`search_tree`, the edit read/write-atomic helpers).
+#     and mode-preservation stat); external and bundled exec in
+#     `runtime/command.rs` (`build_command`); grep + edit in
+#     `exarch/agent_builtins.rs` (`search_tree`, the edit
+#     read/write-atomic helpers).
 #   * REASONED-SILENT — fs/process work that is *not* the model's
 #     turn-time data I/O and raises no card by design: canonicalisation,
 #     `which`/PATH probes, module loading (`source`/`use`), stat

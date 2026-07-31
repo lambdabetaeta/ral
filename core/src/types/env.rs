@@ -233,12 +233,6 @@ impl EnvVars {
     pub fn iter(&self) -> EnvVarsIter<'_> {
         EnvVarsIter(self.0.iter())
     }
-
-    /// True when the bare host environment will do and a caller may skip
-    /// building the overlay — the in-process uutils path turns on this.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
 }
 
 pub struct EnvVarsIter<'a>(

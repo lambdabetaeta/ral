@@ -86,15 +86,6 @@ impl Context {
         }
     }
 
-    /// True when the effective cwd and the process cwd tell one story: the
-    /// chain unseeded — every reader falls through to the process cwd anyway
-    /// — or naming it.
-    #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
-    pub(crate) fn cwd_agrees_with_process(&self) -> bool {
-        self.cwd_chain()
-            .is_none_or(|p| crate::path::process_cwd().is_some_and(|q| q == p))
-    }
-
     /// The raw `(dir, cwd)` pair for the wire mirror, which must carry the
     /// override and the `cd` slot separately; every cwd *consumer* reads
     /// [`Self::cwd_chain`] instead.

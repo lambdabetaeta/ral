@@ -42,8 +42,9 @@ fn main() -> ExitCode {
     #[cfg(windows)]
     ral_core::io::enable_virtual_terminal_processing();
 
-    // Restore SIGPIPE to SIG_DFL once at startup so in-process uutils and
-    // pipeline helpers see the default disposition.
+    // Restore SIGPIPE to SIG_DFL once at startup so bundled uutils (this
+    // same binary re-exec'd as `--ral-bundled-tool`) and pipeline helpers
+    // see the default disposition.
     #[cfg(unix)]
     ral_core::builtins::uutils::init_signal_dispositions();
 

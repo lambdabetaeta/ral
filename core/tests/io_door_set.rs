@@ -122,14 +122,6 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
         "io-door:surface:stdin-redirect",
     ),
     (
-        "core/src/runtime/command/uutils.rs",
-        "io-door:silent:uutils-cwd-restore",
-    ),
-    (
-        "core/src/runtime/command/uutils.rs",
-        "io-door:silent:uutils-cwd-save",
-    ),
-    (
         "core/src/runtime/pipeline/helper.rs",
         "io-door:silent:self-reexec-windows",
     ),

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 28270e2
+generated_at_commit: 5ee3d0c
 generated_at_date: 2026-07-31
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -281,10 +281,11 @@ never a fabricated path.
 
 This boundary is what [[map/exarch|exarch]] reuses as its sandbox. Bundled
 tools route through the *exec* chokepoint in-process; their **filesystem**
-access has no in-process gate, so under a restrictive grant a bundled tool is
-never inlined — it is spawned as a `ral --ral-bundled-tool` child and floored by
-the OS profile of the per-command sandbox it runs in
-([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]]).
+access has no in-process gate, so a bundled tool is never inlined — it is
+spawned as a `ral --ral-bundled-tool` child and, under a restrictive grant,
+floored by the OS profile of the per-command sandbox it runs in
+([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]],
+[[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]]).
 That single binary carrying both ral and its coreutils is part of why ral
 is a [[invariants/single-binary|single-binary]]. `docs/SPEC.md` gives the
 formal capability calculus.

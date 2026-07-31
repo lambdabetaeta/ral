@@ -1,5 +1,5 @@
 ---
-status: active
+status: superseded
 ---
 
 # Bundled tools are executable images
@@ -199,3 +199,10 @@ See also [[decisions/260610_value-edge-locality|value-edge-locality]],
 [[decisions/260610_child-eval-unification|child-eval-unification]],
 [[internals/pipeline-execution|pipeline-execution]], [[map/core/runtime|map: runtime]],
 [[map/core/builtins|map: builtins]], and [[map/core/io-process|map: io-process]].
+
+**Superseded by
+[[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]]:**
+the inline placement's admission gate required empty `env_overrides`, which no
+booted shell has, so the two-placement split collapsed to child placement only.
+The `ExecImage` representation, the hidden entrypoint, the pipeline-launch
+rules, and the audit story carry forward unchanged.

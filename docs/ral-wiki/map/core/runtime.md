@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 28270e2
+generated_at_commit: 5ee3d0c
 generated_at_date: 2026-07-31
 covers_paths: [core/src/runtime.rs, core/src/runtime/, core/src/child_eval.rs]
 ---
@@ -52,21 +52,12 @@ guards
     all ([[map/core/capabilities|capabilities]]). All three of its standard
     descriptors are `/dev/null`.
   - **A bundled coreutils/diffutils/ripgrep head is an `ExecImage::BundledTool`,
-    run as a `ral --ral-bundled-tool <tool>` child whenever process semantics
-    are required** — its inherited stdio, env, cwd, process group, and sandbox
-    are the execution context, so it threads the same spawn/`RunningChild`/audit
-    machinery as a host external, and behaves identically on Windows where no
-    `.exe` exists to spawn
-    ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]]).
-    The inline `uumain` placement (`run_uutils_in_process`) survives only for
-    the clean-terminal case: `can_run_uutils_in_process` gates it on *terminal*
-    stdin (`Source::Terminal`, never `Pipe`/`File`), direct terminal/stderr
-    sinks, no redirects, no capture/audit tee, no env overrides, no
-    `within [dir: …]`, no logical/process cwd mismatch, and no active sandbox
-    projection. A non-terminal stdin forces child placement rather than the
-    parent rewiring its own fd 0; `INLINE_UUTILS_LOCK` serialises the
-    reset → invoke → read window so the process-global uucore exit-code cell
-    cannot interleave across the REPL thread and a `spawn`/`watch`/`par` worker.
+    always run as a `ral --ral-bundled-tool <tool>` child** — its inherited
+    stdio, env, cwd, process group, and sandbox are the execution context, so it
+    threads the same spawn/`RunningChild`/audit machinery as a host external,
+    and behaves identically on Windows where no `.exe` exists to spawn
+    ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]],
+    [[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]]).
   - `foreground.rs`'s `ForegroundDecision::for_standalone` gates the terminal
     handoff on a held *terminal lease* (`Shell::terminal_lease` is `Some`) plus
     top-level launch role and a terminal-bound sink with no shell-side pump, not
@@ -85,8 +76,8 @@ guards
     likewise shared.
   - `io_event.rs` fixes the wire shape of the runtime I/O doors: the read door
     (`< file`), the write door (`> / >> / >|`, settled `committed`/`aborted`/
-    `failed` at frame teardown), and the exec door (Host and spawned/inline
-    `BundledTool` completion). Core emits plain `Value::Map`s onto the run's
+    `failed` at frame teardown), and the exec door (Host and `BundledTool`
+    completion). Core emits plain `Value::Map`s onto the run's
     `surface` sink; a host (exarch) decodes them into cards. The event *shapes*
     and their card rendering live in [[map/exarch/io-surface|io-surface]]
     ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).

@@ -59,11 +59,10 @@ There are two operation classes, and each has one runtime door:
   *not* `eval_call_parts` (`core/src/evaluator/call.rs`): at that point the head may
   still resolve to a ral closure, builtin, or handler. Resolution happens in
   `run_call` (`core/src/runtime/command_call.rs`); only `Resolution::External` reaches
-  `run_external` / `command::run`, and bundled tools either complete through that
-  spawned `ExecImage::BundledTool` path or through the inline
-  `uutils::run_uutils_in_process` door
-  ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]]).
-  Hook those completion doors, after resolution. Then `view 50 100 < foo.rs` is one
+  `run_external` / `command::run`, and bundled tools complete through that same
+  spawned `ExecImage::BundledTool` path
+  ([[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]]).
+  Hook that completion door, after resolution. Then `view 50 100 < foo.rs` is one
   read card and no exec card; a bare external `cargo test` is one exec card; and
   `cat < a` legitimately surfaces two model operations, the read redirect and the
   external exec.
@@ -253,9 +252,8 @@ allowlisted doors split in two, and the mandatory reason field records which:
   `install_stdin_redirect` (`runtime/command/redirect.rs`) record redirect read/write
   attempts; the redirect frame emits their terminal outcome when the frame settles, with
   atomic `>` marked committed only after `commit_atomics` succeeds and aborted when the
-  body failed before commit. The external completion path (`command::run`) and the inline
-  bundled-tool path (`uutils::run_uutils_in_process`) emit exec events when status or
-  spawn failure is known. The search builtin (`agent_builtins.rs`, §2) emits grep once
+  body failed before commit. The external completion path (`command::run`) — bundled
+  tools included — emits exec events when status or spawn failure is known. The search builtin (`agent_builtins.rs`, §2) emits grep once
   for the logical search. There is no open-, write-, or spawn-without-surface API,
   because there is no open, write, or spawn *except* the door.
 - **Reasoned-silent fs sites** do filesystem work that is not the model's data I/O and

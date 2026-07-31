@@ -19,7 +19,6 @@ pub(crate) mod io_event;
 pub(crate) mod process;
 mod redirect;
 mod stdio;
-mod uutils;
 mod vet;
 
 pub(crate) use child::{ExternalPlumbing, GroupOwner, RunningChild};
@@ -42,8 +41,9 @@ use foreground::ForegroundDecision;
 use process::{pipe_err, spawn};
 use stdio::{inherit_tty, wire_stderr, wire_stdin, wire_stdout_file};
 
-/// Runs a standalone external call from vetting to reap, taking the
-/// inline uutils shortcut when the call qualifies for it.
+/// Runs a standalone external call from vetting to reap.  A bundled
+/// coreutils/diffutils/ripgrep head takes the same path as any host
+/// executable: its image is `ral --ral-bundled-tool <tool>`.
 pub(crate) fn run(
     id: &CommandIdentity,
     args: &[Value],
@@ -53,19 +53,6 @@ pub(crate) fn run(
 ) -> Raw<Value> {
     let rc = vet(id, args, shell)?;
     let cmd_name = rc.shown.clone();
-
-    // `redirects.is_empty()` is this site's share of the inline gate:
-    // `run_uutils_in_process` wires no `> file` plumbing.  Every other
-    // bundled call falls through to the spawn path below as an ordinary
-    // `ral --ral-bundled-tool <tool> …` child.
-    #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
-    if let ExecImage::BundledTool { tool } = &rc.image
-        && redirects.is_empty()
-        && uutils::can_run_uutils_in_process(shell)
-    {
-        return uutils::run_uutils_in_process(tool, &rc.args, mooring, shell)
-            .map_err(crate::types::Control::from);
-    }
 
     // Confinement can run for minutes on Windows, so the run's scope goes in
     // with it and is read again on the way out: a wall that expired mid-stamp
@@ -229,8 +216,6 @@ pub(crate) fn run(
     waited.drain();
     let code = outcome.to_user_exit_code();
     shell.mobile.control.last_status = code;
-    // The inline bundled path returned before the spawn, so exactly one
-    // exec event fires per call.
     mooring.emit_io(&io_event::exec(&cmd_name, &rc.args, code));
     commit_result?;
     // A `PipelineStage` forgives SIGPIPE: its reader ended the pipe.
