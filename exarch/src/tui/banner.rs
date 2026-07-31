@@ -18,6 +18,7 @@ use super::status::{ctx_ramp, wait_bar};
 
 pub(super) const ART: &str = include_str!("../../data/banner.txt");
 pub(super) const EAGLE: &str = include_str!("../../data/eagle.txt");
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Metadata shown in the startup banner.
 pub struct SessionInfo<'a> {
@@ -33,7 +34,10 @@ pub struct SessionInfo<'a> {
 /// The startup metadata matrix.  Hue is spent only where it names something:
 /// paths carry Path, a `dangerous` base alarms, quantities stay plain ink.
 pub(super) fn session_card(s: &SessionInfo<'_>) -> Card {
-    let mut rows: Vec<Field> = vec![meta_field("cwd", vec![CardSpan::new(Role::Path, s.cwd)])];
+    let mut rows = vec![
+        meta_field("version", vec![CardSpan::new(Role::Strong, VERSION)]),
+        meta_field("cwd", vec![CardSpan::new(Role::Path, s.cwd)]),
+    ];
 
     // Provider, model and context window are absent by design: the status bar
     // carries them live and repaints on `/model` (`App::update_live_model`).
@@ -309,6 +313,7 @@ mod tests {
         assert_eq!(
             labels,
             [
+                "version",
                 "cwd",
                 "base",
                 "extend-base",
@@ -318,6 +323,11 @@ mod tests {
             ]
         );
         let role = |label: &str| lead_role(&rs.iter().find(|(l, _)| l == label).unwrap().1);
+        assert_eq!(
+            role("version"),
+            Some(Role::Strong),
+            "version names the binary"
+        );
         assert_eq!(role("cwd"), Some(Role::Path), "cwd is a path");
         assert_eq!(role("scratch"), Some(Role::Path), "scratch is a path");
     }

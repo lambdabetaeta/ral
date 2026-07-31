@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: 59173f57
+generated_at_date: 2026-07-31
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/event.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -266,7 +266,7 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input
         - `tui/gesture.rs` — mouse/selection: `GestureState`, `Press`, frame geometry, selection, copy toast, hover, scroll
         - `tui/render.rs` — frame layout: `draw`, `FrameGeom`, `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`
-        - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card`, `legend_panel`, ART/EAGLE constants
+        - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card` (including the compile-time package version), `legend_panel`, ART/EAGLE constants
         - `tui/commands.rs` — slash command registry: `SlashCommand`, `lookup_command`, `route_submit`, handler functions
         - `tui/status.rs` — status line: `rule_line`, `ctx_ramp`, `wait_bar`, `wait_step`
         - `tui/matrix.rs` — agent matrix and tab bar: `MatrixSort`, `matrix_bar`, justified row projection, `step_cells`
