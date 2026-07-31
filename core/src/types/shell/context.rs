@@ -6,9 +6,10 @@
 //! `env_overrides`; the canonical pair lives on `context.cwd`.
 
 use super::Context;
+use super::cwd::Cwd;
 use crate::path::{Resolver, SearchCwd};
-use crate::types::{Audit, EnvVars};
-use std::path::Path;
+use crate::types::{Audit, EnvVars, GrantStack, HandlerStack, Modules};
+use std::path::{Path, PathBuf};
 
 impl Context {
     /// Read-only borrow; mutation goes through [`Self::set_env_var`] and friends.
@@ -82,6 +83,46 @@ impl Context {
         Resolver {
             home: self.home(),
             cwd: self.cwd_chain(),
+        }
+    }
+
+    /// True when the effective cwd and the process cwd tell one story: the
+    /// chain unseeded — every reader falls through to the process cwd anyway
+    /// — or naming it.
+    #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
+    pub(crate) fn cwd_agrees_with_process(&self) -> bool {
+        self.cwd_chain()
+            .is_none_or(|p| crate::path::process_cwd().is_some_and(|q| q == p))
+    }
+
+    /// The raw `(dir, cwd)` pair for the wire mirror, which must carry the
+    /// override and the `cd` slot separately; every cwd *consumer* reads
+    /// [`Self::cwd_chain`] instead.
+    pub(crate) fn wire_cwd_parts(&self) -> (Option<&Path>, &Cwd) {
+        (self.dir.as_deref(), &self.cwd)
+    }
+
+    /// Rebuild a context from its wire mirror's parts — `crate::subprocess`
+    /// is the sole caller.  `hooks` starts empty: host lifecycle entry points
+    /// never ride the wire.
+    pub(crate) fn from_wire(
+        env_overrides: EnvVars,
+        dir: Option<PathBuf>,
+        grants: GrantStack,
+        handlers: HandlerStack,
+        args: Vec<String>,
+        modules: Modules,
+        cwd: Cwd,
+    ) -> Self {
+        Self {
+            env_overrides,
+            dir,
+            grants,
+            handlers,
+            hooks: std::collections::HashMap::default(),
+            args,
+            modules,
+            cwd,
         }
     }
 }

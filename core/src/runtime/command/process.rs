@@ -133,7 +133,7 @@ pub fn apply_env(cmd: &mut crate::process::Launch, shell: &Shell) {
     let cwd = shell.cwd();
     cmd.current_dir(&cwd);
     cmd.env("PWD", &cwd);
-    if let Some(oldpwd) = &shell.mobile.context.cwd.previous {
+    if let Some(oldpwd) = shell.oldpwd() {
         cmd.env("OLDPWD", oldpwd);
     } else {
         // An inherited `OLDPWD` names whichever shell launched ral, not this

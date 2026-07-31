@@ -175,7 +175,7 @@ mod tests {
         let name = plant(here.path(), "zzcwdonly");
 
         let mut shell = Shell::default();
-        shell.mobile.context.cwd.current = Some(here.path().to_path_buf());
+        shell.seed_cwd(here.path().to_path_buf());
         shell
             .mobile
             .context
@@ -208,12 +208,12 @@ mod tests {
 
         let mut shell = Shell::default();
         shell.mobile.context.set_env_var("PATH", "./bin");
-        shell.mobile.context.cwd.current = Some(tmp.path().to_path_buf());
+        shell.seed_cwd(tmp.path().to_path_buf());
         let id = CommandIdentity::resolve(CommandName::Bare(name.clone()), &shell.mobile.context);
         assert_eq!(id.resolved, bin.join(&name).to_string_lossy());
         check_existence(&id).expect("a resolved name must vet");
 
-        shell.mobile.context.cwd.current = Some(elsewhere.path().to_path_buf());
+        shell.seed_cwd(elsewhere.path().to_path_buf());
         let id = CommandIdentity::resolve(CommandName::Bare(name), &shell.mobile.context);
         match check_existence(&id) {
             Err(Break::Error(e)) => assert_eq!(e.exit_code(), 127),

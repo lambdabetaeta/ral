@@ -373,6 +373,10 @@ impl DaclManager {
         }
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:dacl-state-dir] Ensures the ledger's own directory exists before write, since the cached path may predate a later XDG_STATE_HOME change. Sandbox crash-safety infrastructure, not model data I/O."
+    )]
     fn persist_ledger(&self) -> Result<(), DaclError> {
         let ledger = Ledger {
             run_id: self.run_id.clone(),
@@ -384,6 +388,9 @@ impl DaclManager {
             applied: Vec::new(),
             profiles: self.profiles.clone(),
         };
+        if let Some(dir) = self.ledger_path.parent() {
+            fs::create_dir_all(dir)?;
+        }
         write_ledger(&self.ledger_path, &ledger)
     }
 }
@@ -502,15 +509,15 @@ fn stamp_store_path() -> PathBuf {
     clippy::disallowed_methods,
     reason = "[io-door:silent:dacl-stamp-read] Reads the persistent stamp-store witness deciding whether a grant's propagation already ran. Sandbox infrastructure, not model data I/O."
 )]
-fn read_stamp_store_bytes() -> io::Result<Vec<u8>> {
-    fs::read(stamp_store_path())
+fn read_stamp_store_bytes(path: &Path) -> io::Result<Vec<u8>> {
+    fs::read(path)
 }
 
 /// Missing or unreadable reads as "not recorded": the cost of a false no is
 /// one redundant — idempotent — propagation, whose record then rewrites the
 /// store whole.
 fn stamp_recorded(key: &str) -> bool {
-    let Ok(bytes) = read_stamp_store_bytes() else {
+    let Ok(bytes) = read_stamp_store_bytes(&stamp_store_path()) else {
         return false;
     };
     serde_json::from_slice::<StampStore>(&bytes).is_ok_and(|s| s.stamps.contains(key))
@@ -521,9 +528,9 @@ fn stamp_recorded(key: &str) -> bool {
 /// as empty and is rewritten — entries lost that way cost redundant restamps,
 /// never authority.
 fn record_stamp(key: &str) -> Result<(), DaclError> {
-    let path = stamp_store_path();
+    let path = ensure_ledger_dir()?.join("stamps.json");
     let _guard = PathMutexGuard::acquire(&path)?;
-    let mut store: StampStore = match read_stamp_store_bytes() {
+    let mut store: StampStore = match read_stamp_store_bytes(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => StampStore::default(),
         Err(e) => return Err(DaclError::LedgerIo(e)),
@@ -531,7 +538,6 @@ fn record_stamp(key: &str) -> Result<(), DaclError> {
     if !store.stamps.insert(key.to_string()) {
         return Ok(());
     }
-    ensure_ledger_dir()?;
     let json = serde_json::to_vec_pretty(&store)
         .map_err(|e| DaclError::LedgerParse(format!("serialize stamp store: {e}")))?;
     write_bytes_atomic(&path, &json)
@@ -641,12 +647,18 @@ pub fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
 /// Under the XDG `state` base rather than a hardcoded `%LOCALAPPDATA%`, so
 /// `XDG_STATE_HOME` relocates it — which is how the tests get a private one.
 fn ledger_dir() -> PathBuf {
-    crate::path::basedir::resolve_xdg(
+    let dir = crate::path::basedir::resolve_xdg(
         crate::path::basedir::XdgKind::State,
         &crate::path::home_from_env(),
     )
     .join("ral")
-    .join("sandbox-dacl")
+    .join("sandbox-dacl");
+    debug_assert!(
+        dir.is_absolute(),
+        "ledger dir must be absolute: {}",
+        dir.display()
+    );
+    dir
 }
 
 #[allow(
@@ -1948,34 +1960,14 @@ mod tests {
 
     // ---------------- integration tests -----------------
     //
-    // These mutate real filesystem ACLs, each under its own XDG_STATE_HOME,
-    // serialized by `ENV_LOCK` because the suite runs multi-threaded and two
-    // tests' env mutations must not interleave. `crate::test_env` is the same
-    // pattern but `cfg(unix)`, so this module keeps a copy of it.
-
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Real-ACL integration tests, each under its own XDG_STATE_HOME. The
+    // crate-wide env guard also covers the session e2e test, which reads
+    // this variable mid-operation without scoping it.
 
     fn with_scoped_state_dir<R>(f: impl FnOnce() -> R) -> R {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let scratch = tempfile::tempdir().unwrap();
         let state_home = scratch.path().to_string_lossy().into_owned();
-        let prev = std::env::var_os("XDG_STATE_HOME");
-        // SAFETY: ENV_LOCK is held, so no other thread reads or writes
-        // XDG_STATE_HOME meanwhile.
-        unsafe {
-            std::env::set_var("XDG_STATE_HOME", &state_home);
-        }
-        let out = f();
-        // SAFETY: same guard, restoring the pre-scope value.
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-                None => std::env::remove_var("XDG_STATE_HOME"),
-            }
-        }
-        out
+        crate::test_env::with_var("XDG_STATE_HOME", Some(&state_home), f)
     }
 
     #[test]

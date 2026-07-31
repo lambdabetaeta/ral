@@ -75,7 +75,7 @@ pub struct Context {
     pub(crate) env_overrides: EnvVars,
     /// Working directory override set by `within [dir: …]`, rolled back at
     /// scope exit — distinct from [`Cwd::current`], the `cd`-mutated one.
-    pub dir: Option<PathBuf>,
+    dir: Option<PathBuf>,
     /// Capability restrictions, innermost last.
     pub grants: GrantStack,
     /// `within [handlers: …, handler: …]` effect-handler stack, innermost last.
@@ -93,7 +93,7 @@ pub struct Context {
     /// Snapshotted, so a spawned thread sees the logical cwd as of its spawn
     /// point; flowed back on same-thread thunk return, so a `cd` inside a
     /// thunk persists.
-    pub cwd: Cwd,
+    cwd: Cwd,
 }
 
 // The `capability::check_*(&Context, …)` decisions fold the whole stack from

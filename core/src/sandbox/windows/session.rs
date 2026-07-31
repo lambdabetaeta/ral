@@ -546,16 +546,17 @@ mod tests {
     /// inside the granted prefix (the positive control, load-bearing against
     /// a vacuous denial), and deny-by-default must hold a write outside it.
     ///
-    /// Runs against the real user state dir on purpose: scoping
-    /// `XDG_STATE_HOME` here would race `dacl`'s env-scoped tests in this
-    /// multithreaded harness. What it leaves behind is one stamp-store key
-    /// naming a tempdir that no longer exists — inert by construction.
+    /// Runs against the real user state dir under the shared env guard, so a
+    /// `dacl` test's scoped `XDG_STATE_HOME` can never point this test's
+    /// stamp writes at a deleted tempdir. What it leaves behind is one
+    /// stamp-store key naming a dead tempdir, inert.
     #[test]
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:test] e2e sandbox spawn scaffolding"
     )]
     fn confined_child_writes_inside_the_grant_and_not_outside() {
+        let _env = crate::test_env::env_guard();
         use crate::process::cancel::CancelScope;
         use crate::process::{Launch, PgidPolicy, StdioSpec};
         use crate::types::{ExecProjection, FsProjection, FsRules, SandboxProjection};

@@ -247,6 +247,22 @@ fn longest_dir_match(exec: &ExecMap, names: &[&str]) -> Option<bool> {
 mod tests {
     use super::*;
 
+    /// `which.rs`'s `%PATHEXT%` fallback and the grant-key strip list are
+    /// twin copies of one fact; they may only drift together.
+    #[cfg(windows)]
+    #[test]
+    fn grant_key_extensions_agree_with_the_resolver_default_pathext() {
+        let from_pathext: Vec<String> = crate::path::which::DEFAULT_PATHEXT
+            .split(';')
+            .map(|e| e.trim_start_matches('.').to_lowercase())
+            .collect();
+        let from_grant_keys: Vec<String> = WINDOWS_EXEC_EXTENSIONS
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(from_pathext, from_grant_keys);
+    }
+
     #[test]
     fn names_match_off_windows_is_byte_exact() {
         assert!(names_match("git", "git", false));

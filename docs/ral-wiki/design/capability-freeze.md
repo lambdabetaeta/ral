@@ -98,8 +98,9 @@ and the lattice operations run on the resolved bundles.
   (`/work/proj/src ⊂ /work/proj` is seen as such). Strictly more precise than
   comparing sigil strings; no soundness change.
 - the `FreezeCtx` is built **once** per composition site, home and cwd in hand
-  — `eval_grant` against the live shell, `apply_session_profiles` and
-  exarch's `for_invocation` against `home_from_env()` and the session cwd.
+  — `eval_grant` and `apply_session_profiles` against the live shell's
+  effective home; exarch's `for_invocation` against `home_from_env()` and the
+  session cwd.
 
 The composition `meet` and the runtime fold are then two fidelities of one
 algebra — lexical over the resolved strings here, canonical over

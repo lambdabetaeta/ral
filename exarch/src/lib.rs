@@ -148,8 +148,10 @@ pub fn run() -> Result<(), String> {
         );
     }
 
-    let cwd =
-        std::env::current_dir().map_or_else(|_| ".".into(), |p| p.to_string_lossy().into_owned());
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("launch cwd: {e}"))?
+        .to_string_lossy()
+        .into_owned();
     let state_dir = bootstrap::EXARCH.project_dir(&cwd);
 
     let mut catalog = provider::models::ModelCatalog::new(

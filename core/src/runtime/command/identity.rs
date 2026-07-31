@@ -188,7 +188,6 @@ fn absolutize(s: &str, ctx: &Context) -> Option<String> {
 mod tests {
     use super::*;
     use crate::types::Shell;
-    #[cfg(unix)]
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
 
@@ -232,62 +231,64 @@ mod tests {
         );
     }
 
-    /// Unix-only: the expected candidate is spelled with POSIX separators.
-    #[cfg(unix)]
     #[test]
     fn policy_names_surface_cwd_absolute_for_relative_path_head() {
+        let dir = std::env::temp_dir().join("jq_src").join("jq-1.7");
         let mut shell = Shell::default();
-        shell.mobile.context.dir = Some("/tmp/jq_src/jq-1.7".into());
-        let names = CommandIdentity::resolve(
-            CommandName::Path("./configure".into()),
-            &shell.mobile.context,
-        )
-        .policy_names(&shell.mobile.context);
+        let names = shell.with_cwd(dir.clone(), |shell| {
+            CommandIdentity::resolve(
+                CommandName::Path("./configure".into()),
+                &shell.mobile.context,
+            )
+            .policy_names(&shell.mobile.context)
+        });
         assert_eq!(
             names,
             vec![
                 "./configure".to_string(),
-                "/tmp/jq_src/jq-1.7/configure".to_string(),
+                dir.join("configure").to_string_lossy().into_owned(),
             ],
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn policy_names_do_not_duplicate_absolute_path_head() {
+        let head = std::env::temp_dir()
+            .join("bin")
+            .join("configure")
+            .to_string_lossy()
+            .into_owned();
         let shell = Shell::default();
-        let names = CommandIdentity::resolve(
-            CommandName::Path("/usr/local/bin/configure".into()),
-            &shell.mobile.context,
-        )
-        .policy_names(&shell.mobile.context);
-        assert_eq!(names, vec!["/usr/local/bin/configure".to_string()]);
+        let names =
+            CommandIdentity::resolve(CommandName::Path(head.clone()), &shell.mobile.context)
+                .policy_names(&shell.mobile.context);
+        assert_eq!(names, vec![head]);
     }
 
-    /// A policy that denies `bash` by bare name yet allows all of `/bin/`.
-    /// Feeding the narrow set as both identities admits `/bin/bash` through
-    /// the allow dir; the broad `deny_names` vetoes it.
-    #[cfg(unix)]
+    /// A policy that denies `bash` by bare name yet allows all of its bin
+    /// dir.  Feeding the narrow set as both identities admits the bypass
+    /// through the allow dir; the broad `deny_names` vetoes it.
     #[test]
     fn deny_names_close_path_bash_bypass_of_bare_deny() {
         use crate::capability::admits_for_test;
         use crate::path::NormalizedPrefix;
         use crate::types::{Capabilities, Context, ExecMap, ExecPolicy, GrantStack};
 
+        let bin = std::env::temp_dir().join("bin");
+        let bash = bin.join("bash");
         let mut grants = GrantStack::root();
         grants.push(Capabilities {
             exec: Some(ExecMap {
                 literals: BTreeMap::from([("bash".into(), ExecPolicy::Deny)]),
-                allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface("/bin")]),
+                allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface(&bin)]),
                 deny_dirs: BTreeSet::new(),
             }),
             ..Capabilities::root()
         });
-        let ctx = Context {
-            grants,
-            ..Context::default()
-        };
-        let id = CommandIdentity::resolve(CommandName::Path("/bin/bash".into()), &ctx);
+        let mut ctx = Context::default();
+        ctx.grants = grants;
+        let id =
+            CommandIdentity::resolve(CommandName::Path(bash.to_string_lossy().into_owned()), &ctx);
         let allow = id.policy_names(&ctx);
         let allow_refs: Vec<&str> = allow.iter().map(String::as_str).collect();
         let deny = id.deny_names_from(id.policy_names(&ctx));
@@ -296,7 +297,7 @@ mod tests {
         // Narrow set fed as both identities: the hole is open.
         assert!(
             admits_for_test(&ctx.grants, &allow_refs, &allow_refs),
-            "narrow-only gate admits /bin/bash (the pre-fix bypass)",
+            "narrow-only gate admits the planted bash (the bypass)",
         );
         assert!(
             !allow.iter().any(|n| n == "bash"),
@@ -309,13 +310,12 @@ mod tests {
         // The broad deny set closes it.
         assert!(
             !admits_for_test(&ctx.grants, &deny_refs, &allow_refs),
-            "broad deny_names veto closes the /bin/bash bypass",
+            "broad deny_names veto closes the bypass",
         );
     }
 
     /// The mirror of the bypass test: widening the veto set must not widen
-    /// admission, so a bare `rg: allow` cannot reach a planted `/tmp/evil/rg`.
-    #[cfg(unix)]
+    /// admission, so a bare `rg: allow` cannot reach a planted head elsewhere.
     #[test]
     fn deny_names_basename_does_not_admit_planted_path_head() {
         use crate::capability::admits_for_test;
@@ -330,11 +330,11 @@ mod tests {
             }),
             ..Capabilities::root()
         });
-        let ctx = Context {
-            grants,
-            ..Context::default()
-        };
-        let id = CommandIdentity::resolve(CommandName::Path("/tmp/evil/rg".into()), &ctx);
+        let mut ctx = Context::default();
+        ctx.grants = grants;
+        let head = std::env::temp_dir().join("evil").join("rg");
+        let id =
+            CommandIdentity::resolve(CommandName::Path(head.to_string_lossy().into_owned()), &ctx);
         let allow = id.policy_names(&ctx);
         let allow_refs: Vec<&str> = allow.iter().map(String::as_str).collect();
         let deny = id.deny_names_from(id.policy_names(&ctx));
@@ -350,7 +350,7 @@ mod tests {
         );
         assert!(
             !admits_for_test(&ctx.grants, &deny_refs, &allow_refs),
-            "bare rg: allow must not admit a Path-invoked /tmp/evil/rg",
+            "bare rg: allow must not admit a Path-invoked planted rg",
         );
     }
 
@@ -386,7 +386,7 @@ mod tests {
         let name = plant(&bin, "zzwalk");
 
         let mut shell = Shell::default();
-        shell.mobile.context.cwd.current = Some(tmp.path().to_path_buf());
+        shell.seed_cwd(tmp.path().to_path_buf());
         shell.mobile.context.set_env_var("PATH", "./bin");
 
         let id = CommandIdentity::resolve(CommandName::Bare(name.clone()), &shell.mobile.context);
@@ -409,11 +409,12 @@ mod tests {
         };
 
         let mut shell = Shell::default();
-        shell.mobile.context.cwd.current = Some(cd_to.path().to_path_buf());
-        shell.mobile.context.dir = Some(overridden.path().to_path_buf());
+        shell.seed_cwd(cd_to.path().to_path_buf());
         shell.mobile.context.set_env_var("PATH", "./bin");
 
-        let id = CommandIdentity::resolve(CommandName::Bare(name.clone()), &shell.mobile.context);
+        let id = shell.with_cwd(overridden.path().to_path_buf(), |shell| {
+            CommandIdentity::resolve(CommandName::Bare(name.clone()), &shell.mobile.context)
+        });
         assert_eq!(
             id.resolved,
             overridden.path().join("bin").join(&name).to_string_lossy(),
@@ -422,32 +423,26 @@ mod tests {
 
     /// The `absolutize` half of the same precedence: a relative `Path` head's
     /// policy name is joined to the effective cwd, `cd`-mutated or not.
-    #[cfg(unix)]
     #[test]
     fn policy_absolute_uses_the_cd_cwd() {
+        let dir = std::env::temp_dir().join("jq_src").join("jq-1.7");
         let mut shell = Shell::default();
-        shell.mobile.context.cwd.current = Some("/tmp/jq_src/jq-1.7".into());
+        shell.seed_cwd(dir.clone());
         let names = CommandIdentity::resolve(
             CommandName::Path("./configure".into()),
             &shell.mobile.context,
         )
         .policy_names(&shell.mobile.context);
         assert!(
-            names.iter().any(|n| n == "/tmp/jq_src/jq-1.7/configure"),
+            names.iter().any(|n| Path::new(n) == dir.join("configure")),
             "got {names:?}",
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn policy_names_drop_bare_when_scoped_path_diverges() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let tool = dir.path().join("git");
-        std::fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
-        let mut perms = std::fs::metadata(&tool).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&tool, perms).unwrap();
+        let name = plant(dir.path(), "git");
 
         let mut shell = Shell::default();
         shell
@@ -455,7 +450,7 @@ mod tests {
             .context
             .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
 
-        let id = CommandIdentity::resolve(CommandName::Bare("git".into()), &shell.mobile.context);
+        let id = CommandIdentity::resolve(CommandName::Bare(name), &shell.mobile.context);
         let names = id.policy_names(&shell.mobile.context);
         assert_eq!(names, vec![id.resolved]);
     }

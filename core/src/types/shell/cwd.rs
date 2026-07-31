@@ -20,8 +20,8 @@ use std::path::PathBuf;
 /// [`process_cwd`] until [`Shell::seed_default_env_vars`] or [`Shell::seed_cwd`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Cwd {
-    pub current: Option<PathBuf>,
-    pub previous: Option<PathBuf>,
+    pub(in crate::types::shell) current: Option<PathBuf>,
+    pub(in crate::types::shell) previous: Option<PathBuf>,
 }
 
 impl Shell {
@@ -43,6 +43,11 @@ impl Shell {
     /// `chdir`s the process — exarch's `boot_root_shell` seats a session here.
     pub fn seed_cwd(&mut self, cwd: PathBuf) {
         self.mobile.context.cwd.current = Some(cwd);
+    }
+
+    /// The `cd`-recorded previous cwd — what `apply_env` exports as `OLDPWD`.
+    pub(crate) fn oldpwd(&self) -> Option<&std::path::Path> {
+        self.mobile.context.cwd.previous.as_deref()
     }
 
     /// Move the logical cwd to `target`, recording the prior effective cwd —

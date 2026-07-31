@@ -72,6 +72,8 @@ pub fn load_capabilities_from_path(
 /// against the same home and cwd, and an `xdg:` path escaping `$HOME` is
 /// rejected at the profile that names it.  Failures carry a bare mechanism
 /// message; the caller prepends provenance (`--capabilities`, a config key).
+/// The home is the shell's effective `$HOME` — the override chain — the same
+/// anchor `eval_grant` freezes against.
 ///
 /// # Errors
 /// The first profile that fails to load or decode; an escape raised while a
@@ -84,7 +86,7 @@ pub fn apply_session_profiles(
     if paths.is_empty() {
         return Ok(());
     }
-    let home = crate::path::home_from_env();
+    let home = shell.mobile.context.home();
     let cwd = shell.cwd();
     let ctx = crate::path::sigil::FreezeCtx {
         home: &home,
@@ -231,5 +233,35 @@ mod tests {
             Break::Escape(crate::types::Escape::Exit(3)) => {}
             other => panic!("expected Escape::Exit(3), got {other:?}"),
         }
+    }
+
+    /// An env-scoped `HOME` reaches `~` freezing here exactly as it reaches
+    /// `grant`'s: one home for both freeze doors.
+    #[test]
+    fn session_profiles_freeze_tilde_against_the_shell_home() {
+        let home = tempfile::tempdir().unwrap();
+        let profile_dir = tempfile::tempdir().unwrap();
+        let profile_path = profile_dir.path().join("profile.ral");
+        std::fs::write(&profile_path, "return [fs: [read: ['~/data']]]").unwrap();
+
+        let mut shell = shell();
+        shell
+            .mobile
+            .context
+            .set_env_var("HOME", home.path().to_string_lossy().into_owned());
+        apply_session_profiles(&Mooring::adrift(), &mut shell, &[profile_path]).unwrap();
+
+        let expected = home.path().join("data");
+        let pushed = shell.mobile.context.grants.iter().last().unwrap();
+        let read_prefixes = &pushed
+            .fs
+            .as_ref()
+            .expect("fs dimension present")
+            .read_prefixes;
+        assert!(
+            read_prefixes
+                .iter()
+                .any(|p| Path::new(p.as_str()) == expected)
+        );
     }
 }

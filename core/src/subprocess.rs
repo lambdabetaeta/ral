@@ -159,14 +159,15 @@ impl WireContext {
         for frame in &h.handlers {
             handlers.push(WireHandlerFrame::from_runtime(frame, ctx)?);
         }
+        let (dir, cwd) = h.wire_cwd_parts();
         Ok(Self {
             env_overrides: h.env_overrides().clone(),
-            dir: h.dir.clone(),
+            dir: dir.map(std::path::Path::to_path_buf),
             grants: h.grants.clone(),
             handlers,
             args: h.args.clone(),
             modules: h.modules.clone(),
-            cwd: h.cwd.clone(),
+            cwd: cwd.clone(),
         })
     }
 
@@ -176,16 +177,15 @@ impl WireContext {
             .into_iter()
             .map(|frame| frame.into_runtime(arcs))
             .collect::<Result<_, _>>()?;
-        Ok(Context {
-            env_overrides: self.env_overrides,
-            dir: self.dir,
-            grants: self.grants,
-            handlers: HandlerStack::from(handlers),
-            hooks: std::collections::HashMap::default(),
-            args: self.args,
-            modules: self.modules,
-            cwd: self.cwd,
-        })
+        Ok(Context::from_wire(
+            self.env_overrides,
+            self.dir,
+            self.grants,
+            HandlerStack::from(handlers),
+            self.args,
+            self.modules,
+            self.cwd,
+        ))
     }
 }
 

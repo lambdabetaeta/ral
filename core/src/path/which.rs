@@ -373,6 +373,11 @@ pub(crate) fn search(name: &str, path_value: Option<&str>, cwd: SearchCwd<'_>) -
         .map_or(PathSearch::Missing, PathSearch::FoundNotExecutable)
 }
 
+/// The resolver's fallback when `%PATHEXT%` is unset; `capability::exec`
+/// keeps the stripped twin, and the agreement is pinned by its tests.
+#[cfg(windows)]
+pub(crate) const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+
 /// The Windows resolver's `%PATHEXT%` suffixes, leading dots stripped, with
 /// the resolver's own default when the variable is unset.
 ///
@@ -388,8 +393,8 @@ pub(crate) fn search(name: &str, path_value: Option<&str>, cwd: SearchCwd<'_>) -
 )]
 fn windows_pathext_suffixes() -> Vec<String> {
     use std::ffi::OsStr;
-    let pathext = std::env::var_os("PATHEXT")
-        .unwrap_or_else(|| OsStr::new(".COM;.EXE;.BAT;.CMD").to_os_string());
+    let pathext =
+        std::env::var_os("PATHEXT").unwrap_or_else(|| OsStr::new(DEFAULT_PATHEXT).to_os_string());
     pathext
         .to_string_lossy()
         .split(';')

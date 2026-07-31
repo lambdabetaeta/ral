@@ -18,22 +18,17 @@ use {
 /// `uumain` reads fd 0, writes fd 1/2 and consults `std::env` / `current_dir`
 /// directly, so inline is sound only where ral's logical state already agrees
 /// with the process state — a parked stdin, a capture buffer, an env override
-/// or a `cd`/`within [dir: …]` the kernel has not seen would each need this
+/// or a logical cwd the kernel does not already share would each need this
 /// thread to rewire fds, env or cwd, racing every sibling `spawn` / `par` /
 /// pipeline thread.  A sandbox projection is refused separately: inline, the
 /// tool would escape the confinement `build_command` gives the child.
 pub(crate) fn can_run_uutils_in_process(shell: &Shell) -> bool {
     use crate::io::{Sink, Source};
-    let cwd_matches_process = match &shell.mobile.context.cwd.current {
-        None => true,
-        Some(p) => crate::path::process_cwd().is_some_and(|q| q == *p),
-    };
     matches!(shell.io.stdin, Source::Terminal)
         && matches!(shell.io.stdout, Sink::Terminal | Sink::External(_))
         && matches!(shell.io.stderr, Sink::Stderr)
         && shell.mobile.context.env_overrides().is_empty()
-        && shell.mobile.context.dir.is_none()
-        && cwd_matches_process
+        && shell.mobile.context.cwd_agrees_with_process()
         && shell.sandbox_projection().is_none()
 }
 
@@ -73,7 +68,7 @@ pub(crate) fn run_uutils_in_process(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    // The gate already pins `cwd.current` to the process cwd, so this snapshot
+    // The gate already pins the effective cwd to the process cwd, so this snapshot
     // is defence against a tool that `chdir`s internally and would otherwise
     // leak that into the next builtin's process-cwd read.
     #[allow(
@@ -191,5 +186,34 @@ mod tests {
             "a non-terminal stdin must force child placement, not inline \
              fd-0 surgery"
         );
+    }
+
+    /// A `cd` away from the process cwd forces the child placement.
+    #[test]
+    fn cd_away_from_the_process_cwd_forces_child_placement() {
+        let mut shell = Shell::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        shell.seed_cwd(dir.path().to_path_buf());
+        assert!(!can_run_uutils_in_process(&shell));
+    }
+
+    /// A `within [dir: …]` that merely names the process cwd is inline-safe:
+    /// `uumain`'s own `current_dir()` read answers the same place.
+    #[test]
+    fn within_dir_naming_the_process_cwd_admits_inline() {
+        let mut shell = Shell::default();
+        let here = crate::path::process_cwd().expect("test process has a cwd");
+        let admitted = shell.with_cwd(here, |s| can_run_uutils_in_process(s));
+        assert!(admitted);
+    }
+
+    /// A `within [dir: …]` naming anywhere else still forces the child
+    /// placement.
+    #[test]
+    fn within_dir_elsewhere_forces_child_placement() {
+        let mut shell = Shell::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let admitted = shell.with_cwd(dir.path().to_path_buf(), |s| can_run_uutils_in_process(s));
+        assert!(!admitted);
     }
 }
