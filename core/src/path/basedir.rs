@@ -82,7 +82,14 @@ impl XdgKind {
 /// The `XDG_*_HOME` vars themselves still come from the process environment.
 #[allow(clippy::disallowed_methods)]
 pub fn resolve_xdg(kind: XdgKind, home: &str) -> PathBuf {
-    absolute_env_var(kind.env_var()).unwrap_or_else(|| Path::new(home).join(kind.default_suffix()))
+    absolute_env_var(kind.env_var()).unwrap_or_else(|| {
+        // `default_suffix()` is spelled with the spec's `/`, so join it
+        // component-by-component rather than as one literal — otherwise the
+        // result mixes native separators with a stray `/` on Windows.
+        kind.default_suffix()
+            .split('/')
+            .fold(Path::new(home).to_path_buf(), |acc, part| acc.join(part))
+    })
 }
 
 /// The var's value, kept only when absolute — the spec ignores relative ones.
