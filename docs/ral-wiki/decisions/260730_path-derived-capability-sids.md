@@ -73,6 +73,17 @@ Split the two: derive the SID from the path, and let the token select.
   ledger; teardown no longer restores ACEs, so exit no longer hangs. The boot
   sweep still restores *legacy* pre-capability ledgers' per-session ACEs, since
   a recycled pid could resurrect a profile name those ACEs still reference.
+- **A read-write grant also lowers the object's mandatory label to `Low`.**
+  The capability ACE is necessary but not sufficient: Windows runs the
+  mandatory-integrity check *before* the AppContainer pass, and an object with
+  no explicit label defaults to `Medium` with an implicit no-write-up policy —
+  which refuses a `Low`-IL `LowBox` child's write regardless of what the DACL
+  grants. `dacl::ensure_fs_grant` stamps a `SYSTEM_MANDATORY_LABEL_ACE` at
+  `S-1-16-4096` (`Low`) alongside the capability ACE, witnessed and
+  memoized the same way, under its own stamp-key namespace. Read-only and deny
+  grants need no label, since `Low` already reads `Medium` under the default
+  policy. This closed the first item in "Open work" below — the end-to-end rw
+  arm failed on every real Windows CI run until this landed.
 
 ## Consequences
 
@@ -89,6 +100,14 @@ Split the two: derive the SID from the path, and let the token select.
   no token can name unless ral mints it, inside a pass whose result intersects
   the user's own. What the old bounded-mutation protocol protected against is
   paid for by the intersection semantics instead.
+- **The mandatory label is a second permanent mutation**, alongside the
+  capability ACE, on every rw-granted object. It carries the same safety
+  argument by a different route: lowering an object's label to `Low` only
+  lowers the floor a *write* must clear to satisfy the mandatory check — it
+  grants no DACL principal anything, and a process that would already have
+  failed the DACL pass still does. Both mutations are required together; the
+  capability ACE alone is not sufficient, which is what the open-work item
+  below discovered.
 - **Denies are compositional.** Because a deny is its own capability rather than
   a stamp on a shared path, two projections may grant and deny the same path
   concurrently without one clobbering the other.
@@ -139,8 +158,14 @@ The enforcement claims above rest on Windows access-check behaviour that is
 asserted, not yet exercised end to end. Until this matrix passes, treat the
 design as shipped-but-unvalidated:
 
-- an end-to-end LowBox spawn with privately derived capability SIDs, in all
-  three arms — no capability, ro capability, rw capability;
+- ~~an end-to-end LowBox spawn with privately derived capability SIDs, in all
+  three arms — no capability, ro capability, rw capability~~ — run
+  continuously by `session::tests::confined_child_writes_inside_the_grant_and_not_outside`
+  on real Windows CI. The rw arm failed 100% of the time from this decision's
+  landing until the mandatory-label stamp above closed it: the capability ACE
+  was correct and matched, but a `Medium`-labeled tempdir refused every
+  `Low`-IL write at the mandatory-integrity gate before the DACL was ever
+  consulted;
 - a deny capability overriding an enclosing allow, observed from inside the
   child;
 - attenuation: a wide token and a narrowed token over the same tree;

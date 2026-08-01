@@ -22,6 +22,14 @@
 //! intersects the normal pass, so an ACE no live token names is inert and can
 //! never widen any process's reach beyond the owning user's own.
 //!
+//! The capability ACE alone does not admit a write: Windows runs the
+//! mandatory-integrity check before the `AppContainer` pass, and an
+//! unlabeled object defaults to `Medium` with an implicit no-write-up policy,
+//! which refuses every `Low`-IL `LowBox` child regardless of the DACL. A
+//! read-write grant therefore also stamps a `SYSTEM_MANDATORY_LABEL_ACE` at
+//! `Low` ([`ensure_low_integrity_label`]) — its own permanent mutation,
+//! witnessed the same way under its own stamp-key namespace.
+//!
 //! Two witnesses must agree before a stamp is skipped: the stamp store (a
 //! grow-only set beside the ledgers) says the propagation ran to completion,
 //! and a probe of the root's own DACL says the tree it completed on is still
@@ -70,9 +78,10 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION, AclSizeInformation,
-    AddAccessAllowedAceEx, AddAccessDeniedAceEx, AddAce, CONTAINER_INHERIT_ACE,
+    AddAccessAllowedAceEx, AddAccessDeniedAceEx, AddAce, AddMandatoryAce, CONTAINER_INHERIT_ACE,
     DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetLengthSid, INHERITED_ACE,
-    InitializeAcl, IsValidSid, OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID,
+    InitializeAcl, IsValidSid, LABEL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE,
+    PSECURITY_DESCRIPTOR, PSID,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
@@ -180,6 +189,27 @@ const INHERITED_ACE_FLAG: u8 = INHERITED_ACE as u8;
     reason = "OI|CI is 0x3, and AceFlags — the field it is tested against — is a single byte"
 )]
 const OICI_ACE_FLAGS: u8 = (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8;
+
+/// `Low`, the mandatory label a `LowBox`/`AppContainer` child's token
+/// carries. Windows runs the mandatory-integrity check *before* the
+/// DACL/capability-SID pass: an object with no explicit label defaults to
+/// `Medium` with an implicit no-write-up policy, so a `Low`-IL child's write
+/// is refused there regardless of any capability ACE the DACL grants. A
+/// read-write grant must therefore also lower the object's own label to
+/// `Low`, or no capability SID can ever admit the write.
+const LOW_INTEGRITY_SID: &str = "S-1-16-4096";
+
+/// `SYSTEM_MANDATORY_LABEL_NO_WRITE_UP`, absent from `windows_sys`'s constant
+/// set though [`AddMandatoryAce`] is not. The only policy bit this module
+/// sets: a process below the object's label may still read or execute it, it
+/// may just not write. This is the same bit Windows implies by default on an
+/// unlabeled (`Medium`) object, so stamping it explicitly at `Low` only lowers
+/// the floor a write must clear — it does not remove the check.
+const MANDATORY_LABEL_NO_WRITE_UP: u32 = 0x1;
+
+/// `SYSTEM_MANDATORY_LABEL_ACE_TYPE`, likewise absent from `windows_sys`
+/// though the `SYSTEM_MANDATORY_LABEL_ACE` struct it types is present.
+const SYSTEM_MANDATORY_LABEL_ACE_TYPE: u8 = 0x11;
 
 /// Errors returned by [`DaclManager`] and [`recover_orphaned_state`].
 #[derive(Debug)]
@@ -422,12 +452,14 @@ pub(crate) fn fs_capability_name(canonical: &Path, kind: GrantKind) -> String {
 }
 
 /// Ensure the persistent ACE for `(canonical, kind)` under `sid_str` — the
-/// SID [`fs_capability_name`] derives to. Skipped only when both witnesses
-/// hold: the stamp store records a completed propagation, and the root's own
-/// DACL still carries the ACE. `cancel` is polled at entry, which is as
-/// fine-grained as this gets: the stamp is a single `SetNamedSecurityInfoW`,
-/// not interruptible from here — but under this scheme it runs once per
-/// `(path, kind)` ever, not once per projection.
+/// SID [`fs_capability_name`] derives to — and, for a read-write grant, the
+/// mandatory label alongside it (see [`ensure_low_integrity_label`]). Skipped
+/// only when both witnesses hold: the stamp store records a completed
+/// propagation, and the root's own DACL still carries the ACE. `cancel` is
+/// polled at entry, which is as fine-grained as this gets: each stamp is a
+/// single `SetNamedSecurityInfoW`, not interruptible from here — but under
+/// this scheme every stamp runs once per `(path, kind)` ever, not once per
+/// projection.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:dacl-apply] Stats the grant target to choose OI|CI inheritance before stamping the capability ACE. Sandbox grant-application infrastructure, not model data I/O — raises no surface card."
@@ -459,8 +491,28 @@ pub(crate) fn ensure_fs_grant(
         inheritable,
         kind.ace_type(),
     )?;
+    if kind == GrantKind::ReadWrite {
+        // A capability ACE alone cannot admit the write: the mandatory-
+        // integrity check runs first, and a `Low`-IL child clears it only if
+        // the object's own label is `Low` or below. Read-only and deny grants
+        // need no label — `Low` already reads `Medium` under the default
+        // no-write-up-only policy.
+        ensure_low_integrity_label(canonical, inheritable)?;
+    }
     // Apply, then record: dying between the two leaves no witness, and the
     // next grant re-runs a propagation that is idempotent by construction.
+    record_stamp(&key)
+}
+
+/// The mandatory-label half of a read-write grant, stamped and witnessed the
+/// same way [`ensure_fs_grant`] treats the capability ACE — its own stamp-key
+/// namespace, so the two mutations' idempotency never entangles.
+fn ensure_low_integrity_label(canonical: &Path, inheritable: bool) -> Result<(), DaclError> {
+    let key = label_stamp_key(canonical);
+    if stamp_recorded(&key) && low_integrity_label_present(canonical, inheritable) {
+        return Ok(());
+    }
+    apply_mandatory_label_ace(canonical, inheritable)?;
     record_stamp(&key)
 }
 
@@ -499,6 +551,13 @@ struct StampStore {
 /// unfolded for the same case-sensitive-directory reason.
 fn stamp_key(canonical: &Path, kind: GrantKind) -> String {
     format!("{}|{}", kind.tag(), canonical.to_string_lossy())
+}
+
+/// [`stamp_key`]'s counterpart for the mandatory-label stamp — a distinct tag
+/// so the label's witness can never collide with a DACL grant's, even though
+/// both key off the same canonical path.
+fn label_stamp_key(canonical: &Path) -> String {
+    format!("label|{}", canonical.to_string_lossy())
 }
 
 /// The stamp store's file name within [`ledger_dir`] — named once so the
@@ -1132,6 +1191,169 @@ fn apply_explicit_ace(
         return Err(win32_err(path, "SetNamedSecurityInfoW", rc));
     }
     Ok(())
+}
+
+/// Stamp a single `SYSTEM_MANDATORY_LABEL_ACE` at [`LOW_INTEGRITY_SID`] into
+/// `path`'s SACL, replacing whatever mandatory label the object had — this
+/// module ever writes at most one, so there is nothing to merge. Built with
+/// [`AddMandatoryAce`] rather than the manual `EXPLICIT_ACCESS_W`/
+/// `SetEntriesInAclW` path [`apply_explicit_ace`] takes, since that API only
+/// merges DACL entries — mandatory labels are a SACL of their own, and
+/// `AddMandatoryAce` is the dedicated primitive for building one.
+fn apply_mandatory_label_ace(path: &Path, inheritable: bool) -> Result<(), DaclError> {
+    let sid = OwnedSid::parse(LOW_INTEGRITY_SID)?;
+    let inheritance: u32 = if inheritable {
+        OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+    } else {
+        0
+    };
+
+    // SAFETY: `sid` owns a valid PSID for the duration of this call.
+    let sid_len: u32 = unsafe { GetLengthSid(sid.as_psid()) };
+    // Per-ACE byte size: ACE_HEADER (4) + ACCESS_MASK (4) + SID bytes.
+    let ace_size: u32 = 8 + sid_len;
+    let mut acl_size: u32 = ACL_CB + ace_size;
+    acl_size = (acl_size + 3) & !3; // DWORD-align, per ACL_SIZE_INFORMATION's units
+
+    let dwords = (acl_size as usize).div_ceil(4);
+    let mut acl_buf: Vec<u32> = vec![0u32; dwords];
+    let acl_ptr = acl_buf.as_mut_ptr().cast::<ACL>();
+
+    // SAFETY: freshly allocated, zeroed, 4-byte-aligned, and at least
+    // `acl_size` bytes long.
+    if unsafe { InitializeAcl(acl_ptr, acl_size, ACL_REVISION) } == 0 {
+        return Err(win32_err_str(
+            path,
+            &format!("InitializeAcl: {}", io::Error::last_os_error()),
+        ));
+    }
+    // SAFETY: `acl_ptr` was sized above to hold exactly one mandatory-label
+    // ACE; `sid` is a valid PSID.
+    if unsafe {
+        AddMandatoryAce(
+            acl_ptr,
+            ACL_REVISION,
+            inheritance,
+            MANDATORY_LABEL_NO_WRITE_UP,
+            sid.as_psid(),
+        )
+    } == 0
+    {
+        return Err(win32_err_str(
+            path,
+            &format!("AddMandatoryAce: {}", io::Error::last_os_error()),
+        ));
+    }
+
+    let path_w = wide(path);
+    // SAFETY: `acl_ptr` is a fully built SACL owned by this stack frame;
+    // `path_w` is NUL-terminated and outlives the call.
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            path_w.as_ptr(),
+            SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            acl_ptr,
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        return Err(win32_err(path, "SetNamedSecurityInfoW(label)", rc));
+    }
+    Ok(())
+}
+
+/// Whether `path`'s SACL already carries the mandatory label
+/// [`apply_mandatory_label_ace`] stamps: a `SYSTEM_MANDATORY_LABEL_ACE_TYPE`
+/// entry for [`LOW_INTEGRITY_SID`] with the no-write-up bit set, inheritable
+/// when the target is a directory. An unreadable SACL answers `false` —
+/// attempt the real stamp and let it fail loudly.
+fn low_integrity_label_present(path: &Path, inheritable: bool) -> bool {
+    let Ok(sid) = OwnedSid::parse(LOW_INTEGRITY_SID) else {
+        return false;
+    };
+    let path_w = wide(path);
+    let mut sacl: *mut ACL = std::ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: same query shape as `apply_explicit_ace`, over the SACL.
+    let rc = unsafe {
+        GetNamedSecurityInfoW(
+            path_w.as_ptr(),
+            SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut sacl,
+            &raw mut sd,
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        return false;
+    }
+    if sacl.is_null() {
+        unsafe {
+            windows_sys::Win32::Foundation::LocalFree(sd);
+        }
+        return false;
+    }
+
+    let mut info = ACL_SIZE_INFORMATION::default();
+    // SAFETY: `info` is a stack out-param sized to the class asked for.
+    let ok = unsafe {
+        GetAclInformation(
+            sacl,
+            (&raw mut info).cast::<c_void>(),
+            ACL_SIZE_INFORMATION_CB,
+            AclSizeInformation,
+        )
+    };
+    if ok == 0 {
+        unsafe {
+            windows_sys::Win32::Foundation::LocalFree(sd);
+        }
+        return false;
+    }
+
+    let mut found = false;
+    for i in 0..info.AceCount {
+        let mut ace_ptr: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `i` is within the count just reported for this ACL.
+        if unsafe { GetAce(sacl, i, &raw mut ace_ptr) } == 0 {
+            continue;
+        }
+        // SAFETY: filled by a successful GetAce; every ACE opens with an
+        // ACE_HEADER.
+        let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
+        if header.AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE {
+            continue;
+        }
+        let inherited = (header.AceFlags & INHERITED_ACE_FLAG) != 0;
+        let flags = header.AceFlags & !INHERITED_ACE_FLAG;
+        if inheritable && !inherited && (flags & OICI_ACE_FLAGS) != OICI_ACE_FLAGS {
+            continue;
+        }
+        // SYSTEM_MANDATORY_LABEL_ACE shares ACCESS_ALLOWED_ACE's layout up to
+        // and including the inline SidStart dword.
+        let mask_and_sid = ace_ptr as *const ACCESS_ALLOWED_ACE;
+        // SAFETY: same ACE, read through that shared prefix.
+        let ace_mask = unsafe { (*mask_and_sid).Mask };
+        // SAFETY: `SidStart` is the first dword of the inline SID, so its
+        // address is where the SID bytes begin.
+        let ace_sid = (unsafe { &raw const (*mask_and_sid).SidStart }) as PSID;
+        // SAFETY: both point at valid SID buffers for this call.
+        let sid_matches = unsafe { EqualSid(ace_sid, sid.as_psid()) } != 0;
+        if sid_matches && (ace_mask & MANDATORY_LABEL_NO_WRITE_UP) == MANDATORY_LABEL_NO_WRITE_UP {
+            found = true;
+            break;
+        }
+    }
+    unsafe {
+        windows_sys::Win32::Foundation::LocalFree(sd);
+    }
+    found
 }
 
 /// Put one target's DACL back the way the entry found it, under the same
