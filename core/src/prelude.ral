@@ -416,7 +416,7 @@ let stream-each = { |f s|
 let from-lines-list = { |p|
     let info = file-info $p
     if $[$info[size] > 10485760] {
-        fail [status: 1, message: "from-lines-list: file too large to materialise eagerly ($info[size] bytes, ~$[$info[size] / 1048576] MiB); use `from-lines < PATH` with stream operations (stream-take, stream-fold, stream-each) instead"]
+        fail [status: 1, message: "from-lines-list: file too large to materialise eagerly ($info[size] bytes, ~$[$info[size] / 1048576] MiB); use `fold-lines`, `map-lines`, `filter-lines`, or `each-line` with `< PATH` to process lines in bounded memory"]
     } else {
         let s = !{from-lines < $p}
         stream-to-list $s
@@ -458,18 +458,25 @@ let each-line = { |f|
     fold-lines { |_ line| !{$f $line}; return unit } unit
 }
 
-# ANSI styling
-## ANSI escape constants for terminal colour and style.
-## All constants are empty strings when colour is not supported,
-## so `styled` and interpolated uses are automatically no-ops.
+# ANSI styling — every constant is the empty string when colour is not
+# supported, so `styled` and interpolated uses are automatically no-ops.
+## ANSI reset escape; empty when colour is unsupported.
 let ansi-reset   = if !{_ansi-ok} { return "\e[0m"    } else { return '' }
+## ANSI bold escape; empty when colour is unsupported.
 let ansi-bold    = if !{_ansi-ok} { return "\e[1m"    } else { return '' }
+## ANSI dim escape; empty when colour is unsupported.
 let ansi-dim     = if !{_ansi-ok} { return "\e[2m"    } else { return '' }
+## ANSI red escape; empty when colour is unsupported.
 let ansi-red     = if !{_ansi-ok} { return "\e[0;31m" } else { return '' }
+## ANSI green escape; empty when colour is unsupported.
 let ansi-green   = if !{_ansi-ok} { return "\e[0;32m" } else { return '' }
+## ANSI yellow escape; empty when colour is unsupported.
 let ansi-yellow  = if !{_ansi-ok} { return "\e[0;33m" } else { return '' }
+## ANSI blue escape; empty when colour is unsupported.
 let ansi-blue    = if !{_ansi-ok} { return "\e[0;34m" } else { return '' }
+## ANSI magenta escape; empty when colour is unsupported.
 let ansi-magenta = if !{_ansi-ok} { return "\e[0;35m" } else { return '' }
+## ANSI cyan escape; empty when colour is unsupported.
 let ansi-cyan    = if !{_ansi-ok} { return "\e[0;36m" } else { return '' }
 ## Wrap text in an ANSI style code, resetting after.
 let styled = { |code text| "$code$text$ansi-reset" }
