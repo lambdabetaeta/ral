@@ -90,14 +90,34 @@ pub fn expand_tilde_path(user: Option<&str>, suffix: Option<&str>, home: &str) -
 /// The match is on component boundaries, so home `/home/al` leaves
 /// `/home/alex` alone where a `starts_with` on the raw string would clip it.
 pub fn abbreviate_home(path: &std::path::Path, home: &str) -> String {
-    if home.is_empty() {
-        return path.to_string_lossy().into_owned();
-    }
-    match path.strip_prefix(home) {
-        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
-        Ok(rest) => format!("~/{}", rest.display()),
-        Err(_) => path.to_string_lossy().into_owned(),
-    }
+    abbreviate_home_for(&path.to_string_lossy(), home, cfg!(windows))
+}
+
+/// [`abbreviate_home`] on strings, `windows` a parameter rather than a `cfg!`
+/// read as in `lex::starts_with_identity`, so the fold below is pinned on
+/// every host.
+///
+/// Under Windows the result is folded to `/` separators: the `~/` head
+/// already commits the string to them, so a native-separator rest would print
+/// mixed (`~/projects\ral`), and folding the fallback arm too keeps the two
+/// shapes consistent.  Display only — never fed back into resolution or
+/// matching, which accept either spelling anyway.  Off Windows `\` is an
+/// ordinary filename byte, hence the gate.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "lexical Path::new for the component-boundary strip — no I/O behind it; this module is part of crate::path, where the path-construction rule lives"
+)]
+fn abbreviate_home_for(path: &str, home: &str, windows: bool) -> String {
+    let shown = match std::path::Path::new(path).strip_prefix(home) {
+        Ok(rest) if !home.is_empty() => {
+            if rest.as_os_str().is_empty() {
+                return "~".to_string();
+            }
+            format!("~/{}", rest.display())
+        }
+        _ => path.to_string(),
+    };
+    if windows { shown.replace('\\', "/") } else { shown }
 }
 
 // ── $HOME / $USER lookup ──────────────────────────────────────────────
@@ -176,6 +196,34 @@ mod tests {
         assert_eq!(get_user_home("bob"), None);
         assert_eq!(expand_tilde_path(Some("bob"), None, "/h"), None);
         assert_eq!(expand_tilde_path(Some("bob"), Some("/sub"), "/h"), None);
+    }
+
+    // No `cfg(windows)` on the fold tests below: `windows` is a parameter,
+    // and the fixtures are shaped so both hosts' `Path` parses agree (a
+    // drive-letter *home* would strip only under a Windows-parsed `Path`,
+    // so none appears here).
+
+    #[test]
+    fn abbreviation_renders_forward_slashes_on_windows() {
+        assert_eq!(
+            abbreviate_home_for(r"/h/projects\ral", "/h", true),
+            "~/projects/ral"
+        );
+    }
+
+    #[test]
+    fn abbreviation_folds_separators_in_the_unabbreviated_fallback_on_windows() {
+        assert_eq!(
+            abbreviate_home_for(r"D:\work\thing", r"C:\Users\al", true),
+            "D:/work/thing"
+        );
+    }
+
+    /// Off Windows `\` is an ordinary filename byte, so display folding must
+    /// leave it alone.
+    #[test]
+    fn abbreviation_keeps_backslash_bytes_off_windows() {
+        assert_eq!(abbreviate_home_for(r"/h/we\ird", "/h", false), r"~/we\ird");
     }
 
     #[test]
