@@ -14,7 +14,7 @@
 /// deliberately absent: its flag is served by the real `ral` binary.
 pub fn run_pre_main_reexec_stages() -> Option<u8> {
     #[cfg(unix)]
-    crate::builtins::uutils::init_signal_dispositions();
+    crate::uutils::init_signal_dispositions();
     crate::try_run_pipeline_stage_helper()
         .or_else(crate::sandbox::serve_sandbox_early_init)
         .or_else(try_birth_detached)

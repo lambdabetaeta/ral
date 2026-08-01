@@ -77,12 +77,6 @@ impl TypeErrorKind {
             Self::BuiltinNotFirstClass { name } => {
                 format!("`{name}` is a builtin command, not a first-class value")
             }
-            Self::CannotRedefineBuiltin { name, verb } => {
-                format!("cannot {verb} builtin `{name}`")
-            }
-            Self::HandlerShadowedByBinding { name } => {
-                format!("handler `{name}` is hidden by a lexical binding in this scope")
-            }
             Self::BuiltinArity {
                 expected,
                 got,
@@ -163,8 +157,6 @@ impl TypeErrorKind {
             | Self::ControlOperatorAsValue { .. }
             | Self::HandlerNotFirstClass { .. }
             | Self::BuiltinNotFirstClass { .. }
-            | Self::CannotRedefineBuiltin { .. }
-            | Self::HandlerShadowedByBinding { .. }
             | Self::BuiltinArity { .. }
             | Self::DecoderTakesNoArgument { .. }
             | Self::FailStatusZero
@@ -295,14 +287,6 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         TypeErrorKind::BuiltinNotFirstClass { name } => {
             Some(format!("did you mean to invoke `{name} ...` in command position?"))
         }
-        TypeErrorKind::CannotRedefineBuiltin { .. } => Some(
-            "lexical and builtin names are not handler names; did you mean `let name = ...`?"
-                .to_string(),
-        ),
-        TypeErrorKind::HandlerShadowedByBinding { .. } => Some(
-            "bare command lookup resolves to the lexical value before handlers are considered"
-                .to_string(),
-        ),
         TypeErrorKind::BuiltinArity { at_most: false, .. } => {
             Some("check the builtin's help entry for its command shape".to_string())
         }

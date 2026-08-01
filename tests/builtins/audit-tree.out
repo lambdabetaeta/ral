@@ -1,9 +1,9 @@
 step one
 step two
 0
-6
-str
-step one
+2
+echo
+
 handled
 continued
 0
@@ -15,15 +15,15 @@ inner
 0
 inside
 grant
-3
-str
+1
+echo
 inside
 within
-3
+1
 body
 cleanup
 guard
-6
-str
-intercalate
+2
+echo
+echo
 audit tree tests done

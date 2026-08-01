@@ -17,12 +17,12 @@ pub use capability::{
 };
 
 mod value;
-pub use value::{Value, fmt_lambda};
+pub use value::{Value, fmt_lambda, fmt_native};
 
 mod handler;
 pub use handler::{
-    FrameHandle, HandlerArity, HandlerEntry, HandlerFrame, HandlerRole, HandlerStack,
-    validate_handler_arity,
+    FrameHandle, HandlerArity, HandlerEntry, HandlerFrame, HandlerLookup, HandlerRole,
+    HandlerStack, validate_handler_arity,
 };
 
 // The shared state behind `Value::Handle`.

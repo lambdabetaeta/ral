@@ -27,19 +27,14 @@ fn rebake() -> (ral_core::ir::Comp, Vec<(String, ral_core::Scheme)>) {
 
 /// Read the (name, scheme) pairs off an annotated comp's top-level `Bind`
 /// nodes — the spine the harvest walks (a `Seq`'s parts and a `Bind`'s
-/// `rest`).  Builtin names are filtered exactly as `bake_prelude` does.
+/// `rest`).  No filter, matching `harvest_into`.
 fn schemes_on_binds(comp: &ral_core::ir::Comp) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    let table = ral_core::builtins::core_builtin_table();
-    fn walk(
-        comp: &ral_core::ir::Comp,
-        table: &ral_core::types::BuiltinTable,
-        out: &mut Vec<(String, String)>,
-    ) {
+    fn walk(comp: &ral_core::ir::Comp, out: &mut Vec<(String, String)>) {
         match &comp.item {
             CompKind::Seq(parts) => {
                 for part in parts {
-                    walk(part, table, out);
+                    walk(part, out);
                 }
             }
             CompKind::Bind {
@@ -48,16 +43,14 @@ fn schemes_on_binds(comp: &ral_core::ir::Comp) -> Vec<(String, String)> {
                 scheme: Some(scheme),
                 ..
             } => {
-                if table.get(name).is_none() {
-                    out.push((name.clone(), fmt_scheme(scheme)));
-                }
-                walk(rest, table, out);
+                out.push((name.clone(), fmt_scheme(scheme)));
+                walk(rest, out);
             }
-            CompKind::Bind { rest, .. } => walk(rest, table, out),
+            CompKind::Bind { rest, .. } => walk(rest, out),
             _ => {}
         }
     }
-    walk(comp, &table, &mut out);
+    walk(comp, &mut out);
     out
 }
 
@@ -77,16 +70,20 @@ fn bake_returns_top_level_let_bindings() {
     }
 }
 
+/// A prelude binding sharing a native's name seeds and shadows, so the
+/// checker and the env-first runtime agree.  A synthetic fixture stands in —
+/// the real prelude names nothing that collides.
 #[test]
-fn bake_filters_builtins() {
-    let (_, schemes) = rebake();
-    let table = ral_core::builtins::core_builtin_table();
-    for (name, _) in &schemes {
-        assert!(
-            table.get(name).is_none(),
-            "baked prelude schemes must not shadow builtin {name:?}"
-        );
-    }
+fn a_prelude_binding_colliding_with_a_native_survives_the_harvest() {
+    let ast = ral_core::syntax::parser::parse("let upper = { |x| return $x }")
+        .expect("fixture parse");
+    let comp = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
+        .expect("elaborate");
+    let (_, schemes) = ral_core::bake_prelude(&comp);
+    assert!(
+        schemes.iter().any(|(name, _)| name == "upper"),
+        "a prelude binding named after a native must survive the harvest, got {schemes:?}"
+    );
 }
 
 /// The bake runs one checked pass — parse, elaborate, annotate — so the

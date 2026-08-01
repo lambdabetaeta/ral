@@ -2,6 +2,7 @@
 //! `within [handlers: …]`, ordered innermost-last.  Scoped frames come off by
 //! handle, alias frames by name.
 
+use super::builtin::BuiltinEntry;
 use super::value::Value;
 use crate::typecheck;
 use std::borrow::Cow;
@@ -54,12 +55,13 @@ impl HandlerEntry {
     /// the one gate shared by `Shell::install_alias` and `within [handlers:
     /// …]`, so each check is written once.
     ///
-    /// `name` must be free of both a lexical binding and a builtin: a handler
-    /// needs a head of its own to dispatch on.
+    /// A name already a lexical binding or a native installs fine: bare
+    /// heads never reach the new frame, but `^name` does, and resolution
+    /// order alone is what decides that.
     ///
     /// # Errors
-    /// `name` already bound lexically or as a builtin, `thunk` not a unary
-    /// lambda, or its body changing the head's pipeline mode.
+    /// `thunk` not a unary lambda, or its body changing the head's pipeline
+    /// mode.
     pub fn vet(
         name: String,
         thunk: Value,
@@ -67,18 +69,6 @@ impl HandlerEntry {
         role: HandlerRole,
     ) -> Settled<Self> {
         let label = role.label();
-        if session_schemes.bindings.iter().any(|(n, _)| n == &name) {
-            return Err(super::coerce::sig(format!(
-                "{label}: `{name}` is a lexical binding in this scope; handler names must \
-                 be free of lexical bindings and builtins"
-            )));
-        }
-        if session_schemes.builtins.get(&name).is_some() {
-            return Err(super::coerce::sig(format!(
-                "{label}: `{name}` is a builtin; handler names must be free of lexical \
-                 bindings and builtins"
-            )));
-        }
         validate_handler_arity(&thunk, 1, &format!("{label}: `{name}`"))?;
         let Value::Lambda { param, body, .. } = &thunk else {
             unreachable!("validate_handler_arity guarantees a unary lambda");
@@ -187,14 +177,30 @@ impl HandlerFrame {
     }
 }
 
+/// One [`HandlerStack::lookup`] hit: a user frame, masked by depth and run
+/// through the ordinary handler calling convention, or a base frame, called
+/// directly with no masking and no adapter.
+#[derive(Debug, Clone)]
+pub enum HandlerLookup {
+    Frame(HandlerEntry, usize),
+    Base(BuiltinEntry),
+}
+
 /// The handler stack: the innermost frame sits at the highest index.
 ///
 /// No `Serialize` / `Deserialize` — frames carry `Value`, whose closures must
 /// be interned through `serial::InternCtx` to cross an IPC boundary, which
 /// `subprocess`'s `WireHandlerFrame` does field by field.
+///
+/// `base` is a permanent layer below every run frame — manifest rows, not
+/// `HandlerFrame`s, so [`Self::strip_matched`] and [`Self::remove_alias`],
+/// which index `frames` alone, cannot reach it.  It never crosses the wire:
+/// the wire form is a `Vec<HandlerFrame>`, and a receiving shell's own boot
+/// installs its base layer.
 #[derive(Debug, Clone, Default)]
 pub struct HandlerStack {
     frames: Vec<HandlerFrame>,
+    base: Vec<BuiltinEntry>,
     next_handle: u64,
 }
 
@@ -246,22 +252,24 @@ impl HandlerStack {
         Some(self.frames.remove(pos))
     }
 
-    /// The winning handler for `name`, with the depth of its frame counted from
-    /// the top — what [`Self::strip_matched`] needs to mask it.
-    ///
-    /// Two innermost-first passes over the whole stack: per-name entries, then
-    /// catch-alls only if no frame anywhere held a per-name match.  So any
-    /// per-name handler beats any catch-all whatever their relative depth.
-    /// `None` means the caller falls through to external command lookup.
-    pub fn lookup(&self, name: &str) -> Option<(HandlerEntry, usize)> {
+    /// The winning handler for `name`: a run-frame per-name entry (with its
+    /// depth from the top, what [`Self::strip_matched`] masks by); else a
+    /// base frame; else a run-frame catch-all.  So any per-name handler
+    /// beats any catch-all whatever their relative depth, and a catch-all
+    /// never sees a base frame's name.  `None` falls through to external
+    /// command lookup.
+    pub fn lookup(&self, name: &str) -> Option<HandlerLookup> {
         for (depth, frame) in self.frames.iter().rev().enumerate() {
             if let Some(entry) = frame.entries.iter().find(|e| e.name == name) {
-                return Some((entry.clone(), depth + 1));
+                return Some(HandlerLookup::Frame(entry.clone(), depth + 1));
             }
+        }
+        if let Some(entry) = self.base.iter().find(|e| e.name == name) {
+            return Some(HandlerLookup::Base(entry.clone()));
         }
         for (depth, frame) in self.frames.iter().rev().enumerate() {
             if let Some(thunk) = &frame.catch_all {
-                return Some((
+                return Some(HandlerLookup::Frame(
                     HandlerEntry {
                         name: Cow::Owned(name.to_string()),
                         arity: HandlerArity::CatchAll,
@@ -273,6 +281,12 @@ impl HandlerStack {
             }
         }
         None
+    }
+
+    /// Install base handler frames — manifest rows for variadic/optional
+    /// builtins.
+    pub(crate) fn install_base(&mut self, entries: &[BuiltinEntry]) {
+        self.base.extend(entries.iter().cloned());
     }
 
     /// Every per-name entry on the stack, innermost first.  A shadowed name

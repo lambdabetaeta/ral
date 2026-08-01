@@ -69,22 +69,17 @@ impl SessionSchemes {
     }
 }
 
-/// Builtins own their names and shadow both lists.  Alias arms bind as removable
-/// handler frames, so a run-level `unalias` unbinds them statically.
+/// No filter: natives never arrive in this harvest (the bindings walk is
+/// user scopes only), and a binding sharing a native's name shadows it, as
+/// at runtime.
 fn seed_env(env: &mut TyEnv, schemes: SessionSchemes) {
     env.builtins = schemes.builtins;
     for (name, scheme) in schemes.bindings {
-        if env.builtins.get(&name).is_some() {
-            continue;
-        }
         if let Some(scheme) = scheme {
             env.bind(name, scheme);
         }
     }
     for (name, scheme) in schemes.aliases {
-        if env.builtins.get(&name).is_some() {
-            continue;
-        }
         env.bind_handler(name, scheme, true);
     }
 }
@@ -146,14 +141,13 @@ fn harvest_into(comp: &Comp, out: &mut Vec<(String, Scheme)>) {
 /// Callers — `boot::bake_prelude_to_out_dir`, from each host's build script
 /// — serialise the *annotated* prelude, so the comp blob and the scheme
 /// blob come out of one checked pass and evaluating the prelude installs
-/// each binding's scheme beside its value.  Builtin names are filtered out:
-/// the table owns them, not the prelude.
+/// each binding's scheme beside its value.  A prelude binding named after a
+/// native seeds and shadows like any other.
 ///
 /// # Panics
 /// If the prelude fails to type-check, reporting the errors.
 pub fn bake_prelude(comp: &Comp) -> (Comp, Vec<(String, Scheme)>) {
     let seed = SessionSchemes::default();
-    let table = seed.builtins.clone();
     let annotated = match typecheck(comp, seed) {
         Ok(a) => a,
         Err(errs) => {
@@ -161,10 +155,7 @@ pub fn bake_prelude(comp: &Comp) -> (Comp, Vec<(String, Scheme)>) {
             panic!("prelude type errors:\n{}", msgs.join("\n"));
         }
     };
-    let schemes = harvest_schemes(&annotated)
-        .into_iter()
-        .filter(|(name, _)| table.get(name).is_none())
-        .collect();
+    let schemes = harvest_schemes(&annotated);
     (annotated, schemes)
 }
 

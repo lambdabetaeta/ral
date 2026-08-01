@@ -1,7 +1,10 @@
 //! Builtin command bindings: command names implemented by host Rust code.
 //!
-//! The per-shell [`BuiltinTable`] is disjoint from the user handler stack in
-//! `handler.rs`, whose `HandlerEntry::vet` refuses any name a builtin owns.
+//! The per-shell [`BuiltinTable`] is the boot manifest: it seeds the base env
+//! scope (fixed-arity entries, as `Value::Native`) and the base handler
+//! frames (variadic/optional entries) at construction, and backs `help` /
+//! `explain`.  Dispatch never consults it — resolution is env → handlers →
+//! external — and it admits no names: a user handler installs under any.
 
 use super::flow::Settled;
 use super::value::Value;
@@ -9,7 +12,7 @@ use crate::typecheck::builtins::BuiltinTypeRule;
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Runtime closure backing a captured builtin body.
 pub type CapturedBuiltinFn = Arc<
@@ -56,21 +59,57 @@ impl fmt::Debug for BuiltinBody {
 }
 
 /// A builtin command binding; `doc` is the line `help` and `explain` print.
-#[derive(Clone)]
 pub struct BuiltinEntry {
     pub name: Cow<'static, str>,
     pub type_rule: BuiltinTypeRule,
     pub doc: &'static str,
     pub body: BuiltinBody,
+    /// [`Self::fixed_arity`]'s cache: a `Scheme` rule needs a fresh
+    /// [`crate::typecheck::Unifier`] to derive its curry depth, so this
+    /// spares every application step of a native that re-derivation.
+    pub(crate) arity_cache: OnceLock<Option<usize>>,
 }
 
 impl BuiltinEntry {
-    /// Value-arg count `synthesize_builtin_value` η-expands `$name` to;
-    /// `None` when the argv is not fixed.
+    /// Build an entry with an empty arity cache — the one constructor a host
+    /// crate has, `arity_cache` being crate-private.
+    pub const fn new(
+        name: Cow<'static, str>,
+        type_rule: BuiltinTypeRule,
+        doc: &'static str,
+        body: BuiltinBody,
+    ) -> Self {
+        Self {
+            name,
+            type_rule,
+            doc,
+            body,
+            arity_cache: OnceLock::new(),
+        }
+    }
+
+    /// Value-arg count a `$name` reference curries to; `None` when the argv
+    /// is not fixed.  Structural, read off the type rule
+    /// ([`BuiltinTypeRule::fixed_arity`]) once and cached: application calls
+    /// this every apply step, and a `Scheme` rule's derivation is not free.
     pub fn fixed_arity(&self) -> Option<usize> {
-        match &self.type_rule {
-            BuiltinTypeRule::Scheme(arity, _) => *arity,
-            BuiltinTypeRule::Sig(sig) => sig.fixed_arity(),
+        *self.arity_cache.get_or_init(|| self.type_rule.fixed_arity())
+    }
+}
+
+impl Clone for BuiltinEntry {
+    /// Carries an already-computed arity cache forward.
+    fn clone(&self) -> Self {
+        let arity_cache = OnceLock::new();
+        if let Some(a) = self.arity_cache.get() {
+            let _ = arity_cache.set(*a);
+        }
+        Self {
+            name: self.name.clone(),
+            type_rule: self.type_rule,
+            doc: self.doc,
+            body: self.body.clone(),
+            arity_cache,
         }
     }
 }
@@ -92,34 +131,37 @@ pub struct BuiltinTable {
 }
 
 impl BuiltinTable {
-    /// Install a group of builtin entries for this shell.
+    /// Install a group of builtin entries for this shell.  `true` if a new
+    /// set was actually added, so a no-op reinstall does not seed the base
+    /// scope and frames twice.
     ///
     /// # Panics
     /// If a name collides with an installed builtin or repeats in `entries`.
-    pub fn install_static(&mut self, entries: &'static [BuiltinEntry]) {
-        self.install_arc(Arc::from(entries));
+    pub fn install_static(&mut self, entries: &'static [BuiltinEntry]) -> bool {
+        self.install_arc(Arc::from(entries))
     }
 
     /// Install runtime-owned builtin entries for this shell.
     ///
     /// Idempotent: a set already here — by `Arc` identity, or by carrying the
-    /// same names — reinstalls as a no-op.
+    /// same names — reinstalls as a no-op, reported by the `false` return.
     ///
     /// # Panics
     /// If a name collides with a *different* installed set — host crates must
     /// own disjoint surfaces — or repeats in `entries`.
-    pub fn install_arc(&mut self, entries: Arc<[BuiltinEntry]>) {
+    pub fn install_arc(&mut self, entries: Arc<[BuiltinEntry]>) -> bool {
         if self
             .sets
             .iter()
             .any(|set| Arc::ptr_eq(set, &entries) || same_builtin_names(set, &entries))
         {
-            return;
+            return false;
         }
         if let Err(e) = check_builtin_collisions(&entries, &self.sets) {
             panic!("builtin installation failed: {e}");
         }
         self.sets.push_back(entries);
+        true
     }
 
     /// Look up a builtin by name.
@@ -139,6 +181,45 @@ impl BuiltinTable {
             .rev()
             .flat_map(|set| set.iter().map(|entry| entry.name.as_ref()))
     }
+
+    /// The base native scope this manifest implies: every fixed-arity entry's
+    /// [`Value::Native`] plus the language constants — what a wire-hydrated
+    /// `Env` carries, since natives cross the wire by name only and a
+    /// receiver rebuilds them from its own manifest.
+    pub(crate) fn natives_arc(&self) -> Arc<std::collections::HashMap<String, Value>> {
+        let mut map = std::collections::HashMap::new();
+        for set in &self.sets {
+            for entry in set.iter() {
+                if let Some(value) = native_value(entry) {
+                    map.insert(entry.name.clone().into_owned(), value);
+                }
+            }
+        }
+        map.extend(language_constants());
+        Arc::new(map)
+    }
+}
+
+/// `true` and `false` — language-given names in every base scope, live and
+/// hydrated alike, though they are not manifest entries.
+pub(crate) fn language_constants() -> [(String, Value); 2] {
+    [
+        ("true".to_string(), Value::Bool(true)),
+        ("false".to_string(), Value::Bool(false)),
+    ]
+}
+
+/// `entry`'s `Value::Native`, or `None` for a variadic/optional entry, which
+/// seeds a base handler frame instead.  Shared by boot and wire hydration,
+/// so the two never classify an entry differently.
+pub(crate) fn native_value(entry: &BuiltinEntry) -> Option<Value> {
+    entry.fixed_arity().map(|_| {
+        let entry = Arc::new(entry.clone());
+        Value::Native {
+            entry,
+            applied: Vec::new(),
+        }
+    })
 }
 
 fn same_builtin_names(a: &[BuiltinEntry], b: &[BuiltinEntry]) -> bool {

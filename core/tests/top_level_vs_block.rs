@@ -187,6 +187,31 @@ fn top_level_cd_persists_across_calls() {
     );
 }
 
+/// A user handler stacks on `cd`, and a `cd` call from inside its body
+/// reaches the base frame under self-masking rather than looping.
+#[test]
+fn stacked_cd_handler_forwards_to_base_frame_under_self_masking() {
+    let mut shell = fresh_shell();
+    let tmp = std::env::temp_dir();
+    let tmp_disp = display_no_trailing_sep(&tmp);
+    let result = top_level(
+        &mut shell,
+        &format!(
+            "within [handlers: [cd: {{ |args| cd ...$args }}]] {{ cd '{tmp_disp}'; cwd }}"
+        ),
+    )
+    .expect("the stacked handler should forward to the base cd frame");
+    let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
+    let got = match result {
+        Value::String(s) => s,
+        other => panic!("cwd must return a String, got {other:?}"),
+    };
+    assert!(
+        got == tmp_disp || got == canon,
+        "cwd inside the block after the forwarded cd: expected {tmp_disp:?} or {canon:?}, got {got:?}"
+    );
+}
+
 // ── (4) Block non-leakage — grant ───────────────────────────────────────
 
 /// A `let` inside `grant [...] { ... }` must not be visible afterwards:
@@ -668,13 +693,13 @@ fn function_body_records_into_enclosing_audit() {
         },
         other => panic!("audit {{ … }} must return a Map; got {other:?}"),
     };
-    let saw_line_write = children.iter().any(|c| match c {
-        Value::Map(m) => matches!(m.get("cmd"), Some(Value::String(s)) if s == "to-line"),
+    let saw_echo = children.iter().any(|c| match c {
+        Value::Map(m) => matches!(m.get("cmd"), Some(Value::String(s)) if s == "echo"),
         _ => false,
     });
     assert!(
-        saw_line_write,
-        "the `echo` inside the function body must appear as its lowered `to-line` in the enclosing \
+        saw_echo,
+        "the `echo` inside the function body must appear as its own node in the enclosing \
          audit tree; children = {children:?}"
     );
 }

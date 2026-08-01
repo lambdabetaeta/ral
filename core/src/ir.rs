@@ -477,12 +477,11 @@ pub struct Exec {
 /// boolean.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandWord {
-    /// Resolved at evaluation time: binding, then builtin, then handler,
-    /// then PATH.
+    /// Resolved at evaluation time: env, then handlers, then PATH.
     Name(CommandName),
-    /// `^name` — skips binding and builtin lookup but still resolves through
-    /// handlers, so an enclosing `within [handlers:]` frame still contains
-    /// it.  The bypass is on the lookup, not on the frame.
+    /// `^name` — skips the env, and so skips every native, but still
+    /// resolves through handlers, so an enclosing `within [handlers:]` frame
+    /// still contains it.  The bypass is on the lookup, not on the frame.
     External(CommandName),
 }
 

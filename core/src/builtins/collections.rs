@@ -8,7 +8,7 @@
 use crate::types::{Break, Mooring, Settled, Shell, Value, as_list, sig};
 
 use super::apply;
-use super::util::{check_arity, value_ordering};
+use super::util::value_ordering;
 
 /// Steps `range` runs between cancellation polls: its per-step work is a
 /// single push, which an unconditional poll would dominate.  The combinators
@@ -23,7 +23,6 @@ const RANGE_INITIAL_CAP: usize = 1 << 16;
 /// Audit-records itself as `for`, the prelude spelling (`let for = { |list
 /// fn| each $fn $list }`) a loop is normally written in.
 pub(super) fn builtin_each(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 2, "each")?;
     let func = &args[0];
     let items = as_list(&args[1], "each")?;
     iterate_audited("for", shell, |shell| {
@@ -42,7 +41,6 @@ pub(super) fn builtin_each(args: &[Value], mooring: &Mooring, shell: &mut Shell)
 }
 
 pub(super) fn builtin_map(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 2, "map")?;
     let func = &args[0];
     let items = as_list(&args[1], "map")?;
     iterate_audited("map", shell, |shell| {
@@ -105,7 +103,6 @@ pub(super) fn builtin_filter(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    check_arity(args, 2, "filter")?;
     let func = &args[0];
     let items = as_list(&args[1], "filter")?;
     let mut results = Vec::new();
@@ -147,7 +144,6 @@ fn ordered_sort(mut keyed: Vec<(Value, Value)>, name: &str) -> Settled<Value> {
 }
 
 pub(super) fn builtin_sort(args: &[Value]) -> Settled<Value> {
-    check_arity(args, 1, "sort-list")?;
     let items = as_list(&args[0], "sort-list")?;
     ordered_sort(
         items.into_iter().map(|v| (v.clone(), v)).collect(),
@@ -160,7 +156,6 @@ pub(super) fn builtin_sort_by(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    check_arity(args, 2, "sort-list-by")?;
     let func = &args[0];
     let items = as_list(&args[1], "sort-list-by")?;
     let keyed: Vec<(Value, Value)> = items
@@ -175,7 +170,6 @@ pub(super) fn builtin_sort_by(
 }
 
 pub(super) fn builtin_range(args: &[Value], mooring: &Mooring) -> Settled<Value> {
-    check_arity(args, 2, "range")?;
     let start = match &args[0] {
         Value::Int(n) => *n,
         other => {
@@ -221,7 +215,6 @@ pub(super) fn builtin_range(args: &[Value], mooring: &Mooring) -> Settled<Value>
 }
 
 pub(super) fn builtin_fold(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 3, "fold")?;
     let func = &args[0];
     let mut acc = args[1].clone();
     let items = as_list(&args[2], "fold")?;
@@ -238,7 +231,6 @@ pub(super) fn builtin_fold_lines(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    check_arity(args, 2, "fold-lines")?;
     let func = args[0].clone();
     let mut acc = args[1].clone();
     super::util::for_each_stdin_line("fold-lines", shell, |line, shell| {

@@ -42,7 +42,7 @@ pub(crate) fn vet(id: &CommandIdentity, args: &[Value], shell: &mut Shell) -> Se
     let deny_refs: Vec<&str> = deny_names.iter().map(String::as_str).collect();
     shell.check_exec_call(&id.shown, &deny_refs, &policy_refs, &arg_strs)?;
     let image = match &id.name {
-        CommandName::Bare(b) if crate::builtins::uutils::is_uutils_tool(b) => {
+        CommandName::Bare(b) if crate::uutils::is_uutils_tool(b) => {
             ExecImage::BundledTool { tool: b.clone() }
         }
         _ => ExecImage::Host(id.resolved.clone()),
@@ -66,7 +66,7 @@ fn check_existence(id: &CommandIdentity) -> Settled<()> {
     let CommandName::Bare(bare) = &id.name else {
         return Ok(());
     };
-    if crate::builtins::uutils::is_uutils_tool(bare) {
+    if crate::uutils::is_uutils_tool(bare) {
         return Ok(());
     }
     match &id.search {
@@ -109,6 +109,7 @@ fn reject_exec_arg(id: &CommandIdentity, arg: &Value, shell: &Shell) -> Option<B
         | Value::Map(_)
         | Value::Lambda { .. }
         | Value::Block { .. }
+        | Value::Native { .. }
         | Value::Handle(_) => Some(
             shell
                 .err_hint(

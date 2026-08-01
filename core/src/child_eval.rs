@@ -137,10 +137,14 @@ impl WireExecNode {
         })
     }
 
-    pub(crate) fn into_runtime(self, arcs: &ScopeArcs) -> Result<ExecNode, Error> {
+    pub(crate) fn into_runtime(
+        self,
+        arcs: &ScopeArcs,
+        manifest: &crate::types::BuiltinTable,
+    ) -> Result<ExecNode, Error> {
         let mut children = Vec::with_capacity(self.children.len());
         for child in self.children {
-            children.push(child.into_runtime(arcs)?);
+            children.push(child.into_runtime(arcs, manifest)?);
         }
         Ok(ExecNode {
             kind: self.kind,
@@ -152,7 +156,7 @@ impl WireExecNode {
             col: self.col,
             stdout: self.stdout,
             stderr: self.stderr,
-            value: self.value.into_runtime(arcs)?,
+            value: self.value.into_runtime(arcs, manifest)?,
             children,
             start: self.start,
             end: self.end,
@@ -261,7 +265,9 @@ fn eval_request(
         ..
     } = request;
 
-    let arcs = build_arcs(&scope_table)?;
+    // The child shell does not exist yet, so re-link against the same
+    // core-plus-hook manifest `reexec_child_shell` is about to boot with.
+    let arcs = build_arcs(&scope_table, &crate::sandbox::wire_manifest())?;
     let mut shell = reexec_child_shell(mobile, &arcs)?;
     shell.local.audit.install_active_policy(audit_policy);
     if let Some(ctx) = script {
@@ -285,7 +291,7 @@ fn eval_request(
                 1,
             ))
         })?
-        .into_runtime(&arcs)?;
+        .into_runtime(&arcs, &shell.session.builtins)?;
     let mut child = Shell::child_of(&captured, &mut shell);
     // A tail call cannot cross the boundary — the parent's callee and args
     // are meaningless in this address space — so settle it here.
@@ -447,16 +453,17 @@ pub(crate) fn break_response(signal: Break) -> ChildEvalResponse {
 /// fault* — the payload would not turn back into runtime values — as distinct
 /// from `signal`, the body's own outcome, which crossed the wire intact.
 pub(crate) fn decode_response(response: ChildEvalResponse) -> Settled<DecodedResponse> {
+    let manifest = crate::sandbox::wire_manifest();
     let mut audit_nodes = Vec::with_capacity(response.audit_nodes.len());
     for entry in response.audit_nodes {
-        let arcs = build_arcs(&entry.scope_table)?;
-        audit_nodes.push(entry.node.into_runtime(&arcs)?);
+        let arcs = build_arcs(&entry.scope_table, &manifest)?;
+        audit_nodes.push(entry.node.into_runtime(&arcs, &manifest)?);
     }
-    let arcs = build_arcs(&response.scope_table)?;
+    let arcs = build_arcs(&response.scope_table, &manifest)?;
     let (value, signal) = match response.outcome {
         WireOutcome::Ok(value) => {
             let value = match value {
-                Some(value) => Some(value.into_runtime(&arcs)?),
+                Some(value) => Some(value.into_runtime(&arcs, &manifest)?),
                 None => None,
             };
             (value, None)
@@ -619,7 +626,8 @@ mod tests {
         let json = serde_json::to_vec(&request).expect("serialise request");
         let request: ChildEvalRequest = serde_json::from_slice(&json).expect("deserialise request");
 
-        let arcs = build_arcs(&request.scope_table).expect("arcs");
+        let arcs = build_arcs(&request.scope_table, &crate::builtins::core_builtin_table())
+            .expect("arcs");
         let mut child = reexec_child_shell(request.mobile, &arcs).expect("child shell");
         assert!(
             child.has_alias("ll"),
@@ -656,8 +664,9 @@ mod tests {
 
         let json = serde_json::to_vec(&node).expect("serialise node");
         let back: WireExecNode = serde_json::from_slice(&json).expect("deserialise node");
-        let arcs = build_arcs(&ctx.scope_table).expect("arcs");
-        let runtime = back.into_runtime(&arcs).expect("into runtime");
+        let manifest = crate::builtins::core_builtin_table();
+        let arcs = build_arcs(&ctx.scope_table, &manifest).expect("arcs");
+        let runtime = back.into_runtime(&arcs, &manifest).expect("into runtime");
         assert_eq!(
             runtime.kind,
             crate::types::ExecNodeKind::CapabilityCheck,

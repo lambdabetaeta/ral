@@ -37,13 +37,7 @@ impl Inferencer<'_> {
                     for inner_entry in inner_entries {
                         match inner_entry {
                             ValMapEntry::Entry(Val::String(name), Val::Thunk(comp)) => {
-                                if self.reject_handler_for_binding(name, "install handler for") {
-                                    // Not bindable, but errors inside still surface.
-                                    let _ = self.with_scope(|this| this.infer_comp(comp));
-                                } else {
-                                    bindings
-                                        .push((name.clone(), self.handler_comp_scheme(name, comp)));
-                                }
+                                bindings.push((name.clone(), self.handler_comp_scheme(name, comp)));
                             }
                             ValMapEntry::Entry(key_val, val_val) => {
                                 let _ = self.infer_val(key_val);

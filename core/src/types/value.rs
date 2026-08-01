@@ -1,6 +1,7 @@
 //! Runtime values: what a variable holds, what a pipeline stage produces,
 //! what a builtin returns.
 
+use super::builtin::BuiltinEntry;
 use super::env::Env;
 use super::handle::HandleInner;
 use super::list::List;
@@ -41,6 +42,14 @@ pub enum Value {
     Block {
         body: std::sync::Arc<crate::ir::Comp>,
         captured: Arc<Env>,
+    },
+    /// A builtin, curried through `applied`: applying appends arguments until
+    /// `entry.fixed_arity()` is reached, then the host body runs with the
+    /// full slice. Under-application yields the partial `Native` back;
+    /// over-application is an arity error, mirroring a `Lambda`.
+    Native {
+        entry: Arc<BuiltinEntry>,
+        applied: Vec<Self>,
     },
     /// A computation spawned onto a worker thread, not a subprocess.
     Handle(HandleInner),
@@ -110,6 +119,7 @@ impl Value {
             Self::Variant { .. } => "Variant",
             Self::Lambda { .. } => "Lambda",
             Self::Block { .. } => "Block",
+            Self::Native { .. } => "Native",
             Self::Handle(_) => "Handle",
         }
     }
@@ -156,6 +166,11 @@ impl Value {
             Self::Variant { label, payload } => {
                 label.len() + payload.as_deref().map_or(0, Self::shallow_size)
             }
+            // `entry` is opaque like a closure's capture; `applied` counts
+            // like a list's elements.
+            Self::Native { applied, .. } => {
+                OPAQUE_CONSTANT + applied.iter().map(Self::shallow_size).sum::<usize>()
+            }
             Self::Lambda { .. } | Self::Block { .. } | Self::Handle(_) => OPAQUE_CONSTANT,
         }
     }
@@ -182,6 +197,18 @@ impl PartialEq for Value {
                     payload: pb,
                 },
             ) => la == lb && pa == pb,
+            // A name is an intensional identity a closure lacks, so natives
+            // compare where closures never do.
+            (
+                Self::Native {
+                    entry: ea,
+                    applied: aa,
+                },
+                Self::Native {
+                    entry: eb,
+                    applied: ab,
+                },
+            ) => ea.name == eb.name && aa == ab,
             // Closures and handles are never structurally equal.
             _ => false,
         }
@@ -229,6 +256,7 @@ impl fmt::Display for Value {
             },
             Self::Lambda { param, body, .. } => write!(f, "{}", fmt_lambda(param, body)),
             Self::Block { .. } => write!(f, "<block>"),
+            Self::Native { entry, applied } => write!(f, "{}", fmt_native(&entry.name, applied)),
             Self::Handle(h) => write!(f, "<handle:{}>", h.cmd),
         }
     }
@@ -260,6 +288,16 @@ fn fmt_param(p: &crate::ir::IrPattern) -> String {
                 .collect();
             format!("[{}]", parts.join(" "))
         }
+    }
+}
+
+/// Format as `<native NAME>`, or `<native NAME +N>` for a partial with `N`
+/// collected arguments.
+pub fn fmt_native(name: &str, applied: &[Value]) -> String {
+    if applied.is_empty() {
+        format!("<native {name}>")
+    } else {
+        format!("<native {name} +{}>", applied.len())
     }
 }
 

@@ -268,6 +268,17 @@ fn float_crosses_a_process_staged_value_edge_bit_exactly() {
 }
 
 #[test]
+fn captured_native_crosses_a_process_staged_value_edge_and_relinks() {
+    // The byte-emitting last stage forces the pipeline process-staged, so
+    // `$round` crosses a real process boundary by name and re-links against
+    // the receiving process's own manifest; the middle stage applies it
+    // fully, proving the re-linked value is the genuine native.
+    let o = run_pipe("{ return $round } | { |f| return !{$f 1.567 2} } | { |n| echo $n }");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "1.57");
+}
+
+#[test]
 fn value_edge_into_external_applies_data_last_on_every_dispatch_path() {
     // A value edge into an external head is data-last application —
     // `x | cmd = cmd !{x}` — so the upstream value becomes the
@@ -526,6 +537,31 @@ fn catch_all_handler_redirect_is_honored() {
         Some("catchme"),
         "catch-all handler redirect file did not capture the body's stdout"
     );
+}
+
+// ── `echo` as a base handler frame ──────────────────────────────────────────
+
+#[test]
+fn echo_mixed_type_args_are_stringified_and_space_joined() {
+    let o = run_pipe("let n = 5\necho \"count:\" $n");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout, "count: 5\n");
+}
+
+#[test]
+fn echo_zero_args_emits_one_newline() {
+    let o = run_pipe("echo");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout, "\n");
+}
+
+#[test]
+fn stacked_echo_handler_forwards_to_base_frame() {
+    // The stacked frame intercepts the bare head; its own `echo` calls reach
+    // the base frame under self-masking instead of recursing.
+    let o = run_pipe("within [handlers: [echo: { |args| echo intercepted; echo ...$args }]] { echo original }");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout, "intercepted\noriginal\n");
 }
 
 // ── Outer stdin redirect feeds pipeline boundary ─────────────────────────────

@@ -216,6 +216,12 @@ pub(crate) fn step_force(val: &Val, mooring: &Mooring, shell: &mut Shell) -> Raw
             super::eval_block(&body, &captured, Tail::No, mooring, shell)?
         }
         lam @ Value::Lambda { .. } => lam,
+        // An arity-0 native is a thunk, run like a `Block`; any other native
+        // returns unchanged, like a `Lambda`.
+        Value::Native { entry, applied } if entry.fixed_arity() == Some(0) => {
+            entry.body.call(&applied, mooring, shell).map_err(Control::from)?
+        }
+        native @ Value::Native { .. } => native,
         other => {
             return Err(shell
                 .err_hint(

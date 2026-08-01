@@ -186,6 +186,30 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
                     _ => false,
                 }
         }
+        // A name is an intensional identity a closure lacks, so natives
+        // compare where lambdas refuse; a collected lambda argument still
+        // surfaces the refusal.
+        (
+            Value::Native {
+                entry: ea,
+                applied: aa,
+            },
+            Value::Native {
+                entry: eb,
+                applied: ab,
+            },
+        ) => {
+            if ea.name != eb.name || aa.len() != ab.len() {
+                false
+            } else {
+                let pairwise = aa
+                    .iter()
+                    .zip(ab.iter())
+                    .map(|(x, y)| values_equal(x, y))
+                    .collect::<Settled<Vec<bool>>>()?;
+                pairwise.into_iter().all(|eq| eq)
+            }
+        }
         (Value::Lambda { .. } | Value::Block { .. } | Value::Handle(_), _)
         | (_, Value::Lambda { .. } | Value::Block { .. } | Value::Handle(_)) => {
             return Err(uncomparable(a, b, "equal"));
@@ -223,18 +247,14 @@ pub(crate) fn order_cmp(
     name: &str,
     want: fn(std::cmp::Ordering) -> bool,
 ) -> Settled<Value> {
-    check_arity(args, 2, name)?;
     let r = want(value_ordering(&args[0], &args[1], name)?);
     shell.set_status_from_bool(r);
     Ok(Value::Bool(r))
 }
 
-/// Render the first argument as a `String`.
-///
-/// # Errors
-/// Returns `Err` if `args` is empty.
-pub fn arg0_str(args: &[Value], name: &str) -> Settled<String> {
-    check_arity(args, 1, name)?;
+/// Render the first argument as a `String`; application already gated the
+/// count for every fixed-arity-1 caller.
+pub fn arg0_str(args: &[Value]) -> Settled<String> {
     Ok(args[0].to_string())
 }
 
@@ -331,6 +351,9 @@ pub fn value_to_json_lossy_bytes(v: &Value) -> serde_json::Value {
             serde_json::json!({"type": "Lambda", "param": format!("{param:?}")})
         }
         Value::Block { .. } => serde_json::json!({"type": "Block"}),
+        Value::Native { entry, applied } => {
+            serde_json::json!({"type": "Native", "name": entry.name.as_ref(), "applied": applied.len()})
+        }
         Value::Handle(_) => serde_json::json!({"type": "Handle"}),
         Value::Bytes(b) => serde_json::Value::String(String::from_utf8_lossy(b).into_owned()),
         Value::Variant { label, payload } => {

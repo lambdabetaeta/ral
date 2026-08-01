@@ -1,5 +1,5 @@
 //! The external arm of command dispatch — `command_call` picks it over
-//! env, builtin and handler: vet the resolved identity, wire the call's
+//! env and handler: vet the resolved identity, wire the call's
 //! redirects into child stdio, spawn under the canonical pgid and
 //! sandbox, reap.
 //!

@@ -12,7 +12,7 @@ use crate::ir::{
 };
 use crate::source::Span;
 use crate::source::WithSpan;
-use crate::stream::{HEAD_FIELD, TAIL_FIELD, done_tag, more_tag};
+use crate::stream::{done_tag, more_tag};
 use crate::syntax::ast::{BinaryOp, BinaryOpKind};
 use crate::syntax::tag::{is_tag_label, tag_row_label};
 use std::sync::Arc;
@@ -451,36 +451,11 @@ impl Inferencer<'_> {
             .any(|(l, _)| l == &more_tag || l == &done_tag)
     }
 
-    /// The value `from-lines` returns: a recursive Step stream of Strings.  The
-    /// recursion closes through a comp var, not a `TyVar`.
+    /// The value `from-lines` returns: a recursive Step stream of Strings,
+    /// the recursion closing through a comp var, not a `TyVar`.  Shared with
+    /// `derive_sig_scheme`'s value form via [`super::builtins::lines_step_ty`].
     pub(super) fn lines_step_ty(&mut self) -> Ty {
-        let tail_comp = self.ctx.unifier.fresh_comp_ty();
-        let more_tag = more_tag();
-        let done_tag = done_tag();
-        let payload = Ty::Record(Row::Extend(
-            HEAD_FIELD.into(),
-            Box::new(Ty::String),
-            Box::new(Row::Extend(
-                TAIL_FIELD.into(),
-                Box::new(Ty::Thunk(Box::new(tail_comp.clone()))),
-                Box::new(Row::Empty),
-            )),
-        ));
-        let step = Ty::Variant(Row::Extend(
-            more_tag,
-            Box::new(payload),
-            Box::new(Row::Extend(
-                done_tag,
-                Box::new(Ty::Unit),
-                Box::new(Row::Empty),
-            )),
-        ));
-        self.ctx.unify_comp_ty(
-            &tail_comp,
-            &CompTy::pure(step.clone()),
-            Reason::LinesStepSelf,
-        );
-        step
+        super::builtins::lines_step_ty(&mut self.ctx.unifier)
     }
 
     /// Check a map literal's entries against a per-key `schema`: every value is
@@ -568,20 +543,25 @@ impl Inferencer<'_> {
         super::generalize::generalize(&mut self.ctx.unifier, self.env, &thunk_ty)
     }
 
-    /// Head `name`'s known `PipeSpec`, from its handler scheme when one is in
-    /// scope.  An unknown head — or a scheme that is not a `Return` —
-    /// constrains nothing and gets a fresh `F[μ, ν]`, leaving the byte-channel
-    /// discipline to the pipeline edges.  `reject_handler_for_binding` turns
-    /// lexical bindings and builtins away before any arm reaches here.
+    /// Head `name`'s known `PipeSpec`: from its handler scheme when one is
+    /// in scope, else from a base frame's `Sig`.  A plain native pins to
+    /// nothing — only `^name` reaches an arm under it — and an unknown head
+    /// or non-`Return` scheme gets a fresh `F[μ, ν]`, leaving the
+    /// byte-channel discipline to the pipeline edges.
     fn head_pipe_spec(&mut self, name: &str) -> PipeSpec {
-        let spec = self.env.lookup_handler(name).cloned().and_then(|handler| {
+        if let Some(handler) = self.env.lookup_handler(name).cloned() {
             let cty = self.instantiate_comp(&handler.scheme);
-            match self.alias_arm_body(&cty) {
-                CompTy::Return(spec, _) => Some(spec),
-                _ => None,
+            if let CompTy::Return(spec, _) = self.alias_arm_body(&cty) {
+                return spec;
             }
-        });
-        spec.unwrap_or_else(|| self.ctx.unifier.fresh_spec())
+        }
+        if let Some(entry) = self.env.builtins.get(name)
+            && entry.fixed_arity().is_none()
+            && let super::builtins::BuiltinTypeRule::Sig(sig) = entry.type_rule
+        {
+            return super::builtins::sig_pipe_spec(&sig.result, &mut self.ctx.unifier);
+        }
+        self.ctx.unifier.fresh_spec()
     }
 
     /// Peel an alias arm's leading `Fun` arrows: the calling convention forces
@@ -701,28 +681,6 @@ impl Inferencer<'_> {
         }
     }
 
-    pub(super) fn binding_claims_name(&self, name: &str) -> bool {
-        self.env.lookup_binding(name).is_some() || self.env.builtins.get(name).is_some()
-    }
-
-    pub(super) fn reject_handler_for_binding(&mut self, name: &str, verb: &'static str) -> bool {
-        if !self.binding_claims_name(name) {
-            return false;
-        }
-        let kind = if self.env.builtins.get(name).is_some() {
-            TypeErrorKind::CannotRedefineBuiltin {
-                name: name.to_string(),
-                verb,
-            }
-        } else {
-            TypeErrorKind::HandlerShadowedByBinding {
-                name: name.to_string(),
-            }
-        };
-        self.ctx.diagnose(kind);
-        true
-    }
-
     fn infer_not(&mut self, val: &Val) -> Ty {
         let ty = self.infer_val(val);
         self.ctx.unify_ty(&ty, &Ty::Bool, Reason::NotOperand);
@@ -741,9 +699,10 @@ impl Inferencer<'_> {
     }
 
     fn exec_comp_ty(&mut self, name: &str, args: &crate::ir::Args, external_only: bool) -> CompTy {
-        // Lookup order — binding, builtin, handler, external — with builtins
-        // ahead of aliases and `within [handlers:]` because they are language
-        // names, not user handlers.  A binding hit is final.
+        // Lookup order — binding, native rule, handler, external — mirroring
+        // the runtime's env-first order: a binding hit is final, and a
+        // pristine native reaches here only through the rule table, the
+        // bindings harvest walking user scopes alone.
         if !external_only && let Some(scheme) = self.env.lookup_binding(name).cloned() {
             return self.apply_scheme(&scheme, args);
         }
@@ -751,7 +710,7 @@ impl Inferencer<'_> {
         if !external_only && let Some(entry) = self.env.builtins.get(name) {
             use super::builtins::BuiltinTypeRule;
             match entry.type_rule {
-                BuiltinTypeRule::Scheme(_, factory) => {
+                BuiltinTypeRule::Scheme(factory) => {
                     let scheme = factory(&mut self.ctx.unifier);
                     return self.apply_scheme(&scheme, args);
                 }
@@ -806,11 +765,9 @@ impl Inferencer<'_> {
             let mut alias_already_typed = false;
             match alias_statement_shape(part) {
                 Ok(Some((name, thunk))) => {
-                    if !self.reject_handler_for_binding(name, "alias") {
-                        let scheme = self.handler_comp_scheme(name, thunk);
-                        self.env.bind_handler(name.to_string(), scheme, true);
-                        alias_already_typed = true;
-                    }
+                    let scheme = self.handler_comp_scheme(name, thunk);
+                    self.env.bind_handler(name.to_string(), scheme, true);
+                    alias_already_typed = true;
                 }
                 Err(msg) => {
                     self.ctx

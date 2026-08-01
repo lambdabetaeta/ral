@@ -340,8 +340,8 @@ impl Shell {
     /// `$STATUS`, `$USER`); any other name is `None`.  `$SCRIPT` is not among
     /// them: the elaborator bakes it to a literal from the file it compiles, so
     /// no runtime reader exists.  These are computed, never stored in scope,
-    /// hence [`Self::lookup_value_name`] reaching them after lexical scope and
-    /// before the builtin table.
+    /// hence [`Self::lookup_value_name`] reaching them only after lexical
+    /// scope (natives included) misses.
     pub fn pseudo_var(&self, name: &str) -> Option<Value> {
         match name {
             "ENV" => {
@@ -404,16 +404,14 @@ impl Shell {
     /// Resolve `name` at value position (`$name` and other
     /// [`crate::ir::Val::Variable`] uses).  Binding-only: user aliases and
     /// `within` handlers are operation handlers, not first-class values, so no
-    /// lookup here reaches the handler stack.
+    /// lookup here reaches the handler stack.  A fixed-arity builtin is a
+    /// plain env hit — the native scope entry *is* the value — and a
+    /// variadic/optional one has no value form to find.
     pub fn lookup_value_name(&self, name: &str) -> Option<Value> {
         if let Some(v) = self.mobile.scope.get(name) {
             return Some(v.clone());
         }
-        if let Some(v) = self.pseudo_var(name) {
-            return Some(v);
-        }
-        let entry = self.session.builtins.get(name)?;
-        crate::builtins::synthesize_builtin_value(&entry)
+        self.pseudo_var(name)
     }
 
     /// Set `last_status` from a boolean (`true` → 0, `false` → 1).

@@ -95,14 +95,26 @@ impl Shell {
         self.session.builtins.names()
     }
 
+    /// Every native's name — what a `$name` reference can reach, unlike
+    /// [`Self::builtin_names`], which also lists the base-frame names.
+    pub fn native_names(&self) -> impl Iterator<Item = &str> {
+        self.mobile.scope.native_names()
+    }
+
     /// The test-dressing door, with [`Self::install_captured_builtins`]; a
     /// production host's surface rides [`boot_shell`](crate::boot::boot_shell).
+    /// Installs the manifest set, then seeds the base env scope and base
+    /// handler frames from it.
     pub fn install_builtins(&mut self, entries: &'static [BuiltinEntry]) {
-        self.session.builtins.install_static(entries);
+        if self.session.builtins.install_static(entries) {
+            seed_natives_and_base(self, entries);
+        }
     }
 
     pub fn install_captured_builtins(&mut self, entries: Arc<[BuiltinEntry]>) {
-        self.session.builtins.install_arc(entries);
+        if self.session.builtins.install_arc(entries.clone()) {
+            seed_natives_and_base(self, &entries);
+        }
     }
 
     pub fn lookup_builtin(&self, name: &str) -> Option<BuiltinEntry> {
@@ -437,6 +449,23 @@ impl Shell {
     pub fn grant_depth(&self) -> usize {
         self.mobile.context.grants.len()
     }
+}
+
+/// Partition freshly installed `entries` by [`BuiltinEntry::fixed_arity`]:
+/// fixed arity seeds the base env scope as a native value, variadic/optional
+/// installs as a base handler frame.  The one place either is populated, for
+/// core and host installs alike.
+fn seed_natives_and_base(shell: &mut Shell, entries: &[BuiltinEntry]) {
+    let mut natives = Vec::new();
+    let mut base = Vec::new();
+    for entry in entries {
+        match crate::types::builtin::native_value(entry) {
+            Some(value) => natives.push((entry.name.clone().into_owned(), value)),
+            None => base.push(entry.clone()),
+        }
+    }
+    shell.mobile.scope.install_natives(natives);
+    shell.mobile.context.handlers.install_base(&base);
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@
 
 use crate::types::{Settled, Value, sig, sig_hint};
 
-use super::util::{check_arity, f64_to_i64};
+use super::util::f64_to_i64;
 
 /// The largest `places` for which `10^places` is still finite in `f64`.
 const MAX_PLACES: i64 = 308;
@@ -24,13 +24,11 @@ fn finite_float(name: &str, val: &Value) -> Settled<f64> {
 }
 
 fn to_int(name: &str, args: &[Value], op: fn(f64) -> f64) -> Settled<Value> {
-    check_arity(args, 1, name)?;
     let x = finite_float(name, &args[0])?;
     Ok(Value::Int(f64_to_i64(name, op(x))?))
 }
 
 pub(super) fn builtin_round(args: &[Value]) -> Settled<Value> {
-    check_arity(args, 2, "round")?;
     let x = finite_float("round", &args[0])?;
     let places = match &args[1] {
         Value::Int(n) => *n,

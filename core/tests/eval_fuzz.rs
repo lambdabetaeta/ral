@@ -1470,6 +1470,17 @@ fn echo_side_effect_only() {
     assert_eq!(must_succeed("echo hello world"), Value::Unit);
 }
 
+/// A local binding named `echo` wins at the bare head: env-first, so `echo 5`
+/// applies the bound lambda, never the base frame.  Block-scoped, since the
+/// PATH-shadow vet refuses a session-scope `let` for a PATH-reachable name.
+#[test]
+fn binding_named_echo_wins_at_bare_head() {
+    assert_eq!(
+        must_succeed("return !{ let echo = { |x| return $[$x + 1] }; echo 5 }"),
+        Value::Int(6)
+    );
+}
+
 // ── assert_eq (user-defined, not in prelude) ────────────────────────────
 
 const ASSERT_EQ_DEF: &str = "
@@ -1615,18 +1626,57 @@ fn bare_function_name_in_argument_position_is_literal() {
     must_fail("!{map upper [hello, world]}");
 }
 
+/// A native's derived scheme is uncurried, matching the η-equivalent lambda:
+/// `round : U(Float → Int → F Float)`, so `map $round` puts a 2-ary function
+/// where `map` expects a 1-ary one — ill-typed like `map { |x y| … }`.
+#[test]
+fn map_over_a_2ary_native_is_ill_typed() {
+    must_fail("!{map $round [1.4, 2.6]}");
+}
+
+/// The typed idiom for partial application: `let p = $round 1.4` rethunks
+/// the residual across Bind's value/computation boundary, so
+/// `p : U(Int → F Float)` and `map $p` is the ordinary 1-ary case.
+#[test]
+fn bind_rethunks_a_native_partial_for_map() {
+    assert_eq!(
+        must_succeed("let p = $round 1.4\nreturn !{map $p [0, 2]}"),
+        Value::list(vec![Value::Float(1.0), Value::Float(1.4)])
+    );
+}
+
+/// `$from-json` is a nullary native thunk; forcing it reads the ambient
+/// channel exactly as the bare `from-json` command does — here, a
+/// redirected file.
+#[test]
+fn nullary_native_forced_via_dollar_reads_the_redirected_channel() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("doc.json");
+    std::fs::write(&path, r#"{"y": 7}"#).unwrap();
+    let path_str = path.display().to_string();
+    let result = must_succeed(&format!("!$from-json < '{path_str}'"));
+    match result {
+        Value::Map(m) => assert_eq!(m.get("y").cloned(), Some(Value::Int(7))),
+        other => panic!("expected a Map, got {other:?}"),
+    }
+}
+
 #[test]
 fn return_bare_name_is_literal_even_when_prelude_binds_it() {
     assert_eq!(must_succeed("return upper"), Value::String("upper".into()));
 }
 
+/// `$upper` is a plain env hit on the native — the entry *is* the value.
 #[test]
 fn return_deref_name_is_bound_value() {
     let v = must_succeed("return $upper");
-    assert!(
-        matches!(v, Value::Lambda { .. } | Value::Block { .. }),
-        "expected thunk, got {v:?}"
-    );
+    match v {
+        Value::Native { entry, applied } => {
+            assert_eq!(entry.name, "upper");
+            assert!(applied.is_empty());
+        }
+        other => panic!("expected the native itself, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1637,6 +1687,24 @@ fn return_force_expression() {
         must_succeed("return !{upper hello}"),
         Value::String("HELLO".into())
     );
+}
+
+/// A native lives beneath every user scope: an ordinary `let` shadows it,
+/// and popping that scope restores it — no admission check anywhere.
+#[test]
+fn let_named_after_a_native_shadows_it_and_restores_on_scope_exit() {
+    let result = must_succeed(
+        "let inside = !{ let list-dir = 'shadowed'; return $list-dir }\n\
+         return [inside: $inside, outside: $list-dir]",
+    );
+    assert_eq!(map_field(&result, "inside"), Value::String("shadowed".into()));
+    match map_field(&result, "outside") {
+        Value::Native { entry, applied } => {
+            assert_eq!(entry.name, "list-dir");
+            assert!(applied.is_empty());
+        }
+        other => panic!("expected the native restored after scope exit, got {other:?}"),
+    }
 }
 
 #[test]
@@ -2727,6 +2795,25 @@ fn audit_try_records_try_node_with_body_children() {
         first_command_child(try_node).is_some(),
         "try's body command must be a child of the try node: {:?}",
         children_of(try_node)
+    );
+}
+
+/// `^clear` skips the env and resolves external, to the ncurses binary —
+/// proven through the audit tree, since the binary itself may fail for
+/// environmental reasons (no `TERM`).  `try` keeps the tree on either
+/// outcome.
+#[cfg(unix)]
+#[test]
+fn caret_clear_resolves_external_not_the_native() {
+    let tree = must_succeed("audit { try { ^clear } { |_e| return '' } }");
+    let try_node = children_of(&tree)
+        .into_iter()
+        .find(|c| map_field(c, "cmd") == Value::String("try".into()))
+        .expect("audit tree must contain a `try` scope node");
+    let cmd = first_command_child(&try_node);
+    assert!(
+        matches!(cmd, Some(c) if map_field(c, "cmd") == Value::String("clear".into())),
+        "^clear must record an external command node named `clear`, got {cmd:?}"
     );
 }
 

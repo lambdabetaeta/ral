@@ -45,6 +45,7 @@ pub mod text;
 pub mod transport;
 pub mod typecheck;
 pub mod types;
+pub mod uutils;
 // Public because `WireTransport::adopt` takes a `WireStream` in its own
 // signature: a front-end handing over a booted guest's control plane has to
 // be able to name what it is handing over.

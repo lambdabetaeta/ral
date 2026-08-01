@@ -12,7 +12,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::util::{admits_read, arg0_str, check_arity, checked_read_path};
+use super::util::{admits_read, arg0_str, checked_read_path};
 
 /// Symlink first, so a `symlink_metadata` caller sees the link, not its target.
 fn classify(ft: fs::FileType) -> &'static str {
@@ -47,7 +47,6 @@ fn secs_since_epoch(t: std::io::Result<SystemTime>) -> i64 {
     reason = "[io-door:silent:list-dir] `list-dir` builtin: reads a directory's entries as a stat/listing predicate, gated by `check_fs_read`; not turn-time model data I/O, raises no surface card."
 )]
 pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "list-dir")?;
     let path = checked_read_path(shell, &args[0].to_string())?;
     let dir = path.as_path();
     let mut entries: Vec<(String, Value)> = Vec::new();
@@ -92,7 +91,7 @@ pub(super) fn builtin_temp_file(_args: &[Value], shell: &mut Shell) -> Settled<V
 /// Glob, preserving the pattern's shape: a cwd-relative pattern yields
 /// cwd-relative matches, a sigil-rooted or absolute one absolute matches.
 pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let raw = arg0_str(args, "glob")?;
+    let raw = arg0_str(args)?;
     let expanded = crate::path::sigil::expand_path_prefix(&raw, &shell.mobile.context.home());
     let input_is_cwd_relative = !crate::path::is_absolute(&expanded);
     let pattern = checked_read_path(shell, &raw)?
@@ -181,7 +180,6 @@ fn dir_entry_value(entry: &fs::DirEntry) -> Settled<(String, Value)> {
     reason = "[io-door:silent:file-info] `file-info` builtin: `symlink_metadata`/`read_link` stat a path and read a symlink target as a metadata predicate, gated by `check_fs_read`; not turn-time model data I/O, raises no surface card."
 )]
 pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "file-info")?;
     let resolved = checked_read_path(shell, &args[0].to_string())?;
     let path = resolved.as_path();
     let meta = fs::symlink_metadata(path).map_err(|e| io_err("file-info", path, &e))?;
@@ -230,7 +228,6 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
 }
 
 pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "resolve-path")?;
     let s = args[0].to_string();
     let resolved = checked_read_path(shell, &s)?
         .canonicalise_strict()
@@ -242,7 +239,6 @@ pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled
 /// `canonicalise_strict`, so symlinks stand and the path need not exist —
 /// and no `check_fs_read`, since that gate guards a stat this never does.
 pub(super) fn builtin_absolute_path(args: &[Value], shell: &Shell) -> Settled<Value> {
-    check_arity(args, 1, "absolute-path")?;
     let resolved = shell.resolve(&args[0].to_string());
     Ok(Value::String(
         resolved.as_path().to_string_lossy().into_owned(),
@@ -254,11 +250,9 @@ pub(super) fn builtin_absolute_path(args: &[Value], shell: &Shell) -> Settled<Va
 fn fs_probe_with(
     args: &[Value],
     shell: &mut Shell,
-    name: &str,
     read_meta: impl FnOnce(&Path) -> std::io::Result<fs::Metadata>,
     probe: impl FnOnce(Option<fs::Metadata>) -> bool,
 ) -> Settled<Value> {
-    check_arity(args, 1, name)?;
     let rp = checked_read_path(shell, &args[0].to_string())?;
     let meta = read_meta(rp.as_path()).ok();
     let r = probe(meta);
@@ -274,10 +268,9 @@ fn fs_probe_with(
 fn fs_probe(
     args: &[Value],
     shell: &mut Shell,
-    name: &str,
     probe: impl FnOnce(Option<fs::Metadata>) -> bool,
 ) -> Settled<Value> {
-    fs_probe_with(args, shell, name, |p| fs::symlink_metadata(p), probe)
+    fs_probe_with(args, shell, |p| fs::symlink_metadata(p), probe)
 }
 
 /// Follows, as `test -f` / `test -d` / `test -r` do: a link to a file is
@@ -289,34 +282,31 @@ fn fs_probe(
 fn fs_probe_follow(
     args: &[Value],
     shell: &mut Shell,
-    name: &str,
     probe: impl FnOnce(Option<fs::Metadata>) -> bool,
 ) -> Settled<Value> {
-    fs_probe_with(args, shell, name, |p| fs::metadata(p), probe)
+    fs_probe_with(args, shell, |p| fs::metadata(p), probe)
 }
 
 pub(super) fn builtin_exists(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe(args, shell, "exists", |m| m.is_some())
+    fs_probe(args, shell, |m| m.is_some())
 }
 
 pub(super) fn builtin_is_file(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe_follow(args, shell, "is-file", |m| m.is_some_and(|m| m.is_file()))
+    fs_probe_follow(args, shell, |m| m.is_some_and(|m| m.is_file()))
 }
 
 pub(super) fn builtin_is_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe_follow(args, shell, "is-dir", |m| m.is_some_and(|m| m.is_dir()))
+    fs_probe_follow(args, shell, |m| m.is_some_and(|m| m.is_dir()))
 }
 
 pub(super) fn builtin_is_link(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe(args, shell, "is-link", |m| {
-        m.is_some_and(|m| m.file_type().is_symlink())
-    })
+    fs_probe(args, shell, |m| m.is_some_and(|m| m.file_type().is_symlink()))
 }
 
 pub(super) fn builtin_is_readable(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     // Exact on Windows, where `readonly` governs writes alone; on Unix an
     // approximation of `test -r`, the truth needing uid/gid/acl logic.
-    fs_probe_follow(args, shell, "is-readable", |m| m.is_some())
+    fs_probe_follow(args, shell, |m| m.is_some())
 }
 
 /// [`fs_probe_with`] for predicates whose honest answer needs the path
@@ -324,10 +314,8 @@ pub(super) fn builtin_is_readable(args: &[Value], shell: &mut Shell) -> Settled<
 fn fs_probe_path(
     args: &[Value],
     shell: &mut Shell,
-    name: &str,
     probe: impl FnOnce(&Path) -> bool,
 ) -> Settled<Value> {
-    check_arity(args, 1, name)?;
     let rp = checked_read_path(shell, &args[0].to_string())?;
     let r = probe(rp.as_path());
     shell.set_status_from_bool(r);
@@ -352,5 +340,5 @@ fn is_writable_path(path: &Path) -> bool {
 }
 
 pub(super) fn builtin_is_writable(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe_path(args, shell, "is-writable", is_writable_path)
+    fs_probe_path(args, shell, is_writable_path)
 }

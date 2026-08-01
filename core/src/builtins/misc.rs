@@ -78,13 +78,9 @@ pub(super) fn builtin_fail(args: &[Value]) -> Break {
 }
 
 pub(super) fn builtin_exit(args: &[Value], _env: &mut Shell) -> Settled<Value> {
-    if args.len() > 1 {
-        return Err(sig("exit accepts at most 1 argument"));
-    }
-    let code = match args.first() {
-        None => 0,
-        Some(Value::Int(n)) => status_i32("exit", *n)?,
-        Some(v) => v
+    let code = match &args[0] {
+        Value::Int(n) => status_i32("exit", *n)?,
+        v => v
             .to_string()
             .parse::<i32>()
             .map_err(|_| sig("exit: status must be an integer"))?,

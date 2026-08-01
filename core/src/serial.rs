@@ -9,7 +9,7 @@
 //! than unfolding into an exponential tree.
 
 use crate::ir::Comp;
-use crate::types::{Binding, Env, Error, Value};
+use crate::types::{Binding, BuiltinTable, Env, Error, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -78,6 +78,7 @@ pub enum NoExt {}
 pub enum Closure {
     Lambda(SerialLambda),
     Block(SerialThunk),
+    Native(SerialNative),
 }
 
 /// [`FOValue`] with closures, for the re-exec'd child IPC.  A `Handle` has no
@@ -95,6 +96,15 @@ pub struct SerialLambda {
 pub struct SerialThunk {
     pub body: Arc<Comp>,
     pub captured: SerialEnvSnapshot,
+}
+
+/// Wire mirror of a [`Value::Native`](crate::types::Value::Native): the body
+/// cannot cross, so hydration re-links the name against the receiving
+/// shell's manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SerialNative {
+    pub name: std::string::String,
+    pub applied: Vec<SerialValue>,
 }
 
 /// An [`Env`] in wire form: one [`ScopeTable`] index per scope, resolved
@@ -189,6 +199,7 @@ fn value_carries_handle(value: &Value) -> bool {
         Value::Variant {
             payload: Some(p), ..
         } => value_carries_handle(p),
+        Value::Native { applied, .. } => applied.iter().any(value_carries_handle),
         Value::Variant { payload: None, .. }
         | Value::Lambda { .. }
         | Value::Block { .. }
@@ -207,10 +218,13 @@ pub type ScopeArcs = Vec<Option<Arc<HashMap<String, Binding>>>>;
 /// Rebuild one `Arc<HashMap>` per scope table row, each once its dependencies
 /// are built.
 ///
+/// `manifest` is what a captured [`Value::Native`](crate::types::Value::Native)
+/// re-links its name against.
+///
 /// # Errors
 /// A scope reference out of range or unresolved, a binding that fails to
 /// decode, or a cycle — a pass in which no scope makes progress.
-pub fn build_arcs(scope_table: &ScopeTable) -> Result<ScopeArcs, Error> {
+pub fn build_arcs(scope_table: &ScopeTable, manifest: &BuiltinTable) -> Result<ScopeArcs, Error> {
     let n = scope_table.len();
     let mut arcs: ScopeArcs = vec![None; n];
     let deps: Vec<HashSet<u32>> = scope_table
@@ -248,7 +262,7 @@ pub fn build_arcs(scope_table: &ScopeTable) -> Result<ScopeArcs, Error> {
                 entries.insert(
                     k.clone(),
                     Binding {
-                        value: b.value.clone().into_runtime(&arcs)?,
+                        value: b.value.clone().into_runtime(&arcs, manifest)?,
                         scheme: b.scheme.clone(),
                     },
                 );
@@ -276,6 +290,11 @@ fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
         SerialValue::Ext(Closure::Block(t)) => {
             for id in &t.captured.scopes {
                 out.insert(*id);
+            }
+        }
+        SerialValue::Ext(Closure::Native(n)) => {
+            for v in &n.applied {
+                collect_scope_deps(v, out);
             }
         }
         SerialValue::List { items } => {
@@ -351,6 +370,13 @@ impl FOValue<Closure> {
                 body: Arc::clone(body),
                 captured: SerialEnvSnapshot::from_runtime(captured, ctx)?,
             })),
+            Value::Native { entry, applied } => Self::Ext(Closure::Native(SerialNative {
+                name: entry.name.as_ref().to_string(),
+                applied: applied
+                    .iter()
+                    .map(|v| Self::from_runtime(v, ctx))
+                    .collect::<Result<_, _>>()?,
+            })),
             Value::Handle(_) => {
                 // A handle names a worker thread in this process, and no
                 // receiver can join a thread in another address space.
@@ -363,12 +389,14 @@ impl FOValue<Closure> {
     }
 
     /// Decode back into a runtime [`Value`], resolving captured environments
-    /// against `arcs`.
+    /// against `arcs` and a captured [`Value::Native`](crate::types::Value::Native)'s
+    /// name against `manifest`.
     ///
     /// # Errors
-    /// A nested value fails to decode, or a captured environment names a scope
-    /// id out of range or unresolved in `arcs`.
-    pub fn into_runtime(self, arcs: &ScopeArcs) -> Result<Value, Error> {
+    /// A nested value fails to decode, a captured environment names a scope id
+    /// out of range or unresolved in `arcs`, or a native's name is unknown to
+    /// `manifest`.
+    pub fn into_runtime(self, arcs: &ScopeArcs, manifest: &BuiltinTable) -> Result<Value, Error> {
         Ok(match self {
             Self::Unit => Value::Unit,
             Self::Bool { value } => Value::Bool(value),
@@ -379,31 +407,47 @@ impl FOValue<Closure> {
             Self::List { items } => Value::list(
                 items
                     .into_iter()
-                    .map(|v| v.into_runtime(arcs))
+                    .map(|v| v.into_runtime(arcs, manifest))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             Self::Map { entries } => Value::Map(
                 entries
                     .into_iter()
-                    .map(|(k, v)| Ok((k, v.into_runtime(arcs)?)))
+                    .map(|(k, v)| Ok((k, v.into_runtime(arcs, manifest)?)))
                     .collect::<Result<_, Error>>()?,
             ),
             Self::Variant { label, payload } => Value::Variant {
                 label,
                 payload: match payload {
-                    Some(p) => Some(Box::new((*p).into_runtime(arcs)?)),
+                    Some(p) => Some(Box::new((*p).into_runtime(arcs, manifest)?)),
                     None => None,
                 },
             },
             Self::Ext(Closure::Lambda(lam)) => Value::Lambda {
                 param: lam.param,
                 body: lam.body,
-                captured: Arc::new(lam.captured.into_runtime(arcs)?),
+                captured: Arc::new(lam.captured.into_runtime(arcs, manifest)?),
             },
             Self::Ext(Closure::Block(thunk)) => Value::Block {
                 body: thunk.body,
-                captured: Arc::new(thunk.captured.into_runtime(arcs)?),
+                captured: Arc::new(thunk.captured.into_runtime(arcs, manifest)?),
             },
+            Self::Ext(Closure::Native(n)) => {
+                let entry = manifest.get(&n.name).ok_or_else(|| {
+                    Error::new(
+                        format!("serial: unknown native '{}' in receiving manifest", n.name),
+                        1,
+                    )
+                })?;
+                Value::Native {
+                    entry: Arc::new(entry),
+                    applied: n
+                        .applied
+                        .into_iter()
+                        .map(|v| v.into_runtime(arcs, manifest))
+                        .collect::<Result<_, _>>()?,
+                }
+            }
         })
     }
 }
@@ -437,7 +481,7 @@ impl TryFrom<&Value> for FOValue {
                     None => None,
                 },
             },
-            Value::Lambda { .. } | Value::Block { .. } | Value::Handle(_) => {
+            Value::Lambda { .. } | Value::Block { .. } | Value::Native { .. } | Value::Handle(_) => {
                 return Err(Error::new(
                     "value is not first-order: the host seam carries only data, \
                      not closures or handles",
@@ -489,11 +533,13 @@ impl SerialEnvSnapshot {
         Ok(Self { scopes })
     }
 
-    /// Rebuild an [`Env`] from this snapshot's scope ids against `arcs`.
+    /// Rebuild an [`Env`] from this snapshot's scope ids against `arcs`;
+    /// `manifest` seeds its base native scope ([`BuiltinTable::natives_arc`]),
+    /// since natives never ride the wire.
     ///
     /// # Errors
     /// A recorded scope id is out of range or unresolved in `arcs`.
-    pub fn into_runtime(self, arcs: &ScopeArcs) -> Result<Env, Error> {
+    pub fn into_runtime(self, arcs: &ScopeArcs, manifest: &BuiltinTable) -> Result<Env, Error> {
         let scopes = self
             .scopes
             .into_iter()
@@ -508,7 +554,7 @@ impl SerialEnvSnapshot {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Env::from_scope_iter(scopes))
+        Ok(Env::from_scope_iter(scopes, manifest.natives_arc()))
     }
 }
 
@@ -631,7 +677,8 @@ mod tests {
                 scheme: None,
             },
         )]];
-        let err = build_arcs(&table).expect_err("out-of-range ref must fail the build");
+        let err = build_arcs(&table, &crate::builtins::core_builtin_table())
+            .expect_err("out-of-range ref must fail the build");
         assert_eq!(
             err.message,
             "serial: scope ref 5 out of range or unresolved"
@@ -665,7 +712,8 @@ mod tests {
         ]);
         let mut ctx = InternCtx::new();
         let ipc = SerialValue::from_runtime(&value, &mut ctx).expect("to serial");
-        let arcs = build_arcs(&ctx.scope_table).expect("build arcs");
-        assert_eq!(ipc.into_runtime(&arcs).expect("from serial"), value);
+        let manifest = crate::builtins::core_builtin_table();
+        let arcs = build_arcs(&ctx.scope_table, &manifest).expect("build arcs");
+        assert_eq!(ipc.into_runtime(&arcs, &manifest).expect("from serial"), value);
     }
 }

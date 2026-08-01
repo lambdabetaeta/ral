@@ -354,7 +354,6 @@ fn worker_body(
 
 /// `spawn <thunk>` -- spawn a concurrent block on a worker thread, return a handle.
 pub(crate) fn builtin_spawn(args: &[Value], mooring: &Mooring, shell: &Shell) -> Settled<Value> {
-    check_arity(args, 1, "spawn")?;
     let (body, captured) = expect_thunk(&args[0], "spawn")?;
     spawn_buffered(body, captured, mooring, shell)
 }
@@ -393,7 +392,6 @@ pub(super) fn builtin_watch(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    check_arity(args, 2, "watch")?;
     let label = match &args[0] {
         Value::String(s) => s.clone(),
         other => {
@@ -466,7 +464,6 @@ pub(super) fn builtin_service(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    check_arity(args, 2, "service")?;
     let desc = one_line_desc(&args[0], "service")?;
     let (body, captured) = expect_thunk(&args[1], "service")?;
     Ok(Value::Handle(spawn_child(
@@ -515,7 +512,6 @@ fn stop_handle(handle: &HandleInner) {
 
 /// `cancel <handle>` -- mark a running concurrent block as cancelled.
 pub(super) fn builtin_cancel(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "cancel")?;
     let handle = expect_handle(&args[0], "cancel")?;
     stop_handle(handle);
     shell.local.workers.remove(handle);
@@ -653,7 +649,6 @@ pub(super) fn builtin_await(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    check_arity(args, 1, "await")?;
     let handle = expect_handle(&args[0], "await")?;
     await_handle(handle, mooring, shell)
 }
@@ -672,7 +667,6 @@ pub(super) fn builtin_await(
 /// reported as data, not re-raised, so a successful `poll` leaves `$status` at
 /// 0 whatever the block's own status — that lives in `outcome.err.status`.
 pub(super) fn builtin_poll(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "poll")?;
     let handle = expect_handle(&args[0], "poll")?;
     ensure_live(handle, shell)?;
     // Both arms are observations, so the touch lands once at entry, before the
@@ -1650,14 +1644,15 @@ mod tests {
         assert_eq!(catch_all, Value::String("my-server".into()));
     }
 
-    /// A builtin head is refused: there is no process image to detach.
+    /// A base frame's name runs the frame in place of a birth: `cd` moves
+    /// the shell's cwd instead of naming a process image.
     #[cfg(unix)]
     #[test]
-    fn detach_refuses_a_builtin_head() {
-        let mut shell = detach_test_shell(4);
-        let err = run_source(&mut shell, r#"detach "a server" cd /tmp"#)
-            .expect_err("a builtin names no exec image");
-        assert!(format!("{err:?}").contains("builtin"));
+    fn detach_reaches_cds_base_frame_instead_of_spawning_it() {
+        let mut shell = detach_test_shell(0);
+        run_source(&mut shell, r#"detach "a server" cd /tmp"#)
+            .expect("a base frame's name runs the frame, not a birth");
+        assert_eq!(shell.cwd(), std::path::Path::new("/tmp"));
     }
 
     /// Vetting is reused wholesale, so an unresolvable head gives the usual 127.

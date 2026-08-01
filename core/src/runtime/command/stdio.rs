@@ -65,7 +65,7 @@ impl StdinRoute {
 /// to right: `2>&1 2>/dev/null` silences, the reverse does not.
 ///
 /// Stdin is deliberately absent — `<file` is opened upstream into
-/// `shell.io.stdin` by `redirect::install_stdin_redirect`, so builtin,
+/// `shell.io.stdin` by `redirect::install_stdin_redirect`, so a native,
 /// external and pipeline stage all read through the same `Source`.
 pub(crate) struct RedirectPlan {
     pub(crate) stdout_file: Option<(String, RedirectMode)>,

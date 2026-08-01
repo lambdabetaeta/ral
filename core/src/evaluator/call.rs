@@ -78,7 +78,7 @@ fn eval_app(
         "App with empty args reached the evaluator"
     );
     match name {
-        Value::Lambda { .. } | Value::Block { .. } if tail == Tail::Yes => {
+        Value::Lambda { .. } | Value::Block { .. } | Value::Native { .. } if tail == Tail::Yes => {
             Err(TailCall { callee: name, args }.into())
         }
         _ => apply(name, args, mooring, shell).map_err(Into::into),

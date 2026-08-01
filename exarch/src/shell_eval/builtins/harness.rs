@@ -10,7 +10,6 @@
 //! answers every class on the other side.
 
 use crate::fleet::schedule::{CronSchedule, parse_duration};
-use ral_core::builtins::util::check_arity;
 use ral_core::serial::FOValue;
 use ral_core::typecheck::builtins::{
     BuiltinTypeRule, closed_record, fun, mk_scheme as scheme, pure, thunk,
@@ -176,7 +175,6 @@ fn spawn_receipt(answer: FOValue) -> Settled<Value> {
 /// `else` arms below are unreachable through the type checker; they stay
 /// didactic rather than trust it alone.
 fn builtin_agent(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "agent")?;
     let Value::Map(spec) = &args[0] else {
         return Err(sig(format!(
             "agent: expected a [prompt: …, name: …, type: …, grant: …, search: …] record, got {}",
@@ -281,7 +279,6 @@ fn builtin_agents(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Sett
 /// `message <name> <text>` — enquires `` `message ``; name resolution,
 /// descendant-scoping, and delivery errors all belong to the desk.
 fn builtin_message(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 2, "message")?;
     let name = args[0].to_string();
     let text = args[1].to_string();
     shell.enquire(
@@ -302,7 +299,6 @@ fn builtin_message(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Sett
 /// `agent-cancel <name>` — enquires `` `agent-cancel ``; resolution and
 /// descendant-scoping are the desk's.
 fn builtin_agent_cancel(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "agent-cancel")?;
     let name = args[0].to_string();
     shell.enquire(
         mooring,
@@ -331,7 +327,6 @@ fn schedule_receipt(answer: FOValue) -> Settled<Value> {
 /// The self-wakeup grant, label uniqueness, and the reserved `sched-<n>`
 /// namespace are refusals the desk and the schedule registry own.
 fn builtin_schedule(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "schedule")?;
     let Value::Map(spec) = &args[0] else {
         return Err(sig(format!(
             "schedule: expected a [trigger: …, label: …, prompt: …] record, got {}",
@@ -394,7 +389,6 @@ fn builtin_schedules(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
 /// `unschedule <label>` — enquires `` `unschedule ``; resolution (the
 /// unknown label is a no-op) and the grant refusal are the desk's.
 fn builtin_unschedule(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "unschedule")?;
     let label = args[0].to_string();
     shell.enquire(
         mooring,
@@ -412,7 +406,6 @@ fn builtin_unschedule(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
 /// so a non-first-order value fails this call alone and leaves the session
 /// running; the refusal for a non-returning agent is the desk's.
 fn builtin_reply(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "reply")?;
     let payload = FOValue::try_from(&args[0]).map_err(|_| {
         sig(
             "reply: the value must be first-order data — no closures, handles, or \
@@ -554,56 +547,59 @@ fn scheme_reply(u: &mut Unifier) -> Scheme {
     scheme(&[av], &[], &[], thunk(fun(Ty::Var(av), pure(Ty::Unit))))
 }
 
-pub static HARNESS_BUILTINS: &[BuiltinEntry] = &[
-    BuiltinEntry {
-        name: Cow::Borrowed("agent"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_agent),
-        doc: "agent [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>]  — launch a sub-agent. Launch-only and always asynchronous: returns immediately with a receipt [name: Str, log-dir: Str]; the child's reply is NOT this call's result — it arrives later, as its own marked item in your inbox. `type` selects the child's memory: `amnemon starts blank (no shared history, only a value-snapshot of your shell's bindings/cwd/env); `mnemon inherits your current model-visible conversation and reuses your provider selection for cache locality, receiving `prompt` as its fresh final prompt. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `minimal (working tree + /tmp + network), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all six. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth. Answered only on the run that calls it: inside spawn { … } this errors.",
-        body: BuiltinBody::Static(builtin_agent),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("agents"),
-        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_agents),
-        doc: "agents  — list the live descendants you started that are still running: [[name: Str, elapsed-s: Int, log-dir: Str]]. Use it to recover names after a context compaction, then agent-cancel to stop a straggler. Settled agents are not listed — their replies arrive on their own as marked items in your inbox. Answered only on the run that calls it: inside spawn { … } this errors.",
-        body: BuiltinBody::Static(builtin_agents),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("message"),
-        type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_message),
-        doc: "message <name> <text>  — send `text` as a marked item to the live descendant named `name` (from agents or a spawn receipt); it lands at its next exchange boundary, not as human input. Only a descendant of yours may receive it — never a sibling, an ancestor, or yourself; refused otherwise. Does not return the recipient's answer — coordination only. Answered only on the run that calls it: inside spawn { … } this errors.",
-        body: BuiltinBody::Static(builtin_message),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("agent-cancel"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_agent_cancel),
-        doc: "agent-cancel <name>  — cancel the live descendant named `name` (from agents). It is asked to stop at its next checkpoint and then delivers a cancelled result to your inbox; a no-op if no live agent bears that name. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. Answered only on the run that calls it: inside spawn { … } this errors.",
-        body: BuiltinBody::Static(builtin_agent_cancel),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("schedule"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_schedule),
-        doc: "schedule <spec>  — arm a self-wakeup: at the chosen time a marked item carrying the spec's `prompt` is delivered to your inbox and re-engages you at your next exchange boundary, with no human present. `spec` is a record with exactly three fields: trigger, label, prompt. `trigger` is exactly one of `cron '<expr>'` — a five-field cron expression (minute hour day-of-month month day-of-week) in the host's local timezone, e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00; recurring — or `after '<n><unit>'` — a one-shot relative delay, unit one of s/m/h/d, e.g. `after '30m'`, `after '2h'`; any other shape is refused, naming both. `label` is `some '<name>'` to name the wakeup — the label is its identity: it must not be borne by another live schedule, and the sched-<n> form is reserved for defaults — or `none` to take the default sched-<n>; any other shape is refused, naming both. `prompt` is the natural-language instruction you act on when woken, not code — e.g. schedule [trigger: `after '30m', label: `none, prompt: 'check the build']. Returns a receipt [label: Str, next-s: Int] — next-s is the seconds until the first fire; read it back to catch a cron expression that parsed but does not mean what you meant. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant this call is refused. Answered only on the run that calls it: inside spawn { … } this errors.",
-        body: BuiltinBody::Static(builtin_schedule),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("schedules"),
-        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_schedules),
-        doc: "schedules  — list your live scheduled wakeups: [[label: Str, trigger: Str, next-s: Int, fires: Int]] — next-s the seconds until the next fire, fires how many times it has fired so far. Use it to recover labels after a context compaction, then unschedule to remove one. Requires the self-wakeup grant (--allow-schedule) and is refused without it. Answered only on the run that calls it: inside spawn { … } this errors.",
-        body: BuiltinBody::Static(builtin_schedules),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("unschedule"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_unschedule),
-        doc: "unschedule <label>  — remove a scheduled wakeup by its label (from schedules or a schedule receipt). A no-op if no live schedule bears that label. Requires the self-wakeup grant (--allow-schedule) and is refused without it. Answered only on the run that calls it: inside spawn { … } this errors.",
-        body: BuiltinBody::Static(builtin_unschedule),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("reply"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_reply),
-        doc: "reply <value>  — hand `value` back to whoever spawned you: the sole return path for a returning agent. Your parent receives exactly this value, nothing else — not your reasoning, your shell bindings, or any prose you streamed along the way. `value` must be first-order data: no closures, handles, or environments; passing one fails this call with a didactic error and your run continues, so fix the value and call reply again. Call it more than once in an exchange and the last call wins — an earlier value is discarded, not appended. The run does not end at this call: it ends once the enclosing ral call's whole batch of statements finishes draining, so write reply last and let earlier statements in the same script run to completion first. A non-finite Float (NaN, +Infinity, -Infinity) reaches your parent as the string \"NaN\"/\"Infinity\"/\"-Infinity\" — JSON, which the value eventually crosses into, has no such numbers. Refused on the interactive trunk and every /branch child: they converse with the user turn after turn and never return, so they hold no obligation to call this. Answered only on the run that calls it: inside spawn { … } this errors.",
-        body: BuiltinBody::Static(builtin_reply),
-    },
+// A named array, not a promoted temporary: rustc refuses promotion once an
+// entry carries `BuiltinEntry`'s interior-mutable arity cache.
+static HARNESS_BUILTINS_ARR: [BuiltinEntry; 8] = [
+    BuiltinEntry::new(
+    Cow::Borrowed("agent"),
+    BuiltinTypeRule::Scheme(scheme_agent),
+    "agent [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>]  — launch a sub-agent. Launch-only and always asynchronous: returns immediately with a receipt [name: Str, log-dir: Str]; the child's reply is NOT this call's result — it arrives later, as its own marked item in your inbox. `type` selects the child's memory: `amnemon starts blank (no shared history, only a value-snapshot of your shell's bindings/cwd/env); `mnemon inherits your current model-visible conversation and reuses your provider selection for cache locality, receiving `prompt` as its fresh final prompt. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `minimal (working tree + /tmp + network), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all six. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth. Answered only on the run that calls it: inside spawn { … } this errors.",
+    BuiltinBody::Static(builtin_agent),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("agents"),
+    BuiltinTypeRule::Scheme(scheme_agents),
+    "agents  — list the live descendants you started that are still running: [[name: Str, elapsed-s: Int, log-dir: Str]]. Use it to recover names after a context compaction, then agent-cancel to stop a straggler. Settled agents are not listed — their replies arrive on their own as marked items in your inbox. Answered only on the run that calls it: inside spawn { … } this errors.",
+    BuiltinBody::Static(builtin_agents),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("message"),
+    BuiltinTypeRule::Scheme(scheme_message),
+    "message <name> <text>  — send `text` as a marked item to the live descendant named `name` (from agents or a spawn receipt); it lands at its next exchange boundary, not as human input. Only a descendant of yours may receive it — never a sibling, an ancestor, or yourself; refused otherwise. Does not return the recipient's answer — coordination only. Answered only on the run that calls it: inside spawn { … } this errors.",
+    BuiltinBody::Static(builtin_message),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("agent-cancel"),
+    BuiltinTypeRule::Scheme(scheme_agent_cancel),
+    "agent-cancel <name>  — cancel the live descendant named `name` (from agents). It is asked to stop at its next checkpoint and then delivers a cancelled result to your inbox; a no-op if no live agent bears that name. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. Answered only on the run that calls it: inside spawn { … } this errors.",
+    BuiltinBody::Static(builtin_agent_cancel),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("schedule"),
+    BuiltinTypeRule::Scheme(scheme_schedule),
+    "schedule <spec>  — arm a self-wakeup: at the chosen time a marked item carrying the spec's `prompt` is delivered to your inbox and re-engages you at your next exchange boundary, with no human present. `spec` is a record with exactly three fields: trigger, label, prompt. `trigger` is exactly one of `cron '<expr>'` — a five-field cron expression (minute hour day-of-month month day-of-week) in the host's local timezone, e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00; recurring — or `after '<n><unit>'` — a one-shot relative delay, unit one of s/m/h/d, e.g. `after '30m'`, `after '2h'`; any other shape is refused, naming both. `label` is `some '<name>'` to name the wakeup — the label is its identity: it must not be borne by another live schedule, and the sched-<n> form is reserved for defaults — or `none` to take the default sched-<n>; any other shape is refused, naming both. `prompt` is the natural-language instruction you act on when woken, not code — e.g. schedule [trigger: `after '30m', label: `none, prompt: 'check the build']. Returns a receipt [label: Str, next-s: Int] — next-s is the seconds until the first fire; read it back to catch a cron expression that parsed but does not mean what you meant. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant this call is refused. Answered only on the run that calls it: inside spawn { … } this errors.",
+    BuiltinBody::Static(builtin_schedule),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("schedules"),
+    BuiltinTypeRule::Scheme(scheme_schedules),
+    "schedules  — list your live scheduled wakeups: [[label: Str, trigger: Str, next-s: Int, fires: Int]] — next-s the seconds until the next fire, fires how many times it has fired so far. Use it to recover labels after a context compaction, then unschedule to remove one. Requires the self-wakeup grant (--allow-schedule) and is refused without it. Answered only on the run that calls it: inside spawn { … } this errors.",
+    BuiltinBody::Static(builtin_schedules),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("unschedule"),
+    BuiltinTypeRule::Scheme(scheme_unschedule),
+    "unschedule <label>  — remove a scheduled wakeup by its label (from schedules or a schedule receipt). A no-op if no live schedule bears that label. Requires the self-wakeup grant (--allow-schedule) and is refused without it. Answered only on the run that calls it: inside spawn { … } this errors.",
+    BuiltinBody::Static(builtin_unschedule),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("reply"),
+    BuiltinTypeRule::Scheme(scheme_reply),
+    "reply <value>  — hand `value` back to whoever spawned you: the sole return path for a returning agent. Your parent receives exactly this value, nothing else — not your reasoning, your shell bindings, or any prose you streamed along the way. `value` must be first-order data: no closures, handles, or environments; passing one fails this call with a didactic error and your run continues, so fix the value and call reply again. Call it more than once in an exchange and the last call wins — an earlier value is discarded, not appended. The run does not end at this call: it ends once the enclosing ral call's whole batch of statements finishes draining, so write reply last and let earlier statements in the same script run to completion first. A non-finite Float (NaN, +Infinity, -Infinity) reaches your parent as the string \"NaN\"/\"Infinity\"/\"-Infinity\" — JSON, which the value eventually crosses into, has no such numbers. Refused on the interactive trunk and every /branch child: they converse with the user turn after turn and never return, so they hold no obligation to call this. Answered only on the run that calls it: inside spawn { … } this errors.",
+    BuiltinBody::Static(builtin_reply),
+),
 ];
+pub static HARNESS_BUILTINS: &[BuiltinEntry] = &HARNESS_BUILTINS_ARR;
 
 #[cfg(test)]
 #[allow(

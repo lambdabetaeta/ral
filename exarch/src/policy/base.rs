@@ -76,7 +76,7 @@ fn drop_dead_exec_grants(caps: &mut Capabilities, unix_available: bool) {
     }
     if let Some(exec) = caps.exec.as_mut() {
         exec.literals.retain(|name, _| {
-            !ral_core::builtins::uutils::COREUTILS_UNIX_ONLY_TOOLS.contains(&name.as_str())
+            !ral_core::uutils::COREUTILS_UNIX_ONLY_TOOLS.contains(&name.as_str())
         });
     }
 }
@@ -681,7 +681,7 @@ mod tests {
         drop_dead_exec_grants(&mut caps, false);
 
         let exec = caps.exec.as_ref().expect("reasonable declares exec");
-        for dead in ral_core::builtins::uutils::COREUTILS_UNIX_ONLY_TOOLS {
+        for dead in ral_core::uutils::COREUTILS_UNIX_ONLY_TOOLS {
             assert!(
                 !exec.literals.contains_key(*dead),
                 "'{dead}' should be dropped when the platform can't bundle it"

@@ -11,8 +11,8 @@
 use crate::serial::{InternCtx, ScopeArcs, SerialEnvSnapshot, SerialValue};
 use crate::typecheck;
 use crate::types::{
-    Context, ControlState, Error, GrantStack, HandlerEntry, HandlerFrame, HandlerStack, Mobile,
-    Shell,
+    BuiltinTable, Context, ControlState, Error, GrantStack, HandlerEntry, HandlerFrame,
+    HandlerStack, Mobile, Shell,
 };
 use serde::{Deserialize, Serialize};
 
@@ -52,12 +52,12 @@ impl WireHandlerFrame {
         })
     }
 
-    fn into_runtime(self, arcs: &ScopeArcs) -> Result<HandlerFrame, Error> {
+    fn into_runtime(self, arcs: &ScopeArcs, manifest: &BuiltinTable) -> Result<HandlerFrame, Error> {
         let entries = self
             .entries
             .into_iter()
             .map(|(name, value, scheme)| {
-                value.into_runtime(arcs).map(|v| {
+                value.into_runtime(arcs, manifest).map(|v| {
                     let mut entry = HandlerEntry::ral_per_name(name, v);
                     entry.scheme = scheme;
                     entry
@@ -67,7 +67,10 @@ impl WireHandlerFrame {
         // Sentinel: `HandlerStack::from(Vec<HandlerFrame>)` mints the handle.
         Ok(HandlerFrame {
             entries,
-            catch_all: self.catch_all.map(|v| v.into_runtime(arcs)).transpose()?,
+            catch_all: self
+                .catch_all
+                .map(|v| v.into_runtime(arcs, manifest))
+                .transpose()?,
             handle: crate::types::FrameHandle(u64::MAX),
             removable_by_unalias: self.removable_by_unalias,
         })
@@ -144,11 +147,15 @@ impl WireMobile {
     }
 
     /// `arcs` is what `build_arcs` produces from the envelope's scope table.
-    pub(crate) fn into_runtime(self, arcs: &ScopeArcs) -> Result<Mobile, Error> {
+    pub(crate) fn into_runtime(
+        self,
+        arcs: &ScopeArcs,
+        manifest: &BuiltinTable,
+    ) -> Result<Mobile, Error> {
         Ok(Mobile {
-            scope: self.scope.into_runtime(arcs)?,
+            scope: self.scope.into_runtime(arcs, manifest)?,
             control: self.control.into_runtime(),
-            context: self.context.into_runtime(arcs)?,
+            context: self.context.into_runtime(arcs, manifest)?,
         })
     }
 }
@@ -171,11 +178,15 @@ impl WireContext {
         })
     }
 
-    pub(crate) fn into_runtime(self, arcs: &ScopeArcs) -> Result<Context, Error> {
+    pub(crate) fn into_runtime(
+        self,
+        arcs: &ScopeArcs,
+        manifest: &BuiltinTable,
+    ) -> Result<Context, Error> {
         let handlers: Vec<HandlerFrame> = self
             .handlers
             .into_iter()
-            .map(|frame| frame.into_runtime(arcs))
+            .map(|frame| frame.into_runtime(arcs, manifest))
             .collect::<Result<_, _>>()?;
         Ok(Context::from_wire(
             self.env_overrides,
@@ -201,7 +212,7 @@ pub(crate) fn install_shell_mobile(
     shell: &mut Shell,
     arcs: &ScopeArcs,
 ) -> Result<(), Error> {
-    let mut mobile = state.into_runtime(arcs)?;
+    let mut mobile = state.into_runtime(arcs, &shell.session.builtins)?;
     let wire_frames: Vec<HandlerFrame> = std::mem::take(&mut mobile.context.handlers).into();
     mobile.context.handlers = std::mem::take(&mut shell.mobile.context.handlers);
     for frame in wire_frames {

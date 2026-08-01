@@ -201,7 +201,7 @@ not to the block itself; `(!{cmd})[k]` and `!{cmd}[k]` are identical.
 ```
 Value ::= Unit | Bytes | String | Int | Float | Bool
         | List Value | Map String Value | Variant Label Value?
-        | Block | Handle
+        | Block | Native | Handle
 ```
 
 `String` is UTF-8 text. `Bytes` is a finite byte sequence, possibly
@@ -301,6 +301,31 @@ parameterised by the return type of the spawned block: only `await`,
 `<handle:PID>`.  Handles arise from a trailing `&` on a pipeline
 (§13.1) and from `par` and `spawn`; their await semantics are
 specified in §13.3.
+
+`Native` is every fixed-arity builtin (§16), a first-class value seeded into
+the base environment scope at boot — the entry itself, not a wrapper around
+one. Applying a `Native` collects arguments until the entry's fixed arity is
+reached, then the host body runs: at an unchecked site this is runtime
+currying, mirroring `Lambda`. At a checked site a `Native`'s derived scheme is
+an uncurried computation type matching the η-equivalent `Lambda` exactly, so
+`map $round` is as ill-typed as `map` over a 2-ary lambda — `round` is 2-ary.
+The typed idiom for partial application is binding the partial first (`let p
+= $round 1.4`, which rethunks the `Fun`-typed residual across the `Bind`
+value/computation boundary into a 1-ary `p`) or an explicit lambda. Bare
+`list-dir` — no arguments supplied — is the same partial value with nothing
+collected, not a runtime arity error; over-application is, mirroring a
+`Lambda`. A `Native` prints as
+`<native NAME>`, a partial appending its collected-argument count
+(`<native round +1>`); equality compares name and collected arguments, richer than
+the trivial-false comparison two `Lambda`s get, since a name is an intensional
+identity a closure lacks. The `FOValue` projection (§10.3) and string
+coercion at the syscall boundary refuse a `Native`, exactly as they refuse a
+`Lambda`. A captured `Native` crosses the scope envelope (§13.1) by name,
+re-linking against the receiving shell's own manifest; an unknown name on the
+far side is refused. Arity-0 natives are thunks, forced bare in head
+position like a nullary `Block`: `$from-json` is one such thunk, and forcing
+it (`!$from-json`, or bare in a redirect) reads the ambient input channel —
+dynamic state, like the cwd.
 
 The literals `true`, `false`, `unit`, and numeric NAME tokens (matching
 `NUMBER`) are recognised as values before any name lookup. The words
@@ -434,9 +459,15 @@ wrong arity is **rejected at install time** with a clear error. The
 convention follows the surface position — per-name versus catch-all —
 and is never inferred from the value's runtime shape.
 
-Per-name handlers (`handlers:`) may handle only names not claimed by
-the lexical/prelude/builtin binding namespace at the installation
-site. Installing a handler for a builtin such as `length` is an error.
+Per-name handlers (`handlers:`) may be installed under any name at all,
+including one already claimed lexically, by the prelude, or by a native:
+there is no name-admission check. Resolution order alone decides whether the
+new frame is ever reached — a bare head still resolves to the binding or
+native first, so a handler installed under `length` sits shadowed there, live
+only through `^length` (§4). Installation checks only the arm's shape: the
+thunk must be a unary lambda, and its inferred pipeline mode must preserve
+the head's existing modes (so a handler stacked on `echo`, say, must still
+return `None → Bytes`).
 
 Handlers are **deep with self-masking**. *Deep*: the installation
 persists across the dynamic extent of `within`, so successive calls in
@@ -451,8 +482,8 @@ arguments and may return a value, fail, or delegate to the next
 enclosing frame.
 
 `^name` (external-only bypass, §4) still respects `within` handler
-frames: the lookup skips builtins and prelude but the call is
-contained by any enclosing handler.
+frames: the lookup skips the env — and so skips every native — but the
+call remains contained by any enclosing handler frame, run or base alike.
 
 `within` frames nest and compose: inner `dir:` and `env:` override
 outer ones; inner `handlers:` shadow outer handlers for the same
@@ -473,16 +504,17 @@ value form in command context receives an implicit `return`.
 Multiple atoms form an application; the first atom is the **head**.
 Head interpretation is syntactic:
 
-1. **Bare head.** If the name is bound in the value namespace, that
-   value is applied (for a parameterised block) or forced (for a
-   nullary block); any other value type in head position is an error.
-   If the name is a builtin binding, the builtin runs. Otherwise,
-   command lookup consults installed handler frames (alias or active
-   `within`) and finally `$ENV[PATH]`.
+1. **Bare head.** If the name is bound in the value namespace — a
+   lexical binding or a native (§2) alike — that value is applied (for
+   a parameterised block or `Native`) or forced (for a nullary block or
+   an arity-0 native); any other value type in head position is an
+   error. Otherwise, command lookup consults installed handler frames —
+   run frames first (alias or active `within`), then the base layer
+   (§16) — and finally `$ENV[PATH]`.
 2. **Path head.** A `SLASH_WORD` (`./x`, `../x`, `/x`) or a
    `TILDE_WORD` (`~`, `~/x`, `~user/x`) executes that exact path.
    Tilde expansion happens at the process boundary. Path heads never
-   consult aliases, builtins, or `PATH`.
+   consult the env, handlers, or `PATH`.
 3. **Explicit value head.** Any other head form (for example `$map`,
    `!$f`, or a block literal) stays in the value/function world:
    external command lookup is never performed for it, and if it does
@@ -504,9 +536,9 @@ binding-only: aliases, handlers, catch-alls, and external commands are
 not values. `!`
 forces a block, literal (`!{M}`) or stored (`!$b`); in command
 context `!{M}` is the same as `M`, in value context it yields the block's return
-value. `^name` skips lexical/prelude/builtin binding lookup but
-remains contained by active user handlers; if no handler matches, it
-resolves `name` as an external command. The operand must be a plain
+value. `^name` skips the value namespace — bindings and natives alike —
+but remains contained by active handler frames, run or base; if none
+matches, it resolves `name` as an external command. The operand must be a plain
 slash-free word (`NAME`). The `^name` form is valid only in head
 position, where `^` must be the first token of the command.
 
@@ -535,11 +567,13 @@ the form chooses the lookup path:
   `deref`, `force`, `expr-block`, `block`, `collection`, `tag`)
   optionally followed by indices, or a `WORD` head bearing at least
   one trailing index (`$r[k]`, `cmds[deploy]`).  Stays in the value
-  namespace; never falls through to alias / builtin / PATH.
+  namespace; never falls through to the handler stack or `PATH`.
 - **Caret head** — `^name`.  Same fall-through as a bare head with
-  the binding step skipped.  User handler entries (aliases,
-  `within` handlers) still fire, so a `within [handlers: [cat: …]]`
-  block intercepts `^cat` just as it does `cat`.
+  the env step skipped, so every native is skipped too.  Handler
+  frames still fire — a run frame (alias, `within` handlers) and the
+  base layer (§16) alike — so a `within [handlers: [cat: …]]` block
+  intercepts `^cat` just as it does `cat`, and `^detach` reaches the
+  base `detach` frame rather than a `PATH` binary of that name.
 
 An additional rule suppresses implicit dispatch even for bare-shaped
 words: a `NAME` whose spelling is a numeric literal, or one of `true`,
@@ -547,16 +581,22 @@ words: a `NAME` whose spelling is a numeric literal, or one of `true`,
 the value, not a command (it falls into the explicit value-head path
 when used in head position).
 
-A bare-head lookup walks local scope then the prelude; if the name
-is unbound there, dispatch consults builtin bindings before user
-handler frames (aliases and active `within` frames, innermost-first),
-then `$ENV[PATH]`.  `^name` skips the binding namespace and resolves
-to a user handler if one is active; otherwise it resolves to an
-external command.  An external dispatch reached this way is
-further filtered by `exec` whenever a `grant` is in force (§11.1).
-The value namespace is consulted only through `$name` and through the
-implicit head step; bare non-head words and map-key positions never
-trigger either kind of lookup.
+Resolution is **env → handlers → external**.  A bare-head lookup walks
+local scope, then the prelude, then the base environment scope where
+every fixed-arity manifest entry lives as a `Native` (§2); a hit there is
+final.  If the name is unbound in the env, dispatch consults handler
+frames — run frames first (aliases and active `within` frames,
+innermost-first), then the base layer of variadic/optional manifest
+entries (`cd`, `echo`, `detach`, and a host's own, such as the REPL's
+`fg`/`bg`/`disown`) — then `$ENV[PATH]`.  There is no separate builtin
+arm: a native is an env hit, and a variadic or optional entry is the
+floor of the handler stack.  `^name` skips the env — and so skips every
+native — and resolves to a handler if one is active, run or base;
+otherwise it resolves to an external command.  An external dispatch
+reached this way is further filtered by `exec` whenever a `grant` is in
+force (§11.1).  The value namespace is consulted only through `$name`
+and through the implicit head step; bare non-head words and map-key
+positions never trigger either kind of lookup.
 
 **Platform.** On Windows the `$ENV[PATH]` walk is PATHEXT-aware: a
 candidate spelled without an extension is retried with each suffix
@@ -976,8 +1016,10 @@ in the interactive value namespace.  `bindings` entries always land
 in the value namespace, functions included.
 `plugins` lists the plugins to load at startup (§18.1).  Aliases can
 also be installed or removed at runtime via the `alias NAME { |args|
-BODY }` and `unalias NAME` builtins. Alias names may not claim a
-lexical/prelude/builtin binding name.
+BODY }` and `unalias NAME` builtins. An alias may claim any name at
+all, including a lexical, prelude, or native binding: resolution order
+alone decides reach, so an alias over a name like `length` sits
+shadowed at a bare head, live only through `^length`.
 
 The `theme` key is a map with two optional fields.  `value_prefix` is
 a string prepended to every printed value, defaulting to `"=> "`.
@@ -2253,13 +2295,17 @@ shares its owning session's policy, so a `detach` nested in a
 `spawn`ed body spends that session's births rather than a budget of
 its own.
 
-Two surface refusals are raised before anything is born.  `DESC` must
-be non-empty and single-line, as for `service`.  And a builtin head is
-refused: a builtin names no process image to leave running.  A name a
-`within [handlers:]` frame intercepts is *not* refused — it runs its
-handler, and the handler's value is the value of the `detach`.
-Resolution order (§16) holds under this verb as under any call, so no
-process is born on that route and no birth is spent from the budget.
+One surface refusal is raised before anything is born: `DESC` must be
+non-empty and single-line, as for `service`.  The head is an exec image
+by definition — scope bindings, natives included, are not consulted —
+so a fixed-arity name like `clear` (§16) resolves as an exec image,
+`detach "d" clear` detaching the PATH binary that `^clear` would also
+name.  A handler frame in scope over the head, run or base alike (an
+alias, a `within [handlers:]` entry, or a base frame such as `cd`), is
+*not* refused: it runs, and its value is the value of the `detach`.
+Resolution order (§16) holds under this verb as under any call, so a
+name a frame intercepts this way is never born, and no birth is spent
+from the budget.
 Everything else about the call — the 127/126 existence verdicts and
 the `exec` capability's judgment on the whole argv (§11.1) — is the
 ordinary external-command path, so a bundled tool falls out as its own
@@ -2475,12 +2521,34 @@ the canonical user-facing commands.  A few carry a leading `_` to mark
 them as implementation primitives (§16.3).
 Return-type rules follow §4.2.
 
+A manifest entry is one of two kinds, partitioned by arity alone.  A
+**fixed-arity** entry — the great majority: `list-dir`, `round`,
+`spawn`, the codecs, and so on — is a first-class `Native` value (§2),
+seeded into the base environment scope at boot; it curries, prints,
+and crosses the scope envelope like any value, and a bare reference
+(`$round`) or an under-applied call yields the partial value rather
+than a runtime arity error.  A **variadic or optional** entry — `cd`,
+`echo`, `detach`, and a host's own such as the REPL's
+`fg`/`bg`/`disown` — has no function type to curry and lives instead
+as a **base handler frame**, the permanent floor of the handler stack
+(§3.2): a run frame installed above it (an alias, a `within
+[handlers:]` entry) can intercept, self-mask, and forward to it
+exactly as it would to an outer run frame, and `^name` reaches it when
+nothing masks it.  Base frames are otherwise ordinary and stackable;
+only their permanence sets them apart — `unalias` and a scoped frame's
+exit touch run frames alone, so nothing can remove one.
+
 Hosts may also install host builtins: Rust atoms owned by the
 embedding host rather than by `ral-core`.  Builtins are shell-scoped —
 each `Shell` owns a builtin table, seeded with the core set at
-construction; there is no process-level registry, and the typechecker
-resolves names against the same per-shell table the evaluator
-dispatches through.  A host's surface beyond the core set is one
+construction; there is no process-level registry.  The table is the
+**boot manifest**: it seeds the base environment scope and the base
+handler frames once, at construction, and backs `help`/`explain`
+afterward — it is not consulted again at dispatch, which runs env →
+handlers → external (§4) with no table lookup of its own.  The
+typechecker resolves a native name against the same per-shell table
+that seeded the env, so the checker's surface and the boot's agree by
+construction.  A host's surface beyond the core set is one
 host-surface value — its process-static sets plus any closure sets
 capturing host state — handed to shell construction and installed
 there, before any rc file or user code is checked; a shell-free batch
@@ -2528,13 +2596,15 @@ act that sources it.
 | `floor`, `ceil`, `trunc` | Map a `Float` to the `Int` in the named direction; all four rounding builtins reject an `Int` at the type level (it is already rounded) and refuse non-finite or out-of-range inputs |
 | `from-csv`, `to-csv` | CSV codec pair on the §15 codec discipline: `from-csv` decodes channel bytes to a list of header-keyed records (every field a `String`); `to-csv <records>` emits a header plus one row per record, columns being the first record's keys in sorted order |
 
-`echo` is surface syntax, not a builtin: unless the name is locally
-bound (a user binding shadows the sugar), the elaborator lowers
-`echo a b …xs` to `to-line !{intercalate ' ' [str a, str b, …]}`,
-with a spread becoming `map str $xs`.  Each argument is rendered with
-`str` and the space-joined line follows the byte/value boundary rules
-of §4.3 — bytes plus newline to stdout; at a value boundary the final
-line is captured as `String`.
+`echo` is a base handler frame (above), not surface syntax: a bare head
+still resolves to a lexical binding or native named `echo` first, env
+being consulted before the handler stack, and `^echo` reaches the base
+frame itself rather than a `/bin/echo` on `PATH` — the same accepted
+wrinkle `^detach` has.  Each argument is rendered with `str`
+(a spread becoming `map str` over its elements) and space-joined into
+one line, following the byte/value boundary rules of §4.3 — bytes plus
+a trailing newline to stdout; at a value boundary the line is captured
+as a `String`.
 
 ### 16.2  Predicates
 
@@ -2801,7 +2871,10 @@ calls the same way it composes with any other code.
 `aliases` are registered into the shell's alias namespace at load
 time and removed at unload.  An alias name collision with an existing
 `rc` or plugin-registered alias is a load-time error. An alias whose
-name is a lexical/prelude/builtin binding is a load-time error.
+name is a lexical binding or a native's is not: it installs, and
+resolution order (§4) is the only arbiter — shadowed at the bare
+head, where the binding or native wins, and reachable through
+`^name`, which skips the env.
 
 **`load-plugin <name-or-path>`** resolves a plugin file
 (`~/.config/ral/plugins/$name.ral`, `$RAL_PATH`, or a literal path),

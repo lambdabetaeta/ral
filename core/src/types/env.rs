@@ -21,7 +21,10 @@ pub struct Binding {
 
 /// Lexical environment: a stack of name→[`Binding`] scopes, innermost last,
 /// with `builtins::register`'s prelude at `scopes[0]` and the user scope it
-/// pushes at `scopes[1]`.
+/// pushes at `scopes[1]`, plus the base native scope beneath them all —
+/// seeded once at boot ([`Self::install_natives`]), reached by [`Self::get`]
+/// only after every scope misses, outside every scope harvest, and
+/// removable by nothing: no method here unsets from it.
 ///
 /// An `imbl::Vector` rather than a `Vec` because every closure call clones the
 /// chain: an O(1) refcount bump on the persistent root, not one Arc bump and a
@@ -29,6 +32,7 @@ pub struct Binding {
 #[derive(Debug, Clone)]
 pub struct Env {
     scopes: imbl::Vector<Arc<HashMap<String, Binding>>>,
+    natives: Arc<HashMap<String, Value>>,
 }
 
 impl Env {
@@ -36,12 +40,25 @@ impl Env {
     pub fn new() -> Self {
         Self {
             scopes: imbl::Vector::unit(Arc::new(HashMap::new())),
+            natives: Arc::new(HashMap::new()),
         }
     }
 
-    /// Look up `name`, innermost scope first.
+    /// Seed the base native scope — a fixed-arity manifest entry's `Value`,
+    /// or a language-given constant.  Called only at boot, beside
+    /// builtin-table installation.
+    pub(crate) fn install_natives(&mut self, entries: impl IntoIterator<Item = (String, Value)>) {
+        let map = Arc::make_mut(&mut self.natives);
+        map.extend(entries);
+    }
+
+    /// Look up `name`, innermost scope first, falling back to the base
+    /// native scope.
     pub fn get(&self, name: &str) -> Option<&Value> {
-        self.get_binding(name).map(|b| &b.value)
+        if let Some(b) = self.get_binding(name) {
+            return Some(&b.value);
+        }
+        self.natives.get(name)
     }
 
     /// The whole [`Binding`] for `name`, innermost scope first.
@@ -52,6 +69,12 @@ impl Env {
             }
         }
         None
+    }
+
+    /// Every native's name — a host's tab completion or listing surface, the
+    /// native-scope counterpart of [`crate::types::BuiltinTable::names`].
+    pub fn native_names(&self) -> impl Iterator<Item = &str> {
+        self.natives.keys().map(String::as_str)
     }
 
     /// Look up `name` in the local scopes, skipping the prelude.
@@ -182,12 +205,18 @@ impl Env {
     }
 
     /// Rebuild an `Env` from scope `Arc`s — `crate::serial`'s receiving side.
-    pub(crate) fn from_scope_iter<I>(iter: I) -> Self
+    ///
+    /// `natives` is the receiving manifest's own native map, not the
+    /// sender's: natives cross the wire by name only, so a hydrated
+    /// closure's base scope must be rebuilt here or its bare references
+    /// resolve to nothing.
+    pub(crate) fn from_scope_iter<I>(iter: I, natives: Arc<HashMap<String, Value>>) -> Self
     where
         I: IntoIterator<Item = Arc<HashMap<String, Binding>>>,
     {
         Self {
             scopes: iter.into_iter().collect(),
+            natives,
         }
     }
 }

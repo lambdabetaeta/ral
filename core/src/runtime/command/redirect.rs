@@ -203,7 +203,7 @@ fn open_atomic(
 /// Open a redirect target.  `>` to a regular file returns an [`AtomicCommit`]
 /// the caller must fire once the writer finishes; every other shape streams.
 /// Paths resolve against the shell's scoped cwd, so a `within [dir: …]`
-/// redirect lands right even from a builtin, where the host cwd never moves.
+/// redirect lands right even from a native, where the host cwd never moves.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:surface:open-file] The redirect read/write door for `<`/`>`/`>>`/`>~` on fd 1/2: every model redirect opens here. The read/write card is fused onto the operation by the redirect frame that wraps this open (committed/aborted/failed outcome on settle)."

@@ -47,6 +47,7 @@ pub fn pretty_print(val: &Value, indent: usize, params: &PrintParams) -> String 
         Value::Handle(_) => "<handle>".into(),
         Value::Lambda { param, body, .. } => crate::types::fmt_lambda(param, body),
         Value::Block { .. } => "<block>".into(),
+        Value::Native { entry, applied } => crate::types::fmt_native(&entry.name, applied),
         Value::Bytes(b) => {
             let text = String::from_utf8_lossy(b);
             if params.quote_bytes {

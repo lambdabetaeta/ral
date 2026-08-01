@@ -1,15 +1,16 @@
 //! Command dispatch: resolve a head, then run the arm resolution names.
 //!
-//! Order is env → builtins → handlers → external; `^name` skips env and
-//! builtins, a path head skips all three.  [`run_call`] is the entry from
-//! `evaluator::call`; pipeline staging and `command::detach` reach
-//! `resolve_command_word` and `run_handler` directly.
+//! Order is env → handlers → external; `^name` skips env, so it skips every
+//! value builtin (a native is an env hit), but still consults handlers —
+//! run frames and the base layer alike; a path head skips handlers too.
+//! [`run_call`] is the entry from `evaluator::call`; pipeline staging and
+//! `command::detach` reach `resolve_command_word` and `run_handler` directly.
 
 use crate::ir::{CommandName, CommandWord};
 use crate::source::Span;
 use crate::types::{
-    Break, BuiltinEntry, HandlerArity, HandlerEntry, HandlerFrame, Map, Mooring, Raw, Settled,
-    Shell, Value,
+    Break, BuiltinEntry, HandlerArity, HandlerEntry, HandlerFrame, HandlerLookup, Map, Mooring,
+    Raw, Settled, Shell, Value,
 };
 
 use super::command::{self, CommandIdentity, EvalRedirectV};
@@ -21,7 +22,6 @@ use crate::evaluator::redirect::with_redirects;
 /// One arm per place a command name can live.
 pub(crate) enum Resolution {
     Env(Value),
-    Builtin(BuiltinEntry),
     /// `depth` counts handler frames from the top down to the matched one
     /// inclusive — what `strip_matched` takes.  Boxed: [`HandlerEntry`] would
     /// otherwise set the size of every arm.
@@ -29,23 +29,22 @@ pub(crate) enum Resolution {
         entry: Box<HandlerEntry>,
         depth: usize,
     },
+    /// A base handler frame — a variadic/optional manifest entry.
+    Base(BuiltinEntry),
     External(CommandIdentity),
 }
 
-/// Bare-name lookup: env → builtins → handlers → external.  No admission
-/// check and no audit — those belong to [`classify_command`].
+/// Bare-name lookup: env → handlers → external.  No admission check and no
+/// audit — those belong to [`classify_command`].
 pub(crate) fn resolve(name: &str, shell: &Shell) -> Resolution {
     if let Some(value) = shell.mobile.scope.get(name) {
         return Resolution::Env(value.clone());
     }
-    if let Some(entry) = shell.lookup_builtin(name) {
-        return Resolution::Builtin(entry);
-    }
     resolve_handler_then_external(name, shell)
 }
 
-/// Resolve a [`CommandWord`]: `^name` skips env and builtins but still
-/// consults handlers; a path-bearing head skips handlers too.
+/// Resolve a [`CommandWord`]: `^name` skips env but still consults handlers;
+/// a path-bearing head skips handlers too.
 pub(crate) fn resolve_command_word(head: &CommandWord, shell: &Shell) -> Resolution {
     let name = head.name();
     match name {
@@ -60,16 +59,17 @@ pub(crate) fn resolve_command_word(head: &CommandWord, shell: &Shell) -> Resolut
 }
 
 fn resolve_handler_then_external(name: &str, shell: &Shell) -> Resolution {
-    if let Some((entry, depth)) = shell.lookup_handler(name) {
-        return Resolution::Handler {
+    match shell.lookup_handler(name) {
+        Some(HandlerLookup::Frame(entry, depth)) => Resolution::Handler {
             entry: Box::new(entry),
             depth,
-        };
+        },
+        Some(HandlerLookup::Base(entry)) => Resolution::Base(entry),
+        None => Resolution::External(CommandIdentity::resolve(
+            CommandName::Bare(name.to_string()),
+            &shell.mobile.context,
+        )),
     }
-    Resolution::External(CommandIdentity::resolve(
-        CommandName::Bare(name.to_string()),
-        &shell.mobile.context,
-    ))
 }
 
 /// Resolution plus head admission: `Err` is the grant refusing the head before
@@ -121,8 +121,9 @@ fn refuse_head(id: &CommandIdentity, shell: &mut Shell) -> Break {
 /// `span` becomes the run's call site, but not under `_`-prefixed names (the
 /// host-registered `_ed-*` REPL surface), so the register keeps naming the
 /// user's call rather than the wrapper's.  The [`Resolution::Env`] arm is
-/// defensive: the elaborator lowers heads its `is_bound` check sees to CBPV
-/// application, so only a binding installed later arrives here as a command.
+/// every native head's path — natives are invisible to the elaborator's
+/// `is_bound`, so their heads stay commands — plus any binding installed
+/// after elaboration.
 pub(crate) fn run_call(
     head: &CommandWord,
     args: &[Value],
@@ -139,17 +140,19 @@ pub(crate) fn run_call(
         Resolution::Env(value) => with_redirects(redirects, mooring, shell, |shell| {
             crate::evaluator::apply(value, args.to_vec(), mooring, shell).map_err(Into::into)
         }),
-        Resolution::Builtin(entry) => run_builtin(&entry, args, redirects, mooring, shell),
         Resolution::Handler { entry, depth } => {
             with_redirects(redirects, mooring, shell, |shell| {
                 run_handler(&entry, depth, args, mooring, shell).map_err(Into::into)
             })
         }
+        Resolution::Base(entry) => run_base_frame(&entry, args, redirects, mooring, shell),
         Resolution::External(id) => run_external(id, args, redirects, mooring, shell),
     }
 }
 
-fn run_builtin(
+/// Run a base handler frame directly with the argv slice — no adapter, no
+/// masking: a native body never self-forwards.
+pub(crate) fn run_base_frame(
     entry: &BuiltinEntry,
     args: &[Value],
     redirects: &[EvalRedirectV],

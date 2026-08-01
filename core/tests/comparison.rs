@@ -181,15 +181,20 @@ fn sort_list_by_uses_key_ordering() {
     assert_eq!(v, expected);
 }
 
-// ── B5 — arity-1 string builtins reject zero arguments ───────────────────
+// ── B5 — a bare arity-1 string native under-applies to a partial value ────
 
 #[test]
-fn arity_one_string_builtins_require_their_argument() {
-    // Pre-fix: `arg0_str` used `unwrap_or_default()`, so `upper`/`lower`/etc.
-    // silently operated on "" with no argument, contradicting fixed arity.
-    expect_error("upper", "upper requires 1 argument");
-    expect_error("lower", "lower requires 1 argument");
-    expect_error("dedent", "dedent requires 1 argument");
-    expect_error("shell-quote", "shell-quote requires 1 argument");
-    expect_error("shell-split", "shell-split requires 1 argument");
+fn arity_one_string_builtins_curry_to_a_partial_native() {
+    // A bare head with no argument under-applies, yielding the partial
+    // `Native` back — application is the one arity gate.
+    for name in ["upper", "lower", "dedent", "shell-quote", "shell-split"] {
+        let mut shell = fresh_shell();
+        match eval(&mut shell, name) {
+            Ok(Value::Native { entry, applied }) => {
+                assert_eq!(entry.name, name);
+                assert!(applied.is_empty(), "{name:?}: expected no collected args");
+            }
+            other => panic!("{name:?}: expected a partial native, got {other:?}"),
+        }
+    }
 }

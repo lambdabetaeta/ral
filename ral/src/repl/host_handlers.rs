@@ -123,13 +123,13 @@ pub(crate) fn teardown_notice(workers: &[WorkerEntry]) -> Option<String> {
 }
 
 fn build_jobs(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
-    BuiltinEntry {
-        name: Cow::Borrowed("jobs"),
-        type_rule: BuiltinTypeRule::Sig(sig::TERMINAL_CONTROL),
-        doc: "jobs  — list active background and stopped jobs: pgid groups, and this shell's \
+    BuiltinEntry::new(
+    Cow::Borrowed("jobs"),
+    BuiltinTypeRule::Sig(sig::TERMINAL_CONTROL),
+    "jobs  — list active background and stopped jobs: pgid groups, and this shell's \
               detached worker handles (spawn/watch/&) marked [wN], done once settled until \
               observed.",
-        body: BuiltinBody::Captured(Arc::new(move |_args, _mooring, shell| {
+    BuiltinBody::Captured(Arc::new(move |_args, _mooring, shell| {
             let jt = jobs.lock().unwrap();
             let workers = shell.workers();
             for line in render_jobs(&jt, &workers) {
@@ -137,18 +137,18 @@ fn build_jobs(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
             }
             Ok(Value::Unit)
         })),
-    }
+)
 }
 
 // ── fg ────────────────────────────────────────────────────────────────────────
 
 fn build_fg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
-    BuiltinEntry {
-        name: Cow::Borrowed("fg"),
-        type_rule: BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
-        doc: "fg [id]  — bring pgid job [id] (default: most recent) to the foreground. \
+    BuiltinEntry::new(
+    Cow::Borrowed("fg"),
+    BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
+    "fg [id]  — bring pgid job [id] (default: most recent) to the foreground. \
               pgid-only: a worker handle has no foreground — `await` is its fg.",
-        body: BuiltinBody::Captured(Arc::new(move |args, mooring, shell| {
+    BuiltinBody::Captured(Arc::new(move |args, mooring, shell| {
             let (id, pgid) = {
                 let mut jt = jobs.lock().unwrap();
                 let Some(id) = job_id_arg(args, &jt) else {
@@ -172,18 +172,18 @@ fn build_fg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
             }
             Ok(Value::Unit)
         })),
-    }
+)
 }
 
 // ── bg ────────────────────────────────────────────────────────────────────────
 
 fn build_bg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
-    BuiltinEntry {
-        name: Cow::Borrowed("bg"),
-        type_rule: BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
-        doc: "bg [id]  — resume pgid job [id] (default: most recent) in the background. \
+    BuiltinEntry::new(
+    Cow::Borrowed("bg"),
+    BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
+    "bg [id]  — resume pgid job [id] (default: most recent) in the background. \
               pgid-only: a worker handle already runs detached — see `jobs`.",
-        body: BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
+    BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
             let resumed = {
                 let mut jt = jobs.lock().unwrap();
                 let Some(id) = job_id_arg(args, &jt) else {
@@ -197,18 +197,18 @@ fn build_bg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
             }
             Ok(Value::Unit)
         })),
-    }
+)
 }
 
 // ── disown ───────────────────────────────────────────────────────────────────
 
 fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
-    BuiltinEntry {
-        name: Cow::Borrowed("disown"),
-        type_rule: BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
-        doc: "disown [id]  — detach pgid job [id] (default: most recent) from the shell. \
+    BuiltinEntry::new(
+    Cow::Borrowed("disown"),
+    BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
+    "disown [id]  — detach pgid job [id] (default: most recent) from the shell. \
               pgid-only: a worker handle has no disown — `cancel` is its kill.",
-        body: BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
+    BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
             let removed = {
                 let mut jt = jobs.lock().unwrap();
                 let Some(id) = job_id_arg(args, &jt) else {
@@ -229,17 +229,17 @@ fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
             }
             Ok(Value::Unit)
         })),
-    }
+)
 }
 
 // ── load-plugin ───────────────────────────────────────────────────────────────
 
 fn build_load_plugin(runtime: Arc<Mutex<PluginRuntime>>) -> BuiltinEntry {
-    BuiltinEntry {
-        name: Cow::Borrowed("load-plugin"),
-        type_rule: BuiltinTypeRule::Sig(sig::STRING_TO_UNIT),
-        doc: "load-plugin <name>  — load a REPL plugin by name or path.",
-        body: BuiltinBody::Captured(Arc::new(
+    BuiltinEntry::new(
+    Cow::Borrowed("load-plugin"),
+    BuiltinTypeRule::Sig(sig::STRING_TO_UNIT),
+    "load-plugin <name>  — load a REPL plugin by name or path.",
+    BuiltinBody::Captured(Arc::new(
             move |args, mooring: &Mooring, shell: &mut Shell| {
                 let Some(name) = plugin_name_arg(args) else {
                     diagnostic::cmd_error("load-plugin", "missing plugin name");
@@ -253,17 +253,17 @@ fn build_load_plugin(runtime: Arc<Mutex<PluginRuntime>>) -> BuiltinEntry {
                 Ok(Value::Unit)
             },
         )),
-    }
+)
 }
 
 // ── unload-plugin ─────────────────────────────────────────────────────────────
 
 fn build_unload_plugin(runtime: Arc<Mutex<PluginRuntime>>) -> BuiltinEntry {
-    BuiltinEntry {
-        name: Cow::Borrowed("unload-plugin"),
-        type_rule: BuiltinTypeRule::Sig(sig::STRING_TO_UNIT),
-        doc: "unload-plugin <name>  — unload a previously loaded REPL plugin.",
-        body: BuiltinBody::Captured(Arc::new(
+    BuiltinEntry::new(
+    Cow::Borrowed("unload-plugin"),
+    BuiltinTypeRule::Sig(sig::STRING_TO_UNIT),
+    "unload-plugin <name>  — unload a previously loaded REPL plugin.",
+    BuiltinBody::Captured(Arc::new(
             move |args, _mooring: &Mooring, shell: &mut Shell| {
                 let Some(name) = plugin_name_arg(args) else {
                     diagnostic::cmd_error("unload-plugin", "missing plugin name");
@@ -275,7 +275,7 @@ fn build_unload_plugin(runtime: Arc<Mutex<PluginRuntime>>) -> BuiltinEntry {
                 Ok(Value::Unit)
             },
         )),
-    }
+)
 }
 
 #[cfg(test)]
@@ -408,9 +408,10 @@ mod tests {
     /// the six captured entries `Session::boot`'s surface carries
     /// (`repl/session.rs`), so `jobs` sits on the table exactly as it would
     /// in a booted REPL session; `install_alias` reads that same table via
-    /// `HandlerEntry::vet`.
+    /// `HandlerEntry::vet`.  Aliasing `jobs` installs — no name admission —
+    /// shadowed at the bare head (env-first) and live under `^jobs`.
     #[test]
-    fn alias_over_a_captured_builtin_is_rejected() {
+    fn alias_over_a_captured_builtin_installs_and_resolution_order_governs() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         shell.install_captured_builtins(build(
             Arc::new(Mutex::new(crate::jobs::JobTable::new())),
@@ -424,16 +425,52 @@ mod tests {
         );
         let thunk = ral_core::evaluator::evaluate(&comp, &Mooring::adrift(), &mut shell).unwrap();
 
-        let err = shell
+        shell
             .install_alias("jobs".to_string(), thunk)
-            .expect_err("aliasing a captured builtin must be refused");
-        let ral_core::types::Break::Error(e) = err else {
-            panic!("expected a catchable Error, got an Escape: {err:?}");
-        };
-        assert!(
-            e.message.contains("builtin"),
-            "expected the vet's builtin-collision message, got: {}",
-            e.message
+            .expect("a native's name is not admission-checked; the alias installs");
+
+        assert_eq!(
+            run_source(&mut shell, "jobs"),
+            Value::Unit,
+            "the bare head is an env hit on the native; the alias sits shadowed there"
         );
+        assert_eq!(
+            run_source(&mut shell, "^jobs"),
+            Value::Int(1),
+            "`^jobs` skips the env and reaches the alias frame"
+        );
+    }
+
+    /// Run `src` as one capturing top-level run on a shell the caller
+    /// dressed.  Panics on a static failure or a runtime error: every source
+    /// here is expected to compile and succeed.
+    fn run_source(shell: &mut Shell, src: &str) -> Value {
+        use ral_core::transport::{Program, Run};
+        use ral_core::types::Capabilities;
+        use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
+        let req = RunRequest {
+            run: Run {
+                program: Program::Source(src.into()),
+                script_name: "<test>".into(),
+                caps: Capabilities::root(),
+                wall: None,
+                deferred_lease: None,
+                worker_cap: None,
+                io: RunIo::Capture,
+                terminal: RequestedTerminalAccess::Denied,
+                stdin: RunStdin::Empty,
+            },
+            surface: None,
+            deferred: None,
+            desk: None,
+            nursery: None,
+            lifecycle: Box::new(()),
+        };
+        match shell.run(req) {
+            RunReport::Ran { result, .. } => result.expect("a well-formed source must run"),
+            RunReport::Static { .. } => {
+                panic!("well-formed source must run, not fail statically: {src:?}")
+            }
+        }
     }
 }

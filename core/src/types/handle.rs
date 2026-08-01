@@ -16,6 +16,8 @@ pub(crate) fn pins_running_work(v: &Value) -> bool {
         Value::List(items) => items.iter().any(pins_running_work),
         Value::Map(pairs) => pairs.iter().any(|(_, v)| pins_running_work(v)),
         Value::Variant { payload, .. } => payload.as_deref().is_some_and(pins_running_work),
+        // `applied` is collected argument data, walked like a list's elements.
+        Value::Native { applied, .. } => applied.iter().any(pins_running_work),
         Value::Unit
         | Value::Bool(_)
         | Value::Int(_)

@@ -715,12 +715,13 @@ mod tests {
         mk_scheme(&[], &[], &[], thunk(pure(Ty::Unit)))
     }
 
-    static T2_CANCEL_BUILTINS: &[BuiltinEntry] = &[BuiltinEntry {
-        name: Cow::Borrowed("t2-cancel-now"),
-        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_t2_cancel_now),
-        doc: "test-only: cancel the token staged in T2_CANCEL_TOKEN.",
-        body: BuiltinBody::Static(builtin_t2_cancel_now),
-    }];
+    static T2_CANCEL_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
+        Cow::Borrowed("t2-cancel-now"),
+        BuiltinTypeRule::Scheme(scheme_t2_cancel_now),
+        "test-only: cancel the token staged in T2_CANCEL_TOKEN.",
+        BuiltinBody::Static(builtin_t2_cancel_now),
+    )];
+    static T2_CANCEL_BUILTINS: &[BuiltinEntry] = &T2_CANCEL_BUILTINS_ARR;
 
     /// A `reply` staged mid-batch and then overtaken by a cancellation must not
     /// survive into the next deliberation: the batch replies, then cancels the

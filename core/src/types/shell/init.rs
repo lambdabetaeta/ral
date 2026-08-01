@@ -43,6 +43,11 @@ impl Shell {
             local: LocalState::default(),
         };
         shell.install_builtins(crate::builtins::CORE_BUILTINS);
+        // Language-given names live in the base scope, ahead of the prelude.
+        shell
+            .mobile
+            .scope
+            .install_natives(crate::types::builtin::language_constants());
         shell
     }
 

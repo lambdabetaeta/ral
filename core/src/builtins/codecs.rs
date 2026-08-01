@@ -10,7 +10,7 @@ use crate::stream::{DONE_LABEL, HEAD_FIELD, MORE_LABEL, TAIL_FIELD};
 use crate::types::{Env, Settled, Shell, Value, as_list, as_map_ref, sig, sig_hint};
 use std::sync::Arc;
 
-use super::util::{as_byte_list, check_arity, decode_utf8_strict};
+use super::util::{as_byte_list, decode_utf8_strict};
 
 fn read_stdin_bytes(name: &str, shell: &mut Shell) -> Settled<Vec<u8>> {
     use std::io::Read;
@@ -183,7 +183,6 @@ pub(super) fn builtin_from_csv(args: &[Value], shell: &mut Shell) -> Settled<Val
 /// sorted order — `Map` is key-ordered, so no original column order survives
 /// into one to be recovered.
 pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "to-csv")?;
     let rows = as_list(&args[0], "to-csv")?;
     let mut wtr = csv::WriterBuilder::new().from_writer(Vec::new());
     if let Some(first) = rows.iter().next() {
@@ -220,26 +219,35 @@ fn write_encoded(name: &str, bytes: Vec<u8>, shell: &mut Shell) -> Settled<Value
 }
 
 pub(super) fn builtin_to_bytes(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "to-bytes")?;
     let bs = as_byte_list(&args[0], "to-bytes")?;
     write_encoded("to-bytes", bs, shell)
 }
 
 pub(super) fn builtin_to_string(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "to-string")?;
     write_encoded("to-string", args[0].to_string().into_bytes(), shell)
 }
 
 pub(super) fn builtin_to_line(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "to-line")?;
     let mut s = args[0].to_string();
     s.push('\n');
     write_stdout_ok("to-line", s.as_bytes(), shell)?;
     Ok(Value::Unit)
 }
 
+/// `echo`'s base-frame body: `str` each argument (total, `Display`-based),
+/// single-space intercalate, trailing newline to the byte channel.
+pub(super) fn builtin_echo(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    let mut s = args
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    s.push('\n');
+    write_stdout_ok("echo", s.as_bytes(), shell)?;
+    Ok(Value::Unit)
+}
+
 pub(super) fn builtin_to_lines(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "to-lines")?;
     let items = as_list(&args[0], "to-lines")?;
     let joined = items
         .iter()
@@ -277,7 +285,7 @@ pub fn value_to_json(v: &Value) -> Settled<serde_json::Value> {
                 .collect::<Settled<_>>()?;
             serde_json::Value::Object(obj)
         }
-        Value::Lambda { .. } | Value::Block { .. } | Value::Handle(_) => {
+        Value::Lambda { .. } | Value::Block { .. } | Value::Native { .. } | Value::Handle(_) => {
             return Err(sig(format!(
                 "to-json: {} has no JSON representation",
                 v.type_name()
@@ -298,7 +306,6 @@ pub fn value_to_json(v: &Value) -> Settled<serde_json::Value> {
 }
 
 pub(super) fn builtin_to_json(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "to-json")?;
     let text = serde_json::to_string(&value_to_json(&args[0])?)
         .map_err(|e| sig(format!("to-json: {e}")))?;
     write_encoded("to-json", text.into_bytes(), shell)

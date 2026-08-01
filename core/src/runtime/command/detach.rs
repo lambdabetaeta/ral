@@ -14,7 +14,7 @@
 use crate::ir::CommandName;
 use crate::path::tilde::TildePath;
 use crate::process::StdioSpec;
-use crate::types::{Mooring, Settled, Shell, Value, sig};
+use crate::types::{HandlerLookup, Mooring, Settled, Shell, Value, sig};
 
 use super::identity::CommandIdentity;
 use super::io_event;
@@ -23,9 +23,9 @@ use super::vet::vet;
 
 /// `detach <desc> <cmd> <args…>`, with `desc` already vetted by
 /// [`crate::builtins::concurrency`].  The head is an exec image by
-/// definition: scope bindings are not consulted and a builtin name is
-/// refused, but a handler in scope runs and its value is the `detach`'s —
-/// nothing is born, and nothing is spent from the budget.
+/// definition: scope bindings are not consulted, but a handler frame in
+/// scope — a user frame or a base frame alike — runs and its value is the
+/// `detach`'s; nothing is born, and nothing is spent from the budget.
 ///
 /// Three judgments follow resolution: the frame's authority over the verb,
 /// then [`vet`], then the session's remaining births.  The verb comes first
@@ -47,15 +47,21 @@ pub(crate) fn detach(
         CommandName::Bare(spelled)
     };
     if let CommandName::Bare(bare) = &name {
-        if shell.lookup_builtin(bare).is_some() {
-            return Err(sig(format!(
-                "detach: '{bare}' is a ral builtin, so there is no process image to detach. \
-                 Which program did you mean to leave running?"
-            )));
-        }
-        // Both passes of the stack, so a catch-all intercepts as a per-name does.
-        if let Some((entry, depth)) = shell.lookup_handler(bare) {
-            return crate::runtime::command_call::run_handler(&entry, depth, argv, mooring, shell);
+        // Every pass of the stack: a catch-all intercepts as a per-name
+        // does, and a base frame runs rather than being spawned.
+        match shell.lookup_handler(bare) {
+            Some(HandlerLookup::Frame(entry, depth)) => {
+                return crate::runtime::command_call::run_handler(
+                    &entry, depth, argv, mooring, shell,
+                );
+            }
+            Some(HandlerLookup::Base(entry)) => {
+                let raw = crate::runtime::command_call::run_base_frame(
+                    &entry, argv, &[], mooring, shell,
+                );
+                return crate::evaluator::absorb_tail(raw, mooring, shell);
+            }
+            None => {}
         }
     }
     if !shell.permits_detach() {

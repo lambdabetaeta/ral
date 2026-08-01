@@ -73,7 +73,6 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ),
     ("core/src/builtins/misc.rs", "io-door:silent:ask-tty"),
     ("core/src/builtins/modules.rs", "io-door:silent:module-load"),
-    ("core/src/builtins/uutils.rs", "io-door:silent:diff-read"),
     ("core/build.rs", "io-door:silent:prelude-bake-build"),
     ("core/src/capability/load.rs", "io-door:silent:cap-load"),
     ("core/src/boot.rs", "io-door:silent:prelude-bake"),
@@ -175,6 +174,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ),
     ("core/src/transport.rs", "io-door:silent:engine-spawn"),
     ("core/src/types/shell/cwd.rs", "io-door:silent:cwd-stat"),
+    ("core/src/uutils.rs", "io-door:silent:diff-read"),
     // ── exarch ────────────────────────────────────────────────────────────
     (
         "exarch/src/shell_eval/builtins.rs",

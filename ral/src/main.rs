@@ -46,7 +46,7 @@ fn main() -> ExitCode {
     // same binary re-exec'd as `--ral-bundled-tool`) and pipeline helpers
     // see the default disposition.
     #[cfg(unix)]
-    ral_core::builtins::uutils::init_signal_dispositions();
+    ral_core::uutils::init_signal_dispositions();
 
     #[cfg(unix)]
     if std::env::args().any(|a| a == "--engine") {

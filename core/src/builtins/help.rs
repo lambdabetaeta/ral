@@ -273,9 +273,9 @@ fn type_for(name: &str, table: &crate::types::BuiltinTable) -> String {
     })
 }
 
-/// Where the shell would find `name`.  Probes handlers before builtins, the
-/// reverse of `command_call::resolve`; `HandlerEntry::vet` refuses a handler
-/// name that is already a builtin or a binding, so the two orders agree.
+/// Where the shell would find `name`.  Probes handlers before the manifest —
+/// the reverse of `command_call::resolve`'s env-first order — so a handler
+/// under a native's name reports as `handler` though only `^name` reaches it.
 fn which_line(name: &str, shell: &Shell) -> Option<String> {
     if shell.mobile.scope.get_local(name).is_some() {
         return Some(format!("{name}: local"));

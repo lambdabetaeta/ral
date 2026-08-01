@@ -128,6 +128,18 @@ impl HostSurface {
             table.install_arc(Arc::clone(set));
         }
     }
+
+    /// [`Self::install_into`]'s live-shell counterpart: goes through
+    /// [`Shell::install_builtins`]/[`Shell::install_captured_builtins`], which
+    /// also seed the base env scope and base handler frames.
+    pub(crate) fn install_into_shell(&self, shell: &mut Shell) {
+        for &set in &self.statics {
+            shell.install_builtins(set);
+        }
+        for set in &self.captured {
+            shell.install_captured_builtins(Arc::clone(set));
+        }
+    }
 }
 
 /// Construct a fresh `Shell`, install the host's builtin surface, seed the
@@ -144,7 +156,7 @@ impl HostSurface {
 /// within the surface.
 pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude, surface: &HostSurface) -> Shell {
     let mut shell = Shell::new(terminal);
-    surface.install_into(&mut shell.session.builtins);
+    surface.install_into_shell(&mut shell);
     shell.seed_default_env_vars();
     crate::builtins::register(&mut shell, prelude.comp());
     shell

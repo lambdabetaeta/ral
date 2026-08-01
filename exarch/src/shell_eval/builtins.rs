@@ -6,7 +6,7 @@ use crate::shell_eval::skill;
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ignore::WalkBuilder;
-use ral_core::builtins::util::{check_arity, regex_err};
+use ral_core::builtins::util::regex_err;
 use ral_core::typecheck::builtins::{
     BuiltinTypeRule, closed_record, fun, mk_scheme as scheme, pure, thunk,
 };
@@ -233,7 +233,6 @@ fn view_bound(arg: &Value, which: &str) -> Settled<usize> {
 /// carrying its witness.  Reads and hashes the whole file even for a small
 /// slice, since a witness depends on file-wide uniqueness.
 fn builtin_view_text(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 3, "view-text")?;
     let path = args[0].to_string();
     let start = view_bound(&args[1], "start")?;
     let end = view_bound(&args[2], "end")?;
@@ -344,7 +343,6 @@ fn search_tree(mooring: &Mooring, shell: &mut Shell, pattern: &str) -> Settled<V
 /// `grep-files PATTERN` — [`search_tree`] over the cwd, emitting exactly one
 /// `grep` surface for the whole walk rather than a card per file read.
 fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "grep-files")?;
     let pattern = args[0].to_string();
 
     mooring.surface(&Value::map(vec![
@@ -413,7 +411,6 @@ fn note_edit(shell: &mut Shell, path: &str, lines: &str, plural: bool, any_escap
 /// the redirect frame, so `edit-hash` owns its surface — one committed `write`
 /// event the card layer renders as a whole-file diff, as a committed `>` would.
 fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 2, "edit-hash")?;
     let path = args[0].to_string();
     let edits = match &args[1] {
         Value::List(items) => items,
@@ -570,7 +567,6 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> 
 /// leaves the file untouched.  Composed over the same doors as `edit-hash`: a
 /// silent read, then [`Shell::atomic_write`], surfacing one committed `write`.
 fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 3, "edit-replace")?;
     let path = args[0].to_string();
     let from = args[1].to_string();
     let to = args[2].to_string();
@@ -625,7 +621,6 @@ fn relabel_string_replace(b: Break) -> Break {
 /// `explore-dir DEPTH` — list the cwd's tree (ignore-aware) to `DEPTH`, through
 /// the one sanctioned walk site ([`cancellable`]).
 fn builtin_explore_dir(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "explore-dir")?;
     let depth: usize = match &args[0] {
         Value::Int(n) if *n >= 0 => {
             #[allow(
@@ -760,7 +755,6 @@ const DEFAULT_LIMIT: usize = 50;
 
 /// `fff QUERY` — frecency-ranked fuzzy file-name search over the working tree.
 fn builtin_fff(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "fff")?;
     let query = args[0].to_string();
     let cwd = checked_read_path(shell, ".")?;
     let idx = fff_index::index_for(&cwd).map_err(sig)?;
@@ -797,7 +791,6 @@ fn scheme_skill(_u: &mut Unifier) -> Scheme {
 /// `skill NAME` — load a skill's full body, rescanning at each call so a skill
 /// added or edited mid-session is found.
 fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "skill")?;
     let name = args[0].to_string();
     // Rejecting it here is what keeps `root.join(&name)` inside the skills root.
     if !skill::valid_skill_name(&name) {
@@ -892,7 +885,6 @@ fn scheme_service_handle(u: &mut Unifier) -> Scheme {
 /// binding, so by-id re-acquisition stays carved out for services rather than
 /// becoming a control plane over every worker.
 fn builtin_service_handle(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "service-handle")?;
     let id = match args[0].as_int() {
         Some(n) if n >= 0 => {
             #[allow(clippy::cast_sign_loss, reason = "guarded n >= 0")]
@@ -918,62 +910,65 @@ fn builtin_service_handle(args: &[Value], _mooring: &Mooring, shell: &mut Shell)
     }
 }
 
-pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
-    BuiltinEntry {
-        name: Cow::Borrowed("view-text"),
-        type_rule: BuiltinTypeRule::Scheme(Some(3), scheme_view_text),
-        doc: "view-text <path> <start> <end>  — show the half-open line range [start, end) of PATH, each line tagged `<line-no>\\t<hash>\\t<text>`. Returns a list of records [{line: Int, hash: String, text: String}]. The hash is the witness `edit-hash` checks; copy it, never recompute it. Reads the whole file (the witness depends on file-wide uniqueness).",
-        body: BuiltinBody::Static(builtin_view_text),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("grep-files"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_grep_files),
-        doc: "grep-files <pattern>  — recursively search the cwd (ignore-aware, Rust regex) in one read per matched file, giving [{file, line, text}].",
-        body: BuiltinBody::Static(builtin_grep_files),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("edit-hash"),
-        type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_edit_hash),
-        doc: "edit-hash <path> <edits>  — apply a batch of [hash: HASH, line: TEXT] records in one read/write pass: each replaces the line whose witness is HASH with TEXT verbatim (a real newline inside '…' splits the line into several, \\n does not; empty deletes). Atomic — all hashes resolve against the file as read, so edits never interfere; fails writing nothing unless every hash picks exactly one line and no two records name the same one.",
-        body: BuiltinBody::Static(builtin_edit_hash),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("edit-replace"),
-        type_rule: BuiltinTypeRule::Scheme(Some(3), scheme_edit_replace),
-        doc: "edit-replace <path> <from> <to>  — read PATH, replace the one literal occurrence of FROM with TO, write the result back. Errors, leaving the file untouched, if FROM matches zero times or more than once.",
-        body: BuiltinBody::Static(builtin_edit_replace),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("explore-dir"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_explore_dir),
-        doc: "explore-dir <n>  — list directory entries up to depth n respecting ignore files.",
-        body: BuiltinBody::Static(builtin_explore_dir),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("skill-list"),
-        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_skill_list),
-        doc: "skill-list  — list all available skills (fresh scan, filtered by grant). Returns one `name: description` per line.",
-        body: BuiltinBody::Static(builtin_skill_list),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("skill"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_skill),
-        doc: "skill <name>  — load the full SKILL.md body for the named skill (discovered from .exarch/skills/ and your config). Returns its Markdown instructions, or an error string if not found.",
-        body: BuiltinBody::Static(builtin_skill),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("fff"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_fff),
-        doc: "fff <query>  — fuzzy file-name search (frecency-ranked) over the working tree, returning [String].",
-        body: BuiltinBody::Static(builtin_fff),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("service-handle"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_service_handle),
-        doc: "service-handle <id>  — re-acquire a durable service's live Handle by id (durable services only; an ephemeral spawn/watch id is refused). Compose with an eliminator: `await (service-handle 3)`, `cancel (service-handle 3)`.",
-        body: BuiltinBody::Static(builtin_service_handle),
-    },
+// A named array, not a promoted temporary: rustc refuses promotion once an
+// entry carries `BuiltinEntry`'s interior-mutable arity cache.
+static EXARCH_BUILTINS_ARR: [BuiltinEntry; 9] = [
+    BuiltinEntry::new(
+    Cow::Borrowed("view-text"),
+    BuiltinTypeRule::Scheme(scheme_view_text),
+    "view-text <path> <start> <end>  — show the half-open line range [start, end) of PATH, each line tagged `<line-no>\\t<hash>\\t<text>`. Returns a list of records [{line: Int, hash: String, text: String}]. The hash is the witness `edit-hash` checks; copy it, never recompute it. Reads the whole file (the witness depends on file-wide uniqueness).",
+    BuiltinBody::Static(builtin_view_text),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("grep-files"),
+    BuiltinTypeRule::Scheme(scheme_grep_files),
+    "grep-files <pattern>  — recursively search the cwd (ignore-aware, Rust regex) in one read per matched file, giving [{file, line, text}].",
+    BuiltinBody::Static(builtin_grep_files),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("edit-hash"),
+    BuiltinTypeRule::Scheme(scheme_edit_hash),
+    "edit-hash <path> <edits>  — apply a batch of [hash: HASH, line: TEXT] records in one read/write pass: each replaces the line whose witness is HASH with TEXT verbatim (a real newline inside '…' splits the line into several, \\n does not; empty deletes). Atomic — all hashes resolve against the file as read, so edits never interfere; fails writing nothing unless every hash picks exactly one line and no two records name the same one.",
+    BuiltinBody::Static(builtin_edit_hash),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("edit-replace"),
+    BuiltinTypeRule::Scheme(scheme_edit_replace),
+    "edit-replace <path> <from> <to>  — read PATH, replace the one literal occurrence of FROM with TO, write the result back. Errors, leaving the file untouched, if FROM matches zero times or more than once.",
+    BuiltinBody::Static(builtin_edit_replace),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("explore-dir"),
+    BuiltinTypeRule::Scheme(scheme_explore_dir),
+    "explore-dir <n>  — list directory entries up to depth n respecting ignore files.",
+    BuiltinBody::Static(builtin_explore_dir),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("skill-list"),
+    BuiltinTypeRule::Scheme(scheme_skill_list),
+    "skill-list  — list all available skills (fresh scan, filtered by grant). Returns one `name: description` per line.",
+    BuiltinBody::Static(builtin_skill_list),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("skill"),
+    BuiltinTypeRule::Scheme(scheme_skill),
+    "skill <name>  — load the full SKILL.md body for the named skill (discovered from .exarch/skills/ and your config). Returns its Markdown instructions, or an error string if not found.",
+    BuiltinBody::Static(builtin_skill),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("fff"),
+    BuiltinTypeRule::Scheme(scheme_fff),
+    "fff <query>  — fuzzy file-name search (frecency-ranked) over the working tree, returning [String].",
+    BuiltinBody::Static(builtin_fff),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("service-handle"),
+    BuiltinTypeRule::Scheme(scheme_service_handle),
+    "service-handle <id>  — re-acquire a durable service's live Handle by id (durable services only; an ephemeral spawn/watch id is refused). Compose with an eliminator: `await (service-handle 3)`, `cancel (service-handle 3)`.",
+    BuiltinBody::Static(builtin_service_handle),
+),
 ];
+pub static EXARCH_BUILTINS: &[BuiltinEntry] = &EXARCH_BUILTINS_ARR;
 
 #[cfg(test)]
 mod tests {
@@ -1119,12 +1114,13 @@ mod tests {
         scheme(&[], &[], &[], thunk(pure(Ty::Unit)))
     }
 
-    static WORKER_TEST_BUILTINS: &[BuiltinEntry] = &[BuiltinEntry {
-        name: Cow::Borrowed("test-block-forever"),
-        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_test_block_forever),
-        doc: "test-only: block until cancelled.",
-        body: BuiltinBody::Static(builtin_test_block_forever),
-    }];
+    static WORKER_TEST_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
+        Cow::Borrowed("test-block-forever"),
+        BuiltinTypeRule::Scheme(scheme_test_block_forever),
+        "test-only: block until cancelled.",
+        BuiltinBody::Static(builtin_test_block_forever),
+    )];
+    static WORKER_TEST_BUILTINS: &[BuiltinEntry] = &WORKER_TEST_BUILTINS_ARR;
 
     /// Run `src` as one top-level run, deliberately without a deferred lease so
     /// nothing races a reap mid-test.  Panics on any failure.

@@ -232,12 +232,13 @@ mod tests {
         mk_scheme(&[], &[], &[], thunk(pure(Ty::Unit)))
     }
 
-    static PANIC_BUILTINS: &[BuiltinEntry] = &[BuiltinEntry {
-        name: Cow::Borrowed("a4-panic-now"),
-        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_panic_now),
-        doc: "test-only: panic the evaluator mid-eval.",
-        body: BuiltinBody::Static(builtin_panic_now),
-    }];
+    static PANIC_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
+        Cow::Borrowed("a4-panic-now"),
+        BuiltinTypeRule::Scheme(scheme_panic_now),
+        "test-only: panic the evaluator mid-eval.",
+        BuiltinBody::Static(builtin_panic_now),
+    )];
+    static PANIC_BUILTINS: &[BuiltinEntry] = &PANIC_BUILTINS_ARR;
 
     /// A panic mid-eval must preserve what completed calls bound and leave the
     /// dynamic context clean.  Driven through the real `attend` loop, so the

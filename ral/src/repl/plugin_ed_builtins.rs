@@ -13,7 +13,7 @@
 //! installed into the REPL's own shell at startup
 //! (see [`super::session::Session::boot`]).
 
-use ral_core::builtins::util::{arg0_str, check_arity};
+use ral_core::builtins::util::arg0_str;
 use ral_core::source::Span as ByteSpan;
 use ral_core::syntax::lexer::{Token, lex};
 use ral_core::typecheck::builtins::{
@@ -67,8 +67,7 @@ fn split_at_cursor(text: &str, cursor: usize) -> (String, String) {
 // ─── State read ──────────────────────────────────────────────────────────────
 
 /// `_ed-get` → `[text: Str, cursor: Int, keymap: Str]`
-pub fn builtin_ed_get(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 0, "_ed-get")?;
+pub fn builtin_ed_get(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-get", shell)?;
     shell.check_editor_read("get")?;
     let pc = ctx(shell)?;
@@ -88,8 +87,7 @@ pub fn builtin_ed_get(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> 
 }
 
 /// `_ed-text` → `Str` — current buffer text.
-pub fn builtin_ed_text(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 0, "_ed-text")?;
+pub fn builtin_ed_text(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-text", shell)?;
     shell.check_editor_read("text")?;
     let pc = ctx(shell)?;
@@ -97,8 +95,7 @@ pub fn builtin_ed_text(args: &[Value], _mooring: &Mooring, shell: &mut Shell) ->
 }
 
 /// `_ed-cursor` → `Int` — current cursor offset (chars).
-pub fn builtin_ed_cursor(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 0, "_ed-cursor")?;
+pub fn builtin_ed_cursor(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-cursor", shell)?;
     shell.check_editor_read("cursor")?;
     let pc = ctx(shell)?;
@@ -111,8 +108,7 @@ pub fn builtin_ed_cursor(args: &[Value], _mooring: &Mooring, shell: &mut Shell) 
 }
 
 /// `_ed-keymap` → `Str` — current keymap name.
-pub fn builtin_ed_keymap(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 0, "_ed-keymap")?;
+pub fn builtin_ed_keymap(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-keymap", shell)?;
     shell.check_editor_read("keymap")?;
     let pc = ctx(shell)?;
@@ -120,8 +116,7 @@ pub fn builtin_ed_keymap(args: &[Value], _mooring: &Mooring, shell: &mut Shell) 
 }
 
 /// `_ed-lbuffer` → `Str` — text to the left of the cursor.
-pub fn builtin_ed_lbuffer(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 0, "_ed-lbuffer")?;
+pub fn builtin_ed_lbuffer(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-lbuffer", shell)?;
     shell.check_editor_read("lbuffer")?;
     let pc = ctx(shell)?;
@@ -134,7 +129,6 @@ pub fn builtin_ed_lbuffer(args: &[Value], _mooring: &Mooring, shell: &mut Shell)
 /// `_ed-set [text?: Str, cursor?: Int]` — row-polymorphic partial write.
 /// Unknown fields are ignored.
 pub fn builtin_ed_set(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "_ed-set")?;
     require_interactive("_ed-set", shell)?;
     shell.check_editor_write("set")?;
     let map = as_map(&args[0], "_ed-set")?;
@@ -171,7 +165,6 @@ pub fn builtin_ed_set_lbuffer(
     _mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    check_arity(args, 1, "_ed-set-lbuffer")?;
     require_interactive("_ed-set-lbuffer", shell)?;
     shell.check_editor_write("set-lbuffer")?;
     let l = args[0].to_string();
@@ -185,7 +178,6 @@ pub fn builtin_ed_set_lbuffer(
 
 /// `_ed-insert <str>` — insert at cursor; cursor advances to end of insertion.
 pub fn builtin_ed_insert(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "_ed-insert")?;
     require_interactive("_ed-insert", shell)?;
     shell.check_editor_write("insert")?;
     let s = args[0].to_string();
@@ -199,8 +191,7 @@ pub fn builtin_ed_insert(args: &[Value], _mooring: &Mooring, shell: &mut Shell) 
 }
 
 /// `_ed-push` — save buffer to stack, clear.
-pub fn builtin_ed_push(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 0, "_ed-push")?;
+pub fn builtin_ed_push(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-push", shell)?;
     shell.check_editor_write("push")?;
     let pc = ctx_mut(shell)?;
@@ -212,8 +203,7 @@ pub fn builtin_ed_push(args: &[Value], _mooring: &Mooring, shell: &mut Shell) ->
 }
 
 /// `_ed-accept` — mark buffer for immediate execution.
-pub fn builtin_ed_accept(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 0, "_ed-accept")?;
+pub fn builtin_ed_accept(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-accept", shell)?;
     shell.check_editor_write("accept")?;
     let pc = ctx_mut(shell)?;
@@ -259,7 +249,6 @@ fn decode_captured(bytes: &[u8]) -> String {
 /// loaned mooring dies with the call — nothing to restore.
 /// [`Mooring::in_terminal_loan`] is the re-entrancy guard.
 pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "_ed-tui")?;
     require_interactive("_ed-tui", shell)?;
     shell.check_editor_tui()?;
     if mooring.in_terminal_loan() {
@@ -302,7 +291,6 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
 
 /// `_ed-history <prefix> <limit>` — prefix search over history; `limit=0` for unbounded.
 pub fn builtin_ed_history(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 2, "_ed-history")?;
     require_interactive("_ed-history", shell)?;
     shell.check_editor_read("history")?;
     let prefix = args[0].to_string();
@@ -370,8 +358,7 @@ fn word_text(text: &str, tok: &Token, span: ByteSpan) -> String {
 }
 
 /// `_ed-parse` → `[words: [Str], current: Int, offset: Int]` — tokenize buffer at cursor.
-pub fn builtin_ed_parse(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 0, "_ed-parse")?;
+pub fn builtin_ed_parse(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-parse", shell)?;
     shell.check_editor_read("parse")?;
     let pc = ctx(shell)?;
@@ -438,10 +425,9 @@ pub fn builtin_ed_parse(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -
 
 /// `_ed-ghost <text>` — set ghost text (empty string clears).
 pub fn builtin_ed_ghost(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "_ed-ghost")?;
     require_interactive("_ed-ghost", shell)?;
     shell.check_editor_write("ghost")?;
-    let text = arg0_str(args, "_ed-ghost")?;
+    let text = arg0_str(args)?;
     let pc = ctx_mut(shell)?;
     pc.outputs.ghost_text = (!text.is_empty()).then_some(text);
     Ok(Value::Unit)
@@ -463,7 +449,6 @@ pub fn builtin_ed_hyperlink(
     _mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    check_arity(args, 2, "_ed-hyperlink")?;
     require_interactive("_ed-hyperlink", shell)?;
     let uri = args[0].to_string();
     let text = args[1].to_string();
@@ -493,7 +478,6 @@ pub fn builtin_ed_clipboard(
     _mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    check_arity(args, 1, "_ed-clipboard")?;
     require_interactive("_ed-clipboard", shell)?;
     shell.check_editor_write("clipboard")?;
 
@@ -504,7 +488,7 @@ pub fn builtin_ed_clipboard(
     use base64::Engine;
     use std::io::Write;
     let payload = base64::engine::general_purpose::STANDARD
-        .encode(arg0_str(args, "_ed-clipboard")?.as_bytes());
+        .encode(arg0_str(args)?.as_bytes());
     let sequence = ral_core::ansi::osc52_copy(&payload);
     let _ = std::io::stdout().write_all(sequence.as_bytes());
     let _ = std::io::stdout().flush();
@@ -517,7 +501,6 @@ pub fn builtin_ed_highlight(
     _mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    check_arity(args, 1, "_ed-highlight")?;
     require_interactive("_ed-highlight", shell)?;
     shell.check_editor_write("highlight")?;
     let spans_val = as_list(&args[0], "_ed-highlight")?;
@@ -568,7 +551,6 @@ pub fn builtin_ed_highlight(
 /// persistent cell.  `default` is used on first call; `updater` is invoked
 /// with the current value and its return becomes the new value.
 pub fn builtin_ed_state(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 2, "_ed-state")?;
     require_interactive("_ed-state", shell)?;
     shell.check_editor_write("state")?;
     let default = &args[0];
@@ -723,118 +705,122 @@ fn scheme_state(u: &mut Unifier) -> Scheme {
     )
 }
 
+// A named array, not a promoted temporary: rustc refuses promotion once an
+// entry carries `BuiltinEntry`'s interior-mutable arity cache.
+static ED_BUILTINS_ARR: [BuiltinEntry; 18] = [
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-get"),
+    BuiltinTypeRule::Scheme(scheme_ed_get),
+    "_ed-get  — return editor state record [text, cursor, keymap].",
+    BuiltinBody::Static(builtin_ed_get),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-text"),
+    BuiltinTypeRule::Scheme(scheme_string_thunk),
+    "_ed-text  — return current buffer text.",
+    BuiltinBody::Static(builtin_ed_text),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-cursor"),
+    BuiltinTypeRule::Scheme(scheme_int_thunk),
+    "_ed-cursor  — return current cursor offset (chars).",
+    BuiltinBody::Static(builtin_ed_cursor),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-keymap"),
+    BuiltinTypeRule::Scheme(scheme_string_thunk),
+    "_ed-keymap  — return current keymap name.",
+    BuiltinBody::Static(builtin_ed_keymap),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-lbuffer"),
+    BuiltinTypeRule::Scheme(scheme_string_thunk),
+    "_ed-lbuffer  — return text to the left of the cursor.",
+    BuiltinBody::Static(builtin_ed_lbuffer),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-set"),
+    BuiltinTypeRule::Scheme(scheme_ed_set),
+    "_ed-set <map>  — partial write of editor state (text and/or cursor); unknown fields ignored.",
+    BuiltinBody::Static(builtin_ed_set),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-set-lbuffer"),
+    BuiltinTypeRule::Scheme(scheme_string_to_unit),
+    "_ed-set-lbuffer <text>  — replace text left of cursor; right side preserved.",
+    BuiltinBody::Static(builtin_ed_set_lbuffer),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-insert"),
+    BuiltinTypeRule::Scheme(scheme_string_to_unit),
+    "_ed-insert <text>  — insert text at cursor; cursor advances past insertion.",
+    BuiltinBody::Static(builtin_ed_insert),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-push"),
+    BuiltinTypeRule::Scheme(scheme_unit_thunk),
+    "_ed-push  — save buffer to stack, clear.",
+    BuiltinBody::Static(builtin_ed_push),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-accept"),
+    BuiltinTypeRule::Scheme(scheme_unit_thunk),
+    "_ed-accept  — mark buffer for immediate execution.",
+    BuiltinBody::Static(builtin_ed_accept),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-tui"),
+    BuiltinTypeRule::Scheme(scheme_tui),
+    "_ed-tui <thunk>  — suspend editor, run thunk, return [output: Str, status: Int]; never raises on body status.",
+    BuiltinBody::Static(builtin_ed_tui),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-history"),
+    BuiltinTypeRule::Scheme(scheme_history),
+    "_ed-history <prefix> <limit>  — prefix search over history; limit=0 for unbounded.",
+    BuiltinBody::Static(builtin_ed_history),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-parse"),
+    BuiltinTypeRule::Scheme(scheme_parse),
+    "_ed-parse  — tokenize buffer at cursor; returns [words, current, offset].",
+    BuiltinBody::Static(builtin_ed_parse),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-ghost"),
+    BuiltinTypeRule::Scheme(scheme_string_to_unit),
+    "_ed-ghost <text>  — set ghost text (empty string clears).",
+    BuiltinBody::Static(builtin_ed_ghost),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-highlight"),
+    BuiltinTypeRule::Scheme(scheme_highlight),
+    "_ed-highlight <spans>  — set highlight spans (empty list clears).",
+    BuiltinBody::Static(builtin_ed_highlight),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-clipboard"),
+    BuiltinTypeRule::Scheme(scheme_string_to_bool),
+    "_ed-clipboard <text>  — OSC 52 system-clipboard write; returns Bool (true on emit, false when host terminal can't).",
+    BuiltinBody::Static(builtin_ed_clipboard),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-hyperlink"),
+    BuiltinTypeRule::Scheme(scheme_string_string_to_string),
+    "_ed-hyperlink <uri> <text>  — wrap text in OSC 8 hyperlink; returns plain text when terminal can't render hyperlinks.",
+    BuiltinBody::Static(builtin_ed_hyperlink),
+),
+    BuiltinEntry::new(
+    Cow::Borrowed("_ed-state"),
+    BuiltinTypeRule::Scheme(scheme_state),
+    "_ed-state <default> <updater>  — read-modify-write the plugin's persistent cell.",
+    BuiltinBody::Static(builtin_ed_state),
+),
+];
+
 /// Builtins installed into the REPL's own shell at startup
 /// (see [`super::session::Session::boot`]).
-pub static ED_BUILTINS: &[BuiltinEntry] = &[
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-get"),
-        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_ed_get),
-        doc: "_ed-get  — return editor state record [text, cursor, keymap].",
-        body: BuiltinBody::Static(builtin_ed_get),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-text"),
-        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_string_thunk),
-        doc: "_ed-text  — return current buffer text.",
-        body: BuiltinBody::Static(builtin_ed_text),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-cursor"),
-        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_int_thunk),
-        doc: "_ed-cursor  — return current cursor offset (chars).",
-        body: BuiltinBody::Static(builtin_ed_cursor),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-keymap"),
-        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_string_thunk),
-        doc: "_ed-keymap  — return current keymap name.",
-        body: BuiltinBody::Static(builtin_ed_keymap),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-lbuffer"),
-        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_string_thunk),
-        doc: "_ed-lbuffer  — return text to the left of the cursor.",
-        body: BuiltinBody::Static(builtin_ed_lbuffer),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-set"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_ed_set),
-        doc: "_ed-set <map>  — partial write of editor state (text and/or cursor); unknown fields ignored.",
-        body: BuiltinBody::Static(builtin_ed_set),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-set-lbuffer"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_string_to_unit),
-        doc: "_ed-set-lbuffer <text>  — replace text left of cursor; right side preserved.",
-        body: BuiltinBody::Static(builtin_ed_set_lbuffer),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-insert"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_string_to_unit),
-        doc: "_ed-insert <text>  — insert text at cursor; cursor advances past insertion.",
-        body: BuiltinBody::Static(builtin_ed_insert),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-push"),
-        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_unit_thunk),
-        doc: "_ed-push  — save buffer to stack, clear.",
-        body: BuiltinBody::Static(builtin_ed_push),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-accept"),
-        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_unit_thunk),
-        doc: "_ed-accept  — mark buffer for immediate execution.",
-        body: BuiltinBody::Static(builtin_ed_accept),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-tui"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_tui),
-        doc: "_ed-tui <thunk>  — suspend editor, run thunk, return [output: Str, status: Int]; never raises on body status.",
-        body: BuiltinBody::Static(builtin_ed_tui),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-history"),
-        type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_history),
-        doc: "_ed-history <prefix> <limit>  — prefix search over history; limit=0 for unbounded.",
-        body: BuiltinBody::Static(builtin_ed_history),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-parse"),
-        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_parse),
-        doc: "_ed-parse  — tokenize buffer at cursor; returns [words, current, offset].",
-        body: BuiltinBody::Static(builtin_ed_parse),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-ghost"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_string_to_unit),
-        doc: "_ed-ghost <text>  — set ghost text (empty string clears).",
-        body: BuiltinBody::Static(builtin_ed_ghost),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-highlight"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_highlight),
-        doc: "_ed-highlight <spans>  — set highlight spans (empty list clears).",
-        body: BuiltinBody::Static(builtin_ed_highlight),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-clipboard"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_string_to_bool),
-        doc: "_ed-clipboard <text>  — OSC 52 system-clipboard write; returns Bool (true on emit, false when host terminal can't).",
-        body: BuiltinBody::Static(builtin_ed_clipboard),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-hyperlink"),
-        type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_string_string_to_string),
-        doc: "_ed-hyperlink <uri> <text>  — wrap text in OSC 8 hyperlink; returns plain text when terminal can't render hyperlinks.",
-        body: BuiltinBody::Static(builtin_ed_hyperlink),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("_ed-state"),
-        type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_state),
-        doc: "_ed-state <default> <updater>  — read-modify-write the plugin's persistent cell.",
-        body: BuiltinBody::Static(builtin_ed_state),
-    },
-];
+pub static ED_BUILTINS: &[BuiltinEntry] = &ED_BUILTINS_ARR;
 
 #[cfg(test)]
 mod tests {

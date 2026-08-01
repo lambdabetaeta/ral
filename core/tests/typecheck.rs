@@ -854,14 +854,21 @@ fn control_op_audit_in_value_position_errors() {
 // thunk under the handler calling convention, generalises the result
 // computation, and binds it in a fresh handler frame for the body.
 
-/// Handler installation for a builtin name is rejected. Builtin bindings are
-/// language names, not handler names, so `length` cannot be rewritten by a
-/// scoped handler.
+/// A handler under a native's name installs — no name admission — but the
+/// bare head still resolves to the native: `length`'s `Int` scheme governs
+/// `r`, not the arm, so arithmetic on the result typechecks.
 #[test]
-fn within_handler_for_builtin_is_rejected() {
+fn within_handler_for_native_installs_but_bare_head_still_resolves_the_native() {
+    ok(r#"within [handlers: [length: { |xs| return "hi" }]] { let r = !{length [1, 2, 3]}; return $[$r + 1] }"#);
+}
+
+/// `^length` skips the env and reaches the arm: its `String` return clashes
+/// with arithmetic the native's `Int` scheme would have permitted.
+#[test]
+fn caret_reaches_a_handler_stacked_on_a_native_name() {
     has_error(
-        r#"within [handlers: [length: { |xs| "hi" }]] { let r = !{length [1, 2, 3]}; return $r }"#,
-        "cannot install handler for builtin `length`",
+        r#"within [handlers: [length: { |xs| return "mocked" }]] { let r = !{^length hello}; return $[$r + 0] }"#,
+        "couldn't match",
     );
 }
 
@@ -900,6 +907,22 @@ fn within_handler_value_output_pipes_byte_consumer_is_mismatch() {
 #[test]
 fn within_handler_byte_output_arm_ok() {
     ok(r"within [handlers: [foo: { |args| echo hi }]] { foo }");
+}
+
+/// A stacked `echo` arm pins to the base frame's `None → Bytes` modes; a
+/// value-output body is refused at install.
+#[test]
+fn within_handler_for_echo_breaking_its_byte_mode_is_rejected() {
+    assert!(
+        is_mode_mismatch(r#"within [handlers: [echo: { |args| return "not bytes" }]] { echo hi }"#),
+        "expected a ModeMismatch pinning the echo arm to None -> Bytes"
+    );
+}
+
+/// The dual case: an arm that preserves `echo`'s byte mode installs cleanly.
+#[test]
+fn within_handler_for_echo_preserving_its_byte_mode_ok() {
+    ok(r#"within [handlers: [echo: { |args| echo mocked }]] { echo hi }"#);
 }
 
 /// A byte-output forwarding alias defines the unknown head as byte-output and
@@ -1410,11 +1433,11 @@ fn nullary_decoder_keeps_its_byte_modes() {
     );
 }
 
-/// A decoder signature declares `value: None`, so `$from-json` has no
-/// first-class form.
+/// A decoder is fixed arity zero, so it derives a value scheme like any
+/// other fixed-arity native: `$from-json` is a first-class nullary thunk.
 #[test]
-fn decoder_is_not_first_class() {
-    has_error("let f = $from-json; return $f", "builtin command");
+fn decoder_is_a_first_class_nullary_native() {
+    ok("let f = $from-json; return $f");
 }
 
 // ─── Row termination and duplicate-key semantics ──────────────────────────────

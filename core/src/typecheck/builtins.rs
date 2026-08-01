@@ -9,8 +9,10 @@
 //! needs no renaming pass; a [`BuiltinSig`] is inert data, interpreted by the
 //! `Inferencer` impl at the bottom of this file.
 
+use super::env::TyEnv;
 use super::error::{Reason, TypeErrorKind};
 use super::fmt::{fmt_scheme, fmt_ty};
+use super::generalize::generalize;
 use super::infer::Inferencer;
 use super::scheme::{CachedFreeVars, Scheme};
 use super::ty::{CompTy, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar};
@@ -24,11 +26,41 @@ use crate::types::BuiltinTable;
 /// classification.
 #[derive(Clone, Copy)]
 pub enum BuiltinTypeRule {
-    /// Standard polytype.  `arity` is the registry entry's declared `arity:`,
-    /// cached for `$name` synthesis; `None` for entries with no fixed argv.
-    Scheme(Option<usize>, fn(&mut Unifier) -> Scheme),
+    /// Standard polytype; the factory's curry-spine depth (via
+    /// [`BuiltinTypeRule::fixed_arity`]) is always `Some`, never variadic —
+    /// there is no curried type for an open argv to have.
+    Scheme(fn(&mut Unifier) -> Scheme),
     /// Command-position signature; its `value` decides whether `$name` exists.
     Sig(BuiltinSig),
+}
+
+impl BuiltinTypeRule {
+    /// `Some(n)` for fixed arity (including 0); `None` for variadic/optional.
+    /// A `Scheme` rule's arity is its factory's curry-spine depth; a `Sig`
+    /// rule's is [`BuiltinSig::fixed_arity`].
+    pub fn fixed_arity(&self) -> Option<usize> {
+        match self {
+            BuiltinTypeRule::Scheme(factory) => Some(scheme_curry_depth(*factory)),
+            BuiltinTypeRule::Sig(sig) => sig.fixed_arity(),
+        }
+    }
+}
+
+/// The `Fun`-nesting depth of a scheme factory's curried body — instantiated
+/// fresh, since a factory needs a live [`Unifier`] to run.
+fn scheme_curry_depth(factory: fn(&mut Unifier) -> Scheme) -> usize {
+    let mut u = Unifier::new();
+    let scheme = factory(&mut u);
+    fn count(ct: &CompTy) -> usize {
+        match ct {
+            CompTy::Fun(_, body) => 1 + count(body),
+            _ => 0,
+        }
+    }
+    match &scheme.ty {
+        Ty::Thunk(inner) => count(inner),
+        _ => 0,
+    }
 }
 
 /// Data signature for a builtin that is typed as a command operation.
@@ -262,7 +294,6 @@ pub mod sig {
     const TWO_INTS: &[ArgTemplate] = &[INT, INT];
     const ONE_ANY: &[ArgTemplate] = &[ANY];
     const ONE_STR: &[ArgTemplate] = &[STR];
-    const ONE_INT: &[ArgTemplate] = &[INT];
     const ONE_FLOAT: &[ArgTemplate] = &[FLOAT];
     const FLOAT_INT: &[ArgTemplate] = &[FLOAT, INT];
     const TO_BYTES_ARGS: &[ArgTemplate] = &[ArgTemplate::OneOf(BYTES_OR_INT_LIST)];
@@ -312,11 +343,7 @@ pub mod sig {
         None,
     );
 
-    pub const RANGE: BuiltinSig = command(
-        ArgSig::Exact(TWO_INTS),
-        pure(TyTemplate::ListInt),
-        Some(scheme::range),
-    );
+    pub const RANGE: BuiltinSig = command(ArgSig::Exact(TWO_INTS), pure(TyTemplate::ListInt), None);
 
     pub const FROM_BYTES: BuiltinSig = decoder(ret(
         ModeTemplate::Bytes,
@@ -360,27 +387,13 @@ pub mod sig {
     );
 
     pub const CHDIR: BuiltinSig = command(ArgSig::Optional(STR), pure(TyTemplate::Unit), None);
-    pub const PATH_BOOL: BuiltinSig = command(
-        ArgSig::Exact(ONE_STR),
-        pure(TyTemplate::Bool),
-        Some(scheme::path_bool),
-    );
+    pub const PATH_BOOL: BuiltinSig = command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Bool), None);
 
-    pub const INT_PARSE: BuiltinSig = command(
-        ArgSig::Exact(ONE_ANY),
-        pure(TyTemplate::Int),
-        Some(scheme::any_to_int),
-    );
-    pub const FLOAT_PARSE: BuiltinSig = command(
-        ArgSig::Exact(ONE_ANY),
-        pure(TyTemplate::Float),
-        Some(scheme::any_to_float),
-    );
-    pub const STR_PARSE: BuiltinSig = command(
-        ArgSig::Exact(ONE_ANY),
-        pure(TyTemplate::String),
-        Some(scheme::any_to_string),
-    );
+    pub const INT_PARSE: BuiltinSig = command(ArgSig::Exact(ONE_ANY), pure(TyTemplate::Int), None);
+    pub const FLOAT_PARSE: BuiltinSig =
+        command(ArgSig::Exact(ONE_ANY), pure(TyTemplate::Float), None);
+    pub const STR_PARSE: BuiltinSig =
+        command(ArgSig::Exact(ONE_ANY), pure(TyTemplate::String), None);
     pub const ROUND: BuiltinSig = command(ArgSig::Exact(FLOAT_INT), pure(TyTemplate::Float), None);
     /// Shared by `floor`, `ceil`, and `trunc`.
     pub const FLOAT_TO_INT: BuiltinSig =
@@ -398,7 +411,7 @@ pub mod sig {
     pub const EXPLAIN: BuiltinSig = command(
         ArgSig::Exact(ONE_STR),
         ret(ModeTemplate::Fresh, ModeTemplate::Bytes, TyTemplate::Unit),
-        Some(scheme::explain_op),
+        None,
     );
 
     /// `detach`: any argv, and a `{pid, desc}` receipt the checker leaves as a
@@ -409,8 +422,14 @@ pub mod sig {
     /// process that outlives the session.
     pub const DETACH: BuiltinSig = command(ArgSig::Any, pure(TyTemplate::Any), None);
 
-    pub const INT_TO_UNIT: BuiltinSig =
-        command(ArgSig::Exact(ONE_INT), pure(TyTemplate::Unit), None);
+    /// `echo`: any argv — mixed types coexist through per-argument `str`
+    /// rather than a shared element type — with `to-line`'s modes, so
+    /// pipeline typing treats it as the byte write it is.
+    pub const ECHO: BuiltinSig = command(
+        ArgSig::Any,
+        ret(ModeTemplate::None, ModeTemplate::Bytes, TyTemplate::Unit),
+        None,
+    );
 
     /// `fg`/`bg`/`disown`, registered by the REPL host in
     /// `ral/src/repl/host_handlers.rs`: zero or one Int, a bare call meaning
@@ -427,7 +446,7 @@ pub mod sig {
     pub const FAIL: BuiltinSig = BuiltinSig {
         args: ArgSig::Exact(ONE_ANY),
         result: CompTemplate::Never,
-        value: Some(scheme::fail_op),
+        value: None,
         diagnostic: BuiltinDiagnostic::FailStatusNonzero,
     };
 
@@ -592,19 +611,6 @@ pub mod scheme {
     // ── List operations ──────────────────────────────────────────────────
 
     scheme!(length<av>: [Ty::Var(av)] -> Ty::Int);
-
-    /// `range :: Int → Int → F [Int]`
-    pub fn range(_u: &mut Unifier) -> Scheme {
-        mk_scheme(
-            &[],
-            &[],
-            &[],
-            thunk(fun(
-                Ty::Int,
-                fun(Ty::Int, pure(Ty::List(Box::new(Ty::Int)))),
-            )),
-        )
-    }
 
     /// `surface :: ∀ρ. Variant ρ → F ()` — forward a tagged event to the host's
     /// event sink.  The row stays open: the host decides which tags it knows.
@@ -813,8 +819,6 @@ pub mod scheme {
 
     scheme!(is_empty<av>: [Ty::Var(av)] -> Ty::Bool);
 
-    scheme!(path_bool: [Ty::String] -> Ty::Bool);
-
     // ── Streaming reducers ───────────────────────────────────────────────
 
     /// `fold-lines :: ∀α μ. U(α → Str → F[∅,μ] α) → α → F[Bytes,μ] α`
@@ -952,57 +956,17 @@ pub mod scheme {
 
     scheme!(exit_op: [Ty::Int] -> Ty::Unit);
 
-    /// `fail :: ∀α ρ. [status: Int | ρ] → F α` — always diverges, so the result
-    /// is unconstrained, and the open row lets a caught error record be
-    /// re-raised verbatim.
-    ///
-    /// Only the value form `$fail` enforces this shape: in command position
-    /// `sig::FAIL` takes one `Any`, so `fail 0` defers to the runtime and
-    /// only the literal `fail [status: 0]` is caught here, by
-    /// [`super::fail_status_is_zero_literal`].
-    pub fn fail_op(u: &mut Unifier) -> Scheme {
-        let av = u.fresh_tyvar();
-        let rho = u.fresh_row_var();
-        let arg = Ty::Record(Row::Extend(
-            "status".into(),
-            Box::new(Ty::Int),
-            Box::new(Row::Var(rho)),
-        ));
-        // `fail` diverges, so it pins no channel: fresh quantified modes, as
-        // `sig_pipe_spec` projects `CompTemplate::Never`.  `pure` would pin
-        // *no-channel* modes, and the branch-mode union of
-        // `if … { fail } else { <byte pipeline> }` would discard the live
-        // branch's byte mode.
-        let in_mode = u.fresh_modevar();
-        let out_mode = u.fresh_modevar();
-        let result = CompTy::Return(
-            PipeSpec {
-                input: PipeMode::Var(in_mode),
-                output: PipeMode::Var(out_mode),
-            },
-            Box::new(Ty::Var(av)),
-        );
-        mk_scheme(&[av], &[in_mode, out_mode], &[rho], thunk(fun(arg, result)))
-    }
-
     // ── First-class constants / queries ──────────────────────────────────
 
     scheme!(pure_string: pure Ty::String);
 
     scheme!(pure_bool: pure Ty::Bool);
-    scheme!(explain_op: pipe [Ty::String] -> Ty::Unit);
 
     // ── First-class functions with pipeline modes ───────────────────────
 
     scheme!(ask: pipe [Ty::String] -> Ty::String);
 
     scheme!(type_probe<av>: pipe [Ty::Var(av)] -> Ty::Var(av));
-
-    scheme!(any_to_int<av>: [Ty::Var(av)] -> Ty::Int);
-
-    scheme!(any_to_float<av>: [Ty::Var(av)] -> Ty::Float);
-
-    scheme!(any_to_string<av>: [Ty::Var(av)] -> Ty::String);
 
     scheme!(source_op<av>: pipe [Ty::String] -> Ty::Var(av));
 
@@ -1013,11 +977,17 @@ pub mod scheme {
 /// name or the entry has no value form.
 ///
 /// Resolution runs against `table`, the checked session's own surface, so a
-/// name means what that session evaluates.
+/// name means what that session evaluates.  A `Sig` rule's own `value` is an
+/// override for the one case the template vocabulary cannot state
+/// ([`sig::TYPE_PROBE`]); every other `Sig` gets its scheme by
+/// [`derive_sig_scheme`].
 pub fn builtin_scheme(table: &BuiltinTable, name: &str, u: &mut Unifier) -> Option<Scheme> {
     match table.get(name)?.type_rule {
-        BuiltinTypeRule::Scheme(_, factory) => Some(factory(u)),
-        BuiltinTypeRule::Sig(sig) => sig.value.map(|f| f(u)),
+        BuiltinTypeRule::Scheme(factory) => Some(factory(u)),
+        BuiltinTypeRule::Sig(sig) => match sig.value {
+            Some(factory) => Some(factory(u)),
+            None => derive_sig_scheme(&sig, u),
+        },
     }
 }
 
@@ -1028,49 +998,85 @@ pub fn builtin_type_hint(table: &BuiltinTable, name: &str) -> Option<String> {
     Some(fmt_scheme(&scheme))
 }
 
-/// The entry's own [`crate::types::BuiltinEntry::fixed_arity`], guarded in
-/// debug builds by [`check_arity_consistency`].
+/// Derive a `Sig`-ruled builtin's value scheme: `Exact`/`DataLast` argument
+/// templates become the curry spine, the result template the comp.  `None`
+/// for `Optional`/`Any` — nothing to curry — so fixed arity yields a scheme
+/// and variadic arity none, by construction.  `OneOf` derives conservatively
+/// to a fresh variable: command position keeps the precise diagnostic, and
+/// the body still refuses at runtime.
 ///
-/// `builtin_registry!` const-asserts a declared `arity:` against a `Sig`'s
-/// structural arity at build time, but cannot see through a `Scheme`
-/// factory, which needs a `Unifier` to instantiate.  The
-/// `registry_and_scheme_arity_agree` test calls this for every name to
-/// close that gap.
-pub fn builtin_arity(table: &BuiltinTable, name: &str) -> Option<usize> {
-    let arity = table.get(name).and_then(|e| e.fixed_arity());
-    debug_assert!(
-        check_arity_consistency(table, name, arity),
-        "builtin '{name}': table arity ({arity:?}) ≠ scheme-derived arity",
-    );
-    arity
+/// The built `Ty` goes through [`generalize`] against an empty [`TyEnv`]
+/// rather than a hand-rolled quantifier list: `generalize` already snapshots
+/// [`CompTemplate::LinesStep`]'s cyclic comp-var root into the scheme's
+/// `comp_ty_bindings`.
+fn derive_sig_scheme(sig: &BuiltinSig, u: &mut Unifier) -> Option<Scheme> {
+    let args = match sig.args {
+        ArgSig::Exact(a) | ArgSig::DataLast(a) => a,
+        ArgSig::Optional(_) | ArgSig::Any => return None,
+    };
+    let params: Vec<Ty> = args.iter().map(|t| arg_template_ty(*t, u)).collect();
+    let pipe = sig_pipe_spec(&sig.result, u);
+    let value = match sig.result {
+        CompTemplate::Pure(t) | CompTemplate::Return { value: t, .. } => ty_of_template(t, u),
+        CompTemplate::Never => u.fresh_ty(),
+        CompTemplate::LinesStep => lines_step_ty(u),
+    };
+    let body = params
+        .into_iter()
+        .rev()
+        .fold(CompTy::Return(pipe, Box::new(value)), |acc, p| fun(p, acc));
+    Some(generalize(u, &TyEnv::new(), &thunk(body)))
 }
 
-/// Cross-check `table`'s declared `arity:` against the `Fun`-nesting depth of
-/// the entry's scheme factory.  `true` when there is no scheme to check.
-#[doc(hidden)]
-pub fn check_arity_consistency(
-    table: &BuiltinTable,
-    name: &str,
-    table_arity: Option<usize>,
-) -> bool {
-    let mut u = Unifier::new();
-    let Some(scheme) = builtin_scheme(table, name, &mut u) else {
-        return true;
-    };
-    let Some(_) = table_arity else {
-        return true;
-    };
-    fn count(ct: &CompTy) -> usize {
-        match ct {
-            CompTy::Fun(_, body) => 1 + count(body),
-            _ => 0,
-        }
+/// An argument template's type in a derived value scheme; `OneOf` joins
+/// `Any` in deriving to a fresh variable.
+fn arg_template_ty(template: ArgTemplate, u: &mut Unifier) -> Ty {
+    match template {
+        ArgTemplate::Ty(t) => ty_of_template(t, u),
+        ArgTemplate::Any | ArgTemplate::OneOf(_) => u.fresh_ty(),
+        ArgTemplate::BlockOrLambda => Ty::Thunk(Box::new(u.fresh_comp_ty())),
     }
-    let scheme_arity = match &scheme.ty {
-        Ty::Thunk(inner) => Some(count(inner)),
-        _ => Some(0),
-    };
-    scheme_arity == table_arity
+}
+
+/// A [`TyTemplate`]'s type, standalone from an [`Inferencer`] context.
+/// [`Inferencer::ty_from_template`] delegates here.
+fn ty_of_template(template: TyTemplate, u: &mut Unifier) -> Ty {
+    match template {
+        TyTemplate::String => Ty::String,
+        TyTemplate::Int => Ty::Int,
+        TyTemplate::Float => Ty::Float,
+        TyTemplate::Bool => Ty::Bool,
+        TyTemplate::Bytes => Ty::Bytes,
+        TyTemplate::Unit => Ty::Unit,
+        TyTemplate::Any => u.fresh_ty(),
+        TyTemplate::ListAny => Ty::List(Box::new(u.fresh_ty())),
+        TyTemplate::ListInt => Ty::List(Box::new(Ty::Int)),
+    }
+}
+
+/// The value `from-lines` returns, standalone from an [`Inferencer`] context:
+/// a recursive Step stream of Strings, the recursion closing through a comp
+/// var.  [`Inferencer::lines_step_ty`] delegates here.
+pub(super) fn lines_step_ty(u: &mut Unifier) -> Ty {
+    use crate::stream::{HEAD_FIELD, TAIL_FIELD, done_tag, more_tag};
+    let tail_comp = u.fresh_comp_ty();
+    let payload = Ty::Record(Row::Extend(
+        HEAD_FIELD.into(),
+        Box::new(Ty::String),
+        Box::new(Row::Extend(
+            TAIL_FIELD.into(),
+            Box::new(Ty::Thunk(Box::new(tail_comp.clone()))),
+            Box::new(Row::Empty),
+        )),
+    ));
+    let step = Ty::Variant(Row::Extend(
+        more_tag(),
+        Box::new(payload),
+        Box::new(Row::Extend(done_tag(), Box::new(Ty::Unit), Box::new(Row::Empty))),
+    ));
+    u.unify_comp_ty(&tail_comp, &CompTy::pure(step.clone()))
+        .expect("fresh self-referential unify cannot fail");
+    step
 }
 
 /// A per-key type schema, driving `check_map_entry_fields` in `super::infer`.
@@ -1112,20 +1118,7 @@ pub fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
 /// [`CompTy`].  It lives here, beside the templates it reads.
 impl Inferencer<'_> {
     fn ty_from_template(&mut self, template: TyTemplate) -> Ty {
-        match template {
-            TyTemplate::String => Ty::String,
-            TyTemplate::Int => Ty::Int,
-            TyTemplate::Float => Ty::Float,
-            TyTemplate::Bool => Ty::Bool,
-            TyTemplate::Bytes => Ty::Bytes,
-            TyTemplate::Unit => Ty::Unit,
-            TyTemplate::Any => self.ctx.unifier.fresh_ty(),
-            TyTemplate::ListAny => {
-                let elem = self.ctx.unifier.fresh_ty();
-                Ty::List(Box::new(elem))
-            }
-            TyTemplate::ListInt => Ty::List(Box::new(Ty::Int)),
-        }
+        ty_of_template(template, &mut self.ctx.unifier)
     }
 
     fn builtin_sig_result(&mut self, sig: BuiltinSig) -> CompTy {
@@ -1276,12 +1269,28 @@ impl Inferencer<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A `[arg]` in a doc synopsis (before the em dash) reads as optional; a
+    /// fixed-arity `Sig` under it means one of the two is lying.  `exit`/
+    /// `quit` are exempt: `[status]` is elaborator sugar over a fixed-1 form.
     #[test]
-    fn registry_and_scheme_arity_agree() {
+    fn optional_looking_docs_agree_with_a_fixed_sig() {
         let table = crate::builtins::core_builtin_table();
         for name in table.names() {
-            let _ = super::builtin_arity(&table, name);
+            if name == "exit" || name == "quit" {
+                continue;
+            }
+            let entry = table.get(name).unwrap();
+            let BuiltinTypeRule::Sig(sig) = entry.type_rule else {
+                continue;
+            };
+            let fixed = matches!(sig.args, ArgSig::Exact(_) | ArgSig::DataLast(_));
+            let synopsis = entry.doc.split('—').next().unwrap_or(entry.doc);
+            assert!(
+                !(fixed && synopsis.contains('[')),
+                "builtin '{name}': doc reads as optional but its Sig is fixed-arity"
+            );
         }
-        assert_eq!(super::builtin_arity(&table, "values"), None);
     }
 }

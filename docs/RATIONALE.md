@@ -59,17 +59,20 @@ The value/command split leaves a question: what is an external command?
 operation.** The operation is the open name and its arguments; its
 interpretation is supplied separately.
 
-Head lookup first offers a name to the language's bindings and primitives. If
-they decline it, the name belongs to the open command interface. A handler may
-interpret it in-process; otherwise the operating system resolves and runs it.
-The program says *which operation to perform* without baking in *how that
-operation is performed*.
+Head lookup first offers a name to the language's bindings — bindings are the
+primitives' home, so this is one lookup, not two. If the bindings decline it,
+the name belongs to the open command interface. A handler may interpret it
+in-process; otherwise the operating system resolves and runs it. The program
+says *which operation to perform* without baking in *how that operation is
+performed*.
 
 This claim is about the shell's external-process boundary, not every host call
 made by the implementation. `list-dir` and `file-info` reach the kernel, but
 they are closed, structured primitives: their meaning is fixed by `ral` and their
 result is a value. `git` is open and interpreted. Openness, not mere contact
-with the kernel, marks the effect boundary.
+with the kernel, marks the effect boundary: a name is a value or it is handled,
+and the handler stack's base is the host's interpretation of the command-shaped
+names.
 
 Several consequences follow:
 
@@ -203,9 +206,10 @@ context uses stack frames where later re-exposure is actually needed.
 **A handler supplies another interpretation for an open operation.**
 
 `within [handlers: [git: H], handler: K] { body }` installs interpretations for
-the dynamic extent of `body`. Bindings, builtins, and prelude functions retain
-their ordinary meaning; only a name which reaches the open command interface
-can be handled.
+the dynamic extent of `body`. Resolution is env-first, so a lexical binding, a
+native, or a prelude function retains its ordinary meaning at a bare head even
+where a handler of the same name is installed; only a name which reaches the
+open command interface, or an explicit `^name`, is handled.
 
 Handlers in `ral` are deliberately restricted:
 

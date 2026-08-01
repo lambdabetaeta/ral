@@ -1,7 +1,6 @@
 //! Registry-driven property test (rec. A9): the sixth, previously
 //! unchecked facet — *a reducer's returned value inhabits its declared
-//! return type*.  Arity is const-asserted at build and cross-checked
-//! against the `Scheme`, but nothing asserted that running the reducer on
+//! return type*.  Nothing asserted that running the reducer on
 //! inhabitants of its argument types yields an inhabitant of its return
 //! type.  That gap is where B1 (`equal`'s missing arms returned the wrong
 //! shape), B2 (`lt`/`gt` typed `Bool` but compared `to_string`), B5
@@ -129,7 +128,7 @@ fn arg_and_return_types(u: &mut Unifier, ty: &Ty) -> Option<(Vec<Ty>, Ty)> {
 fn every_scheme_reducer_inhabits_its_return_type() {
     let mut checked = 0usize;
     for entry in CORE_BUILTINS {
-        let BuiltinTypeRule::Scheme(_, factory) = entry.type_rule else {
+        let BuiltinTypeRule::Scheme(factory) = entry.type_rule else {
             continue;
         };
         let name = entry.name.as_ref();

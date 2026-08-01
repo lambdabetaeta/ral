@@ -202,7 +202,8 @@ fn check_not_loaded(name: &str, runtime: &Arc<Mutex<PluginRuntime>>) -> Result<(
 
 /// Reject the load if any alias name is already installed by another
 /// plugin / rc-config / interactive `alias`.  Atomic: checked before
-/// any insertion happens.
+/// any insertion happens.  A lexical or native binding under the same
+/// name is not a conflict — the alias installs, live only under `^name`.
 fn check_no_binding_conflicts(
     bindings: &[(String, Value)],
     plugin_name: &str,
@@ -212,11 +213,6 @@ fn check_no_binding_conflicts(
         if shell.has_alias(name) {
             return Err(load_err(format!(
                 "alias '{name}' from plugin '{plugin_name}' conflicts with an existing alias"
-            )));
-        }
-        if shell.scope_lookup(name).is_some() || shell.lookup_builtin(name).is_some() {
-            return Err(load_err(format!(
-                "alias '{name}' from plugin '{plugin_name}' conflicts with a lexical or builtin binding"
             )));
         }
     }

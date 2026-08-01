@@ -7,10 +7,9 @@
 
 use crate::types::{Break, Error, Settled, Shell, Value, as_map_ref};
 
-use super::util::{check_arity, order_cmp, values_equal};
+use super::util::{order_cmp, values_equal};
 
 pub(super) fn builtin_keys(args: &[Value]) -> Settled<Value> {
-    check_arity(args, 1, "keys")?;
     let m = as_map_ref(&args[0], "keys")?;
     Ok(Value::list(
         m.keys().map(|k| Value::String(k.clone())).collect(),
@@ -18,7 +17,6 @@ pub(super) fn builtin_keys(args: &[Value]) -> Settled<Value> {
 }
 
 pub(super) fn builtin_has(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 2, "has")?;
     let m = as_map_ref(&args[0], "has")?;
     let found = m.contains_key(&args[1].to_string());
     shell.set_status_from_bool(found);
@@ -26,7 +24,6 @@ pub(super) fn builtin_has(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 }
 
 pub(super) fn builtin_is_empty(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "is-empty")?;
     let val = &args[0];
     let r = match val {
         Value::List(items) => items.is_empty(),
@@ -51,7 +48,6 @@ pub(super) fn builtin_is_empty(args: &[Value], shell: &mut Shell) -> Settled<Val
 }
 
 pub(super) fn builtin_equal(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 2, "equal")?;
     let r = values_equal(&args[0], &args[1])?;
     shell.set_status_from_bool(r);
     Ok(Value::Bool(r))

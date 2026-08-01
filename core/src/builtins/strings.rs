@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 #[cfg(feature = "grep")]
 use super::util::regex_err;
-use super::util::{arg0_str, check_arity, f64_to_i64};
+use super::util::{arg0_str, f64_to_i64};
 
 #[cfg(not(feature = "grep"))]
 const NO_GREP: &str = "regex operations require the grep feature — rebuild with --features grep";
@@ -26,7 +26,6 @@ fn as_index(v: &Value, ctx: &str) -> Settled<usize> {
 }
 
 pub(super) fn builtin_len(args: &[Value]) -> Settled<Value> {
-    check_arity(args, 1, "length")?;
     let val = &args[0];
     let n = match val {
         Value::String(s) => s.chars().count(),
@@ -48,19 +47,18 @@ pub(super) fn builtin_len(args: &[Value]) -> Settled<Value> {
 }
 
 pub(super) fn builtin_upper(args: &[Value]) -> Settled<Value> {
-    Ok(Value::String(arg0_str(args, "upper")?.to_uppercase()))
+    Ok(Value::String(arg0_str(args)?.to_uppercase()))
 }
 
 pub(super) fn builtin_lower(args: &[Value]) -> Settled<Value> {
-    Ok(Value::String(arg0_str(args, "lower")?.to_lowercase()))
+    Ok(Value::String(arg0_str(args)?.to_lowercase()))
 }
 
 pub(super) fn builtin_dedent(args: &[Value]) -> Settled<Value> {
-    Ok(Value::String(dedent(&arg0_str(args, "dedent")?)))
+    Ok(Value::String(dedent(&arg0_str(args)?)))
 }
 
 pub(super) fn builtin_join(args: &[Value]) -> Settled<Value> {
-    check_arity(args, 2, "intercalate")?;
     let sep = args[0].to_string();
     let items = as_list(&args[1], "intercalate")?;
     Ok(Value::String(
@@ -73,7 +71,6 @@ pub(super) fn builtin_join(args: &[Value]) -> Settled<Value> {
 }
 
 pub(super) fn builtin_slice(args: &[Value]) -> Settled<Value> {
-    check_arity(args, 3, "slice")?;
     let s = args[0].to_string();
     let start = as_index(&args[1], "slice start")?;
     let length = as_index(&args[2], "slice length")?;
@@ -81,7 +78,7 @@ pub(super) fn builtin_slice(args: &[Value]) -> Settled<Value> {
 }
 
 pub(super) fn builtin_shell_split(args: &[Value]) -> Settled<Value> {
-    let s = arg0_str(args, "shell-split")?;
+    let s = arg0_str(args)?;
     // shlex signals every malformed shape as a bare `None`, so one message covers all.
     let parts = shlex::split(&s)
         .ok_or_else(|| sig("shell-split: malformed input (unterminated quote?)".to_string()))?;
@@ -89,7 +86,7 @@ pub(super) fn builtin_shell_split(args: &[Value]) -> Settled<Value> {
 }
 
 pub(super) fn builtin_shell_quote(args: &[Value]) -> Settled<Value> {
-    let s = arg0_str(args, "shell-quote")?;
+    let s = arg0_str(args)?;
     let quoted = shlex::try_quote(&s).map_err(|e| sig(format!("shell-quote: {e}")))?;
     Ok(Value::String(quoted.into_owned()))
 }
@@ -99,15 +96,13 @@ fn compile_regex(ctx: &str, pattern: &str) -> Settled<regex::Regex> {
     regex::Regex::new(pattern).map_err(|e| sig(regex_err(ctx, pattern, &e.to_string())))
 }
 
-/// Arity-check, compile `args[0]`, hand the regex to `f`.  The `grep` gate lives
-/// here so the six regex builtins need not each repeat the `NO_GREP` refusal.
+/// Compile `args[0]`, hand the regex to `f`.  The `grep` gate lives here so
+/// the six regex builtins need not each repeat the `NO_GREP` refusal.
 fn with_regex(
     ctx: &'static str,
     args: &[Value],
-    arity: usize,
     f: impl FnOnce(&regex::Regex, &[Value]) -> Settled<Value>,
 ) -> Settled<Value> {
-    check_arity(args, arity, ctx)?;
     #[cfg(feature = "grep")]
     {
         let re = compile_regex(ctx, &args[0].to_string())?;
@@ -123,7 +118,7 @@ fn with_regex(
 /// Errors unless the pattern matches exactly once, like its literal counterpart
 /// [`builtin_string_replace`]; [`builtin_replace_all`] is the every-match variant.
 pub(super) fn builtin_replace(args: &[Value]) -> Settled<Value> {
-    with_regex("re-replace", args, 3, |re, args| {
+    with_regex("re-replace", args, |re, args| {
         let input = args[2].to_string();
         match re.find_iter(&input).count() {
             0 => Err(sig(
@@ -151,7 +146,6 @@ pub(super) fn builtin_replace(args: &[Value]) -> Settled<Value> {
 /// If given fewer than three arguments, if `from` is empty, or if `from` does not
 /// occur in `s` exactly once.
 pub fn builtin_string_replace(args: &[Value]) -> Settled<Value> {
-    check_arity(args, 3, "string-replace")?;
     let from = args[0].to_string();
     let to = args[1].to_string();
     let input = args[2].to_string();
@@ -173,7 +167,7 @@ pub fn builtin_string_replace(args: &[Value]) -> Settled<Value> {
 }
 
 pub(super) fn builtin_replace_all(args: &[Value]) -> Settled<Value> {
-    with_regex("re-replace-all", args, 3, |re, args| {
+    with_regex("re-replace-all", args, |re, args| {
         Ok(Value::String(
             re.replace_all(&args[2].to_string(), args[1].to_string().as_str())
                 .into_owned(),
@@ -182,7 +176,7 @@ pub(super) fn builtin_replace_all(args: &[Value]) -> Settled<Value> {
 }
 
 pub(super) fn builtin_split(args: &[Value]) -> Settled<Value> {
-    with_regex("re-split", args, 2, |re, args| {
+    with_regex("re-split", args, |re, args| {
         let input = args[1].to_string();
         Ok(Value::list(
             re.split(&input).map(|p| Value::String(p.into())).collect(),
@@ -191,7 +185,7 @@ pub(super) fn builtin_split(args: &[Value]) -> Settled<Value> {
 }
 
 pub(super) fn builtin_match(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    with_regex("re-match", args, 2, |re, args| {
+    with_regex("re-match", args, |re, args| {
         let matched = re.is_match(&args[1].to_string());
         shell.set_status_from_bool(matched);
         Ok(Value::Bool(matched))
@@ -199,7 +193,7 @@ pub(super) fn builtin_match(args: &[Value], shell: &mut Shell) -> Settled<Value>
 }
 
 pub(super) fn builtin_find_match(args: &[Value]) -> Settled<Value> {
-    with_regex("re-find-match", args, 2, |re, args| {
+    with_regex("re-find-match", args, |re, args| {
         let input = args[1].to_string();
         match re.find(&input) {
             Some(m) => Ok(Value::String(m.as_str().to_owned())),
@@ -212,7 +206,7 @@ pub(super) fn builtin_find_match(args: &[Value]) -> Settled<Value> {
 }
 
 pub(super) fn builtin_find_matches(args: &[Value]) -> Settled<Value> {
-    with_regex("re-find-matches", args, 2, |re, args| {
+    with_regex("re-find-matches", args, |re, args| {
         let input = args[1].to_string();
         Ok(Value::list(
             re.find_iter(&input)
@@ -272,7 +266,6 @@ fn dedent(s: &str) -> String {
 }
 
 pub(super) fn builtin_to_int(args: &[Value]) -> Settled<Value> {
-    check_arity(args, 1, "int")?;
     let val = &args[0];
     match val {
         Value::Int(n) => Ok(Value::Int(*n)),
@@ -295,7 +288,6 @@ pub(super) fn builtin_to_int(args: &[Value]) -> Settled<Value> {
 }
 
 pub(super) fn builtin_to_float(args: &[Value]) -> Settled<Value> {
-    check_arity(args, 1, "float")?;
     let val = &args[0];
     match val {
         #[allow(
@@ -324,6 +316,5 @@ pub(super) fn builtin_to_float(args: &[Value]) -> Settled<Value> {
 /// The renderer `echo` lowers through ([`Value`]'s `Display`).  Bytes go lossy
 /// here; `from-string` is the faithful decode, and errors on invalid UTF-8.
 pub(super) fn builtin_to_string(args: &[Value]) -> Settled<Value> {
-    check_arity(args, 1, "str")?;
     Ok(Value::String(args[0].to_string()))
 }

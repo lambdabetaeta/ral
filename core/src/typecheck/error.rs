@@ -146,15 +146,6 @@ pub enum TypeErrorKind {
     BuiltinNotFirstClass {
         name: String,
     },
-    /// An install named a builtin, which owns its name outright.
-    CannotRedefineBuiltin {
-        name: String,
-        verb: &'static str,
-    },
-    /// An install named a binding already in scope; bare lookup finds it first.
-    HandlerShadowedByBinding {
-        name: String,
-    },
     /// Wrong argument count: exactly `expected`, or at most it when `at_most`.
     BuiltinArity {
         expected: usize,
@@ -205,8 +196,6 @@ impl TypeErrorKind {
             Self::ControlOperatorAsValue { .. } => "T0040",
             Self::HandlerNotFirstClass { .. } => "T0041",
             Self::BuiltinNotFirstClass { .. } => "T0042",
-            Self::CannotRedefineBuiltin { .. } => "T0043",
-            Self::HandlerShadowedByBinding { .. } => "T0044",
             Self::BuiltinArity { .. } => "T0050",
             Self::FailStatusZero => "T0051",
             Self::MalformedAlias { .. } => "T0052",

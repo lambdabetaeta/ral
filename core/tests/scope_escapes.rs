@@ -199,14 +199,14 @@ fn audit_recording_survives_consecutive_audit_blocks() {
         },
         other => panic!("audit {{ … }} must return a Map; got {other:?}"),
     };
-    let has_line_write = children.iter().any(|c| match c {
-        Value::Map(m) => matches!(m.get("cmd"), Some(Value::String(s)) if s == "to-line"),
+    let has_echo = children.iter().any(|c| match c {
+        Value::Map(m) => matches!(m.get("cmd"), Some(Value::String(s)) if s == "echo"),
         _ => false,
     });
     assert!(
-        has_line_write,
-        "expected the second `audit {{ echo hi }}` to record echo's `to-line` \
-         child node.  Pre-fix `with_scope` set `scope_pushed=true` \
+        has_echo,
+        "expected the second `audit {{ echo hi }}` to record echo's own \
+         node.  Pre-fix `with_scope` set `scope_pushed=true` \
          during the first block's `guard`; the flag survived into the \
          second block (trail was inactive in between, so \
          `finish_command` couldn't consume it) and silently dropped \
@@ -410,16 +410,16 @@ fn audit_survives_background_amp() {
         },
         other => panic!("audit {{ … }} must return a Map; got {other:?}"),
     };
-    let line_write_count = children
+    let echo_count = children
         .iter()
         .filter(|c| match c {
-            Value::Map(m) => matches!(m.get("cmd"), Some(Value::String(s)) if s == "to-line"),
+            Value::Map(m) => matches!(m.get("cmd"), Some(Value::String(s)) if s == "echo"),
             _ => false,
         })
         .count();
     assert_eq!(
-        line_write_count, 2,
-        "expected both foreground `echo` commands' `to-line` writes to be recorded around \
+        echo_count, 2,
+        "expected both foreground `echo` commands to be recorded around \
          the background `&`.  Pre-fix `eval_background` moved the audit \
          trail into the fork via an unpaired `child_of` and dropped it, \
          losing the whole subtree — even `echo one`, recorded before the \
@@ -467,8 +467,8 @@ fn guard_cleanup_does_not_swallow_exit() {
 /// cleanup and return the body's value.  This pins that the fix did not
 /// over-rotate: the ordinary finalizer path is unchanged.  The body's
 /// value `7` is read from the `guard`'s own return; that the cleanup ran
-/// is read from the audit tree, where the cleanup echo's lowered `to-line`
-/// is recorded as a child of the `guard` scope node.
+/// is read from the audit tree, where the cleanup `echo` is recorded as a
+/// child of the `guard` scope node.
 #[test]
 fn guard_normal_runs_cleanup_and_returns_body() {
     let mut shell = fresh_shell();
@@ -485,9 +485,9 @@ fn guard_normal_runs_cleanup_and_returns_body() {
     let tree = top_level(&mut shell, "audit { guard { return 7 } { echo cleaned } }")
         .expect("`audit { guard … }` must succeed");
     assert!(
-        audit_tree_has_cmd(&tree, "to-line"),
+        audit_tree_has_cmd(&tree, "echo"),
         "the `guard` cleanup must have run on the normal path (recording \
-         its `echo cleaned` line write); a normal guard returns the body value but \
+         its `echo cleaned` node); a normal guard returns the body value but \
          still executes its finalizer.  tree = {tree:?}"
     );
 }
@@ -532,15 +532,16 @@ fn panic_builtin(
     panic!("__test-panic builtin invoked");
 }
 
-static PANIC_BUILTIN: &[ral_core::types::BuiltinEntry] = &[ral_core::types::BuiltinEntry {
-    name: std::borrow::Cow::Borrowed("__test-panic"),
-    type_rule: ral_core::typecheck::builtins::BuiltinTypeRule::Scheme(
-        Some(0),
-        ral_core::typecheck::builtins::scheme::pure_string,
-    ),
-    doc: "__test-panic  — test-only: raise a Rust panic.",
-    body: ral_core::types::BuiltinBody::Static(panic_builtin),
-}];
+static PANIC_BUILTIN_ARR: [ral_core::types::BuiltinEntry; 1] =
+    [ral_core::types::BuiltinEntry::new(
+        std::borrow::Cow::Borrowed("__test-panic"),
+        ral_core::typecheck::builtins::BuiltinTypeRule::Scheme(
+            ral_core::typecheck::builtins::scheme::pure_string,
+        ),
+        "__test-panic  — test-only: raise a Rust panic.",
+        ral_core::types::BuiltinBody::Static(panic_builtin),
+    )];
+static PANIC_BUILTIN: &[ral_core::types::BuiltinEntry] = &PANIC_BUILTIN_ARR;
 
 /// E5 — a Rust panic raised inside an alias body must leave the alias
 /// still installed.  The body invokes `__test-panic`, a host builtin the

@@ -414,6 +414,39 @@ fn the_survivor_writes_to_dev_null_because_std_dup2s_stdio_before_pre_exec_runs(
     }
 }
 
+/// A user handler stacks on `detach`, and a `detach` call from inside its
+/// body reaches the base frame under self-masking, birthing a real survivor
+/// instead of recursing.
+#[test]
+fn stacked_detach_handler_forwards_to_base_frame_under_self_masking() {
+    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut shell = armed();
+    let receipt = birth(
+        &mut shell,
+        "within [handlers: [detach: { |args| detach ...$args }]] \
+         { detach #'through a stacked frame'# /bin/sleep 300 }",
+    );
+    let survivor = Survivor::of(&receipt);
+    assert_eq!(receipt["desc"], "through a stacked frame");
+    assert!(
+        survivor.alive(),
+        "the forwarded call must still birth a live survivor"
+    );
+}
+
+/// `unalias` indexes run frames alone; `detach`'s base frame is not one, so
+/// `unalias detach` refuses as for any name with no alias installed.
+#[test]
+fn unalias_detach_refuses_because_no_run_frame_holds_it() {
+    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut shell = armed();
+    let message = refusal(&mut shell, "unalias detach");
+    assert!(
+        message.contains("no alias named"),
+        "expected a no-alias refusal, got {message:?}"
+    );
+}
+
 /// The single property the whole verb exists for.  The host is a real
 /// process, it is fully gone — waited for, not merely told to leave — and
 /// its survivor is not only alive but still working.

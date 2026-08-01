@@ -3,7 +3,7 @@
 
 fn main() -> std::process::ExitCode {
     #[cfg(unix)]
-    ral_core::builtins::uutils::init_signal_dispositions();
+    ral_core::uutils::init_signal_dispositions();
     // A helper or sandbox re-exec child is served and exits here, never
     // reaching the CLI; `ral`'s `main` opens the same way.
     if let Some(code) = exarch::dispatch_pre_main() {

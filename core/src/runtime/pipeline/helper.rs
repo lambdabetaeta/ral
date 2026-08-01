@@ -60,8 +60,9 @@ fn pack_stage_value(value: &Value) -> Result<StageValue, Error> {
 }
 
 fn unpack_stage_value(value: StageValue) -> Result<Value, Error> {
-    let arcs = build_arcs(&value.scope_table)?;
-    value.value.into_runtime(&arcs)
+    let manifest = crate::sandbox::wire_manifest();
+    let arcs = build_arcs(&value.scope_table, &manifest)?;
+    value.value.into_runtime(&arcs, &manifest)
 }
 
 /// `label` lands in `"{name} is not {label}"`, so it carries its own
@@ -430,7 +431,7 @@ pub fn try_run_pipeline_stage_helper() -> Option<u8> {
 /// comes from `invoke_bundled`.
 #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
 pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
-    use crate::builtins::uutils;
+    use crate::uutils;
 
     let (flag, rest) = args.split_first()?;
     if flag != BUNDLED_TOOL_FLAG {

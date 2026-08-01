@@ -117,12 +117,39 @@ fn apply_inner(
                     return done;
                 }
             }
+            // The single arity gate: collect until `fixed_arity` is reached,
+            // then run the body. Leftover args loop onto the result, so
+            // over-application hits the `not a function` arm like a Lambda's.
+            // The audit frame sits here so command heads and value-position
+            // applications record identically as the entry's name.
+            Value::Native { entry, applied } => {
+                let entry = entry.clone();
+                let needed = entry.fixed_arity().unwrap_or(applied.len());
+                let take = needed.saturating_sub(applied.len()).min(args.len());
+                let mut collected = applied.clone();
+                collected.extend(args.drain(0..take));
+                if collected.len() < needed {
+                    return Ok(Value::Native {
+                        entry,
+                        applied: collected,
+                    });
+                }
+                let result = super::audit::frame_call(&entry.name, &collected, shell, |shell| {
+                    entry
+                        .body
+                        .call(&collected, mooring, shell)
+                        .map_err(Control::from)
+                });
+                if let Some(done) = step(result, &mut callee, &mut args, mooring) {
+                    return done;
+                }
+            }
             _ if args.is_empty() => return Ok(callee),
             _ => {
                 let hint = if matches!(callee, Value::Unit) {
                     "too many arguments — the function returned before consuming all of them"
                 } else {
-                    "only Lambdas and Blocks are functions"
+                    "only Lambdas, Blocks, and natives are functions"
                 };
                 return Err(Break::Error(
                     Error::new(format!("{} is not a function", callee.type_name()), 1)

@@ -130,8 +130,8 @@ impl Shell {
     /// seed the next run's check.
     ///
     /// # Errors
-    /// `name` already a lexical binding or a builtin, `thunk` not a unary
-    /// lambda, or its body changing the head's pipeline mode.
+    /// `thunk` not a unary lambda, or its body changing the head's pipeline
+    /// mode.
     pub fn install_alias(&mut self, name: String, thunk: Value) -> Settled<()> {
         let entry = HandlerEntry::vet(name, thunk, self.session_schemes(), HandlerRole::Alias)?;
         self.mobile.context.handlers.remove_alias(&entry.name);
@@ -200,10 +200,9 @@ impl Shell {
         self.mobile.scope.set_binding(name, binding);
     }
 
-    /// Look `name` up in the lexical scope chain alone — *not* the
-    /// pseudo-variable or builtin namespaces [`Self::lookup_value_name`] also
-    /// consults, so a name shadowed by a builtin still reads as unbound here.
-    /// The read dual of [`Self::set_var`] / [`Self::bind_value`].
+    /// Look `name` up in the lexical scope chain, natives included — *not*
+    /// the pseudo-variable namespace [`Self::lookup_value_name`] also
+    /// consults.  The read dual of [`Self::set_var`] / [`Self::bind_value`].
     pub fn scope_lookup(&self, name: &str) -> Option<&Value> {
         self.mobile.scope.get(name)
     }
@@ -280,9 +279,10 @@ impl Shell {
             .any(|f| f.is_alias_for(name))
     }
 
-    /// The innermost handler entry for `name` and its frame depth.  A named
-    /// entry at any depth outranks every catch-all.
-    pub fn lookup_handler(&self, name: &str) -> Option<(HandlerEntry, usize)> {
+    /// The winning handler for `name` — a run frame (with its depth) or a
+    /// base frame.  A named run-frame entry at any depth outranks every
+    /// catch-all, and a base frame outranks a catch-all too.
+    pub fn lookup_handler(&self, name: &str) -> Option<crate::types::HandlerLookup> {
         self.mobile.context.handlers.lookup(name)
     }
 
