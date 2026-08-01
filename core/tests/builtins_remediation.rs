@@ -2,8 +2,8 @@
 
 //! Regression tests for the builtins remediation (260611 deep-review §6):
 //! `dedent` multibyte slicing (B3), `range` overflow (B4), `fail`/`exit`
-//! status truncation (B6), `int` on a large Float (B7), `to-json` of
-//! NaN/Infinity and computation values (B8, B12), `source`/`use` status
+//! status truncation (B6), `int` on a large Float (B7), non-finite Float
+//! refusal and `to-json` of computation values (B8, B12), `source`/`use` status
 //! laundering (B10), prelude `lines`/`words` empties (B11), and the
 //! `from-json` u64 overflow (B12).
 //!
@@ -224,16 +224,35 @@ fn int_error_message_names_float() {
     expect_error("return !{int `some 1}", "Float");
 }
 
-// ── B8 / B12 — `to-json` refuses NaN/Infinity and computation values ──────
+// ── B8 / B12 — non-finite Floats are refused at construction; `to-json`
+// refuses computation values ──────────────────────────────────────────────
+
+// A Float is finite by construction: `f64::from_str` accepts 'NaN' and
+// 'inf', but admitting them would break `equal`'s reflexivity, ordering,
+// and JSON encoding all at once.
 
 #[test]
-fn to_json_refuses_nan() {
-    expect_error("to-json !{float 'NaN'}", "to-json");
+fn float_refuses_nan() {
+    expect_error("float 'NaN'", "not a finite number");
 }
 
 #[test]
-fn to_json_refuses_infinity() {
-    expect_error("to-json !{float 'inf'}", "to-json");
+fn float_refuses_infinity() {
+    expect_error("float 'inf'", "not a finite number");
+    expect_error("float '-Infinity'", "not a finite number");
+}
+
+#[test]
+fn float_arithmetic_overflow_is_a_clean_error() {
+    // Finite operands with a nonzero divisor can still overflow to ±∞.
+    expect_error("return $[1.0e308 * 10.0]", "float overflow");
+}
+
+#[test]
+fn float_literal_overflow_is_not_a_float() {
+    // 1.0e999 is not representable, so it never classifies as a Float
+    // literal; the word stays a plain String rather than becoming ∞.
+    expect_string("return 1.0e999", "1.0e999");
 }
 
 #[test]

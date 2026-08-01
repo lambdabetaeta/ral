@@ -117,7 +117,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
         (Value::Int(x), Value::Int(y)) => x == y,
         #[allow(
             clippy::float_cmp,
-            reason = "shell `==` is defined as bit-exact IEEE equality; epsilon would break reflexivity"
+            reason = "a Float is finite by construction, so IEEE `==` is reflexive here; epsilon would break that"
         )]
         (Value::Float(x), Value::Float(y)) => x == y,
         #[allow(
@@ -126,7 +126,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
         )]
         #[allow(
             clippy::float_cmp,
-            reason = "shell `==` is defined as bit-exact IEEE equality; epsilon would break reflexivity"
+            reason = "a Float is finite by construction, so IEEE `==` is reflexive here; epsilon would break that"
         )]
         (Value::Int(x), Value::Float(y)) => (*x as f64) == *y,
         #[allow(
@@ -135,7 +135,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
         )]
         #[allow(
             clippy::float_cmp,
-            reason = "shell `==` is defined as bit-exact IEEE equality; epsilon would break reflexivity"
+            reason = "a Float is finite by construction, so IEEE `==` is reflexive here; epsilon would break that"
         )]
         (Value::Float(x), Value::Int(y)) => *x == (*y as f64),
         (Value::String(x), Value::String(y)) => x == y,

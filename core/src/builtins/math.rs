@@ -10,9 +10,8 @@ use super::util::{check_arity, f64_to_i64};
 /// The largest `places` for which `10^places` is still finite in `f64`.
 const MAX_PLACES: i64 = 308;
 
-/// NaN and ±∞ have no rounding, so finiteness is the real gate; the non-Float
-/// arm is defensive, as `sig::ROUND` and `sig::FLOAT_TO_INT` in the typechecker
-/// admit a Float only.
+/// Both arms are defensive: a Float is finite by construction, and
+/// `sig::ROUND` and `sig::FLOAT_TO_INT` in the typechecker admit a Float only.
 fn finite_float(name: &str, val: &Value) -> Settled<f64> {
     match val {
         Value::Float(f) if f.is_finite() => Ok(*f),

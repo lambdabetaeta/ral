@@ -304,12 +304,16 @@ pub(super) fn builtin_to_float(args: &[Value]) -> Settled<Value> {
         )]
         Value::Int(n) => Ok(Value::Float(*n as f64)),
         Value::Float(f) => Ok(Value::Float(*f)),
-        Value::String(s) => s.parse::<f64>().map(Value::Float).map_err(|_| {
-            sig_hint(
+        // `f64::from_str` accepts 'NaN' and 'inf', but a Float is finite by
+        // construction, so those spellings are refused alongside garbage.
+        Value::String(s) => match s.parse::<f64>() {
+            Ok(f) if f.is_finite() => Ok(Value::Float(f)),
+            Ok(_) => Err(sig(format!("float: '{s}' is not a finite number"))),
+            Err(_) => Err(sig_hint(
                 format!("float: '{s}' is not a valid number"),
                 "expected a numeric string, e.g. float '3.14'",
-            )
-        }),
+            )),
+        },
         other => Err(sig_hint(
             format!("float: expected String or Int, got {}", other.type_name()),
             "e.g. float '3.14'",

@@ -148,7 +148,9 @@ fn an_int_argument_is_a_static_type_error() {
 }
 
 #[test]
-fn non_finite_floats_are_refused() {
+fn non_finite_floats_are_refused_at_construction() {
+    // A Float is finite by construction, so `float` refuses these before
+    // any rounding builtin could see them; math.rs's own gate is defensive.
     expect_error("return !{round !{float \"nan\"} 2}", "not a finite number");
     expect_error("return !{floor !{float \"inf\"}}", "not a finite number");
     expect_error("return !{ceil !{float \"-inf\"}}", "not a finite number");

@@ -485,7 +485,9 @@ impl WordLiteral {
                 if let Ok(i) = s.parse::<i64>() {
                     Some(Self::Int(i))
                 } else if s.contains('.') {
-                    s.parse().ok().map(Self::Float)
+                    // A Float is finite by construction; an overflowing
+                    // literal like 1.0e999 stays a plain word.
+                    s.parse().ok().filter(|f: &f64| f.is_finite()).map(Self::Float)
                 } else {
                     None
                 }

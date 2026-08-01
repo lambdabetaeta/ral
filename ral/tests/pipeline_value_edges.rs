@@ -253,17 +253,18 @@ fn value_producer_lambda_returning_block_is_forced_across_helper_value_edge() {
 }
 
 #[test]
-fn non_finite_float_crosses_a_process_staged_value_edge() {
-    // A NaN produced upstream must survive the value wire.  (`/` rejects a
-    // zero divisor on either Int or Float, so a non-finite float is minted
-    // by `float 'NaN'` rather than `0.0 / 0.0`.)  The trailing
-    // byte-emitting stage makes the pipeline `ProcessStaged`, so the NaN
-    // is reified into a `SerialValue::Float` and JSON-framed between
-    // helpers; carried by bits, it decodes back to NaN rather than failing
-    // the frame with JSON's `null`.
-    let o = run_pipe("{ return !{float 'NaN'} } | { |x| return $x } | { |y| echo $y }");
+fn float_crosses_a_process_staged_value_edge_bit_exactly() {
+    // A Float produced upstream must survive the value wire unchanged.
+    // Non-finite floats are refused at construction, so the wire only ever
+    // carries finite values; a full-mantissa one pins that the trailing
+    // byte-emitting stage — which makes the pipeline `ProcessStaged`, so
+    // the Float is reified into a `SerialValue::Float` and JSON-framed
+    // between helpers — reproduces it digit for digit.
+    let o = run_pipe(
+        "{ return $[0.1 + 0.2] } | { |x| return $x } | { |y| echo $y }",
+    );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "NaN");
+    assert_eq!(o.stdout.trim(), "0.30000000000000004");
 }
 
 #[test]

@@ -3,7 +3,8 @@
 //!
 //! Newlines separate statements except inside `[…]`, where they are
 //! whitespace.  The *innermost* open delimiter decides, so `{ [ ] }` and
-//! `[ { } ]` both behave.
+//! `[ { } ]` both behave.  A `;` is a hard separator: the parser continues
+//! pipelines and chains across newlines, never across a `;`.
 //!
 //! Nested forms — `!{…}` and `$[…]` inside `"…"`, `$name[k]` keys, and the
 //! top-level `$[…]` — are lexed in place and stored as token streams inside
@@ -114,6 +115,8 @@ pub enum Token {
     Expr(Vec<(Self, Span)>),
     Bang,
     Newline,
+    /// Separator run containing a `;` — never crossed by continuation.
+    Semi,
     Redirect {
         fd: Option<u32>,
         kind: RedirectMode,
@@ -162,6 +165,7 @@ impl fmt::Display for Token {
             Self::Expr(_) => write!(f, "$[...]"),
             Self::Bang => write!(f, "!"),
             Self::Newline => write!(f, "newline"),
+            Self::Semi => write!(f, "';'"),
             Self::Redirect { .. } => write!(f, "redirect"),
             Self::Eof => write!(f, "end of input"),
         }
@@ -621,18 +625,27 @@ impl Lexer {
         (token, self.finish(span))
     }
 
+    /// Merge a maximal run of newlines, semicolons, whitespace, and comments
+    /// into one separator token: [`Token::Semi`] if the run contains a `;`,
+    /// soft [`Token::Newline`] otherwise.
     fn scan_separator(&mut self, span: Span) -> (Token, Span) {
+        let mut hard = self.peek() == Some(';');
         self.bump();
         loop {
             match self.peek() {
-                Some('\n' | ';' | '\r' | ' ' | '\t') => {
+                Some(';') => {
+                    hard = true;
+                    self.bump();
+                }
+                Some('\n' | '\r' | ' ' | '\t') => {
                     self.bump();
                 }
                 Some('#') if !self.hash_opens_quoted() => self.skip_comment(),
                 _ => break,
             }
         }
-        (Token::Newline, self.finish(span))
+        let token = if hard { Token::Semi } else { Token::Newline };
+        (token, self.finish(span))
     }
 
     /// Does the `:` under `peek()` break the bare word?  Only when space,
@@ -1407,15 +1420,17 @@ mod tests {
     /// swallowed as a comment.
     #[test]
     fn hash_quoted_string_after_separator() {
-        let expect = vec![
-            plain("echo"),
-            plain("a"),
-            Token::Newline,
-            Token::SingleQuoted("hi".into()),
-            Token::Eof,
-        ];
-        assert_eq!(tok_types("echo a\n#'hi'#"), expect);
-        assert_eq!(tok_types("echo a;#'hi'#"), expect);
+        let expect = |sep| {
+            vec![
+                plain("echo"),
+                plain("a"),
+                sep,
+                Token::SingleQuoted("hi".into()),
+                Token::Eof,
+            ]
+        };
+        assert_eq!(tok_types("echo a\n#'hi'#"), expect(Token::Newline));
+        assert_eq!(tok_types("echo a;#'hi'#"), expect(Token::Semi));
     }
 
     /// A `\`-continuation appends nothing, so the no-op flush at `$x` must
@@ -1986,12 +2001,30 @@ mod tests {
             vec![
                 plain("echo"),
                 plain("a"),
-                Token::Newline,
+                Token::Semi,
                 plain("echo"),
                 plain("b"),
                 Token::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn mixed_separator_run_is_hard() {
+        for src in ["echo a ;\n echo b", "echo a\n; echo b", "echo a;;echo b"] {
+            assert_eq!(
+                tok_types(src),
+                vec![
+                    plain("echo"),
+                    plain("a"),
+                    Token::Semi,
+                    plain("echo"),
+                    plain("b"),
+                    Token::Eof,
+                ],
+                "source: {src:?}"
+            );
+        }
     }
 
     #[test]

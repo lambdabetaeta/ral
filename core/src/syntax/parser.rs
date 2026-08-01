@@ -213,12 +213,19 @@ impl Parser {
     fn at_stmt_end(&self) -> bool {
         matches!(
             self.peek(),
-            Token::Newline | Token::Eof | Token::RBrace | Token::Ampersand
+            Token::Newline | Token::Semi | Token::Eof | Token::RBrace | Token::Ampersand
         )
     }
 
+    /// Soft newlines only: continuation contexts may not cross a `;`.
     fn skip_newlines(&mut self) {
         while self.peek() == &Token::Newline {
+            self.advance();
+        }
+    }
+
+    fn skip_separators(&mut self) {
+        while matches!(self.peek(), Token::Newline | Token::Semi) {
             self.advance();
         }
     }
@@ -313,14 +320,14 @@ impl Parser {
     /// program = stmt*
     fn parse_program(&mut self) -> Result<Vec<Stmt>, ParseError> {
         let mut stmts = Vec::new();
-        self.skip_newlines();
+        self.skip_separators();
         while self.peek() != &Token::Eof && self.peek() != &Token::RBrace {
-            // `parse_stmt` leaves the newline, so this span never swallows a
-            // separator.  Underlining the whole statement is the only anchor a
+            // `parse_stmt` leaves the separator, so this span never swallows
+            // one.  Underlining the whole statement is the only anchor a
             // diagnostic has when the guilty sub-expression carries no span.
             let (span, kind) = self.capture_span(Self::parse_stmt)?;
             stmts.push(Spanned::new(span, kind));
-            self.skip_newlines();
+            self.skip_separators();
         }
         Ok(stmts)
     }
@@ -1060,6 +1067,7 @@ impl Parser {
         matches!(
             self.peek(),
             Token::Newline
+                | Token::Semi
                 | Token::Eof
                 | Token::RBrace
                 | Token::RBracket
@@ -1992,6 +2000,21 @@ mod tests {
     fn parse_pipeline_continues_across_newline_before_pipe() {
         let ast = unwrap_stmts(parse("a\n| b").unwrap());
         assert_eq!(ast, vec![Ast::Pipeline(body(vec![plain("a"), plain("b")]))]);
+    }
+
+    #[test]
+    fn parse_semicolon_never_continues() {
+        for src in [
+            "a ; | b", "a | ; b", "a ;\n| b", "a |\n; b", "a ; ? b", "a ? ; b", "a\n; ? b",
+        ] {
+            assert!(parse(src).is_err(), "{src:?} must not parse");
+        }
+    }
+
+    #[test]
+    fn parse_semicolon_separates_statements() {
+        let ast = unwrap_stmts(parse("a ; b").unwrap());
+        assert_eq!(ast, vec![plain("a"), plain("b")]);
     }
 
     #[test]

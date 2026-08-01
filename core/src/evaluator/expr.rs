@@ -167,15 +167,22 @@ fn arithmetic(l: &Value, op: ArithOp, r: &Value, shell: &Shell) -> Result<Value,
         // Both operands cleared `require_numeric`, so `as_float` cannot fail.
         let a = l.as_float().unwrap();
         let b = r.as_float().unwrap();
-        Ok(match op {
-            ArithOp::Add => Value::Float(a + b),
-            ArithOp::Sub => Value::Float(a - b),
-            ArithOp::Mul => Value::Float(a * b),
+        let v = match op {
+            ArithOp::Add => a + b,
+            ArithOp::Sub => a - b,
+            ArithOp::Mul => a * b,
             ArithOp::Div if b == 0.0 => return Err(div_zero()),
-            ArithOp::Div => Value::Float(a / b),
+            ArithOp::Div => a / b,
             ArithOp::Mod => {
                 return Err(shell.err_hint("% requires Int operands", "use int to convert", 1));
             }
-        })
+        };
+        // Finite operands with a nonzero divisor can still overflow to ±∞,
+        // and a Float is finite by construction.
+        if v.is_finite() {
+            Ok(Value::Float(v))
+        } else {
+            Err(shell.err(format!("float overflow: {a} and {b} exceed f64 range"), 1))
+        }
     }
 }
