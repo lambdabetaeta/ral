@@ -609,7 +609,7 @@ impl Parser {
             return Ok(None);
         }
         self.advance(); // consume 'let'
-        let (pattern_span, pattern) = self.capture_span(Self::parse_pattern)?;
+        let (pattern_span, pattern) = self.parse_binder()?;
         match self.peek() {
             tok if tok.as_plain_word() == Some("=") => {
                 self.advance();
@@ -637,6 +637,21 @@ impl Parser {
             pattern: Spanned::new(pattern_span, pattern),
             value: Spanned::boxed(value_span, value),
         }))
+    }
+
+    /// A complete binder — a `let` LHS or one lambda parameter — with its
+    /// span. The one place duplicate names are refused: a pattern binds all
+    /// its names at once, so a repeat within it is ambiguous, whereas a
+    /// repeat across curried parameters is ordinary shadowing.
+    fn parse_binder(&mut self) -> Result<(Span, Pattern), ParseError> {
+        let (span, pattern) = self.capture_span(Self::parse_pattern)?;
+        if let Some(name) = pattern.duplicate_name() {
+            return Err(Self::error_at(
+                span,
+                format!("pattern binds `{name}` more than once"),
+            ));
+        }
+        Ok((span, pattern))
     }
 
     /// A binding LHS or lambda parameter, and the pattern grammar's sole entry:
@@ -1100,7 +1115,7 @@ impl Parser {
             self.advance(); // consume opening |
             let mut params: Vec<Spanned<Pattern>> = Vec::new();
             while self.peek() != &Token::Pipe {
-                let (sp, p) = self.capture_span(Self::parse_pattern)?;
+                let (sp, p) = self.parse_binder()?;
                 params.push(Spanned::new(sp, p));
             }
             self.expect(&Token::Pipe)?;
@@ -2280,6 +2295,28 @@ mod tests {
             err.message.contains("reserved keyword"),
             "rest-pattern name should enforce the reserved-name guard: {err:?}"
         );
+    }
+
+    #[test]
+    fn pattern_rejects_duplicate_names() {
+        for src in [
+            "let [x, x] = [1, 2]",
+            "let [x, [_, x]] = [1, [2, 3]]",
+            "let [x, ...x] = [1, 2]",
+            "let [a: x, b: x] = $m",
+            "echo { |[x, x]| $x }",
+        ] {
+            let err = parse(src).expect_err("duplicate binding must not parse");
+            assert!(
+                err.message.contains("binds `x` more than once"),
+                "{src:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn curried_params_may_shadow() {
+        assert!(parse("echo { |x x| $x }").is_ok());
     }
 
     #[test]

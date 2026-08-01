@@ -497,6 +497,24 @@ impl WordLiteral {
 }
 
 impl<D> Pattern<D> {
+    /// The first name this pattern binds twice, if any. A pattern binds all
+    /// its names at once, so a repeat is an ambiguity, not a shadow — the
+    /// parser rejects it at both binder sites (`let` and lambda parameter).
+    pub fn duplicate_name(&self) -> Option<&str> {
+        fn walk<'a, D>(pat: &'a Pattern<D>, seen: &mut HashSet<&'a str>) -> Option<&'a str> {
+            match pat {
+                Pattern::Wildcard => None,
+                Pattern::Name(n) => (!seen.insert(n.as_str())).then_some(n.as_str()),
+                Pattern::List { elems, rest } => elems
+                    .iter()
+                    .find_map(|e| walk(e, seen))
+                    .or_else(|| rest.as_deref().filter(|r| !seen.insert(*r))),
+                Pattern::Map(entries) => entries.iter().find_map(|e| walk(&e.pattern, seen)),
+            }
+        }
+        walk(self, &mut HashSet::new())
+    }
+
     pub fn collect_names(&self, set: &mut HashSet<String>) {
         match self {
             Self::Wildcard => {}
