@@ -178,7 +178,7 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
         .resolve(&resolved.to_string_lossy())
         .canonicalise_strict()
         .ok()
-        .or_else(|| crate::path::ral_path::find_file(&path))
+        .or_else(|| crate::path::ral_path::find_file(&path, shell.mobile.context.env_overrides()))
         .map_or_else(|| path.clone(), |p| p.to_string_lossy().into_owned());
 
     let source = read_and_normalize(abs_path.as_ref(), &abs_path, "use", shell)?;

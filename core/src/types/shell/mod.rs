@@ -386,7 +386,7 @@ impl Shell {
             ))),
             "CWD" => {
                 let p = self.cwd();
-                let home = crate::path::home_from_env();
+                let home = self.mobile.context.home();
                 let cwd_str = crate::path::abbreviate_home(&p, &home);
                 let cwd_str = if cwd_str.is_empty() {
                     "?".into()
@@ -396,7 +396,9 @@ impl Shell {
                 Some(Value::String(cwd_str))
             }
             "STATUS" => Some(Value::Int(i64::from(self.mobile.control.last_status))),
-            "USER" => Some(Value::String(crate::path::user_name_from_env())),
+            "USER" => Some(Value::String(crate::path::user_name(
+                self.mobile.context.env_overrides(),
+            ))),
             _ => None,
         }
     }

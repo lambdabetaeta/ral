@@ -442,6 +442,12 @@ impl Shell {
         self.mobile.context.env_overrides().get_or_host(name)
     }
 
+    /// The dynamic overlay itself, for a host handing it to an overlay-aware
+    /// helper (the `RAL_PATH` plugin search) rather than reading one key.
+    pub fn env_overrides(&self) -> &crate::types::EnvVars {
+        self.mobile.context.env_overrides()
+    }
+
     /// Capability frames on the grant stack — the ambient root plus every live
     /// `grant` / `within` attenuation — with which a host asserts stack balance
     /// across a run boundary.  [`Shell::has_active_capabilities`] asks

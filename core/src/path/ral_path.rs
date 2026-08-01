@@ -7,12 +7,15 @@
 use std::path::PathBuf;
 
 use super::Resolver;
+use crate::types::EnvVars;
 
 /// `RAL_PATH` directories in declaration order; empty when unset.
-// RAL_PATH is a PATH-style search list, not a single basedir.
-#[allow(clippy::disallowed_methods)]
-pub fn entries() -> Vec<PathBuf> {
-    let raw = std::env::var_os("RAL_PATH").unwrap_or_default();
+///
+/// Reads `env_overrides` before the host env — the overlay-on-process rule
+/// `within [env: …]` obeys.  `RAL_PATH` is a PATH-style search list, not a
+/// single basedir.
+pub fn entries(env_overrides: &EnvVars) -> Vec<PathBuf> {
+    let raw = env_overrides.get_or_host("RAL_PATH").unwrap_or_default();
     std::env::split_paths(&raw).collect()
 }
 
@@ -22,8 +25,8 @@ pub fn entries() -> Vec<PathBuf> {
 ///
 /// A directory of that name is not a module, so it does not end the walk —
 /// otherwise it would shadow a real file further down the list.
-pub fn find_file(name: &str) -> Option<PathBuf> {
-    entries()
+pub fn find_file(name: &str, env_overrides: &EnvVars) -> Option<PathBuf> {
+    entries(env_overrides)
         .into_iter()
         .map(|dir| dir.join(name))
         .find_map(|cand| {
@@ -53,9 +56,9 @@ mod tests {
         std::fs::write(real.join("m.ral"), b"").unwrap();
         let raw = std::env::join_paths([&shadow, &real]).unwrap();
 
-        let found = crate::test_env::with_var("RAL_PATH", Some(&raw.to_string_lossy()), || {
-            find_file("m.ral")
-        });
+        let mut env = EnvVars::new();
+        env.insert("RAL_PATH".into(), raw.to_string_lossy().into_owned());
+        let found = find_file("m.ral", &env);
 
         assert_eq!(found, std::fs::canonicalize(real.join("m.ral")).ok());
     }

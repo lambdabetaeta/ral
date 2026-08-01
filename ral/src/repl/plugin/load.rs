@@ -47,7 +47,7 @@ pub(crate) fn load_plugin(
 
     check_not_loaded(name_or_path, runtime)?;
 
-    let path = resolve_plugin_path(name_or_path)?;
+    let path = resolve_plugin_path(name_or_path, shell.env_overrides())?;
     let rp = shell.resolve(&path);
     shell.check_fs_read(&rp)?;
     #[allow(
@@ -317,11 +317,14 @@ fn check_is_manifest(val: &Value, name: &str) -> Result<(), Error> {
 /// 1. `<config>/ral/plugins/<name>.ral`
 /// 2. Each directory in `RAL_PATH`: `$dir/<name>.ral`
 /// 3. The literal path, then `<name>.ral`
-fn resolve_plugin_path(name_or_path: &str) -> Result<String, Error> {
+fn resolve_plugin_path(
+    name_or_path: &str,
+    env_overrides: &ral_core::types::EnvVars,
+) -> Result<String, Error> {
     let plugin_file = format!("{name_or_path}.ral");
     let config_candidate =
         ral_core::path::config::xdg_config_subpath("ral/plugins").map(|dir| dir.join(&plugin_file));
-    let ral_path_candidates = ral_core::path::ral_path::entries()
+    let ral_path_candidates = ral_core::path::ral_path::entries(env_overrides)
         .into_iter()
         .map(|dir| dir.join(&plugin_file));
     // Final fallbacks: the user-supplied identifier verbatim, then
