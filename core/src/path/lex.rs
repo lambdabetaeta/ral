@@ -77,7 +77,7 @@ pub(crate) fn starts_with_identity(path: &str, prefix: &str, windows: bool) -> b
 /// `capability::exec::names_match` so paths and command names fold alike, and
 /// erring below the real NTFS `$UpCase` table rather than above it — missing
 /// non-ASCII folds sooner than claiming equivalences the driver would refuse.
-fn windows_identity_components(p: &str) -> Vec<String> {
+pub(crate) fn windows_identity_components(p: &str) -> Vec<String> {
     let s = strip_verbatim_prefix(p);
     let s = s
         .strip_prefix("UNC\\")
@@ -91,7 +91,7 @@ fn windows_identity_components(p: &str) -> Vec<String> {
 
 /// Strip a leading verbatim prefix — two separators, `?`, a separator — under
 /// either slash spelling and the mixed forms between.
-fn strip_verbatim_prefix(p: &str) -> &str {
+pub(crate) fn strip_verbatim_prefix(p: &str) -> &str {
     let b = p.as_bytes();
     let is_sep = |c: u8| c == b'/' || c == b'\\';
     if b.len() >= 4 && is_sep(b[0]) && is_sep(b[1]) && b[2] == b'?' && is_sep(b[3]) {

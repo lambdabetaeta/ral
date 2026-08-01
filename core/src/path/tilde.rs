@@ -24,16 +24,46 @@ pub struct TildePath {
 
 impl TildePath {
     /// Recognise the shape; `None` when the input does not begin with `~`.
+    ///
+    /// The public door: `windows` is read from `cfg!` here and nowhere below,
+    /// so [`Self::parse_for`] carries the actual rule and can be pinned on
+    /// every host in tests, matching `lex::starts_with_identity`'s split
+    /// between a platform-reading door and a platform-taking parameter.
     pub fn parse(input: &str) -> Option<Self> {
+        Self::parse_for(input, cfg!(windows))
+    }
+
+    /// [`Self::parse`]'s rule, `windows` a parameter rather than the `cfg!`
+    /// read at the door.
+    ///
+    /// Off Windows only `/` separates the user part from the suffix, as
+    /// before. Under Windows `\` counts too — `~\sub` typed at a Windows
+    /// prompt is exactly the shape `~/sub` is elsewhere, and splitting only on
+    /// `/` would leave it a literal `user = "\sub"` with no suffix, which then
+    /// fails to expand at all.
+    ///
+    /// The suffix keeps whichever separator byte it was split on — `/sub` or
+    /// `\sub` — rather than normalising to one spelling: [`Self::to_literal`]
+    /// promises to reconstruct *the spelling this parsed from*, and callers
+    /// that echo it back in an error message (a `~user` this platform cannot
+    /// resolve) should echo what the user actually typed. Nothing downstream
+    /// cares which separator survives — [`expand_tilde_path`] only
+    /// concatenates, and the resolver it feeds accepts either.
+    fn parse_for(input: &str, windows: bool) -> Option<Self> {
         let rest = input.strip_prefix('~')?;
-        match rest.split_once('/') {
+        let split = if windows {
+            rest.find(['/', '\\'])
+        } else {
+            rest.find('/')
+        };
+        match split {
             None => Some(Self {
                 user: Some(rest.to_string()).filter(|s| !s.is_empty()),
                 suffix: None,
             }),
-            Some((user, suffix)) => Some(Self {
-                user: Some(user.to_string()).filter(|s| !s.is_empty()),
-                suffix: Some(format!("/{suffix}")),
+            Some(idx) => Some(Self {
+                user: Some(rest[..idx].to_string()).filter(|s| !s.is_empty()),
+                suffix: Some(rest[idx..].to_string()),
             }),
         }
     }
@@ -108,16 +138,56 @@ pub fn abbreviate_home(path: &std::path::Path, home: &str) -> String {
     reason = "lexical Path::new for the component-boundary strip — no I/O behind it; this module is part of crate::path, where the path-construction rule lives"
 )]
 fn abbreviate_home_for(path: &str, home: &str, windows: bool) -> String {
-    let shown = match std::path::Path::new(path).strip_prefix(home) {
-        Ok(rest) if !home.is_empty() => {
-            if rest.as_os_str().is_empty() {
-                return "~".to_string();
+    let shown = if windows {
+        windows_strip_home(path, home)
+    } else {
+        match std::path::Path::new(path).strip_prefix(home) {
+            Ok(rest) if !home.is_empty() => {
+                if rest.as_os_str().is_empty() {
+                    return "~".to_string();
+                }
+                format!("~/{}", rest.display())
             }
-            format!("~/{}", rest.display())
+            _ => path.to_string(),
         }
-        _ => path.to_string(),
     };
     if windows { shown.replace('\\', "/") } else { shown }
+}
+
+/// The Windows half of [`abbreviate_home_for`]'s strip: containment under
+/// [`super::lex::starts_with_identity`]'s identity rather than
+/// `Path::strip_prefix`, which is separator-insensitive but
+/// case-*sensitive* — so `USERPROFILE`/`cwd` disagreeing on casing
+/// (`C:\Users\al` vs `c:\users\al`) would otherwise leave the prompt showing
+/// the whole path instead of folding it to `~`.
+///
+/// The identity check only decides *whether* home is a prefix; the displayed
+/// tail is sliced from `path`'s own components, in `path`'s own casing, so
+/// the user's typed spelling survives — only the fold to `~`, never a fold to
+/// `home`'s case, happens here.
+fn windows_strip_home(path: &str, home: &str) -> String {
+    if home.is_empty() || !super::lex::starts_with_identity(path, home, true) {
+        return path.to_string();
+    }
+    let home_depth = super::lex::windows_identity_components(home).len();
+    // The same verbatim/UNC normalisation `windows_identity_components`
+    // folds before it lower-cases and splits, mirrored here without the case
+    // fold: the displayed tail must keep `path`'s own casing, not `home`'s.
+    let stripped = super::lex::strip_verbatim_prefix(path);
+    let stripped = stripped
+        .strip_prefix("UNC\\")
+        .or_else(|| stripped.strip_prefix("UNC/"))
+        .map_or_else(|| stripped.to_string(), |rest| format!(r"\{rest}"));
+    let tail: Vec<&str> = stripped
+        .split(['/', '\\'])
+        .filter(|c| !c.is_empty())
+        .skip(home_depth)
+        .collect();
+    if tail.is_empty() {
+        "~".to_string()
+    } else {
+        format!("~/{}", tail.join("/"))
+    }
 }
 
 // ── $HOME / $USER lookup ──────────────────────────────────────────────
@@ -235,5 +305,84 @@ mod tests {
         assert_eq!(TildePath::parse("~bob").unwrap().to_literal(), "~bob");
         assert_eq!(TildePath::parse("~/sub").unwrap().to_literal(), "~/sub");
         assert_eq!(TildePath::parse("~").unwrap().to_literal(), "~");
+    }
+
+    // `parse_for` rather than `parse` below: `windows` pinned as a parameter,
+    // so the Windows separator rule is exercised on every host.
+
+    #[test]
+    fn backslash_suffix_parses_as_tilde_with_suffix_on_windows() {
+        assert_eq!(
+            TildePath::parse_for(r"~\sub", true),
+            Some(TildePath {
+                user: None,
+                suffix: Some(r"\sub".to_string()),
+            })
+        );
+        assert_eq!(
+            TildePath::parse_for(r"~bob\sub", true),
+            Some(TildePath {
+                user: Some("bob".to_string()),
+                suffix: Some(r"\sub".to_string()),
+            })
+        );
+    }
+
+    /// Off Windows `\` is an ordinary filename byte, so the whole rest is the
+    /// (unresolvable, but honestly reported) user part, not a suffix split.
+    #[test]
+    fn backslash_suffix_is_not_a_separator_off_windows() {
+        assert_eq!(
+            TildePath::parse_for(r"~\sub", false),
+            Some(TildePath {
+                user: Some(r"\sub".to_string()),
+                suffix: None,
+            })
+        );
+    }
+
+    /// [`TildePath::to_literal`] promises the parsed spelling back, so a
+    /// backslash suffix must survive the round trip unnormalised.
+    #[test]
+    fn backslash_suffix_round_trips_through_to_literal() {
+        assert_eq!(
+            TildePath::parse_for(r"~\sub", true).unwrap().to_literal(),
+            r"~\sub"
+        );
+    }
+
+    /// `USERPROFILE` and the path under test disagree on casing — exactly the
+    /// drift `Path::strip_prefix` cannot see past, since it folds separators
+    /// but not case.  The displayed tail keeps `path`'s own casing (`MyProject`,
+    /// not `myproject`): only the prefix comparison is case-insensitive, not
+    /// the fold that renders `MyProject` on top of it.
+    #[test]
+    fn abbreviation_is_case_insensitive_to_home_on_windows() {
+        assert_eq!(
+            abbreviate_home_for("/h/users/MyProject", "/H/Users", true),
+            "~/MyProject"
+        );
+    }
+
+    /// Same identity rule as `lex::starts_with_identity`'s own tests: a
+    /// verbatim `\\?\` prefix and a case difference both fall away, and the
+    /// tail keeps its own case regardless.
+    #[test]
+    fn abbreviation_strips_verbatim_prefix_and_case_on_windows() {
+        assert_eq!(
+            abbreviate_home_for(r"\\?\C:\Users\Al\Work", r"c:\users\al", true),
+            "~/Work"
+        );
+    }
+
+    /// A `Path::strip_prefix`-only rule would leave this printed in full: the
+    /// case mismatch defeats a byte-exact strip even though the two spellings
+    /// name the same directory under Windows identity.
+    #[test]
+    fn abbreviation_off_windows_stays_case_sensitive() {
+        assert_eq!(
+            abbreviate_home_for("/h/users/x", "/H/Users", false),
+            "/h/users/x"
+        );
     }
 }
