@@ -501,8 +501,13 @@ fn stamp_key(canonical: &Path, kind: GrantKind) -> String {
     format!("{}|{}", kind.tag(), canonical.to_string_lossy())
 }
 
+/// The stamp store's file name within [`ledger_dir`] — named once so the
+/// orphan sweep can recognize and skip it by identity rather than by a second
+/// spelling that could drift from this one.
+const STAMP_STORE_FILE_NAME: &str = "stamps.json";
+
 fn stamp_store_path() -> PathBuf {
-    ledger_dir().join("stamps.json")
+    ledger_dir().join(STAMP_STORE_FILE_NAME)
 }
 
 #[allow(
@@ -528,7 +533,7 @@ fn stamp_recorded(key: &str) -> bool {
 /// as empty and is rewritten — entries lost that way cost redundant restamps,
 /// never authority.
 fn record_stamp(key: &str) -> Result<(), DaclError> {
-    let path = ensure_ledger_dir()?.join("stamps.json");
+    let path = ensure_ledger_dir()?.join(STAMP_STORE_FILE_NAME);
     let _guard = PathMutexGuard::acquire(&path)?;
     let mut store: StampStore = match read_stamp_store_bytes(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
@@ -562,6 +567,13 @@ pub fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        // The stamp store lives beside the ledgers but is not one: it has no
+        // `run_id`, so parsing it as a `Ledger` always fails. Recognizing it
+        // by file name keeps the sweep from quarantining a session's grow-only
+        // completion witnesses on every boot.
+        if path.file_name().and_then(|s| s.to_str()) == Some(STAMP_STORE_FILE_NAME) {
             continue;
         }
         report.files_processed += 1;
@@ -2162,6 +2174,40 @@ mod tests {
                     .unwrap()
                     .is_empty(),
                 "the sweep must take the legacy ACE back off"
+            );
+        });
+    }
+
+    /// The stamp store shares [`ledger_dir`] with the ledgers but is not one
+    /// — it has no `run_id` and would fail `Ledger` parsing on every boot if
+    /// the sweep did not recognize it by name first.
+    #[test]
+    fn recovery_leaves_the_stamp_store_unparsed_and_unquarantined() {
+        with_scoped_state_dir(|| {
+            let dir = ensure_ledger_dir().unwrap();
+            let key = stamp_key(Path::new(r"C:\somewhere"), GrantKind::ReadWrite);
+            record_stamp(&key).unwrap();
+            let stamp_path = dir.join(STAMP_STORE_FILE_NAME);
+            assert!(matches!(stamp_path.try_exists(), Ok(true)));
+
+            let report = recover_orphaned_state().unwrap();
+
+            assert!(
+                matches!(stamp_path.try_exists(), Ok(true)),
+                "the stamp store must not be renamed away as corrupt"
+            );
+            assert!(
+                !stamp_path.with_extension("json.corrupt").try_exists().unwrap_or(false),
+                "the sweep must not quarantine the stamp store"
+            );
+            assert!(
+                report.errors.is_empty(),
+                "the stamp store must not surface as a parse error: {:?}",
+                report.errors
+            );
+            assert!(
+                stamp_recorded(&key),
+                "the recorded stamp must survive the sweep"
             );
         });
     }
