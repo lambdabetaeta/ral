@@ -5,7 +5,7 @@
 //! node; under the others those applications land in the enclosing trail
 //! unwrapped.
 
-use crate::types::{Break, Mooring, Settled, Shell, Value, as_list, sig};
+use crate::types::{Break, Mooring, NodeOutcome, Settled, Shell, Value, as_list, sig};
 
 use super::apply;
 use super::util::value_ordering;
@@ -71,20 +71,15 @@ fn iterate_audited(
         let start = crate::evaluator::audit::start(shell);
         let principal = shell.mobile.context.principal();
         let (fragment, (value, err)) = shell.audit_child(body);
-        let (status, stderr) = match &err {
-            Some(Break::Error(e)) => (e.exit_code(), e.message.clone().into_bytes()),
-            _ => (shell.mobile.control.last_status, Vec::new()),
+        let outcome = match &err {
+            Some(Break::Error(e)) => NodeOutcome::of_error(e).with_partial(value.clone()),
+            _ => NodeOutcome::of_value(shell.mobile.control.last_status, value.clone()),
         };
         let node = crate::evaluator::audit::scope_node(
-            shell,
             cmd,
             &start,
             principal,
-            crate::evaluator::audit::NodeOutcome {
-                status,
-                value: value.clone(),
-                stderr,
-            },
+            outcome,
             fragment.into_nodes(),
         );
         shell.local.audit.push(node);

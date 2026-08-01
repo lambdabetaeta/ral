@@ -63,6 +63,7 @@ pub use audit::{
     Audit, AuditFragment, AuditIo, AuditTime, AuditTrail, CapturePolicy, ExecNode, ExecNodeKind,
     STDERR_CAP_BYTES, epoch_us,
 };
+pub(crate) use audit::NodeOutcome;
 
 // Here because audit nodes and capability checks carry one.
 pub use crate::diagnostic::CallSite;

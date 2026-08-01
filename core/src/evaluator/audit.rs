@@ -11,7 +11,7 @@
 use crate::source::Span;
 use crate::types::{
     AuditIo, AuditTime, BodyResult, Break, BuiltinEntry, CallSite, CapturePolicy, Control, Escape,
-    ExecNode, Map, Mooring, Raw, STDERR_CAP_BYTES, Settled, Shell, Value, epoch_us,
+    ExecNode, Map, Mooring, NodeOutcome, Raw, STDERR_CAP_BYTES, Settled, Shell, Value, epoch_us,
 };
 
 /// Proof that a native body is running inside [`frame_call`]'s dynamic
@@ -47,21 +47,12 @@ fn cap_stderr(buf: &mut Vec<u8>) {
     }
 }
 
-/// What a scope or combinator node records, already derived by its caller:
-/// the exit status, the value (a partial accumulation, or `Unit` for a scope
-/// whose body failed), and any captured stderr.
-pub(crate) struct NodeOutcome {
-    pub status: i32,
-    pub value: Value,
-    pub stderr: Vec<u8>,
-}
-
 /// Assemble one scope or combinator node.  Shared by [`record_scope`] and
 /// `iterate_audited` in `builtins::collections`, so the two cannot drift on
-/// the stderr cap or the node shape.  Such a node carries no `args`: the
-/// structural IR is already the record of what the scope received.
+/// the node shape.  Such a node carries no `args`: the structural IR is
+/// already the record of what the scope received; and no I/O: a scope does
+/// not write to file descriptors, its children do.
 pub(crate) fn scope_node(
-    shell: &Shell,
     cmd: &str,
     start: &AuditStart,
     principal: String,
@@ -71,20 +62,15 @@ pub(crate) fn scope_node(
     let NodeOutcome {
         status,
         value,
-        mut stderr,
+        error,
     } = outcome;
-    if shell.local.audit.captures_bytes() {
-        cap_stderr(&mut stderr);
-    }
     ExecNode::command(
         cmd,
         Vec::new(),
         status,
         start.site.clone(),
-        AuditIo {
-            stdout: Vec::new(),
-            stderr,
-        },
+        AuditIo::default(),
+        error,
         value,
         children,
         AuditTime {
@@ -102,7 +88,7 @@ fn finish_command(
     args: &[Value],
     result: &Settled<Value>,
     stdout: Vec<u8>,
-    stderr: Vec<u8>,
+    mut stderr: Vec<u8>,
 ) {
     if !shell.local.audit.active() {
         return;
@@ -112,32 +98,23 @@ fn finish_command(
     if cmd.starts_with('_') {
         return;
     }
-    let (status, value, mut node_stderr) = match result {
-        Ok(v) => (shell.mobile.control.last_status, v.clone(), stderr),
-        Err(Break::Error(e)) => {
-            let s = if stderr.is_empty() {
-                e.message.clone().into_bytes()
-            } else {
-                stderr
-            };
-            (e.exit_code(), Value::Unit, s)
-        }
+    let outcome = match result {
+        Ok(v) => NodeOutcome::of_value(shell.mobile.control.last_status, v.clone()),
+        Err(Break::Error(e)) => NodeOutcome::of_error(e),
         Err(_) => return,
     };
     if shell.local.audit.captures_bytes() {
-        cap_stderr(&mut node_stderr);
+        cap_stderr(&mut stderr);
     }
     let arg_strs: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
     let node = ExecNode::command(
         cmd,
         arg_strs,
-        status,
+        outcome.status,
         start.site,
-        AuditIo {
-            stdout,
-            stderr: node_stderr,
-        },
-        value,
+        AuditIo { stdout, stderr },
+        outcome.error,
+        outcome.value,
         Vec::new(),
         AuditTime {
             start: start.time,
@@ -262,22 +239,11 @@ pub(crate) fn record_scope(
     let (fragment, settled) =
         with_capture_policy(shell, capture, |shell| shell.audit_forced_child(body));
     let body_result = crate::types::split(settled)?;
-    let (status, value, stderr) = match &body_result {
-        BodyResult::Value(v) => (shell.mobile.control.last_status, v.clone(), Vec::new()),
-        BodyResult::Error(e) => (e.exit_code(), Value::Unit, e.message.clone().into_bytes()),
+    let outcome = match &body_result {
+        BodyResult::Value(v) => NodeOutcome::of_value(shell.mobile.control.last_status, v.clone()),
+        BodyResult::Error(e) => NodeOutcome::of_error(e),
     };
-    let node = scope_node(
-        shell,
-        cmd,
-        &start,
-        principal,
-        NodeOutcome {
-            status,
-            value,
-            stderr,
-        },
-        fragment.into_nodes(),
-    );
+    let node = scope_node(cmd, &start, principal, outcome, fragment.into_nodes());
     Ok(ScopeRecord {
         body: body_result,
         node,

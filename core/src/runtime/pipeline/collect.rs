@@ -7,8 +7,8 @@
 use super::super::command;
 use super::launch::StageHandle;
 use crate::types::{
-    AuditFragment, AuditIo, AuditTime, Break, Error, Escape, ExecNode, Settled, Shell, Value,
-    epoch_us,
+    AuditFragment, AuditIo, AuditTime, Break, Error, Escape, ExecNode, NodeOutcome, Settled, Shell,
+    Value, epoch_us,
 };
 
 /// Wait on a direct-spawn external stage and reduce it to a [`StageObservation`].
@@ -32,10 +32,10 @@ fn observe_external_stage(
     };
     let effective = if failure.is_none() { 0 } else { code };
 
-    let audit = synth_external_stage_audit(shell, &name, failure.as_ref(), effective);
+    let err = failure.map(|f| Error::from_command_failure(&name, f, shell));
+    let audit = synth_external_stage_audit(shell, &name, err.as_ref(), effective);
 
-    if let Some(failure) = failure {
-        let err = Error::from_command_failure(&name, failure, shell);
+    if let Some(err) = err {
         let err = super::augment_stage_failure(err, shell, started);
         Ok(StageObservation::failure(err).with_audit(audit))
     } else {
@@ -47,7 +47,7 @@ fn observe_external_stage(
 fn synth_external_stage_audit(
     shell: &Shell,
     name: &str,
-    failure: Option<&crate::process::CommandFailure>,
+    err: Option<&Error>,
     status: i32,
 ) -> AuditFragment {
     if !shell.local.audit.active() {
@@ -55,21 +55,19 @@ fn synth_external_stage_audit(
     }
     let site = shell.call_site();
     let principal = shell.mobile.context.principal();
-    let stderr = match failure {
-        Some(f) => f.message(name).into_bytes(),
-        None => Vec::new(),
+    let outcome = match err {
+        Some(e) => NodeOutcome::of_error(e),
+        None => NodeOutcome::of_value(status, Value::Unit),
     };
     let now = epoch_us();
     let node = ExecNode::command(
         name,
         Vec::new(),
-        status,
+        outcome.status,
         site,
-        AuditIo {
-            stdout: Vec::new(),
-            stderr,
-        },
-        Value::Unit,
+        AuditIo::default(),
+        outcome.error,
+        outcome.value,
         Vec::new(),
         AuditTime {
             start: now,

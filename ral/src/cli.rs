@@ -107,9 +107,10 @@ ENVIRONMENT
     RAL_TIMING            when present, print batch phase timings to stderr
 
 AUDIT
-    Use audit { ... } inside a script to record the exact argv and environment \
-handed to execve(2) for external commands. Use --audit to emit the execution \
-tree as JSON.",
+    Use audit { ... } inside a script to record an execution tree. Each node \
+describes a command, function, or control scope, including its evaluated \
+arguments where applicable, result, status, output, timing, source location, \
+and principal. Use --audit to emit the tree as JSON.",
 )]
 #[allow(clippy::struct_excessive_bools)] // clap flag struct: each bool is a distinct CLI switch.
 pub(crate) struct Cli {

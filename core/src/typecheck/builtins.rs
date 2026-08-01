@@ -495,6 +495,7 @@ pub(super) fn audit_record(value_ty: Ty, child_ty: Ty) -> Ty {
         ("col", Ty::Int),
         ("stdout", Ty::Bytes),
         ("stderr", Ty::Bytes),
+        ("error", Ty::String),
         ("value", value_ty),
         ("children", Ty::List(Box::new(Ty::Map(Box::new(child_ty))))),
         ("start", Ty::Int),

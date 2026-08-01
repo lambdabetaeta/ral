@@ -17,38 +17,13 @@ fn emit_audit_tree(
     name: &str,
     result: &Settled<ral_core::types::Value>,
     exit_code: i32,
-    tree_children: Vec<ral_core::types::ExecNode>,
+    fragment: ral_core::types::AuditFragment,
     audit_start: i64,
     pretty: bool,
     principal: String,
 ) {
-    use ral_core::types::{AuditIo, AuditTime, CallSite, ExecNode, Value};
-    let (value, err_msg) = match result {
-        Ok(v) => (v.clone(), String::new()),
-        Err(Break::Error(e)) => (Value::Unit, e.message.clone()),
-        Err(Break::Escape(_)) => (Value::Unit, String::new()),
-    };
-    let root = ExecNode::command(
-        name,
-        Vec::new(),
-        exit_code,
-        CallSite {
-            script: name.to_string(),
-            line: 0,
-            col: 0,
-        },
-        AuditIo {
-            stdout: Vec::new(),
-            stderr: err_msg.into_bytes(),
-        },
-        value,
-        tree_children,
-        AuditTime {
-            start: audit_start,
-            end: ral_core::types::epoch_us(),
-        },
-        principal,
-    );
+    use ral_core::types::ExecNode;
+    let root = ExecNode::run_root(name, result, exit_code, fragment, audit_start, principal);
     let json_val = ral_core::builtins::value_to_json_lossy_bytes(&root.to_value());
     let json_str = if pretty {
         serde_json::to_string_pretty(&json_val).unwrap_or_default()
@@ -228,10 +203,10 @@ pub(crate) fn run_batch(
     };
     tick!("evaluate");
 
-    let tree_children = if audit {
-        shell.take_audit_fragment().into_nodes()
+    let fragment = if audit {
+        shell.take_audit_fragment()
     } else {
-        Vec::new()
+        ral_core::types::AuditFragment::empty()
     };
 
     let exit_code = match &result {
@@ -263,7 +238,7 @@ pub(crate) fn run_batch(
             name,
             &result,
             exit_code,
-            tree_children,
+            fragment,
             audit_start,
             pretty,
             shell.principal(),

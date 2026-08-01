@@ -5,6 +5,8 @@
 //! pipeline-stage nodes included.  A process boundary only transports
 //! fragments; the wrapping scope decides where they land in the tree.
 
+use super::error::Error;
+use super::flow::{Break, Settled};
 use super::value::Value;
 use crate::diagnostic::CallSite;
 use crate::source::Span;
@@ -231,6 +233,11 @@ pub struct ExecNode {
     pub col: usize,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    /// The runtime's own account of why the node failed — `Some` iff the
+    /// outcome was a runtime error.  `stdout` and `stderr` hold only bytes
+    /// observed on the child's file descriptors; this field is the one place
+    /// ral speaks in its own voice.
+    pub error: Option<String>,
     pub value: Value,
     pub children: Vec<Self>,
     pub start: i64,        // microseconds since the Unix epoch
@@ -238,18 +245,99 @@ pub struct ExecNode {
     pub principal: String, // $USER at the time of recording
 }
 
+/// What a node records of its body's outcome: the exit status, the value,
+/// and the runtime's error message when the body failed.
+pub(crate) struct NodeOutcome {
+    pub status: i32,
+    pub value: Value,
+    pub error: Option<String>,
+}
+
+impl NodeOutcome {
+    /// A body that produced a value: the caller supplies the status it
+    /// observed (usually `last_status`), and there is no error.
+    pub(crate) fn of_value(status: i32, value: Value) -> Self {
+        Self {
+            status,
+            value,
+            error: None,
+        }
+    }
+
+    /// A body that failed: the error's own exit code, no value, and the
+    /// runtime's message.  [`Self::with_partial`] refines the no-value rule
+    /// for a combinator that salvages its accumulation.
+    pub(crate) fn of_error(e: &Error) -> Self {
+        Self {
+            status: e.exit_code(),
+            value: Value::Unit,
+            error: Some(e.message.clone()),
+        }
+    }
+
+    /// Replace the recorded value — a failed combinator records what it had
+    /// accumulated where a scope records `Unit`.
+    pub(crate) fn with_partial(self, value: Value) -> Self {
+        Self { value, ..self }
+    }
+}
+
 impl ExecNode {
-    /// Build a command node.  Every builtin, external, and scope node, and the
-    /// batch-mode root in `ral::batch`, comes through here; the one struct
-    /// literal elsewhere is `WireExecNode::into_runtime` in `crate::child_eval`,
-    /// rehydrating a node off the wire.
+    /// Wrap a run's collected fragment as the tree root.  The root is
+    /// scope-shaped — no args, no I/O — and sits at a sentinel site
+    /// (script = run name, line 0, col 0), since a run has no dispatch
+    /// site of its own.  `exit_code` is the process's exit status as the
+    /// host resolved it, not the error's own code; an escape (`exit`)
+    /// is not a failure, so it records no error.
+    pub fn run_root(
+        name: &str,
+        result: &Settled<Value>,
+        exit_code: i32,
+        fragment: AuditFragment,
+        start: i64,
+        principal: String,
+    ) -> Self {
+        let outcome = match result {
+            Ok(v) => NodeOutcome::of_value(exit_code, v.clone()),
+            Err(Break::Error(e)) => NodeOutcome {
+                status: exit_code,
+                ..NodeOutcome::of_error(e)
+            },
+            Err(Break::Escape(_)) => NodeOutcome::of_value(exit_code, Value::Unit),
+        };
+        Self::command(
+            name,
+            Vec::new(),
+            outcome.status,
+            CallSite {
+                script: name.to_string(),
+                line: 0,
+                col: 0,
+            },
+            AuditIo::default(),
+            outcome.error,
+            outcome.value,
+            fragment.into_nodes(),
+            AuditTime {
+                start,
+                end: epoch_us(),
+            },
+            principal,
+        )
+    }
+
+    /// Build a command node.  Every node in the tree — builtin, external,
+    /// scope, or the run's own root from [`Self::run_root`] — comes through
+    /// here; the one struct literal elsewhere is `WireExecNode::into_runtime`
+    /// in `crate::child_eval`, rehydrating a node off the wire.
     #[allow(clippy::too_many_arguments)]
-    pub fn command(
+    pub(crate) fn command(
         cmd: impl Into<String>,
         args: Vec<String>,
         status: i32,
         site: CallSite,
         io: AuditIo,
+        error: Option<String>,
         value: Value,
         children: Vec<Self>,
         time: AuditTime,
@@ -265,6 +353,7 @@ impl ExecNode {
             col: site.col,
             stdout: io.stdout,
             stderr: io.stderr,
+            error,
             value,
             children,
             start: time.start,
@@ -301,6 +390,7 @@ impl ExecNode {
             col: site.col,
             stdout: Vec::new(),
             stderr: Vec::new(),
+            error: None,
             value: Value::map(value_pairs),
             children: Vec::new(),
             start: now,
@@ -311,7 +401,9 @@ impl ExecNode {
 
     /// Render the node as a map.  A capability check splices `self.value`'s
     /// fields into the top level as well, so `resource` and `decision` sit
-    /// beside `cmd` and `status`.
+    /// beside `cmd` and `status`.  `error` renders as a string, empty when
+    /// the node did not fail — a record field is always present, and a
+    /// runtime error message is never empty.
     pub fn to_value(&self) -> Value {
         let args_list: Vec<Value> = self.args.iter().map(|a| Value::String(a.clone())).collect();
         let children_list: Vec<Value> = self.children.iter().map(Self::to_value).collect();
@@ -329,6 +421,10 @@ impl ExecNode {
             ("col".into(), Value::Int(self.col as i64)),
             ("stdout".into(), Value::Bytes(self.stdout.clone())),
             ("stderr".into(), Value::Bytes(self.stderr.clone())),
+            (
+                "error".into(),
+                Value::String(self.error.clone().unwrap_or_default()),
+            ),
             ("value".into(), self.value.clone()),
             ("children".into(), Value::list(children_list)),
             ("start".into(), Value::Int(self.start)),
