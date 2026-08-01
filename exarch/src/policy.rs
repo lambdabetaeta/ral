@@ -14,8 +14,9 @@ mod load;
 
 use base::{resolve_base, root_fs_policy};
 use load::{absolute_in, lint_deputy_prefixes, load_capabilities_ral};
+use ral_core::host;
 use ral_core::io::TerminalState;
-use ral_core::path::{home_from_env, sigil::FreezeCtx, sigil::freeze_path_list};
+use ral_core::path::{sigil::FreezeCtx, sigil::freeze_path_list};
 use ral_core::types::{Capabilities, Shell};
 use std::path::{Path, PathBuf};
 
@@ -31,6 +32,10 @@ use std::path::{Path, PathBuf};
 ///
 /// # Errors
 /// Unknown `base_name`, or a profile that fails to load.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "host-env: capability profiles freeze against the launching user's real home — no shell overlay exists yet"
+)]
 pub fn for_invocation(
     cwd: &str,
     base_name: &str,
@@ -43,7 +48,7 @@ pub fn for_invocation(
     let mut load_shell = Shell::new(TerminalState::default());
 
     let cwd_path = PathBuf::from(cwd);
-    let home = home_from_env();
+    let home = host::home();
     let ctx = FreezeCtx {
         home: &home,
         cwd: &cwd_path,
@@ -90,9 +95,13 @@ pub fn for_invocation(
 ///
 /// # Errors
 /// Unknown `base_name`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "host-env: the child's base freezes against the launching user's real home, like for_invocation's"
+)]
 pub fn narrow(parent: &Capabilities, base_name: &str, cwd: &str) -> Result<Capabilities, String> {
     let cwd_path = PathBuf::from(cwd);
-    let home = home_from_env();
+    let home = host::home();
     let ctx = FreezeCtx {
         home: &home,
         cwd: &cwd_path,

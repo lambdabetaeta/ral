@@ -125,7 +125,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bakeins_parse() {
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
@@ -150,7 +150,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn bakeins_parse_on_windows() {
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new(r"C:\work"),
@@ -172,7 +172,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn minimal_drops_foreign_rooted_grants_on_windows() {
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new(r"C:\work"),
@@ -226,7 +226,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn read_only_does_not_write_cwd() {
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/work/proj"),
@@ -260,7 +260,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reasonable_carries_xdg_bin_subpath_in_exec() {
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
@@ -279,7 +279,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn minimal_and_reasonable_carry_cwd_and_tempdir_sigils() {
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let cwd = Path::new("/work/proj");
         let ctx = FreezeCtx { home: &home, cwd };
         // Freeze folds away the trailing separator macOS `$TMPDIR` carries, so
@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn freeze_admits_relative_exec_under_cwd_sigil() {
         let work = std::path::Path::new("/work/proj");
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let ctx = FreezeCtx {
             home: &home,
             cwd: work,
@@ -353,7 +353,7 @@ mod tests {
         if !ral_core::path::exists("/opt/homebrew") {
             return;
         }
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
@@ -386,7 +386,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reasonable_admits_cargo_under_rustup_toolchain() {
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
@@ -404,7 +404,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reasonable_admits_go_official_and_user_tools() {
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
@@ -427,7 +427,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reasonable_admits_nvm_node() {
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
@@ -444,7 +444,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reasonable_admits_pyenv_python() {
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
@@ -469,7 +469,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reasonable_and_read_only_admit_git() {
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
@@ -498,7 +498,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn minimal_admits_system_git_not_homebrew() {
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/work"),
@@ -536,7 +536,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn git_extension_widens_into_git_capable_profile() {
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
@@ -589,7 +589,7 @@ mod tests {
     /// platform's own branch and the assertion holds either way.
     #[test]
     fn every_exec_base_admits_live_system_tool_roots() {
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         // Absolute on every platform, unlike the `/work` literal the
         // `cfg(unix)`-gated tests use — Windows reads that as rootless.
         let cwd = std::env::temp_dir();
@@ -660,7 +660,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reasonable_drops_unix_only_bundled_tool_grants_off_unix() {
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),

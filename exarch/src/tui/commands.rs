@@ -149,6 +149,10 @@ pub(super) fn unrecognized_command(trimmed: &str) -> Option<&str> {
 
 /// Resolve a typed `/export` path: expand a `~`/`xdg:` head, then anchor a
 /// still-relative path at the launch `cwd` rather than the process's own.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "host-env: a path the operator types at the TUI means the operator's own `~`"
+)]
 pub(super) fn resolve_export_path(arg: &str, cwd: &str) -> PathBuf {
     let expanded = expand_path_prefix(arg, &ral_core::host::home());
     ral_core::path::resolve_str(Some(cwd), &expanded)

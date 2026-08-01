@@ -99,7 +99,7 @@ and the lattice operations run on the resolved bundles.
   comparing sigil strings; no soundness change.
 - the `FreezeCtx` is built **once** per composition site, home and cwd in hand
   — `eval_grant` and `apply_session_profiles` against the live shell's
-  effective home; exarch's `for_invocation` against `home_from_env()` and the
+  effective home; exarch's `for_invocation` against `host::home()` and the
   session cwd.
 
 The composition `meet` and the runtime fold are then two fidelities of one

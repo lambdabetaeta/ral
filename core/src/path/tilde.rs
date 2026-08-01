@@ -201,19 +201,6 @@ pub fn home(env_overrides: &crate::types::EnvVars) -> String {
         .unwrap_or_default()
 }
 
-/// [`home`] with no overrides — for callers holding no shell env (REPL
-/// completion, policy loaders).
-pub fn home_from_env() -> String {
-    home(&crate::types::EnvVars::new())
-}
-
-/// [`home_from_env`], falling back to `.`, so callers joining onto home never
-/// build a path off an empty base.
-pub fn home_from_env_or_dot() -> String {
-    let h = home_from_env();
-    if h.is_empty() { ".".into() } else { h }
-}
-
 /// `$USER`, then `$USERNAME` (Windows), overrides before the host env; `"?"`
 /// when nothing is set, matching the prompt/audit placeholder.
 pub fn user_name(env_overrides: &crate::types::EnvVars) -> String {
@@ -221,12 +208,6 @@ pub fn user_name(env_overrides: &crate::types::EnvVars) -> String {
         .get_or_host("USER")
         .or_else(|| env_overrides.get_or_host("USERNAME"))
         .unwrap_or_else(|| "?".into())
-}
-
-/// [`user_name`] with no overrides — for callers holding no shell env (REPL
-/// prompt, host snapshot, shell seeding).
-pub fn user_name_from_env() -> String {
-    user_name(&crate::types::EnvVars::new())
 }
 
 #[cfg(test)]

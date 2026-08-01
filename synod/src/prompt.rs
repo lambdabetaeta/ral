@@ -139,6 +139,7 @@ fn host_section(caps: &Capabilities, workspace: &Path) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
@@ -271,7 +272,7 @@ mod tests {
             "the guest scratch is named"
         );
         assert!(p.contains("- cwd: /work"));
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         if !home.is_empty() {
             assert!(
                 !p.contains(&home),

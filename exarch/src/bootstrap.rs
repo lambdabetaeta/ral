@@ -210,8 +210,12 @@ impl App {
     /// one spelling of that convention — [`App::project_dir`] and
     /// `provider::models`'s cache path both build on it.
     #[must_use]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "host-env: exarch's own config/state directories live under the launching user's XDG bases"
+    )]
     pub fn xdg_dir(self, kind: ral_core::path::basedir::XdgKind) -> PathBuf {
-        ral_core::path::basedir::resolve_xdg(kind, &ral_core::path::home_from_env()).join(self.0)
+        ral_core::path::basedir::resolve_xdg(kind, &ral_core::host::home()).join(self.0)
     }
 
     /// `$XDG_STATE_HOME/<app>/<project>/`, `<project>` being the slugified

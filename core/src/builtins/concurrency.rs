@@ -1652,7 +1652,7 @@ mod tests {
         let mut shell = detach_test_shell(0);
         run_source(&mut shell, r#"detach "a server" cd /tmp"#)
             .expect("a base frame's name runs the frame, not a birth");
-        assert_eq!(shell.cwd(), std::path::Path::new("/tmp"));
+        assert_eq!(shell.cwd().to_string_lossy(), "/tmp");
     }
 
     /// Vetting is reused wholesale, so an unresolvable head gives the usual 127.

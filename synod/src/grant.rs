@@ -230,6 +230,10 @@ impl Grant {
     /// folder may be unknown.  It is deliberately not a size or a
     /// depth test: a departmental share at `/Volumes/Registry/Admissions`
     /// is a perfectly ordinary grant and must stay one.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "host-env: the territory being protected is the launching user's real home, canonicalised for the comparison"
+    )]
     fn refuse_too_much(root: &Path) -> Result<(), String> {
         if root.parent().is_none() {
             return Err(format!(
@@ -239,7 +243,7 @@ impl Grant {
             ));
         }
 
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let home = std::fs::canonicalize(&home).unwrap_or_else(|_| PathBuf::from(&home));
         if home.as_os_str().is_empty() {
             return Ok(());
@@ -379,6 +383,7 @@ impl Grant {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use crate::test_fixture::workshop;
@@ -429,7 +434,7 @@ mod tests {
     /// than a synthetic one, so no test has to mutate the environment.
     #[test]
     fn the_home_folder_and_its_parents_are_refused() {
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         let Ok(home) = std::fs::canonicalize(&home) else {
             return; // No usable home on this host; nothing to assert.
         };
@@ -545,7 +550,7 @@ mod tests {
     #[test]
     fn the_home_folder_is_unreachable_from_inside_a_grant() {
         let (dir, grant) = granted("grant-home-unreachable");
-        let home = ral_core::path::home_from_env();
+        let home = ral_core::host::home();
         if home.is_empty() {
             let _ = std::fs::remove_dir_all(&dir);
             return;

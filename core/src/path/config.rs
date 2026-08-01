@@ -7,11 +7,16 @@
 
 use std::path::PathBuf;
 
-use super::basedir::{XdgKind, resolve_xdg};
-use super::home_from_env;
+use crate::host;
 
+use super::basedir::{XdgKind, resolve_xdg};
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "host-env: ral's own config/data live where the tool is installed — a script's env overlay must not relocate them"
+)]
 fn base(kind: XdgKind) -> Option<PathBuf> {
-    let path = resolve_xdg(kind, &home_from_env());
+    let path = resolve_xdg(kind, &host::home());
     path.is_absolute().then_some(path)
 }
 
@@ -27,8 +32,11 @@ pub fn xdg_data_subpath(subpath: &str) -> Option<PathBuf> {
 
 /// `$HOME/<dot_name>` (e.g. `home_dot(".ralrc")`) — the single-file
 /// convention rc loaders probe as a fallback to the XDG form.
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "host-env: the dot-file convention names the launching user's real home — a script's env overlay must not relocate it"
+)]
 pub fn home_dot(dot_name: &str) -> Option<PathBuf> {
-    let p = PathBuf::from(home_from_env()).join(dot_name);
+    let p = PathBuf::from(host::home()).join(dot_name);
     p.is_absolute().then_some(p)
 }

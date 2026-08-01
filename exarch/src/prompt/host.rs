@@ -9,6 +9,10 @@
 /// An empty probe drops its line rather than erroring, so bare and exotic
 /// hosts still yield a well-formed prompt; baked once at boot with the rest
 /// of the prompt, so `now` names boot time.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "host-env: the Host section reports host truths by definition"
+)]
 pub fn snapshot(exarch_state: &std::path::Path) -> String {
     use std::fmt::Write;
     let mut out = String::new();

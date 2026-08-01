@@ -90,7 +90,35 @@ pub fn now() -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-// These live in `path`, which enforces the resolution discipline; they are
-// re-exported so host facts have one address.
+// Process cwd lives in `path`, which enforces the resolution discipline; it
+// is re-exported so host facts have one address.
 pub use crate::path::process_cwd as cwd;
-pub use crate::path::{home_from_env as home, user_name_from_env as user};
+
+/// `$HOME` (then `$USERPROFILE` on Windows) read from the host process env
+/// alone; empty when nothing is set.
+///
+/// This is a host fact — where the tool itself is installed and who launched
+/// it — never language semantics: a `within [env: …]` overlay must not apply.
+/// Code holding a shell env threads its overlay through [`crate::path::home`]
+/// instead.  The clippy denylist bans this function so every call site is a
+/// written decision, carrying an `#[allow]` whose reason says why the read is
+/// host-level.
+pub fn home() -> String {
+    crate::path::home(&crate::types::EnvVars::new())
+}
+
+/// [`home`], falling back to `.`, so callers joining onto home never build a
+/// path off an empty base.  Same discipline as [`home`].
+pub fn home_or_dot() -> String {
+    let h = crate::path::home(&crate::types::EnvVars::new());
+    if h.is_empty() { ".".into() } else { h }
+}
+
+/// `$USER` (then `$USERNAME` on Windows) from the host process env alone.
+///
+/// `"?"` when nothing is set, matching the prompt/audit placeholder.  Same
+/// discipline as [`home`] — overlay-holding code goes through
+/// [`crate::path::user_name`].
+pub fn user() -> String {
+    crate::path::user_name(&crate::types::EnvVars::new())
+}

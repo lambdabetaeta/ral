@@ -75,9 +75,13 @@ impl Shell {
     /// `PWD` / `OLDPWD` are not seeded here: they are `cwd.current` /
     /// `cwd.previous`, which `apply_env` in
     /// `core/src/runtime/command/process.rs` threads into each child.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "host-env: seeding the baseline $ENV at boot — the host process env is the source the overlay later shadows"
+    )]
     pub fn seed_default_env_vars(&mut self) {
-        let home = crate::path::home_from_env_or_dot();
-        let user = crate::path::user_name_from_env();
+        let home = crate::host::home_or_dot();
+        let user = crate::host::user();
         let path = std::env::var("PATH").unwrap_or_else(|_| {
             if cfg!(windows) {
                 "C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\Wbem".into()
