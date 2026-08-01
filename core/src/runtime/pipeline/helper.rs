@@ -10,7 +10,7 @@
 //! execution context.
 
 use crate::child_eval::{ChildEvalRequest, break_response, run_child_eval, transfer_error};
-use crate::serial::{InternCtx, ScopeTable, SerialValue, build_arcs};
+use crate::serial::{InternCtx, ScopeTable, SerialValue};
 use crate::subprocess_codec::{read_frame, write_frame};
 use crate::types::{Break, Error, Settled, Value};
 use serde::{Deserialize, Serialize};
@@ -43,26 +43,21 @@ pub(crate) const ANCHOR_FLAG: &str = "--ral-pipeline-anchor";
 
 pub(crate) const BUNDLED_TOOL_FLAG: &str = "--ral-bundled-tool";
 
-/// One typed value crossing a process-staged pipeline boundary.
+/// One typed value crossing a process-staged pipeline boundary, held serial
+/// until `child_eval` has a child shell to decode against.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StageValue {
-    scope_table: ScopeTable,
-    value: SerialValue,
+pub(crate) struct StageValue {
+    pub(crate) scope_table: ScopeTable,
+    pub(crate) value: SerialValue,
 }
 
-fn pack_stage_value(value: &Value) -> Result<StageValue, Error> {
+pub(crate) fn pack_stage_value(value: &Value) -> Result<StageValue, Error> {
     let mut ctx = InternCtx::new();
     let value = SerialValue::from_runtime(value, &mut ctx).map_err(|e| transfer_error(&e))?;
     Ok(StageValue {
         scope_table: ctx.scope_table,
         value,
     })
-}
-
-fn unpack_stage_value(value: StageValue) -> Result<Value, Error> {
-    let manifest = crate::sandbox::wire_manifest();
-    let arcs = build_arcs(&value.scope_table, &manifest)?;
-    value.value.into_runtime(&arcs, &manifest)
 }
 
 /// `label` lands in `"{name} is not {label}"`, so it carries its own
@@ -140,20 +135,19 @@ fn serve_from_env<P: HelperTransport>() -> u8 {
 /// EOF is an error, not an empty read: the parent wires a value-in channel
 /// only when a value is coming, so a closed pipe means the producer died
 /// before reaching its consumer.
-fn read_required_stage_value<R: std::io::BufRead>(reader: &mut R) -> Settled<Value> {
+fn read_required_stage_value<R: std::io::BufRead>(reader: &mut R) -> Settled<StageValue> {
     let frame = read_frame::<_, StageValue>(reader).map_err(|e| {
         Break::Error(Error::new(
             format!("pipeline value edge: failed to decode upstream value: {e}"),
             1,
         ))
     })?;
-    let value = frame.ok_or_else(|| {
+    frame.ok_or_else(|| {
         Break::Error(
             Error::new("pipeline value edge closed before a value was sent", 1)
                 .with_hint("did the previous stage fail before returning a value?"),
         )
-    })?;
-    unpack_stage_value(value).map_err(Break::Error)
+    })
 }
 
 /// A value that cannot be serialized — an open handle, say — fails here

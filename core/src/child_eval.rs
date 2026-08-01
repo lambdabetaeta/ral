@@ -10,9 +10,10 @@ use crate::evaluator::absorb_tail;
 use crate::evaluator::call;
 use crate::io::TerminalState;
 use crate::ir::Comp;
-use crate::serial::{InternCtx, ScopeArcs, ScopeTable, SerialEnvSnapshot, SerialValue, build_arcs};
+use crate::runtime::pipeline::helper::StageValue;
+use crate::serial::{InternCtx, ScopeTable, SerialEnvSnapshot, SerialValue, WireDecoder};
 use crate::source::{FileId, SourceDb, Span};
-use crate::subprocess::{WireMobile, reexec_child_shell};
+use crate::subprocess::{WireMobile, bare_child_shell, install_shell_mobile};
 use crate::types::{
     Break, CapturePolicy, Env, Error, Escape, ExecNode, ExecNodeKind, Mobile, Mooring, Settled,
     Shell, Status, Tail, Value,
@@ -137,14 +138,10 @@ impl WireExecNode {
         })
     }
 
-    pub(crate) fn into_runtime(
-        self,
-        arcs: &ScopeArcs,
-        manifest: &crate::types::BuiltinTable,
-    ) -> Result<ExecNode, Error> {
+    pub(crate) fn into_runtime(self, dec: &WireDecoder) -> Result<ExecNode, Error> {
         let mut children = Vec::with_capacity(self.children.len());
         for child in self.children {
-            children.push(child.into_runtime(arcs, manifest)?);
+            children.push(child.into_runtime(dec)?);
         }
         Ok(ExecNode {
             kind: self.kind,
@@ -156,7 +153,7 @@ impl WireExecNode {
             col: self.col,
             stdout: self.stdout,
             stderr: self.stderr,
-            value: self.value.into_runtime(arcs, manifest)?,
+            value: self.value.into_runtime(dec)?,
             children,
             start: self.start,
             end: self.end,
@@ -252,7 +249,7 @@ struct EvalOutcome {
 /// ran — which [`run_child_eval`] folds into a [`break_response`].
 fn eval_request(
     request: ChildEvalRequest,
-    upstream: Option<Value>,
+    upstream: Option<StageValue>,
     force_output: bool,
 ) -> Settled<EvalOutcome> {
     let ChildEvalRequest {
@@ -265,10 +262,9 @@ fn eval_request(
         ..
     } = request;
 
-    // The child shell does not exist yet, so re-link against the same
-    // core-plus-hook manifest `reexec_child_shell` is about to boot with.
-    let arcs = build_arcs(&scope_table, &crate::sandbox::wire_manifest())?;
-    let mut shell = reexec_child_shell(mobile, &arcs)?;
+    let mut shell = bare_child_shell();
+    let dec = WireDecoder::for_shell(&shell, &scope_table)?;
+    install_shell_mobile(mobile, &mut shell, &dec)?;
     shell.local.audit.install_active_policy(audit_policy);
     if let Some(ctx) = script {
         shell.install_remote_context(&ctx.name, ctx.file, &ctx.text);
@@ -291,8 +287,14 @@ fn eval_request(
                 1,
             ))
         })?
-        .into_runtime(&arcs, &shell.session.builtins)?;
+        .into_runtime(&dec)?;
     let mut child = Shell::child_of(&captured, &mut shell);
+    let upstream = upstream
+        .map(|sv| {
+            let upstream_dec = WireDecoder::for_shell(&child, &sv.scope_table)?;
+            sv.value.into_runtime(&upstream_dec)
+        })
+        .transpose()?;
     // A tail call cannot cross the boundary — the parent's callee and args
     // are meaningless in this address space — so settle it here.
     let result = absorb_tail(
@@ -371,7 +373,7 @@ fn break_to_outcome(b: Break) -> WireOutcome {
 /// transport fault.
 pub(crate) fn run_child_eval(
     request: ChildEvalRequest,
-    upstream: Option<Value>,
+    upstream: Option<StageValue>,
     force_output: bool,
 ) -> (ChildEvalResponse, Option<Value>) {
     let wants_value = request.wants_value;
@@ -452,18 +454,20 @@ pub(crate) fn break_response(signal: Break) -> ChildEvalResponse {
 /// Rehydrate a child's response for its parent.  An outer `Err` is a *decode
 /// fault* — the payload would not turn back into runtime values — as distinct
 /// from `signal`, the body's own outcome, which crossed the wire intact.
-pub(crate) fn decode_response(response: ChildEvalResponse) -> Settled<DecodedResponse> {
-    let manifest = crate::sandbox::wire_manifest();
+pub(crate) fn decode_response(
+    response: ChildEvalResponse,
+    shell: &Shell,
+) -> Settled<DecodedResponse> {
     let mut audit_nodes = Vec::with_capacity(response.audit_nodes.len());
     for entry in response.audit_nodes {
-        let arcs = build_arcs(&entry.scope_table, &manifest)?;
-        audit_nodes.push(entry.node.into_runtime(&arcs, &manifest)?);
+        let dec = WireDecoder::for_shell(shell, &entry.scope_table)?;
+        audit_nodes.push(entry.node.into_runtime(&dec)?);
     }
-    let arcs = build_arcs(&response.scope_table, &manifest)?;
+    let dec = WireDecoder::for_shell(shell, &response.scope_table)?;
     let (value, signal) = match response.outcome {
         WireOutcome::Ok(value) => {
             let value = match value {
-                Some(value) => Some(value.into_runtime(&arcs, &manifest)?),
+                Some(value) => Some(value.into_runtime(&dec)?),
                 None => None,
             };
             (value, None)
@@ -537,8 +541,10 @@ mod tests {
         let shell = Shell::default();
         let stage = compile_one("{ |x| return $[$x + 1] }");
         let request = pack_stage(stage, &shell, true);
-        let (response, value) = run_child_eval(request, Some(Value::Int(41)), false);
-        let decoded = decode_response(response).expect("decode");
+        let upstream = crate::runtime::pipeline::helper::pack_stage_value(&Value::Int(41))
+            .expect("pack upstream");
+        let (response, value) = run_child_eval(request, Some(upstream), false);
+        let decoded = decode_response(response, &shell).expect("decode");
         assert_eq!(value, Some(Value::Int(42)));
         assert_eq!(decoded.value, Some(Value::Int(42)));
         assert_eq!(decoded.last_status, 0);
@@ -584,7 +590,7 @@ mod tests {
                 node,
             }],
         };
-        let decoded = decode_response(response).expect("decode");
+        let decoded = decode_response(response, &Shell::default()).expect("decode");
         assert!(
             matches!(decoded.signal, Some(Break::Error(ref e)) if e.message == "helper failed"),
             "expected structured error in signal; got {:?}",
@@ -626,9 +632,9 @@ mod tests {
         let json = serde_json::to_vec(&request).expect("serialise request");
         let request: ChildEvalRequest = serde_json::from_slice(&json).expect("deserialise request");
 
-        let arcs = build_arcs(&request.scope_table, &crate::builtins::core_builtin_table())
-            .expect("arcs");
-        let mut child = reexec_child_shell(request.mobile, &arcs).expect("child shell");
+        let mut child = bare_child_shell();
+        let dec = WireDecoder::for_shell(&child, &request.scope_table).expect("decoder");
+        install_shell_mobile(request.mobile, &mut child, &dec).expect("install mobile");
         assert!(
             child.has_alias("ll"),
             "the hydrated child must see the alias as removable"
@@ -664,9 +670,8 @@ mod tests {
 
         let json = serde_json::to_vec(&node).expect("serialise node");
         let back: WireExecNode = serde_json::from_slice(&json).expect("deserialise node");
-        let manifest = crate::builtins::core_builtin_table();
-        let arcs = build_arcs(&ctx.scope_table, &manifest).expect("arcs");
-        let runtime = back.into_runtime(&arcs, &manifest).expect("into runtime");
+        let dec = WireDecoder::for_shell(&Shell::default(), &ctx.scope_table).expect("decoder");
+        let runtime = back.into_runtime(&dec).expect("into runtime");
         assert_eq!(
             runtime.kind,
             crate::types::ExecNodeKind::CapabilityCheck,
@@ -700,7 +705,7 @@ mod tests {
         let stage = compile_one("twice 21");
         let request = pack_stage(stage, &shell, true);
         let (response, value) = run_child_eval(request, None, false);
-        let _ = decode_response(response).expect("decode");
+        let _ = decode_response(response, &shell).expect("decode");
         assert_eq!(value, Some(Value::Int(42)));
     }
 
@@ -726,5 +731,58 @@ mod tests {
             transfer_error(&SerialValue::from_runtime(&handle, &mut ctx).expect_err("must fail"));
         assert!(err.message.contains("cannot cross the process boundary"));
         assert!(err.message.contains("value"));
+    }
+
+    /// A captured (non-core) native riding home in a stage's report value
+    /// must re-link against the receiving shell's own manifest.
+    #[test]
+    fn captured_native_decodes_against_the_receiving_shells_manifest() {
+        #[allow(
+            clippy::unnecessary_wraps,
+            reason = "registered as a `BuiltinBody::Static` fn pointer; `Settled<Value>` is the shape the builtin table dispatches through"
+        )]
+        fn body_stub(
+            _args: &[Value],
+            _mooring: &Mooring,
+            _shell: &mut Shell,
+        ) -> crate::types::Settled<Value> {
+            Ok(Value::Unit)
+        }
+        fn scheme_stub(_u: &mut crate::typecheck::Unifier) -> crate::typecheck::Scheme {
+            use crate::typecheck::builtins::{mk_scheme, pure, thunk};
+            mk_scheme(&[], &[], &[], thunk(pure(crate::typecheck::Ty::Unit)))
+        }
+        let captured: Arc<[crate::types::BuiltinEntry]> = Arc::from(vec![
+            crate::types::BuiltinEntry::new(
+                std::borrow::Cow::Borrowed("test-captured-native"),
+                crate::typecheck::builtins::BuiltinTypeRule::Scheme(scheme_stub),
+                "test-only captured native.",
+                crate::types::BuiltinBody::Static(body_stub),
+            ),
+        ]);
+        let mut shell = Shell::default();
+        shell.install_captured_builtins(captured);
+
+        let response = ChildEvalResponse {
+            scope_table: ScopeTable::default(),
+            outcome: WireOutcome::Ok(Some(SerialValue::Ext(crate::serial::Closure::Native(
+                crate::serial::SerialNative {
+                    name: "test-captured-native".to_string(),
+                    applied: Vec::new(),
+                },
+            )))),
+            last_status: 0,
+            audit_nodes: Vec::new(),
+        };
+
+        let decoded = decode_response(response, &shell).expect(
+            "a captured native must decode against the receiving shell's own manifest",
+        );
+        match decoded.value {
+            Some(Value::Native { entry, .. }) => {
+                assert_eq!(entry.name.as_ref(), "test-captured-native");
+            }
+            other => panic!("expected a decoded native, got {other:?}"),
+        }
     }
 }

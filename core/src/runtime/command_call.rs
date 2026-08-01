@@ -159,9 +159,8 @@ pub(crate) fn run_base_frame(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    let body = entry.body.clone();
-    run_host_thunk(&entry.name, args, redirects, mooring, shell, move |a, s| {
-        body.call(a, mooring, s)
+    run_host_thunk(&entry.name, args, redirects, mooring, shell, |a, s, frame| {
+        entry.call_body(frame, a, mooring, s)
     })
 }
 
@@ -220,11 +219,11 @@ fn run_host_thunk(
     redirects: &[EvalRedirectV],
     mooring: &Mooring,
     shell: &mut Shell,
-    f: impl FnOnce(&[Value], &mut Shell) -> Settled<Value>,
+    f: impl FnOnce(&[Value], &mut Shell, &audit::Frame) -> Settled<Value>,
 ) -> Raw<Value> {
-    audit::frame_call(name, args, shell, |shell| {
+    audit::frame_call(name, args, shell, |shell, frame| {
         with_redirects(redirects, mooring, shell, |shell| {
-            f(args, shell).map_err(Into::into)
+            f(args, shell, frame).map_err(Into::into)
         })
     })
 }
@@ -241,7 +240,7 @@ fn run_external(
 ) -> Raw<Value> {
     let stdin_guard = command::install_stdin_redirect(redirects, mooring, shell)?;
     let shown = id.shown.clone();
-    let result = audit::frame_call(&shown, args, shell, move |shell| {
+    let result = audit::frame_call(&shown, args, shell, move |shell, _| {
         command::run(&id, args, redirects, mooring, shell)
     });
     stdin_guard.restore(shell);

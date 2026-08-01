@@ -5,6 +5,9 @@
 //! frames (variadic/optional entries) at construction, and backs `help` /
 //! `explain`.  Dispatch never consults it — resolution is env → handlers →
 //! external — and it admits no names: a user handler installs under any.
+//!
+//! [`BuiltinEntry::new`] is the sole constructor: `BuiltinBody` has no
+//! bodiless variant, so no entry is expressible without a live body.
 
 use super::flow::Settled;
 use super::value::Value;
@@ -31,24 +34,6 @@ pub enum BuiltinBody {
     Captured(CapturedBuiltinFn),
 }
 
-impl BuiltinBody {
-    /// Invoke the body.
-    ///
-    /// # Errors
-    /// Propagates a `Break` raised by the body.
-    pub fn call(
-        &self,
-        args: &[Value],
-        mooring: &crate::types::Mooring,
-        shell: &mut crate::types::Shell,
-    ) -> Settled<Value> {
-        match self {
-            Self::Static(f) => f(args, mooring, shell),
-            Self::Captured(f) => f(args, mooring, shell),
-        }
-    }
-}
-
 impl fmt::Debug for BuiltinBody {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -63,16 +48,15 @@ pub struct BuiltinEntry {
     pub name: Cow<'static, str>,
     pub type_rule: BuiltinTypeRule,
     pub doc: &'static str,
-    pub body: BuiltinBody,
+    body: BuiltinBody,
     /// [`Self::fixed_arity`]'s cache: a `Scheme` rule needs a fresh
     /// [`crate::typecheck::Unifier`] to derive its curry depth, so this
     /// spares every application step of a native that re-derivation.
-    pub(crate) arity_cache: OnceLock<Option<usize>>,
+    arity_cache: OnceLock<Option<usize>>,
 }
 
 impl BuiltinEntry {
-    /// Build an entry with an empty arity cache — the one constructor a host
-    /// crate has, `arity_cache` being crate-private.
+    /// Build an entry with an empty arity cache — the one constructor.
     pub const fn new(
         name: Cow<'static, str>,
         type_rule: BuiltinTypeRule,
@@ -93,7 +77,27 @@ impl BuiltinEntry {
     /// ([`BuiltinTypeRule::fixed_arity`]) once and cached: application calls
     /// this every apply step, and a `Scheme` rule's derivation is not free.
     pub fn fixed_arity(&self) -> Option<usize> {
-        *self.arity_cache.get_or_init(|| self.type_rule.fixed_arity())
+        *self
+            .arity_cache
+            .get_or_init(|| self.type_rule.fixed_arity())
+    }
+
+    /// Invoke the body — reachable only with a proof that a
+    /// [`crate::evaluator::audit::frame_call`] is already open around it.
+    ///
+    /// # Errors
+    /// Propagates a `Break` raised by the body.
+    pub(crate) fn call_body(
+        &self,
+        _frame: &crate::evaluator::audit::Frame,
+        args: &[Value],
+        mooring: &crate::types::Mooring,
+        shell: &mut crate::types::Shell,
+    ) -> Settled<Value> {
+        match &self.body {
+            BuiltinBody::Static(f) => f(args, mooring, shell),
+            BuiltinBody::Captured(f) => f(args, mooring, shell),
+        }
     }
 }
 

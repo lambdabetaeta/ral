@@ -26,7 +26,7 @@ fn raw_errors(src: &str) -> Vec<TypeError> {
         &comp,
         ral_core::SessionSchemes::from_schemes(
             common::prelude_schemes(),
-            ral_core::builtins::core_builtin_table(),
+            ral_core::HostSurface::default().builtin_table(),
         ),
     )
     .err()

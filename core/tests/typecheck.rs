@@ -18,7 +18,7 @@ fn raw_errors(src: &str) -> Vec<TypeError> {
         &comp,
         ral_core::SessionSchemes::from_schemes(
             common::prelude_schemes(),
-            ral_core::builtins::core_builtin_table(),
+            ral_core::HostSurface::default().builtin_table(),
         ),
     )
     .err()
@@ -1217,7 +1217,7 @@ fn annotated(src: &str) -> Comp {
         &comp,
         ral_core::SessionSchemes::from_schemes(
             common::prelude_schemes(),
-            ral_core::builtins::core_builtin_table(),
+            ral_core::HostSurface::default().builtin_table(),
         ),
     )
     .unwrap_or_else(|errs| panic!("expected no errors in {src:?}, got: {errs:?}"))
@@ -1544,7 +1544,7 @@ fn typecheck_comp(comp: &Comp) -> Vec<String> {
         comp,
         ral_core::SessionSchemes::from_schemes(
             common::prelude_schemes(),
-            ral_core::builtins::core_builtin_table(),
+            ral_core::HostSurface::default().builtin_table(),
         ),
     )
     .err()

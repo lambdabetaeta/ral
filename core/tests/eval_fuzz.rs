@@ -30,7 +30,7 @@ fn eval_on_path(input: &str, path: &str) -> ral_core::types::Settled<Value> {
         &comp,
         ral_core::SessionSchemes::from_schemes(
             common::prelude_schemes(),
-            builtins::core_builtin_table(),
+            ral_core::HostSurface::default().builtin_table(),
         ),
     ) {
         Ok(annotated) => std::sync::Arc::new(annotated),

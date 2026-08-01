@@ -390,7 +390,7 @@ mod tests {
             .expect("elaborate");
         let schemes = ral_core::SessionSchemes::from_schemes(
             crate::PRELUDE.schemes(),
-            ral_core::builtins::core_builtin_table(),
+            ral_core::HostSurface::default().builtin_table(),
         );
         ral_core::typecheck(&comp, schemes)
             .err()

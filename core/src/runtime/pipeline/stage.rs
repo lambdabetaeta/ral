@@ -66,7 +66,7 @@ impl HelperStageHandle {
                 audit_nodes,
                 signal,
                 ..
-            } = decode_response(report)?;
+            } = decode_response(report, shell)?;
             let audit = AuditFragment::from_nodes(audit_nodes);
             if let Some(sig) = signal {
                 return Ok(StageObservation::from_break(sig).with_audit(audit));

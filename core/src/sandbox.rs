@@ -26,8 +26,9 @@ use std::sync::OnceLock;
 /// Host-supplied constructor a re-exec'd child calls to rebuild its
 /// [`HostSurface`](crate::boot::HostSurface): a mobile cannot carry one across
 /// processes, its entries being function pointers, and `Shell::new` installs
-/// only `CORE_BUILTINS`.  `subprocess::reexec_child_shell` runs the hook first,
-/// then overlays the wire mobile, which preserves the builtin table it finds.
+/// only `CORE_BUILTINS`.  `subprocess::bare_child_shell` runs the hook before
+/// any [`crate::serial::WireDecoder`] is built, so the child's own manifest is
+/// what re-links a captured native's name.
 static CHILD_SHELL_HOOK: OnceLock<fn() -> crate::boot::HostSurface> = OnceLock::new();
 
 /// Register the host's builtin surface for re-exec'd children.  Must be
@@ -39,16 +40,6 @@ pub fn set_child_shell_extension(surface: fn() -> crate::boot::HostSurface) {
 pub(crate) fn run_child_shell_extension(shell: &mut Shell) {
     if let Some(surface) = CHILD_SHELL_HOOK.get() {
         surface().install_into_shell(shell);
-    }
-}
-
-/// The manifest a wire decoder re-links captured natives against when no
-/// live shell is in reach: core plus the hook's host surface, the same sets
-/// a re-exec'd child shell boots with.
-pub(crate) fn wire_manifest() -> crate::types::BuiltinTable {
-    match CHILD_SHELL_HOOK.get() {
-        Some(surface) => surface().builtin_table(),
-        None => crate::builtins::core_builtin_table(),
     }
 }
 

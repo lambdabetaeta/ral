@@ -81,13 +81,12 @@ macro_rules! builtin_registry {
             $(
                 $(#[$meta])*
                 $(
-                    BuiltinEntry {
-                        name: Cow::Borrowed($name),
-                        type_rule: $ty,
-                        doc: $doc,
-                        body: BuiltinBody::Static(__core_thunks::$variant),
-                        arity_cache: OnceLock::new(),
-                    },
+                    BuiltinEntry::new(
+                        Cow::Borrowed($name),
+                        $ty,
+                        $doc,
+                        BuiltinBody::Static(__core_thunks::$variant),
+                    ),
                 )+
             )+
         ];
@@ -367,7 +366,7 @@ builtin_registry! {
 /// This is what a checker with no live shell
 /// ([`SessionSchemes`](crate::typecheck::SessionSchemes)'s `Default`) types
 /// against, absent any host dressing.
-pub fn core_builtin_table() -> crate::types::BuiltinTable {
+pub(crate) fn core_builtin_table() -> crate::types::BuiltinTable {
     let mut table = crate::types::BuiltinTable::default();
     table.install_static(CORE_BUILTINS);
     table
@@ -381,13 +380,12 @@ pub fn core_builtin_table() -> crate::types::BuiltinTable {
 /// `watch` there is an unknown-name diagnostic at compile time rather than a
 /// builtin that resolves and then refuses.  [`SERVICE_BUILTIN`] is the same
 /// shape with the hosts swapped.
-static WATCH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry {
-    name: Cow::Borrowed("watch"),
-    type_rule: BuiltinTypeRule::Scheme(scheme::watch),
-    doc: "watch <label> <thunk>  — spawn a concurrent block whose output streams live to the caller's stdout, line-framed with the given label.",
-    body: BuiltinBody::Static(concurrency::builtin_watch),
-    arity_cache: OnceLock::new(),
-}];
+static WATCH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
+    Cow::Borrowed("watch"),
+    BuiltinTypeRule::Scheme(scheme::watch),
+    "watch <label> <thunk>  — spawn a concurrent block whose output streams live to the caller's stdout, line-framed with the given label.",
+    BuiltinBody::Static(concurrency::builtin_watch),
+)];
 pub static WATCH_BUILTIN: &[BuiltinEntry] = &WATCH_BUILTIN_ARR;
 
 /// `service` — an ordinary buffered spawn registered under the durable lease
@@ -398,13 +396,12 @@ pub static WATCH_BUILTIN: &[BuiltinEntry] = &WATCH_BUILTIN_ARR;
 /// anything to exempt a worker from, so exarch installs it while the ral hosts —
 /// whose spawns already live until cancel or exit — leave it out, making the name
 /// a compile-time unknown there rather than a call-time refusal.
-static SERVICE_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry {
-    name: Cow::Borrowed("service"),
-    type_rule: BuiltinTypeRule::Scheme(scheme::service),
-    doc: "service <desc> <thunk>  — birth a durable worker: like spawn, but never idle-reaped and exempt from the 24 h backstop. <desc> is a required, single-line, non-empty description of what it's for — a durable service's only bound is legibility, so the host tracks it by this description rather than a lease. Dies only by `cancel` through its handle, /clear, or process exit. It does not outlive this process: work that must still be running after this process exits needs `detach`.",
-    body: BuiltinBody::Static(concurrency::builtin_service),
-    arity_cache: OnceLock::new(),
-}];
+static SERVICE_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
+    Cow::Borrowed("service"),
+    BuiltinTypeRule::Scheme(scheme::service),
+    "service <desc> <thunk>  — birth a durable worker: like spawn, but never idle-reaped and exempt from the 24 h backstop. <desc> is a required, single-line, non-empty description of what it's for — a durable service's only bound is legibility, so the host tracks it by this description rather than a lease. Dies only by `cancel` through its handle, /clear, or process exit. It does not outlive this process: work that must still be running after this process exits needs `detach`.",
+    BuiltinBody::Static(concurrency::builtin_service),
+)];
 pub static SERVICE_BUILTIN: &[BuiltinEntry] = &SERVICE_BUILTIN_ARR;
 
 /// `detach` — a birth this session renounces: the process reparents to init.
@@ -421,13 +418,12 @@ pub static SERVICE_BUILTIN: &[BuiltinEntry] = &SERVICE_BUILTIN_ARR;
 /// [`Value::Handle`] because no eliminator here can reach what it births.  The
 /// birth is a double-fork, which Windows has no analogue of.
 #[cfg(unix)]
-static DETACH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry {
-    name: Cow::Borrowed("detach"),
-    type_rule: BuiltinTypeRule::Sig(sig::DETACH),
-    doc: "detach <desc> <cmd> <args...>  — run a program that keeps running after this session is over. Returns a receipt {pid, desc}: data, not a handle — await, poll, race and cancel do not apply, and nothing in ral can stop it once it is born. It is also mute. Its stdin, stdout and stderr are all /dev/null, and its exit status is unrecoverable, since init reaps it and nothing here can ever wait for it: if it dies at startup — port already in use, bad flag, a missing import — nothing observes that, and a returned pid says only that the program was exec'd, never that it is alive or that it worked. The one way to learn whether it is running is to probe whatever it serves: connect to the port, fetch the URL, read the file it writes. Give it its own logging if you want a record of what it did. <pid> is the name it had at birth, not a capability over it — pids are recycled, so that number may later name something else entirely. Only cwd and env cross into it, from the enclosing `within`; bindings and the audit tree do not, and a head that a handler in scope intercepts runs that handler instead, birthing nothing. A grant you birth it inside confines it for the rest of its life: it keeps the fs, net and exec limits in force at that moment, and nothing later can widen them, since nothing later can name it. A grant may also withhold the verb outright with `detach: false`, in which case the call is refused and no process is born. <desc> is required, single-line and non-empty: once this session is gone it is all that says what the pid was for.",
-    body: BuiltinBody::Static(concurrency::builtin_detach),
-    arity_cache: OnceLock::new(),
-}];
+static DETACH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
+    Cow::Borrowed("detach"),
+    BuiltinTypeRule::Sig(sig::DETACH),
+    "detach <desc> <cmd> <args...>  — run a program that keeps running after this session is over. Returns a receipt {pid, desc}: data, not a handle — await, poll, race and cancel do not apply, and nothing in ral can stop it once it is born. It is also mute. Its stdin, stdout and stderr are all /dev/null, and its exit status is unrecoverable, since init reaps it and nothing here can ever wait for it: if it dies at startup — port already in use, bad flag, a missing import — nothing observes that, and a returned pid says only that the program was exec'd, never that it is alive or that it worked. The one way to learn whether it is running is to probe whatever it serves: connect to the port, fetch the URL, read the file it writes. Give it its own logging if you want a record of what it did. <pid> is the name it had at birth, not a capability over it — pids are recycled, so that number may later name something else entirely. Only cwd and env cross into it, from the enclosing `within`; bindings and the audit tree do not, and a head that a handler in scope intercepts runs that handler instead, birthing nothing. A grant you birth it inside confines it for the rest of its life: it keeps the fs, net and exec limits in force at that moment, and nothing later can widen them, since nothing later can name it. A grant may also withhold the verb outright with `detach: false`, in which case the call is refused and no process is born. <desc> is required, single-line and non-empty: once this session is gone it is all that says what the pid was for.",
+    BuiltinBody::Static(concurrency::builtin_detach),
+)];
 #[cfg(unix)]
 pub static DETACH_BUILTIN: &[BuiltinEntry] = &DETACH_BUILTIN_ARR;
 

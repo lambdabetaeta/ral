@@ -5,11 +5,12 @@
 //! fills the slot with [`Closure`] so the re-exec'd child IPC (`child_eval`,
 //! `subprocess`, the pipeline stage helper) can ship a captured environment
 //! as JSON.  Scopes intern by `Arc` identity ([`InternCtx`]) and rebuild
-//! topologically ([`build_arcs`]), so sharing survives the crossing rather
-//! than unfolding into an exponential tree.
+//! topologically ([`WireDecoder::for_shell`]), so sharing survives the
+//! crossing rather than unfolding into an exponential tree.  `into_runtime`,
+//! given a [`WireDecoder`], is the sole wire→runtime conversion.
 
 use crate::ir::Comp;
-use crate::types::{Binding, BuiltinTable, Env, Error, Value};
+use crate::types::{Binding, BuiltinTable, Env, Error, Shell, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -121,15 +122,17 @@ pub struct SerialBinding {
     pub scheme: Option<crate::typecheck::Scheme>,
 }
 
-/// One row per `Arc`-shared scope, in DFS intern order; [`build_arcs`]
-/// rebuilds it into [`ScopeArcs`] on the receiving side.
+/// One row per `Arc`-shared scope, in DFS intern order;
+/// [`WireDecoder::for_shell`] rebuilds it into scope arcs on the receiving
+/// side.
 pub type ScopeTable = Vec<Vec<(String, SerialBinding)>>;
 
 // ── Interning context ─────────────────────────────────────────────────────
 //
 // Scopes intern in DFS order, but their references are unordered: a scope may
 // hold a closure whose captured env points back at an earlier-interned sibling.
-// `build_arcs` therefore sorts by dependency rather than trusting id order.
+// `WireDecoder::for_shell` therefore sorts by dependency rather than trusting
+// id order.
 
 pub struct InternCtx {
     pub scope_table: ScopeTable,
@@ -213,73 +216,87 @@ fn value_carries_handle(value: &Value) -> bool {
 }
 
 /// One reconstructed `Arc<HashMap>` per scope table row (`None` until built).
-pub type ScopeArcs = Vec<Option<Arc<HashMap<String, Binding>>>>;
+type ScopeArcs = Vec<Option<Arc<HashMap<String, Binding>>>>;
 
-/// Rebuild one `Arc<HashMap>` per scope table row, each once its dependencies
-/// are built.
-///
-/// `manifest` is what a captured [`Value::Native`](crate::types::Value::Native)
+/// Decode capability for one wire envelope: the rebuilt scope arcs plus the
+/// [`BuiltinTable`] a captured [`Value::Native`](crate::types::Value::Native)
 /// re-links its name against.
 ///
-/// # Errors
-/// A scope reference out of range or unresolved, a binding that fails to
-/// decode, or a cycle — a pass in which no scope makes progress.
-pub fn build_arcs(scope_table: &ScopeTable, manifest: &BuiltinTable) -> Result<ScopeArcs, Error> {
-    let n = scope_table.len();
-    let mut arcs: ScopeArcs = vec![None; n];
-    let deps: Vec<HashSet<u32>> = scope_table
-        .iter()
-        .map(|entries| {
-            let mut set = HashSet::new();
-            for (_, b) in entries {
-                collect_scope_deps(&b.value, &mut set);
-            }
-            set
-        })
-        .collect();
-    for set in &deps {
-        for &d in set {
-            if d as usize >= n {
-                return Err(Error::new(
-                    format!("serial: scope ref {d} out of range or unresolved"),
-                    1,
-                ));
+/// Constructible only from the [`Shell`] that will run the decoded values,
+/// so no call site can pick a manifest of its own.
+#[derive(Debug)]
+pub struct WireDecoder {
+    arcs: ScopeArcs,
+    manifest: BuiltinTable,
+}
+
+impl WireDecoder {
+    /// Rebuild one `Arc<HashMap>` per row of `scope_table`, each once its
+    /// dependencies are built, resolving natives against `shell`'s manifest.
+    ///
+    /// # Errors
+    /// A scope reference out of range or unresolved, a binding that fails to
+    /// decode, or a cycle — a pass in which no scope makes progress.
+    pub(crate) fn for_shell(shell: &Shell, scope_table: &ScopeTable) -> Result<Self, Error> {
+        let n = scope_table.len();
+        let mut dec = Self {
+            arcs: vec![None; n],
+            manifest: shell.session.builtins.clone(),
+        };
+        let deps: Vec<HashSet<u32>> = scope_table
+            .iter()
+            .map(|entries| {
+                let mut set = HashSet::new();
+                for (_, b) in entries {
+                    collect_scope_deps(&b.value, &mut set);
+                }
+                set
+            })
+            .collect();
+        for set in &deps {
+            for &d in set {
+                if d as usize >= n {
+                    return Err(Error::new(
+                        format!("serial: scope ref {d} out of range or unresolved"),
+                        1,
+                    ));
+                }
             }
         }
+        let mut built = 0usize;
+        while built < n {
+            let before = built;
+            for id in 0..n {
+                if dec.arcs[id].is_some() {
+                    continue;
+                }
+                if !deps[id].iter().all(|&d| dec.arcs[d as usize].is_some()) {
+                    continue;
+                }
+                let mut entries = HashMap::new();
+                for (k, b) in &scope_table[id] {
+                    entries.insert(
+                        k.clone(),
+                        Binding {
+                            value: b.value.clone().into_runtime(&dec)?,
+                            scheme: b.scheme.clone(),
+                        },
+                    );
+                }
+                dec.arcs[id] = Some(Arc::new(entries));
+                built += 1;
+            }
+            if built == before {
+                return Err(Error::new("serial: cyclic scope dependencies", 1));
+            }
+        }
+        Ok(dec)
     }
-    let mut built = 0usize;
-    while built < n {
-        let before = built;
-        for id in 0..n {
-            if arcs[id].is_some() {
-                continue;
-            }
-            if !deps[id].iter().all(|&d| arcs[d as usize].is_some()) {
-                continue;
-            }
-            let mut entries = HashMap::new();
-            for (k, b) in &scope_table[id] {
-                entries.insert(
-                    k.clone(),
-                    Binding {
-                        value: b.value.clone().into_runtime(&arcs, manifest)?,
-                        scheme: b.scheme.clone(),
-                    },
-                );
-            }
-            arcs[id] = Some(Arc::new(entries));
-            built += 1;
-        }
-        if built == before {
-            return Err(Error::new("serial: cyclic scope dependencies", 1));
-        }
-    }
-    Ok(arcs)
 }
 
 /// The match is exhaustive on purpose: a new [`SerialValue`] variant must
 /// declare whether it carries scope references, or its dependency edges go
-/// silently missing from [`build_arcs`].
+/// silently missing from [`WireDecoder::for_shell`].
 fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
     match value {
         SerialValue::Ext(Closure::Lambda(l)) => {
@@ -389,14 +406,13 @@ impl FOValue<Closure> {
     }
 
     /// Decode back into a runtime [`Value`], resolving captured environments
-    /// against `arcs` and a captured [`Value::Native`](crate::types::Value::Native)'s
-    /// name against `manifest`.
+    /// and native names against `dec`.
     ///
     /// # Errors
     /// A nested value fails to decode, a captured environment names a scope id
-    /// out of range or unresolved in `arcs`, or a native's name is unknown to
-    /// `manifest`.
-    pub fn into_runtime(self, arcs: &ScopeArcs, manifest: &BuiltinTable) -> Result<Value, Error> {
+    /// out of range or unresolved, or a native's name is unknown to the
+    /// manifest.
+    pub fn into_runtime(self, dec: &WireDecoder) -> Result<Value, Error> {
         Ok(match self {
             Self::Unit => Value::Unit,
             Self::Bool { value } => Value::Bool(value),
@@ -407,33 +423,33 @@ impl FOValue<Closure> {
             Self::List { items } => Value::list(
                 items
                     .into_iter()
-                    .map(|v| v.into_runtime(arcs, manifest))
+                    .map(|v| v.into_runtime(dec))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             Self::Map { entries } => Value::Map(
                 entries
                     .into_iter()
-                    .map(|(k, v)| Ok((k, v.into_runtime(arcs, manifest)?)))
+                    .map(|(k, v)| Ok((k, v.into_runtime(dec)?)))
                     .collect::<Result<_, Error>>()?,
             ),
             Self::Variant { label, payload } => Value::Variant {
                 label,
                 payload: match payload {
-                    Some(p) => Some(Box::new((*p).into_runtime(arcs, manifest)?)),
+                    Some(p) => Some(Box::new((*p).into_runtime(dec)?)),
                     None => None,
                 },
             },
             Self::Ext(Closure::Lambda(lam)) => Value::Lambda {
                 param: lam.param,
                 body: lam.body,
-                captured: Arc::new(lam.captured.into_runtime(arcs, manifest)?),
+                captured: Arc::new(lam.captured.into_runtime(dec)?),
             },
             Self::Ext(Closure::Block(thunk)) => Value::Block {
                 body: thunk.body,
-                captured: Arc::new(thunk.captured.into_runtime(arcs, manifest)?),
+                captured: Arc::new(thunk.captured.into_runtime(dec)?),
             },
             Self::Ext(Closure::Native(n)) => {
-                let entry = manifest.get(&n.name).ok_or_else(|| {
+                let entry = dec.manifest.get(&n.name).ok_or_else(|| {
                     Error::new(
                         format!("serial: unknown native '{}' in receiving manifest", n.name),
                         1,
@@ -444,7 +460,7 @@ impl FOValue<Closure> {
                     applied: n
                         .applied
                         .into_iter()
-                        .map(|v| v.into_runtime(arcs, manifest))
+                        .map(|v| v.into_runtime(dec))
                         .collect::<Result<_, _>>()?,
                 }
             }
@@ -533,18 +549,19 @@ impl SerialEnvSnapshot {
         Ok(Self { scopes })
     }
 
-    /// Rebuild an [`Env`] from this snapshot's scope ids against `arcs`;
-    /// `manifest` seeds its base native scope ([`BuiltinTable::natives_arc`]),
-    /// since natives never ride the wire.
+    /// Rebuild an [`Env`] from this snapshot's scope ids; `dec`'s manifest
+    /// seeds its base native scope ([`BuiltinTable::natives_arc`]), since
+    /// natives never ride the wire.
     ///
     /// # Errors
-    /// A recorded scope id is out of range or unresolved in `arcs`.
-    pub fn into_runtime(self, arcs: &ScopeArcs, manifest: &BuiltinTable) -> Result<Env, Error> {
+    /// A recorded scope id is out of range or unresolved.
+    pub fn into_runtime(self, dec: &WireDecoder) -> Result<Env, Error> {
         let scopes = self
             .scopes
             .into_iter()
             .map(|id| {
-                arcs.get(id as usize)
+                dec.arcs
+                    .get(id as usize)
                     .and_then(std::clone::Clone::clone)
                     .ok_or_else(|| {
                         Error::new(
@@ -554,7 +571,7 @@ impl SerialEnvSnapshot {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Env::from_scope_iter(scopes, manifest.natives_arc()))
+        Ok(Env::from_scope_iter(scopes, dec.manifest.natives_arc()))
     }
 }
 
@@ -677,7 +694,7 @@ mod tests {
                 scheme: None,
             },
         )]];
-        let err = build_arcs(&table, &crate::builtins::core_builtin_table())
+        let err = WireDecoder::for_shell(&Shell::default(), &table)
             .expect_err("out-of-range ref must fail the build");
         assert_eq!(
             err.message,
@@ -712,8 +729,7 @@ mod tests {
         ]);
         let mut ctx = InternCtx::new();
         let ipc = SerialValue::from_runtime(&value, &mut ctx).expect("to serial");
-        let manifest = crate::builtins::core_builtin_table();
-        let arcs = build_arcs(&ctx.scope_table, &manifest).expect("build arcs");
-        assert_eq!(ipc.into_runtime(&arcs, &manifest).expect("from serial"), value);
+        let dec = WireDecoder::for_shell(&Shell::default(), &ctx.scope_table).expect("decoder");
+        assert_eq!(ipc.into_runtime(&dec).expect("from serial"), value);
     }
 }

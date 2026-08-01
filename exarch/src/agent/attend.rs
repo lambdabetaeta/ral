@@ -699,8 +699,7 @@ mod tests {
             .lookup_builtin("cancel")
             .expect("core registers cancel");
         cancel_fn
-            .body
-            .call(
+            .run(
                 &[Value::Handle(entry.handle)],
                 &ral_core::types::Mooring::adrift(),
                 &mut session.seat.shell_mut().shell,

@@ -8,11 +8,11 @@
 //! `child_eval`'s request envelope instead, being an instruction to the child
 //! rather than a property of its shell.
 
-use crate::serial::{InternCtx, ScopeArcs, SerialEnvSnapshot, SerialValue};
+use crate::serial::{InternCtx, SerialEnvSnapshot, SerialValue, WireDecoder};
 use crate::typecheck;
 use crate::types::{
-    BuiltinTable, Context, ControlState, Error, GrantStack, HandlerEntry, HandlerFrame,
-    HandlerStack, Mobile, Shell,
+    Context, ControlState, Error, GrantStack, HandlerEntry, HandlerFrame, HandlerStack, Mobile,
+    Shell,
 };
 use serde::{Deserialize, Serialize};
 
@@ -52,12 +52,12 @@ impl WireHandlerFrame {
         })
     }
 
-    fn into_runtime(self, arcs: &ScopeArcs, manifest: &BuiltinTable) -> Result<HandlerFrame, Error> {
+    fn into_runtime(self, dec: &WireDecoder) -> Result<HandlerFrame, Error> {
         let entries = self
             .entries
             .into_iter()
             .map(|(name, value, scheme)| {
-                value.into_runtime(arcs, manifest).map(|v| {
+                value.into_runtime(dec).map(|v| {
                     let mut entry = HandlerEntry::ral_per_name(name, v);
                     entry.scheme = scheme;
                     entry
@@ -67,10 +67,7 @@ impl WireHandlerFrame {
         // Sentinel: `HandlerStack::from(Vec<HandlerFrame>)` mints the handle.
         Ok(HandlerFrame {
             entries,
-            catch_all: self
-                .catch_all
-                .map(|v| v.into_runtime(arcs, manifest))
-                .transpose()?,
+            catch_all: self.catch_all.map(|v| v.into_runtime(dec)).transpose()?,
             handle: crate::types::FrameHandle(u64::MAX),
             removable_by_unalias: self.removable_by_unalias,
         })
@@ -146,16 +143,11 @@ impl WireMobile {
         })
     }
 
-    /// `arcs` is what `build_arcs` produces from the envelope's scope table.
-    pub(crate) fn into_runtime(
-        self,
-        arcs: &ScopeArcs,
-        manifest: &BuiltinTable,
-    ) -> Result<Mobile, Error> {
+    pub(crate) fn into_runtime(self, dec: &WireDecoder) -> Result<Mobile, Error> {
         Ok(Mobile {
-            scope: self.scope.into_runtime(arcs, manifest)?,
+            scope: self.scope.into_runtime(dec)?,
             control: self.control.into_runtime(),
-            context: self.context.into_runtime(arcs, manifest)?,
+            context: self.context.into_runtime(dec)?,
         })
     }
 }
@@ -178,15 +170,11 @@ impl WireContext {
         })
     }
 
-    pub(crate) fn into_runtime(
-        self,
-        arcs: &ScopeArcs,
-        manifest: &BuiltinTable,
-    ) -> Result<Context, Error> {
+    pub(crate) fn into_runtime(self, dec: &WireDecoder) -> Result<Context, Error> {
         let handlers: Vec<HandlerFrame> = self
             .handlers
             .into_iter()
-            .map(|frame| frame.into_runtime(arcs, manifest))
+            .map(|frame| frame.into_runtime(dec))
             .collect::<Result<_, _>>()?;
         Ok(Context::from_wire(
             self.env_overrides,
@@ -210,9 +198,9 @@ impl WireContext {
 pub(crate) fn install_shell_mobile(
     state: WireMobile,
     shell: &mut Shell,
-    arcs: &ScopeArcs,
+    dec: &WireDecoder,
 ) -> Result<(), Error> {
-    let mut mobile = state.into_runtime(arcs, &shell.session.builtins)?;
+    let mut mobile = state.into_runtime(dec)?;
     let wire_frames: Vec<HandlerFrame> = std::mem::take(&mut mobile.context.handlers).into();
     mobile.context.handlers = std::mem::take(&mut shell.mobile.context.handlers);
     for frame in wire_frames {
@@ -222,16 +210,11 @@ pub(crate) fn install_shell_mobile(
     Ok(())
 }
 
-/// Build the shell for a re-exec'd child — the sole such site, `child_eval`'s
-/// stage runner being the one caller.
-///
-/// `Shell::new` carries only `CORE_BUILTINS`, so the host's surface is
-/// reinstalled through the child-shell hook first; [`install_shell_mobile`]
-/// preserves the receiver's builtin table, so those entries survive the
-/// overlay.
-pub(crate) fn reexec_child_shell(state: WireMobile, arcs: &ScopeArcs) -> Result<Shell, Error> {
+/// A fresh shell wearing the host's builtin surface: `Shell::new` carries
+/// only `CORE_BUILTINS`, so the child-shell hook reinstalls the rest before
+/// any [`WireDecoder`] is built against it.
+pub(crate) fn bare_child_shell() -> Shell {
     let mut shell = Shell::new(crate::io::TerminalState::default());
     crate::sandbox::run_child_shell_extension(&mut shell);
-    install_shell_mobile(state, &mut shell, arcs)?;
-    Ok(shell)
+    shell
 }

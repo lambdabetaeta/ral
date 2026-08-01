@@ -28,7 +28,8 @@ pub(crate) use trampoline::apply;
 
 /// Land an escaping [`TailCall`] through the trampoline; pass `Break`
 /// verbatim.  The one `Raw<Value>` → `Settled<Value>` seam: the verbs here,
-/// thread-worker roots, `child_eval`'s cross-process stage, redirect bodies.
+/// thread-worker roots, `child_eval`'s cross-process stage, redirect bodies,
+/// [`BuiltinEntry::run`](crate::types::BuiltinEntry::run).
 pub(crate) fn absorb_tail(
     raw: crate::types::Raw<Value>,
     mooring: &Mooring,

@@ -149,7 +149,7 @@ fn every_scheme_reducer_inhabits_its_return_type() {
         };
 
         let mut shell = fresh_shell();
-        match entry.body.call(&args, &Mooring::adrift(), &mut shell) {
+        match entry.run(&args, &Mooring::adrift(), &mut shell) {
             Ok(result) => {
                 assert!(
                     inhabits(&result, &ret_ty),

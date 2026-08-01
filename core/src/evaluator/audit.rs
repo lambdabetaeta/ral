@@ -10,9 +10,14 @@
 
 use crate::source::Span;
 use crate::types::{
-    AuditIo, AuditTime, BodyResult, Break, CallSite, CapturePolicy, Control, Escape, ExecNode, Map,
-    Raw, STDERR_CAP_BYTES, Settled, Shell, Value, epoch_us,
+    AuditIo, AuditTime, BodyResult, Break, BuiltinEntry, CallSite, CapturePolicy, Control, Escape,
+    ExecNode, Map, Mooring, Raw, STDERR_CAP_BYTES, Settled, Shell, Value, epoch_us,
 };
+
+/// Proof that a native body is running inside [`frame_call`]'s dynamic
+/// extent — mintable only in this module, so [`BuiltinEntry::call_body`]
+/// cannot be reached unframed.
+pub(crate) struct Frame(());
 
 /// Where a command was called from and when it began — the two halves of a
 /// node's stamp, paired so the dispatch site carries one local.
@@ -147,11 +152,13 @@ fn finish_command(
 /// stdout and stderr through the capture, finalize the node.
 pub(crate) fn frame_call<F>(cmd: &str, args: &[Value], shell: &mut Shell, body: F) -> Raw<Value>
 where
-    F: FnOnce(&mut Shell) -> Raw<Value>,
+    F: FnOnce(&mut Shell, &Frame) -> Raw<Value>,
 {
     let start = start(shell);
-    let (result, stdout, stderr) = super::with_audit_capture(shell, body)
-        .map_err(|e| Control::Break(Break::Error(shell.err(format!("audit capture: {e}"), 1))))?;
+    let (result, stdout, stderr) = super::with_audit_capture(shell, |shell| {
+        body(shell, &Frame(()))
+    })
+    .map_err(|e| Control::Break(Break::Error(shell.err(format!("audit capture: {e}"), 1))))?;
     if shell.local.audit.active() {
         finish_command(
             shell,
@@ -164,6 +171,32 @@ where
         );
     }
     result
+}
+
+/// Run a native body inside a fresh audit frame — the only way to reach
+/// [`BuiltinEntry::call_body`].
+pub(crate) fn run_native(
+    entry: &BuiltinEntry,
+    args: &[Value],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Raw<Value> {
+    frame_call(&entry.name, args, shell, |shell, frame| {
+        entry
+            .call_body(frame, args, mooring, shell)
+            .map_err(Control::from)
+    })
+}
+
+impl BuiltinEntry {
+    /// Framed public surface for hosts and tests: the body runs under its
+    /// own audit frame.
+    ///
+    /// # Errors
+    /// Propagates a `Break` raised by the body.
+    pub fn run(&self, args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+        super::absorb_tail(run_native(self, args, mooring, shell), mooring, shell)
+    }
 }
 
 /// A tail call does not survive a command boundary, so it records as `Unit`.

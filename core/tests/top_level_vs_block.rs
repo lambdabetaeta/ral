@@ -703,3 +703,45 @@ fn function_body_records_into_enclosing_audit() {
          audit tree; children = {children:?}"
     );
 }
+
+/// The lone command child of an `audit { … }` tree, as `(cmd, args, status)`.
+fn only_command_child(tree: &Value) -> (String, Vec<Value>, Value) {
+    let children = match tree {
+        Value::Map(m) => match m.get("children") {
+            Some(Value::List(ch)) => ch,
+            other => panic!("audit tree must have a list `children` field; got {other:?}"),
+        },
+        other => panic!("audit {{ … }} must return a Map; got {other:?}"),
+    };
+    assert_eq!(children.len(), 1, "expected exactly one child; got {children:?}");
+    match &children[0] {
+        Value::Map(m) => (
+            match m.get("cmd") {
+                Some(Value::String(s)) => s.clone(),
+                other => panic!("child node must have a String `cmd`; got {other:?}"),
+            },
+            match m.get("args") {
+                Some(Value::List(a)) => a.iter().cloned().collect(),
+                other => panic!("child node must have a List `args`; got {other:?}"),
+            },
+            m.get("status").cloned().expect("child node must have `status`"),
+        ),
+        other => panic!("audit child must be a Map; got {other:?}"),
+    }
+}
+
+/// Forcing an arity-0 native (`!$cwd`) records exactly the same command
+/// node — same name, args, and status — as applying that native as a
+/// command head (`cwd`).  The `!`-force arm must run under its own audit
+/// frame just like the command-dispatch path, not silently unaudited.
+#[test]
+fn forcing_an_arity_zero_native_records_like_applying_it() {
+    let mut shell = fresh_shell();
+    let forced = top_level(&mut shell, "audit { !$cwd }").expect("forced native under audit");
+    let applied = top_level(&mut shell, "audit { cwd }").expect("applied native under audit");
+    assert_eq!(
+        only_command_child(&forced),
+        only_command_child(&applied),
+        "`!$cwd` must record the same command node as `cwd`"
+    );
+}

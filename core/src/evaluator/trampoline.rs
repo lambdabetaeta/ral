@@ -134,12 +134,7 @@ fn apply_inner(
                         applied: collected,
                     });
                 }
-                let result = super::audit::frame_call(&entry.name, &collected, shell, |shell| {
-                    entry
-                        .body
-                        .call(&collected, mooring, shell)
-                        .map_err(Control::from)
-                });
+                let result = super::audit::run_native(&entry, &collected, mooring, shell);
                 if let Some(done) = step(result, &mut callee, &mut args, mooring) {
                     return done;
                 }
