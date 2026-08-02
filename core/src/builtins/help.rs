@@ -1,6 +1,6 @@
-//! `help` prints the command index; `explain <name>` resolves one builtin,
-//! prelude function, or host-installed library entry to its doc, its type,
-//! and where the shell would find it.
+//! `help` prints the command index; `explain <name>` resolves one user
+//! definition, builtin, prelude function, or host-installed library entry to
+//! its doc, its type, and where the shell would find it.
 
 use crate::ansi::{self, BOLD, CYAN, DIM, RESET};
 use crate::typecheck::{builtin_type_hint, fmt_scheme};
@@ -16,6 +16,19 @@ fn prelude_type_hint(name: &str, shell: &Shell) -> Option<String> {
         .mobile
         .scope
         .get_prelude_binding(name)?
+        .scheme
+        .as_ref()?;
+    Some(fmt_scheme(scheme))
+}
+
+/// A checked top-level `let` installs its generalised scheme beside the
+/// value, so a user definition's most general type reads straight off the
+/// local binding.  `None` for a binding from an unchecked path.
+fn local_type_hint(name: &str, shell: &Shell) -> Option<String> {
+    let scheme = shell
+        .mobile
+        .scope
+        .get_local_binding(name)?
         .scheme
         .as_ref()?;
     Some(fmt_scheme(scheme))
@@ -99,12 +112,15 @@ fn ui_colors() -> (&'static str, &'static str, &'static str, &'static str) {
 
 fn fmt_entry(
     name: &str,
-    doc: &str,
+    doc: Option<&str>,
     type_hint: &str,
     source: Option<&str>,
     (cyan, dim, reset): (&str, &str, &str),
 ) -> String {
-    let mut s = format!("  {cyan}{name}{reset}{dim}:{reset} {doc}\n");
+    let mut s = match doc {
+        Some(doc) => format!("  {cyan}{name}{reset}{dim}:{reset} {doc}\n"),
+        None => format!("  {cyan}{name}{reset}\n"),
+    };
     let _ = writeln!(s, "  {dim}{type_hint}{reset}");
     if let Some(src) = source {
         let _ = writeln!(s, "  {dim}{src}{reset}");
@@ -170,13 +186,17 @@ pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Value {
     let source = which_line(&name, shell);
     let type_str = type_for(&name, &shell.session.builtins);
 
-    let out = if let Some(entry) = shell.lookup_builtin(&name) {
-        fmt_entry(&name, entry.doc, &type_str, source.as_deref(), colors)
+    // A local binding shadows every other resolution at runtime, so it
+    // answers first here too.
+    let out = if let Some(lt) = local_type_hint(&name, shell) {
+        fmt_entry(&name, None, &lt, source.as_deref(), colors)
+    } else if let Some(entry) = shell.lookup_builtin(&name) {
+        fmt_entry(&name, Some(entry.doc), &type_str, source.as_deref(), colors)
     } else if let Some(doc) = prelude_doc(&name) {
         let pt = prelude_type_hint(&name, shell).unwrap_or(type_str);
-        fmt_entry(&name, &doc, &pt, source.as_deref(), colors)
+        fmt_entry(&name, Some(&doc), &pt, source.as_deref(), colors)
     } else if let Some(doc) = shell.session.library_docs.get(&name).cloned() {
-        fmt_entry(&name, &doc, &type_str, source.as_deref(), colors)
+        fmt_entry(&name, Some(&doc), &type_str, source.as_deref(), colors)
     } else if let Some(src) = source {
         format!("explain: {src}\n")
     } else {

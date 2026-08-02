@@ -79,15 +79,20 @@ impl Env {
 
     /// Look up `name` in the local scopes, skipping the prelude.
     pub fn get_local(&self, name: &str) -> Option<&Value> {
+        self.get_local_binding(name).map(|b| &b.value)
+    }
+
+    /// The whole [`Binding`] for `name` in the local scopes, skipping the
+    /// prelude; a checked top-level `let` carries its generalised scheme here.
+    pub fn get_local_binding(&self, name: &str) -> Option<&Binding> {
         if self.scopes.len() < 2 {
             return None;
         }
-        for scope in self.scopes.iter().skip(1).rev() {
-            if let Some(b) = scope.get(name) {
-                return Some(&b.value);
-            }
-        }
-        None
+        self.scopes
+            .iter()
+            .skip(1)
+            .rev()
+            .find_map(|scope| scope.get(name))
     }
 
     /// True with no block/lambda/`if`/`letrec` frame above the user scope: a

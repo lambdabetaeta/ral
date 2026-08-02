@@ -263,7 +263,10 @@ fn emit_capability_audit(
 /// divergence the retired hand-rolled skill matcher had, in both directions.
 #[cfg(unix)]
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs scaffolding: tempdir trees and symlinks for containment pins"
+)]
 mod tests {
     use super::FsOp;
     use crate::path::{NormalizedPrefix, Resolver};
