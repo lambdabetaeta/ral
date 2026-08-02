@@ -38,6 +38,8 @@ pub enum Reason {
     AliasParam,
     BuiltinBlockArg,
     BuiltinTypedArg,
+    /// A raising form's argument against the error-record shape it demands.
+    ErrorRecordArg,
     /// A stage's produced value against the next stage's parameter; the flag
     /// marks a lazy Step stream, which must be consumed explicitly.
     PipedValue {
@@ -159,6 +161,11 @@ pub enum TypeErrorKind {
     },
     /// A nonzero status is required, so `fail` cannot masquerade as a clean exit.
     FailStatusZero,
+    /// An error record's `message` is neither `String` nor `Bytes`: the one
+    /// part of the shape a row cannot state, so the checker states it.
+    ErrorRecordMessage {
+        actual: Ty,
+    },
     /// The elaborated IR for an `alias name { body }` statement has the wrong shape.
     MalformedAlias {
         detail: &'static str,
@@ -202,6 +209,7 @@ impl TypeErrorKind {
             Self::MalformedAlias { .. } => "T0052",
             Self::MalformedUnalias { .. } => "T0053",
             Self::DecoderTakesNoArgument { .. } => "T0054",
+            Self::ErrorRecordMessage { .. } => "T0055",
             Self::IndexIntoThunk => "T0060",
             Self::FieldOnNonRecord { .. } => "T0061",
             Self::DynamicIndexOnScalar { .. } => "T0062",

@@ -1257,6 +1257,38 @@ fn builtin_command_signatures_are_explicit() {
     has_error("fail [status: 0]", "fail requires a nonzero status");
 }
 
+/// `fail` takes an error record, so a bare status — or a record without one —
+/// is a static error rather than a runtime one.  The tail is open: a caught
+/// error re-raises with the fields `try` gave it, and extra fields are the
+/// point of the shape, not a violation of it.
+#[test]
+fn fail_demands_an_error_record() {
+    ok("fail [status: 1]");
+    ok(r#"fail [status: 2, message: "boom"]"#);
+    ok(r#"fail [status: 2, message: "boom", cmd: "deploy", attempt: 3]"#);
+    ok("try { fail [status: 1] } { |e| fail $e }");
+
+    has_error("fail 1", "couldn't match");
+    has_error(r#"fail "boom""#, "couldn't match");
+    has_error(r#"fail [message: "boom"]"#, "no field named 'status'");
+    has_error(r#"fail [status: "one"]"#, "couldn't match");
+}
+
+/// The `message` field is `String` or `Bytes` — a union the row cannot spell,
+/// so the checker judges it once the record's shape is known.  An unresolved
+/// field is left alone: both spellings run, and picking one would be a guess.
+#[test]
+fn fail_message_must_be_text() {
+    ok("let m = !{to-bytes [104, 105]}; fail [status: 1, message: $m]");
+    ok("let f = { |m| fail [status: 1, message: $m] }; return unit");
+
+    has_error("fail [status: 1, message: 42]", "must be a String or Bytes");
+    has_error(
+        "let e = try { fail [status: 1] } { |e| return $e }\nfail [...$e, message: 42]",
+        "must be a String or Bytes",
+    );
+}
+
 #[test]
 fn type_probe_threads_argument_type() {
     // `_type` is `α → F α`: the argument's type flows through to the

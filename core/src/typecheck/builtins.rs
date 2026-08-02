@@ -98,6 +98,10 @@ pub enum ArgTemplate {
     Any,
     BlockOrLambda,
     OneOf(&'static [Self]),
+    /// An error record: `status` and an open tail, the shape `try` hands its
+    /// handler.  Not a record former — one named type, whose optional
+    /// `message` no row can spell.  See [`error_record_arg`].
+    ErrorRecord,
 }
 
 /// The whole type vocabulary a command signature may name.
@@ -293,6 +297,7 @@ pub mod sig {
 
     const TWO_INTS: &[ArgTemplate] = &[INT, INT];
     const ONE_ANY: &[ArgTemplate] = &[ANY];
+    const ONE_ERROR_RECORD: &[ArgTemplate] = &[ArgTemplate::ErrorRecord];
     const ONE_STR: &[ArgTemplate] = &[STR];
     const ONE_FLOAT: &[ArgTemplate] = &[FLOAT];
     const FLOAT_INT: &[ArgTemplate] = &[FLOAT, INT];
@@ -415,8 +420,8 @@ pub mod sig {
     );
 
     /// `detach`: any argv, and a `{pid, desc}` receipt the checker leaves as a
-    /// fresh variable — the template vocabulary has no record former, and one
-    /// builtin does not earn it.
+    /// fresh variable — a result template names a [`TyTemplate`], which has no
+    /// record former, and one builtin does not earn it.
     ///
     /// Command-only, because a partially applied value must not promise a
     /// process that outlives the session.
@@ -443,8 +448,11 @@ pub mod sig {
     pub const STRING_TO_UNIT: BuiltinSig =
         command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Unit), None);
 
+    /// `fail`: an error record, open at the tail so a caught error re-raises
+    /// with the fields `try` gave it.  The nonzero-status rule is a literal
+    /// check the shape cannot state, hence the diagnostic.
     pub const FAIL: BuiltinSig = BuiltinSig {
-        args: ArgSig::Exact(ONE_ANY),
+        args: ArgSig::Exact(ONE_ERROR_RECORD),
         result: CompTemplate::Never,
         value: None,
         diagnostic: BuiltinDiagnostic::FailStatusNonzero,
@@ -465,6 +473,22 @@ pub fn closed_record(fields: &[(&str, Ty)]) -> Ty {
         row = Row::Extend(l.to_string(), Box::new(t.clone()), Box::new(row));
     }
     Ty::Record(row)
+}
+
+/// The error record a raising form demands of its argument: `status`, over a
+/// fresh tail.  Open, because re-raising a caught error carries `cmd`, `line`,
+/// `col` and whatever else the record picked up along the way; the tail is
+/// what makes [`try_error_record`] an instance of this shape.
+///
+/// `message` is absent by design: it is optional, and its type is `String` or
+/// `Bytes` — a union no row can spell.  [`Inferencer::check_error_message`]
+/// judges it once the row has been unified.
+pub(super) fn error_record_arg(u: &mut Unifier) -> Ty {
+    Ty::Record(Row::Extend(
+        "status".into(),
+        Box::new(Ty::Int),
+        Box::new(Row::Var(u.fresh_row_var())),
+    ))
 }
 
 /// The error record `try` hands its handler, mirrored at runtime by
@@ -1036,6 +1060,7 @@ fn arg_template_ty(template: ArgTemplate, u: &mut Unifier) -> Ty {
         ArgTemplate::Ty(t) => ty_of_template(t, u),
         ArgTemplate::Any | ArgTemplate::OneOf(_) => u.fresh_ty(),
         ArgTemplate::BlockOrLambda => Ty::Thunk(Box::new(u.fresh_comp_ty())),
+        ArgTemplate::ErrorRecord => error_record_arg(u),
     }
 }
 
@@ -1187,6 +1212,38 @@ impl Inferencer<'_> {
                     }
                 }
             }
+            ArgTemplate::ErrorRecord => {
+                let expected = error_record_arg(&mut self.ctx.unifier);
+                self.ctx.unify_ty(actual, &expected, Reason::ErrorRecordArg);
+                self.check_error_message(actual);
+            }
+        }
+    }
+
+    /// The half of the error-record shape the row cannot carry: a `message`,
+    /// if the record has one, is `String` or `Bytes`.  Read after unification,
+    /// so a field arriving through the open tail is judged too.  A field still
+    /// a variable stays free — the runtime takes either spelling, so pinning
+    /// one here would be a guess.
+    fn check_error_message(&mut self, actual: &Ty) {
+        let Ty::Record(row) = self.ctx.unifier.apply_ty(actual) else {
+            return;
+        };
+        let mut rest = row;
+        let message = loop {
+            match rest {
+                Row::Extend(label, ty, tail) => {
+                    if label == "message" {
+                        break *ty;
+                    }
+                    rest = *tail;
+                }
+                Row::Empty | Row::Var(_) => return,
+            }
+        };
+        if !matches!(message, Ty::String | Ty::Bytes | Ty::Var(_)) {
+            self.ctx
+                .diagnose(TypeErrorKind::ErrorRecordMessage { actual: message });
         }
     }
 

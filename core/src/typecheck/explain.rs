@@ -93,6 +93,13 @@ impl TypeErrorKind {
             Self::FailStatusZero => {
                 "`fail [status: 0]` is not allowed — fail requires a nonzero status".into()
             }
+            Self::ErrorRecordMessage { actual } => {
+                let ctx = FmtCtx::for_value_types(&[actual]);
+                format!(
+                    "an error record's `message` must be a String or Bytes, but this one is {}",
+                    fmt_ty_ctx(actual, &ctx)
+                )
+            }
             Self::MalformedAlias { .. } => "malformed alias definition".into(),
             Self::MalformedUnalias { .. } => "malformed unalias".into(),
             Self::IndexIntoThunk => {
@@ -153,6 +160,7 @@ impl TypeErrorKind {
             Self::CaseLabelTypeMismatch { label, .. } => {
                 format!("the handler at {label} is the wrong shape")
             }
+            Self::ErrorRecordMessage { .. } => "this `message` is not text".into(),
             Self::CaseOnNonVariant { .. }
             | Self::ControlOperatorAsValue { .. }
             | Self::HandlerNotFirstClass { .. }
@@ -299,6 +307,11 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
                 .to_string(),
         ),
         TypeErrorKind::FailStatusZero => Some("use `return` for a clean exit".to_string()),
+        TypeErrorKind::ErrorRecordMessage { .. } => Some(
+            "the message is the text the failure carries — render the value first, \
+             as in `message: \"$[to-string $v]\"`"
+                .to_string(),
+        ),
         TypeErrorKind::MalformedAlias { detail } | TypeErrorKind::MalformedUnalias { detail } => {
             Some(detail.to_string())
         }
@@ -428,6 +441,12 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
             Some(hint)
         }
         Reason::OptionField { form, key } => Some(format!("{form} {key}: wrong value type")),
+        Reason::ErrorRecordArg => Some(
+            "a failure is raised with an error record: at least `[status: Int]` with a \
+             nonzero status, optionally a `message` of String or Bytes, and any other \
+             fields you care to carry — `fail $e` re-raises a caught error as it stands"
+                .to_string(),
+        ),
         Reason::HandlerModePin => Some(
             "a handler or alias reinterprets a head — it preserves the head's \
              pipeline modes; match the existing head's modes or add a codec"

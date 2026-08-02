@@ -76,6 +76,34 @@ fn expect_error(source: &str, needle: &str) {
     }
 }
 
+/// Run `source` expecting it to be rejected before evaluation.
+fn expect_static(source: &str) {
+    let mut shell = fresh_shell();
+    match shell.run(RunRequest {
+        run: Run {
+            program: Program::Source(source.into()),
+            script_name: "<test>".into(),
+            caps: Capabilities::root(),
+            wall: None,
+            deferred_lease: None,
+            worker_cap: None,
+            io: RunIo::Inherit,
+            terminal: RequestedTerminalAccess::Leased,
+            stdin: RunStdin::Inherit,
+        },
+        surface: None,
+        deferred: None,
+        desk: None,
+        nursery: None,
+        lifecycle: Box::new(()),
+    }) {
+        RunReport::Static { .. } => {}
+        RunReport::Ran { result, .. } => {
+            panic!("{source:?}: expected a static rejection, got {result:?}")
+        }
+    }
+}
+
 // ── B3 — `dedent` counts characters, preserves blanks and CRLF ────────────
 
 #[test]
@@ -176,10 +204,13 @@ fn fail_rejects_status_outside_i32() {
     expect_error("fail [status: 4294967296]", "status");
 }
 
+/// A bare status never reaches `fail`'s body: the error-record shape is in the
+/// signature, so the run stops at the type error.  The body's own rejection
+/// stays as the last line of defence for values that arrive from a host.
 #[test]
 fn fail_bare_forms_are_rejected() {
-    expect_error("fail 7", "error record");
-    expect_error("fail \"boom\"", "error record");
+    expect_static("fail 7");
+    expect_static("fail \"boom\"");
 }
 
 #[test]
