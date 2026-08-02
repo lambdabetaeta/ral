@@ -6,7 +6,7 @@
 use super::apply;
 use super::val::eval_val;
 use crate::ir::Val;
-use crate::syntax::tag::tag_row_label;
+use crate::syntax::tag::{TAG_PREFIX, tag_row_label};
 use crate::types::{Mooring, Raw, Shell, Tail, TailCall, Value};
 
 /// Evaluate `case scrutinee table`: apply the matching handler to the
@@ -56,8 +56,19 @@ pub(crate) fn eval_case(
 
     let key = tag_row_label(&label);
     let handler = entries.get(&key).cloned().ok_or_else(|| {
+        let handled: Vec<&str> = entries
+            .keys()
+            .filter_map(|k| k.strip_prefix(TAG_PREFIX))
+            .collect();
         shell.err(
-            format!("case: no handler for variant `{label}` (typechecker bug)"),
+            if handled.is_empty() {
+                format!("case: handler table has no handler for variant `{label}`")
+            } else {
+                format!(
+                    "case: handler table has no handler for variant `{label}`; table handles: {}",
+                    handled.join(", ")
+                )
+            },
             1,
         )
     })?;
