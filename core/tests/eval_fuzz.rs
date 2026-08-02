@@ -2617,7 +2617,7 @@ fn hoist_inside_untaken_chain_arm_does_not_run() {
     // chain used to share the caller's binds accumulator, running the
     // fallback's hoists unconditionally before the chain itself.
     assert_eq!(
-        must_succeed("return 1 ? echo !{fail \"untaken arm's hoist ran\"}"),
+        must_succeed("return 1 ? return !{fail \"untaken arm's hoist ran\"}"),
         Value::Int(1)
     );
 }

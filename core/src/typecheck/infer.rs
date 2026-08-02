@@ -845,31 +845,14 @@ impl Inferencer<'_> {
         )
     }
 
-    /// `a ? b ? c` yields whichever arm succeeds, a union the type language
-    /// cannot spell: each arm is checked for its own errors, but the chain's
-    /// value type is a fresh variable, so no consumer pins itself to one arm
-    /// and miscomputes when another wins.  The channel modes *are* unioned via
-    /// [`Self::union_mode`] — `tmux a ? tmux b` emits bytes either way.
+    /// `a ? b ? c` yields whichever arm succeeds, so every arm must agree on
+    /// one result type — exactly the discipline [`Self::merge_branches`]
+    /// already applies to `if`'s two arms, here folded over the whole chain.
+    /// The channel modes are unioned via [`Self::union_mode`] — `tmux a ?
+    /// tmux b` emits bytes either way.
     fn infer_chain(&mut self, parts: &[Arc<Comp>]) -> CompTy {
-        let arm_specs: Vec<PipeSpec> = parts
-            .iter()
-            .map(|part| {
-                let arm = self.infer_comp(part);
-                match self.ctx.unifier.resolve_comp_ty(&arm) {
-                    CompTy::Return(s, _) => s,
-                    _ => PipeSpec::none(),
-                }
-            })
-            .collect();
-        let mut specs = arm_specs.into_iter();
-        let mut spec = specs.next().unwrap_or_else(PipeSpec::none);
-        for arm_spec in specs {
-            spec = PipeSpec {
-                input: self.union_mode(spec.input, arm_spec.input),
-                output: self.union_mode(spec.output, arm_spec.output),
-            };
-        }
-        CompTy::Return(spec, Box::new(self.ctx.unifier.fresh_ty()))
+        let arms: Vec<CompTy> = parts.iter().map(|part| self.infer_comp(part)).collect();
+        self.merge_branches(arms, &Reason::ChainBranches)
     }
 
     fn infer_map_val(&mut self, entries: &[ValMapEntry]) -> Ty {

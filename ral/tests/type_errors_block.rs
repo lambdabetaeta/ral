@@ -136,6 +136,26 @@ fn run_agrees_ed_insert_is_external_in_batch() {
     );
 }
 
+/// A `?` chain whose arms disagree on their result type is a static error
+/// under `--check`, exactly as a mixed-result `if` would be — the chain's
+/// value is whichever arm succeeds, so every arm must produce one type.
+#[test]
+fn check_rejects_mixed_result_chain() {
+    let r = common::run_with_timeout(
+        "check_mixed_result_chain",
+        &["--check"],
+        "let zzv = return hello ? return 1\nreturn $[$zzv + 1]",
+        Duration::from_secs(10),
+    )
+    .expect("ral --check must not hang");
+    assert_ne!(r.status, 0, "a mixed-result chain must fail --check");
+    assert!(
+        r.stderr.contains("couldn't match"),
+        "expected a type mismatch under --check; stderr was:\n{}",
+        r.stderr
+    );
+}
+
 // ── rc files at boot ──────────────────────────────────────────────────────
 //
 // An rc check error is reported and the boot survives — never fatal.  The

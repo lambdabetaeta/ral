@@ -51,6 +51,7 @@ pub enum Reason {
     HandlerModePin,
     IfCond,
     IfBranches,
+    ChainBranches,
     TryArms,
     /// A `try` handler against the one-argument function shape it must have.
     TryHandler,

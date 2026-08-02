@@ -387,6 +387,11 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
              because the whole expression has one type"
                 .to_string(),
         ),
+        Reason::ChainBranches => Some(
+            "every arm of a `?` chain must produce the same type, \
+             because the chain's value is whichever arm succeeds"
+                .to_string(),
+        ),
         Reason::TryArms => Some(
             "both outcomes of a `try` must produce the same value when observed; \
              if one arm only writes a line, that line counts as the value at the boundary"

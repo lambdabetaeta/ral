@@ -8,10 +8,10 @@ if false { echo 'wrong' } else { echo 'if false' }
 # if with comparison
 if $[5 > 3] { echo 'comparison' }
 
-# ? chain on status
-return true ? echo 'chain yes'
+# ? chain on status: any arm that returns rather than fails stops the chain
+return true ? return false
 
-return false ? echo 'chain no'
+return false ? return true
 
 # Value-equality dispatch via if/elsif chains.
 let action = 'help'

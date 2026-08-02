@@ -361,6 +361,18 @@ fn builtin_if_branch_mismatch_error() {
 }
 
 #[test]
+fn chain_arms_disagree_on_result() {
+    // The two arms return values of different types — the shared result
+    // type cannot unify.
+    has_error("return hello ? return 1", "couldn't match");
+}
+
+#[test]
+fn chain_arms_agree_on_result() {
+    ok("let zzv = return 1 ? return 2; return $[$zzv + 1]");
+}
+
+#[test]
 fn builtin_map() {
     ok("_map { |x| return $[$x + 1] } [1, 2, 3]");
 }
@@ -1425,6 +1437,15 @@ fn if_value_branches_join_to_value_output() {
     assert_eq!(
         bind_x_output("let x = if true { return 1 } else { return 2 }; return unit"),
         ByteMode::Empty
+    );
+}
+
+#[test]
+fn chain_byte_arms_join_to_byte_output() {
+    // Both arms emit bytes, so the chain's output channel is `Bytes`.
+    assert_eq!(
+        bind_x_output("let x = echo a ? echo b; return unit"),
+        ByteMode::Bytes
     );
 }
 

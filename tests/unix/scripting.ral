@@ -19,7 +19,7 @@ for $files { |f|
     let out = re-replace $f '.m4a' '.flac'
     echo "converting !{basename $f}"
     try {
-        ffmpeg -i $f $out 2> /dev/null ? echo "  done: !{basename $out}"
+        ffmpeg -i $f $out 2> /dev/null ? ^echo "  done: !{basename $out}"
     } { |err|
         echo "  failed: $err[message]"
     }
