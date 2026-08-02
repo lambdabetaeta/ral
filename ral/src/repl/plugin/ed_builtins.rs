@@ -11,7 +11,7 @@
 //! because the editor surface is purely a host concern: core has no
 //! knowledge of editor state or plugin handlers.  [`ED_BUILTINS`] is
 //! installed into the REPL's own shell at startup
-//! (see [`super::session::Session::boot`]).
+//! (see [`super::super::session::Session::boot`]).
 
 use ral_core::builtins::util::arg0_str;
 use ral_core::source::Span as ByteSpan;
@@ -25,8 +25,8 @@ use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, as_map
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 
-use super::highlight_style::style_ansi;
-use super::plugin_editor::{HighlightSpan, PluginContext, Span};
+use super::super::highlight_style::style_ansi;
+use super::editor::{HighlightSpan, PluginContext, Span};
 use ral_core::text::{byte_to_char, char_to_byte};
 
 fn ctx(shell: &Shell) -> Settled<&PluginContext> {
@@ -819,13 +819,13 @@ static ED_BUILTINS_ARR: [BuiltinEntry; 18] = [
 ];
 
 /// Builtins installed into the REPL's own shell at startup
-/// (see [`super::session::Session::boot`]).
+/// (see [`super::super::session::Session::boot`]).
 pub static ED_BUILTINS: &[BuiltinEntry] = &ED_BUILTINS_ARR;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repl::plugin_editor::{EditorState, PluginInputs, PluginOutputs};
+    use super::super::editor::{EditorState, PluginInputs, PluginOutputs};
 
     /// Every `_ed-*` entry must carry all static facets directly.
     #[test]

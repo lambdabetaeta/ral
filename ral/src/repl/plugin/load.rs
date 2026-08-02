@@ -17,7 +17,7 @@ use ral_core::{RequestedTerminalAccess, RunReport, Shell, Value};
 use std::sync::{Arc, Mutex};
 
 use super::super::errfmt::plugin_warning;
-use super::manifest::LoadedPlugin;
+use super::manifest::{LoadedPlugin, ManifestHandlers};
 use super::{PluginRuntime, framed_run_request, load_err, lock, unload_err};
 
 /// Load a plugin by name (or path) with an optional options map.
@@ -66,7 +66,7 @@ pub(crate) fn load_plugin(
     let module = instantiate(value, options, name_or_path, shell)?;
     check_is_manifest(&module, name_or_path)?;
 
-    let (mut plugin, bindings) = LoadedPlugin::parse(&module)?;
+    let (mut plugin, handlers) = LoadedPlugin::parse(&module)?;
     // The manifest value carries no source; retain the file text the handler
     // thunks were compiled from, so a fault inside one renders against it.
     plugin.source = std::sync::Arc::from(source.as_str());
@@ -74,13 +74,13 @@ pub(crate) fn load_plugin(
     // All validations run before any hook or alias is committed, so a
     // rejected load leaves the session exactly as it found it.
     check_not_loaded(&plugin.name, runtime)?;
-    check_no_binding_conflicts(&bindings, &plugin.name, shell)?;
+    check_no_binding_conflicts(&handlers.aliases, &plugin.name, shell)?;
 
     // Commit the hooks and alias bindings.  Any partial failure past this
     // point rolls back the whole plugin namespace, so nothing dispatchable
     // survives a failed load.
-    if let Err(e) =
-        register_plugin_hooks(&plugin, shell).and_then(|()| install_bindings(&bindings, shell))
+    if let Err(e) = register_plugin_hooks(&plugin.name, &handlers, shell)
+        .and_then(|()| install_bindings(&handlers.aliases, shell))
     {
         shell.remove_plugin_hooks(&plugin.name);
         return Err(Break::Error(e));
@@ -118,9 +118,13 @@ pub(crate) fn load_plugin(
 /// [`Shell::remove_plugin_hooks`] can drop them all at unload (or roll back
 /// a failed load).  Every handler fires as a `Program::Hook` through
 /// `Shell::run`.
-fn register_plugin_hooks(plugin: &LoadedPlugin, shell: &mut Shell) -> Result<(), Error> {
+fn register_plugin_hooks(
+    plugin_name: &str,
+    handlers: &ManifestHandlers,
+    shell: &mut Shell,
+) -> Result<(), Error> {
     let origin = Span::synthetic();
-    for (hook_event, handler) in &plugin.hooks {
+    for (hook_event, handler) in &handlers.hooks {
         let sig = match hook_event.as_str() {
             "buffer-change" | "keybinding" => HookSig::Hook {
                 kind: hook_event.clone(),
@@ -134,36 +138,26 @@ fn register_plugin_hooks(plugin: &LoadedPlugin, shell: &mut Shell) -> Result<(),
         };
         shell
             .register_hook(
-                HookName::plugin(plugin.name.clone(), hook_event.clone()),
+                HookName::plugin(plugin_name.to_string(), hook_event.clone()),
                 handler.clone(),
                 sig,
                 DefaultPolicy::denied(),
                 origin,
             )
-            .map_err(|e| {
-                load_err(format!(
-                    "plugin '{}': hook '{}': {e}",
-                    plugin.name, hook_event
-                ))
-            })?;
+            .map_err(|e| load_err(format!("plugin '{plugin_name}': hook '{hook_event}': {e}")))?;
     }
-    for kb in &plugin.keybindings {
+    for (key, handler) in &handlers.keybindings {
         shell
             .register_hook(
-                HookName::plugin(plugin.name.clone(), format!("key:{}", kb.key)),
-                kb.handler.clone(),
+                HookName::plugin(plugin_name.to_string(), format!("key:{key}")),
+                handler.clone(),
                 HookSig::Hook {
                     kind: "keybinding".into(),
                 },
                 DefaultPolicy::leased(),
                 origin,
             )
-            .map_err(|e| {
-                load_err(format!(
-                    "plugin '{}': keybinding '{}': {e}",
-                    plugin.name, kb.key
-                ))
-            })?;
+            .map_err(|e| load_err(format!("plugin '{plugin_name}': keybinding '{key}': {e}")))?;
     }
     Ok(())
 }

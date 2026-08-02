@@ -3,7 +3,7 @@
 //! When a plugin-registered key fires during readline, rustyline stores a
 //! [`PendingKeybinding`] and immediately accepts the line.  The REPL loop
 //! then calls [`dispatch_keybinding`] to run the handler outside the
-//! readline borrow, with a fresh [`PluginContext`](super::plugin_editor::PluginContext) reflecting the current
+//! readline borrow, with a fresh [`PluginContext`](super::plugin::editor::PluginContext) reflecting the current
 //! editor state.  The handler may mutate the buffer, accept the line, or
 //! push a new buffer onto the stack.
 
@@ -37,8 +37,8 @@ fn end_of(s: &str) -> usize {
 
 /// Execute a pending keybinding handler with the current editor state.
 ///
-/// Looks up the handler from the plugin runtime, builds a
-/// [`PluginContext`](super::plugin_editor::PluginContext), invokes the hook through [`call_plugin_hook`], and
+/// Resolves the pending binding against the plugin runtime, builds a
+/// [`PluginContext`](super::plugin::editor::PluginContext), invokes the hook through [`call_plugin_hook`], and
 /// inspects the resulting context to decide whether to accept or re-edit
 /// the line.
 pub(super) fn dispatch_keybinding(
@@ -56,9 +56,9 @@ pub(super) fn dispatch_keybinding(
     let resolved = {
         let rt = lock(runtime);
         rt.resolve_keybinding(&pk.plugin, pk.binding_idx)
-            .map(|(idx, key_str)| (idx, key_str, rt.plugins[idx].state_cell.clone()))
+            .map(|key_str| (key_str, rt.state_cell(&pk.plugin)))
     };
-    let Some((idx, key_str, state_cell)) = resolved else {
+    let Some((key_str, state_cell)) = resolved else {
         return KeybindingOutcome::Edit(current.to_string(), end_of(current));
     };
 
@@ -124,7 +124,7 @@ pub(super) fn dispatch_keybinding(
         return KeybindingOutcome::Edit(current.to_string(), end_of(current));
     };
 
-    lock(runtime).write_back_state_cell(idx, ctx.state_cell.as_ref());
+    lock(runtime).write_back_state_cell(&pk.plugin, ctx.state_cell.as_ref());
 
     if let Some((text, cursor)) = ctx.outputs.pushed_buffer {
         lock(runtime)
@@ -145,19 +145,16 @@ mod tests {
     use super::super::plugin::PluginRuntime;
     use super::super::plugin::manifest::{KeyBinding, LoadedPlugin};
     use super::super::plugin::parse_key_notation;
-    use ral_core::Value;
-    use std::collections::HashMap;
 
     /// A plugin record carrying one keybinding under `key`, so resolution
-    /// can be checked by the `(idx, key)` it yields.
-    fn plugin(name: &str, key: &str, handler: Value) -> LoadedPlugin {
+    /// can be checked by the key it yields.
+    fn plugin(name: &str, key: &str) -> LoadedPlugin {
         LoadedPlugin {
             name: name.to_string(),
-            hooks: HashMap::new(),
+            hooks: Vec::new(),
             keybindings: vec![KeyBinding {
                 key: key.to_string(),
                 chord: parse_key_notation(key).expect("test key parses"),
-                handler,
                 guard: None,
             }],
             bindings: Vec::new(),
@@ -174,18 +171,18 @@ mod tests {
     #[test]
     fn stale_keybinding_does_not_resolve_to_a_different_plugin() {
         let mut rt = PluginRuntime::default();
-        rt.plugins.push(plugin("a", "ctrl-t", Value::Int(1)));
-        rt.plugins.push(plugin("b", "ctrl-r", Value::Int(2)));
+        rt.plugins.push(plugin("a", "ctrl-t"));
+        rt.plugins.push(plugin("b", "ctrl-r"));
 
-        // Before unload, "a"'s binding resolves to slot 0.
-        assert_eq!(rt.resolve_keybinding("a", 0), Some((0, "ctrl-t".into())));
+        // Before unload, "a"'s binding resolves.
+        assert_eq!(rt.resolve_keybinding("a", 0), Some("ctrl-t".into()));
 
         // `unload_plugin` removes "a"; "b" shifts down to slot 0 — the
         // exact compaction that the old index-keyed dispatch mishandled.
         rt.plugins.remove(0);
 
         // The stale "a" binding now misses; it must NOT pick up "b"'s
-        assert_eq!(rt.resolve_keybinding("b", 0), Some((0, "ctrl-r".into())));
+        assert_eq!(rt.resolve_keybinding("b", 0), Some("ctrl-r".into()));
         assert_eq!(rt.resolve_keybinding("a", 0), None);
     }
 
@@ -194,7 +191,7 @@ mod tests {
     #[test]
     fn out_of_range_binding_index_misses() {
         let mut rt = PluginRuntime::default();
-        rt.plugins.push(plugin("a", "ctrl-t", Value::Int(1)));
+        rt.plugins.push(plugin("a", "ctrl-t"));
         assert_eq!(rt.resolve_keybinding("a", 1), None);
     }
 }

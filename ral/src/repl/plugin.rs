@@ -23,14 +23,17 @@
 //! lock before invoking ral code so re-entrant `_ed-*` builtins can
 //! re-acquire it.
 
+pub(super) mod ed_builtins;
+pub(super) mod editor;
 pub(super) mod load;
 pub(super) mod manifest;
 pub(super) mod router;
+pub(super) mod rustyline;
 
 pub(super) use self::router::{KeyChord, KeyName, KeyRouter, Resolution};
 // Production code reaches `parse_key_notation` straight from `router`
-// (manifest.rs); this re-export exists only so plugin.rs's and
-// keybinding.rs's test modules can name it via `crate::repl::plugin`.
+// (manifest.rs); this re-export exists only so keybinding.rs's test
+// module can name it via `crate::repl::plugin`.
 #[cfg(test)]
 pub(super) use self::router::parse_key_notation;
 
@@ -42,22 +45,16 @@ use ral_core::{
 };
 use std::time::Duration;
 
+use self::editor::{EditorState, HighlightSpan, PluginContext, PluginInputs, PluginOutputs};
 use self::manifest::LoadedPlugin;
 use super::errfmt::{format_plugin_disabled, plugin_error};
 use super::frontend::EditBuffer;
-use super::plugin_editor::{
-    EditorState, HighlightSpan, PluginContext, PluginInputs, PluginOutputs,
-};
 use ral_core::text::byte_to_char;
-use rustyline::config::EditMode;
-use rustyline::history::{DefaultHistory, History};
-use rustyline::{
-    Cmd, ConditionalEventHandler, Editor, Event, EventContext, KeyCode, KeyEvent, Modifiers,
-    Movement, RepeatCount,
-};
+// Anchored to the crate root: a bare `rustyline::` path here would resolve
+// to the sibling `rustyline` module instead of the crate of the same name.
+use ::rustyline::KeyEvent;
+use ::rustyline::config::EditMode;
 use std::sync::{Arc, Mutex, MutexGuard};
-
-use super::complete::RalHelper;
 
 // ── Lock helper ─────────────────────────────────────────────────────────
 
@@ -132,7 +129,8 @@ pub(super) struct EditorHooks {
 /// Keybinding-side state.  `pending` is the keybinding rustyline flagged
 /// inside its event handler; the REPL drains it after readline returns.
 /// `buffers` is the stack populated by `_ed-push`.  `bound` records the
-/// key sequences currently registered with rustyline so [`sync_plugins`]
+/// key sequences currently registered with rustyline so
+/// [`rustyline::sync_plugins`]
 /// can unbind the ones an unloaded plugin owned — rustyline keys nothing
 /// on plugin identity, so we hold the reconciliation set here.
 #[derive(Default)]
@@ -518,13 +516,12 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
         let old_buf = std::mem::replace(&mut rt.hooks.previous.text, line.to_string());
         rt.hooks.previous.cursor = pos;
 
-        let handlers: Vec<(usize, String)> = rt
+        let handlers: Vec<String> = rt
             .plugins
             .iter()
-            .enumerate()
-            .filter(|(_, p)| !p.buffer_change_health.is_disabled())
-            .filter(|(_, p)| p.hooks.contains_key("buffer-change"))
-            .map(|(i, p)| (i, p.name.clone()))
+            .filter(|p| !p.buffer_change_health.is_disabled())
+            .filter(|p| p.hooks.iter().any(|h| h == "buffer-change"))
+            .map(|p| p.name.clone())
             .collect();
 
         if handlers.is_empty() {
@@ -547,26 +544,21 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
         reason = "buffer char position, far below i64::MAX"
     )]
     let pos_i = pos as i64;
-    let args = [Value::map(vec![
-        ("old_buf".into(), Value::String(old_buf)),
-        ("line".into(), Value::String(line.to_string())),
-        ("pos".into(), Value::Int(pos_i)),
-        (
-            "history".into(),
-            Value::List(history.iter().cloned().map(Value::String).collect()),
-        ),
-        ("keymap".into(), Value::String(keymap.clone())),
-        ("state".into(), Value::Unit),
-    ])];
+    let history_list = Value::List(history.iter().cloned().map(Value::String).collect());
     let mut ghost: Option<String> = None;
     let mut spans: Vec<HighlightSpan> = Vec::new();
-    for (idx, name) in handlers {
+    for name in handlers {
         let hook = HookName::plugin(name.clone(), "buffer-change".to_string());
-        // Snapshot state cell from the runtime.
-        let state_cell = lock(runtime)
-            .plugins
-            .get(idx)
-            .and_then(|p| p.state_cell.clone());
+        let state_cell = lock(runtime).state_cell(&name);
+
+        let args = [Value::map(vec![
+            ("old_buf".into(), Value::String(old_buf.clone())),
+            ("line".into(), Value::String(line.to_string())),
+            ("pos".into(), Value::Int(pos_i)),
+            ("history".into(), history_list.clone()),
+            ("keymap".into(), Value::String(keymap.clone())),
+            ("state".into(), state_cell.clone().unwrap_or(Value::Unit)),
+        ])];
 
         let ctx_in = PluginRuntime::build_plugin_context(
             line.to_string(),
@@ -602,7 +594,7 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
         }
         {
             let mut rt = lock(runtime);
-            if let Some(p) = rt.plugins.get_mut(idx) {
+            if let Some(p) = rt.plugins.iter_mut().find(|p| p.name == name) {
                 let tripped = p.buffer_change_health.record_outcome(
                     hr.result.is_ok(),
                     hr.timed_out,
@@ -625,7 +617,7 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
         }
 
         if let Some(ctx_out) = hr.ctx {
-            lock(runtime).write_back_state_cell(idx, ctx_out.state_cell.as_ref());
+            lock(runtime).write_back_state_cell(&name, ctx_out.state_cell.as_ref());
             if let Some(g) = ctx_out.outputs.ghost_text {
                 ghost = Some(g);
             }
@@ -640,139 +632,7 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
     rt.hooks.env = Some(hook_env);
 }
 
-// ── Keybinding handlers ─────────────────────────────────────────────────
-
-/// Ctrl-D: EOF on an empty line; delete-char otherwise.
-/// Overrides rustyline's Vi-mode default of submitting the line, matching
-/// the bash/zsh convention in every edit mode.
-pub(super) struct CtrlDHandler;
-
-impl ConditionalEventHandler for CtrlDHandler {
-    fn handle(
-        &self,
-        _evt: &Event,
-        n: RepeatCount,
-        positive: bool,
-        ctx: &EventContext,
-    ) -> Option<Cmd> {
-        if ctx.line().is_empty() {
-            Some(Cmd::EndOfFile)
-        } else {
-            Some(Cmd::Kill(if positive {
-                Movement::ForwardChar(n)
-            } else {
-                Movement::BackwardChar(n)
-            }))
-        }
-    }
-}
-
-/// The one rustyline handler per distinct bound chord.  It consults the
-/// live router, so several entries on one chord resolve in table order;
-/// `None` on [`Resolution::Default`] runs rustyline's own action for the
-/// key.  Resolution is pure — the evaluator never runs here; a claimed
-/// binding is stashed as pending and dispatched after readline returns.
-pub(super) struct RouterKeyHandler {
-    pub(super) runtime: Arc<Mutex<PluginRuntime>>,
-    pub(super) chord: KeyChord,
-}
-
-impl ConditionalEventHandler for RouterKeyHandler {
-    fn handle(
-        &self,
-        _evt: &Event,
-        _n: RepeatCount,
-        _positive: bool,
-        ctx: &EventContext,
-    ) -> Option<Cmd> {
-        let mut rt = lock(&self.runtime);
-        match rt.router.resolve(self.chord, ctx.line(), ctx.pos()) {
-            Resolution::Claimed {
-                plugin,
-                binding_idx,
-            } => {
-                rt.keybindings.pending = Some(PendingKeybinding {
-                    plugin,
-                    binding_idx,
-                    cursor_byte: ctx.pos(),
-                });
-                drop(rt);
-                Some(Cmd::AcceptLine)
-            }
-            Resolution::Default => None,
-        }
-    }
-}
-
-/// Adapt a [`KeyChord`] to the rustyline `KeyEvent` rustyline binds against.
-/// The rustyline boundary — [`sync_plugins`] is the only caller.
-fn chord_to_key_event(chord: KeyChord) -> KeyEvent {
-    let code = match chord.name {
-        KeyName::Char(c) => KeyCode::Char(c),
-        KeyName::Tab => KeyCode::Tab,
-        KeyName::Enter => KeyCode::Enter,
-        KeyName::Escape => KeyCode::Esc,
-        KeyName::Up => KeyCode::Up,
-        KeyName::Down => KeyCode::Down,
-        KeyName::Left => KeyCode::Left,
-        KeyName::Right => KeyCode::Right,
-        KeyName::Home => KeyCode::Home,
-        KeyName::End => KeyCode::End,
-        KeyName::Delete => KeyCode::Delete,
-        KeyName::Backspace => KeyCode::Backspace,
-        KeyName::F(n) => KeyCode::F(n),
-    };
-    let mut mods = Modifiers::NONE;
-    if chord.ctrl {
-        mods |= Modifiers::CTRL;
-    }
-    if chord.alt {
-        mods |= Modifiers::ALT;
-    }
-    KeyEvent(code, mods)
-}
-
 // ── Plugin lifecycle helpers ─────────────────────────────────────────────
-
-/// Reconcile plugin keybindings with rustyline when `load` / `unload`
-/// has touched the plugin list.  The `keybindings_dirty` flag is set by
-/// those routines and cleared here; if it isn't set we skip the work.
-///
-/// rustyline owns its binding table but the router owns precedence, so
-/// registration is one [`RouterKeyHandler`] per distinct bound chord:
-/// every sequence bound on the last sync is dropped, then the router's
-/// chords are re-bound.  A plugin removed by `unload` therefore loses
-/// its sequences here rather than leaving a handler behind.
-pub(super) fn sync_plugins(
-    runtime: &Arc<Mutex<PluginRuntime>>,
-    rl: &mut Editor<RalHelper, DefaultHistory>,
-) {
-    let chords: Vec<KeyChord> = {
-        let mut rt = lock(runtime);
-        if !rt.keybindings_dirty {
-            return;
-        }
-        rt.keybindings_dirty = false;
-        for key in std::mem::take(&mut rt.keybindings.bound) {
-            rl.unbind_sequence(key);
-        }
-        rt.router.bound_chords()
-    };
-
-    let mut bound = Vec::new();
-    for chord in chords {
-        let key_event = chord_to_key_event(chord);
-        rl.bind_sequence(
-            key_event,
-            rustyline::EventHandler::Conditional(Box::new(RouterKeyHandler {
-                runtime: runtime.clone(),
-                chord,
-            })),
-        );
-        bound.push(key_event);
-    }
-    lock(runtime).keybindings.bound = bound;
-}
 
 /// Prepare the hook shell and reset per-readline state before entering readline.
 ///
@@ -827,23 +687,24 @@ impl PluginRuntime {
         self.hooks.env = None;
     }
 
-    /// Resolve a pending keybinding to its plugin index and bound key.
+    /// Resolve a pending keybinding to its bound key notation.
     ///
     /// Lookup is by the plugin's name, the only identity stable across
     /// `unload_plugin`'s `Vec::remove`; `binding_idx` then indexes that
     /// one plugin's immutable keybinding list.  Returns `None` when the
     /// named plugin is no longer loaded — the unbind-and-ignore case.
-    /// Dispatch fires the handler through the hook table by name, so the
-    /// resolution yields only the index and the key notation, never the
-    /// handler value itself.
-    pub(super) fn resolve_keybinding(
-        &self,
-        plugin: &str,
-        binding_idx: usize,
-    ) -> Option<(usize, String)> {
-        let idx = self.plugins.iter().position(|p| p.name == plugin)?;
-        let kb = self.plugins[idx].keybindings.get(binding_idx)?;
-        Some((idx, kb.key.clone()))
+    pub(super) fn resolve_keybinding(&self, plugin: &str, binding_idx: usize) -> Option<String> {
+        let p = self.plugins.iter().find(|p| p.name == plugin)?;
+        let kb = p.keybindings.get(binding_idx)?;
+        Some(kb.key.clone())
+    }
+
+    /// Fetch a plugin's persistent state cell by name.
+    pub(super) fn state_cell(&self, name: &str) -> Option<Value> {
+        self.plugins
+            .iter()
+            .find(|p| p.name == name)
+            .and_then(|p| p.state_cell.clone())
     }
 
     /// Record that the plugin list changed: rebuild the dispatch table and
@@ -882,10 +743,10 @@ impl PluginRuntime {
         }
     }
 
-    /// Save a handler's (possibly mutated) state cell back into the plugin
-    /// record at `idx`.  A no-op if the plugin was unloaded mid-dispatch.
-    pub(super) fn write_back_state_cell(&mut self, idx: usize, state_cell: Option<&Value>) {
-        if let Some(p) = self.plugins.get_mut(idx) {
+    /// Save a handler's (possibly mutated) state cell back into the named
+    /// plugin's record.  A no-op if the plugin was unloaded mid-dispatch.
+    pub(super) fn write_back_state_cell(&mut self, name: &str, state_cell: Option<&Value>) {
+        if let Some(p) = self.plugins.iter_mut().find(|p| p.name == name) {
             p.state_cell = state_cell.cloned();
         }
     }
@@ -907,7 +768,7 @@ pub(crate) fn fold_hook<T>(
     let entries: Vec<String> = lock(runtime)
         .plugins
         .iter()
-        .filter(|p| p.hooks.contains_key(hook_name))
+        .filter(|p| p.hooks.iter().any(|h| h == hook_name))
         .map(|p| p.name.clone())
         .collect();
 
@@ -947,45 +808,9 @@ pub(crate) fn run_lifecycle_hook(
     });
 }
 
-/// Snapshot rustyline history (most-recent-first) into the runtime so plugin
-/// hooks can read it via `_ed-history`.
-pub(super) fn snapshot_history(
-    rl: &Editor<RalHelper, DefaultHistory>,
-    runtime: &Arc<Mutex<PluginRuntime>>,
-) {
-    let entries: Vec<String> = (0..rl.history().len())
-        .rev()
-        .filter_map(|i| {
-            rl.history()
-                .get(i, rustyline::history::SearchDirection::Forward)
-                .ok()?
-                .map(|e| e.entry.to_string())
-        })
-        .collect();
-    lock(runtime).hooks.history = entries;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The rustyline boundary: a parsed chord adapts to exactly the `KeyEvent`
-    /// rustyline binds against, so `sync_plugins` and the structural matcher
-    /// agree on what a notation means.
-    #[test]
-    fn chord_adapts_to_rustyline_key_event() {
-        let ev = |s| parse_key_notation(s).map(chord_to_key_event);
-        assert_eq!(
-            ev("ctrl-r"),
-            Some(KeyEvent(KeyCode::Char('r'), Modifiers::CTRL))
-        );
-        assert_eq!(
-            ev("alt-c"),
-            Some(KeyEvent(KeyCode::Char('c'), Modifiers::ALT))
-        );
-        assert_eq!(ev("tab"), Some(KeyEvent(KeyCode::Tab, Modifiers::NONE)));
-        assert_eq!(ev("f5"), Some(KeyEvent(KeyCode::F(5), Modifiers::NONE)));
-    }
 
     /// `Keymap` is the neutral reduction of rustyline's `EditMode`, and names
     /// the keymap for the `_ed-keymap` query the same way the old code did.

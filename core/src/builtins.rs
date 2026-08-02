@@ -355,7 +355,7 @@ builtin_registry! {
         doc: "explain <name>  — print documentation for one name: doc, type signature, and source location.",
         call: |args, _mooring, shell| Ok(help::builtin_explain(args, shell)), },
     // The `_ed-*` family rides the REPL's boot surface instead; see
-    // `ral::repl::plugin_ed_builtins::ED_BUILTINS`.
+    // `ral::repl::plugin::ed_builtins::ED_BUILTINS`.
     AnsiOk { names: ["_ansi-ok"], ty: Scheme(scheme::pure_bool),
         doc: "_ansi-ok  — true if stdout supports ANSI colour (respects NO_COLOR / non-tty).",
         call: |_args, _mooring, _shell| Ok(Value::Bool(crate::ansi::use_ui_color())), },

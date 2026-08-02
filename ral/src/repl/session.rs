@@ -85,7 +85,7 @@ impl Session {
             &crate::PRELUDE,
             &ral_core::HostSurface {
                 statics: vec![
-                    super::plugin_ed_builtins::ED_BUILTINS,
+                    super::plugin::ed_builtins::ED_BUILTINS,
                     ral_core::builtins::WATCH_BUILTIN,
                 ],
                 captured: vec![super::host_handlers::build(jobs.clone(), runtime.clone())],

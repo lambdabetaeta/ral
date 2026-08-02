@@ -2,14 +2,14 @@
 //!
 //! A plugin manifest is a Map returned by a plugin's top-level block.
 //! The parser validates its shape, extracts hook handlers, keybindings,
-//! and alias thunks, and yields a [`LoadedPlugin`] record plus the list
-//! of `(name, thunk)` pairs that the loader installs into env.
+//! and alias thunks, and yields a [`LoadedPlugin`] record plus the
+//! [`ManifestHandlers`] the caller registers into the shell hook table and
+//! env.
 
 use super::router::{KeyChord, builtin_action, parse_key_notation, reserved_action};
 use super::{HookHealth, load_err};
 use ral_core::types::Error;
 use ral_core::{Map, Value};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Hook events recognised in manifests.  Typos are load errors so a
@@ -26,7 +26,6 @@ pub(super) const KNOWN_HOOKS: &[&str] =
 pub(crate) struct KeyBinding {
     pub(crate) key: String,
     pub(crate) chord: KeyChord,
-    pub(crate) handler: Value,
     pub(crate) guard: Option<regex::Regex>,
 }
 
@@ -43,7 +42,9 @@ pub(crate) struct KeyBinding {
 #[derive(Debug, Clone)]
 pub(crate) struct LoadedPlugin {
     pub(crate) name: String,
-    pub(crate) hooks: HashMap<String, Value>,
+    /// Hook event names this plugin registered.  The handler values
+    /// themselves live only in the shell hook table.
+    pub(crate) hooks: Vec<String>,
     pub(crate) keybindings: Vec<KeyBinding>,
     /// Names installed into env at load time; removed on unload.
     pub(crate) bindings: Vec<String>,
@@ -58,10 +59,20 @@ pub(crate) struct LoadedPlugin {
     pub(crate) buffer_change_health: HookHealth,
 }
 
+/// The handler values a manifest parse extracts, separate from the
+/// [`LoadedPlugin`] record so the loader can register them into the shell
+/// hook table and env without the record retaining a second copy.
+#[derive(Debug)]
+pub(super) struct ManifestHandlers {
+    pub(super) hooks: Vec<(String, Value)>,
+    pub(super) keybindings: Vec<(String, Value)>,
+    pub(super) aliases: Vec<(String, Value)>,
+}
+
 impl LoadedPlugin {
     /// Parse a plugin manifest value into the plugin record plus the
-    /// `(name, thunk)` pairs the caller installs into env.
-    pub(super) fn parse(val: &Value) -> Result<(Self, Vec<(String, Value)>), Error> {
+    /// handler values the caller registers into the hook table and env.
+    pub(super) fn parse(val: &Value) -> Result<(Self, ManifestHandlers), Error> {
         let Value::Map(map) = val else {
             return Err(load_err(format!(
                 "plugin manifest: expected Map, got {}",
@@ -103,9 +114,9 @@ impl LoadedPlugin {
                     other.type_name()
                 )));
             }
-            None => HashMap::new(),
+            None => Vec::new(),
         };
-        let keybindings = match map.get("keybindings") {
+        let (keybindings, keybinding_handlers) = match map.get("keybindings") {
             Some(Value::List(l)) => parse_keybindings(l.iter().cloned())?,
             Some(other) => {
                 return Err(load_err(format!(
@@ -113,10 +124,10 @@ impl LoadedPlugin {
                     other.type_name()
                 )));
             }
-            None => Vec::new(),
+            None => (Vec::new(), Vec::new()),
         };
         let plugin = Self {
-            hooks,
+            hooks: hooks.iter().map(|(event, _)| event.clone()).collect(),
             keybindings,
             bindings: aliases.iter().map(|(n, _)| n.clone()).collect(),
             state_cell: None,
@@ -124,12 +135,17 @@ impl LoadedPlugin {
             buffer_change_health: HookHealth::default(),
             name,
         };
-        Ok((plugin, aliases))
+        let handlers = ManifestHandlers {
+            hooks,
+            keybindings: keybinding_handlers,
+            aliases,
+        };
+        Ok((plugin, handlers))
     }
 }
 
-fn parse_hooks(entries: &Map) -> Result<HashMap<String, Value>, Error> {
-    let mut out = HashMap::new();
+fn parse_hooks(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
+    let mut out = Vec::new();
     for (event, value) in entries {
         if !KNOWN_HOOKS.contains(&event.as_str()) {
             return Err(load_err(format!(
@@ -143,16 +159,19 @@ fn parse_hooks(entries: &Map) -> Result<HashMap<String, Value>, Error> {
                 value.type_name()
             )));
         }
-        out.insert(event.clone(), value.clone());
+        out.push((event.clone(), value.clone()));
     }
     Ok(out)
 }
 
-fn parse_keybindings<I>(entries: I) -> Result<Vec<KeyBinding>, Error>
+type KeybindingHandlers = Vec<(String, Value)>;
+
+fn parse_keybindings<I>(entries: I) -> Result<(Vec<KeyBinding>, KeybindingHandlers), Error>
 where
     I: Iterator<Item = Value>,
 {
     let mut out = Vec::new();
+    let mut handlers = Vec::new();
     for entry in entries {
         let Value::Map(map) = entry else {
             return Err(load_err(format!(
@@ -207,14 +226,10 @@ where
                  press; add a 'guard:' regex so unmatched presses fall through"
             )));
         }
-        out.push(KeyBinding {
-            key,
-            chord,
-            handler,
-            guard,
-        });
+        handlers.push((key.clone(), handler));
+        out.push(KeyBinding { key, chord, guard });
     }
-    Ok(out)
+    Ok((out, handlers))
 }
 
 fn parse_aliases(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
@@ -257,9 +272,9 @@ mod tests {
     #[test]
     fn manifest_without_capabilities_parses() {
         let manifest = Value::map(vec![("name".into(), Value::String("p".into()))]);
-        let (plugin, aliases) = LoadedPlugin::parse(&manifest).expect("clean manifest parses");
+        let (plugin, handlers) = LoadedPlugin::parse(&manifest).expect("clean manifest parses");
         assert_eq!(plugin.name, "p");
-        assert!(aliases.is_empty());
+        assert!(handlers.aliases.is_empty());
     }
 
     /// A trivial `Value::Block` handler for well-formed keybinding entries.
@@ -358,7 +373,7 @@ mod tests {
     /// A `guard:` regex compiles and rides along on the parsed binding.
     #[test]
     fn guard_parses() {
-        let out = parse_keybindings(std::iter::once(keybinding_entry("ctrl-t", Some(r"\S+"))))
+        let (out, _) = parse_keybindings(std::iter::once(keybinding_entry("ctrl-t", Some(r"\S+"))))
             .expect("valid guard parses");
         assert_eq!(out.len(), 1);
         assert!(out[0].guard.is_some());
@@ -402,8 +417,9 @@ mod tests {
     /// tail instead of shadowing it.
     #[test]
     fn guarded_builtin_chord_parses() {
-        let out = parse_keybindings(std::iter::once(keybinding_entry("enter", Some(r"^git "))))
-            .expect("guarded enter parses");
+        let (out, _) =
+            parse_keybindings(std::iter::once(keybinding_entry("enter", Some(r"^git "))))
+                .expect("guarded enter parses");
         assert_eq!(out.len(), 1);
     }
 
@@ -437,7 +453,7 @@ mod tests {
     /// replacing the underlying editor default is the intended use.
     #[test]
     fn modified_chord_without_builtin_action_parses_unguarded() {
-        let out = parse_keybindings(std::iter::once(keybinding_entry("ctrl-t", None)))
+        let (out, _) = parse_keybindings(std::iter::once(keybinding_entry("ctrl-t", None)))
             .expect("ctrl-t without guard still parses");
         assert_eq!(out.len(), 1);
         assert!(out[0].guard.is_none());

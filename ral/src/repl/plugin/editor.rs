@@ -3,7 +3,7 @@
 //! Runtime state for the line-editor plugin system.  The [`PluginContext`]
 //! is installed on `Shell` (via `ReplScratch.plugin_context` in core) before
 //! running plugin hooks and keybinding handlers; the `_ed-*` builtins
-//! defined in [`super::plugin_ed_builtins`] read and write through it
+//! defined in [`super::ed_builtins`] read and write through it
 //! rather than touching shared REPL state directly.
 //!
 //! ## Layering

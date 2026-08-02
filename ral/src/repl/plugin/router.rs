@@ -230,7 +230,6 @@ mod tests {
     use super::super::HookHealth;
     use super::super::manifest::KeyBinding;
     use super::*;
-    use ral_core::Value;
 
     fn entry(plugin: &str, bi: usize, key: &str, guard: Option<&str>) -> RouterEntry {
         RouterEntry {
@@ -387,13 +386,12 @@ mod tests {
     fn build_orders_entries_by_load_then_manifest() {
         let plugin = |name: &str, keys: &[&str]| LoadedPlugin {
             name: name.into(),
-            hooks: std::collections::HashMap::new(),
+            hooks: Vec::new(),
             keybindings: keys
                 .iter()
                 .map(|k| KeyBinding {
                     key: (*k).into(),
                     chord: parse_key_notation(k).unwrap(),
-                    handler: Value::Int(0),
                     guard: None,
                 })
                 .collect(),

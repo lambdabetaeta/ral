@@ -9,7 +9,7 @@
 
 use ral_core::ansi;
 
-use super::plugin_editor::HighlightSpan;
+use super::plugin::editor::HighlightSpan;
 
 #[cfg(feature = "structural")]
 use ratatui::style::{Color, Modifier, Style};
@@ -81,7 +81,7 @@ pub(super) fn style_ratatui(style: &str) -> Option<Style> {
 /// Render `line` with plugin highlight spans as an ANSI string: each span's
 /// character range is painted with its style's escape, reset at every style
 /// boundary.  Out-of-range and inverted spans are folded to safe ranges by
-/// [`super::plugin_editor::Span`].
+/// [`super::plugin::editor::Span`].
 pub(super) fn apply_highlights(line: &str, spans: &[HighlightSpan]) -> String {
     if spans.is_empty() {
         return line.to_string();
@@ -118,7 +118,7 @@ pub(super) fn apply_highlights(line: &str, spans: &[HighlightSpan]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repl::plugin_editor::Span;
+    use crate::repl::plugin::editor::Span;
 
     // `Span::clamped` orders its endpoints, so an inverted `(start, end)`
     // submitted by a plugin folds to the same range as the ordered pair and

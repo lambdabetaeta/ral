@@ -85,7 +85,7 @@ fn clean_pipeline_runs_with_wires() {
 //
 // `--check`'s seed table is core plus `WATCH_BUILTIN` — exactly what the
 // batch shell installs (`ral/src/batch.rs`), never the REPL-only editor
-// surface (`ral::repl::plugin_ed_builtins::ED_BUILTINS`).  So `_ed-insert`
+// surface (`ral::repl::plugin::ed_builtins::ED_BUILTINS`).  So `_ed-insert`
 // resolves as an external command to the checker, not the real builtin's
 // `String → F[∅] Unit` scheme: piping its result into `from-json` (whose
 // input mode is ground `Bytes`) only typechecks under the external

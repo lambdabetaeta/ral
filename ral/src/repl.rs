@@ -15,11 +15,12 @@
 //! - [`exec`]     -- Single-input parse/typecheck/eval cycle.
 //! - [`frontend`] -- The `Frontend` trait and its two implementations.
 //! - [`keybinding`] -- Plugin keybinding dispatch.
-//! - [`plugin`]   -- Plugin runtime state and hook machinery.
-//! - [`plugin_editor`] -- Plugin context / editor state types (host of
-//!   the type-erased `Box<dyn Any>` core stores in `ReplScratch`).
-//! - [`plugin_ed_builtins`] -- The `_ed-*` builtin family, carried on
-//!   the session's boot surface.
+//! - [`plugin`]   -- Plugin runtime state and hook machinery, the
+//!   frontend-neutral core plus its rustyline adapter; also hosts the
+//!   editor context/state types (`plugin::editor`, host of the
+//!   type-erased `Box<dyn Any>` core stores in `ReplScratch`) and the
+//!   `_ed-*` builtin family (`plugin::ed_builtins`), carried on the
+//!   session's boot surface.
 //! - [`host_handlers`] -- Captured builtins for job-control and
 //!   plugin-lifecycle commands; carried on the session's boot surface.
 //! - [`prompt`]   -- Prompt construction and thunk evaluation.
@@ -33,8 +34,6 @@ mod complete;
 mod completion;
 mod config;
 mod plugin;
-mod plugin_ed_builtins;
-mod plugin_editor;
 
 mod cursor;
 mod errfmt;

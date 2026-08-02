@@ -482,7 +482,7 @@ let ansi-cyan    = if !{_ansi-ok} { return "\e[0;36m" } else { return '' }
 let styled = { |code text| "$code$text$ansi-reset" }
 
 # Editor state — all _ed-* operations are host builtins registered by
-# the ral crate (see ral/src/repl/plugin_ed_builtins.rs).  The underscore
+# the ral crate (see ral/src/repl/plugin/ed_builtins.rs).  The underscore
 # prefix hides them from `help`; plugin handlers call them directly
 # without going through any prelude wrapper layer.
 

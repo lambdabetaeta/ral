@@ -51,12 +51,12 @@ use crate::jobs::JobTable;
 use crate::repl::completion::{self, SourceCache};
 use crate::repl::highlight_style::style_ratatui;
 use crate::repl::keybinding::{KeybindingOutcome, dispatch_keybinding};
+use crate::repl::plugin::editor::HighlightSpan;
 use crate::repl::plugin::{
     HookEnvGuard, KeyChord, KeyName, KeyRouter, Keymap, PendingKeybinding, PluginRuntime,
     Resolution, flush_pending_messages, lock, pop_buffer_stack, prepare_hook_env,
     run_buffer_change_hooks,
 };
-use crate::repl::plugin_editor::HighlightSpan;
 use crate::repl::worksheet::Worksheet;
 use ral_core::text::char_to_byte;
 

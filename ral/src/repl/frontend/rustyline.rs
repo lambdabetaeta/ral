@@ -13,9 +13,9 @@ use std::sync::{Arc, Mutex};
 use super::super::complete::RalHelper;
 use super::super::config::dirs_history;
 use super::super::keybinding::{KeybindingOutcome, dispatch_keybinding};
+use super::super::plugin::rustyline::{snapshot_history, sync_plugins};
 use super::super::plugin::{
     HookEnvGuard, PluginRuntime, flush_pending_messages, lock, pop_buffer_stack, prepare_hook_env,
-    snapshot_history, sync_plugins,
 };
 use super::super::prompt::PromptText;
 use super::{EditBuffer, Frontend, Read};
@@ -47,7 +47,7 @@ impl RustylineFrontend {
         let mut rl: Editor<RalHelper, DefaultHistory> = Editor::with_config(config).unwrap();
         rl.bind_sequence(
             KeyEvent(KeyCode::Char('d'), Modifiers::CTRL),
-            EventHandler::Conditional(Box::new(super::super::plugin::CtrlDHandler)),
+            EventHandler::Conditional(Box::new(super::super::plugin::rustyline::CtrlDHandler)),
         );
         rl.set_helper(Some(helper));
 
