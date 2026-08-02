@@ -38,8 +38,8 @@ pub const UNDERLINE_RED: &str = "\x1b[4;31m";
 
 /// SGR escape for one of the eight standard color names, case-insensitively.
 ///
-/// Every other name returns `None`, and ral's `repl::theme` reads `None` as
-/// "no color" — a typo in the RC file drops value styling instead of erroring.
+/// Every other name returns `None`; the caller decides how an unknown name
+/// is reported.
 pub fn named_color(name: &str) -> Option<String> {
     match name.to_ascii_lowercase().as_str() {
         "black" => Some(BLACK.into()),
