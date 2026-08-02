@@ -200,29 +200,35 @@ field is forwarded to the plugin's top-level block.
 Declared as `hooks: [event: $handler, …]` in the manifest. Plugins
 cannot register hooks at runtime.
 
+Every hook handler takes exactly one argument. Event hooks receive
+an event record; arity is checked at registration, so a handler of
+any other shape is a load error.
+
 | Event | Handler | Fires |
 |---|---|---|
-| `buffer-change` | `{Str → Str → Int → F Unit}` | after buffer or cursor changes |
-| `pre-exec` | `{Str → F Unit}` | after Enter, before execution |
-| `post-exec` | `{Str → Int → F Unit}` | after execution completes |
-| `chpwd` | `{Str → Str → F Unit}` | after `cd` or a builtin `chdir(2)` |
+| `buffer-change` | `{Map → F Unit}` | after buffer or cursor changes |
+| `pre-exec` | `{Map → F Unit}` | after Enter, before execution |
+| `post-exec` | `{Map → F Unit}` | after execution completes |
+| `chpwd` | `{Map → F Unit}` | after `cd` or a builtin `chdir(2)` |
 | `prompt` | `{Str → F Str}` | before each prompt render |
 
 All handlers for an event run in plugin load order regardless of
 individual failures. A failing handler's error is logged as
 `plugin 'name': hook 'event' failed: <message>`.
 
-**`buffer-change`** arguments are `old-text`, `new-text`,
-`new-cursor`. Typical uses are highlighting and autosuggestion.
+**`buffer-change`** receives
+`[old_buf: Str, line: Str, pos: Int, history: [Str], keymap: Str,
+state]`. Typical uses are highlighting and autosuggestion.
 
-**`pre-exec` / `post-exec`** receive the full command line as typed;
-`post-exec` also receives the exit status. `chpwd` receives the old
-and new working directories.
+**`pre-exec`** receives `[src: Str]`, the full command line as
+typed; **`post-exec`** receives `[src: Str, status: Int]`, adding
+the exit status. **`chpwd`** receives `[old: Str, new: Str]`, the
+old and new working directories.
 
-**`prompt`** is a transformer. Each handler receives the current
-prompt string (starting from the shell's base) and returns a new
-one. Handlers compose: the output of handler `n` is the input to
-handler `n+1`.
+**`prompt`** is a transformer, not an event record. Each handler
+receives the current prompt string (starting from the shell's base)
+and returns a new one. Handlers compose: the output of handler `n`
+is the input to handler `n+1`.
 
 ```
 # Append a git branch segment.
@@ -663,7 +669,8 @@ or `ps` output to plain `fzf`), and the host-list readers
 ### 11.5 Syntax highlight (sketch)
 
 ```
-let _handler = { |_old new _cursor|
+let _handler = { |ev|
+    let new = $ev[line]
     _if !{is-empty $new} { _ed-highlight []; return unit } {}
     let toks  = split '[ \t]+' $new
     let head  = $toks[0]

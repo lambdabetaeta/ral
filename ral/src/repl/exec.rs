@@ -55,7 +55,10 @@ fn pre_exec(runtime: &Arc<Mutex<PluginRuntime>>, shell: &mut ral_core::Shell, sr
         &ral_core::types::Mooring::adrift(),
         shell,
         "pre-exec",
-        &[Value::String(src.to_string())],
+        &[Value::map(vec![(
+            "src".into(),
+            Value::String(src.to_string()),
+        )])],
     );
 }
 
@@ -91,10 +94,10 @@ fn post_exec(
         &ral_core::types::Mooring::adrift(),
         shell,
         "post-exec",
-        &[
-            Value::String(src.to_string()),
-            Value::Int(i64::from(status)),
-        ],
+        &[Value::map(vec![
+            ("src".into(), Value::String(src.to_string())),
+            ("status".into(), Value::Int(i64::from(status))),
+        ])],
     );
 }
 
@@ -234,5 +237,100 @@ pub(super) fn step(
     ) {
         Some(code) => Step::Exit(code),
         None => Step::Continue,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repl::plugin::manifest::LoadedPlugin;
+    use ral_core::Shell;
+    use ral_core::source::Span;
+    use ral_core::typecheck::builtins::{BuiltinTypeRule, sig};
+    use ral_core::types::{BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring};
+    use std::borrow::Cow;
+
+    /// A test-only sink builtin: `record` appends its argument values into
+    /// the shared vector, so a hook handler's projections out of the event
+    /// record become observable.
+    fn sink_builtin(sink: Arc<Mutex<Vec<Value>>>) -> BuiltinEntry {
+        BuiltinEntry::new(
+            Cow::Borrowed("record"),
+            BuiltinTypeRule::Sig(sig::ECHO),
+            "record — test sink appending its arguments.",
+            BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
+                sink.lock().unwrap().extend(args.iter().cloned());
+                Ok(Value::Unit)
+            })),
+        )
+    }
+
+    /// Parse, elaborate, and evaluate `src` into a handler value.
+    fn handler(shell: &mut Shell, src: &str) -> Value {
+        let ast = ral_core::syntax::parser::parse(src).unwrap();
+        let comp = std::sync::Arc::new(
+            ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
+                .expect("elaborate"),
+        );
+        ral_core::evaluator::evaluate(&comp, &Mooring::adrift(), shell).expect("evaluate")
+    }
+
+    /// Dress a shell with the sink builtin and one plugin `p` whose
+    /// `hook_event` handler is compiled from `handler_src`, mirroring
+    /// `register_plugin_hooks`' lifecycle registration.
+    fn dressed(
+        hook_event: &str,
+        handler_src: &str,
+    ) -> (Shell, Arc<Mutex<PluginRuntime>>, Arc<Mutex<Vec<Value>>>) {
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        shell.install_captured_builtins(vec![sink_builtin(sink.clone())].into());
+
+        let h = handler(&mut shell, handler_src);
+        shell
+            .register_hook(
+                HookName::plugin("p", hook_event),
+                h,
+                HookSig::Lifecycle {
+                    kind: hook_event.into(),
+                },
+                DefaultPolicy::denied(),
+                Span::synthetic(),
+            )
+            .expect("register");
+
+        let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
+        super::super::plugin::lock(&runtime).plugins.push(LoadedPlugin {
+            name: "p".into(),
+            hooks: vec![hook_event.into()],
+            keybindings: Vec::new(),
+            bindings: Vec::new(),
+            state_cell: None,
+            source: Arc::from(""),
+            buffer_change_health: Default::default(),
+        });
+        (shell, runtime, sink)
+    }
+
+    /// `post-exec` dispatch hands the handler one event record carrying the
+    /// source line under `src` and the exit status under `status`.
+    #[test]
+    fn post_exec_passes_src_and_status_in_one_event_record() {
+        let (mut shell, runtime, sink) =
+            dressed("post-exec", "{ |ev| record $ev[src] $ev[status] }");
+        post_exec(&runtime, &mut shell, "true", 7);
+        assert_eq!(
+            *sink.lock().unwrap(),
+            vec![Value::String("true".into()), Value::Int(7)]
+        );
+    }
+
+    /// `pre-exec` dispatch hands the handler one event record carrying the
+    /// source line under `src`.
+    #[test]
+    fn pre_exec_passes_src_in_one_event_record() {
+        let (mut shell, runtime, sink) = dressed("pre-exec", "{ |ev| record $ev[src] }");
+        pre_exec(&runtime, &mut shell, "ls -l");
+        assert_eq!(*sink.lock().unwrap(), vec![Value::String("ls -l".into())]);
     }
 }

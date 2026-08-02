@@ -349,3 +349,61 @@ fn canonicalise_candidate(cand: &std::path::Path) -> Option<std::path::PathBuf> 
         .canonicalise_strict()
         .ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parse, elaborate, and evaluate `src` into the handler value a manifest
+    /// would carry.
+    fn handler(shell: &mut Shell, src: &str) -> Value {
+        let ast = ral_core::syntax::parser::parse(src).unwrap();
+        let comp = std::sync::Arc::new(
+            ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
+                .expect("elaborate"),
+        );
+        ral_core::evaluator::evaluate(&comp, &Mooring::adrift(), shell).expect("evaluate")
+    }
+
+    fn hooks_only(hooks: Vec<(String, Value)>) -> ManifestHandlers {
+        ManifestHandlers {
+            hooks,
+            keybindings: Vec::new(),
+            aliases: Vec::new(),
+        }
+    }
+
+    /// A lifecycle handler taking the one event-record parameter registers.
+    #[test]
+    fn unary_lifecycle_handler_registers() {
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let h = handler(&mut shell, "{ |_ev| return unit }");
+        register_plugin_hooks(
+            "p",
+            &hooks_only(vec![("post-exec".into(), h)]),
+            &mut shell,
+        )
+        .expect("a unary lifecycle handler registers");
+    }
+
+    /// A two-parameter lifecycle handler is rejected at load, with an error
+    /// naming the hook and the arity mismatch.
+    #[test]
+    fn two_parameter_lifecycle_handler_is_rejected() {
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        let h = handler(&mut shell, "{ |_src _status| return unit }");
+        let err = register_plugin_hooks(
+            "p",
+            &hooks_only(vec![("post-exec".into(), h)]),
+            &mut shell,
+        )
+        .expect_err("a two-parameter lifecycle handler must be rejected");
+        assert!(
+            err.message.contains("post-exec")
+                && err.message.contains("1 parameter")
+                && err.message.contains("got 2"),
+            "error should name the hook and the arity mismatch, got: {}",
+            err.message
+        );
+    }
+}

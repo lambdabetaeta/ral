@@ -780,7 +780,9 @@ pub(crate) fn fold_hook<T>(
     acc
 }
 
-/// Run a named lifecycle hook on all plugins, passing `args` to each handler.
+/// Run a named lifecycle hook on all plugins.  Every lifecycle hook receives
+/// exactly one argument, the event record: `{src}` for `pre-exec`,
+/// `{src, status}` for `post-exec`, `{old, new}` for `chpwd`.
 ///
 /// Lifecycle hooks (`pre-exec`, `post-exec`, `chpwd`) apply the handler in
 /// place ([`HookFraming::InFrame`]) rather than framing it; the caller passes

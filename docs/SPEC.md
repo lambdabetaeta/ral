@@ -2941,9 +2941,10 @@ mismatch is a load-time error (the rc `prompt:` *body* is the one
 zero-parameter form).  `buffer-change` (`{Map → F Unit}`) fires on
 each keystroke that changes the buffer, receiving
 `[old_buf: Str, line: Str, pos: Int, history: [Str], keymap: Str,
-state]`; `pre-exec` (`{Str → F Unit}`) runs before command
-evaluation, receiving the source line, and `post-exec` runs after it;
-`chpwd` (`{Map → F Unit}`) fires after `cd`, receiving
+state]`; `pre-exec` (`{Map → F Unit}`) runs before command
+evaluation, receiving `[src: Str]`, and `post-exec` runs after it,
+receiving `[src: Str, status: Int]`; `chpwd` (`{Map → F Unit}`)
+fires after `cd`, receiving
 `[old: Str, new: Str]`; and `prompt` (`{Str → F Str}`) runs just
 before the prompt is drawn, receiving the base prompt and returning
 the rendered one.
