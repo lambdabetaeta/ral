@@ -609,3 +609,32 @@ fn outer_stdin_redirect_feeds_ral_builtin_pipeline_first_stage() {
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), lines.len().to_string());
 }
+
+// ─── guard / audit scope byte I/O ────────────────────────────────────────────
+//
+// `guard` and `audit` are channel-transparent: an arm's bytes flow through
+// the scope's live streams rather than being silenced by the scope
+// boundary.
+
+#[test]
+fn guard_body_bytes_flow_into_downstream_stage() {
+    let o = run_pipe("let s = !{ guard { echo hi } { return unit } | from-string }\necho $s");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "hi");
+}
+
+#[test]
+fn audit_receives_upstream_piped_bytes() {
+    let o = run_pipe("let r = !{ echo hi | audit { from-string } }\necho $r[value]");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "hi");
+}
+
+#[test]
+fn guard_bound_value_is_the_bytes_body_observed_as_a_string() {
+    // `guard` keeps `try`'s observed-value convention: binding a guard whose
+    // body emits bytes captures the decoded String, not the cleanup's value.
+    let o = run_pipe("let gval = guard { echo hi } { return unit }\necho $gval");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "hi");
+}

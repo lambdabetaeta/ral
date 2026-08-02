@@ -383,6 +383,51 @@ fn builtin_try_err_field_types() {
     ok("let r = try { return 1 } { |e| return $e[status] }; return $r");
 }
 
+// ─── guard / audit scope byte I/O (`Inferencer::seal`) ───────────────────────
+//
+// `guard` and `audit` no longer report `CompTy::pure`: their `ScopeSig` arms
+// fold into a real `PipeSpec` via `seal`, output bytes-dominant over every
+// arm and input by byte-join since every `guard`/`audit` arm is `Always`
+// (only `try`'s handler is `OnFailure`, exercised separately below).
+
+#[test]
+fn guard_body_bytes_output_dominates_pure_cleanup() {
+    ok("guard { echo hi } { return unit } | from-string");
+}
+
+#[test]
+fn guard_cleanup_bytes_output_dominates_pure_body() {
+    ok("guard { return unit } { echo hi } | from-string");
+}
+
+#[test]
+fn guard_input_joins_bytes_dominant_when_either_always_arm_reads() {
+    // Both arms always run, so input folds via `join_byte_mode`, not
+    // `union_mode`: an upstream byte producer satisfies the guard even
+    // though only one of the two arms actually reads it.
+    ok("echo hi | guard { from-string } { return unit }");
+    ok("echo hi | guard { return unit } { from-string }");
+}
+
+#[test]
+fn audit_consumes_piped_bytes() {
+    ok("echo hi | audit { from-string }");
+}
+
+#[test]
+fn audit_record_value_field_is_body_raw_value_not_invented() {
+    // The record's `value` field is `infer_audit`'s `alpha` — the body's
+    // own raw value type, unified with nothing else — so it tracks
+    // whatever the body actually returns rather than a synthesized String.
+    ok("let r = audit { return 42 }; return $[$r[value] + 1]");
+    // `echo`'s raw return is `Unit`, not `String`: if the record's value
+    // field invented a decoded String observation, this would typecheck.
+    has_error(
+        "let r = audit { echo hi }; return $[$r[value] + 1]",
+        "couldn't match",
+    );
+}
+
 #[test]
 fn builtin_glob() {
     ok("let xs = glob /tmp; return $xs");
