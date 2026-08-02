@@ -296,7 +296,8 @@ impl Inferencer<'_> {
 
     /// The mode of two arms only one of which runs, so a clash is not a
     /// contradiction but an unknown: it yields a fresh variable a downstream
-    /// stage can pin, and `if c { echo x } else {}` is accepted.
+    /// stage can pin.  Used for branch arms' input end — the arms read the
+    /// same shared stdin, but only one runs, so a mismatch is not fatal.
     pub(super) fn union_mode(&mut self, a: PipeMode, b: PipeMode) -> PipeMode {
         if self.ctx.unifier.unify_mode(&a, &b).is_err() {
             self.ctx.unifier.fresh_mode()
@@ -321,24 +322,33 @@ impl Inferencer<'_> {
     }
 
     /// Bytes-dominant fold of arms' final outputs: a node's capture mode, and
-    /// so the mode every arm's value is observed under.  Callers that observe
-    /// inherit `observed_value_ty`'s blind spot — an arm whose mode or value is
-    /// still an inference variable unifies raw instead of observed.
+    /// so the mode every arm's value is observed under.  Seeds from the first
+    /// element, not `PipeMode::None` — that seed is not an identity for an
+    /// unresolved mode variable, which `join_byte_mode` would otherwise pin to
+    /// `None` via `unify_mode`.  Callers that observe inherit
+    /// `observed_value_ty`'s blind spot — an arm whose mode or value is still
+    /// an inference variable unifies raw instead of observed.
     pub(super) fn joined_final_output(
         &mut self,
         outputs: impl IntoIterator<Item = PipeMode>,
     ) -> PipeMode {
-        outputs
-            .into_iter()
-            .fold(PipeMode::None, |acc, out| self.join_byte_mode(acc, out))
+        let mut iter = outputs.into_iter();
+        let Some(first) = iter.next() else {
+            return PipeMode::None;
+        };
+        iter.fold(first, |acc, out| self.join_byte_mode(acc, out))
     }
 
     /// Merge a conditional's or chain's arms.  Each arm's value is observed
     /// under the arms' [joined final output](Self::joined_final_output), not
     /// under its own, because `eval_bind_rhs` installs capture once for the
     /// whole node and discriminates per-run; the observed values then unify.
-    /// Input is unioned via [`Self::union_mode`] since only one arm runs.  A
-    /// non-`Return` arm falls back to strict computation-type unification.
+    /// Input is unioned via [`Self::union_mode`] since only one arm runs;
+    /// output is a bytes-dominant [`Self::join_byte_mode`] fold over the arms'
+    /// own channel outputs, distinct from the joined final output used for
+    /// observation.  If every arm resolves to `Return` they merge this way;
+    /// otherwise every arm, including Return/Return pairs, goes through
+    /// strict `unify_comp_ty` — an all-or-nothing choice, not a per-arm one.
     fn merge_branches(&mut self, arms: Vec<(&Comp, CompTy)>, why: &Reason) -> CompTy {
         if arms.is_empty() {
             return CompTy::pure(self.ctx.unifier.fresh_ty());
@@ -359,7 +369,8 @@ impl Inferencer<'_> {
         }
 
         let mut input = None;
-        let mut outputs = Vec::with_capacity(arms.len());
+        let mut output = None;
+        let mut final_outputs = Vec::with_capacity(arms.len());
         let mut raw_tys = Vec::with_capacity(arms.len());
         for (comp, cty) in &arms {
             let CompTy::Return(spec, ty) = self.ctx.unifier.resolve_comp_ty(cty) else {
@@ -369,10 +380,14 @@ impl Inferencer<'_> {
                 None => spec.input,
                 Some(acc) => self.union_mode(acc, spec.input),
             });
-            outputs.push(self.final_output_of_comp(comp, cty));
+            output = Some(match output {
+                None => spec.output,
+                Some(acc) => self.join_byte_mode(acc, spec.output),
+            });
+            final_outputs.push(self.final_output_of_comp(comp, cty));
             raw_tys.push(*ty);
         }
-        let joined_output = self.joined_final_output(outputs);
+        let joined_output = self.joined_final_output(final_outputs);
 
         let mut raw_iter = raw_tys.into_iter();
         let observed_acc = {
@@ -387,7 +402,7 @@ impl Inferencer<'_> {
         CompTy::Return(
             PipeSpec {
                 input: input.unwrap(),
-                output: joined_output,
+                output: output.unwrap(),
             },
             Box::new(observed_acc),
         )
@@ -891,8 +906,8 @@ impl Inferencer<'_> {
     /// `a ? b ? c` yields whichever arm succeeds, so every arm must agree on
     /// one result type — exactly the discipline [`Self::merge_branches`]
     /// already applies to `if`'s two arms, here folded over the whole chain.
-    /// The channel modes are unioned via [`Self::union_mode`] — `tmux a ?
-    /// tmux b` emits bytes either way.
+    /// The output mode is a bytes-dominant join — `tmux a ? tmux b` emits
+    /// bytes either way.
     fn infer_chain(&mut self, parts: &[Arc<Comp>]) -> CompTy {
         let arms: Vec<(&Comp, CompTy)> = parts
             .iter()
@@ -1510,7 +1525,7 @@ impl Inferencer<'_> {
             CompKind::Scope(ScopeOp::Try { body, handler }) => {
                 let body_out = self.final_output_of_thunk_value(body, cty);
                 let handler_out = self.final_output_of_thunk_value(handler, cty);
-                self.join_byte_mode(body_out, handler_out)
+                self.joined_final_output([body_out, handler_out])
             }
             // An audit's value is the record it synthesizes, which no byte
             // stream feeds: the body's bytes go to the record's `stdout` field

@@ -1441,6 +1441,19 @@ fn if_value_branches_join_to_value_output() {
 }
 
 #[test]
+fn if_arm_writing_bytes_before_its_return_joins_to_byte_output() {
+    // The `then` arm's channel output is `Bytes` from `echo hi`, even though
+    // its final statement is a pure `return` — the node's output spec must
+    // still see it.
+    ok("if true { echo hi; return 1 } else { return 2 } | from-string");
+}
+
+#[test]
+fn if_arm_echo_alongside_pure_return_arm_joins_to_byte_output() {
+    ok("if true { echo a; return 1 } else { echo b; return 2 } | from-string");
+}
+
+#[test]
 fn chain_byte_arms_join_to_byte_output() {
     // Both arms emit bytes, so the chain's output channel is `Bytes`.
     assert_eq!(
@@ -1478,9 +1491,9 @@ fn if_empty_else_arm_still_accepted() {
 
 #[test]
 fn chain_return_int_then_echo_is_observed_mismatch() {
-    // `return 1` is a pure Int value, no bytes at all — the joined output
-    // stays `None`, so `return 1`'s Int is observed as itself, clashing with
-    // `echo x`'s observed String.
+    // The joined output is `Bytes` (from the `echo` arm), so `echo x`
+    // observes to String, but `return 1`'s Int is untouched by observation —
+    // it clashes with that String outright.
     has_error("return 1 ? echo x", "couldn't match");
 }
 
