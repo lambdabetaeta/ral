@@ -506,11 +506,10 @@ pub(super) fn try_error_record() -> Ty {
 }
 
 /// The record `audit { … }` produces, field for field the value shape
-/// `evaluator::audit::tree_value` materialises.  `audit` is a collection
-/// boundary, not a node — it has no `cmd`, `args`, `script`/`line`/`col`, or
-/// `principal` of its own.  A child in `children` is a fresh map type, one
-/// of the real command/capability-check nodes `ExecNode::to_value` shapes,
-/// so a node's own fields can grow without breaking this.
+/// `evaluator::audit::tree_value` materialises.  A child in `children` is a
+/// fresh map type, one of the real command/capability-check nodes
+/// `ExecNode::to_value` shapes, so a node's own fields can grow without
+/// breaking this.
 pub(super) fn audit_record(value_ty: Ty, child_ty: Ty) -> Ty {
     closed_record(&[
         ("status", Ty::Int),

@@ -157,10 +157,10 @@ pub struct SessionState {
 /// Host-local scratch whose members each carry their own flow rule — not a
 /// lifetime category, the residue left once run and session state are named.
 pub struct LocalState {
-    /// The in-flight execution tree and its byte-capture policy.  The
-    /// scope-introducing builtins (`grant`, `within`, `guard`, `try`, `audit`)
-    /// own the children their bodies produce; the dispatcher posts one node per
-    /// command through [`crate::evaluator::audit`].
+    /// The in-flight execution tree and its byte-capture policy.  `grant`,
+    /// `within`, `guard`, `try`, and `audit` are collection boundaries, not
+    /// tree nodes; the dispatcher posts one node per real command through
+    /// [`crate::evaluator::audit`].
     pub(crate) audit: Audit,
     /// Flows across neither threads nor IPC; moved across the pipeline-stage
     /// boundary.

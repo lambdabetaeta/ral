@@ -16,7 +16,7 @@ use crate::evaluator::{apply, audit};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// `try`'s body result, flattened for the handler-call and audit-tag paths.
+/// `try`'s body result, flattened for the handler-call decision.
 pub(crate) struct Outcome {
     pub ok: bool,
     pub status: i32,

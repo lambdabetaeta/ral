@@ -12,19 +12,28 @@ use crate::PRELUDE;
 use crate::cli::{BatchOpts, RunOpts};
 use crate::platform::{apply_session_capabilities, exit_byte, load_exit_hints, probe_terminal};
 
-/// Serialise the execution tree root to JSON and emit it on stderr.
+/// Serialise the run's outcome and collected tree to JSON and emit it on
+/// stderr.  `exit_code` is the process's exit status as the host resolved
+/// it, not the error's own code; an escape (`exit`) is not a failure, so it
+/// records no error.
 fn emit_audit_tree(
-    name: &str,
     result: &Settled<ral_core::types::Value>,
     exit_code: i32,
     fragment: ral_core::types::AuditFragment,
-    audit_start: i64,
     pretty: bool,
-    principal: String,
 ) {
-    use ral_core::types::ExecNode;
-    let root = ExecNode::run_root(name, result, exit_code, fragment, audit_start, principal);
-    let json_val = ral_core::builtins::value_to_json_lossy_bytes(&root.to_value());
+    use ral_core::types::{Value, tree_value};
+    let (value, error) = match result {
+        Ok(v) => (v.clone(), None),
+        Err(Break::Error(e)) => (Value::Unit, Some(e.message.clone())),
+        Err(Break::Escape(_)) => (Value::Unit, None),
+    };
+    let json_val = ral_core::builtins::value_to_json_lossy_bytes(&tree_value(
+        exit_code,
+        value,
+        error,
+        &fragment.into_nodes(),
+    ));
     let json_str = if pretty {
         serde_json::to_string_pretty(&json_val).unwrap_or_default()
     } else {
@@ -149,12 +158,6 @@ pub(crate) fn run_batch(
     }
     tick!("caps");
 
-    let audit_start = if audit {
-        ral_core::types::epoch_us()
-    } else {
-        0
-    };
-
     if audit {
         shell.enable_audit();
     }
@@ -234,15 +237,7 @@ pub(crate) fn run_batch(
     };
 
     if audit {
-        emit_audit_tree(
-            name,
-            &result,
-            exit_code,
-            fragment,
-            audit_start,
-            pretty,
-            shell.principal(),
-        );
+        emit_audit_tree(&result, exit_code, fragment, pretty);
     }
 
     ExitCode::from(exit_byte(exit_code))

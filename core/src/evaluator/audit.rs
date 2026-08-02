@@ -5,8 +5,8 @@
 //! `within`, `grant`, `guard`, `try`, and `audit` are all collection
 //! boundaries, not tree nodes: none of them constructs an `ExecNode`.
 //! `try`/`audit` force collection on regardless of the surrounding state via
-//! [`forced_subtree`], which never isolates their body's nodes from the
-//! trail — it just marks where the trail was and reads back what got added.
+//! [`forced_subtree`], which marks the trail's length before `body` runs and
+//! reads back everything pushed after that mark.
 //!
 //! With `shell.local.audit.active()` false the recorders are no-ops, so the
 //! dispatcher can call them unconditionally; [`forced_subtree`] is the
@@ -176,8 +176,7 @@ pub(crate) fn record_capability(shell: &mut Shell, resource: &str, decision: &st
 
 /// Force collection on for `body` and return the nodes it produced; used by
 /// `try` (to name the failing command) and `audit` (to return the subtree).
-/// Nothing is moved out of the trail, so the nodes are already flat among
-/// whatever the surrounding trail collects — no wrapping, no merge-back.
+/// The nodes stay in the trail, flat among whatever else it collects.
 pub(crate) fn forced_subtree(
     shell: &mut Shell,
     capture: CapturePolicy,

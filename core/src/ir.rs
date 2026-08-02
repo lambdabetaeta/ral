@@ -510,8 +510,8 @@ pub enum ScopeOp {
     Within { opts: Val, body: Val },
     /// `grant CAPS BODY` — attenuate the active capability set across `body`.
     Grant { caps: Val, body: Val },
-    /// `audit BODY` — record an audit subtree over `body` and reify the
-    /// resulting node as a value.
+    /// `audit BODY` — record an audit subtree over `body` and reify it as a
+    /// `[status, value, error, children]` record.
     Audit { body: Val },
     /// Redirect frame for a body that cannot fuse its own redirects — a
     /// CBPV `App`, or a nested `Scope`.  `body` is an `Arc<Comp>` and not a

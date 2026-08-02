@@ -1528,8 +1528,8 @@ impl Inferencer<'_> {
                 self.joined_final_output([body_out, handler_out])
             }
             // An audit's value is the record it synthesizes, which no byte
-            // stream feeds: the body's bytes go to the record's `stdout` field
-            // and the live stream, never toward the value.
+            // stream feeds: the body's bytes go to the live stream and to its
+            // own real command nodes' `stdout` fields, never toward the value.
             CompKind::Scope(ScopeOp::Audit { .. }) => PipeMode::None,
             // A pipeline's value is its last stage's, so the decode candidate
             // is that stage's own final output, not the wire mode the whole

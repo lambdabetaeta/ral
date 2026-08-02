@@ -9,7 +9,6 @@
 //! decides where the nodes "belong" beyond that flat merge.
 
 use super::error::Error;
-use super::flow::{Break, Settled};
 use super::value::Value;
 use crate::diagnostic::CallSite;
 use crate::source::Span;
@@ -267,53 +266,10 @@ impl NodeOutcome {
 }
 
 impl ExecNode {
-    /// Wrap a run's collected fragment as the tree root.  The root is
-    /// scope-shaped — no args, no I/O — and sits at a sentinel site
-    /// (script = run name, line 0, col 0), since a run has no dispatch
-    /// site of its own.  `exit_code` is the process's exit status as the
-    /// host resolved it, not the error's own code; an escape (`exit`)
-    /// is not a failure, so it records no error.
-    pub fn run_root(
-        name: &str,
-        result: &Settled<Value>,
-        exit_code: i32,
-        fragment: AuditFragment,
-        start: i64,
-        principal: String,
-    ) -> Self {
-        let outcome = match result {
-            Ok(v) => NodeOutcome::of_value(exit_code, v.clone()),
-            Err(Break::Error(e)) => NodeOutcome {
-                status: exit_code,
-                ..NodeOutcome::of_error(e)
-            },
-            Err(Break::Escape(_)) => NodeOutcome::of_value(exit_code, Value::Unit),
-        };
-        Self::command(
-            name,
-            Vec::new(),
-            outcome.status,
-            CallSite {
-                script: name.to_string(),
-                line: 0,
-                col: 0,
-            },
-            AuditIo::default(),
-            outcome.error,
-            outcome.value,
-            fragment.into_nodes(),
-            AuditTime {
-                start,
-                end: epoch_us(),
-            },
-            principal,
-        )
-    }
-
-    /// Build a command node.  Every node in the tree — builtin, external, or
-    /// the run's own root from [`Self::run_root`] — comes through here; the
-    /// one struct literal elsewhere is `WireExecNode::into_runtime` in
-    /// `crate::child_eval`, rehydrating a node off the wire.
+    /// Build a command node.  Every node in the tree — builtin or external —
+    /// comes through here; the one struct literal elsewhere is
+    /// `WireExecNode::into_runtime` in `crate::child_eval`, rehydrating a
+    /// node off the wire.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn command(
         cmd: impl Into<String>,

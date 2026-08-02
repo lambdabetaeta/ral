@@ -470,8 +470,8 @@ fn guard_cleanup_does_not_swallow_exit() {
 /// cleanup and return the body's value.  This pins that the fix did not
 /// over-rotate: the ordinary finalizer path is unchanged.  The body's
 /// value `7` is read from the `guard`'s own return; that the cleanup ran
-/// is read from the audit tree, where the cleanup `echo` is recorded as a
-/// child of the `guard` scope node.
+/// is read from the audit tree, where the cleanup `echo` shows up as a
+/// real command node (`guard` is transparent — it owns no node itself).
 #[test]
 fn guard_normal_runs_cleanup_and_returns_body() {
     let mut shell = fresh_shell();
@@ -483,8 +483,8 @@ fn guard_normal_runs_cleanup_and_returns_body() {
     }
 
     // Re-run under `audit { … }` so the cleanup's `echo` is recorded;
-    // its presence — nested under the `guard` scope node — proves the
-    // finalizer ran on the ordinary (non-escape) path.
+    // its presence in the tree proves the finalizer ran on the ordinary
+    // (non-escape) path.
     let tree = top_level(&mut shell, "audit { guard { return 7 } { echo cleaned } }")
         .expect("`audit { guard … }` must succeed");
     assert!(
