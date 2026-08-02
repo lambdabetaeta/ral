@@ -62,29 +62,58 @@ impl LoadedPlugin {
     /// Parse a plugin manifest value into the plugin record plus the
     /// `(name, thunk)` pairs the caller installs into env.
     pub(super) fn parse(val: &Value) -> Result<(Self, Vec<(String, Value)>), Error> {
-        let map = as_map_ref(val);
-        if map.is_some_and(|m| m.get("capabilities").is_some()) {
+        let Value::Map(map) = val else {
+            return Err(load_err(format!(
+                "plugin manifest: expected Map, got {}",
+                val.type_name()
+            )));
+        };
+        if map.get("capabilities").is_some() {
             return Err(load_err(
                 "manifest 'capabilities:' is not enforced — plugins run with host \
                  authority. Remove the key; to confine a plugin invocation, wrap it \
                  in `grant { ... }`.",
             ));
         }
-        let name = map
-            .and_then(|m| m.get("name"))
-            .map(std::string::ToString::to_string)
-            .ok_or_else(|| load_err("manifest missing required 'name' field"))?;
-        let aliases = match map.and_then(|m| m.get("aliases")) {
+        let name = match map.get("name") {
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => {
+                return Err(load_err(format!(
+                    "manifest 'name': expected String, got {}",
+                    other.type_name()
+                )));
+            }
+            None => return Err(load_err("manifest missing required 'name' field")),
+        };
+        let aliases = match map.get("aliases") {
             Some(Value::Map(m)) => parse_aliases(m)?,
-            _ => Vec::new(),
+            Some(other) => {
+                return Err(load_err(format!(
+                    "manifest 'aliases': expected Map, got {}",
+                    other.type_name()
+                )));
+            }
+            None => Vec::new(),
         };
-        let hooks = match map.and_then(|m| m.get("hooks")) {
+        let hooks = match map.get("hooks") {
             Some(Value::Map(m)) => parse_hooks(m)?,
-            _ => HashMap::new(),
+            Some(other) => {
+                return Err(load_err(format!(
+                    "manifest 'hooks': expected Map, got {}",
+                    other.type_name()
+                )));
+            }
+            None => HashMap::new(),
         };
-        let keybindings = match map.and_then(|m| m.get("keybindings")) {
+        let keybindings = match map.get("keybindings") {
             Some(Value::List(l)) => parse_keybindings(l.iter().cloned())?,
-            _ => Vec::new(),
+            Some(other) => {
+                return Err(load_err(format!(
+                    "manifest 'keybindings': expected List, got {}",
+                    other.type_name()
+                )));
+            }
+            None => Vec::new(),
         };
         let plugin = Self {
             hooks,
@@ -96,13 +125,6 @@ impl LoadedPlugin {
             name,
         };
         Ok((plugin, aliases))
-    }
-}
-
-fn as_map_ref(val: &Value) -> Option<&Map> {
-    match val {
-        Value::Map(m) => Some(m),
-        _ => None,
     }
 }
 
@@ -138,10 +160,16 @@ where
                 entry.type_name()
             )));
         };
-        let key = map
-            .get("key")
-            .map(std::string::ToString::to_string)
-            .ok_or_else(|| load_err("keybinding entry missing 'key' field"))?;
+        let key = match map.get("key") {
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => {
+                return Err(load_err(format!(
+                    "keybinding 'key': expected String, got {}",
+                    other.type_name()
+                )));
+            }
+            None => return Err(load_err("keybinding entry missing 'key' field")),
+        };
         let chord = parse_key_notation(&key)
             .ok_or_else(|| load_err(format!("keybinding '{key}': unrecognised key notation")))?;
         if let Some(action) = reserved_action(chord) {
@@ -149,18 +177,28 @@ where
                 "keybinding '{key}' is reserved for {action} and cannot be bound by a plugin"
             )));
         }
-        let handler = map
-            .get("handler")
-            .cloned()
-            .ok_or_else(|| load_err("keybinding entry missing 'handler' field"))?;
-        let guard = map
-            .get("guard")
-            .map(std::string::ToString::to_string)
-            .map(|g| {
-                regex::Regex::new(&g)
-                    .map_err(|e| load_err(format!("keybinding '{key}': invalid guard regex: {e}")))
-            })
-            .transpose()?;
+        let handler = match map.get("handler") {
+            Some(h @ (Value::Lambda { .. } | Value::Block { .. })) => h.clone(),
+            Some(other) => {
+                return Err(load_err(format!(
+                    "keybinding '{key}': handler: expected a block, got {}",
+                    other.type_name()
+                )));
+            }
+            None => return Err(load_err("keybinding entry missing 'handler' field")),
+        };
+        let guard = match map.get("guard") {
+            Some(Value::String(g)) => Some(regex::Regex::new(g).map_err(|e| {
+                load_err(format!("keybinding '{key}': invalid guard regex: {e}"))
+            })?),
+            Some(other) => {
+                return Err(load_err(format!(
+                    "keybinding '{key}': guard: expected String, got {}",
+                    other.type_name()
+                )));
+            }
+            None => None,
+        };
         if guard.is_none()
             && let Some(action) = builtin_action(chord)
         {
@@ -169,19 +207,12 @@ where
                  press; add a 'guard:' regex so unmatched presses fall through"
             )));
         }
-        match handler {
-            Value::Lambda { .. } | Value::Block { .. } => out.push(KeyBinding {
-                key,
-                chord,
-                handler,
-                guard,
-            }),
-            _ => {
-                eprintln!(
-                    "load-plugin: warning: keybinding '{key}' handler is not a block, skipping"
-                );
-            }
-        }
+        out.push(KeyBinding {
+            key,
+            chord,
+            handler,
+            guard,
+        });
     }
     Ok(out)
 }
@@ -231,8 +262,7 @@ mod tests {
         assert!(aliases.is_empty());
     }
 
-    /// A trivial `Value::Block` handler, so keybinding entries survive the
-    /// not-a-block filter in [`parse_keybindings`].
+    /// A trivial `Value::Block` handler for well-formed keybinding entries.
     fn dummy_block() -> Value {
         Value::Block {
             body: std::sync::Arc::new(ral_core::source::Spanned::synthetic(
@@ -251,6 +281,78 @@ mod tests {
             fields.push(("guard".into(), Value::String(g.into())));
         }
         Value::map(fields)
+    }
+
+    /// Every manifest field with a declared type rejects a value of any
+    /// other type with an error naming the field and both types — nothing
+    /// stringifies or silently degrades to an empty collection.
+    #[test]
+    fn wrong_typed_fields_are_load_errors() {
+        for (field, value, expected) in [
+            ("name", Value::Int(42), "String"),
+            ("aliases", Value::Int(7), "Map"),
+            ("hooks", Value::Int(7), "Map"),
+            ("keybindings", Value::Int(7), "List"),
+        ] {
+            let manifest = Value::map(vec![
+                ("name".into(), Value::String("p".into())),
+                (field.into(), value),
+            ]);
+            let err = LoadedPlugin::parse(&manifest).expect_err("wrong type must be rejected");
+            assert!(
+                err.message.contains(field)
+                    && err.message.contains(expected)
+                    && err.message.contains("Int"),
+                "error should name the field and both types, got: {}",
+                err.message
+            );
+        }
+    }
+
+    /// A manifest that is not a Map at all is named as such, not reported
+    /// as a missing field.
+    #[test]
+    fn non_map_manifest_is_load_error() {
+        let err = LoadedPlugin::parse(&Value::Int(42)).expect_err("non-map must be rejected");
+        assert!(
+            err.message.contains("manifest") && err.message.contains("Int"),
+            "error should name the manifest shape, got: {}",
+            err.message
+        );
+    }
+
+    /// A non-block keybinding handler rejects the manifest — it is not
+    /// warned about and skipped.
+    #[test]
+    fn non_block_handler_is_load_error() {
+        let entry = Value::map(vec![
+            ("key".into(), Value::String("ctrl-t".into())),
+            ("handler".into(), Value::Int(3)),
+        ]);
+        let err = parse_keybindings(std::iter::once(entry))
+            .expect_err("non-block handler must be rejected");
+        assert!(
+            err.message.contains("ctrl-t") && err.message.contains("block"),
+            "error should name the key and expected type, got: {}",
+            err.message
+        );
+    }
+
+    /// A non-string guard is rejected, not stringified into a regex.
+    #[test]
+    fn non_string_guard_is_load_error() {
+        let entry = Value::map(vec![
+            ("key".into(), Value::String("ctrl-t".into())),
+            ("handler".into(), dummy_block()),
+            ("guard".into(), Value::Int(3)),
+        ]);
+        let err =
+            parse_keybindings(std::iter::once(entry)).expect_err("non-string guard rejected");
+        assert!(
+            err.message.contains("guard") && err.message.contains("Int"),
+            "error should name the guard and its type, got: {}",
+            err.message
+        );
     }
 
     /// A `guard:` regex compiles and rides along on the parsed binding.
