@@ -320,34 +320,77 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Merge a conditional's branches: the value type is shared, since every
-    /// branch must produce the same value, but the channel modes are only
-    /// *unioned* via [`Self::union_mode`], since only one branch runs.  A
-    /// non-`Return` branch falls back to strict computation-type unification.
-    fn merge_branches(&mut self, branches: Vec<CompTy>, why: &Reason) -> CompTy {
-        let mut iter = branches.into_iter();
-        let Some(mut acc) = iter.next() else {
+    /// Bytes-dominant fold of arms' final outputs: a node's capture mode, and
+    /// so the mode every arm's value is observed under.  Callers that observe
+    /// inherit `observed_value_ty`'s blind spot — an arm whose mode or value is
+    /// still an inference variable unifies raw instead of observed.
+    pub(super) fn joined_final_output(
+        &mut self,
+        outputs: impl IntoIterator<Item = PipeMode>,
+    ) -> PipeMode {
+        outputs
+            .into_iter()
+            .fold(PipeMode::None, |acc, out| self.join_byte_mode(acc, out))
+    }
+
+    /// Merge a conditional's or chain's arms.  Each arm's value is observed
+    /// under the arms' [joined final output](Self::joined_final_output), not
+    /// under its own, because `eval_bind_rhs` installs capture once for the
+    /// whole node and discriminates per-run; the observed values then unify.
+    /// Input is unioned via [`Self::union_mode`] since only one arm runs.  A
+    /// non-`Return` arm falls back to strict computation-type unification.
+    fn merge_branches(&mut self, arms: Vec<(&Comp, CompTy)>, why: &Reason) -> CompTy {
+        if arms.is_empty() {
             return CompTy::pure(self.ctx.unifier.fresh_ty());
-        };
-        for branch in iter {
-            acc = if let (CompTy::Return(sa, ta), CompTy::Return(sb, tb)) = (
-                self.ctx.unifier.resolve_comp_ty(&acc),
-                self.ctx.unifier.resolve_comp_ty(&branch),
-            ) {
-                self.ctx.unify_ty(&ta, &tb, why.clone());
-                CompTy::Return(
-                    PipeSpec {
-                        input: self.union_mode(sa.input, sb.input),
-                        output: self.union_mode(sa.output, sb.output),
-                    },
-                    ta,
-                )
-            } else {
-                self.ctx.unify_comp_ty(&acc, &branch, why.clone());
-                acc
-            };
         }
-        acc
+
+        let all_return = arms
+            .iter()
+            .all(|(_, cty)| matches!(self.ctx.unifier.resolve_comp_ty(cty), CompTy::Return(..)));
+
+        if !all_return {
+            let mut iter = arms.into_iter();
+            let (_, mut acc) = iter.next().unwrap();
+            for (_, branch) in iter {
+                self.ctx.unify_comp_ty(&acc, &branch, why.clone());
+                acc = branch;
+            }
+            return acc;
+        }
+
+        let mut input = None;
+        let mut outputs = Vec::with_capacity(arms.len());
+        let mut raw_tys = Vec::with_capacity(arms.len());
+        for (comp, cty) in &arms {
+            let CompTy::Return(spec, ty) = self.ctx.unifier.resolve_comp_ty(cty) else {
+                unreachable!("checked all_return above")
+            };
+            input = Some(match input {
+                None => spec.input,
+                Some(acc) => self.union_mode(acc, spec.input),
+            });
+            outputs.push(self.final_output_of_comp(comp, cty));
+            raw_tys.push(*ty);
+        }
+        let joined_output = self.joined_final_output(outputs);
+
+        let mut raw_iter = raw_tys.into_iter();
+        let observed_acc = {
+            let first = raw_iter.next().unwrap();
+            self.observed_value_ty(first, joined_output)
+        };
+        for raw in raw_iter {
+            let observed = self.observed_value_ty(raw, joined_output);
+            self.ctx.unify_ty(&observed_acc, &observed, why.clone());
+        }
+
+        CompTy::Return(
+            PipeSpec {
+                input: input.unwrap(),
+                output: joined_output,
+            },
+            Box::new(observed_acc),
+        )
     }
 
     /// Eventual return type, peering past `Fun` arrows as
@@ -851,7 +894,10 @@ impl Inferencer<'_> {
     /// The channel modes are unioned via [`Self::union_mode`] — `tmux a ?
     /// tmux b` emits bytes either way.
     fn infer_chain(&mut self, parts: &[Arc<Comp>]) -> CompTy {
-        let arms: Vec<CompTy> = parts.iter().map(|part| self.infer_comp(part)).collect();
+        let arms: Vec<(&Comp, CompTy)> = parts
+            .iter()
+            .map(|part| (part.as_ref(), self.infer_comp(part)))
+            .collect();
         self.merge_branches(arms, &Reason::ChainBranches)
     }
 
@@ -1447,12 +1493,15 @@ impl Inferencer<'_> {
             CompKind::If { then, else_, .. } => {
                 let then_out = self.final_output_of_comp(then, cty);
                 let else_out = self.final_output_of_comp(else_, cty);
-                self.join_byte_mode(then_out, else_out)
+                self.joined_final_output([then_out, else_out])
             }
-            CompKind::Chain(parts) => parts.iter().fold(PipeMode::None, |acc, part| {
-                let out = self.final_output_of_comp(part, cty);
-                self.join_byte_mode(acc, out)
-            }),
+            CompKind::Chain(parts) => {
+                let outs: Vec<PipeMode> = parts
+                    .iter()
+                    .map(|part| self.final_output_of_comp(part, cty))
+                    .collect();
+                self.joined_final_output(outs)
+            }
             CompKind::Scope(
                 ScopeOp::Within { body, .. }
                 | ScopeOp::Grant { body, .. }
@@ -1611,7 +1660,10 @@ impl Inferencer<'_> {
                 });
                 let then_cty = self.infer_comp(then);
                 let else_cty = self.infer_comp(else_);
-                self.merge_branches(vec![then_cty, else_cty], &Reason::IfBranches)
+                self.merge_branches(
+                    vec![(then.as_ref(), then_cty), (else_.as_ref(), else_cty)],
+                    &Reason::IfBranches,
+                )
             }
             CompKind::Case { scrutinee, table } => self.infer_case(scrutinee, table),
             CompKind::Scope(op) => match op {

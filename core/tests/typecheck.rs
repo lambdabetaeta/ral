@@ -1449,6 +1449,57 @@ fn chain_byte_arms_join_to_byte_output() {
     );
 }
 
+// ─── Observed-value arm join (if / `?` / try) ─────────────────────────────────
+//
+// One boundary judgment for arm joins: arms that all resolve to
+// `CompTy::Return` observe their raw value under the arms' joined final
+// output, then unify the observed values, instead of unifying raw values —
+// the static image of `eval_bind_rhs`'s per-run `Unit` capture switch.
+
+#[test]
+fn if_mixed_external_and_echo_arms_accepted() {
+    // `^cmd` (external, String) vs `echo` (raw Unit): both observe to
+    // String under the joined Bytes output, so they unify.
+    ok("if true { ^cmd } else { echo x }");
+}
+
+#[test]
+fn chain_mixed_external_and_echo_arms_accepted() {
+    ok("^cmd ? echo x");
+}
+
+#[test]
+fn if_empty_else_arm_still_accepted() {
+    // The empty else arm is pure `Unit`; `echo x` observes to String under
+    // the joined Bytes output; the empty arm's raw `Unit` also observes to
+    // String under that same joined output, so the arms unify.
+    ok("if true { echo x } else {}");
+}
+
+#[test]
+fn chain_return_int_then_echo_is_observed_mismatch() {
+    // `return 1` is a pure Int value, no bytes at all — the joined output
+    // stays `None`, so `return 1`'s Int is observed as itself, clashing with
+    // `echo x`'s observed String.
+    has_error("return 1 ? echo x", "couldn't match");
+}
+
+#[test]
+fn chain_return_string_then_return_int_is_static_mismatch() {
+    // The 27e84d3f two-stage repro: both arms are pure returns, so the
+    // joined output is `None` and each arm's raw type is its own observed
+    // value — String vs Int is a static clash, not a runtime surprise.
+    has_error("return hello ? return 1", "couldn't match");
+}
+
+#[test]
+fn try_relaxation_echo_body_unit_handler_accepted() {
+    // Previously rejected (observed String vs raw Unit): the body's `echo`
+    // and the handler's `return unit` now observe under their joined Bytes
+    // output, both landing on String.
+    ok("try { echo x } { |_| return unit }");
+}
+
 #[test]
 fn nested_binds_carry_no_scheme_while_spine_does() {
     // The spine `let g` carries a scheme; a `let inner` under the lambda

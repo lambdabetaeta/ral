@@ -170,7 +170,6 @@ impl Inferencer<'_> {
         let body_cty = self.infer_scope_body_passthrough(body);
         let (body_raw, body_in, body_out) = self.extract_return(&body_cty);
         let body_final_out = self.final_output_of_thunk_value(body, &body_cty);
-        let body_value = self.observed_value_ty(body_raw, body_final_out);
 
         // `try` yields the body's value or the handler's, so the two observed
         // types unify; the handler's own pipeline modes stay independent.
@@ -190,7 +189,12 @@ impl Inferencer<'_> {
 
         let (handler_raw, handler_in, handler_out) = self.extract_return(&handler_result);
         let handler_final_out = self.final_output_of_thunk_value(handler, &handler_result);
-        let handler_value = self.observed_value_ty(handler_raw, handler_final_out);
+
+        // Both arms observe under the node's joined final output, not each
+        // under its own — the capture mode installed once for the whole scope.
+        let joined_out = self.joined_final_output([body_final_out, handler_final_out]);
+        let body_value = self.observed_value_ty(body_raw, joined_out);
+        let handler_value = self.observed_value_ty(handler_raw, joined_out);
         self.ctx
             .unify_ty(&body_value, &handler_value, Reason::TryArms);
 

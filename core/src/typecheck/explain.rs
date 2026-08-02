@@ -384,12 +384,14 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         ),
         Reason::IfBranches => Some(
             "both branches of an `if` must produce the same type, \
-             because the whole expression has one type"
+             because the whole expression has one type, when observed; \
+             if one arm only writes a line, that line counts as the value at the boundary"
                 .to_string(),
         ),
         Reason::ChainBranches => Some(
             "every arm of a `?` chain must produce the same type, \
-             because the chain's value is whichever arm succeeds"
+             because the chain's value is whichever arm succeeds, when observed; \
+             if one arm only writes a line, that line counts as the value at the boundary"
                 .to_string(),
         ),
         Reason::TryArms => Some(

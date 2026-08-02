@@ -15,7 +15,7 @@ try { cat /nonexistent 2> /dev/null } { |_| echo 'caught' }
 return false ? return true
 
 # ? chain falls through a failing arm to the next
-cat /nonexistent 2> /dev/null ? ^echo 'recovered'
+cat /nonexistent 2> /dev/null ? echo 'recovered'
 
 # ? chain: when every arm fails, the final error propagates
 try { cat /nonexistent 2> /dev/null ? cat /also-missing 2> /dev/null } { |_| echo 'all arms failed' }

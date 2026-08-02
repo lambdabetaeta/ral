@@ -43,11 +43,11 @@ rm $cleanup_marker
 
 # Chained commands
 mkdir -p "$tmpdir/al-chain-test"
-    ? ^echo created
+    ? echo created
     ? ls "$tmpdir/al-chain-test" > "$tmpdir/discard"
-    ? ^echo verified
+    ? echo verified
     ? rm -r "$tmpdir/al-chain-test"
-    ? ^echo cleaned
+    ? echo cleaned
 # Expected: created, verified, cleaned
 
 # Functional pipeline

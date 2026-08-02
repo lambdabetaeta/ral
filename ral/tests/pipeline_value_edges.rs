@@ -638,3 +638,58 @@ fn guard_bound_value_is_the_bytes_body_observed_as_a_string() {
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "hi");
 }
+
+// ─── Observed-value arm join: mixed byte/value arms bind either way ─────────
+//
+// `if`/`?` accept a byte-emitting arm mixed with a raw-value arm because both
+// observe under the arms' joined output; whichever arm actually runs at
+// runtime binds the same String the checker predicted.
+
+#[test]
+fn if_mixed_arms_bind_the_external_arm_when_taken() {
+    let o = run_pipe("let v = if true { ^printf hi } else { echo bye }\necho $v");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "hi");
+}
+
+#[test]
+fn if_mixed_arms_bind_the_echo_arm_when_taken() {
+    let o = run_pipe("let v = if false { ^printf hi } else { echo bye }\necho $v");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "bye");
+}
+
+#[test]
+fn chain_mixed_arms_binds_the_succeeding_external_arm() {
+    let o = run_pipe("let v = ^printf hi ? echo bye\necho $v");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "hi");
+}
+
+#[test]
+fn chain_mixed_arms_falls_through_to_the_echo_arm() {
+    let o = run_pipe("let v = cat /nonexistent-ral-fixture 2> /dev/null ? echo bye\necho $v");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "bye");
+}
+
+#[test]
+fn if_echo_arm_with_empty_else_binds_empty_string_when_else_taken() {
+    let o = run_pipe("let v = if false { echo x } else {}\necho \"[$v]\"");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "[]");
+}
+
+#[test]
+fn try_relaxed_echo_body_binds_the_line_when_body_succeeds() {
+    let o = run_pipe("let v = try { echo hi } { |_| return unit }\necho $v");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "hi");
+}
+
+#[test]
+fn try_relaxed_echo_body_binds_empty_string_when_handler_taken() {
+    let o = run_pipe("let v = try { fail [status: 7] } { |_| return unit }\necho \"[$v]\"");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "[]");
+}
