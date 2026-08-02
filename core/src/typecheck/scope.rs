@@ -7,6 +7,10 @@
 //! would clash with any body that writes bytes (`try { echo x }`).  Unknown
 //! option keys are rejected at runtime — by `WithinScope::parse` and
 //! `decode_capability_map` — not by the schemas here.
+//!
+//! No rule here builds a `CompTy` directly: each states which arms run and
+//! when, and how the value is observed, and returns a [`ScopeSig`] for
+//! [`Inferencer::seal`] to compose into the scope's pipeline modes.
 
 use super::builtins::{FieldSchema, audit_record, try_error_record};
 use super::error::Reason;
@@ -15,6 +19,65 @@ use super::scheme::Scheme;
 use super::ty::{CompTy, PipeSpec, Ty};
 use super::unify::Unifier;
 use crate::ir::{Val, ValMapEntry};
+use crate::mode::PipeMode;
+
+/// How often a scope arm runs relative to its scope.
+enum ArmRuns {
+    Always,
+    OnFailure,
+}
+
+pub(super) struct ScopeArm {
+    runs: ArmRuns,
+    input: PipeMode,
+    output: PipeMode,
+}
+
+/// What a scope rule knows before its computation type exists: the arms the
+/// evaluator runs, each against the live streams, and the value the scope
+/// produces.  Only [`Inferencer::seal`] turns this into a `CompTy`.
+pub(super) struct ScopeSig {
+    arms: Vec<ScopeArm>,
+    value: Ty,
+}
+
+impl Inferencer<'_> {
+    /// Compose a scope's `PipeSpec` from its arms and seal `sig.value` into a
+    /// `CompTy::Return`.  An arm the evaluator applies inside
+    /// `with_scope`/`record_scope` runs against the scope's live streams —
+    /// capture is a tee, never a silencer — so every scope is
+    /// channel-transparent, and this is the only place permitted to build a
+    /// scope's computation type.
+    ///
+    /// Output is bytes-dominant: any arm that may emit bytes makes the scope
+    /// byte-emitting, via `join_byte_mode` folded over every arm's output.
+    /// Input follows suit only when every arm always runs, since they all
+    /// read the same shared stdin; once an arm is `OnFailure`, a clash
+    /// between it and an always-arm is not a contradiction but an unknown a
+    /// neighbouring stage can pin, so input folds via `union_mode` instead.
+    pub(super) fn seal(&mut self, sig: ScopeSig) -> CompTy {
+        let all_always = sig
+            .arms
+            .iter()
+            .all(|arm| matches!(arm.runs, ArmRuns::Always));
+
+        let mut arms = sig.arms.into_iter();
+        let first = arms.next().expect("a scope always has at least one arm");
+        let mut input = first.input;
+        let mut output = first.output;
+
+        for arm in arms {
+            output = self.join_byte_mode(output, arm.output);
+            input = if all_always {
+                self.join_byte_mode(input, arm.input)
+            } else {
+                self.union_mode(input, arm.input)
+            };
+        }
+
+        CompTy::Return(PipeSpec { input, output }, Box::new(sig.value))
+    }
+}
 
 impl Inferencer<'_> {
     /// Collect handler schemes from literal `handlers: [name: { … }]` entries;
@@ -67,24 +130,43 @@ impl Inferencer<'_> {
         bindings
     }
 
-    pub(super) fn infer_within(&mut self, opts: &Val, body: &Val) -> CompTy {
+    pub(super) fn infer_within(&mut self, opts: &Val, body: &Val) -> ScopeSig {
         let bindings = self.infer_within_opts(opts);
 
         self.env.push();
         for (name, scheme) in bindings {
             self.env.bind_handler(name, scheme, false);
         }
-        let result = self.infer_scope_body_passthrough(body);
+        let body_cty = self.infer_scope_body_passthrough(body);
         self.env.pop();
-        result
+
+        let (value, input, output) = self.extract_return(&body_cty);
+        ScopeSig {
+            arms: vec![ScopeArm {
+                runs: ArmRuns::Always,
+                input,
+                output,
+            }],
+            value,
+        }
     }
 
-    pub(super) fn infer_grant(&mut self, caps: &Val, body: &Val) -> CompTy {
+    pub(super) fn infer_grant(&mut self, caps: &Val, body: &Val) -> ScopeSig {
         self.infer_scope_opts(caps, "grant", grant_field_ty);
-        self.infer_scope_body_passthrough(body)
+        let body_cty = self.infer_scope_body_passthrough(body);
+
+        let (value, input, output) = self.extract_return(&body_cty);
+        ScopeSig {
+            arms: vec![ScopeArm {
+                runs: ArmRuns::Always,
+                input,
+                output,
+            }],
+            value,
+        }
     }
 
-    pub(super) fn infer_try(&mut self, body: &Val, handler: &Val) -> CompTy {
+    pub(super) fn infer_try(&mut self, body: &Val, handler: &Val) -> ScopeSig {
         let body_cty = self.infer_scope_body_passthrough(body);
         let (body_raw, body_in, body_out) = self.extract_return(&body_cty);
         let body_final_out = self.final_output_of_thunk_value(body, &body_cty);
@@ -112,25 +194,65 @@ impl Inferencer<'_> {
         self.ctx
             .unify_ty(&body_value, &handler_value, Reason::TryArms);
 
-        CompTy::Return(
-            PipeSpec {
-                input: self.union_mode(body_in, handler_in),
-                output: self.join_byte_output(body_out, handler_out),
-            },
-            Box::new(body_value),
-        )
+        ScopeSig {
+            arms: vec![
+                ScopeArm {
+                    runs: ArmRuns::Always,
+                    input: body_in,
+                    output: body_out,
+                },
+                ScopeArm {
+                    runs: ArmRuns::OnFailure,
+                    input: handler_in,
+                    output: handler_out,
+                },
+            ],
+            value: body_value,
+        }
     }
 
-    pub(super) fn infer_guard(&mut self, body: &Val, cleanup: &Val) -> CompTy {
-        let alpha = self.infer_thunk_body(body);
-        let _beta = self.infer_thunk_body(cleanup);
-        CompTy::pure(alpha)
+    pub(super) fn infer_guard(&mut self, body: &Val, cleanup: &Val) -> ScopeSig {
+        let body_cty = self.infer_scope_body_passthrough(body);
+        let (body_raw, body_in, body_out) = self.extract_return(&body_cty);
+        let body_final_out = self.final_output_of_thunk_value(body, &body_cty);
+        let body_value = self.observed_value_ty(body_raw, body_final_out);
+
+        let cleanup_cty = self.infer_scope_body_passthrough(cleanup);
+        let (_cleanup_value, cleanup_in, cleanup_out) = self.extract_return(&cleanup_cty);
+
+        ScopeSig {
+            arms: vec![
+                ScopeArm {
+                    runs: ArmRuns::Always,
+                    input: body_in,
+                    output: body_out,
+                },
+                ScopeArm {
+                    runs: ArmRuns::Always,
+                    input: cleanup_in,
+                    output: cleanup_out,
+                },
+            ],
+            value: body_value,
+        }
     }
 
-    pub(super) fn infer_audit(&mut self, body: &Val) -> CompTy {
-        let alpha = self.infer_thunk_body(body);
+    pub(super) fn infer_audit(&mut self, body: &Val) -> ScopeSig {
+        let body_cty = self.infer_scope_body_passthrough(body);
+        // The record's `value` field holds the body's raw result — the
+        // runtime stores it undecoded, the body's bytes going to the record's
+        // `stdout` field and the live stream instead — so no observation here.
+        let (alpha, input, output) = self.extract_return(&body_cty);
         let beta = self.ctx.unifier.fresh_ty();
-        CompTy::pure(audit_record(alpha, beta))
+
+        ScopeSig {
+            arms: vec![ScopeArm {
+                runs: ArmRuns::Always,
+                input,
+                output,
+            }],
+            value: audit_record(alpha, beta),
+        }
     }
 
     fn infer_scope_opts(&mut self, opts: &Val, form: &'static str, schema: FieldSchema) {
@@ -142,6 +264,8 @@ impl Inferencer<'_> {
         }
     }
 
+    /// Constrain `body` to `Thunk(F[μ₀,μ₁] α)` for a fresh `α` and fresh
+    /// pipeline modes, and return the `F[μ₀,μ₁] α`.
     fn infer_scope_body_passthrough(&mut self, body: &Val) -> CompTy {
         let alpha = self.ctx.unifier.fresh_ty();
         let body_cty = CompTy::Return(self.ctx.unifier.fresh_spec(), Box::new(alpha));
@@ -154,15 +278,6 @@ impl Inferencer<'_> {
         );
 
         body_cty
-    }
-
-    /// Constrain `val` to `Thunk(F[μ₀,μ₁] α)` for a fresh `α` and fresh
-    /// pipeline modes, and return `α`.
-    fn infer_thunk_body(&mut self, val: &Val) -> Ty {
-        match self.infer_scope_body_passthrough(val) {
-            CompTy::Return(_, alpha) => *alpha,
-            _ => unreachable!("infer_scope_body_passthrough always returns CompTy::Return"),
-        }
     }
 }
 

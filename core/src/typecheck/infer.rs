@@ -305,7 +305,11 @@ impl Inferencer<'_> {
         }
     }
 
-    pub(super) fn join_byte_output(&mut self, a: PipeMode, b: PipeMode) -> PipeMode {
+    /// Bytes-dominant join: `Bytes` if either end may emit bytes, `None` if
+    /// both are silent, else [`Self::union_mode`].  Direction-agnostic — used
+    /// for both input and output ends, wherever any one arm's bytes should
+    /// dominate the whole.
+    pub(super) fn join_byte_mode(&mut self, a: PipeMode, b: PipeMode) -> PipeMode {
         match (
             self.ctx.unifier.resolve_mode(&a),
             self.ctx.unifier.resolve_mode(&b),
@@ -1460,11 +1464,11 @@ impl Inferencer<'_> {
             CompKind::If { then, else_, .. } => {
                 let then_out = self.final_output_of_comp(then, cty);
                 let else_out = self.final_output_of_comp(else_, cty);
-                self.join_byte_output(then_out, else_out)
+                self.join_byte_mode(then_out, else_out)
             }
             CompKind::Chain(parts) => parts.iter().fold(PipeMode::None, |acc, part| {
                 let out = self.final_output_of_comp(part, cty);
-                self.join_byte_output(acc, out)
+                self.join_byte_mode(acc, out)
             }),
             CompKind::Scope(
                 ScopeOp::Within { body, .. }
@@ -1474,8 +1478,18 @@ impl Inferencer<'_> {
             CompKind::Scope(ScopeOp::Try { body, handler }) => {
                 let body_out = self.final_output_of_thunk_value(body, cty);
                 let handler_out = self.final_output_of_thunk_value(handler, cty);
-                self.join_byte_output(body_out, handler_out)
+                self.join_byte_mode(body_out, handler_out)
             }
+            // An audit's value is the record it synthesizes, which no byte
+            // stream feeds: the body's bytes go to the record's `stdout` field
+            // and the live stream, never toward the value.
+            CompKind::Scope(ScopeOp::Audit { .. }) => PipeMode::None,
+            // A pipeline's value is its last stage's, so the decode candidate
+            // is that stage's own final output, not the wire mode the whole
+            // pipeline presents downstream.
+            CompKind::Pipeline { stages, .. } => stages
+                .last()
+                .map_or(PipeMode::None, |last| self.final_output_of_comp(last, cty)),
             _ => self.comp_output_mode(cty),
         };
         self.ctx
@@ -1618,11 +1632,26 @@ impl Inferencer<'_> {
             }
             CompKind::Case { scrutinee, table } => self.infer_case(scrutinee, table),
             CompKind::Scope(op) => match op {
-                ScopeOp::Within { opts, body } => self.infer_within(opts, body),
-                ScopeOp::Grant { caps, body } => self.infer_grant(caps, body),
-                ScopeOp::Try { body, handler } => self.infer_try(body, handler),
-                ScopeOp::Guard { body, cleanup } => self.infer_guard(body, cleanup),
-                ScopeOp::Audit { body } => self.infer_audit(body),
+                ScopeOp::Within { opts, body } => {
+                    let sig = self.infer_within(opts, body);
+                    self.seal(sig)
+                }
+                ScopeOp::Grant { caps, body } => {
+                    let sig = self.infer_grant(caps, body);
+                    self.seal(sig)
+                }
+                ScopeOp::Try { body, handler } => {
+                    let sig = self.infer_try(body, handler);
+                    self.seal(sig)
+                }
+                ScopeOp::Guard { body, cleanup } => {
+                    let sig = self.infer_guard(body, cleanup);
+                    self.seal(sig)
+                }
+                ScopeOp::Audit { body } => {
+                    let sig = self.infer_audit(body);
+                    self.seal(sig)
+                }
                 // A redirect installs fds for the body's duration without
                 // touching its type.  Its body is an `Arc<Comp>`, not a
                 // thunk-shaped `Val` like the other scope ops, so infer it
