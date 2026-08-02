@@ -1,13 +1,10 @@
-//! The `with_*` scope guards, the alias-frame lifecycle, and the
-//! audit-subtree combinators.
+//! The `with_*` scope guards and the alias-frame lifecycle.
 //!
 //! ral evaluation never unwinds for control flow, so each guard here is an
 //! inline save-modify-restore around the body rather than an RAII type.
 
 use super::Shell;
-use crate::types::{
-    AuditFragment, Binding, Capabilities, ExecNode, HandlerEntry, HandlerRole, Map, Settled, Value,
-};
+use crate::types::{Binding, Capabilities, ExecNode, HandlerEntry, HandlerRole, Map, Settled, Value};
 
 impl Shell {
     /// Run `f` with `capabilities` pushed for its dynamic extent.  The single
@@ -284,18 +281,5 @@ impl Shell {
     /// catch-all, and a base frame outranks a catch-all too.
     pub fn lookup_handler(&self, name: &str) -> Option<crate::types::HandlerLookup> {
         self.mobile.context.handlers.lookup(name)
-    }
-
-    /// Run `f` in a fresh audit subtree regardless of the parent's state, for
-    /// `try` (to find the failing child) and `audit` (to return the whole
-    /// subtree) — the only two forms that force collection on.
-    pub fn audit_forced_child<F, R>(&mut self, f: F) -> (AuditFragment, R)
-    where
-        F: FnOnce(&mut Self) -> R,
-    {
-        let parent = self.local.audit.enter_forced_child();
-        let result = f(self);
-        let fragment = self.local.audit.leave_child(parent);
-        (fragment, result)
     }
 }

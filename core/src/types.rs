@@ -61,7 +61,7 @@ pub use shell::cwd::Cwd;
 mod audit;
 pub(crate) use audit::NodeOutcome;
 pub use audit::{
-    Audit, AuditFragment, AuditIo, AuditTime, AuditTrail, CapturePolicy, ExecNode, ExecNodeKind,
+    Audit, AuditFragment, AuditIo, AuditTime, CapturePolicy, ExecNode, ExecNodeKind,
     STDERR_CAP_BYTES, epoch_us, tree_value,
 };
 

@@ -44,13 +44,13 @@ pub enum CapturePolicy {
 
 /// Backing storage for the in-flight tree; reachable only through [`Audit`].
 #[derive(Default, Debug)]
-pub struct AuditTrail {
+struct AuditTrail {
     nodes: Vec<ExecNode>,
 }
 
-/// Nodes detached from a trail — a sandbox child, a pipeline helper, or a
-/// closed lexical scope hands one up, and the receiving side merges it into
-/// the surrounding scope.
+/// Nodes detached from a trail — a sandboxed child or a pipeline helper
+/// hands one up across a process boundary, and the receiving side merges it
+/// into the surrounding trail.
 ///
 /// Same shape as [`AuditTrail`], but in transit.
 #[derive(Default, Debug, Clone)]
@@ -142,17 +142,16 @@ impl Audit {
         }
     }
 
-    /// Install a child trail whatever the parent's state — `try` needs the
-    /// subtree to name the failing command, `audit` to return it.
-    pub fn enter_forced_child(&mut self) -> Option<AuditTrail> {
-        self.trail.replace(AuditTrail::default())
+    /// Open a trail if none is open yet, returning its current length as a mark.
+    pub fn force_open(&mut self) -> usize {
+        self.trail.get_or_insert_default().nodes.len()
     }
 
-    /// Restore `parent` and hand back what the child collected.
-    pub fn leave_child(&mut self, parent: Option<AuditTrail>) -> AuditFragment {
-        let child = self.trail.take().unwrap_or_default();
-        self.trail = parent;
-        AuditFragment::from_nodes(child.nodes)
+    /// The nodes pushed since `mark`.
+    pub fn since(&self, mark: usize) -> Vec<ExecNode> {
+        self.trail
+            .as_ref()
+            .map_or_else(Vec::new, |t| t.nodes[mark..].to_vec())
     }
 
     /// Drain the trail, leaving it open but empty — how a sandbox or pipeline

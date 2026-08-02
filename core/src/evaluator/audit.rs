@@ -3,23 +3,20 @@
 //! `record_capability`).
 //!
 //! `within`, `grant`, `guard`, `try`, and `audit` are all collection
-//! boundaries, not tree nodes: none of them constructs an `ExecNode` for
-//! itself.  `try` and `audit` still need to force a fresh subtree regardless
-//! of whether audit is already on — `try` to find the command that failed,
-//! `audit` to have something to return — but once that subtree is read,
-//! [`forced_subtree`] splices its nodes straight into the surrounding trail
-//! rather than wrapping them.
+//! boundaries, not tree nodes: none of them constructs an `ExecNode`.
+//! `try`/`audit` force collection on regardless of the surrounding state via
+//! [`forced_subtree`], which never isolates their body's nodes from the
+//! trail — it just marks where the trail was and reads back what got added.
 //!
-//! `frame_call` brackets every real command node in the `start` /
-//! `finish_command` lifecycle.  With `shell.local.audit.active()` false the
-//! recorders are no-ops, so the dispatcher can call them unconditionally;
-//! [`forced_subtree`] is the exception, since `try` and `audit` force
-//! collection whether or not audit is on.
+//! With `shell.local.audit.active()` false the recorders are no-ops, so the
+//! dispatcher can call them unconditionally; [`forced_subtree`] is the
+//! exception, since `try` and `audit` force collection whether or not audit
+//! is on.
 
 use crate::types::{
-    AuditFragment, AuditIo, AuditTime, BodyResult, Break, BuiltinEntry, CallSite, CapturePolicy,
-    Control, Escape, ExecNode, Map, Mooring, NodeOutcome, Raw, STDERR_CAP_BYTES, Settled, Shell,
-    Value, epoch_us, split,
+    AuditIo, AuditTime, BodyResult, Break, BuiltinEntry, CallSite, CapturePolicy, Control, Escape,
+    ExecNode, Map, Mooring, NodeOutcome, Raw, STDERR_CAP_BYTES, Settled, Shell, Value, epoch_us,
+    split,
 };
 
 /// Proof that a native body is running inside [`frame_call`]'s dynamic
@@ -177,28 +174,21 @@ pub(crate) fn record_capability(shell: &mut Shell, resource: &str, decision: &st
     shell.local.audit.push(node);
 }
 
-/// Force a fresh audit subtree for `body`'s dynamic extent regardless of
-/// whether one was already collecting, then splice whatever it collected
-/// back into the surrounding trail: `try` and `audit` are collection
-/// boundaries, not tree nodes, so neither wraps what its body produced.
-///
-/// `try` reads the returned nodes to name the command that failed (§10.1);
-/// `audit` renders them into the record it returns (§10.3).  Either way they
-/// are also merged into whatever trail was already open, so a `try`/`audit`
-/// nested inside an outer `audit` still surfaces its real commands there.
-/// `capture` is installed for the body and restored on return; it is the
-/// policy the children observe as they are recorded.
+/// Force collection on for `body` and return the nodes it produced; used by
+/// `try` (to name the failing command) and `audit` (to return the subtree).
+/// Nothing is moved out of the trail, so the nodes are already flat among
+/// whatever the surrounding trail collects — no wrapping, no merge-back.
 pub(crate) fn forced_subtree(
     shell: &mut Shell,
     capture: CapturePolicy,
     body: impl FnOnce(&mut Shell) -> Settled<Value>,
 ) -> Result<(BodyResult, Vec<ExecNode>), Escape> {
-    let (fragment, settled) =
-        with_capture_policy(shell, capture, |shell| shell.audit_forced_child(body));
+    let (mark, settled) = with_capture_policy(shell, capture, |shell| {
+        let mark = shell.local.audit.force_open();
+        (mark, body(shell))
+    });
     let body_result = split(settled)?;
-    let nodes = fragment.into_nodes();
-    shell.local.audit.merge(AuditFragment::from_nodes(nodes.clone()));
-    Ok((body_result, nodes))
+    Ok((body_result, shell.local.audit.since(mark)))
 }
 
 /// Install `policy` for `f`, restoring the previous one after.  Capture is
