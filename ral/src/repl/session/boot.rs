@@ -250,8 +250,12 @@ pub(super) fn setup_terminal(shell: &mut Shell) {
 /// RC: `$XDG_CONFIG_HOME/ral/rc` or `~/.ralrc` (created from a default
 /// skeleton if neither exists).  Each file is parsed as ral source and
 /// its return value is fed to [`apply_rc_config`](super::super::config::apply_rc_config).
+///
+/// `no_rc` (`--norc`/`--noprofile`) suppresses every startup file — the
+/// login profiles as well as the RC file — so a `-l --norc` session boots
+/// from a clean slate.
 pub(super) fn load_profiles(is_login: bool, no_rc: bool, ctx: &mut RcCtx<'_>) {
-    if is_login {
+    if is_login && !no_rc {
         let system_profile = "/etc/ral/profile".to_string();
         let user_profile = ral_core::path::config::home_dot(".ral_profile")
             .map(|p| p.to_string_lossy().into_owned());
