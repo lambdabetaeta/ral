@@ -152,15 +152,27 @@ let retry = { |n body|
 ## whose await record's `value` field is unwrapped into the result
 ## list (stdout/stderr are captured in the per-handle buffers, as for
 ## any `spawn`).
+##
+## Fail-fast: the first block failure cancels every still-running
+## sibling before re-raising, so no worker outlives the call — a
+## detached remainder grinding on after the caller saw the failure is
+## a shell-job semantics `par` refuses to have.  Completed-but-unread
+## siblings are discarded with the rest; exactly the first observed
+## error surfaces, intact.
 let par = { |f items jobs|
     let limit = if $[$jobs <= 0] { return !{length $items} } else { return $jobs }
+
+    let _par_abort = { |handles e|
+        each { |h| cancel $h } $handles
+        fail $e
+    }
 
     let _par_drain = { |handles acc|
         if !{is-empty $handles} {
             reverse $acc
         } else {
             let [h, ...hs] = $handles
-            let r = await $h
+            let r = try { await $h } { |e| _par_abort $hs $e }
             _par_drain $hs [$r[value], ...$acc]
         }
     }
@@ -176,7 +188,7 @@ let par = { |f items jobs|
                 _par_go $xs [...$running, $h] $acc
             } else {
                 let [h, ...hs] = $running
-                let r = await $h
+                let r = try { await $h } { |e| _par_abort $hs $e }
                 _par_go $rest $hs [...$acc, $r[value]]
             }
         }
