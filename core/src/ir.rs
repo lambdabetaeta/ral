@@ -451,9 +451,10 @@ pub enum CompKind {
         else_: Arc<Comp>,
     },
     /// Sum eliminator: `table` is a tag-keyed record of thunks, the matching
-    /// one forced on the scrutinee's payload.  The checker proves coverage
-    /// only for a literal table; an opaque one can still miss at runtime,
-    /// which `evaluator::case` reports as a checker bug.
+    /// one forced on the scrutinee's payload.  Literal handler tables are
+    /// checked for exhaustiveness; an opaque table may still miss at
+    /// runtime, which `evaluator::case` reports as an ordinary
+    /// missing-handler error.
     Case {
         scrutinee: Spanned<Val>,
         table: Spanned<Val>,
