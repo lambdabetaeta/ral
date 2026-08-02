@@ -437,7 +437,10 @@ mod tests {
         );
         let config = ral_core::evaluator::evaluate(&comp, &Mooring::adrift(), &mut shell).unwrap();
         let Value::Map(pairs) = config else {
-            panic!("test rc source must return a map; got {}", config.type_name());
+            panic!(
+                "test rc source must return a map; got {}",
+                config.type_name()
+            );
         };
         let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
         let (settings, _) = apply_rc_config(pairs, &mut shell, &runtime);

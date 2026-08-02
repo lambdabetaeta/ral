@@ -455,8 +455,7 @@ fn evaluate_startup_file(path: &str, shell: &mut Shell) -> Result<Option<Value>,
     // the file defines outlives this boot, and its spans have to keep naming
     // the file for the whole session.
     let file = shell.sources().next_id();
-    let comp = match ral_core::compile_and_typecheck(&src, shell.session_schemes(), file, path)
-    {
+    let comp = match ral_core::compile_and_typecheck(&src, shell.session_schemes(), file, path) {
         ral_core::CompileOutcome::Compiled(annotated) => std::sync::Arc::new(annotated),
         ral_core::CompileOutcome::Parse(e) => return Err(format!("{path}: {e}")),
         ral_core::CompileOutcome::Types(errs) => {
@@ -533,7 +532,10 @@ mod tests {
         let (_dir, path) = startup_file("return [edit_mode: 'vi']\n");
         let err = source_profile_inner(&path, &mut booted_shell()).unwrap_err();
         assert!(err.contains("profile must return unit; got Map"), "{err}");
-        assert!(err.contains("configuration belongs in the rc file"), "{err}");
+        assert!(
+            err.contains("configuration belongs in the rc file"),
+            "{err}"
+        );
     }
 
     /// An rc file returning `unit` is rejected — the error names the rc

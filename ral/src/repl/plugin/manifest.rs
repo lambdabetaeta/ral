@@ -206,18 +206,19 @@ where
             }
             None => return Err(load_err("keybinding entry missing 'handler' field")),
         };
-        let guard = match map.get("guard") {
-            Some(Value::String(g)) => Some(regex::Regex::new(g).map_err(|e| {
-                load_err(format!("keybinding '{key}': invalid guard regex: {e}"))
-            })?),
-            Some(other) => {
-                return Err(load_err(format!(
-                    "keybinding '{key}': guard: expected String, got {}",
-                    other.type_name()
-                )));
-            }
-            None => None,
-        };
+        let guard =
+            match map.get("guard") {
+                Some(Value::String(g)) => Some(regex::Regex::new(g).map_err(|e| {
+                    load_err(format!("keybinding '{key}': invalid guard regex: {e}"))
+                })?),
+                Some(other) => {
+                    return Err(load_err(format!(
+                        "keybinding '{key}': guard: expected String, got {}",
+                        other.type_name()
+                    )));
+                }
+                None => None,
+            };
         if guard.is_none()
             && let Some(action) = builtin_action(chord)
         {
@@ -361,8 +362,7 @@ mod tests {
             ("handler".into(), dummy_block()),
             ("guard".into(), Value::Int(3)),
         ]);
-        let err =
-            parse_keybindings(std::iter::once(entry)).expect_err("non-string guard rejected");
+        let err = parse_keybindings(std::iter::once(entry)).expect_err("non-string guard rejected");
         assert!(
             err.message.contains("guard") && err.message.contains("Int"),
             "error should name the guard and its type, got: {}",

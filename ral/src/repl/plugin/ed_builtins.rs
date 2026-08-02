@@ -116,7 +116,11 @@ pub fn builtin_ed_keymap(_args: &[Value], _mooring: &Mooring, shell: &mut Shell)
 }
 
 /// `_ed-lbuffer` → `Str` — text to the left of the cursor.
-pub fn builtin_ed_lbuffer(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn builtin_ed_lbuffer(
+    _args: &[Value],
+    _mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     require_interactive("_ed-lbuffer", shell)?;
     shell.check_editor_read("lbuffer")?;
     let pc = ctx(shell)?;
@@ -487,8 +491,7 @@ pub fn builtin_ed_clipboard(
 
     use base64::Engine;
     use std::io::Write;
-    let payload = base64::engine::general_purpose::STANDARD
-        .encode(arg0_str(args)?.as_bytes());
+    let payload = base64::engine::general_purpose::STANDARD.encode(arg0_str(args)?.as_bytes());
     let sequence = ral_core::ansi::osc52_copy(&payload);
     let _ = std::io::stdout().write_all(sequence.as_bytes());
     let _ = std::io::stdout().flush();
@@ -709,113 +712,113 @@ fn scheme_state(u: &mut Unifier) -> Scheme {
 // entry carries `BuiltinEntry`'s interior-mutable arity cache.
 static ED_BUILTINS_ARR: [BuiltinEntry; 18] = [
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-get"),
-    BuiltinTypeRule::Scheme(scheme_ed_get),
-    "_ed-get  — return editor state record [text, cursor, keymap].",
-    BuiltinBody::Static(builtin_ed_get),
-),
+        Cow::Borrowed("_ed-get"),
+        BuiltinTypeRule::Scheme(scheme_ed_get),
+        "_ed-get  — return editor state record [text, cursor, keymap].",
+        BuiltinBody::Static(builtin_ed_get),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-text"),
-    BuiltinTypeRule::Scheme(scheme_string_thunk),
-    "_ed-text  — return current buffer text.",
-    BuiltinBody::Static(builtin_ed_text),
-),
+        Cow::Borrowed("_ed-text"),
+        BuiltinTypeRule::Scheme(scheme_string_thunk),
+        "_ed-text  — return current buffer text.",
+        BuiltinBody::Static(builtin_ed_text),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-cursor"),
-    BuiltinTypeRule::Scheme(scheme_int_thunk),
-    "_ed-cursor  — return current cursor offset (chars).",
-    BuiltinBody::Static(builtin_ed_cursor),
-),
+        Cow::Borrowed("_ed-cursor"),
+        BuiltinTypeRule::Scheme(scheme_int_thunk),
+        "_ed-cursor  — return current cursor offset (chars).",
+        BuiltinBody::Static(builtin_ed_cursor),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-keymap"),
-    BuiltinTypeRule::Scheme(scheme_string_thunk),
-    "_ed-keymap  — return current keymap name.",
-    BuiltinBody::Static(builtin_ed_keymap),
-),
+        Cow::Borrowed("_ed-keymap"),
+        BuiltinTypeRule::Scheme(scheme_string_thunk),
+        "_ed-keymap  — return current keymap name.",
+        BuiltinBody::Static(builtin_ed_keymap),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-lbuffer"),
-    BuiltinTypeRule::Scheme(scheme_string_thunk),
-    "_ed-lbuffer  — return text to the left of the cursor.",
-    BuiltinBody::Static(builtin_ed_lbuffer),
-),
+        Cow::Borrowed("_ed-lbuffer"),
+        BuiltinTypeRule::Scheme(scheme_string_thunk),
+        "_ed-lbuffer  — return text to the left of the cursor.",
+        BuiltinBody::Static(builtin_ed_lbuffer),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-set"),
-    BuiltinTypeRule::Scheme(scheme_ed_set),
-    "_ed-set <map>  — partial write of editor state (text and/or cursor); unknown fields ignored.",
-    BuiltinBody::Static(builtin_ed_set),
-),
+        Cow::Borrowed("_ed-set"),
+        BuiltinTypeRule::Scheme(scheme_ed_set),
+        "_ed-set <map>  — partial write of editor state (text and/or cursor); unknown fields ignored.",
+        BuiltinBody::Static(builtin_ed_set),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-set-lbuffer"),
-    BuiltinTypeRule::Scheme(scheme_string_to_unit),
-    "_ed-set-lbuffer <text>  — replace text left of cursor; right side preserved.",
-    BuiltinBody::Static(builtin_ed_set_lbuffer),
-),
+        Cow::Borrowed("_ed-set-lbuffer"),
+        BuiltinTypeRule::Scheme(scheme_string_to_unit),
+        "_ed-set-lbuffer <text>  — replace text left of cursor; right side preserved.",
+        BuiltinBody::Static(builtin_ed_set_lbuffer),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-insert"),
-    BuiltinTypeRule::Scheme(scheme_string_to_unit),
-    "_ed-insert <text>  — insert text at cursor; cursor advances past insertion.",
-    BuiltinBody::Static(builtin_ed_insert),
-),
+        Cow::Borrowed("_ed-insert"),
+        BuiltinTypeRule::Scheme(scheme_string_to_unit),
+        "_ed-insert <text>  — insert text at cursor; cursor advances past insertion.",
+        BuiltinBody::Static(builtin_ed_insert),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-push"),
-    BuiltinTypeRule::Scheme(scheme_unit_thunk),
-    "_ed-push  — save buffer to stack, clear.",
-    BuiltinBody::Static(builtin_ed_push),
-),
+        Cow::Borrowed("_ed-push"),
+        BuiltinTypeRule::Scheme(scheme_unit_thunk),
+        "_ed-push  — save buffer to stack, clear.",
+        BuiltinBody::Static(builtin_ed_push),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-accept"),
-    BuiltinTypeRule::Scheme(scheme_unit_thunk),
-    "_ed-accept  — mark buffer for immediate execution.",
-    BuiltinBody::Static(builtin_ed_accept),
-),
+        Cow::Borrowed("_ed-accept"),
+        BuiltinTypeRule::Scheme(scheme_unit_thunk),
+        "_ed-accept  — mark buffer for immediate execution.",
+        BuiltinBody::Static(builtin_ed_accept),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-tui"),
-    BuiltinTypeRule::Scheme(scheme_tui),
-    "_ed-tui <thunk>  — suspend editor, run thunk, return [output: Str, status: Int]; never raises on body status.",
-    BuiltinBody::Static(builtin_ed_tui),
-),
+        Cow::Borrowed("_ed-tui"),
+        BuiltinTypeRule::Scheme(scheme_tui),
+        "_ed-tui <thunk>  — suspend editor, run thunk, return [output: Str, status: Int]; never raises on body status.",
+        BuiltinBody::Static(builtin_ed_tui),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-history"),
-    BuiltinTypeRule::Scheme(scheme_history),
-    "_ed-history <prefix> <limit>  — prefix search over history; limit=0 for unbounded.",
-    BuiltinBody::Static(builtin_ed_history),
-),
+        Cow::Borrowed("_ed-history"),
+        BuiltinTypeRule::Scheme(scheme_history),
+        "_ed-history <prefix> <limit>  — prefix search over history; limit=0 for unbounded.",
+        BuiltinBody::Static(builtin_ed_history),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-parse"),
-    BuiltinTypeRule::Scheme(scheme_parse),
-    "_ed-parse  — tokenize buffer at cursor; returns [words, current, offset].",
-    BuiltinBody::Static(builtin_ed_parse),
-),
+        Cow::Borrowed("_ed-parse"),
+        BuiltinTypeRule::Scheme(scheme_parse),
+        "_ed-parse  — tokenize buffer at cursor; returns [words, current, offset].",
+        BuiltinBody::Static(builtin_ed_parse),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-ghost"),
-    BuiltinTypeRule::Scheme(scheme_string_to_unit),
-    "_ed-ghost <text>  — set ghost text (empty string clears).",
-    BuiltinBody::Static(builtin_ed_ghost),
-),
+        Cow::Borrowed("_ed-ghost"),
+        BuiltinTypeRule::Scheme(scheme_string_to_unit),
+        "_ed-ghost <text>  — set ghost text (empty string clears).",
+        BuiltinBody::Static(builtin_ed_ghost),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-highlight"),
-    BuiltinTypeRule::Scheme(scheme_highlight),
-    "_ed-highlight <spans>  — set highlight spans (empty list clears).",
-    BuiltinBody::Static(builtin_ed_highlight),
-),
+        Cow::Borrowed("_ed-highlight"),
+        BuiltinTypeRule::Scheme(scheme_highlight),
+        "_ed-highlight <spans>  — set highlight spans (empty list clears).",
+        BuiltinBody::Static(builtin_ed_highlight),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-clipboard"),
-    BuiltinTypeRule::Scheme(scheme_string_to_bool),
-    "_ed-clipboard <text>  — OSC 52 system-clipboard write; returns Bool (true on emit, false when host terminal can't).",
-    BuiltinBody::Static(builtin_ed_clipboard),
-),
+        Cow::Borrowed("_ed-clipboard"),
+        BuiltinTypeRule::Scheme(scheme_string_to_bool),
+        "_ed-clipboard <text>  — OSC 52 system-clipboard write; returns Bool (true on emit, false when host terminal can't).",
+        BuiltinBody::Static(builtin_ed_clipboard),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-hyperlink"),
-    BuiltinTypeRule::Scheme(scheme_string_string_to_string),
-    "_ed-hyperlink <uri> <text>  — wrap text in OSC 8 hyperlink; returns plain text when terminal can't render hyperlinks.",
-    BuiltinBody::Static(builtin_ed_hyperlink),
-),
+        Cow::Borrowed("_ed-hyperlink"),
+        BuiltinTypeRule::Scheme(scheme_string_string_to_string),
+        "_ed-hyperlink <uri> <text>  — wrap text in OSC 8 hyperlink; returns plain text when terminal can't render hyperlinks.",
+        BuiltinBody::Static(builtin_ed_hyperlink),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("_ed-state"),
-    BuiltinTypeRule::Scheme(scheme_state),
-    "_ed-state <default> <updater>  — read-modify-write the plugin's persistent cell.",
-    BuiltinBody::Static(builtin_ed_state),
-),
+        Cow::Borrowed("_ed-state"),
+        BuiltinTypeRule::Scheme(scheme_state),
+        "_ed-state <default> <updater>  — read-modify-write the plugin's persistent cell.",
+        BuiltinBody::Static(builtin_ed_state),
+    ),
 ];
 
 /// Builtins installed into the REPL's own shell at startup
@@ -824,8 +827,8 @@ pub static ED_BUILTINS: &[BuiltinEntry] = &ED_BUILTINS_ARR;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::editor::{EditorState, PluginInputs, PluginOutputs};
+    use super::*;
 
     /// Every `_ed-*` entry must carry all static facets directly.
     #[test]
