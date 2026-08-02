@@ -260,9 +260,7 @@ fn float_crosses_a_process_staged_value_edge_bit_exactly() {
     // byte-emitting stage — which makes the pipeline `ProcessStaged`, so
     // the Float is reified into a `SerialValue::Float` and JSON-framed
     // between helpers — reproduces it digit for digit.
-    let o = run_pipe(
-        "{ return $[0.1 + 0.2] } | { |x| return $x } | { |y| echo $y }",
-    );
+    let o = run_pipe("{ return $[0.1 + 0.2] } | { |x| return $x } | { |y| echo $y }");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "0.30000000000000004");
 }
@@ -559,7 +557,9 @@ fn echo_zero_args_emits_one_newline() {
 fn stacked_echo_handler_forwards_to_base_frame() {
     // The stacked frame intercepts the bare head; its own `echo` calls reach
     // the base frame under self-masking instead of recursing.
-    let o = run_pipe("within [handlers: [echo: { |args| echo intercepted; echo ...$args }]] { echo original }");
+    let o = run_pipe(
+        "within [handlers: [echo: { |args| echo intercepted; echo ...$args }]] { echo original }",
+    );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout, "intercepted\noriginal\n");
 }

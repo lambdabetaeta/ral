@@ -124,12 +124,12 @@ pub(crate) fn teardown_notice(workers: &[WorkerEntry]) -> Option<String> {
 
 fn build_jobs(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
     BuiltinEntry::new(
-    Cow::Borrowed("jobs"),
-    BuiltinTypeRule::Sig(sig::TERMINAL_CONTROL),
-    "jobs  — list active background and stopped jobs: pgid groups, and this shell's \
+        Cow::Borrowed("jobs"),
+        BuiltinTypeRule::Sig(sig::TERMINAL_CONTROL),
+        "jobs  — list active background and stopped jobs: pgid groups, and this shell's \
               detached worker handles (spawn/watch/&) marked [wN], done once settled until \
               observed.",
-    BuiltinBody::Captured(Arc::new(move |_args, _mooring, shell| {
+        BuiltinBody::Captured(Arc::new(move |_args, _mooring, shell| {
             let jt = jobs.lock().unwrap();
             let workers = shell.workers();
             for line in render_jobs(&jt, &workers) {
@@ -137,18 +137,18 @@ fn build_jobs(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
             }
             Ok(Value::Unit)
         })),
-)
+    )
 }
 
 // ── fg ────────────────────────────────────────────────────────────────────────
 
 fn build_fg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
     BuiltinEntry::new(
-    Cow::Borrowed("fg"),
-    BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
-    "fg [id]  — bring pgid job [id] (default: most recent) to the foreground. \
+        Cow::Borrowed("fg"),
+        BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
+        "fg [id]  — bring pgid job [id] (default: most recent) to the foreground. \
               pgid-only: a worker handle has no foreground — `await` is its fg.",
-    BuiltinBody::Captured(Arc::new(move |args, mooring, shell| {
+        BuiltinBody::Captured(Arc::new(move |args, mooring, shell| {
             let (id, pgid) = {
                 let mut jt = jobs.lock().unwrap();
                 let Some(id) = job_id_arg(args, &jt) else {
@@ -172,18 +172,18 @@ fn build_fg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
             }
             Ok(Value::Unit)
         })),
-)
+    )
 }
 
 // ── bg ────────────────────────────────────────────────────────────────────────
 
 fn build_bg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
     BuiltinEntry::new(
-    Cow::Borrowed("bg"),
-    BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
-    "bg [id]  — resume pgid job [id] (default: most recent) in the background. \
+        Cow::Borrowed("bg"),
+        BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
+        "bg [id]  — resume pgid job [id] (default: most recent) in the background. \
               pgid-only: a worker handle already runs detached — see `jobs`.",
-    BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
+        BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
             let resumed = {
                 let mut jt = jobs.lock().unwrap();
                 let Some(id) = job_id_arg(args, &jt) else {
@@ -197,18 +197,18 @@ fn build_bg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
             }
             Ok(Value::Unit)
         })),
-)
+    )
 }
 
 // ── disown ───────────────────────────────────────────────────────────────────
 
 fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
     BuiltinEntry::new(
-    Cow::Borrowed("disown"),
-    BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
-    "disown [id]  — detach pgid job [id] (default: most recent) from the shell. \
+        Cow::Borrowed("disown"),
+        BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
+        "disown [id]  — detach pgid job [id] (default: most recent) from the shell. \
               pgid-only: a worker handle has no disown — `cancel` is its kill.",
-    BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
+        BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
             let removed = {
                 let mut jt = jobs.lock().unwrap();
                 let Some(id) = job_id_arg(args, &jt) else {
@@ -229,17 +229,17 @@ fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
             }
             Ok(Value::Unit)
         })),
-)
+    )
 }
 
 // ── load-plugin ───────────────────────────────────────────────────────────────
 
 fn build_load_plugin(runtime: Arc<Mutex<PluginRuntime>>) -> BuiltinEntry {
     BuiltinEntry::new(
-    Cow::Borrowed("load-plugin"),
-    BuiltinTypeRule::Sig(sig::STRING_TO_UNIT),
-    "load-plugin <name>  — load a REPL plugin by name or path.",
-    BuiltinBody::Captured(Arc::new(
+        Cow::Borrowed("load-plugin"),
+        BuiltinTypeRule::Sig(sig::STRING_TO_UNIT),
+        "load-plugin <name>  — load a REPL plugin by name or path.",
+        BuiltinBody::Captured(Arc::new(
             move |args, mooring: &Mooring, shell: &mut Shell| {
                 let Some(name) = plugin_name_arg(args) else {
                     diagnostic::cmd_error("load-plugin", "missing plugin name");
@@ -253,17 +253,17 @@ fn build_load_plugin(runtime: Arc<Mutex<PluginRuntime>>) -> BuiltinEntry {
                 Ok(Value::Unit)
             },
         )),
-)
+    )
 }
 
 // ── unload-plugin ─────────────────────────────────────────────────────────────
 
 fn build_unload_plugin(runtime: Arc<Mutex<PluginRuntime>>) -> BuiltinEntry {
     BuiltinEntry::new(
-    Cow::Borrowed("unload-plugin"),
-    BuiltinTypeRule::Sig(sig::STRING_TO_UNIT),
-    "unload-plugin <name>  — unload a previously loaded REPL plugin.",
-    BuiltinBody::Captured(Arc::new(
+        Cow::Borrowed("unload-plugin"),
+        BuiltinTypeRule::Sig(sig::STRING_TO_UNIT),
+        "unload-plugin <name>  — unload a previously loaded REPL plugin.",
+        BuiltinBody::Captured(Arc::new(
             move |args, _mooring: &Mooring, shell: &mut Shell| {
                 let Some(name) = plugin_name_arg(args) else {
                     diagnostic::cmd_error("unload-plugin", "missing plugin name");
@@ -275,7 +275,7 @@ fn build_unload_plugin(runtime: Arc<Mutex<PluginRuntime>>) -> BuiltinEntry {
                 Ok(Value::Unit)
             },
         )),
-)
+    )
 }
 
 #[cfg(test)]

@@ -497,7 +497,10 @@ impl TryFrom<&Value> for FOValue {
                     None => None,
                 },
             },
-            Value::Lambda { .. } | Value::Block { .. } | Value::Native { .. } | Value::Handle(_) => {
+            Value::Lambda { .. }
+            | Value::Block { .. }
+            | Value::Native { .. }
+            | Value::Handle(_) => {
                 return Err(Error::new(
                     "value is not first-order: the host seam carries only data, \
                      not closures or handles",

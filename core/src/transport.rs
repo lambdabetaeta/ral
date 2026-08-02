@@ -1707,13 +1707,12 @@ mod durability_tests {
         mk_scheme(&[], &[], &[], thunk(pure(crate::typecheck::Ty::Unit)))
     }
 
-    static PANIC_BUILTINS_ARR: [crate::types::BuiltinEntry; 1] =
-        [crate::types::BuiltinEntry::new(
-            std::borrow::Cow::Borrowed("seam-panic-now"),
-            crate::typecheck::builtins::BuiltinTypeRule::Scheme(scheme_panic_now),
-            "test-only: panic the evaluator mid-run.",
-            crate::types::BuiltinBody::Static(builtin_panic_now),
-        )];
+    static PANIC_BUILTINS_ARR: [crate::types::BuiltinEntry; 1] = [crate::types::BuiltinEntry::new(
+        std::borrow::Cow::Borrowed("seam-panic-now"),
+        crate::typecheck::builtins::BuiltinTypeRule::Scheme(scheme_panic_now),
+        "test-only: panic the evaluator mid-run.",
+        crate::types::BuiltinBody::Static(builtin_panic_now),
+    )];
     static PANIC_BUILTINS: &[crate::types::BuiltinEntry] = &PANIC_BUILTINS_ARR;
 
     fn run(src: &str) -> Run {

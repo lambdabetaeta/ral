@@ -300,15 +300,17 @@ mod tests {
             .expect("register");
 
         let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
-        super::super::plugin::lock(&runtime).plugins.push(LoadedPlugin {
-            name: "p".into(),
-            hooks: vec![hook_event.into()],
-            keybindings: Vec::new(),
-            bindings: Vec::new(),
-            state_cell: None,
-            source: Arc::from(""),
-            buffer_change_health: Default::default(),
-        });
+        super::super::plugin::lock(&runtime)
+            .plugins
+            .push(LoadedPlugin {
+                name: "p".into(),
+                hooks: vec![hook_event.into()],
+                keybindings: Vec::new(),
+                bindings: Vec::new(),
+                state_cell: None,
+                source: Arc::from(""),
+                buffer_change_health: Default::default(),
+            });
         (shell, runtime, sink)
     }
 

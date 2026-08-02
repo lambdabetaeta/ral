@@ -756,14 +756,13 @@ mod tests {
             use crate::typecheck::builtins::{mk_scheme, pure, thunk};
             mk_scheme(&[], &[], &[], thunk(pure(crate::typecheck::Ty::Unit)))
         }
-        let captured: Arc<[crate::types::BuiltinEntry]> = Arc::from(vec![
-            crate::types::BuiltinEntry::new(
+        let captured: Arc<[crate::types::BuiltinEntry]> =
+            Arc::from(vec![crate::types::BuiltinEntry::new(
                 std::borrow::Cow::Borrowed("test-captured-native"),
                 crate::typecheck::builtins::BuiltinTypeRule::Scheme(scheme_stub),
                 "test-only captured native.",
                 crate::types::BuiltinBody::Static(body_stub),
-            ),
-        ]);
+            )]);
         let mut shell = Shell::default();
         shell.install_captured_builtins(captured);
 
@@ -779,9 +778,8 @@ mod tests {
             audit_nodes: Vec::new(),
         };
 
-        let decoded = decode_response(response, &shell).expect(
-            "a captured native must decode against the receiving shell's own manifest",
-        );
+        let decoded = decode_response(response, &shell)
+            .expect("a captured native must decode against the receiving shell's own manifest");
         match decoded.value {
             Some(Value::Native { entry, .. }) => {
                 assert_eq!(entry.name.as_ref(), "test-captured-native");

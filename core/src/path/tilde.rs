@@ -151,7 +151,11 @@ fn abbreviate_home_for(path: &str, home: &str, windows: bool) -> String {
             _ => path.to_string(),
         }
     };
-    if windows { shown.replace('\\', "/") } else { shown }
+    if windows {
+        shown.replace('\\', "/")
+    } else {
+        shown
+    }
 }
 
 /// The Windows half of [`abbreviate_home_for`]'s strip: containment under

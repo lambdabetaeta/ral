@@ -75,8 +75,8 @@ fn bake_returns_top_level_let_bindings() {
 /// the real prelude names nothing that collides.
 #[test]
 fn a_prelude_binding_colliding_with_a_native_survives_the_harvest() {
-    let ast = ral_core::syntax::parser::parse("let upper = { |x| return $x }")
-        .expect("fixture parse");
+    let ast =
+        ral_core::syntax::parser::parse("let upper = { |x| return $x }").expect("fixture parse");
     let comp = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
         .expect("elaborate");
     let (_, schemes) = ral_core::bake_prelude(&comp);

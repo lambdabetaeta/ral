@@ -300,7 +300,9 @@ pub(super) fn builtin_is_dir(args: &[Value], shell: &mut Shell) -> Settled<Value
 }
 
 pub(super) fn builtin_is_link(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe(args, shell, |m| m.is_some_and(|m| m.file_type().is_symlink()))
+    fs_probe(args, shell, |m| {
+        m.is_some_and(|m| m.file_type().is_symlink())
+    })
 }
 
 pub(super) fn builtin_is_readable(args: &[Value], shell: &mut Shell) -> Settled<Value> {

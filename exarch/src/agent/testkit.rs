@@ -158,17 +158,17 @@ pub(crate) fn builtin_test_clear_block_until_released(
 
 static WORKER_REGISTRY_TEST_BUILTINS_ARR: [BuiltinEntry; 2] = [
     BuiltinEntry::new(
-    Cow::Borrowed("test-clear-block-forever"),
-    BuiltinTypeRule::Scheme(scheme_test_clear_block_forever),
-    "test-only: block until cancelled.",
-    BuiltinBody::Static(builtin_test_clear_block_forever),
-),
+        Cow::Borrowed("test-clear-block-forever"),
+        BuiltinTypeRule::Scheme(scheme_test_clear_block_forever),
+        "test-only: block until cancelled.",
+        BuiltinBody::Static(builtin_test_clear_block_forever),
+    ),
     BuiltinEntry::new(
-    Cow::Borrowed("test-clear-block-until-released"),
-    BuiltinTypeRule::Scheme(scheme_test_clear_block_forever),
-    "test-only: ignore cancellation until released, then settle on it.",
-    BuiltinBody::Static(builtin_test_clear_block_until_released),
-),
+        Cow::Borrowed("test-clear-block-until-released"),
+        BuiltinTypeRule::Scheme(scheme_test_clear_block_forever),
+        "test-only: ignore cancellation until released, then settle on it.",
+        BuiltinBody::Static(builtin_test_clear_block_until_released),
+    ),
 ];
 pub(crate) static WORKER_REGISTRY_TEST_BUILTINS: &[BuiltinEntry] =
     &WORKER_REGISTRY_TEST_BUILTINS_ARR;

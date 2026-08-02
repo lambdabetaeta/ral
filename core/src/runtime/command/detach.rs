@@ -56,9 +56,8 @@ pub(crate) fn detach(
                 );
             }
             Some(HandlerLookup::Base(entry)) => {
-                let raw = crate::runtime::command_call::run_base_frame(
-                    &entry, argv, &[], mooring, shell,
-                );
+                let raw =
+                    crate::runtime::command_call::run_base_frame(&entry, argv, &[], mooring, shell);
                 return crate::evaluator::absorb_tail(raw, mooring, shell);
             }
             None => {}

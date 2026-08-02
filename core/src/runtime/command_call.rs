@@ -159,9 +159,14 @@ pub(crate) fn run_base_frame(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    run_host_thunk(&entry.name, args, redirects, mooring, shell, |a, s, frame| {
-        entry.call_body(frame, a, mooring, s)
-    })
+    run_host_thunk(
+        &entry.name,
+        args,
+        redirects,
+        mooring,
+        shell,
+        |a, s, frame| entry.call_body(frame, a, mooring, s),
+    )
 }
 
 /// Lifts the matched frame off the handler stack on [`Self::strip`] and puts it

@@ -1145,13 +1145,12 @@ mod tests {
         mk_scheme(&[], &[], &[], thunk(pure(crate::typecheck::Ty::Unit)))
     }
 
-    static PANIC_BUILTINS_ARR: [crate::types::BuiltinEntry; 1] =
-        [crate::types::BuiltinEntry::new(
-            std::borrow::Cow::Borrowed("core-panic-now"),
-            crate::typecheck::builtins::BuiltinTypeRule::Scheme(scheme_panic_now),
-            "test-only: panic the evaluator mid-run.",
-            crate::types::BuiltinBody::Static(builtin_panic_now),
-        )];
+    static PANIC_BUILTINS_ARR: [crate::types::BuiltinEntry; 1] = [crate::types::BuiltinEntry::new(
+        std::borrow::Cow::Borrowed("core-panic-now"),
+        crate::typecheck::builtins::BuiltinTypeRule::Scheme(scheme_panic_now),
+        "test-only: panic the evaluator mid-run.",
+        crate::types::BuiltinBody::Static(builtin_panic_now),
+    )];
     static PANIC_BUILTINS: &[crate::types::BuiltinEntry] = &PANIC_BUILTINS_ARR;
 
     /// Rollback is to the run's entry, not to session birth: the panicking run's

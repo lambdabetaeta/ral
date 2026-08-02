@@ -2423,7 +2423,10 @@ mod tests {
                 "the stamp store must not be renamed away as corrupt"
             );
             assert!(
-                !stamp_path.with_extension("json.corrupt").try_exists().unwrap_or(false),
+                !stamp_path
+                    .with_extension("json.corrupt")
+                    .try_exists()
+                    .unwrap_or(false),
                 "the sweep must not quarantine the stamp store"
             );
             assert!(

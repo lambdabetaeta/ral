@@ -859,7 +859,9 @@ fn control_op_audit_in_value_position_errors() {
 /// `r`, not the arm, so arithmetic on the result typechecks.
 #[test]
 fn within_handler_for_native_installs_but_bare_head_still_resolves_the_native() {
-    ok(r#"within [handlers: [length: { |xs| return "hi" }]] { let r = !{length [1, 2, 3]}; return $[$r + 1] }"#);
+    ok(
+        r#"within [handlers: [length: { |xs| return "hi" }]] { let r = !{length [1, 2, 3]}; return $[$r + 1] }"#,
+    );
 }
 
 /// `^length` skips the env and reaches the arm: its `String` return clashes

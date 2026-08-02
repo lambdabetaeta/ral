@@ -487,7 +487,10 @@ impl WordLiteral {
                 } else if s.contains('.') {
                     // A Float is finite by construction; an overflowing
                     // literal like 1.0e999 stays a plain word.
-                    s.parse().ok().filter(|f: &f64| f.is_finite()).map(Self::Float)
+                    s.parse()
+                        .ok()
+                        .filter(|f: &f64| f.is_finite())
+                        .map(Self::Float)
                 } else {
                     None
                 }

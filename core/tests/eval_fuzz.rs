@@ -1697,7 +1697,10 @@ fn let_named_after_a_native_shadows_it_and_restores_on_scope_exit() {
         "let inside = !{ let list-dir = 'shadowed'; return $list-dir }\n\
          return [inside: $inside, outside: $list-dir]",
     );
-    assert_eq!(map_field(&result, "inside"), Value::String("shadowed".into()));
+    assert_eq!(
+        map_field(&result, "inside"),
+        Value::String("shadowed".into())
+    );
     match map_field(&result, "outside") {
         Value::Native { entry, applied } => {
             assert_eq!(entry.name, "list-dir");

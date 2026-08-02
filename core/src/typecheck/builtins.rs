@@ -1073,7 +1073,11 @@ pub(super) fn lines_step_ty(u: &mut Unifier) -> Ty {
     let step = Ty::Variant(Row::Extend(
         more_tag(),
         Box::new(payload),
-        Box::new(Row::Extend(done_tag(), Box::new(Ty::Unit), Box::new(Row::Empty))),
+        Box::new(Row::Extend(
+            done_tag(),
+            Box::new(Ty::Unit),
+            Box::new(Row::Empty),
+        )),
     ));
     u.unify_comp_ty(&tail_comp, &CompTy::pure(step.clone()))
         .expect("fresh self-referential unify cannot fail");

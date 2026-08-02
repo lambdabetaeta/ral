@@ -196,9 +196,7 @@ fn stacked_cd_handler_forwards_to_base_frame_under_self_masking() {
     let tmp_disp = display_no_trailing_sep(&tmp);
     let result = top_level(
         &mut shell,
-        &format!(
-            "within [handlers: [cd: {{ |args| cd ...$args }}]] {{ cd '{tmp_disp}'; cwd }}"
-        ),
+        &format!("within [handlers: [cd: {{ |args| cd ...$args }}]] {{ cd '{tmp_disp}'; cwd }}"),
     )
     .expect("the stacked handler should forward to the base cd frame");
     let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
@@ -713,7 +711,11 @@ fn only_command_child(tree: &Value) -> (String, Vec<Value>, Value) {
         },
         other => panic!("audit {{ … }} must return a Map; got {other:?}"),
     };
-    assert_eq!(children.len(), 1, "expected exactly one child; got {children:?}");
+    assert_eq!(
+        children.len(),
+        1,
+        "expected exactly one child; got {children:?}"
+    );
     match &children[0] {
         Value::Map(m) => (
             match m.get("cmd") {
@@ -724,7 +726,9 @@ fn only_command_child(tree: &Value) -> (String, Vec<Value>, Value) {
                 Some(Value::List(a)) => a.iter().cloned().collect(),
                 other => panic!("child node must have a List `args`; got {other:?}"),
             },
-            m.get("status").cloned().expect("child node must have `status`"),
+            m.get("status")
+                .cloned()
+                .expect("child node must have `status`"),
         ),
         other => panic!("audit child must be a Map; got {other:?}"),
     }
