@@ -150,6 +150,14 @@ impl WithSpan for Inferencer<'_> {
     }
 }
 
+/// Whether a pattern binds in let position (names generalize) or as a
+/// lambda/handler parameter (names stay monomorphic).
+#[derive(Clone, Copy)]
+enum BindMode {
+    Let,
+    Param,
+}
+
 impl Inferencer<'_> {
     pub(super) fn with_scope<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
         let saved_pos = self.ctx.pos;
@@ -160,22 +168,30 @@ impl Inferencer<'_> {
         out
     }
 
-    fn bind_pattern(&mut self, pat: &IrPattern, ty: &Ty) {
+    fn bind_pattern(&mut self, pat: &IrPattern, ty: &Ty, mode: BindMode) {
         match pat {
             IrPattern::Wildcard => {}
             IrPattern::Name(name) => {
-                self.env.bind(name.clone(), Scheme::mono(ty.clone()));
+                let scheme = match mode {
+                    BindMode::Let => generalize(&mut self.ctx.unifier, self.env, ty),
+                    BindMode::Param => Scheme::mono(ty.clone()),
+                };
+                self.env.bind(name.clone(), scheme);
             }
             IrPattern::List { elems, rest } => {
                 let elem = self.ctx.unifier.fresh_ty();
                 self.ctx
                     .unify_ty(ty, &Ty::List(Box::new(elem.clone())), Reason::ListPattern);
                 for elem_pat in elems {
-                    self.bind_pattern(elem_pat, &elem);
+                    self.bind_pattern(elem_pat, &elem, mode);
                 }
                 if let Some(rest_name) = rest {
-                    self.env
-                        .bind(rest_name.clone(), Scheme::mono(Ty::List(Box::new(elem))));
+                    let list_ty = Ty::List(Box::new(elem));
+                    let scheme = match mode {
+                        BindMode::Let => generalize(&mut self.ctx.unifier, self.env, &list_ty),
+                        BindMode::Param => Scheme::mono(list_ty),
+                    };
+                    self.env.bind(rest_name.clone(), scheme);
                 }
             }
             IrPattern::Map(entries) => {
@@ -195,7 +211,7 @@ impl Inferencer<'_> {
                 self.ctx
                     .unify_ty(ty, &Ty::Record(row), Reason::RecordPattern);
                 for (entry, field_ty) in entries.iter().zip(field_tys.iter()) {
-                    self.bind_pattern(&entry.pattern, field_ty);
+                    self.bind_pattern(&entry.pattern, field_ty, mode);
                 }
             }
         }
@@ -648,7 +664,7 @@ impl Inferencer<'_> {
                 let elem = self.ctx.unifier.fresh_ty();
                 let argv_ty = Ty::List(Box::new(elem));
                 let body_cty = self.with_scope(|this| {
-                    this.bind_pattern(param, &argv_ty);
+                    this.bind_pattern(param, &argv_ty, BindMode::Param);
                     this.infer_comp(body)
                 });
                 CompTy::Fun(Box::new(argv_ty), Box::new(body_cty))
@@ -665,7 +681,7 @@ impl Inferencer<'_> {
             Some(param) => {
                 let param_ty = self.ctx.unifier.fresh_ty();
                 let body_ty = self.with_scope(|this| {
-                    this.bind_pattern(param, &param_ty);
+                    this.bind_pattern(param, &param_ty, BindMode::Param);
                     this.infer_comp(body)
                 });
                 CompTy::Fun(Box::new(param_ty), Box::new(body_ty))
@@ -1516,19 +1532,13 @@ impl Inferencer<'_> {
                     .bind_outputs
                     .insert(std::ptr::from_ref::<Comp>(comp) as usize, rhs_output);
 
-                match pattern {
-                    IrPattern::Name(name) => {
-                        self.ctx
-                            .bind_tys
-                            .insert(std::ptr::from_ref::<Comp>(comp) as usize, bound_ty.clone());
-                        let scheme = generalize(&mut self.ctx.unifier, self.env, &bound_ty);
-                        self.env.bind(name.clone(), scheme);
-                    }
-                    other => {
-                        let concrete = self.ctx.unifier.apply_ty(&bound_ty);
-                        self.bind_pattern(other, &concrete);
-                    }
+                if let IrPattern::Name(_) = pattern {
+                    self.ctx
+                        .bind_tys
+                        .insert(std::ptr::from_ref::<Comp>(comp) as usize, bound_ty.clone());
                 }
+                let concrete = self.ctx.unifier.apply_ty(&bound_ty);
+                self.bind_pattern(pattern, &concrete, BindMode::Let);
                 let rest_ty = self.infer_comp(rest);
                 self.lift_modes(rest_ty, rhs_reads, false)
             }

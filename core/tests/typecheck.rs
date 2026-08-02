@@ -258,6 +258,18 @@ fn let_generalize_list_id() {
 }
 
 #[test]
+fn let_generalize_through_list_pattern() {
+    ok("let [f, g] = [{ |x| return $x }, { |y| return $y }]; \
+        let _ = !{f 1}; let _ = !{f hello}; let _ = !{g 2}; return unit");
+}
+
+#[test]
+fn let_generalize_through_map_pattern() {
+    ok("let [id: f] = [id: { |x| return $x }]; \
+        let _ = !{f 1}; let _ = !{f hello}; return unit");
+}
+
+#[test]
 fn fmt_scheme_shows_quantified_comp_vars() {
     let beta = CompTyVar(17);
     let scheme = Scheme {
