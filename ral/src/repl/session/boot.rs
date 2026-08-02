@@ -3,19 +3,19 @@
 //! The setup entrypoints here each run once at REPL startup, doing one
 //! process-level setup task: signal handlers, terminal claim, panic
 //! hook, terminal capability probe, profile/rc sourcing, frontend
-//! construction.  (The rc-sourcing helpers are the exception: login
-//! profiles and the user rc are each sourced through `source_config_file`,
-//! so it runs up to three times.)  Splitting them out of `session.rs`
-//! keeps the state machine itself focused on the run/iterate/eval loop.
+//! construction.  (The startup-file helpers are the exception: the two
+//! login profiles go through `source_profile` and the user rc through
+//! `source_rc`, so their shared core runs up to three times.)  Splitting
+//! them out of `session.rs` keeps the state machine itself focused on the
+//! run/iterate/eval loop.
 
 use ral_core::source::Span;
 use ral_core::transport::Program;
-use ral_core::types::{Break, DefaultPolicy, Escape, HookName, HookSig};
+use ral_core::types::{Break, DefaultPolicy, Escape, HookName, HookSig, Map, Value};
 use ral_core::{RequestedTerminalAccess, RunReport, Shell, diagnostic};
-use rustyline::config::{BellStyle, EditMode};
 use std::sync::{Arc, Mutex};
 
-use super::super::config::{RcCtx, create_default_rc, find_ralrc};
+use super::super::config::{RcSettings, apply_rc_config, create_default_rc, find_ralrc};
 #[cfg(feature = "structural")]
 use super::super::frontend::StructuralFrontend;
 use super::super::frontend::{Frontend, MinimalFrontend, RustylineFrontend, Surface};
@@ -244,24 +244,31 @@ pub(super) fn setup_terminal(shell: &mut Shell) {
     shell.set_var("TERMINAL".into(), terminal);
 }
 
-/// Source login profiles (if login shell) and the user RC file.
+/// Source login profiles (if login shell) and the user RC file, returning
+/// the frontend settings the rc resolved (the defaults when no rc ran).
 ///
-/// Login profiles: `/etc/ral/profile`, then `~/.ral_profile`.
+/// Login profiles: `/etc/ral/profile`, then `~/.ral_profile` — scripts
+/// sourced for their effects, contracted to return `unit`.
 /// RC: `$XDG_CONFIG_HOME/ral/rc` or `~/.ralrc` (created from a default
-/// skeleton if neither exists).  Each file is parsed as ral source and
-/// its return value is fed to [`apply_rc_config`](super::super::config::apply_rc_config).
+/// skeleton if neither exists) — a configuration expression, contracted
+/// to return the map that [`apply_rc_config`] applies.
 ///
 /// `no_rc` (`--norc`/`--noprofile`) suppresses every startup file — the
 /// login profiles as well as the RC file — so a `-l --norc` session boots
 /// from a clean slate.
-pub(super) fn load_profiles(is_login: bool, no_rc: bool, ctx: &mut RcCtx<'_>) {
+pub(super) fn load_profiles(
+    is_login: bool,
+    no_rc: bool,
+    shell: &mut Shell,
+    runtime: &Arc<Mutex<PluginRuntime>>,
+) -> RcSettings {
     if is_login && !no_rc {
         let system_profile = "/etc/ral/profile".to_string();
         let user_profile = ral_core::path::config::home_dot(".ral_profile")
             .map(|p| p.to_string_lossy().into_owned());
         for path in [Some(system_profile), user_profile].into_iter().flatten() {
             if ral_core::path::exists(&path) {
-                source_config_file(&path, ctx);
+                source_profile(&path, shell);
             }
         }
     }
@@ -273,40 +280,41 @@ pub(super) fn load_profiles(is_login: bool, no_rc: bool, ctx: &mut RcCtx<'_>) {
             Some(path)
         });
         if let Some(rc_path) = rc_path {
-            source_config_file(&rc_path, ctx);
+            return source_rc(&rc_path, shell, runtime);
         }
     }
+    RcSettings::default()
 }
 
-/// Build the line-editing frontend from the requested [`Surface`].
+/// Build the line-editing frontend from the resolved [`RcSettings`] —
+/// whose `surface` the caller has already overridden with the `--surface`
+/// flag, if given.
 ///
 /// The capability gate comes first: a terminal resolved to
 /// [`InteractiveMode::Minimal`](ral_core::io::InteractiveMode::Minimal) — a
 /// dumb terminal or `RAL_INTERACTIVE_MODE=minimal` — can only do the
 /// canonical-stdin editor, whatever surface was asked for.  Otherwise the
-/// surface preference (`--surface` flag or rc `surface:`) decides.  A
-/// `Structural` request that cannot be honoured — no raw mode, or a binary
-/// built without the `structural` feature — warns and falls back to readline
-/// rather than degrading silently.  The readline frontend routes background
-/// `watch` output above the prompt itself (see [`RustylineFrontend::new`]).
+/// surface preference decides.  A `Structural` request that cannot be
+/// honoured — no raw mode, or a binary built without the `structural`
+/// feature — warns and falls back to readline rather than degrading
+/// silently.  The readline frontend routes background `watch` output above
+/// the prompt itself (see [`RustylineFrontend::new`]).
 pub(super) fn create_frontend(
     interactive_mode: ral_core::io::InteractiveMode,
-    surface: Surface,
+    settings: RcSettings,
     shell: &mut Shell,
-    edit_mode: EditMode,
-    bell: BellStyle,
     runtime: Arc<Mutex<PluginRuntime>>,
 ) -> Box<dyn Frontend> {
     if matches!(interactive_mode, ral_core::io::InteractiveMode::Minimal) {
         return Box::new(MinimalFrontend::new());
     }
-    match surface {
+    match settings.surface {
         Surface::Minimal => return Box::new(MinimalFrontend::new()),
         // The structural surface needs raw mode; its `new` probes for it and
         // errors when unavailable, so a failure warns and falls through.
         Surface::Structural => {
             #[cfg(feature = "structural")]
-            match StructuralFrontend::new(edit_mode, runtime.clone()) {
+            match StructuralFrontend::new(settings.edit_mode, runtime.clone()) {
                 Ok(fe) => return Box::new(fe),
                 Err(_) => diagnostic::shell_warning(
                     "ral: structural surface needs a raw-mode terminal; using readline",
@@ -317,42 +325,137 @@ pub(super) fn create_frontend(
         }
         Surface::Readline => {}
     }
-    Box::new(RustylineFrontend::new(shell, edit_mode, bell, runtime))
+    Box::new(RustylineFrontend::new(
+        shell,
+        settings.edit_mode,
+        settings.bell,
+        runtime,
+    ))
 }
 
-// ── RC sourcing ─────────────────────────────────────────────────────────
+// ── Startup-file sourcing ───────────────────────────────────────────────
+//
+// Two kinds of startup file, each with exactly one contract on its return
+// value: a login profile is a script sourced for its effects and must
+// return `unit`; the rc file is a configuration expression and must
+// return a map.  Both share [`evaluate_startup_file`].
 
-/// Parse and evaluate a config file, applying the resulting map via
-/// [`apply_rc_config`](super::super::config::apply_rc_config) and running
-/// its `startup` block if present.  The fallible body lives in
-/// [`source_config_inner`]; this wrapper just surfaces the one diagnostic
-/// message its `?` chain produces.
-fn source_config_file(path: &str, ctx: &mut RcCtx<'_>) {
-    if let Err(msg) = source_config_inner(path, ctx) {
+/// Source a login profile.  Anything other than `unit` — a configuration
+/// map included — is rejected: silently discarding a returned map would
+/// let a misplaced `[theme: …]` in `~/.ral_profile` do nothing without a
+/// word, and configuration belongs in the rc file.  A profile only ever
+/// mutates the shell, so no [`RcCtx`] reaches it.
+fn source_profile(path: &str, shell: &mut Shell) {
+    if let Err(msg) = source_profile_inner(path, shell) {
         diagnostic::cmd_error("ral", &msg);
     }
 }
 
+fn source_profile_inner(path: &str, shell: &mut Shell) -> Result<(), String> {
+    match evaluate_startup_file(path, shell)? {
+        None | Some(Value::Unit) => Ok(()),
+        Some(v) => Err(format!(
+            "{path}: profile must return unit; got {} — configuration belongs in the rc file",
+            v.type_name()
+        )),
+    }
+}
+
+/// Source the rc file: evaluate it, apply the returned map, and run its
+/// `startup` block if present.  Each stage's failure is reported where
+/// the right amount of state survives it — a broken file or contract
+/// leaves the default settings; a failed `startup` block keeps the
+/// settings the map already applied.
+fn source_rc(path: &str, shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) -> RcSettings {
+    let pairs = match rc_config(path, shell) {
+        Ok(Some(pairs)) => pairs,
+        Ok(None) => return RcSettings::default(),
+        Err(msg) => {
+            diagnostic::cmd_error("ral", &msg);
+            return RcSettings::default();
+        }
+    };
+    let (settings, startup) = apply_rc_config(pairs, shell, runtime);
+    if let Some(block) = startup
+        && let Err(msg) = run_startup(path, block, shell)
+    {
+        diagnostic::cmd_error("ral", &msg);
+    }
+    settings
+}
+
+/// Evaluate the rc file and check its contract: a configuration map.
+/// `Ok(None)` when `exit` escaped the file before it produced one.
+fn rc_config(path: &str, shell: &mut Shell) -> Result<Option<Map>, String> {
+    match evaluate_startup_file(path, shell)? {
+        None => Ok(None),
+        Some(Value::Map(pairs)) => Ok(Some(pairs)),
+        Some(other) => Err(format!(
+            "{path}: rc file must return a map; got {}",
+            other.type_name()
+        )),
+    }
+}
+
+/// Register the rc `startup` block as the session `startup` hook and run
+/// it once, terminal-denied.
+fn run_startup(path: &str, block: Value, shell: &mut Shell) -> Result<(), String> {
+    let origin = Span::synthetic();
+    if let Err(e) = shell.register_hook(
+        HookName::session("startup"),
+        block,
+        HookSig::Prompt,
+        DefaultPolicy::denied(),
+        origin,
+    ) {
+        return Err(format!("{path}: startup: {e}"));
+    }
+    let req = framed_run_request(
+        "<startup>",
+        RequestedTerminalAccess::Denied,
+        Program::Hook {
+            name: HookName::session("startup"),
+            args: vec![],
+        },
+    );
+    match shell.run(req) {
+        RunReport::Ran { result, .. } => match result {
+            Ok(_) | Err(Break::Escape(Escape::Exit(_))) => Ok(()),
+            Err(Break::Error(e)) => Err(format!("{path}: startup: {}", e.message)),
+            #[cfg(unix)]
+            Err(Break::Escape(Escape::Stopped { .. })) => Err(format!(
+                "{path}: startup: a stop signal escaped — rc files cannot park jobs"
+            )),
+        },
+        RunReport::Static { .. } => {
+            unreachable!("a thunk startup block never compiles source")
+        }
+    }
+}
+
+/// The shared core: read, typecheck, and evaluate one startup file,
+/// returning its value for the caller's contract check.  `Ok(None)` means
+/// `exit` escaped the file — sourcing stops with no value to check.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:config-read] reads an rc/config file during session boot; not turn-time model I/O"
+    reason = "[io-door:silent:config-read] reads an rc/profile file during session boot; not turn-time model I/O"
 )]
-fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
+fn evaluate_startup_file(path: &str, shell: &mut Shell) -> Result<Option<Value>, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let src = ral_core::source::normalize_source_text(src);
-    // The rc check always runs (it writes the evaluator's mode wires) and is
-    // seeded from the live shell, so an earlier rc file's bindings are
+    // The check always runs (it writes the evaluator's mode wires) and is
+    // seeded from the live shell, so an earlier startup file's bindings are
     // visible to a later file's check.  A type error of any kind leaves the
     // file with no runnable annotation: it is reported and skipped while the
-    // boot survives — a broken rc must not strand the user at no shell, the
-    // parse-error precedent above.
+    // boot survives — a broken startup file must not strand the user at no
+    // shell, the parse-error precedent above.
     //
     // Compiled against the `FileId` `evaluate_checked` registers the text
     // under a moment later, exactly as a module load is: an alias or function
-    // the rc defines outlives this boot, and its spans have to keep naming
-    // the rc for the whole session.
-    let file = ctx.shell.sources().next_id();
-    let comp = match ral_core::compile_and_typecheck(&src, ctx.shell.session_schemes(), file, path)
+    // the file defines outlives this boot, and its spans have to keep naming
+    // the file for the whole session.
+    let file = shell.sources().next_id();
+    let comp = match ral_core::compile_and_typecheck(&src, shell.session_schemes(), file, path)
     {
         ral_core::CompileOutcome::Compiled(annotated) => std::sync::Arc::new(annotated),
         ral_core::CompileOutcome::Parse(e) => return Err(format!("{path}: {e}")),
@@ -367,63 +470,78 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
     // Evaluate under the same guarded pipeline `source`/`use`/plugin loading
     // share: `evaluate_checked` owns the cycle and depth guards, and registers
     // the text under the id compiled against just above, so a runtime error
-    // inside the rc file is located against it.
-    let config = match ral_core::builtins::modules::evaluate_checked(
+    // inside the file is located against it.
+    match ral_core::builtins::modules::evaluate_checked(
         &ral_core::types::Mooring::adrift(),
-        ctx.shell,
+        shell,
         &comp,
         &src,
         path,
     ) {
-        Ok(v) => v,
-        Err(Break::Error(e)) => return Err(format!("{path}: {}", e.message)),
-        // `exit` in rc: stop sourcing, boot continues.
-        Err(Break::Escape(Escape::Exit(_))) => return Ok(()),
-        // A stop signal (Ctrl-Z during a slow rc command) parks a process
-        // group the REPL job table never learned about — never resumed,
-        // never reaped.  Report it like the `startup:` arm below rather
-        // than silently orphaning the group.
+        Ok(v) => Ok(Some(v)),
+        Err(Break::Error(e)) => Err(format!("{path}: {}", e.message)),
+        // `exit` in a startup file: stop sourcing it, boot continues.
+        Err(Break::Escape(Escape::Exit(_))) => Ok(None),
+        // A stop signal (Ctrl-Z during a slow startup command) parks a
+        // process group the REPL job table never learned about — never
+        // resumed, never reaped.  Report it like the `startup:` arm in
+        // `source_rc_inner` rather than silently orphaning the group.
         #[cfg(unix)]
-        Err(Break::Escape(Escape::Stopped { .. })) => {
-            return Err(format!(
-                "{path}: a stop signal escaped — rc files cannot park jobs"
-            ));
-        }
-    };
-    if let Some(block) = super::super::config::apply_rc_config(config, ctx) {
-        let origin = Span::synthetic();
-        if let Err(e) = ctx.shell.register_hook(
-            HookName::session("startup"),
-            block,
-            HookSig::Prompt,
-            DefaultPolicy::denied(),
-            origin,
-        ) {
-            return Err(format!("{path}: startup: {e}"));
-        }
-        let req = framed_run_request(
-            "<startup>",
-            RequestedTerminalAccess::Denied,
-            Program::Hook {
-                name: HookName::session("startup"),
-                args: vec![],
-            },
-        );
-        match ctx.shell.run(req) {
-            RunReport::Ran { result, .. } => match result {
-                Ok(_) | Err(Break::Escape(Escape::Exit(_))) => {}
-                Err(Break::Error(e)) => return Err(format!("{path}: startup: {}", e.message)),
-                #[cfg(unix)]
-                Err(Break::Escape(Escape::Stopped { .. })) => {
-                    return Err(format!(
-                        "{path}: startup: a stop signal escaped — rc files cannot park jobs"
-                    ));
-                }
-            },
-            RunReport::Static { .. } => {
-                unreachable!("a thunk startup block never compiles source")
-            }
-        }
+        Err(Break::Escape(Escape::Stopped { .. })) => Err(format!(
+            "{path}: a stop signal escaped — startup files cannot park jobs"
+        )),
     }
-    Ok(())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs scaffolding"
+)]
+mod tests {
+    use super::*;
+
+    /// Write `src` as a startup file, returning the tempdir (keeping the
+    /// file alive) and its path.
+    fn startup_file(src: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("startup.ral");
+        std::fs::write(&path, src).unwrap();
+        let path = path.to_str().unwrap().to_owned();
+        (dir, path)
+    }
+
+    fn booted_shell() -> Shell {
+        ral_core::boot::boot_shell(
+            ral_core::io::TerminalState::default(),
+            &crate::PRELUDE,
+            &ral_core::HostSurface::default(),
+        )
+    }
+
+    /// A side-effect-only profile returning `unit` sources cleanly.
+    #[test]
+    fn profile_returning_unit_sources_cleanly() {
+        let (_dir, path) = startup_file("return unit\n");
+        assert_eq!(source_profile_inner(&path, &mut booted_shell()), Ok(()));
+    }
+
+    /// A profile returning a configuration map is rejected — the error
+    /// names the profile contract and points at the rc file.
+    #[test]
+    fn profile_returning_map_is_rejected() {
+        let (_dir, path) = startup_file("return [edit_mode: 'vi']\n");
+        let err = source_profile_inner(&path, &mut booted_shell()).unwrap_err();
+        assert!(err.contains("profile must return unit; got Map"), "{err}");
+        assert!(err.contains("configuration belongs in the rc file"), "{err}");
+    }
+
+    /// An rc file returning `unit` is rejected — the error names the rc
+    /// contract.
+    #[test]
+    fn rc_returning_unit_is_rejected() {
+        let (_dir, path) = startup_file("return unit\n");
+        let err = rc_config(&path, &mut booted_shell()).unwrap_err();
+        assert!(err.contains("rc file must return a map; got Unit"), "{err}");
+    }
 }

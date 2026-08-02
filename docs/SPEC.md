@@ -3236,9 +3236,12 @@ files in order before loading the RC:
 1. `/etc/ral/profile` (system-wide, optional)
 2. `~/.ral_profile` (per-user, optional)
 
-Both files are evaluated as ral source.  They may return a configuration
-map (same format as the RC file; see §18) or `unit` (for files that set
-environment variables purely for their side effects).
+Both files are evaluated as ral source.  A profile is a script, sourced
+for its effects — exports, aliases, `use`s — and must return `unit`.  A
+profile that returns anything else is rejected with an error; in
+particular a configuration map is not applied, since configuration
+belongs in the RC file (§18), the one startup file contracted to return
+a map.
 
 The RC file (`$XDG_CONFIG_HOME/ral/rc` or `~/.ralrc`) is loaded after the
 profiles on every interactive session, login or otherwise.

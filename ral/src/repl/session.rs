@@ -12,13 +12,11 @@
 mod boot;
 
 use ral_core::transport::Transport;
-use rustyline::config::{BellStyle, EditMode};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
-use super::config::RcCtx;
 use super::exec::{Step, step};
-use super::frontend::{EditBuffer, Frontend, Read, Surface};
+use super::frontend::{EditBuffer, Frontend, Read};
 use super::plugin::PluginRuntime;
 use super::prompt::{render as render_prompt, write_terminal_title};
 
@@ -67,7 +65,8 @@ impl Session {
     /// frontend.  Returns `Err(code)` only from `--capabilities`: a load
     /// failure or an escape raised while a capabilities profile evaluates.
     /// Profile/rc errors and escapes are reported and tolerated — a broken
-    /// rc must not strand the user, so `source_config_inner` swallows them.
+    /// startup file must not strand the user, so the sourcing helpers in
+    /// `boot` report and continue.
     pub(super) fn boot(
         is_login: bool,
         opts: &crate::cli::InteractiveOpts,
@@ -104,27 +103,13 @@ impl Session {
         }
 
         boot::setup_terminal(&mut shell);
-        let mut edit_mode = EditMode::Emacs;
-        let mut bell = BellStyle::None;
-        let mut surface = Surface::default();
-
-        boot::load_profiles(
-            is_login,
-            opts.no_rc,
-            &mut RcCtx {
-                shell: &mut shell,
-                edit_mode: &mut edit_mode,
-                bell: &mut bell,
-                surface: &mut surface,
-                runtime: &runtime,
-            },
-        );
-        // CLI flag wins over rc — apply after load_profiles.
+        let mut rc = boot::load_profiles(is_login, opts.no_rc, &mut shell, &runtime);
+        // CLI flags win over rc — apply after load_profiles.
         if let Some(n) = opts.run.recursion_limit {
             shell.set_recursion_limit(n);
         }
         if let Some(s) = opts.surface {
-            surface = s;
+            rc.surface = s;
         }
         // `--capabilities` applies after rc files: rc is operator-trusted
         // session bootstrap, the user-supplied ceiling narrows from there.
@@ -134,14 +119,7 @@ impl Session {
         // register one already (e.g. via the `prompt` key in ralrc).
         boot::install_default_prompt(&mut shell);
 
-        let frontend = boot::create_frontend(
-            interactive_mode,
-            surface,
-            &mut shell,
-            edit_mode,
-            bell,
-            runtime.clone(),
-        );
+        let frontend = boot::create_frontend(interactive_mode, rc, &mut shell, runtime.clone());
 
         // Prompt rendering, the terminal title, and `frontend.read()` all reach
         // through `shell_mut()`, which only `IdentityTransport` offers.

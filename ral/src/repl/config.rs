@@ -8,7 +8,7 @@
 //! rejected with an error naming the key, while the rest of the map still
 //! applies.
 
-use ral_core::types::{DefaultPolicy, HookName, HookSig, Mooring};
+use ral_core::types::{DefaultPolicy, HookName, HookSig, Map, Mooring};
 use ral_core::{Shell, Value};
 
 use super::frontend::Surface;
@@ -18,18 +18,28 @@ use std::sync::{Arc, Mutex};
 
 use super::plugin::PluginRuntime;
 
-// ── Mutable REPL state threaded through rc/profile loading ───────────────
+// ── Frontend knobs resolved by the rc file ───────────────────────────────
 
-/// Bundles the REPL-level state that rc files and profiles are allowed to
-/// mutate: environment bindings, line-editing mode, and bell style.  Passed
-/// by `&mut` to the loaders so the signature stays stable as new knobs
-/// (themes, keymaps, …) grow.
-pub(crate) struct RcCtx<'a> {
-    pub shell: &'a mut Shell,
-    pub edit_mode: &'a mut EditMode,
-    pub bell: &'a mut BellStyle,
-    pub surface: &'a mut Surface,
-    pub runtime: &'a Arc<Mutex<PluginRuntime>>,
+/// The frontend knobs an rc file can set: line-editing mode, bell style,
+/// and surface.  Everything else the rc configures lands directly on the
+/// shell (env, aliases, bindings, hooks, recursion limit) or the plugin
+/// runtime, so rc application takes those two and returns this value —
+/// there is no mutable context to thread.
+#[derive(Clone, Copy)]
+pub(crate) struct RcSettings {
+    pub edit_mode: EditMode,
+    pub bell: BellStyle,
+    pub surface: Surface,
+}
+
+impl Default for RcSettings {
+    fn default() -> Self {
+        Self {
+            edit_mode: EditMode::Emacs,
+            bell: BellStyle::None,
+            surface: Surface::default(),
+        }
+    }
 }
 
 // ── Default RC skeleton ──────────────────────────────────────────────────
@@ -106,33 +116,36 @@ pub(super) fn create_default_rc() -> Option<String> {
 
 // ── RC config application ────────────────────────────────────────────────
 
-/// Apply the RC config map to `ctx`. Returns the `startup` block, if any,
-/// so the caller can execute it in the right context.
-pub(crate) fn apply_rc_config(config: Value, ctx: &mut RcCtx<'_>) -> Option<Value> {
-    let Value::Map(pairs) = config else {
-        ral_core::diagnostic::cmd_error(
-            "ral",
-            &format!("rc file must return a map; got {}", config.type_name()),
-        );
-        return None;
-    };
+/// Apply the RC config map to the shell and plugin runtime.  Returns the
+/// resolved frontend settings and the `startup` block, if any, so the
+/// caller can execute it in the right context.  The rc's map contract
+/// (and the diagnostic for breaking it) lives with the sourcing in
+/// `session::boot`; this function only ever sees a map.
+pub(crate) fn apply_rc_config(
+    pairs: Map,
+    shell: &mut Shell,
+    runtime: &Arc<Mutex<PluginRuntime>>,
+) -> (RcSettings, Option<Value>) {
+    let mut settings = RcSettings::default();
     let mut startup: Option<Value> = None;
     for (key, val) in pairs {
-        if let Err(msg) = apply_rc_key(&key, val, ctx, &mut startup) {
+        if let Err(msg) = apply_rc_key(&key, val, shell, runtime, &mut settings, &mut startup) {
             ral_core::diagnostic::cmd_error("ral", &msg);
         }
     }
-    startup
+    (settings, startup)
 }
 
-/// Apply a single rc top-level `key: val` pair to `ctx`.  An `Err` names the
+/// Apply a single rc top-level `key: val` pair.  An `Err` names the
 /// offending key and the shape it expected; the caller reports it and moves
 /// on to the next key, so one malformed entry does not block the rest of
 /// the rc file.
 fn apply_rc_key(
     key: &str,
     val: Value,
-    ctx: &mut RcCtx<'_>,
+    shell: &mut Shell,
+    runtime: &Arc<Mutex<PluginRuntime>>,
+    settings: &mut RcSettings,
     startup: &mut Option<Value>,
 ) -> Result<(), String> {
     match key {
@@ -149,14 +162,14 @@ fn apply_rc_key(
                 if matches!(k.as_str(), "PWD" | "OLDPWD") {
                     continue;
                 }
-                ctx.shell.set_env_var(k.clone(), v.to_string());
-                ctx.shell.set_var(k, v);
+                shell.set_env_var(k.clone(), v.to_string());
+                shell.set_var(k, v);
             }
             Ok(())
         }
         "prompt" => {
             let origin = ral_core::source::Span::synthetic();
-            if let Err(e) = ctx.shell.register_hook(
+            if let Err(e) = shell.register_hook(
                 HookName::session("prompt"),
                 val,
                 HookSig::Prompt,
@@ -179,7 +192,7 @@ fn apply_rc_key(
             // still lands somewhere usable.
             for (name, value) in m {
                 if matches!(value, Value::Lambda { .. } | Value::Block { .. }) {
-                    if let Err(err) = ctx.shell.install_alias(name, value) {
+                    if let Err(err) = shell.install_alias(name, value) {
                         match err {
                             ral_core::types::Break::Error(e) => {
                                 eprintln!("ralrc: {}", e.message);
@@ -190,7 +203,7 @@ fn apply_rc_key(
                         }
                     }
                 } else {
-                    ctx.shell.set_var(name, value);
+                    shell.set_var(name, value);
                 }
             }
             Ok(())
@@ -206,7 +219,7 @@ fn apply_rc_key(
             // functions included; a function is typed by the checker
             // so it is applyable by function application at the prompt.
             for (name, value) in m {
-                ctx.shell.bind_value(name, value);
+                shell.bind_value(name, value);
             }
             Ok(())
         }
@@ -218,8 +231,8 @@ fn apply_rc_key(
                 ));
             };
             match s.to_ascii_lowercase().as_str() {
-                "vi" => *ctx.edit_mode = EditMode::Vi,
-                "emacs" => *ctx.edit_mode = EditMode::Emacs,
+                "vi" => settings.edit_mode = EditMode::Vi,
+                "emacs" => settings.edit_mode = EditMode::Emacs,
                 _ => {
                     return Err(format!("rc 'edit_mode' must be 'emacs' or 'vi'; got '{s}'"));
                 }
@@ -230,7 +243,7 @@ fn apply_rc_key(
             let Value::Bool(b) = val else {
                 return Err(format!("rc 'bell' must be a bool; got {}", val.type_name()));
             };
-            *ctx.bell = if b {
+            settings.bell = if b {
                 BellStyle::Audible
             } else {
                 BellStyle::None
@@ -246,7 +259,7 @@ fn apply_rc_key(
             };
             match <Surface as clap::ValueEnum>::from_str(&s, true) {
                 Ok(surface) => {
-                    *ctx.surface = surface;
+                    settings.surface = surface;
                     Ok(())
                 }
                 Err(_) => Err(format!(
@@ -270,7 +283,7 @@ fn apply_rc_key(
                 reason = "filtered > 0; a recursion limit far below usize::MAX on 64-bit"
             )]
             let limit = n as usize;
-            ctx.shell.set_recursion_limit(limit);
+            shell.set_recursion_limit(limit);
             Ok(())
         }
         "plugins" => {
@@ -281,7 +294,7 @@ fn apply_rc_key(
                 ));
             };
             for entry in entries {
-                load_rc_plugin(entry, ctx.shell, ctx.runtime);
+                load_rc_plugin(entry, shell, runtime);
             }
             Ok(())
         }
@@ -414,15 +427,7 @@ mod tests {
     /// the resulting environment.  Registers the baked prelude so plugin
     /// files can use `get`, `has`, etc. — the same environment they see at
     /// real startup.
-    fn apply_rc_inner(
-        rc_src: &str,
-    ) -> (
-        Shell,
-        Surface,
-        Arc<Mutex<PluginRuntime>>,
-        EditMode,
-        BellStyle,
-    ) {
+    fn apply_rc_inner(rc_src: &str) -> (Shell, RcSettings, Arc<Mutex<PluginRuntime>>) {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         ral_core::builtins::register(&mut shell, crate::PRELUDE.comp());
         let ast = ral_core::syntax::parser::parse(rc_src).unwrap();
@@ -431,21 +436,12 @@ mod tests {
                 .expect("elaborate"),
         );
         let config = ral_core::evaluator::evaluate(&comp, &Mooring::adrift(), &mut shell).unwrap();
-        let mut mode = EditMode::Emacs;
-        let mut bell = BellStyle::None;
-        let mut surface = Surface::default();
+        let Value::Map(pairs) = config else {
+            panic!("test rc source must return a map; got {}", config.type_name());
+        };
         let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
-        apply_rc_config(
-            config,
-            &mut RcCtx {
-                shell: &mut shell,
-                edit_mode: &mut mode,
-                bell: &mut bell,
-                surface: &mut surface,
-                runtime: &runtime,
-            },
-        );
-        (shell, surface, runtime, mode, bell)
+        let (settings, _) = apply_rc_config(pairs, &mut shell, &runtime);
+        (shell, settings, runtime)
     }
 
     fn apply_rc(rc_src: &str) -> Shell {
@@ -453,7 +449,7 @@ mod tests {
     }
 
     fn apply_rc_with_runtime(rc_src: &str) -> (Shell, Arc<Mutex<PluginRuntime>>) {
-        let (shell, _, runtime, _, _) = apply_rc_inner(rc_src);
+        let (shell, _, runtime) = apply_rc_inner(rc_src);
         (shell, runtime)
     }
 
@@ -583,7 +579,7 @@ mod tests {
     #[test]
     fn aliases_install_as_handler_frames() {
         let src = "return [\n    aliases: [\n        greet: { |args| echo hello ...$args },\n        ll: { |args| ls -lh ...$args },\n    ],\n]\n";
-        let (shell, _, _, _, _) = apply_rc_inner(src);
+        let (shell, _, _) = apply_rc_inner(src);
         assert!(shell.has_alias("greet"));
         assert!(shell.has_alias("ll"));
         // Aliases live in the handler stack, not in scope.
@@ -623,38 +619,29 @@ mod tests {
         );
     }
 
-    /// A non-map rc config is rejected wholesale; every knob keeps its
-    /// default.
-    #[test]
-    fn rc_non_map_config_rejected() {
-        let (shell, _, _, mode, _) = apply_rc_inner("return 42\n");
-        assert_eq!(shell.recursion_limit(), ral_core::types::DEFAULT_RECURSION_LIMIT);
-        assert_eq!(mode, EditMode::Emacs);
-    }
-
     /// Both an unrecognised string and a wrong-typed `edit_mode` are
     /// rejected; the default `EditMode::Emacs` stays in place.
     #[test]
     fn rc_edit_mode_invalid_rejected() {
-        let (_, _, _, mode, _) = apply_to_fresh_env_full(Value::map(vec![(
+        let (_, settings, _) = apply_to_fresh_env_full(Value::map(vec![(
             "edit_mode".into(),
             Value::String("typo".into()),
         )]));
-        assert_eq!(mode, EditMode::Emacs);
+        assert_eq!(settings.edit_mode, EditMode::Emacs);
 
-        let (_, _, _, mode, _) =
+        let (_, settings, _) =
             apply_to_fresh_env_full(Value::map(vec![("edit_mode".into(), Value::Int(3))]));
-        assert_eq!(mode, EditMode::Emacs);
+        assert_eq!(settings.edit_mode, EditMode::Emacs);
     }
 
     /// A wrong-typed `bell` is rejected; the default `BellStyle::None` stays.
     #[test]
     fn rc_bell_wrong_type_rejected() {
-        let (_, _, bell, _, _) = apply_to_fresh_env_full(Value::map(vec![(
+        let (_, settings, _) = apply_to_fresh_env_full(Value::map(vec![(
             "bell".into(),
             Value::String("yes".into()),
         )]));
-        assert_eq!(bell, BellStyle::None);
+        assert_eq!(settings.bell, BellStyle::None);
     }
 
     // ── apply_rc_config: bindings / aliases routing ───────────────────────
@@ -665,39 +652,22 @@ mod tests {
     }
 
     /// Apply `config` to a fresh shell via `apply_rc_config` and return the
-    /// full post-application state: shell, plugin runtime, bell, edit mode,
-    /// and surface.
-    fn apply_to_fresh_env_full(
-        config: Value,
-    ) -> (
-        Shell,
-        Arc<Mutex<PluginRuntime>>,
-        BellStyle,
-        EditMode,
-        Surface,
-    ) {
+    /// full post-application state: shell, resolved settings, and plugin
+    /// runtime.
+    fn apply_to_fresh_env_full(config: Value) -> (Shell, RcSettings, Arc<Mutex<PluginRuntime>>) {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        let mut mode = EditMode::Emacs;
-        let mut bell = BellStyle::None;
-        let mut surface = Surface::default();
         let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
-        apply_rc_config(
-            config,
-            &mut RcCtx {
-                shell: &mut shell,
-                edit_mode: &mut mode,
-                bell: &mut bell,
-                surface: &mut surface,
-                runtime: &runtime,
-            },
-        );
-        (shell, runtime, bell, mode, surface)
+        let Value::Map(pairs) = config else {
+            panic!("test rc config must be a map; got {}", config.type_name());
+        };
+        let (settings, _) = apply_rc_config(pairs, &mut shell, &runtime);
+        (shell, settings, runtime)
     }
 
     /// Apply an rc map and return the resolved [`Surface`] (the default
     /// when the rc does not set one).
     fn apply_rc_surface(rc_src: &str) -> Surface {
-        apply_rc_inner(rc_src).1
+        apply_rc_inner(rc_src).1.surface
     }
 
     /// rc `surface:` selects the frontend, case-insensitively.
@@ -735,9 +705,9 @@ mod tests {
     /// A wrong-typed `surface:` is rejected; the default stays.
     #[test]
     fn rc_surface_wrong_type_rejected() {
-        let (_, _, _, _, surface) =
+        let (_, settings, _) =
             apply_to_fresh_env_full(Value::map(vec![("surface".into(), Value::Int(7))]));
-        assert_eq!(surface, Surface::default());
+        assert_eq!(settings.surface, Surface::default());
     }
 
     #[test]
@@ -773,7 +743,7 @@ mod tests {
     /// stays empty.
     #[test]
     fn rc_plugins_wrong_type_rejected() {
-        let (_, runtime, _, _, _) =
+        let (_, _, runtime) =
             apply_to_fresh_env_full(Value::map(vec![("plugins".into(), Value::Int(7))]));
         assert!(runtime.lock().unwrap().plugins.is_empty());
     }
@@ -795,12 +765,12 @@ mod tests {
     /// same map from applying.
     #[test]
     fn rc_bad_key_does_not_block_other_keys() {
-        let (shell, _, _, mode, _) = apply_to_fresh_env_full(Value::map(vec![
+        let (shell, settings, _) = apply_to_fresh_env_full(Value::map(vec![
             ("edit_mode".into(), Value::Int(42)),
             ("recursion_limit".into(), Value::Int(256)),
         ]));
         assert_eq!(shell.recursion_limit(), 256);
-        assert_eq!(mode, EditMode::Emacs);
+        assert_eq!(settings.edit_mode, EditMode::Emacs);
     }
 
     /// Typecheck `src` against `shell`'s live session schemes — the same
@@ -823,7 +793,7 @@ mod tests {
     #[test]
     fn rc_bindings_function_typechecks_heterogeneous_call() {
         let src = "return [\n    bindings: [\n        ws: { |name body| echo $name; !$body },\n    ],\n]\n";
-        let (shell, _, _, _, _) = apply_rc_inner(src);
+        let (shell, _, _) = apply_rc_inner(src);
         // Lexical binding, not an alias handler frame.
         assert!(shell.scope_lookup("ws").is_some());
         assert!(!shell.has_alias("ws"));
@@ -843,7 +813,7 @@ mod tests {
     #[test]
     fn rc_aliases_function_is_argv_alias() {
         let src = "return [\n    aliases: [\n        ws: { |args| echo $args },\n    ],\n]\n";
-        let (shell, _, _, _, _) = apply_rc_inner(src);
+        let (shell, _, _) = apply_rc_inner(src);
         // Alias handler frame, not a scope binding.
         assert!(shell.has_alias("ws"));
         assert!(shell.scope_lookup("ws").is_none());
