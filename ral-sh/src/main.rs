@@ -132,11 +132,17 @@ fn dispatch() -> ! {
     reason = "[io-door:silent:respawn-ral] login-shell bridge re-execs into the ral binary; infra wrapper, not a model exec image"
 )]
 fn exec_ral(is_login: bool, args: &[OsString]) -> ! {
-    // Find the ral binary in the same directory as ral-sh.
-    let ral = std::env::current_exe()
+    // Prefer the sibling ral next to ral-sh, but only if it's actually
+    // there — a relocated or separately installed ral-sh has no sibling
+    // and must fall back to a $PATH lookup instead of pinning to a path
+    // that will never resolve.
+    let sibling = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("ral")))
-        .unwrap_or_else(|| std::path::PathBuf::from("ral"));
+        .and_then(|p| p.parent().map(|d| d.join("ral")));
+    let ral = match sibling {
+        Some(path) if path.exists() => path,
+        _ => std::path::PathBuf::from("ral"),
+    };
 
     let mut cmd = std::process::Command::new(&ral);
     if is_login {
