@@ -442,8 +442,14 @@ impl Parser {
     /// stage = return-stage | if-stage | case-stage | control-op | command
     ///
     /// The dispatch below is also the list of words reserved in stage position.
+    ///
+    /// Every arm must leave the cursor at [`Self::at_cmd_end`] — checked once
+    /// here rather than trusted of each arm, so a fixed-shape form that stops
+    /// short (like `case`'s scrutinee-then-table) can't hand its leftover
+    /// tokens to `parse_program` as a silent, separator-less next statement.
     fn parse_stage(&mut self) -> Result<Ast, ParseError> {
-        match self.peek().as_plain_word() {
+        let head = self.peek().as_plain_word().map(str::to_owned);
+        let stage = match head.as_deref() {
             // `parse_stmt` peels `let` off first, so arriving here means a
             // binding embedded in pipeline or chain position.
             Some("let") => Err(self.error(
@@ -461,7 +467,15 @@ impl Parser {
                 None => self.parse_command(),
             },
             None => self.parse_command(),
+        }?;
+        if self.at_cmd_end() {
+            return Ok(stage);
         }
+        let found = self.peek().clone();
+        Err(self.error(format!(
+            "unexpected {found} after `{name}`; a new statement needs a separator (newline or ';')",
+            name = head.as_deref().unwrap_or("this"),
+        )))
     }
 
     /// Parse the keyword `kw` names, then exactly `kw.arity` operands and any
@@ -2528,6 +2542,87 @@ mod tests {
     }
 
     #[test]
+    fn parse_if_rejects_trailing_same_line_argument() {
+        let err = parse("if true { echo yes } echo unexpected").unwrap_err();
+        assert!(
+            err.message.contains("unexpected") && err.message.contains("`if`"),
+            "expected an unexpected-argument error naming `if`, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_if_still_allows_a_newline_separated_next_statement() {
+        let ast = unwrap_stmts(parse("if true { echo yes }\necho after").unwrap());
+        assert_eq!(ast.len(), 2);
+        assert!(matches!(ast[0], Ast::If { .. }));
+        assert_eq!(ast[1], app(bare_head("echo"), vec![plain("after")]));
+    }
+
+    #[test]
+    fn parse_if_still_allows_a_semicolon_separated_next_statement() {
+        let ast = unwrap_stmts(parse("if true { echo yes }; echo after").unwrap());
+        assert_eq!(ast.len(), 2);
+        assert!(matches!(ast[0], Ast::If { .. }));
+        assert_eq!(ast[1], app(bare_head("echo"), vec![plain("after")]));
+    }
+
+    #[test]
+    fn parse_case_rejects_trailing_same_line_argument() {
+        let err = parse("case $r $handlers echo unexpected").unwrap_err();
+        assert!(
+            err.message.contains("unexpected") && err.message.contains("`case`"),
+            "expected an unexpected-argument error naming `case`, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_case_still_allows_a_newline_separated_next_statement() {
+        let ast = unwrap_stmts(parse("case $r $handlers\necho after").unwrap());
+        assert_eq!(
+            ast,
+            vec![
+                Ast::Case {
+                    scrutinee: Spanned::synthetic_boxed(Ast::Variable("r".into())),
+                    table: Spanned::synthetic_boxed(Ast::Variable("handlers".into())),
+                },
+                app(bare_head("echo"), vec![plain("after")]),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_case_still_allows_a_semicolon_separated_next_statement() {
+        let ast = unwrap_stmts(parse("case $r $handlers; echo after").unwrap());
+        assert_eq!(
+            ast,
+            vec![
+                Ast::Case {
+                    scrutinee: Spanned::synthetic_boxed(Ast::Variable("r".into())),
+                    table: Spanned::synthetic_boxed(Ast::Variable("handlers".into())),
+                },
+                app(bare_head("echo"), vec![plain("after")]),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_case_still_allowed_as_a_pipeline_stage() {
+        let ast = unwrap_stmts(parse("case $r $handlers | cat").unwrap());
+        assert_eq!(
+            ast,
+            vec![Ast::Pipeline(body(vec![
+                Ast::Case {
+                    scrutinee: Spanned::synthetic_boxed(Ast::Variable("r".into())),
+                    table: Spanned::synthetic_boxed(Ast::Variable("handlers".into())),
+                },
+                plain("cat"),
+            ]))]
+        );
+    }
+
+    #[test]
     fn parse_redirect() {
         let ast = unwrap_stmts(parse("echo hello > out.txt").unwrap());
         match &ast[0] {
@@ -3064,6 +3159,16 @@ mod tests {
             unwrap_single_scope(parse("try { body } { handler } > out 2>&1").unwrap());
         assert_eq!(redirects.len(), 2);
         assert!(matches!(op, ScopeAst::Try { .. }));
+    }
+
+    #[test]
+    fn parse_try_rejects_trailing_argument_after_redirect() {
+        let err = parse("try { body } { handler } > out.txt oops").unwrap_err();
+        assert!(
+            err.message.contains("unexpected") && err.message.contains("`try`"),
+            "expected an unexpected-argument error naming `try`, got: {}",
+            err.message
+        );
     }
 
     #[test]
