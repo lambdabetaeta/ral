@@ -86,17 +86,22 @@ pub(crate) fn detach(
                 .to_string(),
         ));
     };
-    if let Err(budget) = policy.admit() {
-        return Err(sig(format!(
-            "detach: this session has already birthed {budget} processes it no longer owns; \
-             that is the budget, and nothing gives a birth back. Is one of them finished, so \
-             you can stop it by pid and do without another?"
-        )));
-    }
+    let reservation = match policy.admit() {
+        Ok(reservation) => reservation,
+        Err(budget) => {
+            return Err(sig(format!(
+                "detach: this session has already birthed {budget} processes it no longer owns; \
+                 that is the budget, and nothing gives a birth back. Is one of them finished, so \
+                 you can stop it by pid and do without another?"
+            )));
+        }
+    };
 
     // The survivor outlives this run, but confining it happens here, under this
     // run's scope: a cancel during the stamp abandons the birth, which is the
-    // one moment it still can.
+    // one moment it still can — and the abandoned launch's reservation, still
+    // uncommitted, gives the slot straight back. Only a spawned survivor ever
+    // spends one.
     let mut launch = build_command(
         &plan,
         crate::sandbox::Ownership::Surrendered,
@@ -109,6 +114,7 @@ pub(crate) fn detach(
     let pid = launch
         .spawn_detached()
         .map_err(|e| sig(format!("detach: cannot launch '{}': {e}", plan.shown)))?;
+    reservation.commit();
 
     mooring.emit_io(&io_event::exec(&plan.shown, &plan.args, 0));
     shell.mobile.control.last_status = 0;

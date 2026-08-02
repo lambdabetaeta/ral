@@ -84,7 +84,7 @@ pub use shell::{Context, DEFAULT_RECURSION_LIMIT, LocalState, Mobile, SessionSta
 pub(crate) use shell::workers::{CapReached, WorkerRegistry};
 pub use shell::workers::{LeaseClass, ReapCause, ReapNotice, WorkerEntry, WorkerId, WorkerLease};
 
-pub use shell::detached::DetachPolicy;
+pub use shell::detached::{DetachPolicy, Reservation};
 
 pub use shell::bindings::{BindingLease, BindingPruneNotice, LargeBindingNotice};
 
