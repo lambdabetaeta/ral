@@ -167,12 +167,13 @@ impl NormalizedPrefix {
         }
     }
 
-    /// The surface form as a `Path`, for containment matching.
+    /// The surface form as a `Path` — the author's spelling, never the form
+    /// containment is judged on; the gate matches [`Self::resolved_path`].
     #[allow(
         clippy::disallowed_methods,
         reason = "lexical Path::new over a surface already in normal form — no I/O behind it"
     )]
-    pub fn as_path(&self) -> &Path {
+    pub fn surface_path(&self) -> &Path {
         Path::new(&self.surface)
     }
 
@@ -228,7 +229,7 @@ impl NormalizedPrefix {
     /// True iff this prefix is absolute; `capability::decode` rejects a
     /// frozen entry that is not.
     pub fn is_absolute(&self) -> bool {
-        self.as_path().is_absolute()
+        self.surface_path().is_absolute()
     }
 
     /// Mint a divergent `surface`/`resolved` pair — the shape a real

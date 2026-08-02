@@ -49,23 +49,32 @@ pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
 
 /// Frontmatter for every readable skill, for the prompt's Skills section.
 ///
-/// Runs once at boot, before a `Shell` exists, so it filters against the
-/// static `caps` where `skill-list` and `skill` use `Shell::check_fs_read`.
+/// Runs once at boot, before a `Shell` exists, so it asks the fs gate's own
+/// verdict — [`GrantStack::admits_fs`](ral_core::types::GrantStack::admits_fs)
+/// over a one-frame stack of the session `caps` — about each `SKILL.md` it
+/// opens, where `skill-list` and `skill` use `Shell::check_fs_read`.  At boot
+/// that frame is the whole stack, so the two doors agree by construction.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:skill-metadata] reads SKILL.md frontmatter at prompt assembly to build the Skills section; pre-run, gated by caps"
+    reason = "[io-door:silent:skill-metadata] reads SKILL.md frontmatter at prompt assembly to build the Skills section; pre-run, gated by GrantStack::admits_fs"
 )]
 pub fn discover_metadata(
     cwd: &Path,
     config_dir: &Path,
     caps: &ral_core::types::Capabilities,
 ) -> Vec<Skill> {
+    let grants = ral_core::types::GrantStack::of(caps.clone());
+    // Shell-less as at the fff index: every candidate is `cwd`/`config_dir`
+    // joined absolute, so the resolver's home and cwd are never consulted.
+    let resolver = ral_core::path::Resolver::shell_less();
     let mut skills = Vec::new();
     for (name, dir) in discover_all(cwd, config_dir) {
-        if !dir_readable(&dir, caps) {
+        let sk_md = dir.join("SKILL.md");
+        let rp = resolver.resolve(&sk_md.to_string_lossy());
+        if !grants.admits_fs(&ral_core::capability::FsOp::Read, &resolver, &rp) {
             continue;
         }
-        let Ok(raw) = std::fs::read_to_string(dir.join("SKILL.md")) else {
+        let Ok(raw) = std::fs::read_to_string(rp.as_path()) else {
             continue;
         };
         if let Some(skill) = skill_from_frontmatter(&raw, &name) {
@@ -73,24 +82,6 @@ pub fn discover_metadata(
         }
     }
     skills
-}
-
-/// Whether `caps` admits reading `dir`; no fs policy is the lattice top, so
-/// unrestricted and readable.
-fn dir_readable(dir: &Path, caps: &ral_core::types::Capabilities) -> bool {
-    let Some(fs) = &caps.fs else {
-        return true;
-    };
-    let in_read = fs
-        .read_prefixes
-        .iter()
-        .any(|p| ral_core::path::path_within(dir, p.as_path()));
-    if !in_read {
-        return false;
-    }
-    !fs.deny_paths
-        .iter()
-        .any(|p| ral_core::path::path_within(dir, p.as_path()))
 }
 
 /// Parse a `SKILL.md`'s frontmatter, accepting it only when the declared `name`

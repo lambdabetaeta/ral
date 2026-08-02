@@ -27,10 +27,13 @@ pub use tilde::{abbreviate_home, home, user_name};
 
 pub use git::{discover_git_dir, find_git_entry};
 pub use lex::{
-    PathShape, basename, exists, is_absolute, is_dir, parent_or_cwd, path_aliases, path_within,
-    path_within_str, proper_ancestors, resolve_path, resolve_relative_to_script, resolve_str,
-    shape,
+    PathShape, basename, exists, is_absolute, is_dir, parent_or_cwd, path_aliases,
+    proper_ancestors, resolve_path, resolve_relative_to_script, resolve_str, shape,
 };
+// The containment kernel stays crate-private: outside core the only fs
+// containment question is `GrantStack::admits_fs`, so no caller can re-derive
+// a matcher over surface forms as exarch's skill gate once did.
+pub(crate) use lex::path_within_str;
 pub use prefix_set::{PrefixSet, covers, meet_prefixes};
 #[cfg(target_os = "macos")]
 pub(crate) use render::rendered_ancestors;

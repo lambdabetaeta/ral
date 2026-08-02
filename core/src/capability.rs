@@ -21,7 +21,7 @@ pub(crate) use enforce::{
     admits_head, check_editor_read, check_editor_tui, check_editor_write, check_exec_args,
     check_fs_op, check_shell_chdir,
 };
-pub(crate) use fs::FsOp;
+pub use fs::FsOp;
 pub use load::{apply_session_profiles, load_capabilities_from_path, load_capabilities_from_str};
 pub(crate) use sandbox::sandbox_projection;
 

@@ -119,6 +119,27 @@ pub(super) fn fs_verdict(
     }
 }
 
+impl GrantStack {
+    /// The fs gate's verdict as a plain bool, for callers with no [`Context`]
+    /// to audit through — exarch's boot-time skill discovery asks it of a
+    /// one-frame [`GrantStack::of`].  The same [`fs_verdict`] the gate runs,
+    /// canonicalising leniently inside as [`check_fs_op`] does, so there is no
+    /// surface-form spelling of the question.  The `/dev/null` exemption is
+    /// [`check_fs_op`]'s alone: it excuses a discard device from an *access*,
+    /// and this door decides membership, not access.
+    pub fn admits_fs(
+        &self,
+        op: &FsOp,
+        resolver: &Resolver,
+        path: &crate::path::ResolvedPath,
+    ) -> bool {
+        !matches!(
+            fs_verdict(self, resolver, &path.canonicalise_lenient(), op),
+            FsVerdict::Denied
+        )
+    }
+}
+
 /// Decide an `op` on one resolved path, audit it, and mint the `Break` on
 /// denial: [`fs_verdict`] is the decision, this the reporting around it.
 /// `/dev/null` is exempt from both regions as a discard device.
@@ -235,4 +256,77 @@ fn emit_capability_audit(
     fill(&mut fields);
     let node = ExecNode::capability_check(kind, decision, site, principal, fields);
     audit.push(node);
+}
+
+/// Pins for [`GrantStack::admits_fs`]: containment is judged on resolved
+/// forms on both sides, so a symlink-spelled grant covers its target — the
+/// divergence the retired hand-rolled skill matcher had, in both directions.
+#[cfg(unix)]
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)]
+mod tests {
+    use super::FsOp;
+    use crate::path::{NormalizedPrefix, Resolver};
+    use crate::types::{Capabilities, FsPolicy, GrantStack};
+
+    fn stack(fs: FsPolicy) -> GrantStack {
+        GrantStack::of(Capabilities {
+            fs: Some(fs),
+            ..Capabilities::default()
+        })
+    }
+
+    fn admits_read(grants: &GrantStack, path: &std::path::Path) -> bool {
+        let resolver = Resolver::shell_less();
+        let rp = resolver.resolve(&path.to_string_lossy());
+        grants.admits_fs(&FsOp::Read, &resolver, &rp)
+    }
+
+    #[test]
+    fn a_symlink_spelled_read_prefix_admits_its_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("SKILL.md"), "x").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let grants = stack(FsPolicy {
+            read_prefixes: vec![NormalizedPrefix::from_surface(&link)],
+            ..FsPolicy::default()
+        });
+        assert!(
+            admits_read(&grants, &real.join("SKILL.md")),
+            "a prefix granted through a symlink must cover the resolved target"
+        );
+        assert!(
+            !admits_read(&grants, &tmp.path().join("outside")),
+            "the region is still the prefix, not the world"
+        );
+    }
+
+    #[test]
+    fn a_symlink_spelled_deny_covers_its_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        let secret = real.join("secret");
+        std::fs::create_dir_all(&secret).unwrap();
+        std::fs::write(secret.join("SKILL.md"), "x").unwrap();
+        let link = tmp.path().join("link-secret");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let grants = stack(FsPolicy {
+            read_prefixes: vec![NormalizedPrefix::from_surface(&real)],
+            deny_paths: vec![NormalizedPrefix::from_surface(&link)],
+            ..FsPolicy::default()
+        });
+        assert!(
+            !admits_read(&grants, &secret.join("SKILL.md")),
+            "a deny spelled through a symlink must cover the resolved target"
+        );
+        assert!(
+            admits_read(&grants, &real.join("SKILL.md")),
+            "the deny is the entry, not the whole read region"
+        );
+    }
 }

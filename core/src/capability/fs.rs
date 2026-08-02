@@ -21,7 +21,7 @@ use crate::path::{NormalizedPrefix, PrefixSet, Resolver};
 use crate::types::{FsPolicy, GrantStack, Meet};
 
 /// Which fs region a check consults: the read or the write prefix set.
-pub(crate) enum FsOp {
+pub enum FsOp {
     Read,
     Write,
 }

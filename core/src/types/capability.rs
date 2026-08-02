@@ -438,6 +438,15 @@ impl GrantStack {
         Self(vec![Capabilities::root()])
     }
 
+    /// A stack of exactly `frame`: a view for asking a gate's question of one
+    /// frame — a boot-time `Capabilities` no shell holds yet — not a session
+    /// stack, which is always built by [`GrantStack::root`] plus `push`.
+    /// Verdict-identical to `[root, frame]` because the ambient root holds no
+    /// opinion on any axis.
+    pub fn of(frame: Capabilities) -> Self {
+        Self(vec![frame])
+    }
+
     /// True iff a real grant sits above the ambient root — what
     /// `Shell::has_active_capabilities` reports.
     pub fn is_restrictive(&self) -> bool {

@@ -27,7 +27,7 @@ pub fn path_aliases(p: &Path) -> Vec<PathBuf> {
 ///
 /// The runtime grant gate (`capability::enforce`) and the prefix intersector
 /// (`super::prefix_set`) both decide containment through it.
-pub fn path_within(path: &Path, prefix: &Path) -> bool {
+pub(crate) fn path_within(path: &Path, prefix: &Path) -> bool {
     let ps = path_aliases(path);
     let qs = path_aliases(prefix);
     if cfg!(windows) {
@@ -215,7 +215,7 @@ pub fn resolve_str(cwd: Option<&str>, path: &str) -> PathBuf {
 
 /// [`path_within`] on strings.
 #[allow(clippy::disallowed_methods)]
-pub fn path_within_str(path: &str, prefix: &str) -> bool {
+pub(crate) fn path_within_str(path: &str, prefix: &str) -> bool {
     path_within(Path::new(path), Path::new(prefix))
 }
 

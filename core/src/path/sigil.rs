@@ -192,7 +192,7 @@ fn resolve_xdg_safe(
 ) -> Result<NormalizedPrefix, PolicyError> {
     let resolved = join_sub(resolve_xdg(kind, home), sub);
     let folded_home = fold_dots(Path::new(home));
-    if resolved.as_path().starts_with(&folded_home) {
+    if resolved.surface_path().starts_with(&folded_home) {
         return Ok(resolved);
     }
     let val = std::env::var(kind.env_var()).unwrap_or_default();
