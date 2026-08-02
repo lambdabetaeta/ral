@@ -515,6 +515,14 @@ pub(crate) fn run_framed<'a>(
 
     let result = shell.with_capabilities(capabilities, |s| body(mooring, s));
 
+    // Cancellation is sticky until the run settles, and the run settles here: a
+    // recovery construct (`try`) classifies the cancellation `Break::Error`
+    // like any other and may absorb it into a clean value, but the scope is
+    // monotone, so this final poll re-raises it before the status is read —
+    // `post_exec` and the transport both see the true verdict. Demotes only a
+    // successful settle; an error or escape already carries its own.
+    let result = result.and_then(|value| crate::process::check(mooring).map(|()| value));
+
     let status = eval_status(&result, shell);
 
     lifecycle.post_exec(mooring, shell, src, status);
@@ -832,6 +840,43 @@ mod tests {
                     matches!(result, Err(Break::Error(_))),
                     "the cancel must unwind into a Break::Error, got {result:?}"
                 );
+            }
+            RunReport::Static { .. } => panic!("valid source must reach evaluation"),
+        }
+    }
+
+    /// `try` classifies a cancellation like any recoverable error, so a handler
+    /// that settles cleanly resets `last_status` to 0 — the run boundary must
+    /// re-poll the monotone scope before the status is read, or a final
+    /// `try { … } { |_| return unit }` suppresses the interrupt entirely.
+    #[test]
+    fn a_try_handler_cannot_settle_a_cancelled_run() {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
+        struct CancelInPreExec;
+        impl RunLifecycle for CancelInPreExec {
+            fn pre_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str) {
+                crate::process::request_foreground_cancel(crate::process::CancelCause::Interrupt);
+            }
+        }
+
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.face_signals();
+        match shell.run(RunRequest {
+            lifecycle: Box::new(CancelInPreExec),
+            ..capture_req("try { let x = unit\nreturn $x } { |_| return unit }")
+        }) {
+            RunReport::Ran { result, status, .. } => {
+                assert_eq!(
+                    status, 130,
+                    "a try handler must not settle a cancelled run at 0"
+                );
+                match result {
+                    Err(Break::Error(e)) => assert_eq!(
+                        e.message, "interrupted",
+                        "the boundary poll must report the cancel cause's own words"
+                    ),
+                    other => panic!("the re-poll must unwind into a Break::Error, got {other:?}"),
+                }
             }
             RunReport::Static { .. } => panic!("valid source must reach evaluation"),
         }
