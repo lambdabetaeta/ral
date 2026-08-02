@@ -62,7 +62,7 @@ mod audit;
 pub(crate) use audit::NodeOutcome;
 pub use audit::{
     Audit, AuditFragment, AuditIo, AuditTime, AuditTrail, CapturePolicy, ExecNode, ExecNodeKind,
-    STDERR_CAP_BYTES, epoch_us,
+    STDERR_CAP_BYTES, epoch_us, tree_value,
 };
 
 // Here because audit nodes and capability checks carry one.

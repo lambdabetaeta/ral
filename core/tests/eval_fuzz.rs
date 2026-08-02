@@ -2514,15 +2514,20 @@ fn children_of(v: &Value) -> Vec<Value> {
     }
 }
 
+fn is_cap_check(v: &Value, resource: &str, decision: &str) -> bool {
+    map_field(v, "kind") == Value::String("capability-check".into())
+        && map_field(v, "resource") == Value::String(resource.into())
+        && map_field(v, "decision") == Value::String(decision.into())
+}
+
+/// A capability check always lands flat among the collecting audit's own
+/// children now — `grant`/`within`/`guard` are transparent, so nothing ever
+/// nests one a level deeper.  The recursive search stays anyway: it is the
+/// same "is this event present anywhere" question regardless of tree shape.
 fn has_cap_check(children: &[Value], resource: &str, decision: &str) -> bool {
-    children.iter().any(|c| {
-        let here = map_field(c, "kind") == Value::String("capability-check".into())
-            && map_field(c, "resource") == Value::String(resource.into())
-            && map_field(c, "decision") == Value::String(decision.into());
-        // §11.5 nests grant/within/guard bodies under a scope node, so the
-        // capability-check may be a grandchild rather than an immediate child.
-        here || has_cap_check(&children_of(c), resource, decision)
-    })
+    children
+        .iter()
+        .any(|c| is_cap_check(c, resource, decision) || has_cap_check(&children_of(c), resource, decision))
 }
 
 #[cfg(unix)]
@@ -2651,127 +2656,79 @@ fn audit_fs_write_denied_recorded() {
     );
 }
 
-// ── Lexical-audit structural tests (single-audit-path) ───────────────────
+// ── Flat-audit structural tests (single-audit-path) ──────────────────────
 //
-// One mechanism, one tree shape: every scope-introducing builtin owns
-// the audit nodes its body produces.  These tests assert the parent /
-// child topology, not just which leaves appear.
-
-/// Find an immediate child of `parent` whose `cmd` matches `name`, or
-/// `None`.  The traversal helpers above (`has_cap_check`) recurse; for
-/// scope ownership we need to check direct-child placement.
-///
-/// Unix-only: its sole caller is `#[cfg(unix)]` (the fixture execs `/bin/true`).
-#[cfg(unix)]
-fn child_named<'a>(parent: &'a Value, name: &str) -> Option<&'a Value> {
-    match parent {
-        Value::Map(m) => match m.get("children") {
-            Some(Value::List(items)) => items
-                .iter()
-                .find(|c| matches!(c, Value::Map(cm) if cm.get("cmd") == Some(&Value::String(name.into())))),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// Find an immediate child of `parent` that is a `command` node (any
-/// name).  Used when the user only cares that *some* body node ran.
-fn first_command_child(parent: &Value) -> Option<&Value> {
-    match parent {
-        Value::Map(m) => match m.get("children") {
-            Some(Value::List(items)) => items
-                .iter()
-                .find(|c| matches!(c, Value::Map(cm) if cm.get("kind") == Some(&Value::String("command".into())))),
-            _ => None,
-        },
-        _ => None,
-    }
-}
+// `within`/`grant`/`guard`/`try`/`audit` are collection boundaries, not
+// tree nodes: none of them wraps its body's commands under a node of its
+// own.  These tests assert that flatness directly — a body's real command
+// lands as a direct child of the collecting audit, and no node named after
+// the control operator itself ever appears.
 
 #[cfg(unix)]
 #[test]
-fn audit_grant_owns_exec_capability_allowed_child() {
+fn audit_grant_flattens_exec_capability_allowed_child() {
     let tree =
         must_succeed("audit { grant [exec: ['/bin/true': 'allow'], audit: true] { /bin/true } }");
-    let outer_children = children_of(&tree);
-    let grant = outer_children
-        .iter()
-        .find(|c| map_field(c, "cmd") == Value::String("grant".into()))
-        .expect("audit tree must contain a `grant` scope node");
-    let grant_children = children_of(grant);
+    let children = children_of(&tree);
     assert!(
-        has_cap_check(&grant_children, "exec", "allowed"),
-        "exec/allowed capability-check must be a child of `grant`, not the root: {grant_children:?}"
+        children.iter().any(|c| is_cap_check(c, "exec", "allowed")),
+        "exec/allowed capability-check must be a direct child of the audit root: {children:?}"
+    );
+    assert!(
+        !children.iter().any(|c| map_field(c, "cmd") == Value::String("grant".into())),
+        "`grant` is transparent — it must never own a node of its own: {children:?}"
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn audit_grant_owns_exec_capability_denied_child() {
+fn audit_grant_flattens_exec_capability_denied_child() {
     // /bin/false exits 1; the exec check is still allowed because the
     // grant lists '/bin/false' implicitly via the prefix.  For an
     // unambiguous "denied" event we issue a grant that does NOT include
     // the requested binary.
     let tree =
         must_succeed("audit { grant [exec: ['/bin/true': 'allow'], audit: true] { /bin/false } }");
-    let outer_children = children_of(&tree);
-    let grant = outer_children
-        .iter()
-        .find(|c| map_field(c, "cmd") == Value::String("grant".into()))
-        .expect("audit tree must contain a `grant` scope node");
-    let grant_children = children_of(grant);
+    let children = children_of(&tree);
     assert!(
-        has_cap_check(&grant_children, "exec", "denied"),
-        "exec/denied capability-check must be a child of `grant`: {grant_children:?}"
+        children.iter().any(|c| is_cap_check(c, "exec", "denied")),
+        "exec/denied capability-check must be a direct child of the audit root: {children:?}"
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn audit_grant_owns_sandboxed_fs_allowed_child() {
+fn audit_grant_flattens_sandboxed_fs_allowed_child() {
     let tree =
         must_succeed("audit { grant [fs: [read: ['/tmp']], audit: true] { glob '/tmp/*' } }");
-    let outer_children = children_of(&tree);
-    let grant = outer_children
-        .iter()
-        .find(|c| map_field(c, "cmd") == Value::String("grant".into()))
-        .expect("audit tree must contain a `grant` scope node");
-    // The grant body evaluates in-process, so the fs/allowed
-    // capability-check for `glob` is recorded directly under the grant
-    // scope node.
-    let grant_children = children_of(grant);
+    let children = children_of(&tree);
     assert!(
-        has_cap_check(&grant_children, "fs", "allowed"),
-        "fs/allowed event must be under `grant`, not loose at the root: outer={outer_children:?}"
+        children.iter().any(|c| is_cap_check(c, "fs", "allowed")),
+        "fs/allowed event must be a direct child of the audit root: {children:?}"
     );
 }
 
 #[test]
-fn audit_within_owns_body_children() {
+fn audit_within_flattens_body_children() {
     let tree = must_succeed("audit { within [env: [X: 'y']] { /bin/true } }");
-    let outer_children = children_of(&tree);
-    let within = outer_children
-        .iter()
-        .find(|c| map_field(c, "cmd") == Value::String("within".into()))
-        .expect("audit tree must contain a `within` scope node");
+    let children = children_of(&tree);
     assert!(
-        first_command_child(within).is_some(),
-        "within's body command must be a direct child of the within node: {:?}",
-        children_of(within)
+        children
+            .iter()
+            .any(|c| map_field(c, "cmd") == Value::String("/bin/true".into())),
+        "within's body command must be a direct child of the audit root: {children:?}"
+    );
+    assert!(
+        !children.iter().any(|c| map_field(c, "cmd") == Value::String("within".into())),
+        "`within` is transparent — it must never own a node of its own: {children:?}"
     );
 }
 
 #[test]
-fn audit_guard_owns_body_and_cleanup_children() {
+fn audit_guard_flattens_body_and_cleanup_children() {
     let tree = must_succeed("audit { guard { /bin/true } { /bin/echo cleaning } }");
-    let outer_children = children_of(&tree);
-    let guard = outer_children
-        .iter()
-        .find(|c| map_field(c, "cmd") == Value::String("guard".into()))
-        .expect("audit tree must contain a `guard` scope node");
-    let guard_children = children_of(guard);
-    let cmd_names: Vec<String> = guard_children
+    let children = children_of(&tree);
+    let cmd_names: Vec<String> = children
         .iter()
         .filter_map(|c| match map_field(c, "cmd") {
             Value::String(s) => Some(s),
@@ -2780,86 +2737,77 @@ fn audit_guard_owns_body_and_cleanup_children() {
         .collect();
     assert!(
         cmd_names.iter().any(|n| n == "/bin/true"),
-        "guard body must appear under the guard node: {cmd_names:?}"
+        "guard's body command must be a direct child of the audit root: {cmd_names:?}"
     );
     assert!(
         cmd_names.iter().any(|n| n == "/bin/echo"),
-        "guard cleanup must appear under the guard node: {cmd_names:?}"
+        "guard's cleanup command must be a direct child of the audit root: {cmd_names:?}"
+    );
+    assert!(
+        !cmd_names.iter().any(|n| n == "guard"),
+        "`guard` is transparent — it must never own a node of its own: {cmd_names:?}"
     );
 }
 
 #[test]
-fn audit_try_records_try_node_with_body_children() {
+fn audit_try_flattens_body_children() {
     let tree = must_succeed("audit { try { /bin/true } { |_e| return 'caught' } }");
-    let outer_children = children_of(&tree);
-    let try_node = outer_children
-        .iter()
-        .find(|c| map_field(c, "cmd") == Value::String("try".into()))
-        .expect("audit tree must contain a `try` scope node");
+    let children = children_of(&tree);
     assert!(
-        first_command_child(try_node).is_some(),
-        "try's body command must be a child of the try node: {:?}",
-        children_of(try_node)
+        children
+            .iter()
+            .any(|c| map_field(c, "cmd") == Value::String("/bin/true".into())),
+        "try's body command must be a direct child of the audit root: {children:?}"
+    );
+    assert!(
+        !children.iter().any(|c| map_field(c, "cmd") == Value::String("try".into())),
+        "`try` is transparent — it must never own a node of its own: {children:?}"
     );
 }
 
 /// `^clear` skips the env and resolves external, to the ncurses binary —
 /// proven through the audit tree, since the binary itself may fail for
 /// environmental reasons (no `TERM`).  `try` keeps the tree on either
-/// outcome.
+/// outcome, but owns no node of its own: `clear` lands as a direct child
+/// of the audit root.
 #[cfg(unix)]
 #[test]
 fn caret_clear_resolves_external_not_the_native() {
     let tree = must_succeed("audit { try { ^clear } { |_e| return '' } }");
-    let try_node = children_of(&tree)
-        .into_iter()
-        .find(|c| map_field(c, "cmd") == Value::String("try".into()))
-        .expect("audit tree must contain a `try` scope node");
-    let cmd = first_command_child(&try_node);
+    let children = children_of(&tree);
     assert!(
-        matches!(cmd, Some(c) if map_field(c, "cmd") == Value::String("clear".into())),
-        "^clear must record an external command node named `clear`, got {cmd:?}"
+        children
+            .iter()
+            .any(|c| map_field(c, "cmd") == Value::String("clear".into())),
+        "^clear must record an external command node named `clear` as a direct child of the audit root: {children:?}"
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn audit_nested_grants_produce_nested_grant_nodes() {
+fn audit_nested_grants_produce_no_grant_nodes() {
     let tree = must_succeed(
         "audit { grant [exec: ['/bin/true': 'allow'], audit: true] { grant [exec: ['/bin/true': 'allow']] { /bin/true } } }",
     );
-    let outer_children = children_of(&tree);
-    let outer_grant = outer_children
-        .iter()
-        .find(|c| map_field(c, "cmd") == Value::String("grant".into()))
-        .expect("outer grant must be present");
-    let inner =
-        child_named(outer_grant, "grant").expect("inner grant must be a child of the outer grant");
-    let _ = inner;
+    let children = children_of(&tree);
+    assert!(
+        !children.iter().any(|c| map_field(c, "cmd") == Value::String("grant".into())),
+        "nested grants must not produce any `grant`-named node: {children:?}"
+    );
+    assert!(
+        has_cap_check(&children, "exec", "allowed"),
+        "the exec/allowed event from either grant layer must still flatten into the audit root: {children:?}"
+    );
 }
 
 #[test]
-fn audit_nested_audit_records_one_audit_node_and_returns_it() {
-    // Outer `audit { … }` produces the value the test inspects.  The
-    // inner `audit { /bin/true }` should appear as exactly one
-    // command-shaped child whose `cmd` is "audit", and the inner
-    // scope must own the body's command nodes (the recursive
-    // ownership property the plan calls out).
+fn audit_nested_audit_flattens_into_outer_children() {
+    // The inner `audit { … }` is a collection boundary like the outer
+    // one, not a tree node of its own: its /bin/true command flattens
+    // straight into the outer audit's children, and no `audit`-named
+    // node ever appears.
     let tree = must_succeed("audit { audit { /bin/true } }");
-    let outer_children = children_of(&tree);
-    let inner: Vec<_> = outer_children
-        .iter()
-        .filter(|c| map_field(c, "cmd") == Value::String("audit".into()))
-        .collect();
-    assert_eq!(
-        inner.len(),
-        1,
-        "exactly one inner `audit` node expected: {outer_children:?}"
-    );
-    // Inner audit owns /bin/true: the body's command node is a child
-    // of the inner scope, not a sibling of it in the outer tree.
-    let inner_children = children_of(inner[0]);
-    let names: Vec<String> = inner_children
+    let names: Vec<String> = children_of(&tree)
         .iter()
         .filter_map(|c| match map_field(c, "cmd") {
             Value::String(s) => Some(s),
@@ -2868,20 +2816,11 @@ fn audit_nested_audit_records_one_audit_node_and_returns_it() {
         .collect();
     assert!(
         names.iter().any(|n| n.contains("/bin/true")),
-        "inner audit's children must include /bin/true: {names:?}"
+        "inner audit's real command must flatten into the outer audit's children: {names:?}"
     );
-    // And the outer scope must NOT see /bin/true as a direct child —
-    // the inner audit absorbs ownership.
-    let outer_names: Vec<String> = outer_children
-        .iter()
-        .filter_map(|c| match map_field(c, "cmd") {
-            Value::String(s) => Some(s),
-            _ => None,
-        })
-        .collect();
     assert!(
-        !outer_names.iter().any(|n| n.contains("/bin/true")),
-        "outer audit must not directly own /bin/true: {outer_names:?}"
+        !names.iter().any(|n| n == "audit"),
+        "audit must never appear as a node of its own: {names:?}"
     );
 }
 

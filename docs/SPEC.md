@@ -1149,9 +1149,8 @@ Node = [kind: String, cmd: String, args: [String], status: Int,
 ```
 
 Two kinds are emitted.  A `command` node records the execution of a
-single command — external program, builtin, or user function — and
-populates `cmd`, `args`, `status`, `stdout`, `stderr`, and `value` in
-the obvious way.  A `capability-check` node records a `grant` decision
+single command — external program or builtin — and populates `cmd`,
+`args`, `status`, `stdout`, `stderr`, and `value` in the obvious way.  A `capability-check` node records a `grant` decision
 and additionally carries `resource: String` (`"exec"`, `"fs"`, or
 `"deputy"`) and `decision: String` (`"allowed"`, `"denied"`, or
 `"flagged"`); for an allowed `fs` check, the matched prefix appears as

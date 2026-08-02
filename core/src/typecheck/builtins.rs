@@ -505,26 +505,18 @@ pub(super) fn try_error_record() -> Ty {
     ])
 }
 
-/// The audit-node record `audit { … }` produces, field for field the value shape
-/// `ExecNode::to_value` materialises in `core/src/types/audit.rs`.  Children are
-/// a fresh map type, so a node's shape can grow without breaking this.
+/// The record `audit { … }` produces, field for field the value shape
+/// `evaluator::audit::tree_value` materialises.  `audit` is a collection
+/// boundary, not a node — it has no `cmd`, `args`, `script`/`line`/`col`, or
+/// `principal` of its own.  A child in `children` is a fresh map type, one
+/// of the real command/capability-check nodes `ExecNode::to_value` shapes,
+/// so a node's own fields can grow without breaking this.
 pub(super) fn audit_record(value_ty: Ty, child_ty: Ty) -> Ty {
     closed_record(&[
-        ("kind", Ty::String),
-        ("cmd", Ty::String),
-        ("args", Ty::List(Box::new(Ty::String))),
         ("status", Ty::Int),
-        ("script", Ty::String),
-        ("line", Ty::Int),
-        ("col", Ty::Int),
-        ("stdout", Ty::Bytes),
-        ("stderr", Ty::Bytes),
-        ("error", Ty::String),
         ("value", value_ty),
+        ("error", Ty::String),
         ("children", Ty::List(Box::new(Ty::Map(Box::new(child_ty))))),
-        ("start", Ty::Int),
-        ("end", Ty::Int),
-        ("principal", Ty::String),
     ])
 }
 

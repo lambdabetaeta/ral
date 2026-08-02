@@ -104,17 +104,11 @@ pub(crate) fn eval_comp(
             // These brackets apply their body thunk through the trampoline,
             // which absorbs the body's tail call inside the frame, so they
             // have no tail position to grant.
-            ScopeOp::Within { opts, body } => {
-                scope::eval_within(opts, body, comp.span, mooring, shell)
-            }
-            ScopeOp::Grant { caps, body } => scope::eval_grant(caps, body, comp.span, mooring, shell),
-            ScopeOp::Try { body, handler } => {
-                scope::eval_try(body, handler, comp.span, mooring, shell)
-            }
-            ScopeOp::Guard { body, cleanup } => {
-                scope::eval_guard(body, cleanup, comp.span, mooring, shell)
-            }
-            ScopeOp::Audit { body } => scope::eval_audit(body, comp.span, mooring, shell),
+            ScopeOp::Within { opts, body } => scope::eval_within(opts, body, mooring, shell),
+            ScopeOp::Grant { caps, body } => scope::eval_grant(caps, body, mooring, shell),
+            ScopeOp::Try { body, handler } => scope::eval_try(body, handler, mooring, shell),
+            ScopeOp::Guard { body, cleanup } => scope::eval_guard(body, cleanup, mooring, shell),
+            ScopeOp::Audit { body } => scope::eval_audit(body, mooring, shell),
         },
 
         CompKind::Seq(comps) => eval_seq(comps, tail, mooring, shell),

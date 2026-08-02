@@ -1,11 +1,12 @@
 //! List combinators — `each`, `map`, `filter`, `sort-list`, `sort-list-by`,
 //! `fold`, `fold-lines` — and the `range` constructor.
 //!
-//! Only `each` and `map` wrap their per-element applications in an audit
-//! node; under the others those applications land in the enclosing trail
-//! unwrapped.
+//! Every combinator's per-element applications land in the enclosing trail
+//! unwrapped: none of them is a tree node in its own right, only the
+//! combinator's own builtin-call node (from `evaluator::audit::frame_call`)
+//! is real.
 
-use crate::types::{Break, Mooring, NodeOutcome, Settled, Shell, Value, as_list, sig};
+use crate::types::{Break, Mooring, Settled, Shell, Value, as_list, sig};
 
 use super::apply;
 use super::util::value_ordering;
@@ -20,77 +21,29 @@ const INTERRUPT_POLL_CHUNK: usize = 1024;
 /// erroring.  Past it the vector just grows.
 const RANGE_INITIAL_CAP: usize = 1 << 16;
 
-/// Audit-records itself as `for`, the prelude spelling (`let for = { |list
-/// fn| each $fn $list }`) a loop is normally written in.
+/// The prelude spelling (`let for = { |list fn| each $fn $list }`) a loop is
+/// normally written in; either way the audit tree shows the real builtin
+/// that ran, `each`.
 pub(super) fn builtin_each(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let func = &args[0];
     let items = as_list(&args[1], "each")?;
-    iterate_audited("for", shell, |shell| {
-        let mut last = Value::Unit;
-        for item in &items {
-            if let Err(e) = crate::process::check(mooring) {
-                return (last, Some(e));
-            }
-            match apply(func, std::slice::from_ref(item), mooring, shell) {
-                Ok(v) => last = v,
-                Err(e) => return (last, Some(e)),
-            }
-        }
-        (last, None)
-    })
+    let mut last = Value::Unit;
+    for item in &items {
+        crate::process::check(mooring)?;
+        last = apply(func, std::slice::from_ref(item), mooring, shell)?;
+    }
+    Ok(last)
 }
 
 pub(super) fn builtin_map(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let func = &args[0];
     let items = as_list(&args[1], "map")?;
-    iterate_audited("map", shell, |shell| {
-        let mut out = Vec::with_capacity(items.len());
-        for item in &items {
-            if let Err(e) = crate::process::check(mooring) {
-                return (Value::list(out), Some(e));
-            }
-            match apply(func, std::slice::from_ref(item), mooring, shell) {
-                Ok(v) => out.push(v),
-                Err(e) => return (Value::list(out), Some(e)),
-            }
-        }
-        (Value::list(out), None)
-    })
-}
-
-/// Wrap a combinator's loop in an audit node.  `body` hands back its partial
-/// value alongside any error, so a failed combinator records what it had
-/// accumulated where a scope node ([`crate::evaluator::audit::record_scope`])
-/// would record `Unit`.
-fn iterate_audited(
-    cmd: &str,
-    shell: &mut Shell,
-    body: impl FnOnce(&mut Shell) -> (Value, Option<Break>),
-) -> Settled<Value> {
-    let (value, err) = if shell.local.audit.active() {
-        let start = crate::evaluator::audit::start(shell);
-        let principal = shell.mobile.context.principal();
-        let (fragment, (value, err)) = shell.audit_child(body);
-        let outcome = match &err {
-            Some(Break::Error(e)) => NodeOutcome::of_error(e).with_partial(value.clone()),
-            _ => NodeOutcome::of_value(shell.mobile.control.last_status, value.clone()),
-        };
-        let node = crate::evaluator::audit::scope_node(
-            cmd,
-            &start,
-            principal,
-            outcome,
-            fragment.into_nodes(),
-        );
-        shell.local.audit.push(node);
-        (value, err)
-    } else {
-        body(shell)
-    };
-    match err {
-        Some(e) => Err(e),
-        None => Ok(value),
+    let mut out = Vec::with_capacity(items.len());
+    for item in &items {
+        crate::process::check(mooring)?;
+        out.push(apply(func, std::slice::from_ref(item), mooring, shell)?);
     }
+    Ok(Value::list(out))
 }
 
 pub(super) fn builtin_filter(

@@ -1,9 +1,12 @@
 //! Audit collector and execution tree.
 //!
-//! Audit is lexical: a scope-introducing operator (`grant`, `within`, `guard`,
-//! `try`, `audit`) owns every node its body produces, sandboxed subprocess and
-//! pipeline-stage nodes included.  A process boundary only transports
-//! fragments; the wrapping scope decides where they land in the tree.
+//! Only two kinds of node are ever built: a real command (builtin or
+//! external) and a capability check.  `within`, `grant`, `guard`, `try`, and
+//! `audit` are collection boundaries, not tree nodes — none of them owns or
+//! wraps a node of its own; their bodies' real commands land flat in
+//! whichever trail is open.  A sandboxed subprocess or a pipeline-stage
+//! helper only *transports* its fragment back to the parent process; nothing
+//! decides where the nodes "belong" beyond that flat merge.
 
 use super::error::Error;
 use super::flow::{Break, Settled};
@@ -139,17 +142,6 @@ impl Audit {
         }
     }
 
-    /// Move the parent trail aside for a fresh child.  Pairs with
-    /// [`Self::leave_child`]; does nothing when audit is off, so an unaudited
-    /// context leaves the body unaudited too.
-    pub fn enter_child(&mut self) -> Option<AuditTrail> {
-        if self.trail.is_some() {
-            self.trail.replace(AuditTrail::default())
-        } else {
-            None
-        }
-    }
-
     /// Install a child trail whatever the parent's state — `try` needs the
     /// subtree to name the failing command, `audit` to return it.
     pub fn enter_forced_child(&mut self) -> Option<AuditTrail> {
@@ -265,20 +257,13 @@ impl NodeOutcome {
     }
 
     /// A body that failed: the error's own exit code, no value, and the
-    /// runtime's message.  [`Self::with_partial`] refines the no-value rule
-    /// for a combinator that salvages its accumulation.
+    /// runtime's message.
     pub(crate) fn of_error(e: &Error) -> Self {
         Self {
             status: e.exit_code(),
             value: Value::Unit,
             error: Some(e.message.clone()),
         }
-    }
-
-    /// Replace the recorded value — a failed combinator records what it had
-    /// accumulated where a scope records `Unit`.
-    pub(crate) fn with_partial(self, value: Value) -> Self {
-        Self { value, ..self }
     }
 }
 
@@ -326,10 +311,10 @@ impl ExecNode {
         )
     }
 
-    /// Build a command node.  Every node in the tree — builtin, external,
-    /// scope, or the run's own root from [`Self::run_root`] — comes through
-    /// here; the one struct literal elsewhere is `WireExecNode::into_runtime`
-    /// in `crate::child_eval`, rehydrating a node off the wire.
+    /// Build a command node.  Every node in the tree — builtin, external, or
+    /// the run's own root from [`Self::run_root`] — comes through here; the
+    /// one struct literal elsewhere is `WireExecNode::into_runtime` in
+    /// `crate::child_eval`, rehydrating a node off the wire.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn command(
         cmd: impl Into<String>,
@@ -438,4 +423,23 @@ impl ExecNode {
         }
         Value::map(pairs)
     }
+}
+
+/// The record `audit { … }` returns: the body's own outcome plus the flat
+/// list of real nodes its dynamic extent produced.
+///
+/// This is not a node — `audit` runs no command and owns no site of its own,
+/// only the outcome of what it forced into being recorded.  Mirrored in the
+/// typechecker by `audit_record` in `core/src/typecheck/builtins.rs`.
+pub fn tree_value(status: i32, value: Value, error: Option<String>, children: &[ExecNode]) -> Value {
+    let children_list: Vec<Value> = children.iter().map(ExecNode::to_value).collect();
+    Value::map(vec![
+        ("status".into(), Value::Int(i64::from(status))),
+        ("value".into(), value),
+        (
+            "error".into(),
+            Value::String(error.unwrap_or_default()),
+        ),
+        ("children".into(), Value::list(children_list)),
+    ])
 }

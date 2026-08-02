@@ -87,7 +87,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// A delimited body's non-escape outcome: a value, or an error — catchable by
-/// `try`, recorded as a non-zero-status node by `audit`/`grant`/`within`/`guard`.
+/// `try`, recorded as a non-zero-status record by `audit`.
 #[derive(Debug)]
 pub enum BodyResult {
     Value(Value),
@@ -97,8 +97,8 @@ pub enum BodyResult {
 /// Sort a body's outcome into its non-escape and escape halves.
 ///
 /// # Errors
-/// An escape returns `Err`; an error stays in `Ok`, since the scope helpers
-/// must still build a node for it.
+/// An escape returns `Err`; an error stays in `Ok`, since `try`/`audit` must
+/// still classify or record it.
 pub fn split(settled: super::flow::Settled<Value>) -> Result<BodyResult, Escape> {
     match settled {
         Ok(v) => Ok(BodyResult::Value(v)),

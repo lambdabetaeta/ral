@@ -43,11 +43,10 @@ pub(super) struct ScopeSig {
 
 impl Inferencer<'_> {
     /// Compose a scope's `PipeSpec` from its arms and seal `sig.value` into a
-    /// `CompTy::Return`.  An arm the evaluator applies inside
-    /// `with_scope`/`record_scope` runs against the scope's live streams —
-    /// capture is a tee, never a silencer — so every scope is
-    /// channel-transparent, and this is the only place permitted to build a
-    /// scope's computation type.
+    /// `CompTy::Return`.  Every arm the evaluator applies runs against the
+    /// scope's live streams — capture is a tee, never a silencer — so every
+    /// scope is channel-transparent, and this is the only place permitted to
+    /// build a scope's computation type.
     ///
     /// Output is bytes-dominant: any arm that may emit bytes makes the scope
     /// byte-emitting, via `join_byte_mode` folded over every arm's output.
@@ -244,8 +243,10 @@ impl Inferencer<'_> {
     pub(super) fn infer_audit(&mut self, body: &Val) -> ScopeSig {
         let body_cty = self.infer_scope_body_passthrough(body);
         // The record's `value` field holds the body's raw result — the
-        // runtime stores it undecoded, the body's bytes going to the record's
-        // `stdout` field and the live stream instead — so no observation here.
+        // runtime stores it undecoded.  The body's bytes go to the live
+        // stream and to whichever real command nodes wrote them, never to a
+        // field of the record itself: `audit` owns no site, so no
+        // observation here.
         let (alpha, input, output) = self.extract_return(&body_cty);
         let beta = self.ctx.unifier.fresh_ty();
 

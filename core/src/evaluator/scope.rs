@@ -6,10 +6,9 @@
 //! default 2 MiB test-thread stack (`deeply_nested_calls`).
 
 use crate::ir::Val;
-use crate::source::Span;
 use crate::types::{
     BodyResult, Break, CapturePolicy, ExecNode, HandlerEntry, HandlerRole, Map, Mooring, Raw,
-    Settled, Shell, Value, as_map, sig, validate_handler_arity,
+    Settled, Shell, Value, as_map, sig, tree_value, validate_handler_arity,
 };
 
 use crate::evaluator::val::eval_val;
@@ -206,7 +205,6 @@ impl WithinScope {
 pub(crate) fn eval_within(
     opts: &Val,
     body: &Val,
-    span: Option<Span>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
@@ -214,16 +212,14 @@ pub(crate) fn eval_within(
     let opts_map = as_map(&opts_val, "within")?;
     let scope = WithinScope::parse(&opts_map, shell)?;
     let body = eval_val(body, shell)?;
-    audit::with_scope(shell, "within", span, |shell| {
-        scope.enter(shell, |shell| apply(body, vec![], mooring, shell))
-    })
-    .map_err(Into::into)
+    scope
+        .enter(shell, |shell| apply(body, vec![], mooring, shell))
+        .map_err(Into::into)
 }
 
 pub(crate) fn eval_grant(
     caps: &Val,
     body: &Val,
-    span: Option<Span>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
@@ -237,16 +233,14 @@ pub(crate) fn eval_grant(
     let caps =
         crate::capability::decode_capability_map(&caps_val, "grant", &ctx).map_err(Break::from)?;
     let body = eval_val(body, shell)?;
-    audit::with_scope(shell, "grant", span, |shell| {
-        shell.with_capabilities(caps, |shell| apply(body, vec![], mooring, shell))
-    })
-    .map_err(Into::into)
+    shell
+        .with_capabilities(caps, |shell| apply(body, vec![], mooring, shell))
+        .map_err(Into::into)
 }
 
 pub(crate) fn eval_try(
     body: &Val,
     handler: &Val,
-    span: Option<Span>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
@@ -255,11 +249,12 @@ pub(crate) fn eval_try(
     // name the failing command; `Exit`/`Stopped` leave via `?` before `classify`.
     let body_val = eval_val(body, shell)?;
     let handler_val = eval_val(handler, shell)?;
-    let record = audit::record_scope(shell, "try", CapturePolicy::Off, span, |s| {
+    let (body_result, children) = audit::forced_subtree(shell, CapturePolicy::Off, |s| {
         apply(body_val, vec![], mooring, s)
-    })?;
+    })
+    .map_err(Break::Escape)?;
 
-    let outcome = classify(&record.body, &record.node.children, shell);
+    let outcome = classify(&body_result, &children, shell);
 
     let err_record = error_record(
         &outcome.cmd,
@@ -269,23 +264,7 @@ pub(crate) fn eval_try(
         outcome.col,
     );
 
-    // The audit node's `value` carries the success/failure tag so `--audit`
-    // keeps it; `try` itself returns the body or handler value directly.
-    let variant = if outcome.ok {
-        Value::Variant {
-            label: "ok".into(),
-            payload: Some(Box::new(outcome.value.clone())),
-        }
-    } else {
-        Value::Variant {
-            label: "err".into(),
-            payload: Some(Box::new(err_record.clone())),
-        }
-    };
-
-    let mut node = record.node;
-    node.value = variant;
-    shell.local.audit.push(node);
+    // `try` recovers, so the failure's status must not leak past it.
     shell.mobile.control.last_status = 0;
 
     if outcome.ok {
@@ -298,42 +277,36 @@ pub(crate) fn eval_try(
 pub(crate) fn eval_guard(
     body: &Val,
     cleanup: &Val,
-    span: Option<Span>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
     let body_val = eval_val(body, shell)?;
     let cleanup_val = eval_val(cleanup, shell)?;
-    audit::with_scope(shell, "guard", span, |shell| {
-        let body_result = apply(body_val, vec![], mooring, shell);
-        // A cleanup error is logged and the body's result stands; a cleanup
-        // escape takes priority and propagates — dropping `Stopped` orphans
-        // a stopped process group, pgid lost, never resumable or reapable.
-        match apply(cleanup_val, vec![], mooring, shell) {
-            Ok(_) => body_result,
-            Err(Break::Error(err)) => {
-                crate::diagnostic::cmd_error("guard", &format!("cleanup failed: {err}"));
-                body_result
-            }
-            Err(escape @ Break::Escape(_)) => Err(escape),
+    let body_result = apply(body_val, vec![], mooring, shell);
+    // A cleanup error is logged and the body's result stands; a cleanup
+    // escape takes priority and propagates — dropping `Stopped` orphans
+    // a stopped process group, pgid lost, never resumable or reapable.
+    match apply(cleanup_val, vec![], mooring, shell) {
+        Ok(_) => body_result,
+        Err(Break::Error(err)) => {
+            crate::diagnostic::cmd_error("guard", &format!("cleanup failed: {err}"));
+            body_result
         }
-    })
+        Err(escape @ Break::Escape(_)) => Err(escape),
+    }
     .map_err(Into::into)
 }
 
-pub(crate) fn eval_audit(
-    body: &Val,
-    span: Option<Span>,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Raw<Value> {
+pub(crate) fn eval_audit(body: &Val, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
     let body_val = eval_val(body, shell)?;
-    let record = audit::record_scope(shell, "audit", CapturePolicy::Bytes, span, |s| {
+    let (body_result, children) = audit::forced_subtree(shell, CapturePolicy::Bytes, |s| {
         apply(body_val, vec![], mooring, s)
-    })?;
-    let node = record.node;
-    let status = node.status;
-    shell.local.audit.push(node.clone());
+    })
+    .map_err(Break::Escape)?;
+    let (status, value, error) = match &body_result {
+        BodyResult::Value(v) => (shell.mobile.control.last_status, v.clone(), None),
+        BodyResult::Error(e) => (e.exit_code(), Value::Unit, Some(e.message.clone())),
+    };
     shell.mobile.control.last_status = status;
-    Ok(node.to_value())
+    Ok(tree_value(status, value, error, &children))
 }

@@ -1,17 +1,25 @@
-//! Audit recording: `with_scope` wraps a structural scope arm (`grant`,
-//! `within`, `guard`) so its body's nodes become the wrapper's children.
+//! Audit recording: only two kinds of node are ever built — a real command
+//! (builtin or external, via `frame_call`) and a capability check (via
+//! `record_capability`).
 //!
-//! `frame_call` brackets every other node — builtins, externals, stages —
-//! in the `start` / `finish_command` lifecycle.
+//! `within`, `grant`, `guard`, `try`, and `audit` are all collection
+//! boundaries, not tree nodes: none of them constructs an `ExecNode` for
+//! itself.  `try` and `audit` still need to force a fresh subtree regardless
+//! of whether audit is already on — `try` to find the command that failed,
+//! `audit` to have something to return — but once that subtree is read,
+//! [`forced_subtree`] splices its nodes straight into the surrounding trail
+//! rather than wrapping them.
 //!
-//! With `shell.local.audit.active()` false the recorders are no-ops, so the
-//! dispatcher can call them unconditionally; `record_scope` is the exception,
-//! since `try` and `audit` force a subtree whether or not audit is on.
+//! `frame_call` brackets every real command node in the `start` /
+//! `finish_command` lifecycle.  With `shell.local.audit.active()` false the
+//! recorders are no-ops, so the dispatcher can call them unconditionally;
+//! [`forced_subtree`] is the exception, since `try` and `audit` force
+//! collection whether or not audit is on.
 
-use crate::source::Span;
 use crate::types::{
-    AuditIo, AuditTime, BodyResult, Break, BuiltinEntry, CallSite, CapturePolicy, Control, Escape,
-    ExecNode, Map, Mooring, NodeOutcome, Raw, STDERR_CAP_BYTES, Settled, Shell, Value, epoch_us,
+    AuditFragment, AuditIo, AuditTime, BodyResult, Break, BuiltinEntry, CallSite, CapturePolicy,
+    Control, Escape, ExecNode, Map, Mooring, NodeOutcome, Raw, STDERR_CAP_BYTES, Settled, Shell,
+    Value, epoch_us, split,
 };
 
 /// Proof that a native body is running inside [`frame_call`]'s dynamic
@@ -45,40 +53,6 @@ fn cap_stderr(buf: &mut Vec<u8>) {
     if buf.len() > STDERR_CAP_BYTES {
         buf.truncate(STDERR_CAP_BYTES);
     }
-}
-
-/// Assemble one scope or combinator node.  Shared by [`record_scope`] and
-/// `iterate_audited` in `builtins::collections`, so the two cannot drift on
-/// the node shape.  Such a node carries no `args`: the structural IR is
-/// already the record of what the scope received; and no I/O: a scope does
-/// not write to file descriptors, its children do.
-pub(crate) fn scope_node(
-    cmd: &str,
-    start: &AuditStart,
-    principal: String,
-    outcome: NodeOutcome,
-    children: Vec<ExecNode>,
-) -> ExecNode {
-    let NodeOutcome {
-        status,
-        value,
-        error,
-    } = outcome;
-    ExecNode::command(
-        cmd,
-        Vec::new(),
-        status,
-        start.site.clone(),
-        AuditIo::default(),
-        error,
-        value,
-        children,
-        AuditTime {
-            start: start.time,
-            end: epoch_us(),
-        },
-        principal,
-    )
 }
 
 fn finish_command(
@@ -203,72 +177,28 @@ pub(crate) fn record_capability(shell: &mut Shell, resource: &str, decision: &st
     shell.local.audit.push(node);
 }
 
-/// [`record_scope`]'s non-escape result.  `Exit` and `Stopped` leave as
-/// `Err(Escape)` instead, so a `ScopeRecord` always has both halves — there is
-/// no "node missing because the body escaped" state for callers to handle.
-pub(crate) struct ScopeRecord {
-    pub body: BodyResult,
-    pub node: ExecNode,
-}
-
-/// Run `body` in a forced audit subtree and build the wrapping scope node,
-/// handing it back unpushed: `try` overwrites its `value` with the
-/// `ok | err` variant and `audit` returns it as a value.  [`with_scope`] is
-/// the plain form for `grant` / `within` / `guard`.
+/// Force a fresh audit subtree for `body`'s dynamic extent regardless of
+/// whether one was already collecting, then splice whatever it collected
+/// back into the surrounding trail: `try` and `audit` are collection
+/// boundaries, not tree nodes, so neither wraps what its body produced.
 ///
+/// `try` reads the returned nodes to name the command that failed (§10.1);
+/// `audit` renders them into the record it returns (§10.3).  Either way they
+/// are also merged into whatever trail was already open, so a `try`/`audit`
+/// nested inside an outer `audit` still surfaces its real commands there.
 /// `capture` is installed for the body and restored on return; it is the
-/// policy the children observe as they are recorded.  `span` is the scope's
-/// own position, not the dispatch register a command node reads — a scope
-/// names where it sits, not whatever command preceded it.
-pub(crate) fn record_scope(
+/// policy the children observe as they are recorded.
+pub(crate) fn forced_subtree(
     shell: &mut Shell,
-    cmd: &str,
     capture: CapturePolicy,
-    span: Option<Span>,
     body: impl FnOnce(&mut Shell) -> Settled<Value>,
-) -> Result<ScopeRecord, Escape> {
-    let start = if shell.local.audit.active() {
-        AuditStart {
-            site: shell.site_of(span),
-            time: epoch_us(),
-        }
-    } else {
-        AuditStart::default()
-    };
-    let principal = shell.mobile.context.principal();
+) -> Result<(BodyResult, Vec<ExecNode>), Escape> {
     let (fragment, settled) =
         with_capture_policy(shell, capture, |shell| shell.audit_forced_child(body));
-    let body_result = crate::types::split(settled)?;
-    let outcome = match &body_result {
-        BodyResult::Value(v) => NodeOutcome::of_value(shell.mobile.control.last_status, v.clone()),
-        BodyResult::Error(e) => NodeOutcome::of_error(e),
-    };
-    let node = scope_node(cmd, &start, principal, outcome, fragment.into_nodes());
-    Ok(ScopeRecord {
-        body: body_result,
-        node,
-    })
-}
-
-/// Push one wrapping node for `grant`, `within`, or `guard`.  The body's
-/// result propagates untouched, errors and escapes included; the node is the
-/// only difference from calling `body` directly.
-pub(crate) fn with_scope(
-    shell: &mut Shell,
-    cmd: &str,
-    span: Option<Span>,
-    body: impl FnOnce(&mut Shell) -> Settled<Value>,
-) -> Settled<Value> {
-    if !shell.local.audit.active() {
-        return body(shell);
-    }
-    let capture = shell.local.audit.capture_policy();
-    let record = record_scope(shell, cmd, capture, span, body).map_err(Break::Escape)?;
-    shell.local.audit.push(record.node);
-    match record.body {
-        BodyResult::Value(v) => Ok(v),
-        BodyResult::Error(e) => Err(Break::Error(e)),
-    }
+    let body_result = split(settled)?;
+    let nodes = fragment.into_nodes();
+    shell.local.audit.merge(AuditFragment::from_nodes(nodes.clone()));
+    Ok((body_result, nodes))
 }
 
 /// Install `policy` for `f`, restoring the previous one after.  Capture is

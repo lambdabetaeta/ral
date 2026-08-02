@@ -286,28 +286,9 @@ impl Shell {
         self.mobile.context.handlers.lookup(name)
     }
 
-    /// Run `f` in a fresh audit subtree: the parent's trail is set aside and
-    /// reinstalled on return, so children land in an [`AuditFragment`] rather
-    /// than the parent's tree.  With audit inactive the body runs unchanged
-    /// and the fragment is empty — `try` and `audit` want children even
-    /// outside an `audit { … }` scope, and use [`Self::audit_forced_child`].
-    pub fn audit_child<F, R>(&mut self, f: F) -> (AuditFragment, R)
-    where
-        F: FnOnce(&mut Self) -> R,
-    {
-        if !self.local.audit.active() {
-            let result = f(self);
-            return (AuditFragment::empty(), result);
-        }
-        let parent = self.local.audit.enter_child();
-        let result = f(self);
-        let fragment = self.local.audit.leave_child(parent);
-        (fragment, result)
-    }
-
-    /// [`Self::audit_child`] with the subtree installed regardless of parent
-    /// state, for `try` (to find the failing child) and `audit` (to return
-    /// the whole subtree).
+    /// Run `f` in a fresh audit subtree regardless of the parent's state, for
+    /// `try` (to find the failing child) and `audit` (to return the whole
+    /// subtree) — the only two forms that force collection on.
     pub fn audit_forced_child<F, R>(&mut self, f: F) -> (AuditFragment, R)
     where
         F: FnOnce(&mut Self) -> R,

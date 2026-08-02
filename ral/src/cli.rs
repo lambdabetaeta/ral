@@ -107,10 +107,10 @@ ENVIRONMENT
     RAL_TIMING            when present, print batch phase timings to stderr
 
 AUDIT
-    Use audit { ... } inside a script to record an execution tree. Each node \
-describes a command, function, or control scope, including its evaluated \
-arguments where applicable, result, status, output, timing, source location, \
-and principal. Use --audit to emit the tree as JSON.",
+    Use audit { ... } to record an execution tree with a structural root and \
+nodes for builtin and external command calls, including evaluated arguments, \
+results, status, output, timing, source location, and principal. Use --audit \
+to emit the tree as JSON.",
 )]
 #[allow(clippy::struct_excessive_bools)] // clap flag struct: each bool is a distinct CLI switch.
 pub(crate) struct Cli {
