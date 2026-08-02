@@ -1277,8 +1277,11 @@ mod tests {
     use super::*;
 
     /// A `[arg]` in a doc synopsis (before the em dash) reads as optional; a
-    /// fixed-arity `Sig` under it means one of the two is lying.  `exit`/
-    /// `quit` are exempt: `[status]` is elaborator sugar over a fixed-1 form.
+    /// fixed-arity `Sig` under it means one of the two is lying.  A bracket
+    /// spelling a record type — `[status: Int, ...]`, one required argument —
+    /// is not that: only a field-free bracket reads as an optional argument.
+    /// `exit`/`quit` are exempt: `[status]` is elaborator sugar over a fixed-1
+    /// form.
     #[test]
     fn optional_looking_docs_agree_with_a_fixed_sig() {
         let table = crate::builtins::core_builtin_table();
@@ -1292,8 +1295,12 @@ mod tests {
             };
             let fixed = matches!(sig.args, ArgSig::Exact(_) | ArgSig::DataLast(_));
             let synopsis = entry.doc.split('—').next().unwrap_or(entry.doc);
+            let optional_looking = synopsis.split('[').skip(1).any(|rest| {
+                let bracketed = rest.split(']').next().unwrap_or(rest);
+                !bracketed.contains(':')
+            });
             assert!(
-                !(fixed && synopsis.contains('[')),
+                !(fixed && optional_looking),
                 "builtin '{name}': doc reads as optional but its Sig is fixed-arity"
             );
         }
