@@ -177,8 +177,9 @@ fn fail_rejects_status_outside_i32() {
 }
 
 #[test]
-fn fail_bare_int_rejects_status_outside_i32() {
-    expect_error("fail 4294967296", "status");
+fn fail_bare_forms_are_rejected() {
+    expect_error("fail 7", "error record");
+    expect_error("fail \"boom\"", "error record");
 }
 
 #[test]

@@ -193,7 +193,7 @@ fn upstream_helper_failure_reaches_consumer() {
     let out = run(
         "win_pipe_upstream_fail",
         r#"
-        { fail "boom" } | { |x| echo $x }
+        { fail [status: 1, message: "boom"] } | { |x| echo $x }
         "#,
     );
     assert_ne!(out.status, 0);

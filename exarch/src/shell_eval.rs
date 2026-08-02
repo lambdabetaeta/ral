@@ -1289,7 +1289,13 @@ keep-bottom
     fn raised_error_carries_no_recovery_tip() {
         let mut shell = fresh_shell();
         let (emit, _rx) = crate::bus::dummy_emitter();
-        let r = match run_shell_direct(&mut shell, &Capabilities::root(), "fail 7", 10, &emit) {
+        let r = match run_shell_direct(
+            &mut shell,
+            &Capabilities::root(),
+            "fail [status: 7]",
+            10,
+            &emit,
+        ) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
         };

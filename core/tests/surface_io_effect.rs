@@ -193,7 +193,10 @@ fn write_with_failing_body_emits_aborted() {
     // The redirect wraps a forced block whose body fails after the open:
     // `with_redirects` opens the target first, then runs the body, which
     // errors — so the open succeeded but the logical write aborted.
-    let (result, events) = run(&mut shell, &format!("!{{ fail 'boom' }} > '{path}'"));
+    let (result, events) = run(
+        &mut shell,
+        &format!("!{{ fail [status: 1, message: 'boom'] }} > '{path}'"),
+    );
     assert!(result.is_err(), "the failing body must surface its error");
 
     let m = single_io_event(&events);

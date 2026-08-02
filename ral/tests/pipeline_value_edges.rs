@@ -431,7 +431,7 @@ fn required_value_edge_eof_is_structured_error() {
     // way the script must fail loudly rather than silently running
     // the consumer with a phantom upstream.
     let script = r#"
-let res = !{ { fail "producer failed" } | { |x| return $[$x + 1] } }
+let res = { fail [status: 1, message: "producer failed"] } | { |x| return $[$x + 1] }
 echo $res
 "#;
     let o = run_with_timeout("ral_pipeline_value", &[], script, Duration::from_secs(5))

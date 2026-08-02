@@ -39,21 +39,9 @@ fn fail_status_code(status: i64) -> Result<i32, Break> {
 pub(super) fn builtin_fail(args: &[Value]) -> Break {
     let m = match args.first() {
         Some(Value::Map(m)) => m,
-        // In command position `fail` takes one `Any` (`sig::FAIL`), so a scalar
-        // reaches here: raise the author's text, not a shape complaint burying it.
-        Some(Value::String(s)) => return Break::Error(Error::new(s.clone(), 1)),
-        Some(Value::Bytes(b)) => {
-            return Break::Error(Error::new(String::from_utf8_lossy(b).into_owned(), 1));
-        }
-        Some(Value::Int(n)) => {
-            return match fail_status_code(*n) {
-                Ok(code) => Break::Error(Error::new("explicit failure", code)),
-                Err(b) => b,
-            };
-        }
         _ => {
             return Break::Error(Error::new(
-                "fail expects an error record [status: Int, ...]",
+                "fail expects an error record [status: Int, message?: String|Bytes, ...]",
                 1,
             ));
         }

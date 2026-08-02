@@ -129,7 +129,7 @@ builtin_registry! {
         doc: "range <start> <end>  — generate a list of integers from start (inclusive) to end (exclusive).",
         call: |args, mooring, _| collections::builtin_range(args, mooring), },
     Fail { names: ["fail"], ty: Sig(sig::FAIL),
-        doc: "fail <status>  — exit with error status.",
+        doc: "fail [status: Int, message?: String|Bytes]  — raise an error. status must be nonzero; message defaults to \"explicit failure\". `fail $err` on a caught error re-raises it.",
         call: |args, _mooring, _shell| Err(misc::builtin_fail(args)), },
     Len { names: ["length"], ty: Scheme(scheme::length),
         doc: "length <val>  — number of elements in a string, bytes, list, or map.",

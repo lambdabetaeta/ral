@@ -277,7 +277,10 @@ fn pipeline_non_final_stage_is_not_tail_emitting() {
 #[test]
 fn chain_non_final_arm_failure_is_catchable() {
     let mut shell = fresh_shell();
-    let _ = top_level(&mut shell, "let f = { |x| fail \"boom\" }");
+    let _ = top_level(
+        &mut shell,
+        "let f = { |x| fail [status: 1, message: \"boom\"] }",
+    );
     // The non-final arm `f $y` fails; the fallback `return 7` must run,
     // so the chain's value is 7 rather than the propagated error.
     let in_fn = top_level(&mut shell, "let gg = { |y| f $y ? return 7 }\n!{gg 1}");
@@ -333,7 +336,7 @@ fn deep_tail_recursion_trampolines_through_every_eliminator() {
     // (b) recursion through the FINAL chain arm (`fail ? loop`).
     let mut shell = fresh_shell();
     let chained = format!(
-        "let f = {{ |x| fail \"x\" }}\n\
+        "let f = {{ |x| fail [status: 1, message: \"x\"] }}\n\
          let loop = {{ |n| if $[$n <= 0] {{ return $n }} else {{ f $n ? loop $[$n - 1] }} }}\n!{{loop {past_cap}}}"
     );
     assert_eq!(
