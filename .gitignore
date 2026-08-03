@@ -46,3 +46,6 @@ CLAUDE.md
 # and the fuzz target is a tool for a person to run, not part of the build.
 guest-net/fuzz/Cargo.lock
 guest-net/fuzz/target/
+
+# Working notes for a person, not part of the tree.
+scratch/
