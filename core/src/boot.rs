@@ -137,7 +137,7 @@ impl HostSurface {
             shell.install_builtins(set);
         }
         for set in &self.captured {
-            shell.install_captured_builtins(Arc::clone(set));
+            shell.install_captured_builtins(set);
         }
     }
 }

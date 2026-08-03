@@ -64,8 +64,9 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
             sub(then);
             sub(else_);
         }
-        CompKind::Force(Val::Thunk(c)) | CompKind::Return(Val::Thunk(c)) => walk_comp(c, visit),
-        CompKind::Capture(c) => walk_comp(c, visit),
+        CompKind::Force(Val::Thunk(c)) | CompKind::Return(Val::Thunk(c)) | CompKind::Capture(c) => {
+            walk_comp(c, visit);
+        }
         _ => {}
     }
 }

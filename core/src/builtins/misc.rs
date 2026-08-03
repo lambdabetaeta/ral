@@ -37,14 +37,11 @@ fn fail_status_code(status: i64) -> Result<i32, Break> {
 }
 
 pub(super) fn builtin_fail(args: &[Value]) -> Break {
-    let m = match args.first() {
-        Some(Value::Map(m)) => m,
-        _ => {
-            return Break::Error(Error::new(
-                "fail expects an error record [status: Int, message?: String|Bytes, ...]",
-                1,
-            ));
-        }
+    let Some(Value::Map(m)) = args.first() else {
+        return Break::Error(Error::new(
+            "fail expects an error record [status: Int, message?: String|Bytes, ...]",
+            1,
+        ));
     };
     let lookup = |k: &str| m.get(k);
     let Some(status) = lookup("status").and_then(Value::as_int) else {

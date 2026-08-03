@@ -182,7 +182,7 @@ impl HandlerFrame {
 /// directly with no masking and no adapter.
 #[derive(Debug, Clone)]
 pub enum HandlerLookup {
-    Frame(HandlerEntry, usize),
+    Frame(Box<HandlerEntry>, usize),
     Base(BuiltinEntry),
 }
 
@@ -261,7 +261,7 @@ impl HandlerStack {
     pub fn lookup(&self, name: &str) -> Option<HandlerLookup> {
         for (depth, frame) in self.frames.iter().rev().enumerate() {
             if let Some(entry) = frame.entries.iter().find(|e| e.name == name) {
-                return Some(HandlerLookup::Frame(entry.clone(), depth + 1));
+                return Some(HandlerLookup::Frame(Box::new(entry.clone()), depth + 1));
             }
         }
         if let Some(entry) = self.base.iter().find(|e| e.name == name) {
@@ -270,12 +270,12 @@ impl HandlerStack {
         for (depth, frame) in self.frames.iter().rev().enumerate() {
             if let Some(thunk) = &frame.catch_all {
                 return Some(HandlerLookup::Frame(
-                    HandlerEntry {
+                    Box::new(HandlerEntry {
                         name: Cow::Owned(name.to_string()),
                         arity: HandlerArity::CatchAll,
                         thunk: thunk.clone(),
                         scheme: None,
-                    },
+                    }),
                     depth + 1,
                 ));
             }

@@ -22,7 +22,9 @@ use crate::types::{
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
 
-use super::util::{check_arity, expect_handle, expect_thunk};
+#[cfg(unix)]
+use super::util::check_arity;
+use super::util::{expect_handle, expect_thunk};
 use crate::types::as_list;
 
 /// How a child block's stdout/stderr are wired.

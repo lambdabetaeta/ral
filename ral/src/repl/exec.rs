@@ -243,6 +243,7 @@ pub(super) fn step(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repl::plugin::HookHealth;
     use crate::repl::plugin::manifest::LoadedPlugin;
     use ral_core::Shell;
     use ral_core::source::Span;
@@ -275,16 +276,17 @@ mod tests {
         ral_core::evaluator::evaluate(&comp, &Mooring::adrift(), shell).expect("evaluate")
     }
 
+    /// A dressed shell, the plugin runtime holding `p`, and the sink its
+    /// builtin appends every call to.
+    type Dressed = (Shell, Arc<Mutex<PluginRuntime>>, Arc<Mutex<Vec<Value>>>);
+
     /// Dress a shell with the sink builtin and one plugin `p` whose
     /// `hook_event` handler is compiled from `handler_src`, mirroring
     /// `register_plugin_hooks`' lifecycle registration.
-    fn dressed(
-        hook_event: &str,
-        handler_src: &str,
-    ) -> (Shell, Arc<Mutex<PluginRuntime>>, Arc<Mutex<Vec<Value>>>) {
+    fn dressed(hook_event: &str, handler_src: &str) -> Dressed {
         let sink = Arc::new(Mutex::new(Vec::new()));
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        shell.install_captured_builtins(vec![sink_builtin(sink.clone())].into());
+        shell.install_captured_builtins(&vec![sink_builtin(sink.clone())].into());
 
         let h = handler(&mut shell, handler_src);
         shell
@@ -309,7 +311,7 @@ mod tests {
                 bindings: Vec::new(),
                 state_cell: None,
                 source: Arc::from(""),
-                buffer_change_health: Default::default(),
+                buffer_change_health: HookHealth::default(),
             });
         (shell, runtime, sink)
     }

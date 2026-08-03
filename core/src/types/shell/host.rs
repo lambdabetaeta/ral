@@ -111,9 +111,9 @@ impl Shell {
         }
     }
 
-    pub fn install_captured_builtins(&mut self, entries: Arc<[BuiltinEntry]>) {
-        if self.session.builtins.install_arc(entries.clone()) {
-            seed_natives_and_base(self, &entries);
+    pub fn install_captured_builtins(&mut self, entries: &Arc<[BuiltinEntry]>) {
+        if self.session.builtins.install_arc(Arc::clone(entries)) {
+            seed_natives_and_base(self, entries);
         }
     }
 

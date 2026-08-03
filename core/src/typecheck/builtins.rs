@@ -40,8 +40,8 @@ impl BuiltinTypeRule {
     /// rule's is [`BuiltinSig::fixed_arity`].
     pub fn fixed_arity(&self) -> Option<usize> {
         match self {
-            BuiltinTypeRule::Scheme(factory) => Some(scheme_curry_depth(*factory)),
-            BuiltinTypeRule::Sig(sig) => sig.fixed_arity(),
+            Self::Scheme(factory) => Some(scheme_curry_depth(*factory)),
+            Self::Sig(sig) => sig.fixed_arity(),
         }
     }
 }

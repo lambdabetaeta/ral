@@ -19,9 +19,10 @@ pub struct Binding {
     pub scheme: Option<Scheme>,
 }
 
-/// Lexical environment: a stack of name→[`Binding`] scopes, innermost last,
-/// with `builtins::register`'s prelude at `scopes[0]` and the user scope it
-/// pushes at `scopes[1]`, plus the base native scope beneath them all —
+/// Lexical environment: a stack of name→[`Binding`] scopes, innermost last.
+///
+/// `builtins::register`'s prelude sits at `scopes[0]` and the user scope it
+/// pushes at `scopes[1]`, with the base native scope beneath them all —
 /// seeded once at boot ([`Self::install_natives`]), reached by [`Self::get`]
 /// only after every scope misses, outside every scope harvest, and
 /// removable by nothing: no method here unsets from it.

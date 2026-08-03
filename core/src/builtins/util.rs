@@ -254,8 +254,8 @@ pub(crate) fn order_cmp(
 
 /// Render the first argument as a `String`; application already gated the
 /// count for every fixed-arity-1 caller.
-pub fn arg0_str(args: &[Value]) -> Settled<String> {
-    Ok(args[0].to_string())
+pub fn arg0_str(args: &[Value]) -> String {
+    args[0].to_string()
 }
 
 /// Resolve `path` against the `within [dir: …]` scoped cwd and capability-check

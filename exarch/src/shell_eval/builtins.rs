@@ -791,6 +791,10 @@ fn scheme_skill(_u: &mut Unifier) -> Scheme {
 
 /// `skill NAME` — load a skill's full body, rescanning at each call so a skill
 /// added or edited mid-session is found.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "installed as a `BuiltinBody::Static` fn pointer, whose signature fixes the `Settled` return; a skill that cannot be read answers with a message rather than raising."
+)]
 fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let name = args[0].to_string();
     // Rejecting it here is what keeps `root.join(&name)` inside the skills root.
@@ -981,7 +985,7 @@ mod tests {
         for set in surface.statics {
             shell.install_builtins(set);
         }
-        for set in surface.captured {
+        for set in &surface.captured {
             shell.install_captured_builtins(set);
         }
     }

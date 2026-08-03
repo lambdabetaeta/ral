@@ -431,7 +431,7 @@ pub fn builtin_ed_parse(_args: &[Value], _mooring: &Mooring, shell: &mut Shell) 
 pub fn builtin_ed_ghost(args: &[Value], _mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-ghost", shell)?;
     shell.check_editor_write("ghost")?;
-    let text = arg0_str(args)?;
+    let text = arg0_str(args);
     let pc = ctx_mut(shell)?;
     pc.outputs.ghost_text = (!text.is_empty()).then_some(text);
     Ok(Value::Unit)
@@ -491,7 +491,7 @@ pub fn builtin_ed_clipboard(
 
     use base64::Engine;
     use std::io::Write;
-    let payload = base64::engine::general_purpose::STANDARD.encode(arg0_str(args)?.as_bytes());
+    let payload = base64::engine::general_purpose::STANDARD.encode(arg0_str(args).as_bytes());
     let sequence = ral_core::ansi::osc52_copy(&payload);
     let _ = std::io::stdout().write_all(sequence.as_bytes());
     let _ = std::io::stdout().flush();

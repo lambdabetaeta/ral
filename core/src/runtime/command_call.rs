@@ -60,10 +60,7 @@ pub(crate) fn resolve_command_word(head: &CommandWord, shell: &Shell) -> Resolut
 
 fn resolve_handler_then_external(name: &str, shell: &Shell) -> Resolution {
     match shell.lookup_handler(name) {
-        Some(HandlerLookup::Frame(entry, depth)) => Resolution::Handler {
-            entry: Box::new(entry),
-            depth,
-        },
+        Some(HandlerLookup::Frame(entry, depth)) => Resolution::Handler { entry, depth },
         Some(HandlerLookup::Base(entry)) => Resolution::Base(entry),
         None => Resolution::External(CommandIdentity::resolve(
             CommandName::Bare(name.to_string()),

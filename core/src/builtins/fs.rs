@@ -91,7 +91,7 @@ pub(super) fn builtin_temp_file(_args: &[Value], shell: &mut Shell) -> Settled<V
 /// Glob, preserving the pattern's shape: a cwd-relative pattern yields
 /// cwd-relative matches, a sigil-rooted or absolute one absolute matches.
 pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let raw = arg0_str(args)?;
+    let raw = arg0_str(args);
     let expanded = crate::path::sigil::expand_path_prefix(&raw, &shell.mobile.context.home());
     let input_is_cwd_relative = !crate::path::is_absolute(&expanded);
     let pattern = checked_read_path(shell, &raw)?
@@ -238,11 +238,9 @@ pub(super) fn builtin_resolve_path(args: &[Value], shell: &mut Shell) -> Settled
 /// Lexical sibling of `resolve-path`: same anchoring, no
 /// `canonicalise_strict`, so symlinks stand and the path need not exist —
 /// and no `check_fs_read`, since that gate guards a stat this never does.
-pub(super) fn builtin_absolute_path(args: &[Value], shell: &Shell) -> Settled<Value> {
+pub(super) fn builtin_absolute_path(args: &[Value], shell: &Shell) -> Value {
     let resolved = shell.resolve(&args[0].to_string());
-    Ok(Value::String(
-        resolved.as_path().to_string_lossy().into_owned(),
-    ))
+    Value::String(resolved.as_path().to_string_lossy().into_owned())
 }
 
 /// Shared predicate body.  `probe` sees `None` when the path is missing or

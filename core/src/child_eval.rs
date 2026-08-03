@@ -764,7 +764,7 @@ mod tests {
                 crate::types::BuiltinBody::Static(body_stub),
             )]);
         let mut shell = Shell::default();
-        shell.install_captured_builtins(captured);
+        shell.install_captured_builtins(&captured);
 
         let response = ChildEvalResponse {
             scope_table: ScopeTable::default(),

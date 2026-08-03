@@ -413,7 +413,7 @@ mod tests {
     #[test]
     fn alias_over_a_captured_builtin_installs_and_resolution_order_governs() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        shell.install_captured_builtins(build(
+        shell.install_captured_builtins(&build(
             Arc::new(Mutex::new(crate::jobs::JobTable::new())),
             Arc::new(Mutex::new(PluginRuntime::default())),
         ));

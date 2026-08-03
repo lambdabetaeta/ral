@@ -157,7 +157,7 @@ pub(super) fn builtin_source(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    let path = arg0_str(args)?;
+    let path = arg0_str(args);
     let resolved = resolve_relative_to_current_script(&path, shell);
     let abs_path = shell
         .resolve(&resolved.to_string_lossy())
@@ -171,7 +171,7 @@ pub(super) fn builtin_source(
 }
 
 pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let path = arg0_str(args)?;
+    let path = arg0_str(args);
     let resolved = resolve_relative_to_current_script(&path, shell);
     // Unlike `source`, `use` falls back to a RAL_PATH search for a bare name.
     let abs_path = shell

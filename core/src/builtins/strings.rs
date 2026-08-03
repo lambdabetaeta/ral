@@ -46,16 +46,16 @@ pub(super) fn builtin_len(args: &[Value]) -> Settled<Value> {
     Ok(Value::Int(n as i64))
 }
 
-pub(super) fn builtin_upper(args: &[Value]) -> Settled<Value> {
-    Ok(Value::String(arg0_str(args)?.to_uppercase()))
+pub(super) fn builtin_upper(args: &[Value]) -> Value {
+    Value::String(arg0_str(args).to_uppercase())
 }
 
-pub(super) fn builtin_lower(args: &[Value]) -> Settled<Value> {
-    Ok(Value::String(arg0_str(args)?.to_lowercase()))
+pub(super) fn builtin_lower(args: &[Value]) -> Value {
+    Value::String(arg0_str(args).to_lowercase())
 }
 
-pub(super) fn builtin_dedent(args: &[Value]) -> Settled<Value> {
-    Ok(Value::String(dedent(&arg0_str(args)?)))
+pub(super) fn builtin_dedent(args: &[Value]) -> Value {
+    Value::String(dedent(&arg0_str(args)))
 }
 
 pub(super) fn builtin_join(args: &[Value]) -> Settled<Value> {
@@ -78,7 +78,7 @@ pub(super) fn builtin_slice(args: &[Value]) -> Settled<Value> {
 }
 
 pub(super) fn builtin_shell_split(args: &[Value]) -> Settled<Value> {
-    let s = arg0_str(args)?;
+    let s = arg0_str(args);
     // shlex signals every malformed shape as a bare `None`, so one message covers all.
     let parts = shlex::split(&s)
         .ok_or_else(|| sig("shell-split: malformed input (unterminated quote?)".to_string()))?;
@@ -86,7 +86,7 @@ pub(super) fn builtin_shell_split(args: &[Value]) -> Settled<Value> {
 }
 
 pub(super) fn builtin_shell_quote(args: &[Value]) -> Settled<Value> {
-    let s = arg0_str(args)?;
+    let s = arg0_str(args);
     let quoted = shlex::try_quote(&s).map_err(|e| sig(format!("shell-quote: {e}")))?;
     Ok(Value::String(quoted.into_owned()))
 }
@@ -315,6 +315,6 @@ pub(super) fn builtin_to_float(args: &[Value]) -> Settled<Value> {
 
 /// The renderer `echo` lowers through ([`Value`]'s `Display`).  Bytes go lossy
 /// here; `from-string` is the faithful decode, and errors on invalid UTF-8.
-pub(super) fn builtin_to_string(args: &[Value]) -> Settled<Value> {
-    Ok(Value::String(args[0].to_string()))
+pub(super) fn builtin_to_string(args: &[Value]) -> Value {
+    Value::String(args[0].to_string())
 }

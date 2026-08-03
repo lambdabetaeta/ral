@@ -1002,7 +1002,7 @@ fn within_handler_for_echo_breaking_its_byte_mode_is_rejected() {
 /// The dual case: an arm that preserves `echo`'s byte mode installs cleanly.
 #[test]
 fn within_handler_for_echo_preserving_its_byte_mode_ok() {
-    ok(r#"within [handlers: [echo: { |args| echo mocked }]] { echo hi }"#);
+    ok(r"within [handlers: [echo: { |args| echo mocked }]] { echo hi }");
 }
 
 /// A byte-output forwarding alias defines the unknown head as byte-output and
