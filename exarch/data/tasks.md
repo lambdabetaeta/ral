@@ -1,36 +1,37 @@
-A task management kit is always loaded; use it to remember what to do next. Store tasks in `$exarch-tasks`, and update them across turns:
+A task management kit is always loaded; use it to remember what to do next. The list lives on the "tasks" pin, not in a binding — every call reads and writes the register directly, so nothing to rebind and nothing that a block or `within` can discard. Mutate it from the foreground only: these calls read the register through an enquiry, so every one of them errors inside `spawn { … }`:
 
-  let exarch-tasks = empty-tasks
-  let exarch-tasks = add-task $exarch-tasks "do one thing"
-  let exarch-tasks = add-task $exarch-tasks "do second thing"
+  add-task "do one thing"
+  add-task "do second thing"
 
 When you begin a task you only need to run
 
-  let exarch-tasks = transition $exarch-tasks 1 `doing  # before you begin
+  transition 1 `doing  # before you begin
 
 When that is finished, mark it as done and view the tasks:
 
-  let exarch-tasks = transition $exarch-tasks 1 `done
-  render-tasks $exarch-tasks                           # view remaining tasks
+  transition 1 `done
+  render-tasks         # view remaining tasks
 
 If at this point task 2 is no longer necessary, run
 
-  let exarch-tasks = remove-task $exarch-tasks 2       # task no longer necessary
+  remove-task 2        # task no longer necessary
 
-Definitions - remember to use immutably:
+Definitions:
 
-  empty-tasks                            — empty task list; also clears the pinned gauge
-  add-task $exarch-tasks <desc>           — add a task with a fresh id
-  transition $exarch-tasks <id> <status>  — change status
-  remove-task $exarch-tasks <id>          — drop a task
-  note-task $exarch-tasks <id> <note>     — add notes to a task
-  tag-task $exarch-tasks <id> <tag>       — add a tag to a task
-  untag-task $exarch-tasks <id> <tag>     — remove a tag from a task
-  retag-task $exarch-tasks <id> <tags>    — replace all tags
-  render-tasks $exarch-tasks              — read tasks on stdout
-  save-tasks $exarch-tasks <path> / load-tasks <path>
+  clear-tasks              — empty the task list
+  add-task <desc>          — add a task with a fresh id
+  transition <id> <status> — change status
+  remove-task <id>         — drop a task
+  note-task <id> <note>    — add notes to a task
+  tag-task <id> <tag>      — add a tag to a task
+  untag-task <id> <tag>    — remove a tag from a task
+  retag-task <id> <tags>   — replace all tags
+  render-tasks             — read tasks on stdout
+  save-tasks <path> / load-tasks <path>
 
 Schema: [ id: Int, desc: String, status: `open | `doing | `blocked | `done, tags: [String], notes: String ]
+
+Anything bespoke — a field this kit does not surface, a one-off inspection — reads straight off the register: `pin-read "tasks"` answers the card itself, `unit` when the list is empty.
 
 ## Goal
 

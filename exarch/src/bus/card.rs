@@ -19,6 +19,7 @@ use serde::Serialize;
 mod decode;
 mod diff;
 mod done;
+mod encode;
 mod io;
 mod notice;
 #[cfg(test)]
@@ -33,6 +34,7 @@ pub use notice::Notice;
 pub(crate) use decode::{value_to_card, value_to_pin};
 pub(crate) use diff::hunk_magnitude;
 pub(crate) use done::{done_card, value_to_done};
+pub(crate) use encode::encode_card;
 pub(crate) use io::{ObservationKind, execs_card, greps_card, io_card, reads_card, value_to_io};
 pub(crate) use notice::{notice_card, services_pin_card, value_to_notice};
 

@@ -126,6 +126,7 @@ impl Agent {
             generation: self.agents.generation(),
             disk_warn_bytes: self.disk_warn_bytes,
             egress: self.egress.clone(),
+            pins: Some(self.pins.clone()),
         }
     }
 

@@ -135,10 +135,16 @@ Sourced into the shell at boot:
 - `view-text-around path line peek` — the one thin helper over the atoms:
   `view-text` of the `2*peek + 1` lines centred on `line`, clamped at the top of
   the file.
-- the **tasks kit** — `mk-task`/`add-task`/`transition`/`surface-progress` and
-  friends, the pure-ral task list whose status changes surface a pinned card
+- `pin-set <key> <card>` / `pin-clear <key>` — the model-facing write pair,
+  thin wrappers over `surface `` `pin ``/`` `unpin ``, completing the
+  `pin-*` family the two enquiries below start
+  ([[decisions/260803_register-is-read-write|register-is-read-write]]).
+- the **tasks kit** — `mk-task`/`add-task`/`transition` and friends, a
+  pure-ral task list that reads its own state back through `pin-read` and
+  writes the rendered rollup forward through `pin-set`/`pin-clear`
+  (`sync-tasks`) rather than threading a bound list through every mutator
   ([[map/exarch/cards|cards]]).
-- `set-goal` / `clear-goal` — pin or drop a session goal under the `goal`
+- `set-goal` / `clear-goal` — `pin-set`/`pin-clear` under the `goal`
   register key, kept visible by the [[map/exarch/agent|nudge]] reminder.
 
 ## Harness verbs — spawn, schedule, reply
@@ -193,6 +199,16 @@ error with no room for a didactic message.
   fires: Int]]`. Silent; `next-s` saturates to `i64::MAX` for a cron with no
   next occurrence.
 - **`unschedule <label>`** → `F Unit`.
+- **`pin-read <key>`** → `∀α. F α`. Enquiry over the caller's own pin
+  register: the card pinned at `key`, canonically re-encoded
+  ([[map/exarch/cards|cards]]) so a kit can destructure it whether or not the
+  bytes it wrote match what comes back; `unit` on a miss or an absent
+  register. Typed on the `from-json` precedent — trusted, not checked —
+  because the register is schemaless by design
+  ([[decisions/260803_register-is-read-write|register-is-read-write]]).
+- **`pin-list`** → `F [String]`. Silent; the keys currently occupied on the
+  caller's register, in `BTreeMap` order — a key names a slot for
+  `pin-read`, not its content.
 - **`reply <value>`** — `∀α. α → F Unit`, first-orderness checked at the
   door. The sole return path for a returning agent; last write wins within a
   run. Refused on every non-returning agent — the interactive trunk and

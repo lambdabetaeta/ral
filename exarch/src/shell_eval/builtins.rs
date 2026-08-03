@@ -74,18 +74,19 @@ pub fn install_agent_library(mooring: &Mooring, shell: &mut Shell) -> Settled<Va
 pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
     [
         ("view-text-around", "view-text-around PATH LINE PEEK  — show the 2*PEEK+1 lines of PATH centred on LINE, tagged like `view-text`, clamped at the top of the file."),
-        ("empty-tasks", "empty-tasks  — an empty task list; clears the pinned gauge.  Canonical initialiser."),
-        ("add-task", "add-task $exarch-tasks <desc>  — allocate fresh id, append task, update pinned gauge"),
-        ("remove-task", "remove-task $exarch-tasks <id>  — drop task by id, update pinned gauge"),
-        ("tag-task", "tag-task $exarch-tasks <id> <tag>  — add a tag to a task"),
-        ("untag-task", "untag-task $exarch-tasks <id> <tag>  — remove a tag from a task"),
-        ("note-task", "note-task $exarch-tasks <id> <note>  — set notes on a task"),
-        ("retag-task", "retag-task $exarch-tasks <id> <tags>  — replace all tags on a task"),
-        ("transition", "transition $exarch-tasks <id> <status>  — change status (validated: `open|`doing|`blocked|`done) + update pinned gauge"),
-        ("status-counts", "status-counts $exarch-tasks  — record of per-status counts (single fold)"),
-        ("render-tasks", "render-tasks $exarch-tasks  — echo each task to stdout"),
-        ("save-tasks", "save-tasks $exarch-tasks <path>  — write task list as JSON"),
-        ("load-tasks", "load-tasks <path>  — read task list from JSON"),
+        ("pin-set", "pin-set <key> <card>  — overwrite the register slot under key with card."),
+        ("pin-clear", "pin-clear <key>  — empty the register slot under key."),
+        ("clear-tasks", "clear-tasks  — empty the task list."),
+        ("add-task", "add-task <desc>  — allocate a fresh id and append a task."),
+        ("remove-task", "remove-task <id>  — drop a task by id."),
+        ("tag-task", "tag-task <id> <tag>  — add a tag to a task."),
+        ("untag-task", "untag-task <id> <tag>  — remove a tag from a task."),
+        ("note-task", "note-task <id> <note>  — set notes on a task."),
+        ("retag-task", "retag-task <id> <tags>  — replace all tags on a task."),
+        ("transition", "transition <id> <status>  — change status (validated: `open|`doing|`blocked|`done)."),
+        ("render-tasks", "render-tasks  — echo each task to stdout."),
+        ("save-tasks", "save-tasks <path>  — write the task list as JSON."),
+        ("load-tasks", "load-tasks <path>  — read a task list from JSON and replace the current one."),
     ]
     .into_iter()
     .map(|(n, d)| (n.to_string(), d.to_string()))

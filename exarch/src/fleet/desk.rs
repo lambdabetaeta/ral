@@ -68,6 +68,10 @@ pub(crate) struct HostServices {
     pub disk_warn_bytes: Option<u64>,
     /// A spawn shares its parent's egress policy, never a fresh one.
     pub egress: egress::Egress,
+    /// The agent's own pin register, shared verbatim so `pin-read`/`pin-list`
+    /// answer from the same mirror the nudge already reads. `None` on a seat
+    /// with no mirror of its own — the wire test seat above all.
+    pub pins: Option<PinDigests>,
 }
 
 /// Answers one [`FOValue`] enquiry against a captured [`HostServices`]. Fresh
@@ -243,6 +247,8 @@ impl ExarchDesk {
             "schedule-list" => self.schedule_list(),
             "unschedule" => self.unschedule(payload),
             "reply" => self.reply(payload),
+            "pin-read" => self.pin_read(payload),
+            "pin-list" => Ok(self.pin_list()),
             other => Err(Error::new(
                 format!("unrecognised enquiry class `{other}`"),
                 1,
@@ -739,6 +745,38 @@ impl ExarchDesk {
         s.reply.set(value);
         Ok(FOValue::Unit)
     }
+
+    /// `` `pin-read `` — the card stored under `key` on this agent's own
+    /// register, canonically re-encoded, or `` `unit `` on a miss or an absent
+    /// mirror. Read-after-write within one run is sound because
+    /// [`DeskBinding::enquire`] drains queued surface frames before handling.
+    fn pin_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+        let [key] = payload_list(payload, "pin-read", "[key]")?;
+        let key = payload_string(key, "pin-read", "key")?;
+        let Some(pins) = &self.services.pins else {
+            return Ok(FOValue::Unit);
+        };
+        let m = pins.lock().expect("pin register poisoned");
+        match m.get(&key) {
+            // A card value is always first-order, so this conversion never fails.
+            Some(digest) => FOValue::try_from(&crate::bus::card::encode_card(&digest.card)),
+            None => Ok(FOValue::Unit),
+        }
+    }
+
+    /// `` `pin-list `` — the keys currently occupied on this agent's own
+    /// register, in `BTreeMap` order; an absent mirror answers empty.
+    fn pin_list(&self) -> FOValue {
+        FOValue::List {
+            items: self.services.pins.as_ref().map_or_else(Vec::new, |pins| {
+                pins.lock()
+                    .expect("pin register poisoned")
+                    .keys()
+                    .map(|key| FOValue::String { value: key.clone() })
+                    .collect()
+            }),
+        }
+    }
 }
 
 /// Decodes a surfaced value onto the bus, folding a `` `pin ``/`` `unpin ``
@@ -903,6 +941,7 @@ mod tests {
             generation: 0,
             disk_warn_bytes: None,
             egress: Egress::for_test(),
+            pins: None,
         }
     }
 
@@ -1075,6 +1114,200 @@ mod tests {
         assert!(
             binding.events.try_recv().is_none(),
             "enquire must drain the transport's event queue fully"
+        );
+    }
+
+    fn fresh_mirror() -> PinDigests {
+        Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()))
+    }
+
+    /// A `` `pin [key, body] `` surface value carrying a one-span text card —
+    /// the minimal shape [`SurfaceApplier::live`] folds into the mirror.
+    fn pin_value(key: &str, text: &str) -> FOValue {
+        FOValue::Variant {
+            label: "pin".into(),
+            payload: Some(Box::new(FOValue::Map {
+                entries: vec![
+                    ("key".into(), FOValue::String { value: key.into() }),
+                    (
+                        "body".into(),
+                        FOValue::Variant {
+                            label: "text".into(),
+                            payload: Some(Box::new(FOValue::Map {
+                                entries: vec![(
+                                    "spans".into(),
+                                    FOValue::List {
+                                        items: vec![FOValue::Map {
+                                            entries: vec![(
+                                                "text".into(),
+                                                FOValue::String { value: text.into() },
+                                            )],
+                                        }],
+                                    },
+                                )],
+                            })),
+                        },
+                    ),
+                ],
+            })),
+        }
+    }
+
+    fn unpin_value(key: &str) -> FOValue {
+        FOValue::Variant {
+            label: "unpin".into(),
+            payload: Some(Box::new(FOValue::Map {
+                entries: vec![("key".into(), FOValue::String { value: key.into() })],
+            })),
+        }
+    }
+
+    fn pin_read_req(key: &str) -> FOValue {
+        FOValue::Variant {
+            label: "pin-read".into(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![FOValue::String { value: key.into() }],
+            })),
+        }
+    }
+
+    /// A pin applied through [`SurfaceApplier::live`] comes back from
+    /// `pin-read` as the canonical card — the readback and the pinned mark
+    /// agree on shape, which is the whole point of a readable register.
+    #[test]
+    fn pin_read_returns_the_canonical_card() {
+        let mirror = fresh_mirror();
+        let (emit, _rx) = crate::bus::dummy_emitter();
+        SurfaceApplier {
+            emit,
+            pins: Some(mirror.clone()),
+        }
+        .live(pin_value("tasks", "hi"));
+
+        let d = ExarchDesk {
+            services: HostServices {
+                pins: Some(mirror),
+                ..base_services()
+            },
+        };
+        let answer = d
+            .handle(pin_read_req("tasks"))
+            .expect("a hit must answer Ok");
+        let card = crate::bus::card::value_to_card(&RalValue::from(answer))
+            .expect("the readback must decode as a card");
+        assert!(
+            matches!(
+                card.marks(),
+                [crate::bus::card::Mark::Text { spans }]
+                    if spans.len() == 1 && spans[0].role.is_none() && spans[0].text == "hi"
+            ),
+            "the canonical card must round-trip the pinned text mark, got {card:?}"
+        );
+    }
+
+    /// A key never pinned, and a key unpinned after being pinned, both answer
+    /// `unit` — a miss and a clear are the same absence to `pin-read`.
+    #[test]
+    fn pin_read_answers_unit_on_miss_and_after_unpin() {
+        let mirror = fresh_mirror();
+        let (emit, _rx) = crate::bus::dummy_emitter();
+        let applier = SurfaceApplier {
+            emit,
+            pins: Some(mirror.clone()),
+        };
+        let d = ExarchDesk {
+            services: HostServices {
+                pins: Some(mirror),
+                ..base_services()
+            },
+        };
+
+        assert!(
+            matches!(d.handle(pin_read_req("tasks")), Ok(FOValue::Unit)),
+            "a key never pinned must answer unit"
+        );
+
+        applier.live(pin_value("tasks", "hi"));
+        applier.live(unpin_value("tasks"));
+        assert!(
+            matches!(d.handle(pin_read_req("tasks")), Ok(FOValue::Unit)),
+            "an unpinned key must answer unit"
+        );
+    }
+
+    /// `pin-list` names exactly the occupied keys, in `BTreeMap` order, and
+    /// tracks a set/clear pair.
+    #[test]
+    fn pin_list_tracks_set_and_clear() {
+        let mirror = fresh_mirror();
+        let (emit, _rx) = crate::bus::dummy_emitter();
+        let applier = SurfaceApplier {
+            emit,
+            pins: Some(mirror.clone()),
+        };
+        let d = ExarchDesk {
+            services: HostServices {
+                pins: Some(mirror),
+                ..base_services()
+            },
+        };
+        let keys = |d: &ExarchDesk| match d
+            .handle(FOValue::Variant {
+                label: "pin-list".into(),
+                payload: None,
+            })
+            .expect("pin-list must answer Ok")
+        {
+            FOValue::List { items } => items
+                .into_iter()
+                .map(|v| match v {
+                    FOValue::String { value } => value,
+                    other => panic!("pin-list must answer strings, got {other:?}"),
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("pin-list must answer a list, got {other:?}"),
+        };
+
+        assert!(keys(&d).is_empty(), "an empty register lists no keys");
+
+        applier.live(pin_value("b", "one"));
+        applier.live(pin_value("a", "two"));
+        assert_eq!(
+            keys(&d),
+            vec!["a", "b"],
+            "keys list in BTreeMap (lexicographic) order"
+        );
+
+        applier.live(unpin_value("b"));
+        assert_eq!(keys(&d), vec!["a"], "a clear drops its key from the list");
+    }
+
+    /// The protected-`services` guard blocks a model's `` `pin `` write,
+    /// never a read: `` `pin-read `` answers a host-authored `"services"`
+    /// slot exactly like any other key.
+    #[test]
+    fn pin_read_of_services_answers() {
+        let mirror = fresh_mirror();
+        mirror.lock().expect("pin register poisoned").insert(
+            "services".to_string(),
+            shell_eval::PinDigest::new(crate::bus::card::Card(vec![
+                crate::bus::card::Mark::Text {
+                    spans: vec![crate::bus::card::Span {
+                        role: None,
+                        text: "svc".into(),
+                    }],
+                },
+            ])),
+        );
+        let d = ExarchDesk {
+            services: HostServices {
+                pins: Some(mirror),
+                ..base_services()
+            },
+        };
+        assert!(
+            d.handle(pin_read_req("services")).is_ok(),
+            "reads are not writes: the protected-pin guard must not reach `pin-read`"
         );
     }
 

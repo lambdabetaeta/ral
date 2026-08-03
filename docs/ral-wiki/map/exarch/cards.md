@@ -62,6 +62,24 @@ malformed. The `diff` mark reads a `path` and a `hunks` list — each hunk a
 lifts to empty so a bare diff still renders. Detached workers buffer their
 `surface` calls and replay them on `await`, so a card replays for free.
 
+## Encode — `encode_card`
+
+`encode_card` (`bus/card/encode.rs`) is `value_to_card`'s inverse on the
+decoder's image: `value_to_card(&encode_card(&card)) == card` for every `Card`
+the decoder can produce. It exists because
+[[decisions/260803_register-is-read-write|register-is-read-write]]'s
+`pin-read` hands the model back a stored pin as a value it can destructure,
+and that value must be **canonical**, not the bytes a kit happened to author:
+a bare-string span or a bare mark — sugar the decoder accepts — comes back
+through the tagged form (`` `text [spans: […]] ``), and an unknown mark comes
+back as the plain text it already degraded to on the way in. Canonical
+read-back is what makes storage and display one thing: a kit cannot smuggle
+state through a payload the decoder discards, because the only card
+`pin-read` can ever return is the one the rail already showed. `Mark::Listing`
+is host-composed and sits outside the decoder's image, so it encodes as
+`` `raw `` of its bytes — the encoder's one deliberate lossy corner, matching
+where the inverse law is stated.
+
 ## Host-composed one-liners — `done`, notices
 
 Some cards are composed in Rust, never decoded from a kit-authored `` `card ``.
@@ -136,11 +154,17 @@ stderr condenser (`card_stderr`, `headless.rs`) walks marks generically.
 
 The kit declares data and its level of measurement; the host binds it to visual
 variables, and with no host `surface` is the identity, so a kit stays runnable in
-a bare ral REPL. The tasks library holds the small constructors so the mark
-grammar lives in one ral place: `task-to-marks`/`surface-progress` in
-`exarch/data/agent.ral` (the tasks section; the kit owns the status→role
-mapping, since the host knows only the closed role set), surfaced per
-transition through `transition`/`add-task` onto the pinned `tasks` card.
+a bare ral REPL. The tasks library holds the small constructor so the mark
+grammar lives in one ral place: `tasks-card` in `exarch/data/agent.ral` (the
+tasks section; the kit owns the status→role mapping, since the host knows
+only the closed role set), paired with `decode-tasks`, its inverse over the
+same shape. Every mutator reads the register through `decode-tasks
+!{pin-read "tasks"}`, computes the new list, and writes it back through
+`sync-tasks` — one write point wrapping `pin-set`/`pin-clear`
+([[map/exarch/builtins|builtins]];
+[[decisions/260803_register-is-read-write|register-is-read-write]]). The card
+is the kit's only state; there is no bound list threaded alongside it to drift
+from what's pinned.
 
 The agent library's surfacing constructors are gone: `view-text`, `grep-files`,
 and `edit-hash`/`edit-replace` are Rust host builtins
@@ -168,4 +192,8 @@ decision), [[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphi
 (the chrome-side Bertin encoding this extends), [[map/exarch/frontend|frontend]]
 (the bus / block / line arm this re-grounds), [[map/exarch/shell-eval|shell-eval]]
 (the host sink that decodes the card), [[map/exarch/io-surface|io-surface]] (the
-core I/O events the sibling decoder turns into cards), [[map/exarch|map: exarch]].
+core I/O events the sibling decoder turns into cards),
+[[decisions/260803_register-is-read-write|register-is-read-write]] (the encoder
+this page's cards feed, and the canonical-form rule it answers to),
+[[design/pins|pins]] (the register `pin-read` answers from),
+[[map/exarch|map: exarch]].

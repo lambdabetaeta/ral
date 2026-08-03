@@ -14,23 +14,30 @@ let view-text-around = { |path line peek|
     view-text $path $lo $[$line + $peek + 1]
 }
 
+# --- the pin family -----------------------------------------------------------
+# `pin-set`/`pin-clear` are thin wrappers over the `surface `pin`` wire;
+# `pin-read`/`pin-list` are host builtins answered from the agent's own
+# register mirror.  Every kit below is a pure prelude over these four: no Rust
+# knows what a task or a goal is.
+
+let pin-set   = { |key card| surface `pin [key: $key, body: $card] }
+let pin-clear = { |key|      surface `unpin [key: $key] }
+
 # --- task management ---------------------------------------------------------
 # Schema: { id: Int, desc: String, status: `open|`doing|`blocked|`done, tags: [String], notes: String }
 # Statuses: open | doing | blocked | done
 # Id allocation: max(ids) + 1; freed ids are recycled.
-# `surface-progress` pins a `tasks <done>/<total>` gauge to the rail register;
-# add-task, remove-task, and transition update it.  The pin clears when no work
-# is left.
+# The list lives on the "tasks" pin, not in a binding: every mutator reads the
+# register, changes it, and writes it back through `sync-tasks`, so the state
+# survives blocks, `within`, and skipped rebinds.  Mutate it from the
+# foreground only: `pin-read`/`pin-list` are enquiries, so every mutator below
+# errors inside `spawn { … }`.  The pin clears when no work is left, so a
+# finished board stops being named by the boundary nudge.
 
 let mk-task = { |id desc|
   [ id: $id, desc: $desc, status: `open, tags: [], notes: "" ]
 }
 
-let empty-tasks = {
-  let ts = drop 1 [ !{mk-task 0 ""} ]
-  surface-progress $ts
-  $ts
-}
 let valid-statuses = [`open, `doing, `blocked, `done]
 
 # --- per-field setters ---
@@ -40,7 +47,16 @@ let set-status = { |t v| [id: $t[id], desc: $t[desc], status: $v,         tags: 
 let set-tags   = { |t v| [id: $t[id], desc: $t[desc], status: $t[status], tags: $v,       notes: $t[notes]] }
 let set-notes  = { |t v| [id: $t[id], desc: $t[desc], status: $t[status], tags: $t[tags], notes: $v        ] }
 
-let add-tag    = { |t g| set-tags $t [...$t[tags], $g] }
+## Tags render as one comma-joined, bracketed span on the tasks card, so a
+## tag holding `,` or `]` would be unreadable back out; refuse it rather than
+## corrupt the round trip.
+let add-tag = { |t g|
+  if !{re-match #'[,\]]'# $g} {
+    fail [status: 1, message: "add-tag: tag '$g' may not contain ',' or ']' — tags render as a comma-joined, bracketed span on the tasks card"]
+  } else {
+    set-tags $t [...$t[tags], $g]
+  }
+}
 let remove-tag = { |t g| set-tags $t !{filter { |x| $[not !{equal $x $g}] } $t[tags]} }
 
 # --- id allocation ---
@@ -51,27 +67,6 @@ let next-id = { |ts|
     else { $[!{fold { |acc x| if $[$x > $acc] { $x } else { $acc } } 0 $ids} + 1] }
 }
 
-# --- list operations ---
-
-let add-task = { |ts desc|
-  let new-ts = [...$ts, !{mk-task !{next-id $ts} $desc}]
-  surface-progress $new-ts
-  $new-ts
-}
-
-let remove-task = { |ts id|
-  let new-ts = filter { |t| $[$t[id] != $id] } $ts
-  surface-progress $new-ts
-  $new-ts
-}
-let find-task   = { |ts id|   first  { |t| $[$t[id] == $id] } $ts }
-let tag-task   = { |ts id tag|  map { |t| if $[$t[id] == $id] { add-tag    $t $tag  } else { $t } } $ts }
-let untag-task = { |ts id tag|  map { |t| if $[$t[id] == $id] { remove-tag $t $tag  } else { $t } } $ts }
-let note-task  = { |ts id note| map { |t| if $[$t[id] == $id] { set-notes  $t $note } else { $t } } $ts }
-let retag-task = { |ts id tags| map { |t| if $[$t[id] == $id] { set-tags   $t $tags } else { $t } } $ts }
-
-let by-status = { |ts s| filter { |t| equal $t[status] $s } $ts }
-
 # --- rendering ---
 
 let render-task = { |t|
@@ -80,59 +75,171 @@ let render-task = { |t|
   "#$t[id]  !{to-string $t[status] | from-string}  $t[desc]$tag-str$note-str"
 }
 
-let render-tasks = { |ts| for $ts { |t| echo !{render-task $t} } }
+# --- the tasks card, and its inverse ------------------------------------------
+# `tasks-card` and `decode-tasks` are the kit's serialization pair: a
+# `measure` gauge over a `fields` matrix, one row per task, `label: "#<id>"`,
+# `value` a `text` of exactly four positionally-decoded spans — status word
+# (chrome by status: done->ok, doing->warn, blocked->bad, open->muted), the
+# two-space-led description, the tag list (empty or " [a,b]"), and the notes
+# (empty or " -- text").  Rendering tags and notes is what a readable register
+# demands: a field the card never shows cannot survive a read back.
+
+let tasks-card = { |ts|
+  let row = { |t|
+    let chrome =
+      if    !{equal $t[status] `done}    { [role: "ok",    word: "done"] }
+      elsif !{equal $t[status] `doing}   { [role: "warn",  word: "doing"] }
+      elsif !{equal $t[status] `blocked} { [role: "bad",   word: "blocked"] }
+      else                                { [role: "muted", word: "open"] }
+    let tag-str  = if !{is-empty $t[tags]}  { "" } else { " [!{intercalate "," $t[tags]}]" }
+    let note-str = if !{equal $t[notes] ""} { "" } else { " -- $t[notes]" }
+    [label: "#$t[id]", value: `text [spans: [
+      [role: $chrome[role], text: $chrome[word]],
+      [role: "", text: "  $t[desc]"],
+      [role: "", text: $tag-str],
+      [role: "", text: $note-str],
+    ]]]
+  }
+  `card [`measure [label: "tasks", value: !{length !{filter { |t| equal $t[status] `done} $ts}}, max: !{length $ts}], `fields [rows: !{map $row $ts}]]
+}
+
+## `marks` is one homogeneous list, so two single-tag `case`s over different
+## elements would close its element type around whichever table ran first;
+## the one `describe` case names both tags, keeping the list one type.
+let decode-tasks = { |v|
+  if !{equal $v unit} { [] }
+  else {
+    try {
+      case $v [
+        `card: { |marks|
+          let describe = { |m| case $m [
+            `measure: { |_|          [kind: "measure", rows: []] },
+            `fields:  { |[rows: rs]| [kind: "fields",  rows: $rs] },
+          ] }
+          let [d0, d1] = map $describe $marks
+          if !{equal $d0[kind] "measure"} { unit } else { fail [status: 1, message: "not task-shaped"] }
+          if !{equal $d1[kind] "fields"}  { unit } else { fail [status: 1, message: "not task-shaped"] }
+          map { |r|
+            let [label: lbl, value: valv] = $r
+            case $valv [
+              `text: { |[spans: sp]|
+                let [s0, s1, s2, s3] = $sp
+                let [text: word]     = $s0
+                let [text: dtext]    = $s1
+                let [text: tagtext]  = $s2
+                let [text: notetext] = $s3
+                let status =
+                  if    !{equal $word "done"}    { `done }
+                  elsif !{equal $word "doing"}   { `doing }
+                  elsif !{equal $word "blocked"} { `blocked }
+                  elsif !{equal $word "open"}    { `open }
+                  else  { fail [status: 1, message: "not task-shaped"] }
+                let tags =
+                  if !{equal $tagtext ""} { [] }
+                  else { re-split "," !{slice $tagtext 2 $[!{length $tagtext} - 3]} }
+                let notes = if !{equal $notetext ""} { "" } else { slice $notetext 4 $[!{length $notetext} - 4] }
+                [ id: !{int !{slice $lbl 1 $[!{length $lbl} - 1]}}, desc: !{slice $dtext 2 $[!{length $dtext} - 2]},
+                  status: $status, tags: $tags, notes: $notes ]
+              },
+            ]
+          } $d1[rows]
+        },
+      ]
+    } { |_|
+      fail [status: 1, message: "tasks: the card under the 'tasks' pin is not task-shaped — expected `measure [label, value, max] then `fields [rows: [[label: \"#<id>\", value: `text [spans: [status, desc, tags, notes]]], …]], four spans per row"]
+    }
+  }
+}
+
+## The kit's one write point: an empty or all-`done` list clears the slot —
+## no outstanding work, no pin — otherwise it holds `tasks-card`'s rendering.
+let sync-tasks = { |ts|
+  if !{is-empty !{filter { |t| $[not !{equal $t[status] `done}] } $ts}} { pin-clear "tasks" }
+  else { pin-set "tasks" !{tasks-card $ts} }
+}
+
+# --- mutators: each reads the register, none takes a list ---
+
+let add-task = { |desc|
+  let ts = decode-tasks !{pin-read "tasks"}
+  sync-tasks [...$ts, !{mk-task !{next-id $ts} $desc}]
+}
+
+let remove-task = { |id| sync-tasks !{filter { |t| $[$t[id] != $id] } !{decode-tasks !{pin-read "tasks"}}} }
+
+let transition = { |id new-status|
+  if !{elem $new-status $valid-statuses} {
+    sync-tasks !{map { |t| if $[$t[id] == $id] { set-status $t $new-status } else { $t } } !{decode-tasks !{pin-read "tasks"}}}
+  } else {
+    echo "transition: invalid status -- !{to-string $new-status | from-string} (expected open|doing|blocked|done)" 1>&2
+  }
+}
+
+let tag-task   = { |id tag|  sync-tasks !{map { |t| if $[$t[id] == $id] { add-tag    $t $tag  } else { $t } } !{decode-tasks !{pin-read "tasks"}}} }
+let untag-task = { |id tag|  sync-tasks !{map { |t| if $[$t[id] == $id] { remove-tag $t $tag  } else { $t } } !{decode-tasks !{pin-read "tasks"}}} }
+let note-task  = { |id note| sync-tasks !{map { |t| if $[$t[id] == $id] { set-notes  $t $note } else { $t } } !{decode-tasks !{pin-read "tasks"}}} }
+
+let retag-task = { |id tags|
+  for $tags { |g|
+    if !{re-match #'[,\]]'# $g} {
+      fail [status: 1, message: "retag-task: tag '$g' may not contain ',' or ']' — tags render as a comma-joined, bracketed span on the tasks card"]
+    }
+  }
+  sync-tasks !{map { |t| if $[$t[id] == $id] { set-tags $t $tags } else { $t } } !{decode-tasks !{pin-read "tasks"}}}
+}
+
+let clear-tasks = { sync-tasks [] }
+let render-tasks = { for !{decode-tasks !{pin-read "tasks"}} { |t| echo !{render-task $t} } }
+let find-task = { |id| first { |t| $[$t[id] == $id] } !{decode-tasks !{pin-read "tasks"}} }
+let by-status = { |s| filter { |t| equal $t[status] $s } !{decode-tasks !{pin-read "tasks"}} }
 
 # --- persistence ---
+# `to-json`/`from-json` do not round-trip a bare variant (a JSON tag reads
+# back as a record, not `status` itself), so `status` crosses the file as its
+# word and is translated back on the way in; every other field is already
+# JSON-native.
 
-let save-tasks = { |ts path| to-json   $ts > $path }
-let load-tasks = { |path|    from-json     < $path }
-
-# --- host-rail surfacing ---
-
-let task-to-marks = { |t|
-  let id-str = "#$t[id]  "
-  let status-str = !{to-string $t[status] | from-string}
-  let header =
-    if    !{equal $t[status] `done}    { [[role: "muted", text: $id-str], [role: "ok",    text: $status-str]] }
-    elsif !{equal $t[status] `doing}   { [[role: "muted", text: $id-str], [role: "warn",   text: $status-str]] }
-    elsif !{equal $t[status] `blocked} { [[role: "muted", text: $id-str], [role: "bad",    text: $status-str]] }
-    else                               { [[role: "muted", text: $id-str], [role: "muted",  text: $status-str]] }
-  let body = [[role: "", text: "  $t[desc]"]]
-  [`text [spans: $header], `text [spans: $body]]
+let save-tasks = { |path|
+  to-json !{map { |t|
+    let word =
+      if    !{equal $t[status] `done}    { "done" }
+      elsif !{equal $t[status] `doing}   { "doing" }
+      elsif !{equal $t[status] `blocked} { "blocked" }
+      else                                { "open" }
+    set-status $t $word
+  } !{decode-tasks !{pin-read "tasks"}}} > $path
 }
 
-let surface-progress = { |ts|
-    let done  = !{length !{by-status $ts `done}}
-    let total = !{length $ts}
-    let gauge = `measure [label: "tasks", value: $done, max: $total]
-    let marks =
-      if $[$done == $total] { drop 1 [$gauge] }
-      else                  { [$gauge, ...!{flat-map $task-to-marks $ts}] }
-    surface `pin [key: "tasks", body: `card $marks]
-}
-
-let transition = { |ts id new-status|
-    if !{elem $new-status $valid-statuses} {
-        let new-ts = map { |t| if $[$t[id] == $id] { set-status $t $new-status } else { $t } } $ts
-        surface-progress $new-ts
-        $new-ts
-    } else {
-        echo "transition: invalid status -- !{to-string $new-status | from-string} (expected open|doing|blocked|done)" 1>&2
-        $ts
+let load-tasks = { |path|
+  let ts = map { |t|
+    let status =
+      if    !{equal $t[status] "done"}    { `done }
+      elsif !{equal $t[status] "doing"}   { `doing }
+      elsif !{equal $t[status] "blocked"} { `blocked }
+      else                                 { `open }
+    set-status $t $status
+  } !{from-json < $path}
+  for $ts { |t|
+    for $t[tags] { |g|
+      if !{re-match #'[,\]]'# $g} {
+        fail [status: 1, message: "load-tasks: tag '$g' may not contain ',' or ']' — tags render as a comma-joined, bracketed span on the tasks card"]
+      }
     }
+  }
+  sync-tasks $ts
 }
+
 # --- goal ----------------------------------------------------------------------
 
 ## Pin a session goal so the periodic nudge reminder keeps it visible.  A
 ## single plain-text card under the "goal" register key; call again to replace.
 
 let set-goal = { |text|
-  surface `pin [key: "goal", body: `card [`text [spans: [[role: "strong", text: "goal"]]], `text [spans: [[role: "", text: $text]]]]]
+  pin-set "goal" `card [`text [spans: [[role: "strong", text: "goal"]]],
+                        `text [spans: [[role: "", text: $text]]]]
 }
 
 ## Drop the goal pin — when the session's aim is met or abandoned.  Idempotent:
 ## calling it with nothing pinned is a quiet no-op.
 
-let clear-goal = {
-  surface `unpin [key: "goal"]
-}
+let clear-goal = { pin-clear "goal" }

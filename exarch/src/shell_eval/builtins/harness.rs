@@ -1,6 +1,6 @@
 //! The harness builtins — `agent`, `agents`, `message`, `agent-cancel`,
-//! `schedule`, `schedules`, `unschedule`, `reply` — with the type schemes
-//! that gate them.
+//! `schedule`, `schedules`, `unschedule`, `reply`, `pin-read`, `pin-list` —
+//! with the type schemes that gate them.
 //!
 //! Each body validates at the door before it enquires, so a malformed call
 //! never reaches the host. `agent` forks this shell into the run's nursery
@@ -402,6 +402,39 @@ fn builtin_unschedule(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
     Ok(Value::Unit)
 }
 
+/// `pin-read <key>` — enquires `` `pin-read ``; the mirror lookup, the miss
+/// (→ `Unit`), and the canonical re-encoding are the desk's.
+fn builtin_pin_read(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    let key = args[0].to_string();
+    let answer = shell.enquire(
+        mooring,
+        FOValue::Variant {
+            label: "pin-read".to_string(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![FOValue::String { value: key }],
+            })),
+        },
+    )?;
+    Ok(Value::from(answer))
+}
+
+/// `pin-list` — enquires `` `pin-list ``; the key ordering is the desk's.
+fn builtin_pin_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    let answer = shell.enquire(
+        mooring,
+        FOValue::Variant {
+            label: "pin-list".to_string(),
+            payload: None,
+        },
+    )?;
+    let FOValue::List { items } = answer else {
+        return Err(sig(
+            "pin-list: host answered an unexpected shape for the listing",
+        ));
+    };
+    Ok(Value::list(items.into_iter().map(Value::from).collect()))
+}
+
 /// `reply <value>` — `FOValue::try_from` runs before any enquiry crosses,
 /// so a non-first-order value fails this call alone and leaves the session
 /// running; the refusal for a non-returning agent is the desk's.
@@ -547,9 +580,23 @@ fn scheme_reply(u: &mut Unifier) -> Scheme {
     scheme(&[av], &[], &[], thunk(fun(Ty::Var(av), pure(Ty::Unit))))
 }
 
+/// `pin-read :: ∀α. String → F α` — the `from-json` precedent
+/// (`TyTemplate::Any`, `core/src/typecheck/builtins.rs:391`): trusted, not
+/// checked, since only the kit's own decoder can judge whether the card
+/// read back matches the shape it expects.
+fn scheme_pin_read(u: &mut Unifier) -> Scheme {
+    let av = u.fresh_tyvar();
+    scheme(&[av], &[], &[], thunk(fun(Ty::String, pure(Ty::Var(av)))))
+}
+
+/// `pin-list :: F [String]`
+fn scheme_pin_list(_u: &mut Unifier) -> Scheme {
+    scheme(&[], &[], &[], thunk(pure(Ty::List(Box::new(Ty::String)))))
+}
+
 // A named array, not a promoted temporary: rustc refuses promotion once an
 // entry carries `BuiltinEntry`'s interior-mutable arity cache.
-static HARNESS_BUILTINS_ARR: [BuiltinEntry; 8] = [
+static HARNESS_BUILTINS_ARR: [BuiltinEntry; 10] = [
     BuiltinEntry::new(
         Cow::Borrowed("agent"),
         BuiltinTypeRule::Scheme(scheme_agent),
@@ -597,6 +644,18 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 8] = [
         BuiltinTypeRule::Scheme(scheme_reply),
         "reply <value>  — hand `value` back to whoever spawned you: the sole return path for a returning agent. Your parent receives exactly this value, nothing else — not your reasoning, your shell bindings, or any prose you streamed along the way. `value` must be first-order data: no closures, handles, or environments; passing one fails this call with a didactic error and your run continues, so fix the value and call reply again. Call it more than once in an exchange and the last call wins — an earlier value is discarded, not appended. The run does not end at this call: it ends once the enclosing ral call's whole batch of statements finishes draining, so write reply last and let earlier statements in the same script run to completion first. A non-finite Float (NaN, +Infinity, -Infinity) reaches your parent as the string \"NaN\"/\"Infinity\"/\"-Infinity\" — JSON, which the value eventually crosses into, has no such numbers. Refused on the interactive trunk and every /branch child: they converse with the user turn after turn and never return, so they hold no obligation to call this. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_reply),
+    ),
+    BuiltinEntry::new(
+        Cow::Borrowed("pin-read"),
+        BuiltinTypeRule::Scheme(scheme_pin_read),
+        "pin-read <key>  — the card currently pinned under KEY on your register, as a `card value you can destructure, or unit if the slot is empty. Reads your own register only. Answered only on the run that calls it: inside spawn { … } this errors.",
+        BuiltinBody::Static(builtin_pin_read),
+    ),
+    BuiltinEntry::new(
+        Cow::Borrowed("pin-list"),
+        BuiltinTypeRule::Scheme(scheme_pin_list),
+        "pin-list  — the keys currently occupied on your pin register, as [String]. Read one back with pin-read. Answered only on the run that calls it: inside spawn { … } this errors.",
+        BuiltinBody::Static(builtin_pin_list),
     ),
 ];
 pub static HARNESS_BUILTINS: &[BuiltinEntry] = &HARNESS_BUILTINS_ARR;
@@ -1186,5 +1245,375 @@ mod tests {
             }
             other => panic!("expected Replied, got {other:?}"),
         }
+    }
+
+    // ── `pin-read` / `pin-list` ─────────────────────────────────────────────
+
+    /// The scripted-provider round-trip pattern of
+    /// `reply_full_stack_round_trip_delivers_structured_record_to_parent_inbox`,
+    /// crossed with the desk's `` `pin-read `` arm: the child pins through
+    /// `surface`, reads its own pin back in the same run, and hands the
+    /// canonical card to its parent.
+    #[test]
+    fn pin_read_full_stack_round_trip_returns_canonical_card_to_parent() {
+        let dir = tmp("pin-read-full-stack-round-trip");
+        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
+            "test-model",
+            crate::provider::ProviderKind::Openai,
+            crate::provider::scripted::Script::new().then(
+                crate::provider::scripted::Reply::tool_calls(vec![ral_call(
+                    "c1",
+                    r#"surface `pin [key: "note", body: `card ["hi there"]]; reply !{pin-read "note"}"#,
+                )]),
+            ),
+        ));
+        session.provider_handle().swap(provider);
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.id);
+
+        let result = session.run_shell(
+            "call-1".to_string(),
+            r"agent [prompt: #'pin and read back'#, name: 'pinner', type: `amnemon, grant: `read-only, search: false]",
+            5,
+            &emit,
+        );
+        assert!(
+            result.content.contains("pinner"),
+            "the receipt record must be the run's value, got: {}",
+            result.content
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match session.next_item_for_test() {
+                Some(crate::bus::Item::Agent(r)) => {
+                    // The pretty-printer elides past its depth cap, so the
+                    // span text itself does not survive to this rendering;
+                    // what proves the round trip *canonical* — a lifted
+                    // `` `text `` mark, not the bare-string sugar it was
+                    // authored with — does.
+                    assert!(
+                        r.text.contains("`card") && r.text.contains("`text [spans:"),
+                        "the canonical card must reach the parent, got: {}",
+                        r.text
+                    );
+                    break;
+                }
+                Some(_other) => panic!("expected an Agent result item"),
+                None => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "child did not settle within the timeout"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
+    }
+
+    /// An absent key answers `Unit`, which crosses to the parent as `reply`'s
+    /// empty rendering.
+    #[test]
+    fn pin_read_full_stack_absent_key_replies_unit() {
+        let dir = tmp("pin-read-full-stack-absent");
+        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
+            "test-model",
+            crate::provider::ProviderKind::Openai,
+            crate::provider::scripted::Script::new().then(
+                crate::provider::scripted::Reply::tool_calls(vec![ral_call(
+                    "c1",
+                    r#"reply !{pin-read "nope"}"#,
+                )]),
+            ),
+        ));
+        session.provider_handle().swap(provider);
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.id);
+
+        let result = session.run_shell(
+            "call-1".to_string(),
+            r"agent [prompt: #'read an absent key'#, name: 'reader', type: `amnemon, grant: `read-only, search: false]",
+            5,
+            &emit,
+        );
+        assert!(
+            result.content.contains("reader"),
+            "the receipt record must be the run's value, got: {}",
+            result.content
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match session.next_item_for_test() {
+                Some(crate::bus::Item::Agent(r)) => {
+                    assert_eq!(
+                        r.text.trim(),
+                        "",
+                        "an absent key must reply unit, got: {}",
+                        r.text
+                    );
+                    break;
+                }
+                Some(_other) => panic!("expected an Agent result item"),
+                None => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "child did not settle within the timeout"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
+    }
+
+    // ── the task kit as a pure prelude over the pin family ─────────────────
+
+    /// `add-task`, `transition`, `tag-task`, and `note-task` all read and
+    /// write the "tasks" pin through `sync-tasks`; `render-tasks` and a direct
+    /// `decode-tasks !{pin-read "tasks"}` must agree on every field, including
+    /// the tags and notes the old pinned rollup never rendered.
+    #[test]
+    fn kit_round_trip_holds_every_field_including_tags_and_notes() {
+        let dir = tmp("kit-round-trip");
+        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.id);
+
+        session.run_shell(
+            "call-1".to_string(),
+            r#"add-task "fix the parser""#,
+            5,
+            &emit,
+        );
+        session.run_shell("call-2".to_string(), r#"add-task "write docs""#, 5, &emit);
+        session.run_shell("call-3".to_string(), "transition 1 `doing", 5, &emit);
+        session.run_shell("call-4".to_string(), r#"tag-task 1 "urgent""#, 5, &emit);
+        session.run_shell(
+            "call-5".to_string(),
+            r#"note-task 1 "blocked on review""#,
+            5,
+            &emit,
+        );
+
+        let rendered = session.run_shell("call-6".to_string(), "render-tasks", 5, &emit);
+        assert!(
+            rendered
+                .content
+                .contains("#1  `doing  fix the parser [urgent]  -- blocked on review"),
+            "render-tasks must show the tagged, noted task, got: {}",
+            rendered.content
+        );
+        assert!(
+            rendered.content.contains("#2  `open  write docs"),
+            "render-tasks must show the untouched second task, got: {}",
+            rendered.content
+        );
+
+        let read = session.run_shell(
+            "call-7".to_string(),
+            r#"let [t, _] = !{decode-tasks !{pin-read "tasks"}}
+               echo $t[desc]
+               echo $t[status]
+               echo !{intercalate "," $t[tags]}
+               echo $t[notes]"#,
+            5,
+            &emit,
+        );
+        assert!(
+            read.content.contains("fix the parser"),
+            "the decoded desc must survive, got: {}",
+            read.content
+        );
+        assert!(
+            read.content.contains("doing"),
+            "the decoded status must survive, got: {}",
+            read.content
+        );
+        assert!(
+            read.content.contains("urgent"),
+            "the decoded tags must survive, got: {}",
+            read.content
+        );
+        assert!(
+            read.content.contains("blocked on review"),
+            "the decoded notes must survive, got: {}",
+            read.content
+        );
+    }
+
+    /// `add-task` inside a function body pins to the register, which SPEC
+    /// §10's block-discard rule never touches — a later, separate top-level
+    /// run still sees it.
+    #[test]
+    fn add_task_inside_a_function_body_survives_the_block_and_the_call() {
+        let dir = tmp("block-survival");
+        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.id);
+
+        session.run_shell(
+            "call-1".to_string(),
+            r#"let f = { add-task "inside a block" }; !{f}"#,
+            5,
+            &emit,
+        );
+
+        let rendered = session.run_shell("call-2".to_string(), "render-tasks", 5, &emit);
+        assert!(
+            rendered.content.contains("inside a block"),
+            "a task added inside a function body must survive to the next top-level run, got: {}",
+            rendered.content
+        );
+    }
+
+    /// A sub-agent's register is its own: a child's `add-task` must never
+    /// reach the parent's "tasks" pin.
+    #[test]
+    fn sub_agent_pinning_tasks_leaves_the_parents_register_untouched() {
+        let dir = tmp("pin-isolation");
+        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.id);
+
+        session.run_shell("call-1".to_string(), r#"add-task "parent task""#, 5, &emit);
+
+        let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
+            "test-model",
+            crate::provider::ProviderKind::Openai,
+            crate::provider::scripted::Script::new().then(
+                crate::provider::scripted::Reply::tool_calls(vec![ral_call(
+                    "c1",
+                    r#"add-task "child task"; reply "done""#,
+                )]),
+            ),
+        ));
+        session.provider_handle().swap(provider);
+
+        let result = session.run_shell(
+            "call-2".to_string(),
+            r"agent [prompt: #'add a task'#, name: 'tasker', type: `amnemon, grant: `read-only, search: false]",
+            5,
+            &emit,
+        );
+        assert!(
+            result.content.contains("tasker"),
+            "the receipt record must be the run's value, got: {}",
+            result.content
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match session.next_item_for_test() {
+                Some(crate::bus::Item::Agent(_)) => break,
+                Some(_other) => panic!("expected an Agent result item"),
+                None => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "child did not settle within the timeout"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
+
+        let rendered = session.run_shell("call-3".to_string(), "render-tasks", 5, &emit);
+        assert!(
+            rendered.content.contains("parent task"),
+            "the parent's own task must survive, got: {}",
+            rendered.content
+        );
+        assert!(
+            !rendered.content.contains("child task"),
+            "the child's pin must never reach the parent's register, got: {}",
+            rendered.content
+        );
+    }
+
+    /// The protected-`services` guard blocks the write direction only:
+    /// `pin-set "services"` is refused with the existing diagnostic, and
+    /// `pin-read "services"` still answers (reads are not writes).
+    #[test]
+    fn services_pin_refuses_writes_but_pin_read_still_answers() {
+        let dir = tmp("protected-pin-full-stack");
+        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let (tx, rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.id);
+
+        session.run_shell(
+            "call-1".to_string(),
+            r#"pin-set "services" `card [`text [spans: [[text: "nope"]]]]"#,
+            5,
+            &emit,
+        );
+        let saw_refusal = std::iter::from_fn(|| rx.try_recv().ok()).any(|event| {
+            matches!(&event.kind, crate::bus::Kind::Error(msg) if msg.contains("protected service-ledger pin"))
+        });
+        assert!(saw_refusal, "expected the protected-pin diagnostic");
+
+        let read = session.run_shell("call-2".to_string(), r#"pin-read "services""#, 5, &emit);
+        assert!(
+            read.content.contains("EXIT: 0"),
+            "pin-read of a protected key must still answer, got: {}",
+            read.content
+        );
+    }
+
+    /// `sync-tasks` clears the slot once no work remains: transitioning the
+    /// last open task to `` `done `` empties the pin, and a later `add-task`
+    /// finds no register and restarts id allocation at 1.
+    #[test]
+    fn transitioning_the_last_open_task_to_done_clears_the_pin_and_restarts_ids() {
+        let dir = tmp("all-done-clears");
+        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.id);
+
+        session.run_shell("call-1".to_string(), r#"add-task "only task""#, 5, &emit);
+        session.run_shell("call-2".to_string(), "transition 1 `done", 5, &emit);
+
+        let read = session.run_shell("call-3".to_string(), r#"pin-read "tasks""#, 5, &emit);
+        assert!(
+            !read.content.contains("VALUE:"),
+            "an all-done list must clear the pin to unit, got: {}",
+            read.content
+        );
+
+        session.run_shell("call-4".to_string(), r#"add-task "fresh""#, 5, &emit);
+        let rendered = session.run_shell("call-5".to_string(), "render-tasks", 5, &emit);
+        assert!(
+            rendered.content.contains("#1  `open  fresh"),
+            "id allocation must restart at 1 once the register is empty, got: {}",
+            rendered.content
+        );
+    }
+
+    /// A card under "tasks" that `decode-tasks` does not recognise — the
+    /// model scribbled on the shared key — fails the next kit call with the
+    /// didactic message naming the expected shape, rather than corrupting or
+    /// silently discarding it.
+    #[test]
+    fn a_foreign_card_under_tasks_fails_the_kit_didactically() {
+        let dir = tmp("schema-collision");
+        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.id);
+
+        session.run_shell(
+            "call-1".to_string(),
+            r#"pin-set "tasks" `card [`text [spans: [[text: "not task shaped"]]]]"#,
+            5,
+            &emit,
+        );
+
+        let result = session.run_shell("call-2".to_string(), r#"add-task "x""#, 5, &emit);
+        assert!(
+            result
+                .content
+                .contains("tasks: the card under the 'tasks' pin is not task-shaped"),
+            "the didactic fail must name the expected shape, got: {}",
+            result.content
+        );
     }
 }
