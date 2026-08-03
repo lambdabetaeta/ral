@@ -184,6 +184,33 @@ fn write_report(writer: &Mutex<WireChannel>, id: DispatchId, report: Report) {
         .write_frame(&Frame::Event(id, Event::Report(report)));
 }
 
+/// The engine's rendezvous, held for one run or one probe. Winning a claim is
+/// the only way to mint one and only a `Dispatch` rides the channel, so the
+/// busy flag can never stand raised without work behind it.
+struct Dispatch {
+    id: DispatchId,
+    busy: Arc<AtomicBool>,
+    stamp: Arc<AtomicU64>,
+}
+
+impl Dispatch {
+    fn claim(busy: &Arc<AtomicBool>, stamp: &Arc<AtomicU64>, id: DispatchId) -> Option<Self> {
+        busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self { id, busy: busy.clone(), stamp: stamp.clone() })
+    }
+}
+
+/// The one place the stamp and the flag are lowered, so no path can skip it —
+/// including an unwind out of the worker. Only infallible work belongs here: a
+/// panic raised during an unwind aborts the process.
+impl Drop for Dispatch {
+    fn drop(&mut self) {
+        self.stamp.store(0, Ordering::Relaxed);
+        self.busy.store(false, Ordering::Release);
+    }
+}
+
 /// Adopt the socket the front-end left on fd 3 and run the engine on it.
 ///
 /// Only the adoption and the final `exit` live here; the protocol itself is
@@ -300,18 +327,19 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
     // second dispatch gets.
     enum WorkItem {
         /// Boxed so a probe is not sized to `Run`'s stack footprint.
-        Run(DispatchId, Box<Run>),
-        Probe(DispatchId, FOValue),
+        Run(Box<Run>),
+        Probe(FOValue),
     }
 
     // Taken before the shell moves into the worker: the teardown must reach the
     // shell's deferred workers without the shell in hand.
     let root = shell.cancel_handle();
 
-    // Cleared by the worker only once its Report is written, so "engine busy"
-    // means a run genuinely in flight, not a worker slow to re-park.
+    // Lowered by the claimed `Dispatch`'s `Drop`, which runs once the worker
+    // has written its Report, so "engine busy" means a run genuinely in
+    // flight, not a worker slow to re-park.
     let busy = Arc::new(AtomicBool::new(false));
-    let (run_tx, run_rx) = mpsc::channel::<WorkItem>();
+    let (run_tx, run_rx) = mpsc::channel::<(Dispatch, WorkItem)>();
 
     let current_dispatch = Arc::new(AtomicU64::new(0));
     let desk = Arc::new(WireDesk {
@@ -333,15 +361,18 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
     // ── Worker thread: owns the Shell ──────────────────────────────
     let worker_writer = writer.clone();
     let worker_desk = desk.clone();
-    let worker_current_dispatch = current_dispatch.clone();
-    let worker_busy = busy.clone();
     std::thread::spawn(move || {
         let mut shell = shell;
-        while let Ok(item) = run_rx.recv() {
-            match item {
-                WorkItem::Run(id, run) => {
+        while let Ok((dispatch, item)) = run_rx.recv() {
+            let id = dispatch.id;
+            // `Shell::run` already catches, rolls back, and reports a panic in
+            // the run itself; this outer catch is for one escaping the report
+            // plumbing, or `answer_probe`'s own lock poisoning, either of which
+            // would otherwise kill the thread unreported.
+            let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match item {
+                WorkItem::Run(run) => {
                     // What the desk and the sinks read to stamp their frames.
-                    worker_current_dispatch.store(id.0, Ordering::Relaxed);
+                    dispatch.stamp.store(id.0, Ordering::Relaxed);
 
                     let req = crate::run::RunRequest {
                         run: *run,
@@ -351,58 +382,48 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
                         nursery: None,
                         lifecycle: Box::new(()),
                     };
-                    // `Shell::run` already catches, rolls back, and reports a
-                    // panic in the run itself; this outer catch is for one
-                    // escaping the report plumbing, which would otherwise kill
-                    // the thread unreported and hang the front-end forever.
-                    let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let run_report = shell.run(req);
-                        run_report.into_report(shell.sources())
-                    }))
-                    .unwrap_or_else(|_| Report::Static {
-                        diagnostics: crate::transport::Diagnostics::Host(
-                            "engine: run report plumbing panicked".into(),
-                        ),
-                    });
+                    let run_report = shell.run(req);
+                    run_report.into_report(shell.sources())
+                }
+                WorkItem::Probe(reading) => match answer_probe(&mut shell, &reading) {
+                    Ok(v) => Report::Ran {
+                        result: Ok(v),
+                        status: 0,
+                        single_command: false,
+                        captured: None,
+                        timed_out: false,
+                    },
+                    Err(message) => Report::Ran {
+                        result: Err(crate::transport::Break::Error {
+                            rendered: message,
+                            command_exit: false,
+                        }),
+                        status: 1,
+                        single_command: false,
+                        captured: None,
+                        timed_out: false,
+                    },
+                },
+            }))
+            .unwrap_or_else(|_| Report::Static {
+                diagnostics: crate::transport::Diagnostics::Host(
+                    "engine: dispatch panicked in the engine worker".into(),
+                ),
+            });
 
-                    worker_current_dispatch.store(0, Ordering::Relaxed);
-                    write_report(&worker_writer, id, report);
-                }
-                WorkItem::Probe(id, reading) => {
-                    let report = match answer_probe(&mut shell, &reading) {
-                        Ok(v) => Report::Ran {
-                            result: Ok(v),
-                            status: 0,
-                            single_command: false,
-                            captured: None,
-                            timed_out: false,
-                        },
-                        Err(message) => Report::Ran {
-                            result: Err(crate::transport::Break::Error {
-                                rendered: message,
-                                command_exit: false,
-                            }),
-                            status: 1,
-                            single_command: false,
-                            captured: None,
-                            timed_out: false,
-                        },
-                    };
-                    write_report(&worker_writer, id, report);
-                }
-            }
-            worker_busy.store(false, Ordering::Release);
+            // `dispatch` drops after this, never before: the engine reads idle
+            // only once the front-end has the report in hand.
+            write_report(&worker_writer, id, report);
         }
     });
 
     // Only the frame that wins the `false → true` flip may hand the worker
-    // work; the rest get the refusal below. False means the worker is gone.
+    // work; the rest get the refusal below. False means the worker is gone —
+    // reachable because an unwind lowers the flag on its way out, so a closed
+    // channel here is a dead thread rather than a stale claim.
     let claim = |id: DispatchId, item: WorkItem| -> bool {
-        if busy
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            run_tx.send(item).is_ok()
+        if let Some(dispatch) = Dispatch::claim(&busy, &current_dispatch, id) {
+            run_tx.send((dispatch, item)).is_ok()
         } else {
             write_report(
                 &writer,
@@ -458,12 +479,12 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
 
         match frame {
             Frame::Dispatch(id, run) => {
-                if !claim(id, WorkItem::Run(id, run)) {
+                if !claim(id, WorkItem::Run(run)) {
                     break 0; // worker died
                 }
             }
             Frame::Probe(id, reading) => {
-                if !claim(id, WorkItem::Probe(id, reading)) {
+                if !claim(id, WorkItem::Probe(reading)) {
                     break 0; // worker died
                 }
             }
