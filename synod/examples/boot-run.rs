@@ -114,7 +114,6 @@ fn main() {
             stdin: RunStdin::Empty,
         },
         |_| {},
-        |_| {},
         |_| -> Result<_, EnquiryError> { unreachable!("this run raises no enquiry") },
     )
     .expect("the guest engine must answer the dispatch with a Report");

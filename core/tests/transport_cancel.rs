@@ -49,7 +49,6 @@ fn a_cancel_through_the_control_door_stops_an_in_flight_run() {
             stdin: RunStdin::Empty,
         },
         |_| {},
-        |_| {},
         |_| unreachable!("no desk is installed"),
     )
     .expect("the identity transport sends the Report synchronously");

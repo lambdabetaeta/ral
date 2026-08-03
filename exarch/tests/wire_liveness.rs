@@ -141,7 +141,6 @@ fn an_idle_session_stays_alive_on_the_heartbeat_alone() {
         &transport,
         source_run("$[1 + 1]"),
         |_| {},
-        |_| {},
         |_| -> Result<_, EnquiryError> { unreachable!("this run raises no enquiry") },
     )
     .expect("the engine must answer the dispatch with a Report");

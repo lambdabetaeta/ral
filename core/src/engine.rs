@@ -8,6 +8,7 @@
 //! and the durable root under it, then waits for the worker to report and park.
 
 use std::collections::HashMap;
+use std::io;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
@@ -15,7 +16,8 @@ use std::time::{Duration, Instant};
 use crate::process::CancelCause;
 use crate::serial::FOValue;
 use crate::transport::{
-    Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run, answer_probe,
+    Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run, SessionEvent,
+    answer_probe,
 };
 use crate::types::{DeferredSink, EnquiryDesk, Error, Shell, SurfaceSink};
 use crate::wire::WireChannel;
@@ -35,39 +37,63 @@ pub struct EngineInstaller {
     pub boot: fn() -> Shell,
 }
 
+/// The engine's one write door: locks `writer`, writes `frame`, and on error
+/// severs the connection under the guard and raises `fault` — the flag the
+/// reader loop consults on exit so a front-end that stopped reading is never
+/// mistaken for one that cleanly detached.
+///
+/// Every engine-side write crosses here: a surface emit, a deferred batch, an
+/// enquiry, a report, a `Pong`. None of them may park the reader loop, so a
+/// stalled write becomes exactly the same fatal, non-blocking event a severed
+/// pipe already is.
+fn engine_write(writer: &Mutex<WireChannel>, fault: &AtomicBool, frame: &Frame) -> io::Result<()> {
+    let outcome = {
+        let mut guard = writer.lock().unwrap();
+        let outcome = guard.write_frame(frame);
+        if outcome.is_err() {
+            guard.shutdown();
+        }
+        outcome
+    };
+    if outcome.is_err() {
+        fault.store(true, Ordering::SeqCst);
+    }
+    outcome
+}
+
 /// Writes `Event::Surface` frames as values are produced, stamped at emit time
 /// with whatever dispatch is then in flight.
 struct ChannelSurfaceSink {
     current_dispatch: Arc<AtomicU64>,
     writer: Arc<Mutex<WireChannel>>,
+    fault: Arc<AtomicBool>,
 }
 
 impl crate::types::EventSink for ChannelSurfaceSink {
     fn emit(&self, ev: &FOValue) {
         let id = DispatchId(self.current_dispatch.load(Ordering::Relaxed));
-        let _ = self
-            .writer
-            .lock()
-            .unwrap()
-            .write_frame(&Frame::Event(id, Event::Surface(ev.clone())));
+        let _ = engine_write(
+            &self.writer,
+            &self.fault,
+            &Frame::Event(id, Event::Surface(ev.clone())),
+        );
     }
 }
 
-/// A batch settling between runs finds no dispatch in flight, so it is stamped
-/// id 0.
+/// A detached worker's batch outlives the run that spawned it, so it has no
+/// dispatch to stamp and rides `Frame::Session` instead.
 struct ChannelDeferredSink {
-    current_dispatch: Arc<AtomicU64>,
     writer: Arc<Mutex<WireChannel>>,
+    fault: Arc<AtomicBool>,
 }
 
 impl crate::types::DeferredSink for ChannelDeferredSink {
     fn deliver(&self, batch: Vec<FOValue>) {
-        let id = DispatchId(self.current_dispatch.load(Ordering::Relaxed));
-        let _ = self
-            .writer
-            .lock()
-            .unwrap()
-            .write_frame(&Frame::Event(id, Event::DeferredSurface(batch)));
+        let _ = engine_write(
+            &self.writer,
+            &self.fault,
+            &Frame::Session(SessionEvent::DeferredSurface(batch)),
+        );
     }
 }
 
@@ -83,6 +109,27 @@ const TICK: Duration = Duration::from_secs(1);
 /// host's default 5s ping interval, so no scheduling jitter can fake one.
 const HOST_SILENCE_DEADLINE: Duration = Duration::from_secs(30);
 
+/// How long the engine tolerates a silent front-end and a stalled write before
+/// declaring it dead. The two deadlines are conceptually distinct — one
+/// bounds an absent read, the other a stuck write — so a test that must see a
+/// write stall resolved without waiting out the production silence deadline
+/// gets its own brisk `Patience`, rather than the constant being hollowed out
+/// into a knob. Production always runs [`Patience::default`].
+#[derive(Debug, Clone, Copy)]
+struct Patience {
+    silence: Duration,
+    write_stall: Duration,
+}
+
+impl Default for Patience {
+    fn default() -> Self {
+        Self {
+            silence: HOST_SILENCE_DEADLINE,
+            write_stall: HOST_SILENCE_DEADLINE,
+        }
+    }
+}
+
 /// Bounds the settle against a run that ignores cancellation, so a dead peer
 /// can never wedge the exit.
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -95,6 +142,7 @@ const SETTLE_POLL: Duration = Duration::from_millis(50);
 /// cancel scope fires, polled at the condvar's timeout.
 struct WireDesk {
     writer: Arc<Mutex<WireChannel>>,
+    fault: Arc<AtomicBool>,
     /// Stamped by the worker, so an enquiry names the run that raised it.
     current_dispatch: Arc<AtomicU64>,
     next_eid: AtomicU64,
@@ -126,12 +174,12 @@ impl EnquiryDesk for WireDesk {
         let eid = EnquiryId(self.next_eid.fetch_add(1, Ordering::Relaxed));
         self.slots.lock().unwrap().insert(eid, None);
 
-        if self
-            .writer
-            .lock()
-            .unwrap()
-            .write_frame(&Frame::Event(id, Event::Enquiry(eid, req)))
-            .is_err()
+        if engine_write(
+            &self.writer,
+            &self.fault,
+            &Frame::Event(id, Event::Enquiry(eid, req)),
+        )
+        .is_err()
         {
             self.slots.lock().unwrap().remove(&eid);
             return Err(Error::new("enquiry lost: the host connection is down", 1));
@@ -177,11 +225,8 @@ fn resolve_installer<'a>(
         .ok_or_else(|| format!("engine: unknown builtin installer '{installer}'"))
 }
 
-fn write_report(writer: &Mutex<WireChannel>, id: DispatchId, report: Report) {
-    let _ = writer
-        .lock()
-        .unwrap()
-        .write_frame(&Frame::Event(id, Event::Report(report)));
+fn write_report(writer: &Mutex<WireChannel>, fault: &AtomicBool, id: DispatchId, report: Report) {
+    let _ = engine_write(writer, fault, &Frame::Event(id, Event::Report(report)));
 }
 
 /// The engine's rendezvous, held for one run or one probe. Winning a claim is
@@ -197,7 +242,11 @@ impl Dispatch {
     fn claim(busy: &Arc<AtomicBool>, stamp: &Arc<AtomicU64>, id: DispatchId) -> Option<Self> {
         busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .ok()
-            .map(|_| Self { id, busy: busy.clone(), stamp: stamp.clone() })
+            .map(|_| Self {
+                id,
+                busy: busy.clone(),
+                stamp: stamp.clone(),
+            })
     }
 }
 
@@ -229,22 +278,33 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
         std::process::exit(1);
     }
     let reader_ch = WireChannel::from_stream(stream);
-    std::process::exit(engine_session(reader_ch, installers));
+    std::process::exit(engine_session(reader_ch, installers, Patience::default()));
 }
 
 /// The engine's whole protocol life over one already-open channel: `Attach`
 /// handshake, worker rendezvous, reader loop, teardown settle.
 ///
 /// Returns the process exit code — `0` for a clean detach or EOF, `1` for a
-/// protocol fault, a read error, or silence past the deadline. An unrecognised
-/// installer tag refuses as loudly as a version mismatch: an engine speaking the
-/// wrong builtins is exactly the incoherence this rail rules out.
+/// protocol fault, a read error, silence past the deadline, or a write that
+/// stalled past `patience.write_stall`: a front-end that stops reading is,
+/// within that bound, treated exactly as one that has gone silent. An
+/// unrecognised installer tag refuses as loudly as a version mismatch: an
+/// engine speaking the wrong builtins is exactly the incoherence this rail
+/// rules out.
 ///
 /// # Panics
 /// Panics if the wire channel cannot be cloned for the writer.
-pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) -> i32 {
+fn engine_session(
+    reader_ch: WireChannel,
+    installers: &[EngineInstaller],
+    patience: Patience,
+) -> i32 {
     let writer_ch = reader_ch.try_clone().expect("try_clone engine channel");
+    writer_ch
+        .set_write_deadline(patience.write_stall)
+        .expect("set write deadline on engine channel");
     let writer = Arc::new(Mutex::new(writer_ch));
+    let wire_fault = Arc::new(AtomicBool::new(false));
     let mut reader_ch = reader_ch;
 
     // Nothing but Attach is a legal first frame, so this is one read, not a
@@ -344,6 +404,7 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
     let current_dispatch = Arc::new(AtomicU64::new(0));
     let desk = Arc::new(WireDesk {
         writer: writer.clone(),
+        fault: wire_fault.clone(),
         current_dispatch: current_dispatch.clone(),
         next_eid: AtomicU64::new(1),
         slots: Mutex::new(HashMap::new()),
@@ -352,14 +413,16 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
     let surface = Arc::new(ChannelSurfaceSink {
         current_dispatch: current_dispatch.clone(),
         writer: writer.clone(),
+        fault: wire_fault.clone(),
     });
     let deferred = Arc::new(ChannelDeferredSink {
-        current_dispatch: current_dispatch.clone(),
         writer: writer.clone(),
+        fault: wire_fault.clone(),
     });
 
     // ── Worker thread: owns the Shell ──────────────────────────────
     let worker_writer = writer.clone();
+    let worker_fault = wire_fault.clone();
     let worker_desk = desk.clone();
     std::thread::spawn(move || {
         let mut shell = shell;
@@ -413,7 +476,7 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
 
             // `dispatch` drops after this, never before: the engine reads idle
             // only once the front-end has the report in hand.
-            write_report(&worker_writer, id, report);
+            write_report(&worker_writer, &worker_fault, id, report);
         }
     });
 
@@ -427,6 +490,7 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
         } else {
             write_report(
                 &writer,
+                &wire_fault,
                 id,
                 Report::Static {
                     diagnostics: crate::transport::Diagnostics::Host("engine busy".into()),
@@ -450,11 +514,11 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
                 Ok(true) => reader_ch.read_frame(),
                 Ok(false) => {
                     let silent = last_frame.elapsed();
-                    if silent >= HOST_SILENCE_DEADLINE {
+                    if silent >= patience.silence {
                         eprintln!(
                             "engine: front-end silent for {}s (deadline {}s) — failing the in-flight run and exiting",
                             silent.as_secs(),
-                            HOST_SILENCE_DEADLINE.as_secs()
+                            patience.silence.as_secs()
                         );
                         break 1;
                     }
@@ -488,9 +552,7 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
                     break 0; // worker died
                 }
             }
-            Frame::Answer(_, eid, answer) => {
-                // Correlated by `EnquiryId` alone: the dispatch id names the
-                // run for the front-end's benefit, but the slot is the enquiry's.
+            Frame::Answer(eid, answer) => {
                 desk.fill(eid, answer);
             }
             Frame::Control(Control::Cancel(did)) => {
@@ -506,7 +568,7 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
             Frame::Control(Control::Suspend | Control::Resume) => {}
             Frame::Ping(seq) => {
                 armed = true;
-                let _ = writer.lock().unwrap().write_frame(&Frame::Pong(seq));
+                let _ = engine_write(&writer, &wire_fault, &Frame::Pong(seq));
             }
             Frame::Pong(_) => {
                 eprintln!("engine: unexpected Pong — the engine never pings");
@@ -518,19 +580,29 @@ pub fn engine_session(reader_ch: WireChannel, installers: &[EngineInstaller]) ->
             Frame::Event(..) => {
                 eprintln!("engine: unexpected Event frame");
             }
+            Frame::Session(..) => {
+                eprintln!("engine: unexpected Session frame");
+            }
         }
     };
 
     // ── Teardown settle ────────────────────────────────────────────
     // The loop may have exited with a run in flight: cancel it and the durable
-    // root under it, then wait. The exit code the loop chose stands either way.
+    // root under it, then wait.
     crate::process::request_foreground_cancel(CancelCause::Explicit);
     root.cancel(CancelCause::Explicit);
     let settle_by = Instant::now() + SETTLE_TIMEOUT;
     while busy.load(Ordering::Acquire) && Instant::now() < settle_by {
         std::thread::sleep(SETTLE_POLL);
     }
-    exit_code
+    // A severed wire is never the clean detach the EOF arm's `0` reports: a
+    // front-end that stopped reading loses its in-flight run exactly as one
+    // that fell silent does, and the exit code must say so.
+    if exit_code == 0 && wire_fault.load(Ordering::SeqCst) {
+        1
+    } else {
+        exit_code
+    }
 }
 
 // ── Wire desk tests ───────────────────────────────────────────────────
@@ -552,6 +624,7 @@ mod wire_desk_tests {
         let (ours, mut peer) = WireChannel::pair().expect("socketpair");
         let desk = Arc::new(WireDesk {
             writer: Arc::new(Mutex::new(ours)),
+            fault: Arc::new(AtomicBool::new(false)),
             current_dispatch: Arc::new(AtomicU64::new(7)),
             next_eid: AtomicU64::new(1),
             slots: Mutex::new(HashMap::new()),
@@ -585,6 +658,7 @@ mod wire_desk_tests {
         let (ours, mut peer) = WireChannel::pair().expect("socketpair");
         let desk = Arc::new(WireDesk {
             writer: Arc::new(Mutex::new(ours)),
+            fault: Arc::new(AtomicBool::new(false)),
             current_dispatch: Arc::new(AtomicU64::new(1)),
             next_eid: AtomicU64::new(1),
             slots: Mutex::new(HashMap::new()),
@@ -621,6 +695,7 @@ mod wire_desk_tests {
         let (ours, _peer) = WireChannel::pair().expect("socketpair");
         let desk = WireDesk {
             writer: Arc::new(Mutex::new(ours)),
+            fault: Arc::new(AtomicBool::new(false)),
             current_dispatch: Arc::new(AtomicU64::new(1)),
             next_eid: AtomicU64::new(1),
             slots: Mutex::new(HashMap::new()),
@@ -647,6 +722,7 @@ mod wire_desk_tests {
         let (ours, _peer) = WireChannel::pair().expect("socketpair");
         let desk = WireDesk {
             writer: Arc::new(Mutex::new(ours)),
+            fault: Arc::new(AtomicBool::new(false)),
             current_dispatch: Arc::new(AtomicU64::new(1)),
             next_eid: AtomicU64::new(1),
             slots: Mutex::new(HashMap::new()),
@@ -757,8 +833,12 @@ mod engine_session_tests {
     }
 
     fn start() -> Host {
+        start_with(Patience::default())
+    }
+
+    fn start_with(patience: Patience) -> Host {
         let (host_ch, engine_ch) = WireChannel::pair().expect("socketpair");
-        let engine = std::thread::spawn(move || engine_session(engine_ch, INSTALLERS));
+        let engine = std::thread::spawn(move || engine_session(engine_ch, INSTALLERS, patience));
         let mut host = Host {
             ch: host_ch,
             seen: Vec::new(),
@@ -903,15 +983,55 @@ mod engine_session_tests {
     }
 
     #[test]
-    fn deferred_batch_is_stamped_dispatch_zero() {
+    fn deferred_batch_crosses_as_a_session_frame() {
         let _g = REQUEST_SERIAL.lock();
         let mut host = start();
         host.run(1, "let h = spawn { sleep 1 }");
-        let frame = host.await_frame(|f| matches!(f, Frame::Event(_, Event::DeferredSurface(_))));
-        let Frame::Event(did, _) = frame else {
-            unreachable!("await_frame matched a DeferredSurface");
+        let frame = host.await_frame(|f| matches!(f, Frame::Session(..)));
+        let Frame::Session(SessionEvent::DeferredSurface(batch)) = frame else {
+            unreachable!("await_frame matched a Session frame");
         };
-        assert_eq!(did, DispatchId(0), "a boundary batch is stamped id 0");
+        match batch.last() {
+            Some(FOValue::Variant { label, .. }) if label == "done" => {}
+            other => panic!("expected the batch to end in a `done` record, got {other:?}"),
+        }
         assert_eq!(host.detach_and_join(), 0);
+    }
+
+    /// A front-end that keeps pinging, dispatches a run whose surface value
+    /// overflows the socket buffer, and then simply stops reading must be
+    /// treated exactly like one gone silent: the engine's own write stalls
+    /// past `patience.write_stall`, and that — not a graceful EOF — is what
+    /// ends the session. `engine_session` must return on its own, and with
+    /// `1`, never wedged in its reader loop forever.
+    #[test]
+    fn a_front_end_that_stops_reading_is_treated_as_dead() {
+        let _g = REQUEST_SERIAL.lock();
+        let brisk = Patience {
+            silence: Duration::from_millis(500),
+            write_stall: Duration::from_millis(300),
+        };
+        let mut host = start_with(brisk);
+        host.send(&Frame::Ping(1));
+
+        let payload = "x".repeat(4 * 1024 * 1024);
+        host.dispatch(1, &format!("let big = \"{payload}\"\nsurface `data $big\n"));
+
+        // No further read: the host abandons the connection exactly like a
+        // dead peer would, and never drains the surface write the engine now
+        // owes it.
+        let deadline = Instant::now() + WAIT;
+        while !host.engine.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "engine_session must return once its surface write stalls past patience.write_stall"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let code = host.engine.join().expect("engine thread");
+        assert_eq!(
+            code, 1,
+            "a front-end that stopped reading must exit 1, not the clean-detach 0"
+        );
     }
 }

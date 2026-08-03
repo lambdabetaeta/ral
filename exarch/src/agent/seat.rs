@@ -134,7 +134,9 @@ impl Seat {
                     apply: install.apply,
                 }));
             }
-            Self::Wire { .. } => {}
+            Self::Wire { transport } => {
+                transport.set_deferred_sink(install.deferred);
+            }
         }
         RunGuard(self)
     }
@@ -384,7 +386,6 @@ mod tests {
             seat.transport(),
             source_run("surface `ping"),
             |v| surfaced.push(v),
-            |_| {},
             |_| unreachable!("this run raises no enquiry"),
         )
         .expect("the engine must answer the dispatch with a Report");
@@ -421,7 +422,6 @@ mod tests {
             seat.transport(),
             source_run("agents"),
             |_| {},
-            |_| {},
             |req| {
                 desk.handle(req).map_err(|e| EnquiryError {
                     status: e.exit_code(),
@@ -434,6 +434,78 @@ mod tests {
         match report {
             Report::Ran { result: Ok(_), .. } => {}
             other => panic!("`agents` must settle through the installed desk, got {other:?}"),
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// A detached `spawn` worker settles after its spawning dispatch has
+    /// already reported, so its batch has no dispatch to ride: it crosses on
+    /// `Frame::Session` and reaches the `InboxDeferred` this seat installs,
+    /// landing in `inbox` as a `Post::Surface`. Polled with no dispatch in
+    /// flight, the shape a real front-end sees between tool calls.
+    #[test]
+    fn wire_seat_install_run_installs_the_deferred_sink_for_a_settled_spawn_worker() {
+        let (seat, mut child) = wire_seat(Liveness::default());
+        let inbox = Inbox::new();
+        let (tx, _rx) = crate::bus::channel();
+        let root_id = crate::agent::fresh_id();
+        let emit = Emitter::with_mailbox(tx, root_id, inbox.mailbox());
+        let registry = AgentRegistry::new();
+
+        let install = RunInstall {
+            desk: Arc::new(ExarchDesk {
+                services: wire_host_services(&emit, &registry),
+            }),
+            apply: crate::fleet::desk::SurfaceApplier {
+                emit: emit.clone(),
+                pins: None,
+            },
+            deferred: crate::shell_eval::deferred_sink(&emit, root_id, &registry),
+            nursery: Nursery::default(),
+        };
+        let _guard = seat.install_run(install);
+
+        let report = ral_core::transport::dispatch_to_report(
+            seat.transport(),
+            source_run("let h = spawn { sleep 1 }"),
+            |_| {},
+            |_| unreachable!("this run raises no enquiry"),
+        )
+        .expect("the engine must answer the dispatch with a Report");
+        assert!(
+            matches!(report, Report::Ran { result: Ok(_), .. }),
+            "the spawning statement itself must settle to Report::Ran {{ Ok }}, got {report:?}"
+        );
+
+        // No dispatch is in flight from here on: the worker settles on its own
+        // and its batch must still reach `inbox` through the installed sink.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let item = loop {
+            if let Some(item) = inbox.next_item() {
+                break item;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the settled worker's batch never reached the inbox"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        match item {
+            crate::bus::Item::Surface { id, values, .. } => {
+                assert_eq!(id, root_id, "stamped with the root session id");
+                // Not a singleton: a `sleep 1` worker's batch also carries its
+                // own exec-summary record ahead of the completion marker, so
+                // this asserts on content rather than length.
+                assert!(
+                    values
+                        .iter()
+                        .any(|v| matches!(v, ral_core::Value::Variant { label, .. } if label == "done")),
+                    "the batch must carry the worker's completion marker, got {values:?}"
+                );
+            }
+            other => panic!("expected the settled batch to surface as Item::Surface, got {other:?}"),
         }
 
         let _ = child.kill();
@@ -453,7 +525,6 @@ mod tests {
                 ral_core::transport::dispatch_to_report(
                     seat.transport(),
                     source_run("sleep 30"),
-                    |_| {},
                     |_| {},
                     |_| unreachable!("this run raises no enquiry"),
                 )

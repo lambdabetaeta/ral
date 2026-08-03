@@ -135,12 +135,12 @@ pub(super) fn execute_input(
     };
 
     // Dispatch and drain to the terminal Report.  The REPL renders no live
-    // surface values or deferred batches, and answers no enquiries.
+    // surface values and answers no enquiries; it installs no deferred sink,
+    // so a session-lived batch is dropped.
     let report = transport::dispatch_to_report(
         transport,
         run,
         |_val| {},
-        |_batch| {},
         |_req| {
             Err(transport::EnquiryError {
                 message: "this host answers no enquiries".into(),

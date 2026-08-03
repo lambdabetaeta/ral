@@ -27,7 +27,7 @@ use crate::types::DeferredSink;
 use crate::types::SurfaceSink;
 use std::sync::OnceLock;
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 static CURRENT_CONTROL: OnceLock<ControlSender> = OnceLock::new();
 
@@ -76,14 +76,21 @@ pub enum Frame {
     /// answered on the `Event::Report` rail under the same `DispatchId`. The
     /// `FOValue` is a `Variant` naming the class [`answer_probe`] decodes.
     Probe(DispatchId, FOValue),
-    /// Engine → front-end. May arrive while a Dispatch is outstanding.
+    /// Engine → front-end, inside a dispatch's claim-to-Report window. May
+    /// arrive while that Dispatch is outstanding.
     Event(DispatchId, Event),
+    /// Engine → front-end, outside any dispatch's window: emitted by a
+    /// detached worker that settles between runs, so it has no dispatch to
+    /// ride and reaches the front-end through the transport's session sink
+    /// instead of the per-run event stream.
+    Session(SessionEvent),
     /// Front-end → engine. Out-of-band: deliverable while a Dispatch is
     /// outstanding.
     Control(Control),
-    /// Front-end → engine: the dual of `Event::Enquiry`, correlated by both
-    /// the dispatch and the enquiry.
-    Answer(DispatchId, EnquiryId, Result<FOValue, EnquiryError>),
+    /// Front-end → engine: the dual of `Event::Enquiry`, correlated by the
+    /// enquiry alone — `WireDesk::fill` keys its slots by `EnquiryId`, and the
+    /// dispatch it belongs to is implicit in which enquiry is outstanding.
+    Answer(EnquiryId, Result<FOValue, EnquiryError>),
     /// Front-end → engine heartbeat, never sent before `Attach`. Where the
     /// failure mode is silence — a virtual socket into a guest, whose dead host
     /// produces no EOF — liveness must be manufactured: *any* received frame is
@@ -134,21 +141,34 @@ pub enum Program {
     },
 }
 
-/// Engine → front-end event frame.
+/// Engine → front-end event frame, emitted between a dispatch's claim and
+/// that dispatch's Report. Anything produced outside that window is a
+/// [`SessionEvent`], carried by `Frame::Session` instead.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Event {
     /// A live surface value from the foreground run, ordered before this
     /// dispatch's Report.
     Surface(FOValue),
-    /// A deferred worker's surface batch, delivered when it settles and
-    /// rendered by the host at the next run boundary.
-    DeferredSurface(Vec<FOValue>),
     /// One enquiry the running dispatch raised on its host desk, ordered
     /// before this dispatch's Report and answered by a `Frame::Answer`
     /// carrying the same `EnquiryId`.
     Enquiry(EnquiryId, FOValue),
     /// The dispatch's sole terminal frame.
     Report(Report),
+}
+
+/// Engine → front-end event with no dispatch to ride.
+///
+/// Produced by something that outlives the run which started it. One variant
+/// today — a detached worker's surface batch, settling after its spawning
+/// run's Report — but the enum, not `Frame`, is where the next session-lived
+/// event class joins it: this names the lifetime class once, so a new member
+/// costs one variant here rather than a new frame kind.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SessionEvent {
+    /// A deferred worker's surface batch, delivered when it settles and
+    /// rendered by the host at the next run boundary.
+    DeferredSurface(Vec<FOValue>),
 }
 
 /// What crosses when an enquiry is refused or its handler fails: message *and*
@@ -388,7 +408,12 @@ pub trait Transport: Send + Sync {
     /// Answer one enquiry the engine raised on `Event::Enquiry`. A no-op under
     /// the identity transport, whose enquiry is a direct call through the
     /// installed `Desk` and never a frame.
-    fn answer(&self, _id: DispatchId, _eid: EnquiryId, _answer: Result<FOValue, EnquiryError>) {}
+    fn answer(&self, _eid: EnquiryId, _answer: Result<FOValue, EnquiryError>) {}
+
+    /// Install the session sink a `Frame::Session` batch is delivered to.
+    /// With no sink installed, a batch is dropped — a front-end explicitly
+    /// declining session events, not a loss the transport owes anyone.
+    fn set_deferred_sink(&self, sink: Arc<dyn DeferredSink>);
 
     /// Returns `self` as an `&dyn Any` for downcast support.
     fn as_any(&self) -> &dyn std::any::Any;
@@ -399,13 +424,15 @@ pub trait Transport: Send + Sync {
 /// Mint a dispatch id, send `run` down `transport`, and drain events to the
 /// run's terminal [`Report`](Event::Report).
 ///
-/// The two surface regimes stay distinct on purpose: a host tracking live pins
-/// (exarch) updates its mirror only from `on_surface`, since a deferred
-/// worker's batch never touches the pin map. Flattening them would be a
-/// behaviour change, not a fold. `on_enquiry` is dead under the identity
-/// transport, whose `Desk` the run calls directly mid-evaluation; under the
-/// wire it is the front-end's side of that rendezvous, answered through
-/// [`Transport::answer`].
+/// `on_enquiry` is dead under the identity transport, whose `Desk` the run
+/// calls directly mid-evaluation; under the wire it is the front-end's side of
+/// that rendezvous, answered through [`Transport::answer`].
+///
+/// The `did != id` filter rejects a cancelled predecessor's late run frames,
+/// and nothing else: every `Event` belongs to some dispatch, and this is the
+/// one whose Report is awaited. A session-lived batch never reaches here at
+/// all — it rides `Frame::Session`, delivered to whatever sink
+/// `Transport::set_deferred_sink` installed.
 ///
 /// `None` means the stream closed without a Report — impossible under the
 /// identity transport, which sends it before `dispatch` returns.
@@ -413,7 +440,6 @@ pub fn dispatch_to_report(
     transport: &dyn Transport,
     run: Run,
     mut on_surface: impl FnMut(FOValue),
-    mut on_deferred: impl FnMut(Vec<FOValue>),
     mut on_enquiry: impl FnMut(FOValue) -> Result<FOValue, EnquiryError>,
 ) -> Option<Report> {
     let id = mint_dispatch_id();
@@ -426,10 +452,9 @@ pub fn dispatch_to_report(
         }
         match event {
             Event::Surface(val) => on_surface(val),
-            Event::DeferredSurface(batch) => on_deferred(batch),
             Event::Enquiry(eid, req) => {
                 let answer = on_enquiry(req);
-                transport.answer(id, eid, answer);
+                transport.answer(eid, answer);
             }
             Event::Report(report) => return Some(report),
         }
@@ -671,11 +696,7 @@ impl ControlSender {
             // A control frame that cannot be written is as fatal as a dispatch
             // that cannot: the peer is gone, and waiting on the reader's
             // eventual EOF to say so leaves a cancel silently lost meanwhile.
-            let outcome = ch.lock().unwrap().write_frame(&Frame::Control(ctrl));
-            if let Err(e) = outcome {
-                death.store(true, Ordering::SeqCst);
-                eprintln!("wire: engine process died ({e})");
-            }
+            let _ = write_through(ch, death, &Frame::Control(ctrl));
             return;
         }
         match ctrl {
@@ -748,7 +769,7 @@ mod event_receiver_tests {
     fn try_recv_drains_the_stash_before_the_channel() {
         let (receiver, tx) = receiver();
         let channelled = (DispatchId(2), Event::Surface(FOValue::Unit));
-        let stashed = (DispatchId(1), Event::DeferredSurface(vec![]));
+        let stashed = (DispatchId(1), Event::Surface(FOValue::Unit));
         tx.send(channelled.clone()).unwrap();
         receiver.stash.lock().unwrap().push_back(stashed.clone());
 
@@ -766,14 +787,13 @@ mod event_receiver_tests {
 
 // ── Transport sink ────────────────────────────────────────────────────
 
-/// The identity transport's sink for both surface regimes — a live value
-/// ([`EventSink`](crate::types::EventSink)) and a deferred worker's settled
-/// batch ([`DeferredSink`]) — forwarded onto the event channel.
+/// The identity transport's sink for a live surface value
+/// ([`EventSink`](crate::types::EventSink)), forwarded onto the event
+/// channel.
 struct TransportSink {
     event_tx: mpsc::Sender<(DispatchId, Event)>,
-    /// `0` = no dispatch in flight. A live value emitted then has nothing to
-    /// correlate to and is dropped; a deferred batch settling between runs is
-    /// stamped `0` and delivered anyway.
+    /// `0` = no dispatch in flight, so a value emitted then has nothing to
+    /// correlate to and is dropped.
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -787,18 +807,6 @@ impl crate::types::EventSink for TransportSink {
                 .event_tx
                 .send((DispatchId(id), Event::Surface(ev.clone())));
         }
-    }
-}
-
-impl crate::types::DeferredSink for TransportSink {
-    fn deliver(&self, batch: Vec<FOValue>) {
-        let _ = self.event_tx.send((
-            DispatchId(
-                self.current_dispatch
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            Event::DeferredSurface(batch),
-        ));
     }
 }
 
@@ -855,8 +863,9 @@ pub struct EngineInner {
     pub shell: crate::types::Shell,
     pub(crate) event_tx: mpsc::Sender<(DispatchId, Event)>,
     surface_sink: Arc<TransportSink>,
-    /// Session-lived, seeded with the transport sink; a host may install its
-    /// own through `set_deferred_sink`.
+    /// Session-lived: `None` until a host installs one through
+    /// `set_deferred_sink`, and while it is `None` a settling worker's batch is
+    /// dropped.
     deferred_sink: Option<Arc<dyn DeferredSink>>,
     /// `None` until a host calls `set_desk`, in which case `enquire` answers
     /// its honest absence error.
@@ -899,8 +908,8 @@ impl IdentityTransport {
         let engine = EngineInner {
             shell,
             event_tx,
-            surface_sink: sink.clone(),
-            deferred_sink: Some(sink),
+            surface_sink: sink,
+            deferred_sink: None,
             desk: None,
             nursery: None,
             terminal_lease: None,
@@ -920,11 +929,6 @@ impl IdentityTransport {
     /// alongside the transport rather than through a borrow of `&self`.
     pub fn events_shared(&self) -> Arc<EventReceiver> {
         self.events_recv.clone()
-    }
-
-    /// Set the session deferred sink for deferred worker batches.
-    pub fn set_deferred_sink(&self, deferred: Arc<dyn DeferredSink>) {
-        self.engine.lock().deferred_sink = Some(deferred);
     }
 
     /// Arm this transport to publish each run's foreground scope into `cell`
@@ -1094,6 +1098,11 @@ impl Transport for IdentityTransport {
         crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
         self.engine.lock().terminal_lease = None;
     }
+
+    fn set_deferred_sink(&self, sink: Arc<dyn DeferredSink>) {
+        self.engine.lock().deferred_sink = Some(sink);
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -1101,8 +1110,43 @@ impl Transport for IdentityTransport {
 
 // ── Wire transport ────────────────────────────────────────────────────
 
-/// How briskly a front-end manufactures traffic to keep an idle engine visibly
-/// alive, and how much silence it tolerates before declaring the peer dead.
+/// The one front-end write door: locks `ch`, writes `frame`, and on error
+/// severs the connection before the lock is released — stores `death`, shuts
+/// the channel down while the guard is still held, and reports the failure.
+/// Shared by [`WireTransport::write`] and the wire arm of [`ControlSender::send`].
+///
+/// Invariant: a stream that suffered a failed write is severed before the
+/// lock is released, so nothing can append a fresh frame after a truncated
+/// one. `Err` is handed back so a caller that must react further — the
+/// heartbeat's `Ping` arm breaking its loop — can, without repeating the
+/// severing itself.
+fn write_through(
+    ch: &Mutex<crate::wire::WireChannel>,
+    death: &AtomicBool,
+    frame: &Frame,
+) -> io::Result<()> {
+    let outcome = {
+        let mut guard = ch.lock().unwrap();
+        let outcome = guard.write_frame(frame);
+        if outcome.is_err() {
+            guard.shutdown();
+        }
+        outcome
+    };
+    if let Err(e) = &outcome {
+        death.store(true, Ordering::SeqCst);
+        eprintln!("wire: engine process died ({e})");
+    }
+    outcome
+}
+
+/// How briskly a front-end manufactures traffic to keep an idle engine
+/// visibly alive, and how much silence it tolerates before declaring the
+/// peer dead.
+///
+/// The same `deadline` also arms [`crate::wire::WireChannel::set_write_deadline`],
+/// so it doubles as the bound on how long a single stalled write may block
+/// before that, too, is read as the peer's death.
 ///
 /// Since liveness is *any* received frame (the law on [`Frame::Ping`]), the
 /// interval must be comfortably shorter than the deadline: several exchanges
@@ -1113,11 +1157,17 @@ pub struct Liveness {
     pub deadline: Duration,
 }
 
+/// The peer-patience deadline used wherever one socket needs a single
+/// deadline but no full [`Liveness`]: [`WireTransport::new`]'s same-host child
+/// (no ticker, so only a write deadline applies) and `Liveness::default`'s own
+/// deadline, so the two never drift apart into two literals.
+const DEFAULT_PEER_PATIENCE: Duration = Duration::from_secs(25);
+
 impl Default for Liveness {
     fn default() -> Self {
         Self {
             interval: Duration::from_secs(5),
-            deadline: Duration::from_secs(25),
+            deadline: DEFAULT_PEER_PATIENCE,
         }
     }
 }
@@ -1161,6 +1211,16 @@ pub struct WireTransport {
     /// [`WireTransport::adopt`] and taken by the first [`Transport::attach`].
     /// `None` under [`WireTransport::new`], which never pings at all.
     pending_heartbeat: Mutex<Option<Liveness>>,
+    /// Where the reader thread hands a `Frame::Session` batch. Shared with the
+    /// reader so `set_deferred_sink` takes effect on the next batch without
+    /// restarting anything; `None` drops a batch that arrives before a host
+    /// installs one.
+    deferred_sink: Arc<Mutex<Option<Arc<dyn DeferredSink>>>>,
+    /// A shutdown-only duplicate of the socket, minted alongside `write_tx` by
+    /// both constructors. `Drop` shuts this down directly rather than taking
+    /// `write_tx`'s lock, so tearing the transport down never parks behind a
+    /// write some other thread holds the lock over.
+    shutdown: crate::wire::WireChannel,
 }
 
 /// The reader loop shared by both constructors. `last_seen` records *every*
@@ -1168,9 +1228,14 @@ pub struct WireTransport {
 /// error, or an already-set flag it sets `death` before exiting, so `dead()` is
 /// honest under every teardown path and the dropped `event_tx` closes the
 /// channel whose `recv` is what fails the in-flight dispatch.
+///
+/// `Frame::Event` goes onto the per-run channel; `Frame::Session` goes to
+/// whichever sink `deferred_sink` holds at the moment it arrives, or is
+/// dropped if none is installed.
 fn spawn_wire_reader(
     mut reader_ch: crate::wire::WireChannel,
     event_tx: mpsc::Sender<(DispatchId, Event)>,
+    deferred_sink: Arc<Mutex<Option<Arc<dyn DeferredSink>>>>,
     death: Arc<AtomicBool>,
     last_seen: Arc<Mutex<Instant>>,
 ) -> std::thread::JoinHandle<()> {
@@ -1183,10 +1248,18 @@ fn spawn_wire_reader(
                 Ok(Some(frame)) => {
                     *last_seen.lock().unwrap() = Instant::now();
                     // A `Pong`'s whole job is the refresh above.
-                    if let Frame::Event(id, ev) = frame
-                        && event_tx.send((id, ev)).is_err()
-                    {
-                        break;
+                    match frame {
+                        Frame::Event(id, ev) => {
+                            if event_tx.send((id, ev)).is_err() {
+                                break;
+                            }
+                        }
+                        Frame::Session(SessionEvent::DeferredSurface(batch)) => {
+                            if let Some(sink) = deferred_sink.lock().unwrap().as_ref() {
+                                sink.deliver(batch);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Ok(None) | Err(_) => break,
@@ -1202,11 +1275,18 @@ fn spawn_wire_reader(
 /// construction. On declaring death, from silence or a failed write, it shuts
 /// the wire down too, waking the parked reader so the event channel closes.
 /// Never joined.
+///
+/// The deadline arm never takes `write_tx`'s lock: declaring death from
+/// silence must not itself be capable of parking behind a write some other
+/// thread is stalled on, so `dead()==true` always implies `shutdown` runs in
+/// bounded time. The `Ping` arm goes through [`write_through`], which severs
+/// on failure the same way any other front-end write does.
 fn spawn_heartbeat(
     write_tx: Arc<Mutex<crate::wire::WireChannel>>,
     death: Arc<AtomicBool>,
     last_seen: Arc<Mutex<Instant>>,
     liveness: Liveness,
+    shutdown: crate::wire::WireChannel,
 ) {
     std::thread::spawn(move || {
         let mut seq: u64 = 0;
@@ -1217,18 +1297,11 @@ fn spawn_heartbeat(
             }
             if last_seen.lock().unwrap().elapsed() >= liveness.deadline {
                 death.store(true, Ordering::SeqCst);
-                write_tx.lock().unwrap().shutdown();
+                shutdown.shutdown();
                 break;
             }
             seq += 1;
-            if write_tx
-                .lock()
-                .unwrap()
-                .write_frame(&Frame::Ping(seq))
-                .is_err()
-            {
-                death.store(true, Ordering::SeqCst);
-                write_tx.lock().unwrap().shutdown();
+            if write_through(&write_tx, &death, &Frame::Ping(seq)).is_err() {
                 break;
             }
         }
@@ -1257,6 +1330,11 @@ impl WireTransport {
         // A duplicate fd, so the reader can park in `read_frame` while the
         // front-end writes on the same socket.
         let writer = frontend.try_clone()?;
+        writer.set_write_deadline(DEFAULT_PEER_PATIENCE)?;
+        // A second duplicate, held back from ever taking the write lock, so
+        // `Drop` can sever the connection without parking behind a write in
+        // progress.
+        let shutdown = writer.try_clone()?;
 
         let engine_fd = engine.as_raw_fd();
         let mut cmd =
@@ -1285,7 +1363,14 @@ impl WireTransport {
         let (event_tx, event_rx) = mpsc::channel();
         // No ticker here, but the shared reader keeps `last_seen` anyway.
         let last_seen = Arc::new(Mutex::new(Instant::now()));
-        let reader = spawn_wire_reader(frontend, event_tx, death.clone(), last_seen.clone());
+        let deferred_sink = Arc::new(Mutex::new(None));
+        let reader = spawn_wire_reader(
+            frontend,
+            event_tx,
+            deferred_sink.clone(),
+            death.clone(),
+            last_seen.clone(),
+        );
 
         let write_tx = Arc::new(Mutex::new(writer));
         let current_dispatch = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1302,6 +1387,8 @@ impl WireTransport {
             current_dispatch,
             last_seen,
             pending_heartbeat: Mutex::new(None),
+            deferred_sink,
+            shutdown,
         })
     }
 
@@ -1326,11 +1413,23 @@ impl WireTransport {
         // A duplicate fd, so the reader can park in `read_frame` while the
         // ticker and the front-end write on the same socket.
         let writer = reader_ch.try_clone()?;
+        writer.set_write_deadline(liveness.deadline)?;
+        // A second duplicate, held back from ever taking the write lock, so
+        // `Drop` can sever the connection without parking behind a write in
+        // progress.
+        let shutdown = writer.try_clone()?;
 
         let death = Arc::new(AtomicBool::new(false));
         let last_seen = Arc::new(Mutex::new(Instant::now()));
         let (event_tx, event_rx) = mpsc::channel();
-        let reader = spawn_wire_reader(reader_ch, event_tx, death.clone(), last_seen.clone());
+        let deferred_sink = Arc::new(Mutex::new(None));
+        let reader = spawn_wire_reader(
+            reader_ch,
+            event_tx,
+            deferred_sink.clone(),
+            death.clone(),
+            last_seen.clone(),
+        );
 
         let write_tx = Arc::new(Mutex::new(writer));
         let current_dispatch = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1348,6 +1447,8 @@ impl WireTransport {
             current_dispatch,
             last_seen,
             pending_heartbeat: Mutex::new(Some(liveness)),
+            deferred_sink,
+            shutdown,
         })
     }
 
@@ -1362,20 +1463,17 @@ impl WireTransport {
     /// dropped frame means no `Report` will ever arrive, so the host's `recv`
     /// must learn of the death rather than block forever.
     fn write(&self, frame: &Frame) {
-        let outcome = self.write_tx.lock().unwrap().write_frame(frame);
-        if let Err(e) = outcome {
-            self.death.store(true, Ordering::SeqCst);
-            eprintln!("wire: engine process died ({e})");
-        }
+        let _ = write_through(&self.write_tx, &self.death, frame);
     }
 }
 
 impl Drop for WireTransport {
     fn drop(&mut self) {
-        // The shutdown wakes the reader and (under `adopt`) the ticker, which
-        // share the one socket: neither may outlive the transport parked.
+        // `self.shutdown` never takes `write_tx`'s lock, so this wakes the
+        // reader and (under `adopt`) the ticker — which share the one socket —
+        // without ever parking behind a write in progress.
         self.death.store(true, Ordering::SeqCst);
-        self.write_tx.lock().unwrap().shutdown();
+        self.shutdown.shutdown();
         // An adopted stream owns no child — its far end is a guest VM the
         // session manager reaps — so only `new`'s child is reaped here.
         #[cfg(unix)]
@@ -1459,6 +1557,9 @@ impl Transport for WireTransport {
                 self.death.clone(),
                 self.last_seen.clone(),
                 liveness,
+                self.shutdown
+                    .try_clone()
+                    .expect("dup an already-open socket"),
             );
         }
     }
@@ -1467,8 +1568,12 @@ impl Transport for WireTransport {
         self.write(&Frame::Detach);
     }
 
-    fn answer(&self, id: DispatchId, eid: EnquiryId, answer: Result<FOValue, EnquiryError>) {
-        self.write(&Frame::Answer(id, eid, answer));
+    fn answer(&self, eid: EnquiryId, answer: Result<FOValue, EnquiryError>) {
+        self.write(&Frame::Answer(eid, answer));
+    }
+
+    fn set_deferred_sink(&self, sink: Arc<dyn DeferredSink>) {
+        *self.deferred_sink.lock().unwrap() = Some(sink);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1743,7 +1848,6 @@ mod durability_tests {
             &transport,
             run("seam-panic-now"),
             |_| {},
-            |_| {},
             |_| {
                 Err(EnquiryError {
                     message: "no desk".into(),
@@ -1762,7 +1866,6 @@ mod durability_tests {
         let report = dispatch_to_report(
             &transport,
             run("$[1 + 1]"),
-            |_| {},
             |_| {},
             |_| {
                 Err(EnquiryError {
@@ -2160,5 +2263,107 @@ mod wire_liveness_tests {
             "a cancel that cannot be written is death, not silence"
         );
         drop(back);
+    }
+
+    /// A batch settling with no dispatch in flight — the shape a detached
+    /// worker's completion takes between runs — reaches a sink installed
+    /// through `set_deferred_sink`, and a dispatch that follows still
+    /// round-trips to its own Report: `Frame::Session` routing on the reader
+    /// does not disturb `Frame::Event`.
+    #[test]
+    fn session_frame_with_no_dispatch_reaches_the_installed_sink() {
+        use crate::types::DeferredSink;
+
+        struct RecordingSink {
+            batches: Mutex<Vec<Vec<FOValue>>>,
+        }
+        impl DeferredSink for RecordingSink {
+            fn deliver(&self, batch: Vec<FOValue>) {
+                self.batches.lock().unwrap().push(batch);
+            }
+        }
+
+        let (front, back) = UnixStream::pair().unwrap();
+        let mut peer = crate::wire::WireChannel::from_stream(back);
+
+        let transport = WireTransport::adopt(front, Liveness::default()).unwrap();
+        attach(&transport);
+        match peer
+            .read_frame()
+            .unwrap()
+            .expect("the Attach handshake must cross first")
+        {
+            Frame::Attach { .. } => {}
+            other => panic!("expected the Attach frame, got {other:?}"),
+        }
+
+        let sink = Arc::new(RecordingSink {
+            batches: Mutex::new(Vec::new()),
+        });
+        transport.set_deferred_sink(sink.clone() as Arc<dyn DeferredSink>);
+
+        peer.write_frame(&Frame::Session(SessionEvent::DeferredSurface(vec![
+            FOValue::Int { value: 7 },
+        ])))
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if !sink.batches.lock().unwrap().is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the session batch never reached the installed sink"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            sink.batches.lock().unwrap()[0],
+            vec![FOValue::Int { value: 7 }]
+        );
+
+        let id = DispatchId(1);
+        transport.dispatch(
+            id,
+            Run {
+                program: Program::Source("$[1 + 1]".into()),
+                script_name: "<test>".into(),
+                caps: crate::types::Capabilities::root(),
+                wall: None,
+                deferred_lease: None,
+                worker_cap: None,
+                io: crate::run::RunIo::Capture,
+                terminal: crate::run::RequestedTerminalAccess::Denied,
+                stdin: crate::run::RunStdin::Empty,
+            },
+        );
+
+        match peer
+            .read_frame()
+            .unwrap()
+            .expect("the dispatch must cross the wire")
+        {
+            Frame::Dispatch(did, _) => assert_eq!(did, id),
+            other => panic!("expected a Dispatch frame, got {other:?}"),
+        }
+        peer.write_frame(&Frame::Event(
+            id,
+            Event::Report(Report::Ran {
+                result: Ok(FOValue::Int { value: 2 }),
+                status: 0,
+                single_command: false,
+                captured: None,
+                timed_out: false,
+            }),
+        ))
+        .unwrap();
+
+        match transport.events().recv() {
+            Some((rid, Event::Report(_))) => {
+                assert_eq!(rid, id, "the dispatch still round-trips to its own Report");
+            }
+            other => panic!("expected the dispatch's Report, got {other:?}"),
+        }
     }
 }

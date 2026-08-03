@@ -185,6 +185,23 @@ impl WireChannel {
     pub fn shutdown(&self) {
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
     }
+
+    /// Bound how long a single `write_frame` may block on this socket.
+    ///
+    /// `SO_SNDTIMEO` lives on the shared file description, not the file
+    /// descriptor, so every clone of this channel inherits the same deadline —
+    /// one call at construction reaches every writer — and it governs writes
+    /// alone: `read_frame` and [`Self::poll_readable`] are untouched. A write
+    /// that stalls past `d` becomes an `io::Error`, which the framing law at
+    /// the call sites above converts into connection death, the same as a
+    /// severed pipe. The invariant this buys: no `write_frame` blocks past the
+    /// peer's patience deadline.
+    ///
+    /// # Errors
+    /// Returns the socket error if the timeout cannot be set.
+    pub fn set_write_deadline(&self, d: std::time::Duration) -> io::Result<()> {
+        self.stream.set_write_timeout(Some(d))
+    }
 }
 
 #[cfg(test)]

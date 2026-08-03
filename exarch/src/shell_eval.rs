@@ -272,7 +272,6 @@ pub(crate) fn run_shell(
         transport,
         run,
         |val| applier.live(val),
-        |batch| applier.deferred(batch),
         // Dead under the identity transport, where the desk installed by
         // `set_desk` answers a mid-dispatch `Shell::enquire` directly; live
         // only for a wire engine's `Event::Enquiry`.  Either way it is the
