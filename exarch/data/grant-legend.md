@@ -1,4 +1,4 @@
-A denied call raises `… denied by active grant` at runtime. Abandon the approach; do not work around it. Do not retry under a different name (e.g. `unlink` for `rm`), do not chain alternatives that achieve the same effect (e.g. `find -delete`, `tee` to a write-denied path), do not seek the capability through a side channel.
+A denied call raises `… denied by active grant` for a command, `… denied by grant` for a path, at runtime. Abandon the approach; do not work around it. Do not retry under a different name (e.g. `unlink` for `rm`), do not chain alternatives that achieve the same effect (e.g. `find -delete`, `tee` to a write-denied path), do not seek the capability through a side channel.
 
 Notation:
 

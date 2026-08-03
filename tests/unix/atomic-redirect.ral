@@ -1,0 +1,19 @@
+# Test: `>` is atomic — a failing body leaves the target untouched — while
+# `>~` streams and clobbers.  This is the whole reason the two operators exist.
+
+let d = temp-dir
+
+# Atomic: the target already holds bytes; the body writes and then fails.
+to-string 'original' > "$d/f.txt"
+try {
+    /bin/sh -c 'printf clobbered; exit 1' > "$d/f.txt"
+} { |_err|
+    echo aborted
+}
+echo !{from-string < "$d/f.txt"}
+
+# Streaming: the same failing body writes through regardless.
+/bin/sh -c 'printf clobbered2; exit 1' >~ "$d/g.txt" ? echo 'stream arm failed'
+echo !{from-string < "$d/g.txt"}
+
+rm -rf $d
