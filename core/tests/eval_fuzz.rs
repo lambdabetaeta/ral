@@ -1211,6 +1211,18 @@ fn value_output_alias_installs() {
     assert_eq!(must_succeed("alias foo { |args| return 3 }"), Value::Unit);
 }
 
+/// The arm `install_alias` vets is a live value, so its body is annotated IR —
+/// `Capture` nodes included — and the guard's `alias_arm_scheme` re-infers it.
+/// A byte-payload `let` inside the arm therefore installs only if inference is
+/// defined on `Capture`, and agrees with the first pass that it is a `String`.
+#[test]
+fn alias_arm_with_a_captured_byte_payload_installs() {
+    assert_eq!(
+        must_succeed("alias foo { |args| let u = echo hi; return $u }; foo"),
+        Value::String("hi".into())
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn grant_exec_attenuation_subcommand_intersection_permits_common() {

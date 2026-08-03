@@ -1700,9 +1700,24 @@ impl Inferencer<'_> {
                 // directly.
                 ScopeOp::Redirect { body, .. } => self.infer_comp(body),
             },
-            // Checker-inserted only, by `annotate`'s later write-back pass —
-            // never present in a tree `infer_comp` walks.
-            CompKind::Capture(_) => unreachable!("Capture is annotate-only IR"),
+            // Inserted by `annotate`'s write-back pass, so it is absent from a
+            // freshly elaborated tree but present in every tree re-inferred
+            // from a live value — a handler arm vetted at install, a bound
+            // lambda's body.  The bytes the body would have emitted become
+            // this node's `String` result: the byte channel ends here, while
+            // the body's stdin demand still rides through.
+            CompKind::Capture(body) => {
+                let body_ty = self.infer_comp(body);
+                let (_, input, _, _) = self.extract_return(&body_ty);
+                CompTy::Return(
+                    PipeSpec {
+                        input,
+                        output: PipeMode::None,
+                        result: PipeMode::None,
+                    },
+                    Box::new(Ty::String),
+                )
+            }
         };
         if let CompTy::Return(spec, _) = self.ctx.unifier.resolve_comp_ty(&cty) {
             self.ctx
