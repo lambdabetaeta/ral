@@ -799,28 +799,6 @@ mod tests {
         assert_eq!(order.first(), Some(&"grep"), "got {order:?}");
     }
 
-    // ── Quoting integration with the core helper ────────────────────────
-    //
-    // The helper itself is unit-tested in `ral_core::syntax::quote`; here we
-    // only pin the completion-side contract that path candidates quote exactly
-    // when the candidate is not a bare ral word.
-
-    #[test]
-    fn replacement_quotes_when_name_has_metachar() {
-        assert_eq!(
-            ral_core::syntax::quote_word_if_needed("a b.txt").as_ref(),
-            "'a b.txt'",
-        );
-    }
-
-    #[test]
-    fn replacement_borrows_when_bare() {
-        assert_eq!(
-            ral_core::syntax::quote_word_if_needed("normal.txt").as_ref(),
-            "normal.txt",
-        );
-    }
-
     // ── complete_path / dotfile_visible ─────────────────────────────────
 
     #[test]
@@ -872,6 +850,30 @@ mod tests {
         let (_, cands) = complete_path("sub/", 0, tmp.path());
         let names: Vec<&str> = cands.iter().map(|c| c.display.as_str()).collect();
         assert_eq!(names, vec!["gamma"]);
+    }
+
+    /// A path candidate's `replacement` is source-quoted exactly when the name
+    /// is not a bare ral word; its `display` never is, and a directory keeps
+    /// its trailing slash on both.
+    #[test]
+    fn complete_path_quotes_replacement_but_not_display() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a b.txt"), "").unwrap();
+        std::fs::write(tmp.path().join("plain.txt"), "").unwrap();
+        std::fs::create_dir(tmp.path().join("sub")).unwrap();
+
+        let (_, cands) = complete_path("", 0, tmp.path());
+        let replacement = |display: &str| {
+            cands
+                .iter()
+                .find(|c| c.display == display)
+                .unwrap_or_else(|| panic!("no candidate for {display}"))
+                .replacement
+                .as_str()
+        };
+        assert_eq!(replacement("a b.txt"), "'a b.txt'");
+        assert_eq!(replacement("plain.txt"), "plain.txt");
+        assert_eq!(replacement("sub/"), "sub/");
     }
 
     #[test]

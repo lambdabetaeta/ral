@@ -567,6 +567,77 @@ mod tests {
         }
     }
 
+    /// A denied subtree drops out of both tree walks: `grep-files` and
+    /// `explore-dir` filter each entry through the live grant, so a narrowed
+    /// agent neither reads a denied file's lines nor learns its name — and the
+    /// skip is a `continue`, so one off-limits path cannot blank the listing
+    /// around it.
+    #[cfg(unix)]
+    #[test]
+    fn a_denied_subtree_is_skipped_by_grep_and_explore() {
+        let tmp = scratch_dir("denied-walk")
+            .canonicalize()
+            .expect("canonical scratch dir");
+        for sub in ["public", "secret"] {
+            std::fs::create_dir_all(tmp.join(sub)).expect("create subtree");
+            std::fs::write(tmp.join(sub).join("hit.txt"), format!("NEEDLE {sub}\n"))
+                .expect("write fixture");
+        }
+        let root = display_no_trailing_sep(&tmp);
+
+        let walk = |denied: &str| -> String {
+            let caps = Capabilities {
+                fs: Some(ral_core::types::FsPolicy {
+                    read_prefixes: vec![ral_core::path::NormalizedPrefix::from_surface("/")],
+                    write_prefixes: vec![ral_core::path::NormalizedPrefix::from_surface("/")],
+                    deny_paths: vec![ral_core::path::NormalizedPrefix::from_surface(
+                        tmp.join(denied),
+                    )],
+                }),
+                ..Capabilities::root()
+            };
+            let mut shell = fresh_shell();
+            let (emit, _rx) = crate::bus::dummy_emitter();
+            let cmd = format!(
+                "cd '{root}'\n\
+                 let hits = grep-files 'NEEDLE'\n\
+                 let listing = explore-dir 3\n\
+                 return [hits: $hits, listing: $listing]"
+            );
+            match run_shell_direct(&mut shell, &caps, &cmd, 30, &emit) {
+                Outcome::Ran(r) => {
+                    assert_eq!(
+                        r.exit,
+                        0,
+                        "a denied entry is skipped, never raised; stderr was: {}",
+                        String::from_utf8_lossy(&r.stderr)
+                    );
+                    r.value.expect("both walks return a value")
+                }
+                Outcome::Static(s) => panic!("static failure: {s}"),
+            }
+        };
+
+        // Both directions, so a walk that answers with nothing at all fails one.
+        for (denied, granted) in [("secret", "public"), ("public", "secret")] {
+            let val = walk(denied);
+            assert!(
+                val.contains(&format!("{granted}/hit.txt")),
+                "the granted subtree still lists with {denied} denied: {val}"
+            );
+            assert!(
+                !val.contains(&format!("{denied}/hit.txt")),
+                "a denied path must not be named: {val}"
+            );
+            assert!(
+                !val.contains(&format!("NEEDLE {denied}")),
+                "a denied file's contents must not leak through grep: {val}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// `view-text` returns one record per line: its number, its witness hash,
     /// and its text.
     #[cfg(unix)]
@@ -821,6 +892,54 @@ Y
 keep-bottom
 "
         );
+    }
+
+    /// The other half of the batch law: two records naming one line are caught
+    /// in the same pre-write scan a stale hash is, so neither rewrite lands and
+    /// the model is told which line they collided on rather than silently
+    /// getting one of them.
+    #[test]
+    fn edit_batch_rejects_two_edits_naming_one_line() {
+        let mut shell = fresh_shell();
+        let (dir, path) = scratch_file("dup-edit", "f.txt", "a\nb\nc\n");
+
+        let clash = run_once(
+            &mut shell,
+            &format!(
+                "let rows = view-text '{path}' 1 4\n\
+                 edit-hash '{path}' [[hash: $rows[1][hash], line: 'FIRST'], [hash: $rows[1][hash], line: 'SECOND']]"
+            ),
+        );
+        assert_ne!(clash.exit, 0, "two edits on one line must fail the batch");
+        let stderr = String::from_utf8_lossy(&clash.stderr);
+        assert!(
+            stderr.contains(&format!("two edits name line 2 in {path}")),
+            "the diagnostic names the colliding line and the file, got: {stderr}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).expect("read after clashing batch"),
+            "a\nb\nc\n",
+            "a rejected batch rebuilds nothing"
+        );
+
+        // The control: distinct lines in one batch still apply, so the test
+        // cannot pass by refusing every batch.
+        let ok = run_once(
+            &mut shell,
+            &format!(
+                "let rows = view-text '{path}' 1 4\n\
+                 edit-hash '{path}' [[hash: $rows[1][hash], line: 'FIRST'], [hash: $rows[2][hash], line: 'SECOND']]"
+            ),
+        );
+        let after = std::fs::read_to_string(dir.join("f.txt")).expect("read after clean batch");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            ok.exit,
+            0,
+            "a batch over distinct lines must succeed; stderr was: {}",
+            String::from_utf8_lossy(&ok.stderr)
+        );
+        assert_eq!(after, "a\nFIRST\nSECOND\n");
     }
 
     /// A committed `edit-hash` notes what it changed on stderr for the model,
@@ -1619,6 +1738,62 @@ return !{{length $hits}}"
         );
     }
 
+    /// An edit makes the same diff-versus-listing choice a committed `>` makes:
+    /// both snapshots must fit `DIFF_SNAPSHOT_CAP`, or the pre-image is withheld
+    /// and the card degrades to the listing preview a fresh write gets.  Both
+    /// sides of the gate, so a cap drifted to either extreme fails one.
+    #[test]
+    fn edit_over_an_oversized_file_falls_back_to_a_listing_card() {
+        use crate::bus::card::{IoEvent, WriteOutcome, io_card};
+        for (tag, tail, diffed) in [
+            ("edit-oversized", "x".repeat(70_000), false),
+            ("edit-small", "x".repeat(10), true),
+        ] {
+            let mut shell = fresh_shell();
+            let (dir, path) = scratch_file(tag, "big.txt", &format!("HEAD\n{tail}"));
+
+            let (r, kinds) =
+                run_capturing(&mut shell, &format!("edit-replace '{path}' 'HEAD' 'TAIL'"));
+            let wrote = std::fs::read_to_string(dir.join("big.txt")).ok();
+            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(
+                r.exit,
+                0,
+                "edit-replace must succeed; stderr was {:?}",
+                String::from_utf8_lossy(&r.stderr)
+            );
+            assert_eq!(
+                wrote.as_deref(),
+                Some(format!("TAIL\n{tail}").as_str()),
+                "the edit committed to disk"
+            );
+
+            let ios = io_events(&kinds);
+            assert_eq!(
+                ios.len(),
+                1,
+                "edit-replace raises exactly one write io event, got {ios:?}"
+            );
+            let IoEvent::Write {
+                outcome, old_bytes, ..
+            } = ios[0]
+            else {
+                panic!("expected a Write event, got {:?}", ios[0])
+            };
+            assert_eq!(*outcome, WriteOutcome::Committed);
+            assert_eq!(
+                old_bytes.is_some(),
+                diffed,
+                "only a file within the cap carries its pre-image ({tag})"
+            );
+            assert_eq!(
+                io_card(ios[0]).has_diff(),
+                diffed,
+                "the card diffs exactly when both snapshots fit the cap ({tag})"
+            );
+        }
+    }
+
     /// Editing an executable leaves its `0o755` intact: a plain
     /// temp-file-then-rename would narrow it to the temp file's own `0o600`,
     /// stripping the exec bit off a script.
@@ -1646,6 +1821,48 @@ return !{{length $hits}}"
             Some(0o755),
             "the executable mode must survive the edit, not narrow to 0o600"
         );
+    }
+
+    /// `skill NAME`'s charset check *is* its path-traversal guard: the name is
+    /// joined straight onto a skills root, so anything that could climb out of
+    /// one must be refused at the door, unread.
+    #[test]
+    fn skill_name_validation_confines_the_join_to_the_skills_root() {
+        let mut shell = fresh_shell();
+        let tmp = scratch_dir("skill-root");
+        let skills = tmp.join(".exarch").join("skills");
+        std::fs::create_dir_all(skills.join("demo")).expect("create skill dir");
+        std::fs::write(
+            skills.join("demo").join("SKILL.md"),
+            "---\nname: demo\ndescription: d\n---\n# Demo\nbody line\n",
+        )
+        .expect("write skill fixture");
+        // A sibling of the skills root, reachable by `..` and nothing else.
+        std::fs::create_dir_all(tmp.join(".exarch").join("secret")).expect("create secret dir");
+        std::fs::write(
+            tmp.join(".exarch").join("secret").join("SKILL.md"),
+            "TOPSECRET\n",
+        )
+        .expect("write secret fixture");
+        let root = display_no_trailing_sep(&tmp);
+
+        let loaded = run_once(&mut shell, &format!("cd '{root}'; skill 'demo'"));
+        let body = loaded.value.as_deref().expect("skill returns its body");
+        assert!(
+            body.contains("// skill root:") && body.contains("body line"),
+            "a valid name loads the body under its root banner, got: {body}"
+        );
+
+        for name in ["../secret", "demo/../../secret", ".", "../../etc/passwd"] {
+            let r = run_once(&mut shell, &format!("skill '{name}'"));
+            assert_eq!(
+                r.value.as_deref(),
+                Some(format!("skill not found: {name}").as_str()),
+                "a name that could climb out of the root is refused unread"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// One tool call through `run_shell` over a real bus `Emitter`, returning

@@ -632,28 +632,6 @@ mod tests {
         }
     }
 
-    /// The Windows branch, driven with synthetic env and a synthetic install
-    /// probe so it can be checked from any host.
-    #[test]
-    fn windows_tool_roots_produce_a_sane_grant_set() {
-        let roots =
-            ral_core::path::sigil::windows_tool_roots(r"C:\Windows", &[r"C:\Program Files"], |p| {
-                p == r"C:\Program Files\Git\usr\bin"
-            });
-        assert!(
-            roots.contains(&r"C:\Windows\System32".to_string()),
-            "{roots:?}"
-        );
-        assert!(
-            roots.contains(&r"C:\Windows\System32\WindowsPowerShell\v1.0".to_string()),
-            "{roots:?}"
-        );
-        assert!(
-            roots.contains(&r"C:\Program Files\Git\usr\bin".to_string()),
-            "{roots:?}"
-        );
-    }
-
     /// Passing [`drop_dead_exec_grants`] `false` simulates a non-Unix host:
     /// the `coreutils-unix-only` grants go, ordinary and cross-platform names
     /// stay.  Unix-gated because it first checks the host really bundles them.

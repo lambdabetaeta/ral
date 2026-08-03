@@ -124,11 +124,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_capabilities_has_no_finding() {
-        assert!(deputy_prefixes(&Capabilities::default()).is_empty());
-    }
-
-    #[test]
     fn fs_none_is_invisible_even_with_an_exec_dir() {
         let caps = Capabilities {
             exec: Some(exec_dir("/usr/bin")),

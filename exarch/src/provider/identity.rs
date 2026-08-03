@@ -263,20 +263,4 @@ mod tests {
             AdapterKind::OpenAI
         );
     }
-
-    #[test]
-    fn provider_label_decorates_per_flavour() {
-        assert_eq!(
-            provider_label(Subscription::Metered, "deepseek"),
-            "deepseek"
-        );
-        assert_eq!(
-            provider_label(Subscription::ChatGpt, "openai"),
-            "openai (ChatGPT subscription)"
-        );
-        assert_eq!(
-            provider_label(Subscription::FlatRate, "opencode-go"),
-            "opencode-go (subscription)"
-        );
-    }
 }

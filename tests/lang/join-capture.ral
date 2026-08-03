@@ -1,0 +1,40 @@
+# Test: capture across a *join* — every arm of a branching byte-side command
+# must contribute its own bytes to the binding, never the join's.
+
+let assert_eq = { |name expected actual|
+    if !{equal $expected $actual} {} else {
+        echo "FAIL:" $name "expected:" $expected "actual:" $actual 1>&2
+        fail [status: 1]
+    }
+}
+
+# The demand descends into each arm, so the taken arm's own bytes are bound.
+let taken = if true { echo one } else { echo two }
+assert_eq 'if then-arm' one $taken
+
+let other = if false { echo one } else { echo two }
+assert_eq 'if else-arm' two $other
+
+# An empty arm is subsumed into the byte side and contributes the empty
+# String — not `unit`, which would make the comparison below ill-typed.
+let empty_arm = if false { echo one } else {}
+assert_eq 'empty arm' '' $empty_arm
+
+let chained = ^false ? echo fallback
+assert_eq 'chain arm' fallback $chained
+
+# `guard`'s cleanup arm stays an effect: its bytes land on stdout (see the
+# golden) while only the body's bytes are bound.
+let guarded = guard { echo body } { echo cleanup }
+assert_eq 'guard body' body $guarded
+
+let recovered = try { ^false } { |_| return unit }
+assert_eq 'try handler' '' $recovered
+
+# The body arm is a variable, not a literal block, so it is eta-expanded
+# before the capture is placed.
+let arm = { echo indirect }
+let indirect = try $arm { |_| return unit }
+assert_eq 'eta-expanded arm' indirect $indirect
+
+echo 'join capture done'

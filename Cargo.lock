@@ -2787,6 +2787,7 @@ dependencies = [
  "http",
  "httparse",
  "ral-daemon",
+ "serde_json",
  "smoltcp",
 ]
 

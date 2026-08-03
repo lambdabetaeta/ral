@@ -306,6 +306,53 @@ mod tests {
     }
 
     #[test]
+    fn output_capped_end_is_cut_short_and_keeps_its_stop_reason() {
+        let end = StreamEnd {
+            captured_content: Some(MessageContent::from("as far as I got")),
+            captured_stop_reason: Some(StopReason::MaxTokens("max_tokens".into())),
+            ..Default::default()
+        };
+        let out = step_out_from_end("m", end, true, AdapterKind::Anthropic);
+        assert!(
+            matches!(out.cut_short, Some(CutShort::OutputCap)),
+            "an output cap must read as one, got {:?}",
+            out.cut_short
+        );
+        assert!(matches!(out.stop_reason, Some(StopReason::MaxTokens(_))));
+    }
+
+    #[test]
+    fn completed_end_is_not_cut_short() {
+        let end = StreamEnd {
+            captured_content: Some(MessageContent::from("all done")),
+            captured_stop_reason: Some(StopReason::Completed("end_turn".into())),
+            ..Default::default()
+        };
+        let out = step_out_from_end("m", end, true, AdapterKind::Anthropic);
+        assert!(out.cut_short.is_none());
+    }
+
+    /// The case `scripted::Reply::truncated_with_tool_calls` imitates: the cap
+    /// lands with tool calls already captured, and both must reach `deliberate`.
+    #[test]
+    fn output_capped_end_keeps_its_tool_calls() {
+        let end = StreamEnd {
+            captured_content: Some(MessageContent::from(vec![ToolCall {
+                call_id: "call-1".into(),
+                fn_name: "ral".into(),
+                fn_arguments: serde_json::json!({ "cmd": "echo hi" }),
+                thought_signatures: None,
+            }])),
+            captured_stop_reason: Some(StopReason::MaxTokens("length".into())),
+            ..Default::default()
+        };
+        let out = step_out_from_end("m", end, true, AdapterKind::Anthropic);
+        assert!(matches!(out.cut_short, Some(CutShort::OutputCap)));
+        assert_eq!(out.tool_calls.len(), 1);
+        assert_eq!(out.tool_calls[0].fn_name, "ral");
+    }
+
+    #[test]
     fn stalled_step_out_keeps_streamed_prefix() {
         let cause = ProviderError::from_genai(
             &web_stream_http(StatusCode::SERVICE_UNAVAILABLE),

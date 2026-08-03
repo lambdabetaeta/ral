@@ -334,3 +334,65 @@ fn live_binding_scheme_matches_baked_entry() {
         );
     }
 }
+
+// ─── (9) a session scheme instantiates polymorphically ──────────────────────
+
+/// The scheme that crosses the run boundary is generalized against an
+/// empty environment, so a later run may instantiate it at two unrelated
+/// types at once — and each instantiation must keep its own roots, so the
+/// `Int` use stays `Int` and the `String` use never becomes one.
+#[test]
+fn session_scheme_instantiates_at_two_types() {
+    let mut sh = shell();
+    run(&mut sh, "let idf = { |x| return $x }").unwrap();
+    let stored = fmt_scheme(&scheme_of(&sh, "idf").expect("idf must carry a scheme"));
+    assert!(
+        stored.starts_with('∀'),
+        "the stored scheme must be quantified, got: {stored}"
+    );
+    for (src, why) in [
+        (
+            "let nn = !{idf 1}\nlet ss = !{idf hello}\nreturn unit",
+            "two instantiations in one run must not clash",
+        ),
+        (
+            "let nn = !{idf 1}\nreturn $[$nn + 1]",
+            "the Int must flow through the instantiation",
+        ),
+    ] {
+        let errs = check_errors(&sh, src);
+        assert!(
+            errs.is_empty(),
+            "{why}, got: {:?}",
+            errs.iter()
+                .map(|e| e.kind.render_message())
+                .collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        check_errors(&sh, "let ss = !{idf hello}\nreturn $[$ss + 1]")
+            .iter()
+            .any(|e| e.kind.render_message().contains("couldn't match")),
+        "the String instantiation must not admit Int arithmetic"
+    );
+}
+
+/// A recursive binding is installed without a scheme, so a later run must
+/// fall back to a fresh type rather than to a wrong stored one.
+#[test]
+fn recursive_binding_is_usable_next_run() {
+    let mut sh = shell();
+    run(
+        &mut sh,
+        "let go = { |n| if $[$n == 0] { return 0 } else { return !{go $[$n - 1]} } }",
+    )
+    .unwrap();
+    let errs = check_errors(&sh, "return !{go 3}");
+    assert!(
+        errs.is_empty(),
+        "a recursive binding must stay usable across the run boundary, got: {:?}",
+        errs.iter()
+            .map(|e| e.kind.render_message())
+            .collect::<Vec<_>>()
+    );
+}

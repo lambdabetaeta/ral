@@ -2,12 +2,13 @@
 
 // Regression tests for the capability-gated interactive frontend.
 //
-// Covers the non-REPL paths (NO_COLOR, TERM=dumb) that produce visible
-// output via `diagnostic::use_color`.  The REPL-side gating of the
-// highlighter / hinter / CPR is covered by unit tests in core/src/io.rs
-// on `TerminalState`; driving a full PTY from a cargo test is possible
-// but fragile, so those paths are exercised manually.  See
-// TODO(interactive) below.
+// Covers the non-REPL path that produces visible output via
+// `diagnostic::use_color`.  The env gates (NO_COLOR, TERM) are pinned
+// by `stderr_ansi_ok_gates` in core/src/io/terminal.rs.  The REPL-side
+// gating of the highlighter / hinter / CPR is covered by unit tests in
+// core/src/io.rs on `TerminalState`; driving a full PTY from a cargo
+// test is possible but fragile, so those paths are exercised manually.
+// See TODO(interactive) below.
 
 mod common;
 
@@ -33,30 +34,10 @@ fn has_ansi(bytes: &[u8]) -> bool {
 }
 
 #[test]
-fn no_color_strips_ansi_from_error() {
-    // A syntax error guarantees diagnostic output on stderr.
-    let (_out, err) = run_c("[", &[("NO_COLOR", "1"), ("TERM", "xterm-256color")]);
-    assert!(!err.is_empty(), "expected a diagnostic on stderr");
-    assert!(
-        !has_ansi(&err),
-        "NO_COLOR=1 should suppress ANSI in diagnostics, got {err:?}",
-    );
-}
-
-#[test]
-fn term_dumb_strips_ansi_from_error() {
-    let (_out, err) = run_c("[", &[("TERM", "dumb")]);
-    assert!(!err.is_empty(), "expected a diagnostic on stderr");
-    assert!(
-        !has_ansi(&err),
-        "TERM=dumb should suppress ANSI in diagnostics, got {err:?}",
-    );
-}
-
-#[test]
 fn piped_stderr_has_no_ansi() {
     // When stderr is not a tty (cargo test captures it via pipe),
     // diagnostics must not emit ANSI — even without NO_COLOR or TERM=dumb.
+    // A syntax error guarantees diagnostic output on stderr.
     let (_out, err) = run_c("[", &[("TERM", "xterm-256color")]);
     assert!(!err.is_empty(), "expected a diagnostic on stderr");
     assert!(

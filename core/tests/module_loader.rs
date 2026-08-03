@@ -7,10 +7,10 @@
 //! return shape.  These tests pin the observable contract at the public
 //! evaluator API:
 //!
-//! - `use` re-reads the file on every call (no cache): editing a module
-//!   between two `use`s of the same path yields the new value.
 //! - a file that loads itself is rejected as a circular dependency, for
-//!   both verbs (the cycle guard is load-bearing once the cache is gone).
+//!   both verbs — nothing else keeps re-evaluation terminating.
+//! - a module's failure reaches the caller with its own status, named once
+//!   by the verb that loaded it.
 //! - `use` projects the loaded scope into a Map; `source` leaks the
 //!   file's bindings into the caller's scope.
 //!
@@ -23,7 +23,7 @@ mod common;
 use std::io::Write;
 
 use ral_core::transport::{Program, Run};
-use ral_core::types::{Break, Capabilities, Settled, Shell};
+use ral_core::types::{Break, Capabilities, Settled, Shell, Status};
 use ral_core::{
     RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value, builtins, diagnostic,
 };
@@ -71,33 +71,6 @@ fn write_module(name: &str, contents: &str) -> std::path::PathBuf {
     let mut f = std::fs::File::create(&path).expect("create temp module");
     f.write_all(contents.as_bytes()).expect("write temp module");
     path
-}
-
-// ── Cacheless re-`use` ──────────────────────────────────────────────────
-
-/// `use` reads the file on every call: rewriting the module between two
-/// `use`s of the same path surfaces the new value.  A result cache keyed
-/// by canonical path (the previous design) would have served the stale
-/// `answer = 1` on the second load.
-#[test]
-fn use_rereads_a_rewritten_module() {
-    let path = write_module("ral_use_reread.ral", "let answer = 1\n");
-    let p = path.to_string_lossy();
-    let mut shell = fresh_shell();
-
-    let first = top_level(&mut shell, &format!("use '{p}'")).expect("first use");
-    assert_eq!(answer_of(&first), 1);
-
-    std::fs::write(&path, "let answer = 2\n").expect("rewrite temp module");
-
-    let second = top_level(&mut shell, &format!("use '{p}'")).expect("second use");
-    assert_eq!(
-        answer_of(&second),
-        2,
-        "second `use` must re-read, not serve a cache"
-    );
-
-    std::fs::remove_file(&path).ok();
 }
 
 /// Pull the `answer` field out of a module Map.
@@ -161,6 +134,44 @@ fn source_self_reference_is_a_cycle() {
     std::fs::remove_file(&path).ok();
 }
 
+// ── Failure propagation ─────────────────────────────────────────────────
+
+/// The loader names itself on a module's failure without rewriting it: the
+/// status the module chose survives, and two nested loads do not stack the
+/// prefix.  Re-signalling (`sig(format!("source: {e}"))`) would flatten the
+/// 7 to a 1 and read `source: source: boom`.
+#[test]
+fn a_sourced_failure_keeps_its_status_and_is_tagged_once() {
+    let inner = write_module("ral_fail_inner.ral", "fail [status: 7, message: 'boom']\n");
+    let i = inner.to_string_lossy().into_owned();
+    let outer = write_module("ral_fail_outer.ral", &format!("source '{i}'\n"));
+    let o = outer.to_string_lossy().into_owned();
+
+    let mut shell = fresh_shell();
+    let e = match top_level(&mut shell, &format!("source '{o}'")) {
+        Err(Break::Error(e)) => e,
+        other => panic!("expected the module's failure, got {other:?}"),
+    };
+    assert_eq!(e.status, Status::Code(7), "the module's status survives");
+    assert_eq!(e.message, "source: boom");
+    assert_eq!(
+        e.message.matches("source: ").count(),
+        1,
+        "two nested loads must not stack the prefix"
+    );
+
+    // `use` tags with its own verb, from the same guard.
+    let e = match top_level(&mut shell, &format!("use '{i}'")) {
+        Err(Break::Error(e)) => e,
+        other => panic!("expected the module's failure, got {other:?}"),
+    };
+    assert_eq!(e.status, Status::Code(7));
+    assert_eq!(e.message, "use: boom");
+
+    std::fs::remove_file(&inner).ok();
+    std::fs::remove_file(&outer).ok();
+}
+
 // ── Scope / return semantics ────────────────────────────────────────────
 
 /// `use` returns a Map of the loaded file's bindings without leaking them
@@ -199,6 +210,84 @@ fn source_leaks_bindings_into_caller_scope() {
     );
 
     std::fs::remove_file(&path).ok();
+}
+
+// ── `RAL_PATH` fallback ─────────────────────────────────────────────────
+
+/// A fresh directory under the system temp dir, keyed on the pid.
+fn scratch(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("ral-modpath-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// `use` of a bare name that the logical cwd cannot supply falls through to
+/// a `RAL_PATH` walk — reading the `within [env: …]` overlay, not the host
+/// env — and a *directory* bearing the module's name on an earlier entry
+/// does not end that walk.  Planting a real file in the cwd afterwards
+/// flips the answer, pinning which anchor wins.
+#[test]
+fn use_falls_through_to_ral_path_and_the_cwd_wins_when_it_can() {
+    let root = scratch("walk");
+    let (d1, d2, here) = (root.join("d1"), root.join("d2"), root.join("here"));
+    std::fs::create_dir_all(d1.join("m.ral")).unwrap();
+    std::fs::create_dir_all(&d2).unwrap();
+    std::fs::create_dir_all(&here).unwrap();
+    std::fs::write(d2.join("m.ral"), "let answer = 42\n").unwrap();
+
+    let source = format!(
+        "within [dir: '{}', env: [RAL_PATH: '{}:{}']] {{ use 'm.ral' }}",
+        here.display(),
+        d1.display(),
+        d2.display()
+    );
+    let mut shell = fresh_shell();
+    let found = top_level(&mut shell, &source).expect("RAL_PATH walk finds the module");
+    assert_eq!(
+        answer_of(&found),
+        42,
+        "a directory named `m.ral` must not end the walk"
+    );
+
+    std::fs::write(here.join("m.ral"), "let answer = 7\n").unwrap();
+    let shadowed = top_level(&mut shell, &source).expect("cwd-relative module loads");
+    assert_eq!(
+        answer_of(&shadowed),
+        7,
+        "a real file at the logical cwd must beat the RAL_PATH walk"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Discovery does not widen a grant: the module the `RAL_PATH` walk found is
+/// still read through `check_fs_read`, so a read set naming only a sibling
+/// directory denies the load.
+#[test]
+fn a_ral_path_find_still_answers_to_the_fs_read_grant() {
+    let root = scratch("grant");
+    let (lib, other) = (root.join("lib"), root.join("other"));
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(lib.join("m.ral"), "let answer = 42\n").unwrap();
+
+    let mut shell = fresh_shell();
+    let source = format!(
+        "grant [fs: [read: ['{o}']]] {{ within [dir: '{o}', env: [RAL_PATH: '{l}']] {{ use 'm.ral' }} }}",
+        o = other.display(),
+        l = lib.display()
+    );
+    match top_level(&mut shell, &source).unwrap_err() {
+        Break::Error(e) => assert!(
+            e.message.contains("denied by grant"),
+            "expected an fs-grant denial, got: {}",
+            e.message
+        ),
+        other @ Break::Escape(_) => panic!("expected Break::Error, got {other:?}"),
+    }
+
+    std::fs::remove_dir_all(&root).ok();
 }
 
 // ── Cross-source diagnostics ─────────────────────────────────────────────

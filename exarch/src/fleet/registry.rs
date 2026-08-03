@@ -1707,4 +1707,57 @@ mod tests {
     fn mb() -> Mailbox {
         crate::bus::Inbox::new().mailbox()
     }
+
+    /// The fleet's ordering law, wired to the real registry: a settling child
+    /// delivers *before* it retires its entry, so the parent's park verdict —
+    /// computed ahead of the pop — can never quiesce between the two facts.
+    #[test]
+    fn a_settling_childs_result_outruns_the_quiesce_verdict() {
+        use crate::bus::{AgentOutcome, AgentResult, Inbox, Item, ParkMode, Post};
+
+        let reg = AgentRegistry::new();
+        entry(&reg, 1, None);
+        let generation = entry(&reg, 2, Some(1));
+        let inbox = Inbox::new();
+        let park = || {
+            if reg.has_children(1) {
+                ParkMode::HeldByChildren
+            } else {
+                ParkMode::Quiesce
+            }
+        };
+        assert_eq!(
+            park(),
+            ParkMode::HeldByChildren,
+            "a live direct child holds its parent's park"
+        );
+
+        // `spawn_async`'s epilogue in production order: deliver, then retire.
+        inbox
+            .mailbox()
+            .push(Post::AgentResult(AgentResult {
+                name: "a2".into(),
+                outcome: AgentOutcome::Complete,
+                text: "done".into(),
+                elapsed: Duration::ZERO,
+                generation,
+            }))
+            .expect("a fresh inbox admits one result");
+        reg.settle(2, generation);
+        assert_eq!(
+            park(),
+            ParkMode::Quiesce,
+            "the last child settling drains the fleet"
+        );
+
+        let token = Token::new();
+        assert!(
+            matches!(inbox.next_or_idle(park, &token), Some(Item::Agent(r)) if r.name == "a2"),
+            "a quiescing fleet still hands over the result it was already owed"
+        );
+        assert!(
+            inbox.next_or_idle(park, &token).is_none(),
+            "and with nothing left queued it quiesces rather than parking forever"
+        );
+    }
 }

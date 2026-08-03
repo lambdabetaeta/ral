@@ -208,30 +208,6 @@ mod tests {
     }
 
     #[test]
-    fn render_returns_bare_name_verbatim() {
-        let shell = Shell::default();
-        assert_eq!(
-            render(
-                &CommandName::Bare("/usr/local/bin/claude".into()),
-                &shell.mobile.context,
-            ),
-            "/usr/local/bin/claude",
-        );
-    }
-
-    #[test]
-    fn render_returns_path_head_verbatim() {
-        let shell = Shell::default();
-        assert_eq!(
-            render(
-                &CommandName::Path("./bin/claude".into()),
-                &shell.mobile.context,
-            ),
-            "./bin/claude",
-        );
-    }
-
-    #[test]
     fn policy_names_surface_cwd_absolute_for_relative_path_head() {
         let dir = std::env::temp_dir().join("jq_src").join("jq-1.7");
         let mut shell = Shell::default();

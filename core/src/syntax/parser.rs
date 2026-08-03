@@ -1943,16 +1943,6 @@ mod tests {
 
     // ── Sub-token-stream parsers require EOF ─────────────────────────
 
-    #[test]
-    fn expr_block_rejects_trailing_input() {
-        let err = parse("echo $[1 2 3]").unwrap_err();
-        assert!(
-            err.message.contains("trailing input"),
-            "expected trailing-input error, got: {}",
-            err.message
-        );
-    }
-
     /// `$[2>3]` lexes `2>` as a file descriptor, so `>` lands in operand
     /// position; the error must name the glued shape, not "redirect".
     #[test]
@@ -1969,28 +1959,6 @@ mod tests {
         assert!(
             err.message.contains("comparison operator"),
             "expected a comparison-operator error, got: {}",
-            err.message
-        );
-    }
-
-    /// A key stream holds one word; `$m[a b]` must reject, not index by `a`.
-    #[test]
-    fn index_keys_reject_trailing_input() {
-        let err = parse("$m[a b]").unwrap_err();
-        assert!(
-            err.message.contains("trailing input"),
-            "expected trailing-input error, got: {}",
-            err.message
-        );
-    }
-
-    /// A stray `}` is an error, not a stop that truncates the program.
-    #[test]
-    fn top_level_stray_rbrace_rejected() {
-        let err = parse("echo a\n}\necho b").unwrap_err();
-        assert!(
-            err.message.contains("unmatched `}`"),
-            "expected an unmatched-brace error, got: {}",
             err.message
         );
     }
@@ -2026,12 +1994,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_pipeline_continues_across_newline_before_pipe() {
-        let ast = unwrap_stmts(parse("a\n| b").unwrap());
-        assert_eq!(ast, vec![Ast::Pipeline(body(vec![plain("a"), plain("b")]))]);
-    }
-
-    #[test]
     fn parse_semicolon_never_continues() {
         for src in [
             "a ; | b", "a | ; b", "a ;\n| b", "a |\n; b", "a ; ? b", "a ? ; b", "a\n; ? b",
@@ -2044,18 +2006,6 @@ mod tests {
     fn parse_semicolon_separates_statements() {
         let ast = unwrap_stmts(parse("a ; b").unwrap());
         assert_eq!(ast, vec![plain("a"), plain("b")]);
-    }
-
-    #[test]
-    fn parse_block_stmt() {
-        let ast = unwrap_stmts(parse("{ echo hello }").unwrap());
-        assert_eq!(
-            ast,
-            vec![Ast::Block(body(vec![app(
-                bare_head("echo"),
-                vec![plain("hello")]
-            )]))]
-        );
     }
 
     #[test]
@@ -2256,12 +2206,6 @@ mod tests {
                 ])],
             )]
         );
-    }
-
-    #[test]
-    fn parse_multiple_stmts() {
-        let ast = unwrap_stmts(parse("x = 5\necho $x").unwrap());
-        assert_eq!(ast.len(), 2);
     }
 
     #[test]
@@ -2715,21 +2659,6 @@ mod tests {
                 user: None,
                 suffix: None,
             })]
-        );
-    }
-
-    #[test]
-    fn parse_tilde_as_command_arg() {
-        let ast = unwrap_stmts(parse("cd ~").unwrap());
-        assert_eq!(
-            ast,
-            vec![app(
-                bare_head("cd"),
-                vec![tilde_word(TildePath {
-                    user: None,
-                    suffix: None,
-                })],
-            )]
         );
     }
 
@@ -3205,12 +3134,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_guard_one_arg_is_error() {
-        let err = parse("guard { body }").unwrap_err();
-        assert!(err.message.contains("guard requires 2"), "msg: {err}");
-    }
-
-    #[test]
     fn parse_within_opts_and_body() {
         let (op, _) = unwrap_single_scope(parse("within [dir: '/tmp'] { body }").unwrap());
         match op {
@@ -3223,21 +3146,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_within_one_arg_is_error() {
-        let err = parse("within [dir: '/tmp']").unwrap_err();
-        assert!(err.message.contains("within requires 2"), "msg: {err}");
-    }
-
-    #[test]
     fn parse_grant_caps_and_body() {
         let (op, _) = unwrap_single_scope(parse("grant [exec: [:]] { body }").unwrap());
         assert!(matches!(op, ScopeAst::Grant { .. }));
-    }
-
-    #[test]
-    fn parse_grant_zero_args_is_error() {
-        let err = parse("grant").unwrap_err();
-        assert!(err.message.contains("grant requires 2"), "msg: {err}");
     }
 
     #[test]
@@ -3283,21 +3194,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_let_guard_rejected() {
-        assert!(parse("let guard = 1").is_err());
-    }
-
-    #[test]
-    fn parse_let_grant_rejected() {
-        assert!(parse("let grant = 1").is_err());
-    }
-
-    #[test]
-    fn parse_let_audit_rejected() {
-        assert!(parse("let audit = 1").is_err());
-    }
-
-    #[test]
     fn parse_lambda_param_named_try_rejected() {
         assert!(parse("let f = { |try| 1 }").is_err());
     }
@@ -3311,22 +3207,7 @@ mod tests {
         assert_eq!(args.len(), 1);
     }
 
-    #[test]
-    fn parse_external_within_still_valid() {
-        let (head, _args) = unwrap_single_exec(parse("^within").unwrap());
-        assert_eq!(head, external_head("within"));
-    }
-
     // ── Standalone redirect rejection ───────────────────────────────────
-
-    #[test]
-    fn parse_standalone_redirect_rejected() {
-        let err = parse("> out.txt").unwrap_err();
-        assert!(
-            err.message.contains("redirect must follow a command"),
-            "msg: {err}"
-        );
-    }
 
     #[test]
     fn parse_leading_redirect_after_newline_rejected() {

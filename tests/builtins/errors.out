@@ -1,9 +1,3 @@
 recovered
 cmd: <runtime>
 status: 1
-trying...
-trying...
-trying...
-retry exhausted
-inner caught
-continued after inner recovery

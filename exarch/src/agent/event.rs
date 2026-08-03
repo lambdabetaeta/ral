@@ -1061,6 +1061,75 @@ mod tests {
         assert!(disk.contains("USER1") && disk.contains("ASST2"));
     }
 
+    /// Two tool-bearing exchanges, the second steered mid-batch: the shapes the
+    /// bare user/assistant fixtures above never put in a compaction's way.
+    fn tool_bearing_log(tag: &str) -> AgentLog {
+        let mut s = fresh_root(tag);
+        for (u, id) in [("U1", "a"), ("U2", "b")] {
+            s.append_user(u.into()).unwrap();
+            s.append_assistant(assistant_with_tool(id), vec![id.into()], None)
+                .unwrap();
+            s.append_tool_results(vec![ToolResult {
+                id: id.into(),
+                content: "ok".into(),
+            }])
+            .unwrap();
+            if id == "b" {
+                s.append_steering("STEER".into()).unwrap();
+            }
+            s.append_assistant(ChatMessage::assistant("A"), vec![], None)
+                .unwrap();
+        }
+        s
+    }
+
+    /// Whatever the keep budget, the kept suffix is a whole exchange: no cut
+    /// orphans a tool result from the assistant turn that called it, and none
+    /// opens the suffix on a steering prompt, which is mid-exchange user text
+    /// rather than an exchange boundary.  Either would 400 every provider.
+    #[test]
+    fn no_compaction_cut_orphans_a_tool_result() {
+        let total = tool_bearing_log("orphan-total")
+            .events
+            .iter()
+            .map(event_message_bytes)
+            .sum::<usize>();
+
+        for keep in [0, 1].into_iter().chain((0..=10).map(|i| total * i / 10)) {
+            let mut s = tool_bearing_log("orphan-sweep");
+            let Some(plan) = s.plan_compaction(keep) else {
+                continue;
+            };
+            s.apply_compaction("SUMMARY".into(), plan.suffix_start)
+                .unwrap();
+            let ms = s.history_messages();
+            assert_ne!(
+                ms.get(1).and_then(|m| m.content.first_text()),
+                Some("STEER"),
+                "keep={keep}: a steering prompt must never open the kept suffix"
+            );
+            for (i, m) in ms.iter().enumerate() {
+                for part in &m.content {
+                    let ContentPart::ToolResponse(r) = part else {
+                        continue;
+                    };
+                    assert!(
+                        ms[..i]
+                            .iter()
+                            .rev()
+                            .take_while(|p| p.role != ChatRole::User)
+                            .any(|p| p.content.iter().any(|q| matches!(
+                                q,
+                                ContentPart::ToolCall(tc) if tc.call_id == r.call_id
+                            ))),
+                        "keep={keep}: tool result {} answers a call no longer in context",
+                        r.call_id
+                    );
+                }
+            }
+        }
+    }
+
     /// A successful compaction reclaims heap: `event_count` and `history_bytes`
     /// shrink, not just the read-time model view.
     #[test]

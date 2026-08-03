@@ -162,6 +162,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A run that died before its closing checkpoint still gets a report:
+    /// the folder as it stands now stands in for the checkpoint nobody
+    /// took, so a job that rewrote documents is never reported as quiet.
+    #[test]
+    fn a_crashed_run_is_reported_against_the_folder_as_it_stands() {
+        let (dir, folder, store) = workshop("report-crashed");
+        std::fs::write(folder.join("letter.docx"), b"v1").expect("fixture");
+        std::fs::write(folder.join("notes.txt"), b"kept").expect("fixture");
+        store.capture(&folder, Moment::Before).expect("baseline");
+
+        // The job ran and the machine died: no after-checkpoint at all.
+        std::fs::write(folder.join("letter.docx"), b"v2").expect("job");
+        std::fs::create_dir(folder.join("sent")).expect("job");
+        std::fs::remove_file(folder.join("notes.txt")).expect("job");
+
+        let report = job_report(&store, &folder).expect("reports");
+        assert!(report.finished_at_ms.is_none(), "the run took no after");
+        assert!(report.changes.changes.contains(&Change::Modified {
+            path: "letter.docx".into(),
+        }));
+        assert!(report.changes.changes.contains(&Change::Created {
+            path: "sent".into(),
+            folder: true,
+        }));
+        assert!(report.changes.changes.contains(&Change::Deleted {
+            path: "notes.txt".into(),
+            folder: false,
+        }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn before_any_job_there_is_nothing_to_report_or_undo() {
         let (dir, folder, store) = workshop("report-nothing");

@@ -151,6 +151,33 @@ gg 2";
     }
 }
 
+/// The `within` sibling of the test above.  `eval_within` nests three
+/// separate `with_*` frames (env, cwd, handlers) around its body, and each
+/// must contain the trampoline the way `with_capabilities` does.  If one
+/// stops containing it, every iteration after the first runs *outside* the
+/// override: `$ENV[MARK]` is gone, or the scoped handler is no longer
+/// installed and the name falls through to PATH resolution.  The recursion
+/// reaches the observation only at depth 0, so a leak cannot hide.
+#[test]
+fn within_overrides_survive_tail_recursion() {
+    let mut shell = fresh_shell();
+    let env = top_level(
+        &mut shell,
+        "let probe_env = { |n| if $[$n <= 0] { return $ENV[MARK] } else { probe_env $[$n - 1] } }\n\
+         within [env: [MARK: inside]] { probe_env 3 }",
+    )
+    .expect("the env override must still be installed at depth 0");
+    assert_eq!(env, Value::String("inside".into()));
+
+    let handled = top_level(
+        &mut shell,
+        "let probe_handled = { |n| if $[$n <= 0] { return !{within-probe} } else { probe_handled $[$n - 1] } }\n\
+         within [handlers: [within-probe: { |args| to-string pong }]] { probe_handled 3 }",
+    )
+    .expect("the handler frame must still be installed at depth 0");
+    assert_eq!(handled, Value::String("pong".into()));
+}
+
 // ── (3) consecutive audit blocks must not drop the next inner command ────
 
 /// Regression for: `audit::with_scope` used to call `Audit::push_scope`,

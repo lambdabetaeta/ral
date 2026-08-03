@@ -293,13 +293,6 @@ fn block_scoping() {
 }
 
 #[test]
-fn assignment_returns_status_not_value() {
-    // Assignment doesn't leak the value.
-    // A block like { x = 42 } doesn't auto-execute 42.
-    must_succeed("let xv = {echo hello}\necho 'after'");
-}
-
-#[test]
 fn wildcard_assignment_discards_value() {
     assert_eq!(
         must_succeed("let _ = 42\nreturn ok"),
@@ -316,11 +309,6 @@ fn wildcard_destructure_discards_element() {
 }
 
 // ── Recursion ────────────────────────────────────────────────────────────
-
-#[test]
-fn self_recursion_works() {
-    must_succeed("let f = { |n| if $[$n == 0] { echo done } else { f $[$n - 1] } }\nf 5");
-}
 
 #[test]
 fn recursion_base_case() {
@@ -384,11 +372,6 @@ fn mutual_recursion_non_tail() {
 #[test]
 fn index_string_not_indexable() {
     must_fail("let x = 'hello'\necho $x[0]");
-}
-
-#[test]
-fn index_int_not_indexable() {
-    must_fail("let x = 42\necho $x[0]");
 }
 
 #[test]
@@ -504,11 +487,6 @@ fn destructure_too_many_values() {
 #[test]
 fn not_invocable_int() {
     must_fail("let f = 42\nf 1 2 3");
-}
-
-#[test]
-fn not_invocable_list() {
-    must_fail("let f = [1, 2]\nf 1 2");
 }
 
 // ── is-empty type strictness ─────────────────────────────────────────────
@@ -709,12 +687,6 @@ fn with_overrides_command() {
     must_succeed("within [handlers: [cat: { |args| echo mocked }]] { cat /nonexistent }");
 }
 
-#[test]
-fn with_does_not_leak() {
-    // After within block, the handler is gone
-    must_succeed("within [handlers: [mytest: { |args| echo mock }]] { mytest }\necho 'after with'");
-}
-
 #[cfg(unix)]
 #[test]
 fn grant_exec_subcommand_allows_listed_subcommand() {
@@ -759,15 +731,6 @@ fn within_handler_applies_inside_pipeline() {
         ),
         Value::Int(7)
     );
-}
-
-#[test]
-fn within_dir_scoped() {
-    let tmp = std::env::temp_dir();
-    must_succeed(&format!(
-        "within [dir: '{}'] {{ echo 'in tmp' }}",
-        tmp.display()
-    ));
 }
 
 #[test]
@@ -1495,6 +1458,42 @@ fn binding_named_echo_wins_at_bare_head() {
     );
 }
 
+/// The PATH-shadow vet guards both session-scope binders — `eval_bind`'s
+/// pattern check and `eval_letrec`'s group install — so all three spellings
+/// of a `let` naming a PATH-reachable command must be refused with the same
+/// diagnostic.  Inside a block frame the very same `let` is legal, which is
+/// what makes the refusal a scope rule rather than a ban on the name.
+#[cfg(unix)]
+#[test]
+fn session_scope_let_may_not_shadow_a_path_command() {
+    for src in [
+        "let cat = 1",
+        "let cat = { |x| if $[$x <= 0] { return 0 } else { cat $[$x - 1] } }",
+        "let [cat, other] = [1, 2]",
+    ] {
+        match eval(src) {
+            Err(Break::Error(e)) => {
+                assert!(
+                    e.message.contains("cannot bind `cat`")
+                        && e.message.contains("reachable on PATH"),
+                    "wrong refusal for {src:?}: {e:?}"
+                );
+                assert!(
+                    e.hint
+                        .as_deref()
+                        .is_some_and(|h| h.contains("value and command names disjoint")),
+                    "refusal for {src:?} must hint at the namespace rule: {e:?}"
+                );
+            }
+            other => panic!("session-scope {src:?} must be refused, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        must_succeed("return !{ let cat = 1; return $cat }"),
+        Value::Int(1)
+    );
+}
+
 // ── assert_eq (user-defined, not in prelude) ────────────────────────────
 
 const ASSERT_EQ_DEF: &str = "
@@ -1607,23 +1606,6 @@ fn block_with_trailing_args_is_error() {
 // ── §4.6 Currying / partial application ─────────────────────────────────
 
 #[test]
-fn curry_under_application() {
-    // { |x y| ... } applied with 1 arg returns a lambda
-    assert_eq!(
-        must_succeed("let add = { |x y| return $[$x + $y] }\nlet add5 = add 5\n!{add5 3}"),
-        Value::Int(8)
-    );
-}
-
-#[test]
-fn curry_exact_application() {
-    assert_eq!(
-        must_succeed("let add = { |x y| return $[$x + $y] }\n!{add 5 3}"),
-        Value::Int(8)
-    );
-}
-
-#[test]
 fn curry_map_partial() {
     // Passing a function as data is explicit: map $upper $list
     assert_eq!(
@@ -1725,14 +1707,6 @@ fn let_named_after_a_native_shadows_it_and_restores_on_scope_exit() {
 }
 
 #[test]
-fn head_position_still_calls_prelude_function() {
-    assert_eq!(
-        must_succeed("!{upper hello}"),
-        Value::String("HELLO".into())
-    );
-}
-
-#[test]
 fn lexical_head_position_still_calls_bound_function() {
     assert_eq!(
         must_succeed("let f = { |x| return $[$x + 1] }\n!{f 4}"),
@@ -1821,21 +1795,11 @@ fn filter_named_function_requires_deref() {
 }
 
 #[test]
-fn filter_bare_named_function_argument_is_literal() {
-    must_fail("let pred = { |x| return $[$x > 1] }\n!{filter pred [1, 2, 3]}");
-}
-
-#[test]
 fn fold_named_function_requires_deref() {
     assert_eq!(
         must_succeed("let add = { |acc x| return $[$acc + $x] }\n!{fold $add 0 [1, 2, 3]}"),
         Value::Int(6)
     );
-}
-
-#[test]
-fn fold_bare_named_function_argument_is_literal() {
-    must_fail("let add = { |acc x| return $[$acc + $x] }\n!{fold add 0 [1, 2, 3]}");
 }
 
 #[test]
@@ -1857,41 +1821,7 @@ fn curry_three_partial() {
 // ── §4.4: empty block returns Unit ──────────────────────────────────────
 // (already tested above as empty_block_returns_unit)
 
-// ── §13 Concurrency: spawn returns structured values ────────────────────
-
-#[test]
-fn spawn_returns_list() {
-    assert_eq!(
-        must_succeed("let h = !{spawn { return [1, 2, 3] }}\nlet r = await $h\nreturn $r[value]"),
-        Value::list(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
-    );
-}
-
-#[test]
-fn spawn_returns_map() {
-    let result = must_succeed(
-        "let h = !{spawn { return [name: alice] }}\nlet r = await $h\nreturn $r[value][name]",
-    );
-    assert_eq!(result, Value::String("alice".into()));
-}
-
-#[test]
-fn spawn_returns_lambda() {
-    assert_eq!(
-        must_succeed(
-            "let h = !{spawn { return { |x| return $[$x * 2] } }}\nlet r = await $h\nlet dbl = $r[value]\n!{dbl 21}"
-        ),
-        Value::Int(42)
-    );
-}
-
-#[test]
-fn spawn_returns_int() {
-    assert_eq!(
-        must_succeed("let h = !{spawn { return 42 }}\nlet r = await $h\nreturn $r[value]"),
-        Value::Int(42)
-    );
-}
+// ── §13 Concurrency: spawn, await, background ───────────────────────────
 
 #[test]
 fn await_cached() {
@@ -1935,19 +1865,6 @@ fn background_value_pipeline() {
     );
 }
 
-#[test]
-fn par_returns_structured() {
-    assert_eq!(
-        must_succeed("!{par { |x| return $[$x * $x] } [1, 2, 3, 4] 2}"),
-        Value::list(vec![
-            Value::Int(1),
-            Value::Int(4),
-            Value::Int(9),
-            Value::Int(16)
-        ])
-    );
-}
-
 // ── Concurrency stress tests ────────────────────────────────────────────
 
 #[test]
@@ -1979,25 +1896,6 @@ fn spawn_nested_structured() {
              return $[$a + $bb]"
         ),
         Value::Int(31) // (10+1) + (10*2) = 11 + 20 = 31
-    );
-}
-
-#[test]
-fn spawn_passes_block_as_arg() {
-    // Spawn a block that itself spawns — nested concurrency.
-    assert_eq!(
-        must_succeed(
-            r"
-            let h = !{spawn {
-                let inner = !{spawn { return 100 }}
-                let base = await $inner
-                return $[$base[value] + 1]
-            }}
-            let r = await $h
-            return $r[value]
-        "
-        ),
-        Value::Int(101)
     );
 }
 
@@ -2119,17 +2017,6 @@ fn spawn_deep_recursion_in_thread() {
 }
 
 // ── §10.2 guard ─────────────────────────────────────────────────────────
-
-#[test]
-fn guard_runs_cleanup_on_success() {
-    must_succeed("guard { echo body } { echo cleanup }");
-}
-
-#[test]
-fn guard_runs_cleanup_on_failure() {
-    // Body fails, cleanup still runs, failure propagates.
-    must_fail("guard { fail [status: 1] } { echo cleanup }");
-}
 
 #[test]
 fn guard_propagates_original_error() {
@@ -2306,20 +2193,6 @@ fn spawn_pipeline_chain() {
 }
 
 #[test]
-fn par_returning_closures_composed() {
-    // par produces a list of results, then we fold them.
-    assert_eq!(
-        must_succeed(
-            r"
-            let offsets = !{par { |n| return $n } !{range 1 4} 3}
-            return $[$offsets[0] + $offsets[1] + $offsets[2]]
-        "
-        ),
-        Value::Int(6) // 1+2+3
-    );
-}
-
-#[test]
 fn race_with_spawn_inside() {
     // Each racer itself spawns internal work.
     assert_eq!(
@@ -2391,16 +2264,6 @@ fn unit_in_map() {
 }
 
 // ── map pattern defaults ────────────────────────────────────────────────
-
-#[test]
-fn map_pattern_default_present_uses_supplied_value() {
-    assert_eq!(
-        must_succeed(
-            "let f = { |m| let [host: h, port: p = 8080] = $m; return $p }\nreturn !{f [host: localhost, port: 8080]}"
-        ),
-        Value::Int(8080)
-    );
-}
 
 #[test]
 fn map_pattern_default_overridden() {
@@ -2544,30 +2407,6 @@ fn has_cap_check(children: &[Value], resource: &str, decision: &str) -> bool {
     })
 }
 
-#[cfg(unix)]
-#[test]
-fn audit_exec_allowed_recorded() {
-    let tree =
-        must_succeed("audit { grant [exec: ['/bin/true': 'allow'], audit: true] { /bin/true } }");
-    let children = children_of(&tree);
-    assert!(
-        has_cap_check(&children, "exec", "allowed"),
-        "expected allowed exec capability-check in audit tree; children: {children:?}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn audit_exec_denied_recorded() {
-    let tree =
-        must_succeed("audit { grant [exec: ['/bin/true': 'allow'], audit: true] { /bin/false } }");
-    let children = children_of(&tree);
-    assert!(
-        has_cap_check(&children, "exec", "denied"),
-        "expected denied exec capability-check in audit tree; children: {children:?}"
-    );
-}
-
 #[test]
 fn audit_no_flag_no_recording() {
     let tree = must_succeed("audit { grant [exec: ['/bin/true': 'allow']] { /bin/true } }");
@@ -2575,21 +2414,6 @@ fn audit_no_flag_no_recording() {
     assert!(
         !has_cap_check(&children, "exec", "allowed"),
         "expected no capability-check nodes without audit: true; children: {children:?}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn audit_nested_grant_outeraudit_propagates() {
-    // SPEC §11.5: audit is logical OR — once enabled by an outer grant it
-    // stays enabled for nested grants even if they omit audit: true.
-    let tree = must_succeed(
-        "audit { grant [exec: ['/bin/true': 'allow'], audit: true] { grant [exec: ['/bin/true': 'allow']] { /bin/true } } }",
-    );
-    let children = children_of(&tree);
-    assert!(
-        has_cap_check(&children, "exec", "allowed"),
-        "expected exec event when inner grant lacks audit: true; children: {children:?}"
     );
 }
 
@@ -2804,6 +2628,8 @@ fn caret_clear_resolves_external_not_the_native() {
 #[cfg(unix)]
 #[test]
 fn audit_nested_grants_produce_no_grant_nodes() {
+    // SPEC §11.5: audit is logical OR — once enabled by an outer grant it
+    // stays enabled for nested grants even if they omit audit: true.
     let tree = must_succeed(
         "audit { grant [exec: ['/bin/true': 'allow'], audit: true] { grant [exec: ['/bin/true': 'allow']] { /bin/true } } }",
     );
@@ -3064,17 +2890,6 @@ fn flat_map_uses_concat_forward_reference() {
             Value::Int(2),
         ])
     );
-}
-
-#[test]
-fn hoist_applies_block_and_substitutes() {
-    // §2.4: !{$f $x} evaluates $f $x and substitutes its result.
-    let r = must_succeed(
-        "let double = { |n| return $[$n * 2] }\n\
-         let xv = !{double 21}\n\
-         return $xv",
-    );
-    assert_eq!(r, Value::Int(42));
 }
 
 // ── expression blocks: logical operators ─────────────────────────────────

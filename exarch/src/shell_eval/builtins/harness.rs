@@ -711,6 +711,34 @@ mod tests {
         }
     }
 
+    /// The door's table and `policy::base::resolve_base`'s match are two hands
+    /// on one enumeration: every label the door admits must resolve to a
+    /// bake-in profile — which also parses and evaluates all six bundled
+    /// `data/*.exarch.ral` — and the policy layer's refusal must name exactly
+    /// the labels the door holds, so a base added on either side alone shows up.
+    #[test]
+    fn every_permission_label_resolves_to_a_bake_in_base() {
+        let root = ral_core::types::Capabilities::root();
+        let cwd = std::env::current_dir().unwrap().display().to_string();
+        for label in PERMISSION_LABELS {
+            crate::policy::narrow(&root, label, &cwd)
+                .unwrap_or_else(|e| panic!("door label `{label} must name a bake-in base: {e}"));
+        }
+        let err = crate::policy::narrow(&root, "bogus", &cwd)
+            .expect_err("an unknown base must be refused");
+        let offered: std::collections::BTreeSet<&str> = err
+            .rsplit_once("expected one of: ")
+            .unwrap_or_else(|| panic!("the refusal must enumerate the bases, got: {err}"))
+            .1
+            .split(", ")
+            .collect();
+        assert_eq!(
+            offered,
+            PERMISSION_LABELS.into_iter().collect(),
+            "the door's table and the policy layer's bases are one enumeration"
+        );
+    }
+
     /// A payload-carrying tag is refused, never truncated to its label.
     #[test]
     fn permission_label_rejects_a_variant_carrying_a_payload() {
@@ -1376,6 +1404,12 @@ mod tests {
     /// the tags and notes the old pinned rollup never rendered.
     #[test]
     fn kit_round_trip_holds_every_field_including_tags_and_notes() {
+        // Seven evals deep where this file's other tests run one or two, so a
+        // debug build sharing the box with the rest of the suite needs more
+        // room than the usual 5s: a call that times out here reads as a lost
+        // field, not as a slow machine.
+        const BUDGET: u64 = 60;
+
         let dir = tmp("kit-round-trip");
         let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
         let (tx, _rx) = crate::bus::channel();
@@ -1384,20 +1418,30 @@ mod tests {
         session.run_shell(
             "call-1".to_string(),
             r#"add-task "fix the parser""#,
-            5,
+            BUDGET,
             &emit,
         );
-        session.run_shell("call-2".to_string(), r#"add-task "write docs""#, 5, &emit);
-        session.run_shell("call-3".to_string(), "transition 1 `doing", 5, &emit);
-        session.run_shell("call-4".to_string(), r#"tag-task 1 "urgent""#, 5, &emit);
+        session.run_shell(
+            "call-2".to_string(),
+            r#"add-task "write docs""#,
+            BUDGET,
+            &emit,
+        );
+        session.run_shell("call-3".to_string(), "transition 1 `doing", BUDGET, &emit);
+        session.run_shell(
+            "call-4".to_string(),
+            r#"tag-task 1 "urgent""#,
+            BUDGET,
+            &emit,
+        );
         session.run_shell(
             "call-5".to_string(),
             r#"note-task 1 "blocked on review""#,
-            5,
+            BUDGET,
             &emit,
         );
 
-        let rendered = session.run_shell("call-6".to_string(), "render-tasks", 5, &emit);
+        let rendered = session.run_shell("call-6".to_string(), "render-tasks", BUDGET, &emit);
         assert!(
             rendered
                 .content
@@ -1418,7 +1462,7 @@ mod tests {
                echo $t[status]
                echo !{intercalate "," $t[tags]}
                echo $t[notes]"#,
-            5,
+            BUDGET,
             &emit,
         );
         assert!(

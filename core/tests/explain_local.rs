@@ -1,7 +1,9 @@
 //! `explain <name>` for a user-defined function surfaces the checker's
 //! generalised scheme straight off the local binding — the same scheme that
 //! seeds the next run's check — and reports where the name lives.  A local
-//! binding shadows every other resolution at runtime, so it answers first.
+//! binding shadows every other resolution at runtime, so it answers first —
+//! and below it, `explain` names the frame that would actually run: alias
+//! before handler, handler before the builtin manifest.
 
 mod common;
 
@@ -116,5 +118,46 @@ fn explain_local_shadows_prelude_entry() {
     assert!(
         !out.contains("Split a string into lines"),
         "the shadowed prelude doc must not answer, got:\n{out}"
+    );
+}
+
+/// An alias installs a handler frame, so `explain` must name it as an alias
+/// before the handler arm swallows it.
+#[test]
+fn explain_names_an_alias_before_the_handler_arm() {
+    let mut sh = shell();
+    run(&mut sh, "alias greet { |a| echo hi }").unwrap();
+
+    let (result, out) = run_capture(&mut sh, "explain greet");
+    result.unwrap();
+    assert_eq!(out, "explain: greet: alias\n");
+}
+
+/// A handler stacked under a native's name is what runs, so `explain` reports
+/// `handler` — while the doc arm still answers off the builtin manifest.
+/// Probing the manifest first would have `explain` name code that never runs.
+#[test]
+fn explain_prefers_a_handler_over_the_builtin_manifest() {
+    let mut sh = shell();
+
+    let (result, bare) = run_capture(&mut sh, "explain length");
+    result.unwrap();
+    assert!(
+        bare.contains("length: builtin"),
+        "undressed, `length` is a builtin, got:\n{bare}"
+    );
+
+    let (result, out) = run_capture(
+        &mut sh,
+        "within [handlers: [length: { |a| return 0 }]] { explain length }",
+    );
+    result.unwrap();
+    assert!(
+        out.contains("length: handler") && !out.contains("length: builtin"),
+        "the handler frame is what runs, got:\n{out}"
+    );
+    assert!(
+        out.contains("number of elements"),
+        "the builtin doc still answers, got:\n{out}"
     );
 }

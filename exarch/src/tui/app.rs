@@ -719,3 +719,129 @@ impl App {
         draw(self, term)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bus::card::{Card, Mark};
+    use crate::tui::line::plain;
+    use crate::tui::palette::READ_W;
+
+    fn app() -> (App, BusReceiver) {
+        let (_tx, rx) = crate::bus::channel();
+        let app = App::new(
+            1,
+            &std::env::temp_dir(),
+            false,
+            Inbox::new(),
+            AgentRegistry::new(),
+        );
+        (app, rx)
+    }
+
+    fn read(path: &str) -> Kind {
+        Kind::Io {
+            event: IoEvent::Read { path: path.into() },
+            card: Card(vec![]),
+        }
+    }
+
+    fn text(app: &mut App, id: AgentId) -> String {
+        let w = app
+            .tabs
+            .viewport_mut(id)
+            .expect("the tab under test has a viewport")
+            .render_window(READ_W, 40);
+        w.lines.iter().map(plain).collect::<Vec<_>>().join("\n")
+    }
+
+    /// A pin is ambient state, not a scrollback barrier: arriving mid-burst it
+    /// must leave the observation run whole, and land in the keyed register
+    /// rather than on the rail.
+    #[test]
+    fn a_pin_never_splits_a_coalesced_observation_run() {
+        let (mut app, rx) = app();
+        for kind in [
+            Kind::ToolCall {
+                tool: "ral",
+                cmd: "read 'a.rs'".into(),
+                summary: Some("look around".into()),
+            },
+            read("a.rs"),
+            Kind::Pin {
+                key: "tasks".into(),
+                card: Card(vec![Mark::Raw {
+                    bytes: b"one left".to_vec(),
+                }]),
+            },
+            read("b.rs"),
+            Kind::Boundary,
+        ] {
+            app.handle(Event { id: 1, kind }, &rx);
+        }
+
+        let vp = app.tabs.viewport(1).expect("root has a viewport");
+        assert_eq!(
+            vp.probe_figures().0,
+            2,
+            "the call, then the two reads as one coalesced block"
+        );
+        assert_eq!(
+            vp.pins()
+                .iter()
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>(),
+            ["tasks"],
+            "the pin lands in the register, never in scrollback"
+        );
+        let all = text(&mut app, 1);
+        assert!(
+            all.contains("a.rs") && all.contains("b.rs"),
+            "both reads render in the one block: {all:?}"
+        );
+    }
+
+    /// A tab in the linger window has rendered its final frame: a straggler
+    /// from a worker whose cancel it outran must not paint into it.
+    #[test]
+    fn a_dying_tab_admits_no_straggler() {
+        let (mut app, rx) = app();
+        app.handle(
+            Event {
+                id: 2,
+                kind: Kind::Born {
+                    log_dir: std::env::temp_dir(),
+                    name: "helper".into(),
+                    parent: 1,
+                    branch: false,
+                },
+            },
+            &rx,
+        );
+        for kind in [Kind::Token("alive".into()), Kind::Boundary, Kind::Died] {
+            app.handle(Event { id: 2, kind }, &rx);
+        }
+        let blocks = app
+            .tabs
+            .viewport(2)
+            .expect("the child keeps its viewport through the linger window")
+            .probe_figures()
+            .0;
+
+        for kind in [Kind::Token("straggler".into()), Kind::Boundary] {
+            app.handle(Event { id: 2, kind }, &rx);
+        }
+
+        let all = text(&mut app, 2);
+        assert!(all.contains("alive"), "the final frame survives: {all:?}");
+        assert!(
+            !all.contains("straggler"),
+            "a dying tab admits no post-mortem text: {all:?}"
+        );
+        assert_eq!(
+            app.tabs.viewport(2).expect("viewport").probe_figures().0,
+            blocks,
+            "and gains no block from the events it dropped"
+        );
+    }
+}

@@ -25,7 +25,3 @@ let servers = [
 for $servers { |[host: h, port: p]|
     echo "$h:$p"
 }
-# Should be:
-for $servers { |[host: h, port: p]|
-    echo "$h on port $p"
-}

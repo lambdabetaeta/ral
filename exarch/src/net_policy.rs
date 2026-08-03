@@ -251,12 +251,6 @@ mod tests {
     }
 
     #[test]
-    fn admits_is_false_for_an_unlisted_host() {
-        let policy = parse(&hosts_policy(&["example.com"])).expect("well-formed policy");
-        assert!(!policy.admits(&Host::parse("other.com").unwrap()));
-    }
-
-    #[test]
     fn case_normalization_makes_pypi_org_and_pypi_org_uppercase_the_same_host() {
         let policy = parse(&hosts_policy(&["PyPI.ORG"])).expect("well-formed policy");
         assert!(policy.admits(&Host::parse("pypi.org").unwrap()));

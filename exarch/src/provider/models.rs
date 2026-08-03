@@ -6,8 +6,9 @@
 //! wanted model, still leaves manual entry.
 //!
 //! All network I/O sits behind [`ModelSource`], so tests drive the resolution
-//! logic against a fake; they take [`ModelCatalog::memo_only`], leaving the
-//! disk cache and its staleness path unexercised.
+//! logic against a fake; the unit tests here take [`ModelCatalog::memo_only`],
+//! and `tests/model_cache.rs` drives the disk cache and its staleness path
+//! against a real `XDG_CACHE_HOME`.
 
 use crate::provider::credential::{Credential, CredentialStore};
 use crate::provider::oauth;
@@ -629,17 +630,6 @@ mod tests {
         let fetched = cat.source().endpoints(model).unwrap();
         cat.record_endpoints(model, fetched.clone());
         assert_eq!(cat.cached_endpoints(model), Some(fetched));
-    }
-
-    #[test]
-    fn custom_provider_lists_through_catalog() {
-        let id = custom("local-llama");
-        let source = FakeSource::new(one(id.clone(), &["llama-3", "llama-3-instruct"]));
-        let mut cat = ModelCatalog::memo_only(source);
-        assert_eq!(
-            cat.list(&id),
-            Some(vec!["llama-3".to_string(), "llama-3-instruct".to_string()])
-        );
     }
 
     /// The catalog drops the reason on the floor; the picker reads it off the

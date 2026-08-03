@@ -234,11 +234,6 @@ mod tests {
     }
 
     #[test]
-    fn head_tail_passes_short_input_through() {
-        assert!(head_tail("short", 1024, "").is_none());
-    }
-
-    #[test]
     fn handles_utf8_at_cut_boundary() {
         let input = "λ".repeat(20_000);
         assert!(head_tail(&input, 16 * 1024, "").unwrap().contains("elided"));

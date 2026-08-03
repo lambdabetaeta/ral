@@ -233,19 +233,6 @@ mod tests {
         assert_eq!(refs(&ws, "c"), vec!["a", "b"]);
     }
 
-    /// A reference to a name that is not a user binding — a command head, a
-    /// prelude function — is not a worksheet edge and is dropped.
-    #[test]
-    fn non_binding_reference_is_not_an_edge() {
-        let shell = shell();
-        let mut ws = Worksheet::default();
-        // `$x` is a candidate (a prior binding); `nonexistent` is not bound,
-        // so even if referenced it is not an edge.
-        ws.record("let x = 1", &shell);
-        ws.record("let y = $x", &shell);
-        assert_eq!(refs(&ws, "y"), vec!["x"]);
-    }
-
     /// A re-bind overwrites the name's edges and verdict in place, keeping
     /// its first-definition position rather than appending a duplicate.
     #[test]

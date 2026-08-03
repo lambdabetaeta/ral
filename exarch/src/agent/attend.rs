@@ -448,6 +448,8 @@ fn agent_outcome(
 )]
 mod tests {
     use super::*;
+    use crate::agent::ProviderHandle;
+    use crate::agent::event::SessionEvent;
     use crate::agent::testkit::*;
     use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
     use crate::provider::scripted::{Reply, Script};
@@ -548,6 +550,73 @@ mod tests {
             "the final prose must not be scraped: {text:?}"
         );
         assert!(child.is_ready());
+    }
+
+    /// A host-side unwind — transport, decode, render — is recorded, fails the
+    /// item, and leaves the log ready, so the next prompt still deliberates.
+    /// The eval-side panics in `agent/shell.rs` never reach this arm:
+    /// `Shell::run` rolls those back long before the loop sees them.
+    #[test]
+    fn host_panic_is_recorded_and_the_next_prompt_still_deliberates() {
+        let dir = tmp("host-panic-recovery");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        // The first prompt unwinds; the rest answer the second and the no-reply
+        // nudges it draws.
+        let mut script = Script::new().then(Reply::panicking());
+        for _ in 0..8 {
+            script = script.then(Reply::text("recovered"));
+        }
+        session.provider = ProviderHandle::new(scripted("test-model", script));
+
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::new(tx, session.id);
+        session.seed("crash on this one".into());
+        let (panicked, _) = session.attend(&mut NoControl, &emit);
+        assert!(
+            matches!(&panicked, AgentOutcome::Failed(m) if m.starts_with(WORKER_PANIC_PREFIX)),
+            "the unwind must fail the item, not sink the attend thread: {panicked:?}"
+        );
+        assert!(
+            session.is_ready(),
+            "the panicked exchange must be wound back"
+        );
+
+        // Seeded only now: consecutive prompts coalesce into one inbox entry.
+        session.seed("but answer this one".into());
+        let (outcome, _) = session.attend(&mut NoControl, &emit);
+
+        let kinds: Vec<Kind> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|e| e.kind)
+            .collect();
+        assert!(
+            kinds
+                .iter()
+                .any(|k| matches!(k, Kind::Error(msg) if msg.starts_with(WORKER_PANIC_PREFIX))),
+            "the unwind must reach the user as an error too"
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|k| matches!(k, Kind::Token(t) if t == "recovered")),
+            "the prompt after the panic must still deliberate"
+        );
+        assert!(
+            matches!(outcome, AgentOutcome::Failed(_)),
+            "an un-replied run settles Failed, got {outcome:?}"
+        );
+        assert!(session.is_ready());
+
+        let events = std::fs::read_to_string(session.log_dir().join("events.json")).unwrap();
+        let parsed: Vec<SessionEvent> = serde_json::Deserializer::from_str(&events)
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .expect("the panicked exchange must leave a parseable log");
+        assert!(
+            parsed.iter().any(
+                |e| matches!(e, SessionEvent::Error { text } if text.starts_with(WORKER_PANIC_PREFIX))
+            ),
+            "the panic is recorded in the model-view event log too"
+        );
     }
 
     /// Run `cmd` as one dispatched run under a millisecond-scale
@@ -748,6 +817,53 @@ mod tests {
         assert!(
             saw_error,
             "the forged pin must be rejected with a diagnostic"
+        );
+    }
+
+    /// The reminder is built from the register the model actually wrote, and it
+    /// becomes the next committed prompt: `pinned_digest` → `NudgeCtx` →
+    /// `Post::Nudge` → the user turn the next deliberation sends.  The nudge
+    /// unit tests hand `react` a hand-written digest; only this joins it to the
+    /// live register.
+    #[test]
+    fn pinned_state_reminder_reads_the_live_register_and_becomes_the_next_prompt() {
+        let dir = tmp("pinned-reminder-live");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        session.run_shell(
+            "c0".into(),
+            r#"surface `pin [key: "goal", body: `text [spans: [[text: "ship the reminder"]]]]"#,
+            5,
+            &emit,
+        );
+        let digest = session
+            .pinned_digest()
+            .expect("the model's own pin must reach the register");
+        assert!(digest.contains("ship the reminder"), "got: {digest}");
+
+        // A finish with nothing returned draws the reminder; the two `reply`
+        // turns then satisfy the headless root's verification and end the loop.
+        session.provider = ProviderHandle::new(scripted(
+            "test-model",
+            Script::new()
+                .then(Reply::text("done"))
+                .then(Reply::tool_calls(vec![ral_call("r1", "reply 'x'")]))
+                .then(Reply::tool_calls(vec![ral_call("r2", "reply 'x'")])),
+        ));
+        session.seed("get on with it".into());
+        session.attend(&mut NoControl, &emit);
+
+        assert!(
+            std::iter::from_fn(|| rx.try_recv().ok()).any(
+                |e| matches!(e.kind, Kind::Nudge { cause, .. } if cause == "pinned-state reminder")
+            ),
+            "the live register must raise a pinned-state nudge"
+        );
+        let view = serde_json::to_string(&session.rendered_messages()).unwrap();
+        assert!(
+            view.contains("There is pinned state: ship the reminder"),
+            "the reminder must be committed as the next prompt, not dropped: {view}"
         );
     }
 

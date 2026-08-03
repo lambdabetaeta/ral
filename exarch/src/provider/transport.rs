@@ -268,4 +268,50 @@ mod tests {
             TransportKey::for_selection(&chat, "gpt-5.5", &credential("second")),
         );
     }
+
+    /// `metered` decides whether a turn is priced at all, so the three flavours
+    /// are checked where they are decided and again where the user reads them.
+    #[test]
+    fn subscription_turns_report_tokens_but_never_a_cost() {
+        let flat_rate = Transport::build(
+            &ProviderId::Famous(ProviderKind::OpencodeGo),
+            "glm-5.2",
+            &Credential::ApiKey("k".into()),
+        );
+        let keyed = Transport::build(
+            &ProviderId::Famous(ProviderKind::Anthropic),
+            "claude-opus-4",
+            &Credential::ApiKey("k".into()),
+        );
+        let chatgpt = Transport::build(
+            &ProviderId::ChatGpt(Arc::new(super::super::identity::ChatGptAccount {
+                account_id: "account".into(),
+                label: "me@example.com".into(),
+            })),
+            "gpt-5.5",
+            &Credential::OAuth(Arc::new(Mutex::new(token("live")))),
+        );
+        assert_eq!(flat_rate.subscription(), Subscription::FlatRate);
+        assert_eq!(keyed.subscription(), Subscription::Metered);
+        assert_eq!(chatgpt.subscription(), Subscription::ChatGpt);
+
+        let raw = genai::chat::Usage {
+            prompt_tokens: Some(1_000),
+            completion_tokens: Some(50),
+            ..Default::default()
+        };
+        let usage = |transport: &Transport, model: &str| {
+            super::super::usage::usage_from(model, &raw, transport.metered(), transport.adapter())
+        };
+        for (transport, model) in [(&flat_rate, "glm-5.2"), (&chatgpt, "gpt-5.5")] {
+            let usage = usage(transport, model);
+            assert!(usage.unmetered);
+            assert_eq!(usage.parts().cost, "subscription");
+            assert_eq!(usage.parts().input, "1000");
+        }
+        let keyed = usage(&keyed, "claude-opus-4");
+        assert!(!keyed.unmetered);
+        assert_ne!(keyed.parts().cost, "subscription");
+        assert_eq!(keyed.parts().input, "1000");
+    }
 }

@@ -9,7 +9,7 @@
 //! Every test supplies its own [`TestDialer`], the crate's one injectable
 //! resolve-and-dial seam, so nothing here ever opens a socket to a real
 //! host: an "allowed" CONNECT is vetted exactly as production code vets it
-//! (`resolve` answers a public-looking address, `vet::open`'s own
+//! (`resolve` answers whatever address the case chose, `vet::open`'s own
 //! `is_public` filter runs for real), but `dial` is free to ignore that
 //! address and connect to a local fixture instead.
 //!
@@ -160,17 +160,33 @@ impl GuestSide {
     }
 }
 
-/// The one injected [`vet::Dialer`]. `resolve` always answers a
-/// public-looking address so `vet::open`'s own classifier runs honestly;
-/// `dial` ignores that address and connects to `fixture` — a loopback
-/// listener this test owns — after sleeping `dial_delay`, and panics
-/// instead of resolving if `panic_on_resolve` is set.
+/// The one injected [`vet::Dialer`]. `resolve` answers `resolve_to` — a
+/// public-looking address by default, so `vet::open`'s own classifier runs
+/// honestly; `dial` ignores that address and connects to `fixture` — a
+/// loopback listener this test owns — after sleeping `dial_delay`, and
+/// panics instead of resolving if `panic_on_resolve` is set.
 struct TestDialer {
     fixture: SocketAddr,
+    resolve_to: SocketAddr,
     dial_delay: Duration,
     panic_on_resolve: bool,
     resolve_calls: AtomicUsize,
     dial_calls: AtomicUsize,
+}
+
+/// Nothing listens at the default `fixture`: a case that dials at all when
+/// it should not fails loudly rather than quietly tunnelling.
+impl Default for TestDialer {
+    fn default() -> Self {
+        Self {
+            fixture: "127.0.0.1:1".parse().unwrap(),
+            resolve_to: "93.184.216.34:443".parse().unwrap(),
+            dial_delay: Duration::ZERO,
+            panic_on_resolve: false,
+            resolve_calls: AtomicUsize::new(0),
+            dial_calls: AtomicUsize::new(0),
+        }
+    }
 }
 
 impl vet::Dialer for TestDialer {
@@ -180,7 +196,7 @@ impl vet::Dialer for TestDialer {
             !self.panic_on_resolve,
             "injected worker panic for the panic-reporting test"
         );
-        Ok(vec!["93.184.216.34:443".parse().unwrap()])
+        Ok(vec![self.resolve_to])
     }
 
     fn dial(&self, _addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
@@ -190,16 +206,6 @@ impl vet::Dialer for TestDialer {
         }
         TcpStream::connect_timeout(&self.fixture, timeout)
     }
-}
-
-fn no_fixture_dialer() -> Arc<TestDialer> {
-    Arc::new(TestDialer {
-        fixture: "127.0.0.1:1".parse().unwrap(),
-        dial_delay: Duration::ZERO,
-        panic_on_resolve: false,
-        resolve_calls: AtomicUsize::new(0),
-        dial_calls: AtomicUsize::new(0),
-    })
 }
 
 /// A loopback listener that echoes whatever it reads back until EOF.
@@ -247,11 +253,20 @@ fn connect_request(host: &str) -> Vec<u8> {
 }
 
 fn harness(dialer: Arc<dyn vet::Dialer>) -> (GuestSide, guest_net::Session<UnixStream>) {
+    harness_with(dialer, Egress::for_test())
+}
+
+/// [`harness`] over a caller-built [`Egress`] — the one case that has to
+/// know where the ledger lands.
+fn harness_with(
+    dialer: Arc<dyn vet::Dialer>,
+    egress: Egress,
+) -> (GuestSide, guest_net::Session<UnixStream>) {
     let (host_end, guest_end) = UnixStream::pair().expect("a socket pair");
     let session = guest_net::run(
         host_end,
         Config {
-            egress: Egress::for_test(),
+            egress,
             gateway: GATEWAY,
             dialer,
         },
@@ -279,7 +294,7 @@ fn join_within(
 /// it is dropped rather than reset: the connection goes nowhere.
 #[test]
 fn direct_traffic_to_an_arbitrary_address_never_reaches_a_worker() {
-    let dialer = no_fixture_dialer();
+    let dialer = Arc::new(TestDialer::default());
     let (mut guest, session) = harness(dialer.clone());
     let handle = guest.tcp_connect(Ipv4Addr::new(93, 184, 216, 34), 443, 40000);
     let established = guest.poll_until(Duration::from_secs(2), |g| {
@@ -296,7 +311,7 @@ fn direct_traffic_to_an_arbitrary_address_never_reaches_a_worker() {
 
 #[test]
 fn a_port_other_than_3128_has_no_listener() {
-    let (mut guest, session) = harness(no_fixture_dialer());
+    let (mut guest, session) = harness(Arc::new(TestDialer::default()));
     let handle = guest.tcp_connect(GATEWAY, 9999, 40001);
     let closed = guest.poll_until(Duration::from_secs(5), |g| {
         matches!(
@@ -313,7 +328,7 @@ fn a_port_other_than_3128_has_no_listener() {
 
 #[test]
 fn a_denied_connect_never_dials() {
-    let dialer = no_fixture_dialer();
+    let dialer = Arc::new(TestDialer::default());
     let (mut guest, session) = harness(dialer.clone());
     let handle = guest.tcp_connect(GATEWAY, PORT, 40002);
     let established = guest.poll_until(Duration::from_secs(5), |g| {
@@ -350,7 +365,7 @@ fn a_denied_connect_never_dials() {
 /// proxy: `decode` must refuse it before policy or DNS is consulted.
 #[test]
 fn the_authority_confusion_regression_is_refused_before_any_dial() {
-    let dialer = no_fixture_dialer();
+    let dialer = Arc::new(TestDialer::default());
     let (mut guest, session) = harness(dialer.clone());
     let handle = guest.tcp_connect(GATEWAY, PORT, 40003);
     let established = guest.poll_until(Duration::from_secs(5), |g| {
@@ -373,6 +388,49 @@ fn the_authority_confusion_regression_is_refused_before_any_dial() {
         .unwrap();
 }
 
+/// DNS rebinding, end to end: a host the IT department really did approve,
+/// whose answer is the cloud metadata address. Policy admits the name, so
+/// `vet::open`'s own `is_public` filter is all that stands between the
+/// guest and the host's own network — and its refusal must reach the guest
+/// instead of a tunnel.
+#[test]
+fn an_allowed_host_that_resolves_to_a_link_local_address_never_dials() {
+    let dialer = Arc::new(TestDialer {
+        // A dial that did happen would succeed, and say so loudly.
+        fixture: spawn_echo_fixture(),
+        resolve_to: "169.254.169.254:443".parse().unwrap(),
+        ..TestDialer::default()
+    });
+    let (mut guest, session) = harness(dialer.clone());
+    let handle = guest.tcp_connect(GATEWAY, PORT, 40010);
+    assert!(
+        guest.poll_until(Duration::from_secs(5), |g| g.tcp_state(handle)
+            == tcp::State::Established)
+    );
+    guest.tcp_send(handle, &connect_request("a.example"));
+
+    assert!(guest.poll_until(Duration::from_secs(5), |g| g.tcp_can_recv(handle)));
+    let refused = String::from_utf8(guest.tcp_recv(handle)).expect("the status line is UTF-8");
+    assert!(refused.starts_with("HTTP/1.1 403"), "got: {refused}");
+    assert!(refused.contains("no public address"), "got: {refused}");
+    assert_eq!(
+        dialer.resolve_calls.load(Ordering::SeqCst),
+        1,
+        "policy admitted the name, so it really was resolved"
+    );
+    assert_eq!(
+        dialer.dial_calls.load(Ordering::SeqCst),
+        0,
+        "a non-public answer must never be dialled"
+    );
+    let closed = guest.poll_until(Duration::from_secs(5), |g| g.tcp_peer_closed(handle));
+    assert!(closed, "a refused host must close the connection");
+    session.stop();
+    join_within(session, Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+}
+
 /// An allowed CONNECT reaches the fixture through the injected dialer, and
 /// bytes copy both ways; closing the guest's side then closes the whole
 /// tunnel.
@@ -381,10 +439,7 @@ fn an_allowed_connect_tunnels_bytes_both_ways_and_either_eof_closes_both() {
     let fixture = spawn_echo_fixture();
     let dialer = Arc::new(TestDialer {
         fixture,
-        dial_delay: Duration::ZERO,
-        panic_on_resolve: false,
-        resolve_calls: AtomicUsize::new(0),
-        dial_calls: AtomicUsize::new(0),
+        ..TestDialer::default()
     });
     let (mut guest, session) = harness(dialer.clone());
     let handle = guest.tcp_connect(GATEWAY, PORT, 40004);
@@ -417,6 +472,86 @@ fn an_allowed_connect_tunnels_bytes_both_ways_and_either_eof_closes_both() {
         .unwrap();
 }
 
+/// The ledger is the review surface synod's grant sells as `audit: true`,
+/// and this proxy is its only writer: a refusal in the department's own
+/// words, the tunnel that was allowed, and what that tunnel carried.
+#[test]
+fn the_ledger_records_the_refusal_the_tunnel_and_its_byte_counts() {
+    let ledger = std::env::temp_dir().join(format!(
+        "guest-net-ledger-test-{}.jsonl",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&ledger);
+    let egress = Egress {
+        policy: Arc::new(exarch::net_policy::NetPolicy {
+            hosts: std::iter::once(Host::parse("a.example").expect("a valid fixture host"))
+                .collect(),
+            search: true,
+        }),
+        audit: exarch::egress::AuditLog::for_test(&ledger),
+    };
+    let dialer = Arc::new(TestDialer {
+        fixture: spawn_echo_fixture(),
+        ..TestDialer::default()
+    });
+    let (mut guest, session) = harness_with(dialer, egress);
+
+    let denied = guest.tcp_connect(GATEWAY, PORT, 40011);
+    assert!(
+        guest.poll_until(Duration::from_secs(5), |g| g.tcp_state(denied)
+            == tcp::State::Established)
+    );
+    guest.tcp_send(denied, &connect_request("off-list.example"));
+    assert!(guest.poll_until(Duration::from_secs(5), |g| g.tcp_can_recv(denied)));
+    assert!(guest.tcp_recv(denied).starts_with(b"HTTP/1.1 403"));
+
+    let allowed = guest.tcp_connect(GATEWAY, PORT, 40012);
+    assert!(
+        guest.poll_until(Duration::from_secs(5), |g| g.tcp_state(allowed)
+            == tcp::State::Established)
+    );
+    guest.tcp_send(allowed, &connect_request("a.example"));
+    assert!(guest.poll_until(Duration::from_secs(5), |g| g.tcp_can_recv(allowed)));
+    assert!(guest.tcp_recv(allowed).starts_with(b"HTTP/1.1 200"));
+    guest.tcp_send(allowed, b"ping");
+    assert!(guest.poll_until(Duration::from_secs(5), |g| g.tcp_can_recv(allowed)));
+    assert_eq!(guest.tcp_recv(allowed), b"ping");
+    guest.tcp_close(allowed);
+    assert!(guest.poll_until(Duration::from_secs(5), |g| g.tcp_done(allowed)));
+
+    session.stop();
+    join_within(session, Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+
+    let text = std::fs::read_to_string(&ledger).expect("the ledger is written");
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each line is JSON on its own"))
+        .collect();
+    assert_eq!(lines.len(), 3, "one refusal, one tunnel, one close: {text}");
+
+    assert_eq!(lines[0]["host"], "off-list.example");
+    assert_eq!(lines[0]["allowed"], false);
+    assert_eq!(
+        lines[0]["note"],
+        serde_json::json!(exarch::net_policy::refusal("off-list.example"))
+    );
+
+    assert_eq!(lines[1]["host"], "a.example");
+    assert_eq!(lines[1]["allowed"], true);
+    // The vetted address the dialer was handed, not the loopback fixture
+    // this test's double actually connected to.
+    assert_eq!(lines[1]["addr"], "93.184.216.34:443");
+    assert!(lines[1]["note"].is_null());
+
+    assert_eq!(lines[2]["host"], "a.example");
+    assert_eq!(lines[2]["note"], "closed");
+    assert_eq!(lines[2]["up"], 4);
+    assert_eq!(lines[2]["down"], 4);
+    let _ = std::fs::remove_file(&ledger);
+}
+
 /// The fixed live-tunnel cap refuses the next connection at accept, before
 /// any worker exists, and frees a slot the moment one tunnel ends.
 #[test]
@@ -424,10 +559,7 @@ fn capacity_rejects_the_next_connection_and_frees_after_one_tunnel_ends() {
     let fixture = spawn_echo_fixture();
     let dialer = Arc::new(TestDialer {
         fixture,
-        dial_delay: Duration::ZERO,
-        panic_on_resolve: false,
-        resolve_calls: AtomicUsize::new(0),
-        dial_calls: AtomicUsize::new(0),
+        ..TestDialer::default()
     });
     let (mut guest, session) = harness(dialer);
 
@@ -481,7 +613,7 @@ fn capacity_rejects_the_next_connection_and_frees_after_one_tunnel_ends() {
 
 #[test]
 fn stop_during_an_incomplete_connect_ends_the_session_promptly() {
-    let (mut guest, session) = harness(no_fixture_dialer());
+    let (mut guest, session) = harness(Arc::new(TestDialer::default()));
     let handle = guest.tcp_connect(GATEWAY, PORT, 40005);
     assert!(
         guest.poll_until(Duration::from_secs(5), |g| g.tcp_state(handle)
@@ -504,9 +636,7 @@ fn stop_while_a_worker_is_dialling_ends_the_session_once_the_dial_returns() {
     let dialer = Arc::new(TestDialer {
         fixture,
         dial_delay: Duration::from_millis(300),
-        panic_on_resolve: false,
-        resolve_calls: AtomicUsize::new(0),
-        dial_calls: AtomicUsize::new(0),
+        ..TestDialer::default()
     });
     let (mut guest, session) = harness(dialer);
     let handle = guest.tcp_connect(GATEWAY, PORT, 40006);
@@ -531,10 +661,7 @@ fn stop_during_an_idle_established_tunnel_ends_the_session_promptly() {
     let fixture = spawn_echo_fixture();
     let dialer = Arc::new(TestDialer {
         fixture,
-        dial_delay: Duration::ZERO,
-        panic_on_resolve: false,
-        resolve_calls: AtomicUsize::new(0),
-        dial_calls: AtomicUsize::new(0),
+        ..TestDialer::default()
     });
     let (mut guest, session) = harness(dialer);
     let handle = guest.tcp_connect(GATEWAY, PORT, 40007);
@@ -563,10 +690,7 @@ fn stop_while_the_worker_to_guest_direction_is_blocked_ends_the_session_promptly
     let fixture = spawn_flood_fixture();
     let dialer = Arc::new(TestDialer {
         fixture,
-        dial_delay: Duration::ZERO,
-        panic_on_resolve: false,
-        resolve_calls: AtomicUsize::new(0),
-        dial_calls: AtomicUsize::new(0),
+        ..TestDialer::default()
     });
     let (mut guest, session) = harness(dialer);
     let handle = guest.tcp_connect(GATEWAY, PORT, 40008);
@@ -594,11 +718,8 @@ fn stop_while_the_worker_to_guest_direction_is_blocked_ends_the_session_promptly
 #[test]
 fn a_worker_panic_becomes_a_named_session_failure() {
     let dialer = Arc::new(TestDialer {
-        fixture: "127.0.0.1:1".parse().unwrap(),
-        dial_delay: Duration::ZERO,
         panic_on_resolve: true,
-        resolve_calls: AtomicUsize::new(0),
-        dial_calls: AtomicUsize::new(0),
+        ..TestDialer::default()
     });
     let (mut guest, session) = harness(dialer);
     let handle = guest.tcp_connect(GATEWAY, PORT, 40009);
@@ -634,7 +755,7 @@ fn repeated_start_stop_leaves_thread_count_stable() {
 
     let before = thread_count();
     for _ in 0..5 {
-        let (guest, session) = harness(no_fixture_dialer());
+        let (guest, session) = harness(Arc::new(TestDialer::default()));
         drop(guest);
         session.stop();
         join_within(session, Duration::from_secs(5))

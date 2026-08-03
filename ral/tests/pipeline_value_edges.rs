@@ -333,16 +333,6 @@ fn block_return_captures_only_last_command() {
 }
 
 #[test]
-fn block_non_final_bytes_reach_terminal() {
-    // Non-final commands in a value-bound sequence flush their bytes to the
-    // outer stdout so side-effects remain visible.
-    let o = run_pipe("let xv = !{ echo log; echo result }\necho \"x=$xv\"");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    let lines: Vec<_> = o.stdout.trim().lines().collect();
-    assert_eq!(lines, ["log", "x=result"], "full stdout: {:?}", o.stdout);
-}
-
-#[test]
 fn higher_order_capture() {
     // Call-site mode instantiation: the higher-order function's Var output mode
     // is resolved to Bytes from the argument thunk's syntactic mode.
@@ -380,19 +370,10 @@ fn to_json_via_user_wrapper() {
 }
 
 #[test]
-fn block_mixed_modes_returns_value() {
-    // When the final command of a block returns a value, that value is bound.
-    // Preceding byte-output commands' output goes to the terminal as an effect.
-    let o = run_pipe("let xv = !{ echo hello; length [1, 2, 3] }\necho $xv");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    let lines: Vec<_> = o.stdout.trim().lines().collect();
-    assert_eq!(lines, ["hello", "3"], "full stdout: {:?}", o.stdout);
-}
-
-#[test]
 fn mixed_sequence_return_type_matches_runtime_value() {
     // Regression: the checker and evaluator must agree that this binds the
-    // final Int value, not the non-final stdout string.
+    // final Int value, not the non-final stdout string.  The preceding
+    // byte-output command's output reaches the terminal as an effect.
     let o = run_pipe("let n = !{ echo hello; length [1, 2, 3] }\necho $[$n + 1]");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     let lines: Vec<_> = o.stdout.trim().lines().collect();

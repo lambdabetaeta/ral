@@ -1,0 +1,16 @@
+# Test: `/dev/null` stays writable under a restrictive fs write grant —
+# and only `/dev/null`. The discard device is exempt from the fs gate, so
+# `2> /dev/null` keeps working inside a grant that names neither `/dev`
+# nor anything under it. Unix-only: Windows has no such device path.
+
+let d = temp-dir
+
+# The exemption: a write nobody granted still lands.
+grant [fs: [write: [$d]]] { to-string 'x' > /dev/null; echo ok }
+
+# The converse, so the run above cannot pass merely because the grant is
+# toothless: a sibling device is denied.
+try { grant [fs: [write: [$d]]] { to-string 'x' > /dev/zero } } { |_| echo denied }
+
+# And the granted region itself is still live.
+grant [fs: [write: [$d]]] { to-string 'x' > "$d/f"; echo ok }

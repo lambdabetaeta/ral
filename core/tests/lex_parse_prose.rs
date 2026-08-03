@@ -400,6 +400,54 @@ fn unterminated_string_with_inner_unclosed_anchors_on_outer_string() {
     }
 }
 
+/// A nested form inside a double-quoted string (`$[…]`, `$name[…]`) is
+/// lexed once, by the outer lexer, and its tokens are handed to the
+/// sub-parser as they are.  So a diagnostic raised deep inside one still
+/// underlines the outer file at the right column.  Re-lexing an inner body
+/// from a substring would restart every span at 0 and point every
+/// in-string error at column 1.
+#[test]
+fn nested_stream_error_spans_point_into_the_outer_source() {
+    let cases = &[
+        (
+            "expr_in_string",
+            "echo \"aaa !{return $[1 2]} bbb\"",
+            "trailing input",
+            "2",
+            ":1:24",
+        ),
+        (
+            "index_in_string",
+            "let m = [a: 1]\necho \"xx $m[a b] yy\"",
+            "trailing input",
+            "b",
+            ":2:15",
+        ),
+    ];
+    for (tag, src, anchor, offender, position) in cases {
+        let Err(err) = parse(src) else {
+            panic!("{tag}: should reject {src:?}")
+        };
+        assert!(
+            err.message.contains(anchor),
+            "{tag}: rejection of {src:?} should say {anchor:?}; got: {msg}",
+            msg = err.message,
+        );
+        let span = err.span.expect("nested error must carry a span");
+        assert_eq!(
+            &src[span.start as usize..span.end as usize],
+            *offender,
+            "{tag}: span should cover the offending token in the outer source"
+        );
+        let rendered = strip_ansi(&format_parse_error_ariadne("fuzz.ral", src, &err));
+        assert!(
+            rendered.contains(position),
+            "{tag}: report should point at {position}; rendered:\n{rendered}"
+        );
+        assert_friendly(tag, src, &err);
+    }
+}
+
 /// A spread in a control-operator operand position is rejected by the
 /// parser, so it never reaches the elaborator — whose `Ast::Spread` arm
 /// is `unreachable!` and would otherwise panic.  Regression for the F1

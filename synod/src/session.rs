@@ -992,6 +992,33 @@ mod tests {
         assert_eq!(lock(&catalog).cached(&fam(ProviderKind::Deepseek)), None);
     }
 
+    /// The window dereferences `menu.default_effort` (`synod/ui/index.html`
+    /// line 1436) and `p.largeFolderLine` (line 2119) — two structs in this
+    /// file under opposite serde conventions.  Tidying either one into the
+    /// other's convention compiles, passes every other test, and leaves the
+    /// window reading `undefined`: an empty effort and a warning that never
+    /// appears.
+    #[test]
+    fn the_window_reads_these_exact_json_keys() {
+        let mut catalog = ModelCatalog::memo_only(FakeSource::new(Lists::new()));
+        let menu = serde_json::to_value(menu_from(&[fam(ProviderKind::Anthropic)], &mut catalog))
+            .expect("the menu serialises");
+        assert!(menu["default_effort"].is_string());
+        assert!(menu["efforts"].is_array());
+        assert!(menu["providers"][0]["default_model"].is_string());
+        assert!(menu["providers"][0]["models"][0]["reasoning"].is_boolean());
+
+        let opening = serde_json::to_value(Opening {
+            account: "work".to_string(),
+            model: ProviderKind::Anthropic.info().1.to_string(),
+            effort: "med".to_string(),
+            large_folder_line: Some("This folder is very large.".to_string()),
+        })
+        .expect("the opening serialises");
+        assert_eq!(opening["largeFolderLine"], "This folder is very large.");
+        assert!(opening.get("large_folder_line").is_none());
+    }
+
     #[test]
     fn resolve_tuning_with_no_effort_keeps_the_thinking_on_default() {
         let tuning = resolve_tuning(None, "claude-opus-4").unwrap();

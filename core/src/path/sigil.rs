@@ -478,12 +478,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unix_tool_roots_ignores_absent_homebrew_prefixes() {
-        let roots = unix_tool_roots(|_| false);
-        assert!(!roots.iter().any(|r| r.contains("homebrew")));
-    }
-
     /// No `cfg(windows)` on any of the Windows-shape tests: they run on the
     /// macOS and Linux CI hosts that never compile `system_tool_roots`' other
     /// half.

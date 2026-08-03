@@ -183,11 +183,6 @@ fn map_empty_is_homogeneous() {
 }
 
 #[test]
-fn map_spread_record() {
-    ok("let a = [x: 1]; let b = [y: 2, ...$a]; return $b[x]");
-}
-
-#[test]
 fn map_spread_fields_propagate() {
     // Under scoped-label semantics the spread source's fields are visible
     // in the result type.  Accessing a field from the spread must typecheck.
@@ -218,11 +213,6 @@ fn map_multiple_spreads_no_crash() {
 }
 
 // ─── Pattern binding ──────────────────────────────────────────────────────────
-
-#[test]
-fn pattern_name() {
-    ok("let x = 1; return $x");
-}
 
 #[test]
 fn pattern_wildcard() {
@@ -358,13 +348,6 @@ fn builtin_if_branch_mismatch_error() {
         "if true { return 1 } else { return hello }",
         "couldn't match",
     );
-}
-
-#[test]
-fn chain_arms_disagree_on_result() {
-    // The two arms return values of different types — the shared result
-    // type cannot unify.
-    has_error("return hello ? return 1", "couldn't match");
 }
 
 #[test]

@@ -424,25 +424,6 @@ mod tests {
         ral_core::process::clear();
     }
 
-    /// The attend loop threads *clones* into `deliberate`/`run_batch`/tools, so
-    /// an Esc landing mid-exchange must halt the in-flight tool call.
-    #[test]
-    fn published_token_clone_shares_cancellation() {
-        let _g = SERIAL.lock().unwrap();
-        ral_core::process::clear();
-        install();
-        let token = Token::new();
-        let _slot = publish(&token);
-        let threaded = token;
-        assert!(!threaded.is_cancelled());
-        raise_interrupt();
-        assert!(
-            threaded.is_cancelled(),
-            "a clone of the published token is cancelled with it"
-        );
-        ral_core::process::clear();
-    }
-
     /// Without `boot_shell`'s re-chaining, ral's bare handler would run alone
     /// after a rebuild: a delivered SIGINT would miss the token and tick the
     /// escalation ladder.

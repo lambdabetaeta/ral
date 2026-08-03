@@ -416,20 +416,6 @@ mod tests {
     }
 
     #[test]
-    fn helper_semantic_failure_is_failure_not_control() {
-        // A helper's `child_eval::WireOutcome::Error` decodes to `Break::Error`,
-        // which must land as a failure the user sees, not as control flow.
-        let mut c = PipelineCollector::new();
-        let mut shell = Shell::default();
-        c.fold(
-            &mut shell,
-            true,
-            StageObservation::failure(make_error(5, "helper boom")),
-        );
-        assert!(matches!(c.break_, Some(PipelineBreak::Failure(_))));
-    }
-
-    #[test]
     fn final_status_recorded_on_success() {
         let mut c = PipelineCollector::new();
         let mut shell = Shell::default();

@@ -1,0 +1,31 @@
+# Test: the double-quoted escape table, as it reaches a value.
+#
+# Every escape is compared against the single-quoted literal it should denote.
+# Single quotes go through a different lexer path — no escape processing — so
+# the comparisons are not tautological.
+
+echo !{equal "\x41" 'A'}
+# Expected: true
+echo !{equal "\u{1F600}" '😀'}
+# Expected: true
+echo !{equal "\t" '	'}
+# Expected: true
+echo !{equal "\\" '\'}
+# Expected: true
+
+# `\!` keeps the bang textual: without it, `!{rm -rf x}` would run.
+echo !{equal "\!{rm -rf x}" '!{rm -rf x}'}
+# Expected: true
+
+# A backslash before a newline continues the line and emits nothing.
+echo !{equal "a\
+b" 'ab'}
+# Expected: true
+
+# Escapes with no printable literal to compare against: check their length.
+echo !{length "\e"}
+# Expected: 1
+echo !{length "\0"}
+# Expected: 1
+echo !{length "\r\n"}
+# Expected: 2

@@ -1,0 +1,13 @@
+# Test: a capture stops at 16 MiB and says so exactly once
+
+# 20 MB down the capture sink. The buffer keeps the first 16 MiB, appends the
+# truncation marker once, and drops everything after — so the length is the
+# cap plus the marker (57 bytes, less the trailing newline every capture
+# strips), whatever chunk sizes the pump thread happened to read.
+let big = yes ral | head -c 20000000
+echo !{length $big}
+
+# The control below the cap: nothing is dropped and no marker appears, so the
+# length is just the bytes produced, less that same trailing newline.
+let small = yes ral | head -c 1000
+echo !{length $small}

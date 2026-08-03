@@ -157,6 +157,79 @@ fn top_level_partial_effects_persist_on_error() {
     );
 }
 
+/// A destructuring bind is all-or-nothing even across the run door.  The
+/// outer pattern's first element matches and would stage `matched_x`; the
+/// second fails.  Since a top-level run installs its mobile on error (the
+/// sibling test above), a stage-as-you-recurse regression would leak
+/// `matched_x` into the session — a half-destructured record visible at the
+/// next prompt.
+#[test]
+fn top_level_partial_destructure_binds_nothing() {
+    let mut shell = fresh_shell();
+    let result = top_level(
+        &mut shell,
+        "let [[matched_x], [unmatched_a, unmatched_b]] = [[1], [2]]",
+    );
+    assert!(result.is_err(), "the inner pattern must fail to match");
+    for name in ["matched_x", "unmatched_a", "unmatched_b"] {
+        assert!(
+            shell.scope_lookup(name).is_none(),
+            "`{name}` must not survive a partially matched destructure"
+        );
+    }
+}
+
+/// A `try` that recovers clears the failure's status: the run's transport
+/// status is 0 and `$?` reads 0 in the next run.  The baseline half proves
+/// the failing command really does set the register, so the recovered half
+/// is a genuine reset rather than a status that was never written.
+#[cfg(unix)]
+#[test]
+fn recovered_try_clears_the_status_register() {
+    let status = |shell: &mut Shell, source: &str| match shell.run(RunRequest {
+        run: Run {
+            program: Program::Source(source.into()),
+            script_name: "<test>".into(),
+            caps: Capabilities::root(),
+            wall: None,
+            deferred_lease: None,
+            worker_cap: None,
+            io: RunIo::Inherit,
+            terminal: RequestedTerminalAccess::Leased,
+            stdin: RunStdin::Inherit,
+        },
+        surface: None,
+        deferred: None,
+        desk: None,
+        nursery: None,
+        lifecycle: Box::new(()),
+    }) {
+        RunReport::Ran { status, .. } => status,
+        RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+    };
+
+    let mut shell = fresh_shell();
+    let failing = "cat /nonexistent 2> /dev/null";
+    assert_ne!(
+        status(&mut shell, failing),
+        0,
+        "the baseline failure must report a non-zero status"
+    );
+    assert_ne!(shell.last_status(), 0, "the baseline failure must set `$?`");
+
+    let recovered = format!("try {{ {failing} }} {{ |_e| return unit }}");
+    assert_eq!(
+        status(&mut shell, &recovered),
+        0,
+        "a recovered `try` must report success to the transport"
+    );
+    assert_eq!(
+        shell.last_status(),
+        0,
+        "`$?` must not see past the recovery"
+    );
+}
+
 // ── (3) Top-level cwd ───────────────────────────────────────────────────
 
 /// `cd` in one top-level run is visible to subsequent runs: a later
@@ -434,24 +507,6 @@ fn handle_is_usable_inside_local_grant_body() {
         ),
         Err(e) => panic!("handle should be usable in a local grant body, got error: {e:?}"),
     }
-}
-
-/// `poll` is the non-blocking dual of `await`.  A handle whose block
-/// has already settled (forced here by an `await` first) polls to
-/// `` `settled `` whose `` `ok `` outcome carries the block's value,
-/// drawn from the shared cache.
-#[test]
-fn poll_settled_after_completion_carries_the_value() {
-    let mut shell = fresh_shell();
-    let result = top_level(
-        &mut shell,
-        "let h = !{spawn { return 42 }}\n\
-         let _ = await $h\n\
-         let polled = poll $h\n\
-         case $polled [`settled: { |s| case $s[outcome] [`ok: { |v| return $v }, `err: { |_| return -2 }] }, `pending: { |_| return -1 }]",
-    )
-    .expect("poll a settled handle");
-    assert_eq!(result, Value::Int(42));
 }
 
 /// `poll` on a still-running block returns `` `pending ``.  The block

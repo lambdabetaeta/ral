@@ -208,6 +208,29 @@ mod tests {
         assert_eq!(value.as_deref(), Some("hello"));
     }
 
+    #[test]
+    fn an_oversized_length_is_refused_before_the_body_is_allocated() {
+        let mut reader = std::io::Cursor::new(vec![0xFF; 4]);
+        let err = read_frame::<_, String>(&mut reader).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("exceeds max"),
+            "unexpected diagnostic: {err}"
+        );
+    }
+
+    #[test]
+    fn a_truncated_length_is_not_a_clean_hangup() {
+        let mut empty = std::io::Cursor::new(Vec::new());
+        let value: Option<String> = read_frame(&mut empty).unwrap();
+        assert_eq!(value, None, "EOF at a frame boundary is an orderly close");
+
+        let mut partial = std::io::Cursor::new(vec![0x02, 0x00]);
+        let err = read_frame::<_, String>(&mut partial).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(err.to_string(), "subprocess: partial frame length");
+    }
+
     #[cfg(unix)]
     #[test]
     fn decode_failure_dump_is_owner_only() {

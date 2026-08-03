@@ -123,3 +123,42 @@ fn spawn_handler_does_not_leak_to_parent() {
         out.stdout
     );
 }
+
+// A `grant` in force at spawn time must still bind inside the worker: the
+// capability stack travels with the cloned context, so a denied command stays
+// denied across the thread boundary — and only within the grant's extent.
+#[test]
+fn spawn_inherits_grant_denial() {
+    let out = run(
+        "ral_spawn_dyn",
+        r"
+        grant [exec: [ls: 'deny']] {
+            let h = spawn { ls /tmp }
+            try {
+                let r = await $h
+                echo LEAKED
+            } { |_|
+                echo 'denied in worker'
+            }
+        }
+        let ok = !{ls /tmp | from-lines}
+        echo 'parent still allowed'
+    ",
+    );
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(
+        !out.stdout.contains("LEAKED"),
+        "grant did not reach the worker: stdout={:?}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("denied in worker"),
+        "worker did not report the denial: stdout={:?}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("parent still allowed"),
+        "denial escaped the grant's extent: stdout={:?}",
+        out.stdout
+    );
+}

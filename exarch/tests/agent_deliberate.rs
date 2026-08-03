@@ -15,7 +15,7 @@
 
 use exarch::agent::event::ProviderErrorRecord;
 use exarch::agent::{Agent, deliberate};
-use exarch::bus::{AgentId, Emitter, Kind, channel};
+use exarch::bus::{AgentId, AgentState, Emitter, Kind, channel};
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Provider, ProviderError, ProviderKind};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
@@ -289,6 +289,80 @@ fn empty_reply_commits_a_stub_not_empty_content() {
     assert!(
         !assistants.is_empty() && assistants.iter().all(|m| !m.content.is_empty()),
         "the empty reply must have been replaced with a non-empty stub"
+    );
+}
+
+/// Auto-compaction fires at the one boundary `deliberate` checks — its own
+/// entry — and rewrites the model view to the summary plus the recent
+/// exchange, verbatim.  `test-model` has no pricing-catalog entry, so the
+/// window is unknown and the byte fallback (`digest::COMPACT_THRESHOLD`, 500
+/// KiB) is the live trigger: the older exchange is the larger, so half the
+/// history holds the newer one whole.
+#[test]
+fn compaction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
+    let dir = tmp("auto-compaction");
+    let mut session = Agent::for_test(&dir, "system").unwrap();
+    let provider = scripted(
+        "test-model",
+        Script::new()
+            .then(Reply::text("ack one"))
+            .then(Reply::text("ack two"))
+            .then(Reply::text("done")),
+    );
+
+    let first = format!("EXCHANGE1 {}", "x".repeat(450_000));
+    let second = format!("EXCHANGE2 {}", "y".repeat(150_000));
+    for prompt in [&first, &second] {
+        let (acked, _) = drive_deliberate(&mut session, &provider, Some(prompt));
+        assert!(matches!(acked, Ok(deliberate::Outcome::Complete(_))));
+    }
+    let (outcome, kinds) = drive_deliberate(&mut session, &provider, Some("after"));
+
+    match outcome {
+        Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "done"),
+        other => panic!("expected Complete, got {other:?}"),
+    }
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, Kind::State(AgentState::Compacting))),
+        "the compaction must announce its own state"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, Kind::SystemNote(t) if t.starts_with("[Compacting history"))),
+        "the user is told the history is being compacted"
+    );
+
+    let view = session.rendered_messages();
+    assert_eq!(view[0].role, ChatRole::User);
+    let summary = view[0].content.first_text().unwrap_or_default();
+    assert!(
+        summary.contains("scripted summary"),
+        "the model view must open on the summary, got {summary:?}"
+    );
+    let rendered = serde_json::to_string(&view).unwrap();
+    assert!(
+        !rendered.contains("EXCHANGE1"),
+        "the summarised prefix must leave the model view"
+    );
+    assert!(
+        rendered.contains("EXCHANGE2") && rendered.contains("ack two"),
+        "the recent exchange is kept verbatim, not summarised"
+    );
+    assert!(session.is_ready());
+
+    // Reclamation is heap-only: the forensic record keeps every byte.
+    let events = std::fs::read_to_string(
+        dir.join("sessions")
+            .join(session.id.to_string())
+            .join("events.json"),
+    )
+    .unwrap();
+    assert!(
+        events.contains("EXCHANGE1"),
+        "compaction must not touch the durable event log"
     );
 }
 

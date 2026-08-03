@@ -1,0 +1,20 @@
+# Test: from-csv / to-csv codecs
+
+# Encode to the byte channel, decode back: the value survives the round trip.
+let rows = [[b: 2, a: 1], [a: 3, b: 4]]
+let back = !{to-csv $rows | from-csv}
+echo !{length $back}
+echo $back[0][a]
+echo $back[1][b]
+
+# Columns are the Map's key order — sorted, not the order they were written.
+to-csv $rows
+
+# A row short of the header decodes as empty strings, not an error.
+let short = !{to-string "a,b\n1\n" | from-csv}
+echo !{equal $short[0][b] ''}
+
+# A duplicate header column is refused: a record cannot hold two `a`s.
+try { let _dup = !{to-string "a,a\n1,2\n" | from-csv} } { |e| echo $e[message] }
+
+echo 'csv tests done'

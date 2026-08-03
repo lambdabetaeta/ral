@@ -180,8 +180,8 @@ fn grant_fs_write_denies_append_redirect() {
 // `source <file>` and `use <file>` read the `.ral` text through
 // `modules::read_and_normalize` → `check_fs_read`.  A load of a file outside
 // the read set must fail at that gate, before the bytes are read or the
-// module body runs.  (Only the direct-path case is covered; RAL_PATH
-// discovery is separately tracked.)
+// module body runs.  (The `RAL_PATH`-discovered path answers to the same
+// gate; `module_loader.rs` pins that leg, where the walk itself lives.)
 
 /// `source` of a `.ral` file outside the read set is denied at `check_fs_read`.
 /// The sourced file performs a side effect (a redirect into a writable temp)

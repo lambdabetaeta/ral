@@ -687,6 +687,53 @@ mod tests {
         assert_eq!(v["result"]["files"][0], serde_json::json!("a.rs"), "{out}");
     }
 
+    /// A seed of whitespace is no seed: [`crate::cli::load_seed`] collapses it,
+    /// and `run` refuses before the provider is touched, naming all three ways
+    /// to supply one — the only thing a scripted caller has to go on.
+    #[test]
+    fn a_blank_seed_is_no_seed_and_the_refusal_names_every_flag() {
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from(["exarch", "--headless", "--prompt", "   \n\t"])
+            .expect("whitespace is a value, not a parse error");
+        let seed = crate::cli::load_seed(cli.prompt, cli.file, cli.trailing_prompt)
+            .expect("no --file to read");
+        assert_eq!(seed, None, "a blank seed must never reach the model");
+
+        let err = run(
+            &mut converse_trunk("blank-seed", Script::new()),
+            &SessionInfo {
+                system_size: 0,
+                system_files: &[],
+                base: "dangerous",
+                extend_base: None,
+                restrict_files: &[],
+                scratch: std::path::Path::new("/tmp/scratch"),
+                cwd: "/tmp",
+            },
+            &Provider::scripted(
+                "test-model",
+                crate::provider::ProviderKind::Openai,
+                Script::new(),
+            ),
+            seed,
+            OutputFormat::Text,
+            Engine::new(),
+        )
+        .expect_err("a headless run with no seed has nothing to do");
+        assert_eq!(
+            err,
+            "--headless requires a seed prompt: --prompt, --file, or trailing words after --"
+        );
+
+        // The filter trims only to judge: real content keeps its own spacing.
+        assert_eq!(
+            crate::cli::load_seed(Some(" x ".into()), None, Vec::new())
+                .expect("no --file to read")
+                .as_deref(),
+            Some(" x ")
+        );
+    }
+
     /// A host's own writers get the same split `converse` gives the process's
     /// stdout/stderr — reply text on `out`, breadcrumbs on `err`.
     #[test]

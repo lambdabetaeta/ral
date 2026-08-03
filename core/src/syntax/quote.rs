@@ -142,22 +142,6 @@ mod tests {
     }
 
     #[test]
-    fn quote_word_dollar_uses_single_quotes() {
-        assert_eq!(quote_word("$HOME"), "'$HOME'");
-    }
-
-    #[test]
-    fn quote_word_bang_uses_single_quotes() {
-        assert_eq!(quote_word("a!b"), "'a!b'");
-    }
-
-    #[test]
-    fn quote_word_tilde_uses_single_quotes() {
-        // Bare `~foo` would tilde-expand.
-        assert_eq!(quote_word("~foo"), "'~foo'");
-    }
-
-    #[test]
     fn quote_word_brackets_use_single_quotes() {
         assert_eq!(quote_word("[a]"), "'[a]'");
         assert_eq!(quote_word("{a}"), "'{a}'");
@@ -210,6 +194,10 @@ mod tests {
 
     // ── lexer round-trips ────────────────────────────────────────────
 
+    /// The whole corpus is load-bearing: `lex_round_trip` accepts only a
+    /// single `SingleQuoted`/`Plain`/`Slash` token, so any input whose
+    /// emission is left bare (`$HOME`, `a!b`, `~foo`, …) lexes as some
+    /// other token kind and fails here.  Trim it and that cover is lost.
     #[test]
     fn lex_round_trips_for_assorted_inputs() {
         for input in [

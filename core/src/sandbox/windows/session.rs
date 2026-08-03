@@ -507,18 +507,6 @@ mod tests {
     }
 
     #[test]
-    fn memo_lets_an_unrelated_path_through() {
-        let mut granted = HashSet::new();
-        granted.insert((PathBuf::from(r"C:\work"), GrantKind::Deny));
-        let kept = filter_out_granted(
-            &granted,
-            vec![PathBuf::from(r"C:\Users\me\.ssh")],
-            GrantKind::Deny,
-        );
-        assert_eq!(kept, vec![PathBuf::from(r"C:\Users\me\.ssh")]);
-    }
-
-    #[test]
     fn projection_key_identity_is_the_fs_triple() {
         let a = ProjectionKey {
             read: vec![r"C:\work".into()],

@@ -90,6 +90,40 @@ fn comma_separated_profiles_meet_both_denies() {
     std::fs::remove_file(&b).ok();
 }
 
+/// Composition only ever narrows: a key one profile allows and the other
+/// never names does not survive the meet.  `join` would keep it, and so
+/// would a `meet_literal_exec` that carried one-sided allows — either
+/// silently widens the ceiling of every `--capabilities` session.  Asserted
+/// in both orders, since a fold that narrows must also commute.
+#[test]
+fn a_one_sided_allow_does_not_survive_the_meet() {
+    let a = write_profile("allow_a", "return [exec: [ls: 'allow', cat: 'allow']]\n");
+    let b = write_profile("allow_b", "return [exec: [ls: 'allow']]\n");
+
+    for arg in [
+        format!("{},{}", a.display(), b.display()),
+        format!("{},{}", b.display(), a.display()),
+    ] {
+        let out_ls = ral(&["--capabilities", &arg, "-c", "ls /tmp"]);
+        assert_eq!(
+            out_ls.status, 0,
+            "both profiles allow ls, so the intersection must admit it; stderr:\n{}",
+            out_ls.stderr
+        );
+
+        let out_cat = ral(&["--capabilities", &arg, "-c", "cat /etc/hostname"]);
+        assert_ne!(out_cat.status, 0, "cat is allowed by one profile only");
+        assert!(
+            out_cat.stderr.contains("denied by active grant"),
+            "expected the grant-denied diagnostic; got:\n{}",
+            out_cat.stderr
+        );
+    }
+
+    std::fs::remove_file(&a).ok();
+    std::fs::remove_file(&b).ok();
+}
+
 /// Without `--capabilities`, ambient root authority lets a normal
 /// command through — pins the negative case so a regression making the
 /// flag load even when absent gets caught.
@@ -105,6 +139,39 @@ fn no_flag_leaves_session_unrestricted() {
         out.stdout.contains("hello"),
         "stdout missing 'hello':\n{}",
         out.stdout
+    );
+}
+
+/// A misspelt `xdg:` name is a load-time error naming the typo and every
+/// kind it could have meant — not a silently frozen literal prefix, and not
+/// a bare non-absolute complaint that hides the real cause.  The companion
+/// run proves the rejection is the *name*, not `xdg:` as such.
+#[test]
+fn unknown_xdg_token_in_profile_names_the_typo_and_the_alternatives() {
+    let bad = write_profile("xdg_typo", "return [fs: [read: ['xdg:cofnig']]]\n");
+    let out = ral(&["--capabilities", bad.to_str().unwrap(), "-c", "echo never"]);
+    std::fs::remove_file(&bad).ok();
+    assert_ne!(out.status, 0, "a typo'd xdg token must not load");
+    assert!(
+        out.stderr.contains("unknown xdg token 'xdg:cofnig'"),
+        "expected the unknown-token diagnostic; got:\n{}",
+        out.stderr
+    );
+    for kind in ["config", "data", "cache", "state", "bin"] {
+        assert!(
+            out.stderr.contains(kind),
+            "the alternatives must list '{kind}'; got:\n{}",
+            out.stderr
+        );
+    }
+
+    let good = write_profile("xdg_known", "return [fs: [read: ['xdg:config']]]\n");
+    let out = ral(&["--capabilities", good.to_str().unwrap(), "-c", "echo never"]);
+    std::fs::remove_file(&good).ok();
+    assert_eq!(
+        out.status, 0,
+        "a known xdg token must load; stderr:\n{}",
+        out.stderr
     );
 }
 
@@ -238,4 +305,51 @@ fn deny_pin_survives_write_prefix_root_rename() {
         out.stderr
     );
     assert!(refused, "the write-prefix root rename was not refused");
+}
+
+/// The grant schema leaves `exec`/`fs` policy values to the runtime
+/// decoder — they are key-shaped and heterogeneous, inexpressible as one
+/// homogeneous element type.  So `--check` waves an ill-shaped policy
+/// through, and the decoder must refuse it *before* the grant frame is
+/// pushed and the body entered.
+#[test]
+fn undecodable_exec_policy_passes_the_checker_and_is_refused_at_run() {
+    let src = "grant [exec: [git: 5]] { echo BODYRAN }";
+    assert_eq!(
+        ral(&["--check", "-c", src]).status,
+        0,
+        "the checker deliberately does not police policy values"
+    );
+    let out = ral(&["-c", src]);
+    assert_ne!(out.status, 0, "an Int policy must not decode");
+    assert!(
+        out.stderr
+            .contains("must be 'allow', 'deny', or a list of subcommands"),
+        "expected the exec-policy diagnostic; got:\n{}",
+        out.stderr
+    );
+    // stdout only: stderr echoes the source line inside the ariadne snippet.
+    assert!(
+        !out.stdout.contains("BODYRAN"),
+        "the body must not run under an undecodable grant; stdout:\n{}",
+        out.stdout
+    );
+}
+
+/// The `fs` axis refuses a relative prefix outright — a grant whose
+/// meaning would shift after a `cd` is no grant at all.
+#[test]
+fn relative_fs_prefix_is_refused_before_the_body_runs() {
+    let out = ral(&["-c", "grant [fs: [read: ['proj']]] { echo BODYRAN }"]);
+    assert_ne!(out.status, 0, "a relative fs prefix must not decode");
+    assert!(
+        out.stderr.contains("'proj'") && out.stderr.contains("cwd:"),
+        "expected the relative-path diagnostic naming the cwd: form; got:\n{}",
+        out.stderr
+    );
+    assert!(
+        !out.stdout.contains("BODYRAN"),
+        "the body must not run under an undecodable grant; stdout:\n{}",
+        out.stdout
+    );
 }

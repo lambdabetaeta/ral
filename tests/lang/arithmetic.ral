@@ -1,0 +1,36 @@
+# Test: arithmetic and logic inside `$[...]`
+
+# Left associativity of `-` and `/`
+echo $[10 - 3 - 2]
+# Expected: 5
+echo $[8 / 2 / 2]
+# Expected: 2
+
+# Precedence, and parentheses overriding it
+echo $[1 + 2 * 3]
+# Expected: 7
+echo $[(1 + 2) * 3]
+# Expected: 9
+
+echo $[7 % 3]
+# Expected: 1
+echo $[- 2 + 3]
+# Expected: 1
+
+# Fused `&&` / `||`, and comparisons feeding them
+echo $[true && false]
+# Expected: false
+echo $[false || true]
+# Expected: true
+echo $[1 < 2 && 3 >= 3]
+# Expected: true
+
+# `not` binds tighter than the binary operators: this is `(not true) && false`,
+# not `not (true && false)`.
+echo $[not true && false]
+# Expected: false
+
+# Expressions interpolated inside a double-quoted string
+let n = 4
+echo "n+1 = $[$n + 1] half = $[$n / 2]"
+# Expected: n+1 = 5 half = 2

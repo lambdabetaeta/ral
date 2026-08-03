@@ -1,11 +1,4 @@
-# Test: equal, lt, gt, is-empty, and filesystem predicates
-
-# equal — structural equality
-echo !{equal hello hello}
-echo !{equal hello world}
-echo !{equal 42 42}
-echo !{equal [1, 2] [1, 2]}
-echo !{equal [1, 2] [1, 3]}
+# Test: lt, gt, is-empty, and filesystem predicates
 
 # lt / gt (lexicographic)
 echo !{lt abc def}

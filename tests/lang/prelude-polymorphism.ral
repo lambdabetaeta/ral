@@ -1,0 +1,25 @@
+# Test: the prelude's schemes survive the baked postcard round trip still
+# quantified — each combinator is used at two distinct types in one script,
+# which a monomorphised scheme would reject statically.
+
+let assert_eq = { |name expected actual|
+    if !{equal $expected $actual} {} else {
+        echo "FAIL:" $name "expected:" $expected "actual:" $actual 1>&2
+        fail [status: 1]
+    }
+}
+
+# id :: ∀α. α → Command α
+let n = !{id 41}
+let s = !{id hello}
+assert_eq 'id at Int' 42 $[$n + 1]
+assert_eq 'id at String' hello $s
+
+# reverse :: ∀α. [α] → Command [α] — the element type flows through the
+# instantiation, so the arithmetic below is legal only at [Int].
+let rev_ints = !{reverse [1, 2, 3]}
+let rev_strs = !{reverse [a, b]}
+assert_eq 'reverse at [Int]' 4 $[$rev_ints[0] + 1]
+assert_eq 'reverse at [String]' b $rev_strs[0]
+
+echo 'prelude polymorphism done'

@@ -1,0 +1,28 @@
+# Test: a confused-deputy fold reaches the audit tree.
+#
+# An exec-granting frame and a write-granting frame are each innocent
+# alone; only the meet over the live grant stack names the same directory
+# as both writable and executable. The finding is a `capability-check`
+# node, never a denial.
+
+let d = temp-dir
+let bindir = "$d/bin/"
+
+let deputy = audit {
+    grant [exec: [$bindir: 'allow'], audit: true] {
+        grant [fs: [write: [$d]]] { echo x }
+    }
+}
+echo !{length !{filter { |c| equal $c[kind] 'capability-check' } $deputy[children]}}
+echo $deputy[children][0][cmd]
+echo $deputy[children][0][value][decision]
+echo !{length $deputy[children][0][value][prefixes]}
+
+# Control: with the fs dimension absent the same exec dir is innocent —
+# an unrestricted fs is not read as "everything writable".
+let innocent = audit {
+    grant [exec: [$bindir: 'allow'], audit: true] {
+        grant [net: false] { echo x }
+    }
+}
+echo !{length !{filter { |c| equal $c[kind] 'capability-check' } $innocent[children]}}

@@ -40,14 +40,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn char_byte_round_trip_ascii() {
-        let s = "hello";
-        for n in 0..=s.chars().count() {
-            assert_eq!(byte_to_char(s, char_to_byte(s, n)), n);
-        }
-    }
-
-    #[test]
     fn char_byte_round_trip_unicode() {
         let s = "héllo🦀world";
         let nchars = s.chars().count();

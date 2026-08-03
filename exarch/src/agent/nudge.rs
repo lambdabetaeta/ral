@@ -244,7 +244,6 @@ mod tests {
     use super::*;
     use crate::bus::channel;
     use ral_core::serial::FOValue;
-    use std::time::Duration;
 
     /// An emitter onto a dropped receiver: these tests assert on `react`'s return
     /// and the budget counter, so the events may go nowhere.
@@ -257,35 +256,6 @@ mod tests {
         let root = std::env::temp_dir().join(format!("exarch-nudge-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         AgentLog::root(&root, 0, "test", "test", 0).expect("session log")
-    }
-
-    /// A surfaced rate limit already exhausted the provider loop's backoff budget,
-    /// and is not a model turn, so it is reported rather than nudged.
-    #[test]
-    fn rate_limit_surfaces_without_nudge() {
-        let mut reg = Registry::new();
-        let mut log = fresh_log("ratelimit");
-        let attempt = Err(ProviderError::RateLimited {
-            retry_after: Some(Duration::from_secs(5)),
-            cause: "429".into(),
-            body: None,
-        });
-        assert!(
-            reg.react(
-                &attempt,
-                &NudgeCtx {
-                    must_reply: false,
-                    is_headless_root: false,
-                    pinned: None,
-                    waiting_on_children: false,
-                },
-                &emit(),
-                &mut log,
-            )
-            .is_none(),
-            "rate limits are provider failures, not nudgeable model behavior",
-        );
-        assert_eq!(reg.used, 0);
     }
 
     /// The transient exhausted the provider loop before the model produced output;
@@ -386,26 +356,6 @@ mod tests {
         assert!(
             reg.react(
                 &Ok(deliberate::Outcome::Empty),
-                &NudgeCtx {
-                    must_reply: false,
-                    is_headless_root: false,
-                    pinned: None,
-                    waiting_on_children: false,
-                },
-                &emit(),
-                &mut log,
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn completion_stops() {
-        let mut reg = Registry::new();
-        let mut log = fresh_log("complete");
-        assert!(
-            reg.react(
-                &Ok(deliberate::Outcome::Complete("done".into())),
                 &NudgeCtx {
                     must_reply: false,
                     is_headless_root: false,

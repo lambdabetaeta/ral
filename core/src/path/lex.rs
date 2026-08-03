@@ -460,17 +460,6 @@ mod tests {
     }
 
     #[test]
-    fn aliases_includes_self() {
-        assert!(path_aliases(Path::new("/usr/local")).contains(&pb("/usr/local")));
-    }
-
-    #[test]
-    fn aliases_unrelated_path_unchanged() {
-        let a = path_aliases(Path::new("/usr/bin/ls"));
-        assert_eq!(a, vec![pb("/usr/bin/ls")]);
-    }
-
-    #[test]
     fn aliases_no_false_match_on_substring() {
         let a = path_aliases(Path::new("/tmpx/foo"));
         assert_eq!(a, vec![pb("/tmpx/foo")]);

@@ -2027,28 +2027,6 @@ mod tests {
         );
     }
 
-    /// The mechanism attaches no policy: a shell granted no `deferred_lease`
-    /// (the interactive shape) registers exactly as the agent-framed case above.
-    #[test]
-    fn spawn_child_registers_with_no_deferred_lease_granted() {
-        let shell = Shell::new(crate::io::TerminalState::default());
-        let m = Mooring::adrift();
-        assert!(m.deferred_lease.is_none(), "precondition: no lease granted");
-        let snap = Arc::new(shell.mobile().scope);
-        let handle = spawn_child(
-            snap,
-            &m,
-            &shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
-            "<repl>",
-            |_, _child| Ok(Value::Unit),
-        )
-        .expect("spawn must succeed");
-        assert_eq!(shell.local.workers.count(), 1);
-        assert_eq!(shell.local.workers.snapshot()[0].handle, handle);
-    }
-
     /// Every eliminator that observes a settled worker removes its entry, while a
     /// `` `pending `` `poll` leaves it: only observation may mutate the registry.
     #[test]

@@ -1,0 +1,19 @@
+# Test: absolute-path reads the live cwd and the live HOME
+
+# The `cd`-tracked cwd, not just `within [dir: …]`, anchors a relative path —
+# and it keeps anchoring after the statement that moved it.
+let real_home = !{absolute-path '~'}
+let t = temp-dir
+cd $t
+if !{equal !{absolute-path 'a/../b'} "$t/b"} { echo 'cd anchors' }
+if !{equal !{absolute-path './c'} "$t/c"} { echo 'cd persists' }
+
+# `~` expands against the scoped HOME overlay, not the host's.
+within [env: [HOME: '/ral-home-probe']] {
+    if !{equal !{absolute-path '~/x'} '/ral-home-probe/x'} { echo 'scoped home' }
+    if !{equal !{absolute-path '~'} '/ral-home-probe'} { echo 'bare tilde' }
+}
+if !{equal !{absolute-path '~/x'} "$real_home/x"} { echo 'home restored' }
+
+rm -rf $t
+echo 'paths tests done'

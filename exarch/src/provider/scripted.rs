@@ -9,12 +9,16 @@ use std::sync::Mutex;
 pub struct Reply {
     text: String,
     outcome: Result<StepOut, ProviderError>,
+    /// Set by [`Self::panicking`]: the turn unwinds as it is consumed, rather
+    /// than answering.
+    panics: bool,
 }
 
 impl Reply {
     pub fn text(text: &str) -> Self {
         Self {
             text: text.to_string(),
+            panics: false,
             outcome: Ok(StepOut {
                 assistant_message: ChatMessage::assistant(text.to_string()),
                 tool_calls: Vec::new(),
@@ -32,6 +36,7 @@ impl Reply {
     pub fn stalled(text: &str) -> Self {
         Self {
             text: text.to_string(),
+            panics: false,
             outcome: Ok(StepOut {
                 assistant_message: ChatMessage::assistant(text.to_string()),
                 tool_calls: Vec::new(),
@@ -53,6 +58,7 @@ impl Reply {
             .collect::<Vec<_>>();
         Self {
             text: String::new(),
+            panics: false,
             outcome: Ok(StepOut {
                 assistant_message: ChatMessage::assistant(parts),
                 tool_calls: calls,
@@ -73,6 +79,7 @@ impl Reply {
             .collect::<Vec<_>>();
         Self {
             text: String::new(),
+            panics: false,
             outcome: Ok(StepOut {
                 assistant_message: ChatMessage::assistant(parts),
                 tool_calls: calls,
@@ -89,6 +96,7 @@ impl Reply {
     pub fn empty() -> Self {
         Self {
             text: String::new(),
+            panics: false,
             outcome: Ok(StepOut {
                 assistant_message: ChatMessage::assistant(genai::chat::MessageContent::default()),
                 tool_calls: Vec::new(),
@@ -100,9 +108,20 @@ impl Reply {
         }
     }
 
+    /// A turn that unwinds host-side as it is consumed, standing in for a
+    /// transport or decode crash — the arm `Agent::attend`'s `catch_unwind`
+    /// exists for, which no eval-side panic can reach.
+    pub fn panicking() -> Self {
+        Self {
+            panics: true,
+            ..Self::empty()
+        }
+    }
+
     pub fn error(error: ProviderError) -> Self {
         Self {
             text: String::new(),
+            panics: false,
             outcome: Err(error),
         }
     }
@@ -131,7 +150,8 @@ impl Script {
 
     /// The scripted counterpart to `Engine::complete`: no stream, so the whole
     /// reply fires through `on_text` at once and `on_think` never runs. Panics
-    /// once the queue runs dry — a test drove more turns than it scripted.
+    /// once the queue runs dry — a test drove more turns than it scripted —
+    /// and on a [`Reply::panicking`] turn, by construction.
     pub(super) fn complete<F: FnMut(&str), G: FnMut(&str)>(
         &self,
         _model: &str,
@@ -144,6 +164,7 @@ impl Script {
             .unwrap()
             .pop_front()
             .expect("scripted provider ran out of `complete` replies");
+        assert!(!reply.panics, "scripted host panic");
         if !reply.text.is_empty() {
             on_text(&reply.text);
         }

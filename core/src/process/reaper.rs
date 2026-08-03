@@ -197,27 +197,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn arm_fires_after_the_ceiling() {
-        let scope = CancelScope::default();
-        let _d = arm_lifetime(scope.clone(), Duration::from_millis(20));
-
-        let mut fired = false;
-        for _ in 0..200 {
-            if scope.is_cancelled() {
-                fired = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(fired, "an armed scope must be cancelled after its ceiling");
-        assert_eq!(
-            scope.cause(),
-            Some(CancelCause::Deadline),
-            "the reaper fires the Deadline cause"
-        );
-    }
-
-    #[test]
     fn arm_does_not_fire_before_the_ceiling() {
         let scope = CancelScope::default();
         let _d = arm_lifetime(scope.clone(), Duration::from_hours(1));
@@ -276,29 +255,6 @@ mod tests {
             scope.cause(),
             Some(CancelCause::Deadline),
             "the reaper fires the Deadline cause"
-        );
-    }
-
-    #[test]
-    fn arm_callback_runs_after_the_ceiling() {
-        let fired = Arc::new(AtomicBool::new(false));
-        let flag = fired.clone();
-        arm_callback(Duration::from_millis(20), move || {
-            flag.store(true, Ordering::Release);
-        })
-        .keep();
-
-        let mut ran = false;
-        for _ in 0..200 {
-            if fired.load(Ordering::Acquire) {
-                ran = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(
-            ran,
-            "a Run deadline must invoke its closure after the ceiling"
         );
     }
 

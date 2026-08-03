@@ -1251,13 +1251,6 @@ mod windows {
             assert_eq!(decode_wide_null(&encoded), s);
         }
 
-        #[test]
-        fn wide_null_round_trips_a_non_ascii_program_path() {
-            let path = r"C:\Users\café\日本語プロジェクト\ral.exe";
-            let encoded = wide_null(OsStr::new(path)).unwrap();
-            assert_eq!(decode_wide_null(&encoded), path);
-        }
-
         /// `environment_block` layers `edits` over the live environment, so
         /// the assertion hunts the block for the one injected entry.
         #[test]

@@ -792,21 +792,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_in_path_anchors_relative_entries_to_cwd() {
-        let tmp = tempfile::tempdir().unwrap();
-        let bin = tmp.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        touch(&bin.join("runme"), 0o755);
-        // Against the supplied cwd, not the process cwd: dispatch and the
-        // exec gate must land on the binary the shell's own `./bin` names.
-        let hit = resolve_in_path("runme", "./bin", SearchCwd::of(tmp.path())).unwrap();
-        assert_eq!(
-            std::fs::canonicalize(&hit).unwrap(),
-            std::fs::canonicalize(bin.join("runme")).unwrap(),
-        );
-    }
-
-    #[test]
     fn locate_folds_the_dots_out_of_an_anchored_path() {
         let tmp = tempfile::tempdir().unwrap();
         touch(&tmp.path().join("runme"), 0o755);

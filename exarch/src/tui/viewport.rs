@@ -1332,19 +1332,6 @@ mod tests {
         }
     }
 
-    /// Between turns `open` is empty, so the window is exactly the flatten.
-    #[test]
-    fn no_seat_between_turns() {
-        let mut vp = viewport();
-        vp.push_token("```ral\nlet x = 1\n", 0);
-        vp.close_boundary(0);
-        let w = vp.render_window(READ_W, 24);
-        assert!(
-            !plain(w.lines.last().expect("committed rows")).contains('░'),
-            "an idle viewport shows no streaming seat"
-        );
-    }
-
     /// `scroll_down` clears `sticky`, so `render_window` takes the clamping
     /// branch — scrolling down at the bottom must not over-scroll past
     /// `max_off` and blank the rows below.

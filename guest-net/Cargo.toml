@@ -26,3 +26,7 @@ smoltcp = { version = "0.13", default-features = false, features = [
 httparse = "1"
 # `Authority` parsing for the CONNECT target — deliberately not a full URL.
 http = "1"
+
+[dev-dependencies]
+# The loopback suite reads the audit ledger back, one JSON object per line.
+serde_json = { workspace = true }

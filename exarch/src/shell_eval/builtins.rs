@@ -1179,6 +1179,34 @@ mod tests {
         }
     }
 
+    /// The idiom `service-handle`'s doc advertises, put to the checker: two
+    /// call sites eliminated at different value types.  A monomorphic `Handle`
+    /// fails the first, an under-generalised one the second.
+    #[test]
+    fn service_handle_typechecks_under_its_documented_eliminators() {
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
+        dress(&mut shell);
+        match ral_core::compile_and_typecheck(
+            "let a = await !{service-handle 3}\n\
+             let n = $[$a[value] + 1]\n\
+             let b = await !{service-handle 4}\n\
+             let s = string-replace 'x' 'y' $b[value]\n\
+             cancel !{service-handle 5}",
+            shell.session_schemes(),
+            ral_core::source::FileId::DUMMY,
+            "",
+        ) {
+            ral_core::CompileOutcome::Compiled(_) => {}
+            ral_core::CompileOutcome::Parse(e) => panic!("expected a clean parse, got: {e}"),
+            ral_core::CompileOutcome::Types(errs) => panic!(
+                "`service-handle`'s ∀α Handle must instantiate per call site, got: {:?}",
+                errs.iter()
+                    .map(|e| e.kind.render_message())
+                    .collect::<Vec<_>>()
+            ),
+        }
+    }
+
     #[test]
     fn service_registers_as_durable_with_its_description() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());

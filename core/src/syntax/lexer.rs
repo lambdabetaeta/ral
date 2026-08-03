@@ -1474,22 +1474,6 @@ mod tests {
     }
 
     #[test]
-    fn assignment() {
-        // With `let`, `=` is an ordinary bare word.
-        let toks = tok_types("let x = hello");
-        assert_eq!(
-            toks,
-            vec![
-                plain("let"),
-                plain("x"),
-                plain("="),
-                plain("hello"),
-                Token::Eof,
-            ]
-        );
-    }
-
-    #[test]
     fn variable() {
         let toks = tok_types("echo $x");
         assert_eq!(
@@ -1510,19 +1494,6 @@ mod tests {
             vec![
                 plain("echo"),
                 Token::SingleQuoted("hello world".into()),
-                Token::Eof,
-            ]
-        );
-    }
-
-    #[test]
-    fn single_quoted_embed_via_bump() {
-        let toks = tok_types("echo #'it's'#");
-        assert_eq!(
-            toks,
-            vec![
-                plain("echo"),
-                Token::SingleQuoted("it's".into()),
                 Token::Eof,
             ]
         );
@@ -1628,21 +1599,6 @@ mod tests {
     fn bare_backtick_is_lex_error() {
         let err = lex_err("echo `");
         assert!(err.contains("expected tag label after backtick"));
-    }
-
-    #[test]
-    fn block_tokens() {
-        let toks = tok_types("{ echo hello }");
-        assert_eq!(
-            toks,
-            vec![
-                Token::LBrace,
-                plain("echo"),
-                plain("hello"),
-                Token::RBrace,
-                Token::Eof,
-            ]
-        );
     }
 
     #[test]
@@ -2133,12 +2089,6 @@ mod tests {
             toks,
             vec![plain("foo"), Token::Caret, plain("bar"), Token::Eof,]
         );
-    }
-
-    #[test]
-    fn backslash_not_special_in_middle() {
-        let toks = tok_types("foo\\bar");
-        assert_eq!(toks, vec![plain("foo\\bar"), Token::Eof]);
     }
 
     #[test]

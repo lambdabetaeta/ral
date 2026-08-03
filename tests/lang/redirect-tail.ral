@@ -1,0 +1,24 @@
+# Test: a tail call made under a trailing redirect writes inside the fd frame.
+
+let assert_eq = { |name expected actual|
+    if !{equal $expected $actual} {} else {
+        echo "FAIL:" $name "expected:" $expected "actual:" $actual 1>&2
+        fail [status: 1]
+    }
+}
+
+let tmpdir = temp-dir
+let inner = { |_| echo inside }
+let outer = { |_| inner unit }
+
+# `outer unit` is the last statement of `run`, so it reaches the redirect in
+# tail position: the frame must absorb the tail call while it is still open.
+let run = { |_| outer unit > "$tmpdir/out.txt" }
+run unit
+
+let got = !{from-string < "$tmpdir/out.txt"}
+assert_eq 'tail call writes inside the redirect frame' 'inside
+' $got
+
+rm -rf $tmpdir
+echo 'redirect tail done'

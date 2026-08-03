@@ -143,17 +143,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_highlights_out_of_range_span_clamps() {
-        let line = "hi";
-        let span = HighlightSpan {
-            span: Span::clamped(0, 999, line.chars().count()),
-            style: "command".into(),
-        };
-        // Must not panic: the range is clamped to the slice length.
-        let _ = apply_highlights(line, &[span]);
-    }
-
-    #[test]
     fn apply_highlights_span_reclamps_to_shorter_line() {
         // A span minted against a longer buffer must not panic when the line
         // rendered at the slice site has since shrunk.

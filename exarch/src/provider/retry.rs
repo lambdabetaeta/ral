@@ -175,6 +175,59 @@ mod tests {
         ));
     }
 
+    /// From the wire error to the clock: a provider asking for ten minutes is
+    /// honoured only up to the cap, so a 429 costs the session minutes, not an
+    /// hour indistinguishable from a hang.
+    #[test]
+    fn rate_limited_429_spends_its_budget_under_the_delay_cap() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("600"),
+        );
+        let error = ProviderError::from_genai(
+            &genai::Error::WebModelCall {
+                model_iden: genai::ModelIden::new(genai::adapter::AdapterKind::Anthropic, "m"),
+                webc_error: genai::webc::Error::ResponseFailedStatus {
+                    status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+                    body: String::new(),
+                    headers: Box::new(headers),
+                },
+            },
+            "m",
+        );
+        assert!(matches!(
+            error,
+            ProviderError::RateLimited {
+                retry_after: Some(_),
+                ..
+            }
+        ));
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .expect("build paused retry test runtime");
+        runtime.block_on(async {
+            let calls = std::cell::Cell::new(0u32);
+            let start = tokio::time::Instant::now();
+            let out: Result<(), ProviderError> =
+                retry_with_backoff("test", &cancel::Token::new(), async |_attempt| {
+                    calls.set(calls.get() + 1);
+                    Attempt::Failed(error.clone())
+                })
+                .await;
+            assert!(matches!(out, Err(ProviderError::RateLimited { .. })));
+            assert_eq!(calls.get(), RATE_LIMIT_MAX_ATTEMPTS);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed >= Duration::from_secs(140) && elapsed < Duration::from_secs(200),
+                "five waits capped at {RATE_LIMIT_MAX_DELAY_MS}ms, got {elapsed:?}"
+            );
+        });
+    }
+
     #[test]
     fn idle_timeout_budget_stays_bounded() {
         let worst_case: Duration = (1..=MAX_ATTEMPTS).map(idle_timeout).sum();

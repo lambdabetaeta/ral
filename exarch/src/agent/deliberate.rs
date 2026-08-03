@@ -494,6 +494,7 @@ mod tests {
     use crate::bus::{AgentOutcome, Inbox, Post};
     use crate::fleet::registry::{AGENT_LEASE_IDLE, EvalReach, Registration, RunScope};
     use crate::provider::scripted::{Reply, Script};
+    use genai::chat::ChatRole;
     use ral_core::Shell;
     use ral_core::Value;
     use ral_core::typecheck::builtins::{BuiltinTypeRule, mk_scheme, pure, thunk};
@@ -638,6 +639,61 @@ mod tests {
             child.agents.settle(sibling, sibling_generation),
             "reply must not bump the global generation and poison siblings"
         );
+    }
+
+    /// A prompt typed while a tool batch runs is committed as a steering turn
+    /// between the results and the next assistant turn — the one mid-exchange
+    /// user ingress there is.  Several drained at once coalesce into one
+    /// message, blank-line joined.
+    #[test]
+    fn steering_typed_during_a_tool_batch_is_committed_between_results_and_reply() {
+        let dir = tmp("steering-mid-batch");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        session
+            .inbox
+            .push(Post::UserSteering("actually, stop after this".into()))
+            .unwrap();
+        session
+            .inbox
+            .push(Post::UserSteering("and report".into()))
+            .unwrap();
+
+        let provider = scripted(
+            "test-model",
+            Script::new()
+                .then(Reply::tool_calls(vec![ral_call("c1", "let steer_x = 1")]))
+                .then(Reply::text("ok")),
+        );
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::new(tx, session.id);
+        match session.deliberate(&provider, Some("go".into()), &cancel::Token::new(), &emit) {
+            Ok(Outcome::Complete(s)) => assert_eq!(s, "ok"),
+            other => panic!("the steering prompt must be admitted mid-exchange, got {other:?}"),
+        }
+
+        let ms = session.rendered_messages();
+        assert_eq!(
+            ms.iter().map(|m| m.role.clone()).collect::<Vec<_>>(),
+            vec![
+                ChatRole::User,
+                ChatRole::Assistant,
+                ChatRole::Tool,
+                ChatRole::User,
+                ChatRole::Assistant,
+            ],
+            "the steering turn sits between the tool results and the next reply"
+        );
+        assert_eq!(
+            ms[3].content.first_text(),
+            Some("actually, stop after this\n\nand report"),
+            "both drained prompts coalesce into the one admitted message"
+        );
+        assert!(
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .any(|e| matches!(e.kind, Kind::UserPromptEcho(t) if t.contains("and report"))),
+            "the arrival must be announced as it enters context"
+        );
+        assert!(session.is_ready());
     }
 
     /// A provider error mid-deliberation strands the session in

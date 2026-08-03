@@ -369,21 +369,9 @@ fn pipeline_stage_handler_redirect_to_file_is_honored() {
 // ── Broken pipe ──────────────────────────────────────────────────────────────
 
 #[test]
-fn broken_pipe_large_producer_small_consumer() {
-    // yes generates infinite output; head reads 100 lines and closes the pipe.
-    // The pipeline must not hang.
-    let o = run_with_timeout(
-        &[],
-        "yes MARKER | head -100 | wc -l",
-        Duration::from_secs(5),
-    )
-    .expect("pipeline timed out — probable broken-pipe deadlock");
-    assert_eq!(o.status, 0);
-    assert_eq!(o.stdout.trim(), "100");
-}
-
-#[test]
 fn broken_pipe_very_large_count() {
+    // `yes` generates infinite output; `head` reads its fill and closes the
+    // pipe.  The pipeline must not hang.
     let o = run_with_timeout(
         &[],
         "yes DATA | head -10000 | wc -l",
@@ -435,18 +423,6 @@ echo done
     }
 }
 
-#[test]
-fn spawned_pipeline_result_is_awaitable() {
-    let script = r"
-let h = !{spawn { /bin/echo 42 | cat }}
-let res = await $h
-echo !{to-bytes $res[stdout] | from-string}
-";
-    let o = run(script);
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert!(o.stdout.contains("42"));
-}
-
 // ── Mixed pipeline output ────────────────────────────────────────────────────
 
 #[test]
@@ -457,13 +433,6 @@ fn mixed_pipeline_range_to_wc() {
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     let count: u32 = o.stdout.trim().parse().expect("grep -c output");
     assert_eq!(count, 20);
-}
-
-#[test]
-fn mixed_pipeline_range_grep() {
-    let o = run("range 1 100 | to-lines | grep 42");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert!(o.stdout.contains("42"));
 }
 
 // ── Stress: many sequential pipelines ───────────────────────────────────────
@@ -1048,22 +1017,6 @@ fn parse_tagged_pgid(stderr: &str, tag: &str) -> Option<i32> {
 }
 
 #[test]
-fn race_short_producer_does_not_strand_consumer() {
-    // `printf ""` exits immediately.  The consumer (a ral pgid probe) must
-    // still join the pipeline pgid and run to completion.
-    let ral = ral_bin();
-    let script = format!("printf \"\" | {} --ral-test-pgid-check post", ral.display());
-    let o = run_with_timeout(&[], &script, Duration::from_secs(5))
-        .expect("pipeline hung after short producer — anchor lost?");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert!(
-        parse_tagged_pgid(&o.stderr, "post").is_some(),
-        "consumer did not run; stderr: {}",
-        o.stderr
-    );
-}
-
-#[test]
 fn race_true_producer_does_not_strand_consumer() {
     // `/usr/bin/true` (the external, byte-typed) exits immediately with no
     // bytes.  Distinct from ral's value-typed `true` builtin, which would
@@ -1085,27 +1038,8 @@ fn race_true_producer_does_not_strand_consumer() {
 }
 
 #[test]
-fn pipeline_two_stages_share_anchor_pgid() {
-    // Both stages must report the same pgid — the anchor's.
-    let ral = ral_bin();
-    let script = format!(
-        "{} --ral-test-pgid-check up | {} --ral-test-pgid-check down",
-        ral.display(),
-        ral.display(),
-    );
-    let o = run_with_timeout(&[], &script, Duration::from_secs(5)).expect("pipeline hung");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    let up = parse_tagged_pgid(&o.stderr, "up").expect("up pgid in stderr");
-    let down = parse_tagged_pgid(&o.stderr, "down").expect("down pgid in stderr");
-    assert_eq!(
-        up, down,
-        "stages did not share a pgid; stderr: {}",
-        o.stderr
-    );
-}
-
-#[test]
 fn pipeline_three_stages_share_anchor_pgid() {
+    // Every stage must report the same pgid — the anchor's.
     let ral = ral_bin();
     let script = format!(
         "{r} --ral-test-pgid-check a | {r} --ral-test-pgid-check b | {r} --ral-test-pgid-check c",
@@ -1168,7 +1102,8 @@ fn pipeline_mid_stage_launch_failure_with_long_producer_kills_it() {
 
 #[test]
 fn race_repeats_deterministically() {
-    // Run the short-producer race a number of times in a row.  The
+    // `printf ""` exits immediately; the consumer (a ral pgid probe) must
+    // still join the pipeline pgid and run to completion, every time.  The
     // anchor + deferred-job protocol should make this deterministic; in a
     // pre-anchor build, occasional timeouts would surface here.
     let ral = ral_bin();

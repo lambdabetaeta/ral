@@ -1311,6 +1311,41 @@ mod tests {
         );
     }
 
+    /// A detached worker's replayed batch renders, but carries no live-pin
+    /// state: only [`SurfaceApplier::live`] moves the mirror, so a flush can
+    /// never resurrect a pin the agent has since cleared.
+    #[test]
+    fn a_deferred_batch_renders_a_pin_without_touching_the_mirror() {
+        let mirror = fresh_mirror();
+        let (emit, rx) = crate::bus::dummy_emitter();
+        let applier = SurfaceApplier {
+            emit,
+            pins: Some(mirror.clone()),
+        };
+
+        applier.deferred(vec![pin_value("tasks", "hi")]);
+        assert!(
+            matches!(
+                rx.try_recv().map(|e| e.kind),
+                Ok(Kind::Pin { key, .. }) if key == "tasks"
+            ),
+            "the deferred batch still renders its pin onto the bus"
+        );
+        assert!(
+            mirror.lock().expect("pin register poisoned").is_empty(),
+            "a flush carries no live-pin state, so the mirror is untouched"
+        );
+
+        applier.live(pin_value("tasks", "hi"));
+        assert!(
+            mirror
+                .lock()
+                .expect("pin register poisoned")
+                .contains_key("tasks"),
+            "the live path is the one that folds a pin into the mirror"
+        );
+    }
+
     /// The receipt names the child, and its reply lands in the parent's inbox
     /// once it settles.
     #[test]
