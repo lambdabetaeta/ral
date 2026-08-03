@@ -81,9 +81,10 @@ fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
     });
     match report {
         RunReport::Ran {
-            result: Ok(Value::Bytes(json)),
+            result: Ok(Value::Unit),
+            captured: Some(captured),
             ..
-        } => serde_json::from_slice(&json).expect("`to-json` emits JSON"),
+        } => serde_json::from_slice(&captured.stdout).expect("`to-json` emits JSON"),
         RunReport::Ran { result, .. } => {
             panic!("{call} must return a receipt record, got {result:?}")
         }

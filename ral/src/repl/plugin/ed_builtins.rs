@@ -674,15 +674,17 @@ fn scheme_tui(u: &mut Unifier) -> Scheme {
     let av = u.fresh_tyvar();
     let i = u.fresh_modevar();
     let o = u.fresh_modevar();
+    let r = u.fresh_modevar();
     scheme(
         &[av],
-        &[i, o],
+        &[i, o, r],
         &[],
         thunk(fun(
             thunk(CompTy::Return(
                 PipeSpec {
                     input: PipeMode::Var(i),
                     output: PipeMode::Var(o),
+                    result: PipeMode::Var(r),
                 },
                 Box::new(Ty::Var(av)),
             )),

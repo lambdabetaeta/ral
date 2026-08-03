@@ -143,11 +143,12 @@ pub struct InferCtx {
     /// The value flowing out of each pipeline stage.  Feeds the structural REPL's
     /// typed spine; the evaluator never reads it.
     pub stage_types: HashMap<usize, Ty>,
-    pub bind_outputs: HashMap<usize, PipeMode>,
-    /// The output mode of the computation a node's value actually comes from: a
-    /// `Seq` may write bytes before its last statement, and those are effects, not
-    /// the value's byte source.
-    pub final_outputs: HashMap<usize, PipeMode>,
+    /// A `Comp` node's own top-level `result`, recorded for `annotate`'s
+    /// demand walk; absent = no `Return` shape at record time = `∅`.
+    pub results: HashMap<usize, PipeMode>,
+    /// A scope arm's (`Val`-keyed) own `result`, the `Val`-level analogue of
+    /// [`Self::results`] — scope arms have no `Comp` node of their own.
+    pub val_results: HashMap<usize, PipeMode>,
 }
 
 impl Default for InferCtx {
@@ -165,8 +166,8 @@ impl InferCtx {
             bind_tys: HashMap::new(),
             stage_specs: HashMap::new(),
             stage_types: HashMap::new(),
-            bind_outputs: HashMap::new(),
-            final_outputs: HashMap::new(),
+            results: HashMap::new(),
+            val_results: HashMap::new(),
         }
     }
 

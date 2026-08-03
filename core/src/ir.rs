@@ -7,7 +7,7 @@
 //! onto, so a span rides with the value rather than the parent; `None`
 //! means the node is synthetic — a builtin, the prelude, generated code.
 
-use crate::mode::{ByteMode, Wire};
+use crate::mode::Wire;
 use crate::path::tilde::TildePath;
 use crate::source::Spanned;
 use crate::syntax::ast::{BinaryOp, Pattern, RedirectMode};
@@ -189,7 +189,6 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
             pattern,
             rest,
             scheme: _,
-            rhs_output: _,
         } => {
             walk_comp(comp, out);
             walk_pattern_defaults(pattern, out);
@@ -251,6 +250,7 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
             walk_val(&table.item, out);
         }
         CompKind::Scope(op) => walk_scope_op(op, out),
+        CompKind::Capture(body) => walk_comp(body, out),
     }
 }
 
@@ -384,10 +384,6 @@ pub enum CompKind {
         /// check starts from the live binding.  Closed — every variable
         /// ground or quantified — so it survives across per-run unifiers.
         scheme: Option<Box<crate::typecheck::Scheme>>,
-        /// Ground output mode of `comp`; the evaluator's bind rule reads it
-        /// to decide stdout capture.  The elaborator emits the
-        /// [`ByteMode::Empty`] placeholder, the annotation pass the verdict.
-        rhs_output: ByteMode,
     },
     /// `M : A → B, V : A ⊢ M V : B` — the elimination form taken when the
     /// head resolves to a bound value (`$f x`, `(|x| body) x`).  It carries
@@ -462,6 +458,9 @@ pub enum CompKind {
     /// Effect-frame scope: install an effect for the duration of a body,
     /// then restore.
     Scope(ScopeOp),
+    /// Checker-inserted value boundary: run `body` with its byte channel
+    /// captured, decode the bytes as its value. No surface syntax.
+    Capture(Arc<Comp>),
 }
 
 /// Body of a [`CompKind::Exec`].
@@ -584,7 +583,6 @@ mod tests {
             pattern: bind_pattern,
             rest: ret("r_bind_rest"),
             scheme: None,
-            rhs_output: crate::mode::ByteMode::Empty,
         });
 
         let app = Spanned::synthetic(CompKind::App {
@@ -714,6 +712,7 @@ mod tests {
         let val_thunk = Spanned::synthetic(CompKind::Return(Val::Thunk(Arc::new(
             Spanned::synthetic(CompKind::Return(var("r_thunk_body"))),
         ))));
+        let capture = Spanned::synthetic(CompKind::Capture(ret("r_capture_body")));
 
         let whole = Spanned::synthetic(CompKind::Seq(vec![
             Arc::new(Spanned::synthetic(CompKind::Force(var("r_force")))),
@@ -744,6 +743,7 @@ mod tests {
             Arc::new(val_variant),
             Arc::new(val_variant_empty),
             Arc::new(val_thunk),
+            Arc::new(capture),
         ]));
 
         let found: std::collections::HashSet<&str> = referenced_names(&whole).into_iter().collect();
@@ -799,6 +799,7 @@ mod tests {
             "r_map_spread",
             "r_variant_payload",
             "r_thunk_body",
+            "r_capture_body",
         ];
 
         for name in expected {

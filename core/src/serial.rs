@@ -585,8 +585,8 @@ mod tests {
 
     /// The child reads modes off the node rather than re-inferring, so a
     /// lambda body must carry its interior verdicts across the wire — a wire
-    /// per pipeline stage, a ground RHS output mode on each `Bind`.  There is
-    /// no thunk-root wire, so those interior slots are the whole of it.
+    /// per pipeline stage, a `Capture` node on a byte-payload `Bind` RHS.
+    /// There is no thunk-root wire, so those interior slots are the whole of it.
     fn annotated_lambda_body() -> Arc<Comp> {
         let src = r"let f = { |x| let y = /bin/echo $x; /bin/cat | /bin/cat }";
         let ast = crate::parse(src).expect("parse");
@@ -624,15 +624,16 @@ mod tests {
             }
             CompKind::Force(crate::ir::Val::Thunk(c))
             | CompKind::Return(crate::ir::Val::Thunk(c)) => walk_comp(c, visit),
+            CompKind::Capture(c) => walk_comp(c, visit),
             _ => {}
         }
     }
 
-    /// `(byte pipeline wire, byte bind rhs_output)`.  The elaborator's
-    /// placeholder is all-`Empty`, so a `Bytes` edge can only be the checker's.
+    /// `(byte pipeline wire, a `Capture` node)`. The elaborator never emits
+    /// either, so finding one is proof the checker wrote it.
     fn interior_annotations(body: &Comp) -> (bool, bool) {
         use crate::mode::ByteMode;
-        let (mut wires, mut rhs) = (false, false);
+        let (mut wires, mut capture) = (false, false);
         walk_comp(body, &mut |c| match &c.item {
             CompKind::Pipeline { wires: ws, .. }
                 if ws
@@ -641,21 +642,21 @@ mod tests {
             {
                 wires = true;
             }
-            CompKind::Bind {
-                rhs_output: ByteMode::Bytes,
-                ..
-            } => rhs = true,
+            CompKind::Capture(_) => capture = true,
             _ => {}
         });
-        (wires, rhs)
+        (wires, capture)
     }
 
     #[test]
     fn lambda_body_round_trips_with_interior_annotations() {
         let body = annotated_lambda_body();
-        let (wires, rhs) = interior_annotations(&body);
+        let (wires, capture) = interior_annotations(&body);
         assert!(wires, "body's pipeline carries a Bytes wire annotation");
-        assert!(rhs, "body's bind carries a Bytes rhs_output annotation");
+        assert!(
+            capture,
+            "body's byte-payload bind RHS carries a Capture node"
+        );
 
         let lambda = SerialValue::Ext(Closure::Lambda(SerialLambda {
             param: IrPattern::Name("x".to_string()),
@@ -674,9 +675,9 @@ mod tests {
             *back.body, *body,
             "the deserialised body must equal the original, annotations and all"
         );
-        let (wires, rhs) = interior_annotations(&back.body);
+        let (wires, capture) = interior_annotations(&back.body);
         assert!(wires, "pipeline wires survive the round-trip");
-        assert!(rhs, "bind rhs_output survives the round-trip");
+        assert!(capture, "the Capture node survives the round-trip");
     }
 
     /// A reference past the end of the table is out of range, not a cycle:

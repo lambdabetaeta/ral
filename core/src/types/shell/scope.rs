@@ -4,7 +4,9 @@
 //! inline save-modify-restore around the body rather than an RAII type.
 
 use super::Shell;
-use crate::types::{Binding, Capabilities, ExecNode, HandlerEntry, HandlerRole, Map, Settled, Value};
+use crate::types::{
+    Binding, Capabilities, ExecNode, HandlerEntry, HandlerRole, Map, Settled, Value,
+};
 
 impl Shell {
     /// Run `f` with `capabilities` pushed for its dynamic extent.  The single

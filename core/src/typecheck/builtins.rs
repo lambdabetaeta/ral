@@ -15,7 +15,7 @@ use super::fmt::{fmt_scheme, fmt_ty};
 use super::generalize::generalize;
 use super::infer::Inferencer;
 use super::scheme::{CachedFreeVars, Scheme};
-use super::ty::{CompTy, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar};
+use super::ty::{ByteMode, CompTy, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar};
 use super::unify::Unifier;
 use crate::types::BuiltinTable;
 
@@ -126,6 +126,7 @@ pub enum CompTemplate {
         input: ModeTemplate,
         output: ModeTemplate,
         value: TyTemplate,
+        result: ByteMode,
     },
     Never,
     LinesStep,
@@ -164,24 +165,35 @@ pub fn mode_of_template(template: ModeTemplate, u: &mut Unifier) -> PipeMode {
 pub fn sig_pipe_spec(result: &CompTemplate, u: &mut Unifier) -> PipeSpec {
     match result {
         CompTemplate::Pure(_) => PipeSpec::none(),
-        CompTemplate::Return { input, output, .. } => PipeSpec {
+        CompTemplate::Return {
+            input,
+            output,
+            result,
+            ..
+        } => PipeSpec {
             input: mode_of_template(*input, u),
             output: mode_of_template(*output, u),
+            result: (*result).into(),
         },
+        // A divergent computation (`fail`, `exit`) joins either side of a
+        // byte/value split, so its result is a fresh mode var like its
+        // input/output, not a ground `∅` — see `join_arm_results`.
         CompTemplate::Never => PipeSpec {
             input: u.fresh_mode(),
             output: u.fresh_mode(),
+            result: u.fresh_mode(),
         },
         CompTemplate::LinesStep => PipeSpec::decode(),
     }
 }
 
 /// The boundary [`PipeSpec`] of a streaming reducer (`fold-lines`): bytes in,
-/// output following the callback's own quantified output mode.
+/// output follows the callback's mode, result ground `None` (the reduction).
 pub fn reducer_spec(callback_output: PipeMode) -> PipeSpec {
     PipeSpec {
         input: PipeMode::Bytes,
         output: callback_output,
+        result: PipeMode::None,
     }
 }
 
@@ -250,16 +262,16 @@ macro_rules! scheme {
     // scheme!(ask: pipe [Ty::String] -> Ty::String);
     ($name:ident: pipe [$($p:expr),*] -> $ret:expr) => {
         pub fn $name(u: &mut Unifier) -> Scheme {
-            let (m0,m1,ct) = fm(u, $ret);
-            mk_scheme(&[], &[m0,m1], &[], thunk(curry_pipe!($($p),* => ct)))
+            let (m0,m1,m2,ct) = fm(u, $ret);
+            mk_scheme(&[], &[m0,m1,m2], &[], thunk(curry_pipe!($($p),* => ct)))
         }
     };
     // scheme!(source_op<av>: pipe [Ty::String] -> Ty::Var(av));
     ($name:ident<$tv:ident>: pipe [$($p:expr),*] -> $ret:expr) => {
         pub fn $name(u: &mut Unifier) -> Scheme {
             let $tv = u.fresh_tyvar();
-            let (m0,m1,ct) = fm(u, $ret);
-            mk_scheme(&[$tv], &[m0,m1], &[], thunk(curry_pipe!($($p),* => ct)))
+            let (m0,m1,m2,ct) = fm(u, $ret);
+            mk_scheme(&[$tv], &[m0,m1,m2], &[], thunk(curry_pipe!($($p),* => ct)))
         }
     };
 }
@@ -281,8 +293,8 @@ macro_rules! curry_pipe {
 /// Command signatures for builtins whose surface is not a curried value.
 pub mod sig {
     use super::{
-        ArgSig, ArgTemplate, BuiltinDiagnostic, BuiltinSig, CompTemplate, ModeTemplate, TyTemplate,
-        scheme,
+        ArgSig, ArgTemplate, BuiltinDiagnostic, BuiltinSig, ByteMode, CompTemplate, ModeTemplate,
+        TyTemplate, scheme,
     };
 
     const ANY: ArgTemplate = ArgTemplate::Any;
@@ -315,6 +327,22 @@ pub mod sig {
             input,
             output,
             value,
+            result: ByteMode::Empty,
+        }
+    }
+
+    /// Like [`ret`], but the byte channel *is* the result: `result: Bytes`,
+    /// so `value` must be `Unit` (WF-2).
+    const fn ret_bytes(input: ModeTemplate, output: ModeTemplate) -> CompTemplate {
+        debug_assert!(
+            matches!(output, ModeTemplate::Bytes),
+            "WF-1: result ⊑ output"
+        );
+        CompTemplate::Return {
+            input,
+            output,
+            value: TyTemplate::Unit,
+            result: ByteMode::Bytes,
         }
     }
 
@@ -344,7 +372,7 @@ pub mod sig {
 
     pub const TERMINAL_CONTROL: BuiltinSig = command(
         ArgSig::Exact(NO_ARGS),
-        ret(ModeTemplate::Fresh, ModeTemplate::Bytes, TyTemplate::Unit),
+        ret_bytes(ModeTemplate::Fresh, ModeTemplate::Bytes),
         None,
     );
 
@@ -369,25 +397,25 @@ pub mod sig {
 
     pub const TO_BYTES: BuiltinSig = command(
         ArgSig::DataLast(TO_BYTES_ARGS),
-        ret(ModeTemplate::None, ModeTemplate::Bytes, TyTemplate::Bytes),
+        ret_bytes(ModeTemplate::None, ModeTemplate::Bytes),
         None,
     );
 
     pub const TO_ANY_BYTES: BuiltinSig = command(
         ArgSig::DataLast(ONE_ANY),
-        ret(ModeTemplate::None, ModeTemplate::Bytes, TyTemplate::Bytes),
+        ret_bytes(ModeTemplate::None, ModeTemplate::Bytes),
         None,
     );
 
     pub const TO_LINE: BuiltinSig = command(
         ArgSig::DataLast(ONE_ANY),
-        ret(ModeTemplate::None, ModeTemplate::Bytes, TyTemplate::Unit),
+        ret_bytes(ModeTemplate::None, ModeTemplate::Bytes),
         None,
     );
 
     pub const TO_LINES: BuiltinSig = command(
         ArgSig::DataLast(TO_LINES_ARGS),
-        ret(ModeTemplate::None, ModeTemplate::Bytes, TyTemplate::Bytes),
+        ret_bytes(ModeTemplate::None, ModeTemplate::Bytes),
         None,
     );
 
@@ -409,13 +437,13 @@ pub mod sig {
 
     pub const HELP: BuiltinSig = command(
         ArgSig::Exact(NO_ARGS),
-        ret(ModeTemplate::Fresh, ModeTemplate::Bytes, TyTemplate::Unit),
+        ret_bytes(ModeTemplate::Fresh, ModeTemplate::Bytes),
         None,
     );
 
     pub const EXPLAIN: BuiltinSig = command(
         ArgSig::Exact(ONE_STR),
-        ret(ModeTemplate::Fresh, ModeTemplate::Bytes, TyTemplate::Unit),
+        ret_bytes(ModeTemplate::Fresh, ModeTemplate::Bytes),
         None,
     );
 
@@ -432,7 +460,7 @@ pub mod sig {
     /// pipeline typing treats it as the byte write it is.
     pub const ECHO: BuiltinSig = command(
         ArgSig::Any,
-        ret(ModeTemplate::None, ModeTemplate::Bytes, TyTemplate::Unit),
+        ret_bytes(ModeTemplate::None, ModeTemplate::Bytes),
         None,
     );
 
@@ -610,18 +638,20 @@ pub mod scheme {
         fs_list_entry_ty, fun, mk_scheme, poll_variant, pure, reducer_spec, thunk,
     };
 
-    /// `F[μ₀,μ₁] τ` with fresh per-call mode vars, so a first-class builtin
-    /// like `$ask` or `$source` takes its pipeline modes from each use site.
-    fn fm(u: &mut Unifier, ty: Ty) -> (super::ModeVar, super::ModeVar, CompTy) {
-        let (m0, m1) = (u.fresh_modevar(), u.fresh_modevar());
+    /// `F[μ₀,μ₁,μ₂] τ` with fresh per-call mode vars (`μ₂` is `result`), so a
+    /// first-class builtin like `$ask` or `$source` takes its pipeline modes
+    /// from each use site.
+    fn fm(u: &mut Unifier, ty: Ty) -> (super::ModeVar, super::ModeVar, super::ModeVar, CompTy) {
+        let (m0, m1, m2) = (u.fresh_modevar(), u.fresh_modevar(), u.fresh_modevar());
         let cty = CompTy::Return(
             PipeSpec {
                 input: PipeMode::Var(m0),
                 output: PipeMode::Var(m1),
+                result: PipeMode::Var(m2),
             },
             Box::new(ty),
         );
-        (m0, m1, cty)
+        (m0, m1, m2, cty)
     }
 
     // ── List operations ──────────────────────────────────────────────────
@@ -670,13 +700,12 @@ pub mod scheme {
 
     scheme!(compare<av,bv>: [Ty::Var(av), Ty::Var(bv)] -> Ty::Bool);
 
-    /// Result type of a higher-order callback: `F[μ₀,μ₁] τ` with fresh,
-    /// scheme-quantified modes.  `map { echo $x }` is ordinary ral, and mode
-    /// unification is equality-strict rather than subsumptive, so pinning the
-    /// callback to `F[none,none] τ` would reject every byte-writing body.
-    fn callback_result(u: &mut Unifier, ty: Ty) -> ([super::ModeVar; 2], CompTy) {
-        let (m0, m1, cty) = fm(u, ty);
-        ([m0, m1], cty)
+    /// Result type of a higher-order callback: `F[μ₀,μ₁,μ₂] τ`, all three
+    /// modes scheme-quantified — `map { echo $x }` needs `result` free to
+    /// instantiate `Bytes`.
+    fn callback_result(u: &mut Unifier, ty: Ty) -> ([super::ModeVar; 3], CompTy) {
+        let (m0, m1, m2, cty) = fm(u, ty);
+        ([m0, m1, m2], cty)
     }
 
     /// `map :: ∀α β μ₀ μ₁. U(α → F[μ₀,μ₁] β) → [α] → F [β]`
@@ -847,16 +876,18 @@ pub mod scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
         let mu = u.fresh_modevar();
+        let mr = u.fresh_modevar();
         let callback_result = CompTy::Return(
             PipeSpec {
                 input: PipeMode::None,
                 output: PipeMode::Var(mu),
+                result: PipeMode::Var(mr),
             },
             Box::new(a.clone()),
         );
         mk_scheme(
             &[av],
-            &[mu],
+            &[mu, mr],
             &[],
             thunk(fun(
                 thunk(fun(a.clone(), fun(Ty::String, callback_result))),
@@ -874,10 +905,10 @@ pub mod scheme {
     pub fn spawn(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
-        let (m0, m1, body) = fm(u, a.clone());
+        let (m0, m1, m2, body) = fm(u, a.clone());
         mk_scheme(
             &[av],
-            &[m0, m1],
+            &[m0, m1, m2],
             &[],
             thunk(fun(thunk(body), pure(Ty::Handle(Box::new(a))))),
         )
@@ -887,10 +918,10 @@ pub mod scheme {
     pub fn watch(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
-        let (m0, m1, body) = fm(u, a.clone());
+        let (m0, m1, m2, body) = fm(u, a.clone());
         mk_scheme(
             &[av],
-            &[m0, m1],
+            &[m0, m1, m2],
             &[],
             thunk(fun(
                 Ty::String,
@@ -906,10 +937,10 @@ pub mod scheme {
     pub fn service(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
-        let (m0, m1, body) = fm(u, a.clone());
+        let (m0, m1, m2, body) = fm(u, a.clone());
         mk_scheme(
             &[av],
-            &[m0, m1],
+            &[m0, m1, m2],
             &[],
             thunk(fun(
                 Ty::String,
@@ -1151,6 +1182,10 @@ impl Inferencer<'_> {
             CompTemplate::Never => self.ctx.unifier.fresh_ty(),
             CompTemplate::LinesStep => self.lines_step_ty(),
         };
+        debug_assert!(
+            pipe.result != PipeMode::Bytes || matches!(value, Ty::Unit),
+            "WF-2: a Bytes-result sig's value template must be Unit"
+        );
         CompTy::Return(pipe, Box::new(value))
     }
 

@@ -12,7 +12,7 @@ within [env: [MY_VAR: hello]] {
 # Expected: hello
 
 # within [env:] doesn't leak — printenv exits 1 when var is unset, use try
-try { printenv MY_VAR } { |_| echo 'MY_VAR correctly unset'; return "" }
+try { printenv MY_VAR | from-string } { |_| echo 'MY_VAR correctly unset'; return "" }
 # Expected: MY_VAR correctly unset
 
 # Nested within [env:]

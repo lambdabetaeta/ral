@@ -1542,9 +1542,10 @@ mod tests {
         assert_eq!(rows.len(), 2, "two stages");
         assert_eq!(rows[0].src, "/bin/echo hi");
         assert_eq!(rows[1].src, "/bin/cat");
-        // Both external stages resolve to `String` (the retained value type).
-        assert_eq!(rows[0].ty, "String");
-        assert_eq!(rows[1].ty, "String");
+        // Both external stages resolve to `Unit` (the retained value type;
+        // their payload rides the byte channel).
+        assert_eq!(rows[0].ty, "Unit");
+        assert_eq!(rows[1].ty, "Unit");
     }
 
     /// A non-pipeline buffer yields no spine rows.

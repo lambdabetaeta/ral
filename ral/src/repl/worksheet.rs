@@ -14,18 +14,17 @@
 //! Neither analysis is reimplemented here.  The edges reuse
 //! [`Ast::free_refs`](ral_core::syntax::ast) — the same free-variable
 //! analysis `syntax::group` (private to `ral_core`) uses to form `LetRec`
-//! groups.  The effect verdict reuses the checker's own IR: a binding
-//! whose RHS compiles to a [`CompKind::Exec`] or [`CompKind::Scope`], or
-//! whose `Bind` node carries a non-[`ByteMode::Empty`] output mode
-//! (`rhs_output`), is effectful — pure otherwise.  This is the mode-system
-//! verdict the typechecker already records, not a new heuristic.
+//! groups.  The effect verdict reuses the checker's own IR: a binding whose
+//! RHS compiles to a [`CompKind::Exec`] or [`CompKind::Scope`], or whose RHS
+//! the checker wrapped in a [`CompKind::Capture`], is effectful — pure
+//! otherwise.  This is the mode-system verdict the typechecker already
+//! records, not a new heuristic.
 //!
 //! A read-only projection of edges and classification: it records, the
 //! frontend renders a dependency tree, and nothing re-evaluates.
 
 use ral_core::Shell;
 use ral_core::ir::{Comp, CompKind};
-use ral_core::mode::ByteMode;
 use ral_core::syntax::ast::{Ast, Pattern};
 
 use std::collections::HashSet;
@@ -62,16 +61,10 @@ impl Worksheet {
         &self.entries
     }
 
-    /// Record the top-level bindings of a *successfully evaluated* input.
-    ///
-    /// Called from the success arm of the eval path, after the run has
-    /// installed its bindings into the env.  Re-parses the input for the
-    /// free-reference edges and re-compiles it for the effect verdict — both
-    /// at human-typing cadence (once per submit, not per keystroke), so the
-    /// duplicate analysis is cheap.  A top-level `let name = rhs` with a
-    /// `Name` pattern yields one entry; other statements are ignored.  An
-    /// input that fails to compile records nothing (the checker rejected it,
-    /// so no binding landed).
+    /// Record the top-level bindings of a *successfully evaluated* input —
+    /// see the module doc for what edges and verdicts it reuses. Called from
+    /// the success arm of the eval path. A top-level `let name = rhs` with a
+    /// `Name` pattern yields one entry; other statements are ignored.
     pub(super) fn record(&mut self, input: &str, shell: &Shell) {
         let Ok(stmts) = ral_core::syntax::parser::parse(input) else {
             return;
@@ -147,8 +140,8 @@ fn top_level_let(ast: &Ast) -> Option<(&str, &Ast)> {
 /// Walk an annotated comp's top-level `Bind` nodes into `(name, effectful)`
 /// pairs, reading the checker's verdict off the IR.  A binding is effectful
 /// when its RHS compiles to a [`CompKind::Exec`] or [`CompKind::Scope`], or
-/// when its `Bind` node carries a non-[`ByteMode::Empty`] output mode — the
-/// mode-system verdict the annotation pass already recorded.
+/// when its RHS is a [`CompKind::Capture`] — the annotation pass's own
+/// verdict that the RHS is a byte-payload computation.
 ///
 /// Walks `Seq` siblings and `Bind` `rest` chains, the two shapes a sequence
 /// of top-level lets elaborates to; it does not descend into nested
@@ -170,12 +163,13 @@ fn collect_bind_effects(comp: &Comp, out: &mut Vec<(String, bool)>) {
             comp: rhs,
             pattern,
             rest,
-            rhs_output,
             ..
         } => {
             if let Pattern::Name(name) = pattern {
-                let effectful = matches!(rhs.item, CompKind::Exec(_) | CompKind::Scope(_))
-                    || *rhs_output != ByteMode::Empty;
+                let effectful = matches!(
+                    rhs.item,
+                    CompKind::Exec(_) | CompKind::Scope(_) | CompKind::Capture(_)
+                );
                 out.push((name.clone(), effectful));
             }
             collect_bind_effects(rest, out);

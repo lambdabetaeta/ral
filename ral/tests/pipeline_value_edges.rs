@@ -52,7 +52,8 @@ fn read_json_from_non_utf8_pipeline_fails() {
 
 #[test]
 fn to_bytes_roundtrips_through_from_bytes() {
-    // to-bytes returns Value::Bytes (not a list of ints).
+    // to-bytes writes bytes to the channel (not a list of ints); from-bytes
+    // decodes them back to Value::Bytes.
     // Verify the roundtrip via length and string decoding (pure ASCII input).
     let o = run_pipe(
         "let bs = !{return [65, 66, 67] | to-bytes | from-bytes}\necho !{length $bs}\nlet txt = !{to-bytes $bs | from-string}\necho $txt",
@@ -351,22 +352,19 @@ fn higher_order_capture() {
 }
 
 #[test]
-fn to_json_returns_bytes() {
-    // to-json is a dual-channel encoder: it emits bytes on the output channel
-    // AND returns those bytes as a Bytes value.  In let position, the Bytes
-    // value is bound directly (not decoded to String).  Verify by roundtripping
-    // through from-json — route the Bytes value via to-bytes (emit-stage).
-    let o =
-        run_pipe("let bb = to-json [a: 1]\nlet obj = !{to-bytes $bb | from-json}\necho $obj[a]");
+fn to_json_pipes_to_from_json() {
+    // to-json is a pure byte writer, like to-line and echo: the roundtrip
+    // lives in the pipe, not at a value boundary.
+    let o = run_pipe("let obj = !{to-json [a: 1] | from-json}\necho $obj[a]");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "1");
 }
 
 #[test]
-fn to_bytes_non_utf8_succeeds() {
-    // to-bytes returns Bytes, not String — so non-UTF-8 byte sequences
-    // are not passed through String::from_utf8 and do not produce an error.
-    let o = run_pipe("let bb = to-bytes [255, 0, 254]\necho !{length $bb}");
+fn to_bytes_non_utf8_survives_the_pipe() {
+    // Binding a non-UTF-8 write at a value boundary now strict-decodes it as
+    // a String and fails; the pipe form still carries the raw bytes through.
+    let o = run_pipe("let bb = !{to-bytes [255, 0, 254] | from-bytes}\necho !{length $bb}");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "3");
 }
@@ -374,10 +372,9 @@ fn to_bytes_non_utf8_succeeds() {
 #[test]
 fn to_json_via_user_wrapper() {
     // to-json is a primitive; users who want a first-class handle wrap it
-    // in a block.  Roundtrip: encode → bytes → decode.
-    let o = run_pipe(
-        "let f = { |v| to-json $v }\nlet bb = !{f [a: 42]}\nlet obj = !{to-bytes $bb | from-json}\necho $obj[a]",
-    );
+    // in a block.  Roundtrip: encode → pipe → decode.
+    let o =
+        run_pipe("let f = { |v| to-json $v }\nlet obj = !{f [a: 42] | from-json}\necho $obj[a]");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "42");
 }
@@ -626,6 +623,14 @@ fn guard_body_bytes_flow_into_downstream_stage() {
 #[test]
 fn audit_receives_upstream_piped_bytes() {
     let o = run_pipe("let r = !{ echo hi | audit { from-string } }\necho $r[value]");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "hi");
+}
+
+#[test]
+fn pipeline_ending_in_audit_binds_the_piped_string() {
+    // Pins: `v` binds the piped text, not the record `audit` returns.
+    let o = run_pipe("let v = echo hi | audit { cat }\necho $v");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "hi");
 }

@@ -25,11 +25,18 @@ pub enum PipeMode {
     Var(ModeVar),
 }
 
-/// The two ends of a command: `F[input, output]` in the CBPV computation type.
+/// A command's computation type: `F[input, output]` plus which conduit
+/// carries its result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PipeSpec {
     pub input: PipeMode,
     pub output: PipeMode,
+    /// Which conduit carries this computation's result: `Bytes` for the byte
+    /// channel, `None` for the return value. Ground at every source-tree
+    /// node — a payload decision pins an unresolved variable to `None`;
+    /// variables appear in declared signature slots and shape expectations,
+    /// quantified if never consulted.
+    pub result: PipeMode,
 }
 
 impl PipeSpec {
@@ -38,6 +45,7 @@ impl PipeSpec {
         Self {
             input: PipeMode::None,
             output: PipeMode::None,
+            result: PipeMode::None,
         }
     }
     /// Decoder: bytes in, value out.
@@ -45,6 +53,7 @@ impl PipeSpec {
         Self {
             input: PipeMode::Bytes,
             output: PipeMode::None,
+            result: PipeMode::None,
         }
     }
 }
@@ -87,12 +96,13 @@ impl Wire {
         output: ByteMode::Empty,
     };
 
-    /// Lift back into the lattice for `runtime::pipeline::resolve`, which takes
-    /// its boundary and kind decisions on [`PipeSpec`] modes.
+    /// Lift back into the lattice for `runtime::pipeline::resolve`, which
+    /// takes its boundary and kind decisions on [`PipeSpec`] modes.
     pub fn spec(self) -> PipeSpec {
         PipeSpec {
             input: self.input.into(),
             output: self.output.into(),
+            result: PipeMode::None,
         }
     }
 }

@@ -386,15 +386,17 @@ impl ExecNode {
 /// This is not a node — `audit` runs no command and owns no site of its own,
 /// only the outcome of what it forced into being recorded.  Mirrored in the
 /// typechecker by `audit_record` in `core/src/typecheck/builtins.rs`.
-pub fn tree_value(status: i32, value: Value, error: Option<String>, children: &[ExecNode]) -> Value {
+pub fn tree_value(
+    status: i32,
+    value: Value,
+    error: Option<String>,
+    children: &[ExecNode],
+) -> Value {
     let children_list: Vec<Value> = children.iter().map(ExecNode::to_value).collect();
     Value::map(vec![
         ("status".into(), Value::Int(i64::from(status))),
         ("value".into(), value),
-        (
-            "error".into(),
-            Value::String(error.unwrap_or_default()),
-        ),
+        ("error".into(), Value::String(error.unwrap_or_default())),
         ("children".into(), Value::list(children_list)),
     ])
 }

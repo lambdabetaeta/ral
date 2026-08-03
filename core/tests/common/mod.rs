@@ -44,7 +44,7 @@ pub fn prelude_schemes() -> &'static [(String, Scheme)] {
 /// Visit every `Comp` in a tree, descending past the top-level spine into
 /// thunk bodies, lambda bodies, branches, and pipeline stages — so the
 /// nodes the annotation pass writes at any depth (a `Pipeline`'s wires, a
-/// `Bind`'s RHS output mode) are all reached.
+/// `Capture` node) are all reached.
 pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
     use ral_core::ir::{CompKind, Val};
     visit(comp);
@@ -65,6 +65,7 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
             sub(else_);
         }
         CompKind::Force(Val::Thunk(c)) | CompKind::Return(Val::Thunk(c)) => walk_comp(c, visit),
+        CompKind::Capture(c) => walk_comp(c, visit),
         _ => {}
     }
 }

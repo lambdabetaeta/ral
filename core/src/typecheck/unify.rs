@@ -287,11 +287,12 @@ impl Unifier {
     pub fn fresh_mode(&mut self) -> PipeMode {
         PipeMode::Var(self.fresh_modevar())
     }
-    /// The unconstrained `F[μ, ν]`, for a head whose modes are not yet known.
+    /// The unconstrained `F[μ, ν]`, for a head whose modes are not yet known; `result` grounds `∅`.
     pub fn fresh_spec(&mut self) -> PipeSpec {
         PipeSpec {
             input: self.fresh_mode(),
             output: self.fresh_mode(),
+            result: PipeMode::None,
         }
     }
 
@@ -929,6 +930,12 @@ impl Unifier {
                         actual: self.resolve_mode(&sb.output),
                     });
                 }
+                if self.unify_mode(&sa.result, &sb.result).is_err() {
+                    diffs.push(CompDiff::Result {
+                        expected: self.resolve_mode(&sa.result),
+                        actual: self.resolve_mode(&sb.result),
+                    });
+                }
                 // A return-type disagreement folds into the rich `Return` diff,
                 // but a spent depth budget is exhaustion rather than
                 // disagreement, so it propagates verbatim.
@@ -966,6 +973,7 @@ impl Unifier {
         PipeSpec {
             input: self.resolve_mode(&spec.input),
             output: self.resolve_mode(&spec.output),
+            result: self.resolve_mode(&spec.result),
         }
     }
 

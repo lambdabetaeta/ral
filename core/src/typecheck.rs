@@ -21,7 +21,9 @@ pub use self::env::{InferCtx, TyEnv};
 pub use self::error::{CompDiff, Reason, TypeError, TypeErrorKind};
 pub use self::fmt::{FmtCtx, fmt_mode, fmt_mode_ctx, fmt_scheme, fmt_ty, fmt_ty_ctx};
 pub use self::scheme::{CachedFreeVars, Scheme};
-pub use self::ty::{CompTy, CompTyVar, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar};
+pub use self::ty::{
+    ByteMode, CompTy, CompTyVar, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar,
+};
 pub use self::unify::Unifier;
 
 use self::generalize::generalize;

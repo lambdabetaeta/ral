@@ -291,7 +291,6 @@ impl Elaborator {
                         pattern: pattern_ir,
                         rest: Arc::new(comp!(self, CompKind::Return(Val::Unit))),
                         scheme: None,
-                        rhs_output: crate::mode::ByteMode::Empty,
                     }
                 );
                 wrap_binds(self.current_span, binds, inner)
@@ -903,7 +902,6 @@ fn wrap_binds(span: Option<Span>, binds: Vec<(IrPattern, Comp)>, inner: Comp) ->
                     pattern,
                     rest: Arc::new(rest),
                     scheme: None,
-                    rhs_output: crate::mode::ByteMode::Empty,
                 },
             )
         })

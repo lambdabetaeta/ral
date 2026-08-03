@@ -21,14 +21,19 @@ let f = { |cmd| !$cmd }
 let h = f { printf hello }
 assert_eq 'higher-order capture' hello $h
 
-# to-json is a dual-channel encoder: returns Bytes, not String.
-# Roundtrip via from-json confirms the value is Bytes.
-let encoded = to-json [a: 42]
-let obj = !{to-bytes $encoded | from-json}
-assert_eq 'to-json returns bytes (roundtrip)' 42 $obj[a]
+# to-json writes JSON bytes to the channel; it no longer returns them, so a
+# roundtrip lives in the pipe, not at a value boundary.
+let obj = !{to-json [a: 42] | from-json}
+assert_eq 'to-json roundtrip' 42 $obj[a]
 
-# to-bytes: non-UTF-8 roundtrip via from-bytes.
-let raw = to-bytes [72, 105]
-assert_eq 'to-bytes length' 2 !{length $raw}
+# Binding an encoder captures its write as a String — nothing is discarded.
+let jj = to-json [a: 42]
+let obj2 = !{echo $jj | from-json}
+assert_eq 'to-json bind captures its write' 42 $obj2[a]
+
+# to-bytes: a non-UTF-8 roundtrip must also stay in pipe form — binding the
+# write as a value would now strict-decode it as a String and fail.
+let raw = !{to-bytes [72, 105, 255] | from-bytes}
+assert_eq 'to-bytes non-utf8 roundtrip' 3 !{length $raw}
 
 echo 'capture semantics done'

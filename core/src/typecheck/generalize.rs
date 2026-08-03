@@ -130,6 +130,7 @@ fn free_comp_inner(u: &mut Unifier, cty: &CompTy, out: &mut FreeVars, visited: &
         CompTy::Return(spec, a) => {
             free_mode_inner(u, spec.input, out);
             free_mode_inner(u, spec.output, out);
+            free_mode_inner(u, spec.result, out);
             free_ty_inner(u, &a, out, visited);
         }
         CompTy::Fun(a, b) => {
@@ -412,6 +413,7 @@ impl SubstMap {
                 PipeSpec {
                     input: self.mode(spec.input),
                     output: self.mode(spec.output),
+                    result: self.mode(spec.result),
                 },
                 Box::new(self.ty(a)),
             ),

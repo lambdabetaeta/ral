@@ -6,7 +6,7 @@
 //! (`F`).  The pipeline-mode lattice is [`crate::mode`]'s, re-exported here so
 //! that `typecheck`'s surface carries it.
 
-pub use crate::mode::{ModeVar, PipeMode, PipeSpec};
+pub use crate::mode::{ByteMode, ModeVar, PipeMode, PipeSpec};
 
 /// Unification variable for value types.
 #[derive(

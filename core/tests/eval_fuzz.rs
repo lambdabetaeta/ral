@@ -576,7 +576,9 @@ fn is_file_on_dir() {
 fn try_error_map_has_status() {
     // try's handler receives a flat record: [cmd, status, message, line, col].
     assert_eq!(
-        must_succeed("try { cat /nonexistent 2> /dev/null } { |err| return \"$err[status]\" }"),
+        must_succeed(
+            "try { cat /nonexistent 2> /dev/null | from-string } { |err| return \"$err[status]\" }"
+        ),
         Value::String("1".into())
     );
 }
@@ -2525,9 +2527,9 @@ fn is_cap_check(v: &Value, resource: &str, decision: &str) -> bool {
 /// nests one a level deeper.  The recursive search stays anyway: it is the
 /// same "is this event present anywhere" question regardless of tree shape.
 fn has_cap_check(children: &[Value], resource: &str, decision: &str) -> bool {
-    children
-        .iter()
-        .any(|c| is_cap_check(c, resource, decision) || has_cap_check(&children_of(c), resource, decision))
+    children.iter().any(|c| {
+        is_cap_check(c, resource, decision) || has_cap_check(&children_of(c), resource, decision)
+    })
 }
 
 #[cfg(unix)]
@@ -2622,9 +2624,7 @@ fn hoist_inside_untaken_chain_arm_does_not_run() {
     // chain used to share the caller's binds accumulator, running the
     // fallback's hoists unconditionally before the chain itself.
     assert_eq!(
-        must_succeed(
-            "return 1 ? return !{fail [status: 1, message: \"untaken arm's hoist ran\"]}"
-        ),
+        must_succeed("return 1 ? return !{fail [status: 1, message: \"untaken arm's hoist ran\"]}"),
         Value::Int(1)
     );
 }
@@ -2675,7 +2675,9 @@ fn audit_grant_flattens_exec_capability_allowed_child() {
         "exec/allowed capability-check must be a direct child of the audit root: {children:?}"
     );
     assert!(
-        !children.iter().any(|c| map_field(c, "cmd") == Value::String("grant".into())),
+        !children
+            .iter()
+            .any(|c| map_field(c, "cmd") == Value::String("grant".into())),
         "`grant` is transparent — it must never own a node of its own: {children:?}"
     );
 }
@@ -2719,7 +2721,9 @@ fn audit_within_flattens_body_children() {
         "within's body command must be a direct child of the audit root: {children:?}"
     );
     assert!(
-        !children.iter().any(|c| map_field(c, "cmd") == Value::String("within".into())),
+        !children
+            .iter()
+            .any(|c| map_field(c, "cmd") == Value::String("within".into())),
         "`within` is transparent — it must never own a node of its own: {children:?}"
     );
 }
@@ -2751,7 +2755,7 @@ fn audit_guard_flattens_body_and_cleanup_children() {
 
 #[test]
 fn audit_try_flattens_body_children() {
-    let tree = must_succeed("audit { try { /bin/true } { |_e| return 'caught' } }");
+    let tree = must_succeed("audit { try { /bin/true | from-string } { |_e| return 'caught' } }");
     let children = children_of(&tree);
     assert!(
         children
@@ -2760,7 +2764,9 @@ fn audit_try_flattens_body_children() {
         "try's body command must be a direct child of the audit root: {children:?}"
     );
     assert!(
-        !children.iter().any(|c| map_field(c, "cmd") == Value::String("try".into())),
+        !children
+            .iter()
+            .any(|c| map_field(c, "cmd") == Value::String("try".into())),
         "`try` is transparent — it must never own a node of its own: {children:?}"
     );
 }
@@ -2773,7 +2779,7 @@ fn audit_try_flattens_body_children() {
 #[cfg(unix)]
 #[test]
 fn caret_clear_resolves_external_not_the_native() {
-    let tree = must_succeed("audit { try { ^clear } { |_e| return '' } }");
+    let tree = must_succeed("audit { try { ^clear | from-string } { |_e| return '' } }");
     let children = children_of(&tree);
     assert!(
         children
@@ -2791,7 +2797,9 @@ fn audit_nested_grants_produce_no_grant_nodes() {
     );
     let children = children_of(&tree);
     assert!(
-        !children.iter().any(|c| map_field(c, "cmd") == Value::String("grant".into())),
+        !children
+            .iter()
+            .any(|c| map_field(c, "cmd") == Value::String("grant".into())),
         "nested grants must not produce any `grant`-named node: {children:?}"
     );
     assert!(

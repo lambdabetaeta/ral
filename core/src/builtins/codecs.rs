@@ -200,7 +200,7 @@ pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value
         }
     }
     let bytes = wtr.into_inner().map_err(|e| sig(format!("to-csv: {e}")))?;
-    write_encoded("to-csv", bytes, shell)
+    write_encoded("to-csv", &bytes, shell)
 }
 
 /// Write `bytes` to stdout and claim success: an encoder sets its own exit
@@ -213,18 +213,18 @@ fn write_stdout_ok(name: &str, bytes: &[u8], shell: &mut Shell) -> Settled<()> {
     Ok(())
 }
 
-fn write_encoded(name: &str, bytes: Vec<u8>, shell: &mut Shell) -> Settled<Value> {
-    write_stdout_ok(name, &bytes, shell)?;
-    Ok(Value::Bytes(bytes))
+fn write_encoded(name: &str, bytes: &[u8], shell: &mut Shell) -> Settled<Value> {
+    write_stdout_ok(name, bytes, shell)?;
+    Ok(Value::Unit)
 }
 
 pub(super) fn builtin_to_bytes(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let bs = as_byte_list(&args[0], "to-bytes")?;
-    write_encoded("to-bytes", bs, shell)
+    write_encoded("to-bytes", &bs, shell)
 }
 
 pub(super) fn builtin_to_string(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    write_encoded("to-string", args[0].to_string().into_bytes(), shell)
+    write_encoded("to-string", &args[0].to_string().into_bytes(), shell)
 }
 
 pub(super) fn builtin_to_line(args: &[Value], shell: &mut Shell) -> Settled<Value> {
@@ -254,7 +254,7 @@ pub(super) fn builtin_to_lines(args: &[Value], shell: &mut Shell) -> Settled<Val
         .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    write_encoded("to-lines", joined.into_bytes(), shell)
+    write_encoded("to-lines", &joined.into_bytes(), shell)
 }
 
 /// Encode `v` as JSON, refusing whatever has no faithful JSON form rather
@@ -308,5 +308,5 @@ pub fn value_to_json(v: &Value) -> Settled<serde_json::Value> {
 pub(super) fn builtin_to_json(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let text = serde_json::to_string(&value_to_json(&args[0])?)
         .map_err(|e| sig(format!("to-json: {e}")))?;
-    write_encoded("to-json", text.into_bytes(), shell)
+    write_encoded("to-json", &text.into_bytes(), shell)
 }

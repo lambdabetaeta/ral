@@ -16,6 +16,10 @@ pub enum CompDiff {
         expected: PipeMode,
         actual: PipeMode,
     },
+    Result {
+        expected: PipeMode,
+        actual: PipeMode,
+    },
     ReturnType {
         expected: Ty,
         actual: Ty,
@@ -90,6 +94,10 @@ pub enum Reason {
     LetRecSelf,
     /// `from-lines`' recursive Step tail against the stream it closes into.
     LinesStepSelf,
+    /// An undecided `result` mode pinned at a payload-conduit decision (a
+    /// `Bind` RHS, a join's non-byte or byte side) so a later grounding
+    /// becomes an honest mismatch rather than silent divergence.
+    ResultPin,
 }
 
 /// The structural cause of a type error, raised by the unifier or inferencer.

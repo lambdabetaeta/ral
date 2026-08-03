@@ -205,6 +205,9 @@ pub fn fmt_comp_ty_ctx(cty: &CompTy, ctx: &FmtCtx) -> String {
             if let Some(s) = fmt_mode_field_ctx(spec.output) {
                 fields.push(format!("stdout: {s}"));
             }
+            if let Some(s) = fmt_mode_field_ctx(spec.result) {
+                fields.push(format!("result: {s}"));
+            }
             if fields.is_empty() {
                 format!("Command {}", fmt_ty_ctx(a, ctx))
             } else {

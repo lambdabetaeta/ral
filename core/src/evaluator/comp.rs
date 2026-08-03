@@ -8,7 +8,7 @@
 
 use crate::io::strip_trailing_newline;
 use crate::ir::{Comp, CompKind, IrPattern, ScopeOp, Val};
-use crate::mode::{ByteMode, Wire};
+use crate::mode::Wire;
 use crate::source::Spanned;
 use crate::typecheck::Scheme;
 use crate::types::{Binding, Break, Control, Error, Mooring, Raw, Shell, Tail, Value};
@@ -66,17 +66,9 @@ pub(crate) fn eval_comp(
             pattern,
             rest,
             scheme,
-            rhs_output,
-        } => eval_bind(
-            m,
-            pattern,
-            rest,
-            scheme.as_deref(),
-            *rhs_output,
-            tail,
-            mooring,
-            shell,
-        ),
+        } => eval_bind(m, pattern, rest, scheme.as_deref(), tail, mooring, shell),
+
+        CompKind::Capture(body) => eval_capture(body, mooring, shell),
 
         // `invoke` is the call evaluator pipelines use; a pipeline stage
         // enters it with the upstream value, a bare call with none.
@@ -253,40 +245,30 @@ fn eval_index(target: &Val, keys: &[Spanned<Val>], shell: &mut Shell) -> Raw<Val
     Ok(v)
 }
 
-/// The bound computation of a `Bind`, never in tail position since `rest`
-/// runs after it. A byte-mode RHS runs under capture, so a command that
-/// writes bytes and returns `Unit` binds the decoded bytes.
-fn eval_bind_rhs(
-    m: &Arc<Comp>,
-    rhs_output: ByteMode,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Raw<Value> {
-    if rhs_output != ByteMode::Bytes {
-        return eval_comp(m, mooring, shell, Tail::No);
-    }
+/// `capture M` — run `M` with its byte channel captured, decode the bytes as
+/// its value; `M`'s value is `Unit` by typing (WF-2), so no inspection is
+/// needed. On failure, flush what `M` already wrote to the enclosing sink
+/// before propagating — a partial write (`echo half; exit 3`) stays visible.
+fn eval_capture(body: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
     let (result, mut bytes) =
-        super::capture::with_capture(shell, |shell| eval_comp(m, mooring, shell, Tail::No));
-    // Flush what the RHS already wrote before propagating its error, so a
-    // partial write (`echo HALF; exit 3`) stays visible instead of vanishing
-    // with the buffer.
+        super::capture::with_capture(shell, |shell| eval_comp(body, mooring, shell, Tail::No));
     if result.is_err() && !bytes.is_empty() {
         shell
             .write_stdout(&bytes)
-            .map_err(|e| shell.err(format!("bind flush: {e}"), 1))?;
+            .map_err(|e| shell.err(format!("capture flush: {e}"), 1))?;
     }
-    match result? {
-        Value::Unit => {
-            strip_trailing_newline(&mut bytes);
-            let s = crate::builtins::util::decode_utf8_strict(
-                bytes,
-                "`(let)` returned bytes that are not valid UTF-8",
-                "bind with `| from-bytes` to keep raw output",
-            )?;
-            Ok(Value::String(s))
-        }
-        other => Ok(other),
-    }
+    debug_assert!(
+        matches!(&result, Err(_) | Ok(Value::Unit)),
+        "capture's operand is result: Bytes, so WF-2 makes its value Unit"
+    );
+    result?;
+    strip_trailing_newline(&mut bytes);
+    let s = crate::builtins::util::decode_utf8_strict(
+        bytes,
+        "captured output is not valid UTF-8",
+        "bind with `| from-bytes` to keep raw output",
+    )?;
+    Ok(Value::String(s))
 }
 
 /// `M to x. N` — run `M`, destructure its result against `pattern`, then
@@ -294,23 +276,18 @@ fn eval_bind_rhs(
 ///
 /// The checker's `scheme` for the node installs together with the value, so
 /// the next run's check is seeded from the live binding.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the bind rule's operands, threaded; grouping them would hide the rule's shape"
-)]
 fn eval_bind(
     m: &Arc<Comp>,
     pattern: &IrPattern,
     rest: &Arc<Comp>,
     scheme: Option<&Scheme>,
-    rhs_output: ByteMode,
     tail: Tail,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
     crate::process::check(mooring)?;
     super::pattern::check_pattern_shadow(pattern, shell)?;
-    let val = eval_bind_rhs(m, rhs_output, mooring, shell)?;
+    let val = eval_comp(m, mooring, shell, Tail::No)?;
     set_status_from_value(&val, shell);
     assign_pattern(pattern, &val, scheme, mooring, shell)?;
     eval_comp(rest, mooring, shell, tail)
@@ -386,9 +363,8 @@ fn eval_if(
 }
 
 /// Sequence of computations — the last value is the result, and only it
-/// inherits the sequence's tail position. Under a capture, a non-final
-/// element's bytes are an effect rather than the value, so flush them to the
-/// visible outer stream.
+/// inherits the sequence's tail position. Flush-through: non-final parts'
+/// bytes are effect, so they route past the innermost `Capture`.
 fn eval_seq(comps: &[Arc<Comp>], tail: Tail, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
     let mut result = Value::Unit;
     let len = comps.len();

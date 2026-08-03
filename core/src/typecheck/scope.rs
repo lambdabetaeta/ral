@@ -34,11 +34,13 @@ pub(super) struct ScopeArm {
 }
 
 /// What a scope rule knows before its computation type exists: the arms the
-/// evaluator runs, each against the live streams, and the value the scope
-/// produces.  Only [`Inferencer::seal`] turns this into a `CompTy`.
+/// evaluator runs, each against the live streams, the value the scope
+/// produces, and which conduit carries it.  Only [`Inferencer::seal`] turns
+/// this into a `CompTy`.
 pub(super) struct ScopeSig {
     arms: Vec<ScopeArm>,
     value: Ty,
+    result: PipeMode,
 }
 
 impl Inferencer<'_> {
@@ -74,7 +76,20 @@ impl Inferencer<'_> {
             };
         }
 
-        CompTy::Return(PipeSpec { input, output }, Box::new(sig.value))
+        debug_assert!(
+            self.ctx.unifier.resolve_mode(&sig.result) != PipeMode::Bytes
+                || self.ctx.unifier.resolve_mode(&output) == PipeMode::Bytes,
+            "WF-1: result ⊑ output"
+        );
+
+        CompTy::Return(
+            PipeSpec {
+                input,
+                output,
+                result: sig.result,
+            },
+            Box::new(sig.value),
+        )
     }
 }
 
@@ -139,7 +154,10 @@ impl Inferencer<'_> {
         let body_cty = self.infer_scope_body_passthrough(body);
         self.env.pop();
 
-        let (value, input, output) = self.extract_return(&body_cty);
+        let (value, input, output, result) = self.extract_return(&body_cty);
+        self.ctx
+            .val_results
+            .insert(std::ptr::from_ref::<Val>(body) as usize, result);
         ScopeSig {
             arms: vec![ScopeArm {
                 runs: ArmRuns::Always,
@@ -147,6 +165,7 @@ impl Inferencer<'_> {
                 output,
             }],
             value,
+            result,
         }
     }
 
@@ -154,7 +173,10 @@ impl Inferencer<'_> {
         self.infer_scope_opts(caps, "grant", grant_field_ty);
         let body_cty = self.infer_scope_body_passthrough(body);
 
-        let (value, input, output) = self.extract_return(&body_cty);
+        let (value, input, output, result) = self.extract_return(&body_cty);
+        self.ctx
+            .val_results
+            .insert(std::ptr::from_ref::<Val>(body) as usize, result);
         ScopeSig {
             arms: vec![ScopeArm {
                 runs: ArmRuns::Always,
@@ -162,22 +184,28 @@ impl Inferencer<'_> {
                 output,
             }],
             value,
+            result,
         }
     }
 
+    /// `try` joins body and handler via [`Inferencer::join_arm_results`], the
+    /// same rule [`Inferencer::merge_branches`] uses for `if`/`?` arms.
     pub(super) fn infer_try(&mut self, body: &Val, handler: &Val) -> ScopeSig {
         let body_cty = self.infer_scope_body_passthrough(body);
-        let (body_raw, body_in, body_out) = self.extract_return(&body_cty);
-        let body_final_out = self.final_output_of_thunk_value(body, &body_cty);
+        let (body_raw, body_in, body_out, body_result) = self.extract_return(&body_cty);
+        self.ctx
+            .val_results
+            .insert(std::ptr::from_ref::<Val>(body) as usize, body_result);
 
-        // `try` yields the body's value or the handler's, so the two observed
-        // types unify; the handler's own pipeline modes stay independent.
-        let handler_value_raw = self.ctx.unifier.fresh_ty();
-        let handler_result =
-            CompTy::Return(self.ctx.unifier.fresh_spec(), Box::new(handler_value_raw));
+        // `try` yields the body's value or the handler's, so the two joined
+        // types unify; the handler's own pipeline modes stay independent. A
+        // bare fresh comp var, not a pre-built `Return`, is the expected
+        // shape: it binds to the handler's actual type wholesale, `result`
+        // included, rather than comparing a hardcoded placeholder against it.
+        let handler_result_cty = self.ctx.unifier.fresh_comp_ty();
         let handler_inner = CompTy::Fun(
             Box::new(try_error_record()),
-            Box::new(handler_result.clone()),
+            Box::new(handler_result_cty.clone()),
         );
         let handler_ty = self.infer_val(handler);
         self.ctx.unify_ty(
@@ -186,16 +214,31 @@ impl Inferencer<'_> {
             Reason::TryHandler,
         );
 
-        let (handler_raw, handler_in, handler_out) = self.extract_return(&handler_result);
-        let handler_final_out = self.final_output_of_thunk_value(handler, &handler_result);
-
-        // Both arms observe under the node's joined final output, not each
-        // under its own — the capture mode installed once for the whole scope.
-        let joined_out = self.joined_final_output([body_final_out, handler_final_out]);
-        let body_value = self.observed_value_ty(body_raw, joined_out);
-        let handler_value = self.observed_value_ty(handler_raw, joined_out);
+        let (handler_raw, handler_in, handler_out, handler_result) =
+            self.extract_return(&handler_result_cty);
         self.ctx
-            .unify_ty(&body_value, &handler_value, Reason::TryArms);
+            .val_results
+            .insert(std::ptr::from_ref::<Val>(handler) as usize, handler_result);
+
+        let per_arm = [
+            (
+                PipeSpec {
+                    input: body_in,
+                    output: body_out,
+                    result: body_result,
+                },
+                body_raw,
+            ),
+            (
+                PipeSpec {
+                    input: handler_in,
+                    output: handler_out,
+                    result: handler_result,
+                },
+                handler_raw,
+            ),
+        ];
+        let (result, value) = self.join_arm_results(&per_arm, &Reason::TryArms);
 
         ScopeSig {
             arms: vec![
@@ -210,18 +253,21 @@ impl Inferencer<'_> {
                     output: handler_out,
                 },
             ],
-            value: body_value,
+            value,
+            result,
         }
     }
 
+    /// `guard`'s value and result pass through from its body; `cleanup` contributes neither.
     pub(super) fn infer_guard(&mut self, body: &Val, cleanup: &Val) -> ScopeSig {
         let body_cty = self.infer_scope_body_passthrough(body);
-        let (body_raw, body_in, body_out) = self.extract_return(&body_cty);
-        let body_final_out = self.final_output_of_thunk_value(body, &body_cty);
-        let body_value = self.observed_value_ty(body_raw, body_final_out);
+        let (body_value, body_in, body_out, body_result) = self.extract_return(&body_cty);
+        self.ctx
+            .val_results
+            .insert(std::ptr::from_ref::<Val>(body) as usize, body_result);
 
         let cleanup_cty = self.infer_scope_body_passthrough(cleanup);
-        let (_cleanup_value, cleanup_in, cleanup_out) = self.extract_return(&cleanup_cty);
+        let (_cleanup_value, cleanup_in, cleanup_out, _) = self.extract_return(&cleanup_cty);
 
         ScopeSig {
             arms: vec![
@@ -237,17 +283,15 @@ impl Inferencer<'_> {
                 },
             ],
             value: body_value,
+            result: body_result,
         }
     }
 
     pub(super) fn infer_audit(&mut self, body: &Val) -> ScopeSig {
         let body_cty = self.infer_scope_body_passthrough(body);
         // The record's `value` field holds the body's raw result — the
-        // runtime stores it undecoded.  The body's bytes go to the live
-        // stream and to whichever real command nodes wrote them, never to a
-        // field of the record itself: `audit` owns no site, so no
-        // observation here.
-        let (alpha, input, output) = self.extract_return(&body_cty);
+        // runtime stores it undecoded.
+        let (alpha, input, output, _) = self.extract_return(&body_cty);
         let beta = self.ctx.unifier.fresh_ty();
 
         ScopeSig {
@@ -257,6 +301,7 @@ impl Inferencer<'_> {
                 output,
             }],
             value: audit_record(alpha, beta),
+            result: PipeMode::None,
         }
     }
 
@@ -269,19 +314,16 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Constrain `body` to `Thunk(F[μ₀,μ₁] α)` for a fresh `α` and fresh
-    /// pipeline modes, and return the `F[μ₀,μ₁] α`.
+    /// Constrain `body` to `Thunk(c)` for a bare fresh comp var `c`, and
+    /// return `c`; callers read it back with `extract_return` once resolved.
     fn infer_scope_body_passthrough(&mut self, body: &Val) -> CompTy {
-        let alpha = self.ctx.unifier.fresh_ty();
-        let body_cty = CompTy::Return(self.ctx.unifier.fresh_spec(), Box::new(alpha));
-
+        let body_cty = self.ctx.unifier.fresh_comp_ty();
         let body_ty = self.infer_val(body);
         self.ctx.unify_ty(
             &body_ty,
             &Ty::Thunk(Box::new(body_cty.clone())),
             Reason::ScopeBody,
         );
-
         body_cty
     }
 }

@@ -441,6 +441,25 @@ fn audit_record_value_field_is_body_raw_value_not_invented() {
 }
 
 #[test]
+fn pipeline_ending_in_audit_binds_the_piped_string_not_the_record() {
+    // Pins: `v` observes the piped `String`, not the record `audit` returns.
+    let comp = annotated("let v = echo a | audit { cat }; return unit");
+    let mut bound = None;
+    common::walk_comp(&comp, &mut |c| {
+        if let CompKind::Bind {
+            pattern: IrPattern::Name(name),
+            scheme: Some(scheme),
+            ..
+        } = &c.item
+            && name == "v"
+        {
+            bound = Some(scheme.ty.clone());
+        }
+    });
+    assert_eq!(bound, Some(Ty::String));
+}
+
+#[test]
 fn builtin_glob() {
     ok("let xs = glob /tmp; return $xs");
 }
@@ -534,6 +553,13 @@ fn pipeline_byte_into_value_stage_is_mode_mismatch() {
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn pipeline_var_tail_stays_shape_forcing_not_pinned() {
+    // Pins: a `Var`-typed pipeline tail mints a fresh `result` instead of
+    // pinning `∅`, so a forced parameter that writes bytes still typechecks.
+    ok("let ff = { |k| echo a | !$k }; ff { /bin/cat }");
 }
 
 // A block stage's byte channels are the join over *all* its statements, not
@@ -1361,11 +1387,9 @@ fn top_level_pipeline_retains_per_stage_value_types() {
     let (stage_count, types) = &pipelines[0];
     assert_eq!(*stage_count, 2, "two-stage pipeline");
     assert_eq!(types.len(), *stage_count, "one value type per stage");
-    // The annotation pass overwrote the elaborator's `Unit` placeholders
-    // with each external command's resolved value type (`String`), proving
-    // the per-stage types are retained rather than discarded.
-    assert_eq!(types[0], Ty::String, "stage 0 value type retained");
-    assert_eq!(types[1], Ty::String, "stage 1 value type retained");
+    // Pins: each stage's value type is `Unit`, its bytes now being `result`.
+    assert_eq!(types[0], Ty::Unit, "stage 0 value type retained");
+    assert_eq!(types[1], Ty::Unit, "stage 1 value type retained");
 }
 
 #[test]
@@ -1412,27 +1436,24 @@ fn pipeline_inside_thunk_body_carries_wires() {
 
 #[test]
 fn bind_rhs_output_mode_is_ground() {
-    // A byte-producing RHS (`echo`, `F[μ, Bytes]`) records `Bytes`; a
-    // pure value RHS (`return 42`, `F[∅, ∅]`) records `Empty`.
+    // A byte-producing RHS (`echo`, `F[μ, Bytes]`) is wrapped in `Capture`;
+    // a pure value RHS (`return 42`, `F[∅, ∅]`) is left alone.
     let comp = annotated(r"let x = echo hi; let y = return 42; return unit");
     let mut binds = Vec::new();
     common::walk_comp(&comp, &mut |c| {
         if let CompKind::Bind {
+            comp: rhs,
             pattern: IrPattern::Name(name),
-            rhs_output,
             ..
         } = &c.item
             && !name.starts_with("_g")
         {
-            binds.push((name.clone(), *rhs_output));
+            binds.push((name.clone(), matches!(rhs.item, CompKind::Capture(_))));
         }
     });
     assert_eq!(
         binds,
-        vec![
-            ("x".to_string(), ByteMode::Bytes),
-            ("y".to_string(), ByteMode::Empty),
-        ]
+        vec![("x".to_string(), true), ("y".to_string(), false)]
     );
 }
 
@@ -1442,13 +1463,26 @@ fn bind_x_output(src: &str) -> ByteMode {
     let mut found = None;
     common::walk_comp(&comp, &mut |c| {
         if let CompKind::Bind {
+            comp: rhs,
             pattern: IrPattern::Name(name),
-            rhs_output,
             ..
         } = &c.item
             && name == "x"
         {
-            found = Some(*rhs_output);
+            // A join's byte-side arms are captured individually (per-arm, not
+            // at the join's own node), so the verdict is "any Capture in the
+            // RHS subtree", not "the RHS itself is one".
+            let mut has_capture = false;
+            common::walk_comp(rhs, &mut |c| {
+                if let CompKind::Capture(_) = &c.item {
+                    has_capture = true;
+                }
+            });
+            found = Some(if has_capture {
+                ByteMode::Bytes
+            } else {
+                ByteMode::Empty
+            });
         }
     });
     found.expect("a bind named `x`")
@@ -1523,10 +1557,29 @@ fn if_empty_else_arm_still_accepted() {
 
 #[test]
 fn chain_return_int_then_echo_is_observed_mismatch() {
-    // The joined output is `Bytes` (from the `echo` arm), so `echo x`
-    // observes to String, but `return 1`'s Int is untouched by observation —
-    // it clashes with that String outright.
+    // Pins: `return 1`'s `Int` can't subsume onto the byte side `echo x` grounds.
     has_error("return 1 ? echo x", "couldn't match");
+}
+
+#[test]
+fn if_byte_arm_alongside_value_arm_is_rejected() {
+    // Pins: a mixed byte/value join is rejected outright, not reconciled.
+    has_error("if true { echo hi } else { return 's' }", "result conduit");
+}
+
+#[test]
+fn try_byte_body_alongside_value_handler_is_rejected() {
+    has_error("try { echo hi } { |_| return 's' }", "result conduit");
+}
+
+#[test]
+fn traced_mixed_join_under_opaque_force_is_now_rejected() {
+    // Pins: the soundness hole this pass closes — a mixed join under an
+    // opaque force is now a static error, not a silent runtime mismatch.
+    has_error(
+        "let v = !{ echo pre; if true { echo hi } else { return 'other' } }",
+        "result conduit",
+    );
 }
 
 #[test]

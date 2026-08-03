@@ -1,8 +1,13 @@
 //! Write-back pass: rebuild a checked comp with the inferencer's verdicts —
-//! generalised schemes, ground byte modes, pipeline wires — in place of the
-//! elaborator's placeholders.  [`super::typecheck`] runs it on a clean
-//! inference, over the very tree that was inferred: [`InferCtx`]'s side maps
-//! are keyed by node address.
+//! generalised schemes, ground byte modes, pipeline wires, `Capture` nodes —
+//! over the tree that was inferred, using [`InferCtx`]'s node-address-keyed
+//! side maps.
+//!
+//! `Capture` insertion is one recursive walk carrying a [`Demand`]: `Value`
+//! where a boundary reads a payload, `Discard` where one is dropped. `Value`
+//! reaching a node whose recorded `result` grounds `Bytes` wraps it in
+//! `Capture`; the demand follows the same path the payload rides at run
+//! time, so the wrap lands at the leaf that actually owns the bytes.
 
 use super::env::{InferCtx, TyEnv};
 use super::generalize::generalize;
@@ -10,65 +15,165 @@ use crate::ir::{
     Comp, CompKind, Exec, IrPattern, RedirectV, ScopeOp, Val, ValListElem, ValMapEntry,
     ValRedirectTarget,
 };
-use crate::mode::Wire;
+use crate::mode::{ByteMode, Wire};
 use crate::source::Spanned;
 use crate::syntax::ast::MapPatternEntry;
 use std::sync::Arc;
 
-/// Rebuild `comp`; `spine` marks the `Bind`s that install into the persistent
-/// session scope — a `Seq`'s parts and a `Bind`'s `rest`, never a thunk body or
-/// an `if` branch — and only those carry a scheme.  Generalising against an
-/// empty environment closes it: a run's unifier dies with the run and restarts
-/// its variable ids at zero, so a scheme left open would alias the next run's
-/// fresh variables.
-///
-/// [`Wire`]s and modes are written wherever inference recorded one, at any
-/// depth; an unvisited node keeps its placeholder, and every other field and
-/// span is rebuilt bit-identically.
+/// What a demand-carrying position wants from the node it reaches.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Demand {
+    /// A value is dropped here (statement position, an operand's interior):
+    /// never wraps.
+    Discard,
+    /// A value is read here: a node whose own recorded result grounds
+    /// `Bytes` wraps in `Capture`.
+    Value,
+}
+
+/// Whether to grow the arm/body found (syntactic thunk: recurse into its
+/// body; opaque: η-expand) into its byte-payload or subsumed shape.
+#[derive(Clone, Copy)]
+enum ArmWalk {
+    /// `Discard`, or a `Value` demand the node's own result doesn't ground
+    /// `Bytes` for: rebuild plain, no `Capture` anywhere.
+    Plain,
+    /// A byte-payload arm/body: push `Value` demand into it, so the wrap
+    /// lands at its own tail leaf.
+    Descend,
+    /// A subsumed (`∅`-at-`Unit`) arm in a byte-side join: wrap the whole
+    /// arm — its own payload is empty, so its `Capture` contributes `""`
+    /// and its non-final bytes flush through as effect.
+    Wrap,
+}
+
+fn comp_key(comp: &Comp) -> usize {
+    std::ptr::from_ref::<Comp>(comp) as usize
+}
+
+fn val_key(val: &Val) -> usize {
+    std::ptr::from_ref::<Val>(val) as usize
+}
+
+/// Does `key`'s recorded result ground `Bytes`? Absent or still-unresolved
+/// both read `Empty`, via [`InferCtx::ground`].
+fn bytes_result(ctx: &mut InferCtx, key: usize) -> bool {
+    matches!(
+        ctx.results.get(&key).copied().map(|m| ctx.ground(m)),
+        Some(ByteMode::Bytes)
+    )
+}
+
+/// The `Val`-keyed analogue of [`bytes_result`], for scope arms.
+fn bytes_val_result(ctx: &mut InferCtx, key: usize) -> bool {
+    matches!(
+        ctx.val_results.get(&key).copied().map(|m| ctx.ground(m)),
+        Some(ByteMode::Bytes)
+    )
+}
+
+/// A `Bind`'s scheme (spine only) and its RHS, always walked at `Value`
+/// demand — a bind's whole point is to observe its RHS.
+fn annotate_bind(
+    comp: &Comp,
+    rhs: &Arc<Comp>,
+    ctx: &mut InferCtx,
+    spine: bool,
+) -> (Arc<Comp>, Option<Box<crate::typecheck::Scheme>>) {
+    let scheme = spine
+        .then(|| ctx.bind_tys.get(&comp_key(comp)).cloned())
+        .flatten()
+        .map(|ty| {
+            let scheme = generalize(&mut ctx.unifier, &TyEnv::new(), &ty);
+            super::generalize::debug_assert_scheme_closed(
+                &mut ctx.unifier,
+                &scheme,
+                "top-level Bind scheme must leave no variable free",
+            );
+            Box::new(scheme)
+        });
+    let rhs = Arc::new(annotate_demand(rhs, ctx, false, Demand::Value));
+    (rhs, scheme)
+}
+
+/// Rebuild `comp` under `demand`; `spine` marks the `Bind`s that install into
+/// the persistent session scope, so only those carry a generalised scheme
+/// (closed against an empty environment, since the unifier dies with the run).
 pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
-    let item = match &comp.item {
-        CompKind::Seq(parts) => CompKind::Seq(
-            parts
-                .iter()
-                .map(|part| Arc::new(annotate(part, ctx, spine)))
-                .collect(),
-        ),
+    annotate_demand(comp, ctx, spine, Demand::Discard)
+}
+
+fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, spine: bool, demand: Demand) -> Comp {
+    match &comp.item {
+        CompKind::Seq(parts) => {
+            let item = match parts.split_last() {
+                None => CompKind::Seq(Vec::new()),
+                Some((last, init)) => {
+                    let mut rebuilt: Vec<Arc<Comp>> = init
+                        .iter()
+                        .map(|p| Arc::new(annotate_demand(p, ctx, spine, Demand::Discard)))
+                        .collect();
+                    rebuilt.push(Arc::new(annotate_demand(last, ctx, spine, demand)));
+                    CompKind::Seq(rebuilt)
+                }
+            };
+            return Spanned::with_span(comp.span, item);
+        }
         CompKind::Bind {
             comp: rhs,
             pattern,
             rest,
-            rhs_output,
             ..
         } => {
-            let scheme = spine
-                .then(|| {
-                    ctx.bind_tys
-                        .get(&(std::ptr::from_ref::<Comp>(comp) as usize))
-                        .cloned()
-                })
-                .flatten()
-                .map(|ty| {
-                    let scheme = generalize(&mut ctx.unifier, &TyEnv::new(), &ty);
-                    super::generalize::debug_assert_scheme_closed(
-                        &mut ctx.unifier,
-                        &scheme,
-                        "top-level Bind scheme must leave no variable free",
-                    );
-                    Box::new(scheme)
-                });
-            let rhs_output = ctx
-                .bind_outputs
-                .get(&(std::ptr::from_ref::<Comp>(comp) as usize))
-                .copied()
-                .map_or(*rhs_output, |m| ctx.ground(m));
-            CompKind::Bind {
-                comp: Arc::new(annotate(rhs, ctx, false)),
+            let (rhs, scheme) = annotate_bind(comp, rhs, ctx, spine);
+            let item = CompKind::Bind {
+                comp: rhs,
                 pattern: annotate_pattern(pattern, ctx),
-                rest: Arc::new(annotate(rest, ctx, spine)),
+                rest: Arc::new(annotate_demand(rest, ctx, spine, demand)),
                 scheme,
-                rhs_output,
-            }
+            };
+            return Spanned::with_span(comp.span, item);
         }
+        CompKind::Force(Val::Thunk(inner)) => {
+            let item = CompKind::Force(Val::Thunk(Arc::new(annotate_demand(
+                inner, ctx, false, demand,
+            ))));
+            return Spanned::with_span(comp.span, item);
+        }
+        CompKind::If { cond, then, else_ } => {
+            let item = CompKind::If {
+                cond: annotate_spanned_val(cond, ctx),
+                then: Arc::new(annotate_join_arm(comp, then, ctx, demand)),
+                else_: Arc::new(annotate_join_arm(comp, else_, ctx, demand)),
+            };
+            return Spanned::with_span(comp.span, item);
+        }
+        CompKind::Chain(parts) => {
+            let item = CompKind::Chain(
+                parts
+                    .iter()
+                    .map(|p| Arc::new(annotate_join_arm(comp, p, ctx, demand)))
+                    .collect(),
+            );
+            return Spanned::with_span(comp.span, item);
+        }
+        CompKind::Scope(op) => return annotate_scope(comp, op, ctx, demand),
+        _ => {}
+    }
+
+    let item = annotate_plain(comp, ctx);
+    let wrapped = if demand == Demand::Value && bytes_result(ctx, comp_key(comp)) {
+        CompKind::Capture(Arc::new(Spanned::with_span(comp.span, item)))
+    } else {
+        item
+    };
+    Spanned::with_span(comp.span, wrapped)
+}
+
+/// The structural rebuild shared by every node `annotate_demand` doesn't walk
+/// specially: every child is `Discard`.
+fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
+    match &comp.item {
         CompKind::Pipeline {
             stages,
             wires,
@@ -79,7 +184,7 @@ pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
                 .zip(wires)
                 .map(|(stage, placeholder)| {
                     ctx.stage_specs
-                        .get(&(std::ptr::from_ref::<Comp>(stage.as_ref()) as usize))
+                        .get(&comp_key(stage))
                         .copied()
                         .map_or(*placeholder, |spec| Wire {
                             input: ctx.ground(spec.input),
@@ -92,7 +197,7 @@ pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
                 .zip(stage_types)
                 .map(|(stage, placeholder)| {
                     ctx.stage_types
-                        .get(&(std::ptr::from_ref::<Comp>(stage.as_ref()) as usize))
+                        .get(&comp_key(stage))
                         .cloned()
                         .map_or_else(|| placeholder.clone(), |ty| ctx.unifier.resolve_ty(&ty))
                 })
@@ -113,17 +218,6 @@ pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
         CompKind::App { head, args } => CompKind::App {
             head: Arc::new(annotate(head, ctx, false)),
             args: annotate_args(args, ctx),
-        },
-        CompKind::Chain(parts) => CompKind::Chain(
-            parts
-                .iter()
-                .map(|part| Arc::new(annotate(part, ctx, false)))
-                .collect(),
-        ),
-        CompKind::If { cond, then, else_ } => CompKind::If {
-            cond: annotate_spanned_val(cond, ctx),
-            then: Arc::new(annotate(then, ctx, false)),
-            else_: Arc::new(annotate(else_, ctx, false)),
         },
         CompKind::Force(value) => CompKind::Force(annotate_val(value, ctx)),
         CompKind::Return(value) => CompKind::Return(annotate_val(value, ctx)),
@@ -161,9 +255,102 @@ pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
             scrutinee: annotate_spanned_val(scrutinee, ctx),
             table: annotate_spanned_val(table, ctx),
         },
-        CompKind::Scope(op) => CompKind::Scope(annotate_scope(op, ctx)),
+        // `Capture` is checker-inserted only, by this very pass; the rest are
+        // walked directly by `annotate_demand` and never reach here.
+        CompKind::Capture(_)
+        | CompKind::Seq(_)
+        | CompKind::Bind { .. }
+        | CompKind::If { .. }
+        | CompKind::Chain(_)
+        | CompKind::Scope(_) => unreachable!("not a plain-rebuild node"),
+    }
+}
+
+/// One arm of an `If`/`Chain` join under `demand`: a byte-side join walks a
+/// byte-payload arm at `Value` and wraps a subsumed (`∅`-`Unit`) arm whole;
+/// otherwise `demand` simply inherits into the arm.
+fn annotate_join_arm(join: &Comp, arm: &Comp, ctx: &mut InferCtx, demand: Demand) -> Comp {
+    if demand == Demand::Value && bytes_result(ctx, comp_key(join)) {
+        if bytes_result(ctx, comp_key(arm)) {
+            return annotate_demand(arm, ctx, false, Demand::Value);
+        }
+        return Spanned::with_span(
+            arm.span,
+            CompKind::Capture(Arc::new(annotate_demand(arm, ctx, false, Demand::Discard))),
+        );
+    }
+    annotate_demand(arm, ctx, false, demand)
+}
+
+/// A scope arm/body `Val`, dispatched the way [`annotate_join_arm`]
+/// dispatches a `Comp` arm: `join`'s result decides byte-side-or-not, `val`'s
+/// own recorded result (by its `Val` address) decides descend-vs-wrap.
+fn annotate_scope_val(
+    join: &Comp,
+    val: &Val,
+    ctx: &mut InferCtx,
+    handler: bool,
+    demand: Demand,
+) -> Val {
+    let walk = if demand != Demand::Value || !bytes_result(ctx, comp_key(join)) {
+        ArmWalk::Plain
+    } else if bytes_val_result(ctx, val_key(val)) {
+        ArmWalk::Descend
+    } else {
+        ArmWalk::Wrap
     };
-    Spanned::with_span(comp.span, item)
+    match walk {
+        ArmWalk::Plain => annotate_val(val, ctx),
+        ArmWalk::Descend | ArmWalk::Wrap => match val {
+            Val::Thunk(inner) if !handler => Val::Thunk(arm_body(inner, ctx, walk)),
+            Val::Thunk(inner) => match &inner.item {
+                CompKind::Lam { param, body } => Val::Thunk(Arc::new(Spanned::with_span(
+                    inner.span,
+                    CompKind::Lam {
+                        param: annotate_pattern(param, ctx),
+                        body: arm_body(body, ctx, walk),
+                    },
+                ))),
+                _ => eta_expand_captured(val, ctx, handler),
+            },
+            _ => eta_expand_captured(val, ctx, handler),
+        },
+    }
+}
+
+/// A syntactic arm/handler body under [`ArmWalk::Descend`] (push `Value` in)
+/// or [`ArmWalk::Wrap`] (wrap the whole body at `Discard`).
+fn arm_body(body: &Arc<Comp>, ctx: &mut InferCtx, walk: ArmWalk) -> Arc<Comp> {
+    match walk {
+        ArmWalk::Descend => Arc::new(annotate_demand(body, ctx, false, Demand::Value)),
+        ArmWalk::Wrap => Arc::new(Spanned::with_span(
+            body.span,
+            CompKind::Capture(Arc::new(annotate_demand(body, ctx, false, Demand::Discard))),
+        )),
+        ArmWalk::Plain => unreachable!("arm_body is only called under Descend/Wrap"),
+    }
+}
+
+/// `{ capture (force <val>) }`, or `{ |e| capture (force <val> e) }` for a
+/// handler. Safe: a scope forces its arm exactly once and never returns it.
+fn eta_expand_captured(val: &Val, ctx: &mut InferCtx, handler: bool) -> Val {
+    let forced = Spanned::synthetic(CompKind::Force(annotate_val(val, ctx)));
+    if !handler {
+        let captured = Spanned::synthetic(CompKind::Capture(Arc::new(forced)));
+        return Val::Thunk(Arc::new(captured));
+    }
+    let param = "__capture_e".to_string();
+    let app = Spanned::synthetic(CompKind::App {
+        head: Arc::new(forced),
+        args: vec![Spanned::synthetic(ValListElem::Single(Val::Variable(
+            param.clone(),
+        )))],
+    });
+    let captured = Spanned::synthetic(CompKind::Capture(Arc::new(app)));
+    Val::Thunk(Arc::new(Spanned::synthetic(CompKind::Lam {
+        param: IrPattern::Name(param),
+        body: Arc::new(captured),
+    })))
 }
 
 fn annotate_val(val: &Val, ctx: &mut InferCtx) -> Val {
@@ -223,35 +410,36 @@ fn annotate_redirect(redirect: &RedirectV, ctx: &mut InferCtx) -> RedirectV {
     }
 }
 
-fn annotate_scope(op: &ScopeOp, ctx: &mut InferCtx) -> ScopeOp {
-    match op {
-        ScopeOp::Try { body, handler } => ScopeOp::Try {
-            body: annotate_val(body, ctx),
-            handler: annotate_val(handler, ctx),
-        },
-        ScopeOp::Guard { body, cleanup } => ScopeOp::Guard {
-            body: annotate_val(body, ctx),
+fn annotate_scope(comp: &Comp, op: &ScopeOp, ctx: &mut InferCtx, demand: Demand) -> Comp {
+    let item = match op {
+        ScopeOp::Try { body, handler } => CompKind::Scope(ScopeOp::Try {
+            body: annotate_scope_val(comp, body, ctx, false, demand),
+            handler: annotate_scope_val(comp, handler, ctx, true, demand),
+        }),
+        ScopeOp::Guard { body, cleanup } => CompKind::Scope(ScopeOp::Guard {
+            body: annotate_scope_val(comp, body, ctx, false, demand),
             cleanup: annotate_val(cleanup, ctx),
-        },
-        ScopeOp::Within { opts, body } => ScopeOp::Within {
+        }),
+        ScopeOp::Within { opts, body } => CompKind::Scope(ScopeOp::Within {
             opts: annotate_val(opts, ctx),
-            body: annotate_val(body, ctx),
-        },
-        ScopeOp::Grant { caps, body } => ScopeOp::Grant {
+            body: annotate_scope_val(comp, body, ctx, false, demand),
+        }),
+        ScopeOp::Grant { caps, body } => CompKind::Scope(ScopeOp::Grant {
             caps: annotate_val(caps, ctx),
+            body: annotate_scope_val(comp, body, ctx, false, demand),
+        }),
+        ScopeOp::Audit { body } => CompKind::Scope(ScopeOp::Audit {
             body: annotate_val(body, ctx),
-        },
-        ScopeOp::Audit { body } => ScopeOp::Audit {
-            body: annotate_val(body, ctx),
-        },
-        ScopeOp::Redirect { body, redirects } => ScopeOp::Redirect {
-            body: Arc::new(annotate(body, ctx, false)),
+        }),
+        ScopeOp::Redirect { body, redirects } => CompKind::Scope(ScopeOp::Redirect {
+            body: Arc::new(annotate_demand(body, ctx, false, demand)),
             redirects: redirects
                 .iter()
                 .map(|r| annotate_redirect(r, ctx))
                 .collect(),
-        },
-    }
+        }),
+    };
+    Spanned::with_span(comp.span, item)
 }
 
 /// Map-pattern defaults are the only `Comp` a pattern carries.

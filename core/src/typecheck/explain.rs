@@ -181,7 +181,7 @@ impl TypeErrorKind {
 /// the two heads differ in shape — `Return` against `Fun` — blaming no
 /// component.
 fn fmt_comp_mismatch(diffs: &[CompDiff]) -> String {
-    use CompDiff::{ReturnType, Stdin, Stdout};
+    use CompDiff::{Result, ReturnType, Stdin, Stdout};
     if diffs.is_empty() {
         return "two computations have incompatible shapes — one is a function, the other is not"
             .into();
@@ -228,6 +228,11 @@ fn fmt_comp_mismatch(diffs: &[CompDiff]) -> String {
             ),
             Stdout { expected, actual } => format!(
                 "  stdout channel: one expects {}, the other {}",
+                fmt_mode_ctx(expected, &ctx),
+                fmt_mode_ctx(actual, &ctx)
+            ),
+            Result { expected, actual } => format!(
+                "  result conduit: one expects {}, the other {}",
                 fmt_mode_ctx(expected, &ctx),
                 fmt_mode_ctx(actual, &ctx)
             ),
@@ -396,20 +401,33 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
                 .to_string(),
         ),
         Reason::IfBranches => Some(
-            "both branches of an `if` must produce the same type, \
-             because the whole expression has one type, when observed; \
-             if one arm only writes a line, that line counts as the value at the boundary"
+            "both branches of an `if` must agree on where their payload lives: \
+             either both produce a value of the same type, or both write to \
+             the byte channel — a mix of the two cannot join, so pipe the \
+             byte-payload arm through a decoder (`| from-string`) to bring \
+             it onto the value side"
                 .to_string(),
         ),
         Reason::ChainBranches => Some(
-            "every arm of a `?` chain must produce the same type, \
-             because the chain's value is whichever arm succeeds, when observed; \
-             if one arm only writes a line, that line counts as the value at the boundary"
+            "every arm of a `?` chain must agree on where their payload lives: \
+             either every arm produces a value of the same type, or every arm \
+             writes to the byte channel — a mix of the two cannot join, so \
+             pipe the byte-payload arm through a decoder (`| from-string`) to \
+             bring it onto the value side"
                 .to_string(),
         ),
         Reason::TryArms => Some(
-            "both outcomes of a `try` must produce the same value when observed; \
-             if one arm only writes a line, that line counts as the value at the boundary"
+            "both outcomes of a `try` must agree on where their payload lives: \
+             either both produce a value of the same type, or both write to \
+             the byte channel — a mix of the two cannot join, so pipe the \
+             byte-payload arm through a decoder (`| from-string`) to bring \
+             it onto the value side"
+                .to_string(),
+        ),
+        Reason::ResultPin => Some(
+            "this computation's result was still undecided where a payload \
+             decision was made, so it was pinned to the return value — a \
+             later use that puts it on the byte channel disagrees with that"
                 .to_string(),
         ),
         Reason::BinaryOperands(op) => Some(

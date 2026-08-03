@@ -686,7 +686,7 @@ fn ext_command_non_utf8_gives_named_error() {
     let o = run("let xv = /usr/bin/printf '\\377'");
     assert_ne!(o.status, 0, "expected failure on non-UTF-8 output");
     assert!(
-        o.stderr.contains("returned bytes that are not valid UTF-8"),
+        o.stderr.contains("captured output is not valid UTF-8"),
         "stderr: {}",
         o.stderr
     );
@@ -1628,4 +1628,13 @@ printf hi | !{ let _s = !{from-string}; let _x = !{/bin/echo nested-record}; fai
         "structured helper error must surface; stderr: {}",
         o.stderr
     );
+}
+
+/// Pins: a failing chain arm's bytes flush live, not into the winning arm's
+/// decoded value.
+#[test]
+fn failed_chain_arm_bytes_flush_live_not_into_the_winner() {
+    let o = run("let vv = /bin/sh -c 'echo half; exit 3' ? echo x\necho $vv");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout, "half\nx\n", "stderr: {}", o.stderr);
 }

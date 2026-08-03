@@ -87,33 +87,27 @@ fn a_prelude_binding_colliding_with_a_native_survives_the_harvest() {
 }
 
 /// The bake runs one checked pass — parse, elaborate, annotate — so the
-/// comp blob the build embeds already carries the checker's ground mode
+/// comp blob the build embeds already carries the checker's ground
 /// verdicts on interior nodes, not just the top-level spine.  The
-/// elaborator emits an all-`Empty` placeholder, so a `Bytes` mode below
-/// the spine is proof the checked pass descended and overwrote it — were
-/// the bake to embed the bare elaborated comp, every slot would stay
-/// `Empty`.
+/// elaborator never emits a `Capture` node, so one below the spine is proof
+/// the checked pass descended and inserted it — were the bake to embed the
+/// bare elaborated comp, none would exist anywhere in the tree.
 ///
 /// The streaming reducers (`map-lines` / `filter-lines` / `each-line`) wrap
-/// an `echo`-per-line body, a byte-emitting `Bind` whose `rhs_output` the
-/// bake annotates `Bytes`.
+/// an `echo`-per-line body, whose byte-payload bind RHS the bake wraps in
+/// `Capture`.
 #[test]
-fn baked_prelude_carries_interior_rhs_modes() {
-    use ral_core::mode::ByteMode;
+fn baked_prelude_carries_interior_captures() {
     let (annotated, _) = rebake();
-    let mut rhs = false;
+    let mut capture = false;
     common::walk_comp(&annotated, &mut |c| {
-        if let CompKind::Bind {
-            rhs_output: ByteMode::Bytes,
-            ..
-        } = &c.item
-        {
-            rhs = true;
+        if let CompKind::Capture(_) = &c.item {
+            capture = true;
         }
     });
     assert!(
-        rhs,
-        "a prelude bind must carry a Bytes rhs_output — the bake's checked pass annotates it"
+        capture,
+        "a prelude bind must carry a Capture node — the bake's checked pass inserts it"
     );
 }
 

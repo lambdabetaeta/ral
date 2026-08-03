@@ -25,7 +25,7 @@ for $files { |f|
 
 # Use try for error handling
 try {
-    cat /nonexistent/file
+    cat /nonexistent/file | from-string
 } { |err|
     echo "caught error with status $err[status]"; return ""
 }
