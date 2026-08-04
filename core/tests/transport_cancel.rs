@@ -1,37 +1,36 @@
 //! The transport's control door, driven the way a front-end drives it: a
 //! `Control::Cancel` arriving mid-dispatch must actually stop the run.
 //!
-//! The identity arm of `ControlSender::send` raises nothing but the ambient
-//! interrupt watermark, so the cancel reaches the run only because the host
-//! declared this session signal-facing before wiring the transport — the
-//! frame's root then hears shutdown and its foreground is judged against the
-//! watermark.  Wire a transport over a deaf shell and Ctrl-C in the REPL
-//! becomes a silent no-op.  The wall clock is the discriminating half: the
-//! child would sleep far longer than the ceiling asserted here.
+//! The identity arm of `ControlSender::send` trips the `ForegroundScope` that
+//! `dispatch` files under the cancelled id, and `run_under` seats the run's
+//! frame beneath it.  The id is the hinge: the dispatch counter starts at one
+//! and `dispatch` restores nought on the way out, so a cancel naming
+//! `DispatchId(0)` — or any dispatch but the one in flight — finds nothing
+//! filed and is dropped on the floor.  Hence the cancel here is minted by
+//! `cancel_in_flight`, the call the REPL's Ctrl-C makes, rather than by hand.
+//! The wall clock is the discriminating half: the child would sleep far longer
+//! than the ceiling asserted here.
 //!
-//! Its own test binary, so the process-global watermark needs no serialising
-//! lock.
+//! The ambient interrupt watermark is the other, independent leg of the same
+//! fold, driven by SIGINT and exercised by the `run` and `process::cancel`
+//! suites; nothing here rests on the session being signal-facing.
 
 #![cfg(unix)]
 
-use ral_core::transport::{
-    Control, DispatchId, IdentityTransport, Program, Report, Run, Transport, dispatch_to_report,
-};
+use ral_core::transport::{IdentityTransport, Program, Report, Run, Transport, dispatch_to_report};
 use ral_core::types::{Capabilities, Shell};
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use std::time::{Duration, Instant};
 
 #[test]
 fn a_cancel_through_the_control_door_stops_an_in_flight_run() {
-    let mut shell = Shell::new(ral_core::io::TerminalState::default());
-    shell.face_signals();
+    let shell = Shell::new(ral_core::io::TerminalState::default());
     let transport = IdentityTransport::new(shell);
 
     let sender = transport.control().clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(250));
-        // The identity arm ignores the id: it raises the ambient watermark.
-        sender.send(Control::Cancel(DispatchId(0)));
+        sender.cancel_in_flight();
     });
 
     let started = Instant::now();
