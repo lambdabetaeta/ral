@@ -69,8 +69,6 @@ impl Engine {
                 let mut streamed = String::new();
                 let mut streamed_reasoning = String::new();
                 let attempt_result: Result<StreamEnd, ProviderError> = async {
-                    // Bounds only the stream's opening; later silence trips the
-                    // transport's own per-read `tls::STREAM_IDLE_TIMEOUT` instead.
                     let mut response = tokio::select! {
                         biased;
                         () = wait_for_cancel(cancel) => {
@@ -90,10 +88,20 @@ impl Engine {
                         ) => result.map_err(|error| ProviderError::from_genai(&error, model))?,
                     };
                     loop {
+                        // The opening's bound, re-armed by every event: a
+                        // `Heartbeat` through a long think counts as life, so only
+                        // true silence ends the stream.
                         let event = tokio::select! {
                             biased;
                             () = wait_for_cancel(cancel) => {
                                 return Err(ProviderError::Cancelled("mid-stream"));
+                            }
+                            () = tokio::time::sleep(idle_timeout(attempt)) => {
+                                return Err(ProviderError::Transient {
+                                    cause: "stream idle: no event within timeout".into(),
+                                    attempts: 1,
+                                    body: None,
+                                });
                             }
                             event = response.stream.next() => match event {
                                 Some(Ok(event)) => event,
@@ -115,9 +123,12 @@ impl Engine {
                                 streamed_reasoning.push_str(&chunk.content);
                                 on_think(&chunk.content);
                             }
-                            // Signatures and tool calls arrive whole in `End`; named
-                            // rather than wildcarded so a new event cannot slip past.
+                            // Nothing to add to the turn: signatures and tool calls
+                            // arrive whole in `End`, and a heartbeat's only use is
+                            // the re-arming above. Named rather than wildcarded so
+                            // a new event cannot slip past.
                             ChatStreamEvent::Start
+                            | ChatStreamEvent::Heartbeat
                             | ChatStreamEvent::ThoughtSignatureChunk(_)
                             | ChatStreamEvent::ToolCallChunk(_) => {}
                         }

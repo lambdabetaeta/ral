@@ -11,8 +11,8 @@ use std::time::Duration;
 /// counts as life and a slow completion runs as long as it likes; only true
 /// silence — TCP open, bytes stopped, `next()` never waking — trips it, into a
 /// retryable transport error. `retry::idle_timeout` reuses the value as attempt
-/// one's bound on *opening* a stream, where three minutes is the room a slow
-/// high-effort time-to-first-token needs.
+/// one's bound on opening a stream and on the gap between its events, where
+/// three minutes is the room a slow high-effort time-to-first-token needs.
 pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_mins(3);
 
 /// rustls config validating against the bundled Mozilla webpki roots, never the
