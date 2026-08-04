@@ -65,7 +65,10 @@ pub use audit::{
     STDERR_CAP_BYTES, epoch_us, tree_value,
 };
 
-// Here because audit nodes and capability checks carry one.
+mod observation;
+pub use observation::{CommandOrigin, Decision, Observation, Observed, WriteOutcome};
+
+// Here because every observation carries one.
 pub use crate::diagnostic::CallSite;
 
 mod mooring;

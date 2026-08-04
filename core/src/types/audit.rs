@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 pub const STDERR_CAP_BYTES: usize = 64 * 1024;
 
 /// Bytes captured for one node under `CapturePolicy::Bytes`, empty otherwise.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuditIo {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
