@@ -116,7 +116,7 @@ pub(crate) fn spawn_async(
         name: name.clone(),
         log_dir: log_dir.clone(),
         cancel,
-        reach: Some(reach),
+        reach,
         mailbox: child_mailbox,
         provider: child_provider,
     }) {

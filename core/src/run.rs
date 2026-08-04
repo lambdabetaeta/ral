@@ -26,8 +26,10 @@ use crate::{CompileOutcome, compile_and_typecheck};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Optional per-run lifecycle hooks; a host with none uses the `()` impl. A
-/// hook holds the run's [`Mooring`], which is what lets it surface, enquire, or
+/// Optional per-run lifecycle hooks; a host with none uses the `()` impl.
+///
+/// Every production host does: the live implementors are all in tests. A hook
+/// holds the run's [`Mooring`], which is what lets it surface, enquire, or
 /// nest a run under the run it is hooking.
 pub trait RunLifecycle {
     fn pre_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str) {}

@@ -45,13 +45,21 @@ The `Cancel` arm is now trunk-versus-not, and both keys keep returning `Cancel`,
 so the key layer needs no split:
 
 - **Off the trunk** it routes to `AgentRegistry::interrupt(id)` — the single-entry,
-  non-cascading turn cancel. It trips one entry's token and eval-root with
-  `Interrupt` — *no descendant walk, no deregistration* — unwinding one turn and
-  nothing else.
+  non-cascading turn cancel. It trips one entry's token and its reach's run
+  scope with `Interrupt` — *no descendant walk, no deregistration, and
+  `eval_root` never touched* — unwinding one turn and nothing else.
 - **On the trunk** `raise_interrupt()` already *is* the trunk's single-turn
   interrupt (its published foreground slot plus the ral foreground child,
   [[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]), so the old
   unconditional `cancel(focused)` cascade beside it was simply deleted.
+
+> **Superseded, in part.** Every registry entry now carries a reach, the trunk
+> included — `AgentRegistry::interrupt(focused)` runs on the trunk too, and
+> `raise_interrupt()` is no longer the trunk's *whole* interrupt, only what the
+> registry path cannot reach: the SIGINT re-created for a foreground external
+> child, and the ambient foreground stamp, which needs no dispatch handle to
+> land. See [[internals/cancellation|cancellation]] and
+> [[map/exarch/agent|agent]] for the current shape.
 
 A focused agent parks `Held`, so the tab you just interrupted is always left alive
 and steerable — the whole point. A defocused idle sub-agent you interrupt and then

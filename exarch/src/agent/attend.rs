@@ -483,7 +483,7 @@ mod tests {
                 name: "child".into(),
                 log_dir: dir.join("child"),
                 cancel: child.cancel_token().clone(),
-                reach: Some(child.seat.eval_reach()),
+                reach: child.seat.eval_reach(),
                 mailbox: child.mailbox(),
                 provider: child.provider_handle(),
             })

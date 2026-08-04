@@ -8,11 +8,13 @@
 //! re-parks, anything stronger ends the agent.
 //!
 //! Esc and Ctrl-C are a per-tab exchange interrupt — never a cascade, never an
-//! agent's death, and they never tick ral's escalation ladder.  The trunk routes
-//! through [`raise_interrupt`] and the published slot; any other focused tab
-//! through [`crate::fleet::registry::AgentRegistry::interrupt`], which cancels
-//! that agent's own token and whatever foreground scope its run holds, never its
-//! durable root.  Only the trunk publishes to the slot.
+//! agent's death, and they never tick ral's escalation ladder.  Every focused
+//! tab routes through [`crate::fleet::registry::AgentRegistry::interrupt`],
+//! which cancels that agent's own token and the scope of its dispatch in
+//! flight, never its durable root; the trunk additionally routes through
+//! [`raise_interrupt`] and the published slot, the only path that re-creates
+//! the SIGINT a foreground external child would have received.  Only the trunk
+//! publishes to the slot.
 //!
 //! On Unix `install` chains SIGINT into ral's *non-escalating* `relay_handler`,
 //! never the `term_handler` whose third delivery `_exit`s: a stray SIGINT
@@ -134,12 +136,9 @@ fn raise(cause: CancelCause) {
     }
 }
 
-/// The trunk-only half of Esc/Ctrl-C: `Interrupt` on the published token, then
+/// The trunk-only half of Esc/Ctrl-C, beside the registry interrupt every
+/// focused tab gets: `Interrupt` on the published token, then
 /// [`deliver_interrupt`] to unwind the exchange.
-///
-/// Any other focused tab goes through
-/// [`crate::fleet::registry::AgentRegistry::interrupt`] instead, which reaches
-/// that agent's own token rather than the slot.
 pub fn raise_interrupt() {
     raise(CancelCause::Interrupt);
     deliver_interrupt();

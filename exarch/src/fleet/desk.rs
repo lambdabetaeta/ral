@@ -921,7 +921,7 @@ mod tests {
     use crate::agent::testkit::ral_call;
     use crate::bus::{Inbox, channel};
     use crate::egress::Egress;
-    use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
+    use crate::fleet::registry::{AGENT_LEASE_IDLE, EvalReach, Registration, RunScope};
     use crate::provider::{
         Provider, ProviderKind,
         scripted::{Reply, Script},
@@ -1021,7 +1021,10 @@ mod tests {
             name: "parent".into(),
             log_dir: PathBuf::from("/tmp/parent"),
             cancel: crate::agent::cancel::Token::new(),
-            reach: None,
+            reach: EvalReach::Identity {
+                eval_root: Some(ral_core::process::DurableRoot::default()),
+                run_scope: RunScope::default(),
+            },
             mailbox: parent_inbox.mailbox(),
             provider: ProviderHandle::new(scripted_provider()),
         });
@@ -1907,7 +1910,10 @@ mod tests {
                 name: name.to_string(),
                 log_dir: PathBuf::from(format!("/tmp/{id}")),
                 cancel: crate::agent::cancel::Token::new(),
-                reach: None,
+                reach: EvalReach::Identity {
+                    eval_root: Some(ral_core::process::DurableRoot::default()),
+                    run_scope: RunScope::default(),
+                },
                 mailbox: Inbox::new().mailbox(),
                 provider: ProviderHandle::new(scripted_provider()),
             });
@@ -2413,7 +2419,7 @@ mod tests {
                 name: name.to_string(),
                 log_dir: child.log_dir(),
                 cancel: child.cancel_token().clone(),
-                reach: Some(child.seat.eval_reach()),
+                reach: child.seat.eval_reach(),
                 mailbox: child.mailbox(),
                 provider: child.provider_handle(),
             })
@@ -2461,7 +2467,10 @@ mod tests {
             name: format!("keepalive-{parent_id}"),
             log_dir: log_dir.to_path_buf(),
             cancel: crate::agent::cancel::Token::new(),
-            reach: None,
+            reach: EvalReach::Identity {
+                eval_root: Some(ral_core::process::DurableRoot::default()),
+                run_scope: RunScope::default(),
+            },
             mailbox: crate::bus::Inbox::new().mailbox(),
             provider: ProviderHandle::new(scripted_provider()),
         });

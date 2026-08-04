@@ -193,7 +193,7 @@ impl Agent {
             name: name.to_string(),
             log_dir: self.log.lock().dir().to_path_buf(),
             cancel: self.cancel.clone(),
-            reach: self.parent.map(|_| self.seat.eval_reach()),
+            reach: self.seat.eval_reach(),
             mailbox: self.inbox.mailbox(),
             provider: self.provider.clone(),
         });

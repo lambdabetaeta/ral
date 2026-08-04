@@ -57,20 +57,34 @@ cause-directed group teardown — so Esc-to-stop is bounded by poll cadence
 cancel, and latching its durable root would kill every future turn and
 detached worker; its turn-level cancel rides the published foreground slot.
 
+> **Superseded, in part.** The trunk now registers a reach too, an
+> *interrupt-only* one (`EvalReach::interrupt_only`): `eval_root` stays `None`,
+> so a registry `terminate` on the trunk still degrades to the `Token` alone
+> and cannot poison the session, but a registry `interrupt` now reaches the
+> trunk's run scope the same way it reaches any other entry's. The published
+> foreground slot remains the trunk's Esc path for what the registry cannot
+> reach — see [[internals/cancellation|cancellation]] and
+> [[map/exarch/agent|agent]].
+
 ## Where
 
 - **`core/src/types/shell/mod.rs` / `init.rs` / `inherit.rs`** —
-  `publishes_signal_slots` on `SessionState`; set at `Shell::new`, cleared by
-  `fork_session`.
-- **`core/src/turn.rs`** — `TurnGuard` holds `Option`al slot guards, published
-  only for the signal-facing session.
+  `publishes_signal_slots` on `SessionState` no longer exists either; the
+  one-publishing-session rule dissolved into how a session's scopes are minted
+  (`Shell::face_signals`,
+  [[decisions/260726_cancel-is-a-join|cancel-is-a-join]]).
+- **`core/src/process/cancel.rs`** — the slot-publication mechanism this
+  bullet described (`TurnGuard`) no longer exists; it dissolved into the
+  watermark this file now carries
+  ([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]).
 - **`core/src/types/shell/host.rs`** — `Shell::cancel_handle`, the host verb
   for a non-signal-facing session's stop lever.
-- **`exarch/src/agent_registry.rs`** — `eval_root` on `Entry`; `cancel_entry`
-  cancels token + root for both cascade primitives.
-- **`exarch/src/agent.rs` / `tools/agent.rs`** — `Agent::eval_root` reads the
-  handle off the agent's shell; `register_self` and `spawn_async` thread it
-  into registration.
+- **`exarch/src/fleet/registry.rs`** — `eval_root` on `EvalReach::Identity`;
+  `terminate_entry` (the cascade) and `AgentRegistry::interrupt` (single
+  entry) each cancel token + reach.
+- **`exarch/src/agent/seat.rs`** — `Seat::eval_reach` reads the handle off the
+  agent's shell; **`exarch/src/agent/build.rs`** — `register_self`/
+  `register_self_named` thread it into registration.
 
 ## Covered
 

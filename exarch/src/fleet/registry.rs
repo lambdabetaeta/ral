@@ -11,8 +11,8 @@
 //! root, so an in-flight `ral` eval unwinds at ral's poll points rather than
 //! grinding to its timeout wall — and, a worker's cancel scope being a
 //! descendant of that root, reaching the agent's detached workers with no edge
-//! of its own.  *Interrupt* cancels only the foreground scope the current run
-//! installed, so the next run, minted fresh from the untouched root, is clean.
+//! of its own.  *Interrupt* cancels only the scope of the dispatch in flight,
+//! so the next one, minted fresh from the untouched root, is clean.
 //!
 //! The generation counter, bumped by `/clear`, is the fleet's one late-settle
 //! fence: an async agent's result (`Agent::admits`) and a detached worker's
@@ -28,11 +28,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-/// A live agent's current-run foreground scope, republished by its transport at
-/// the start of every run
+/// A live agent's current-dispatch scope, republished by its transport as each
+/// dispatch is minted
 /// ([`ral_core::transport::IdentityTransport::observe_foreground`]).  It sits
 /// outside the engine lock the run itself holds, so an interrupt can reach the
-/// in-flight run from another thread.  `None` until the first run.
+/// in-flight run from another thread — and it is published *ahead* of that
+/// lock, so an interrupt raised while a dispatch still waits on it lands on
+/// the scope that dispatch minted: the run's frame is born a descendant and
+/// observes a cancel recorded before it existed.  `None` until the first
+/// dispatch.
 pub(crate) type RunScope = Arc<Mutex<Option<ForegroundScope>>>;
 
 /// How the registry reaches one agent's running eval, per seat kind — the
@@ -41,16 +45,19 @@ pub(crate) type RunScope = Arc<Mutex<Option<ForegroundScope>>>;
 pub(crate) enum EvalReach {
     /// The in-process reach: the agent's own shell's durable root (terminate,
     /// and through the cancel-scope ancestor chain its detached workers too),
-    /// and the run-scope cell its transport refreshes each run (interrupt).
+    /// and the run-scope cell its transport refreshes each dispatch
+    /// (interrupt).  `eval_root` is `None` for the trunk's interrupt-only
+    /// reach — see [`Self::interrupt_only`].
     Identity {
-        eval_root: DurableRoot,
+        eval_root: Option<DurableRoot>,
         run_scope: RunScope,
     },
     /// The wire reach: the engine lives in another process, whose only
-    /// host-reachable cancel primitive is a `Cancel` control frame against the
-    /// in-flight dispatch, so both motions collapse into it.  Only a parented
-    /// agent carries a reach and only an identity seat can be forked into, so
-    /// nothing constructs this in production — but it must still answer.
+    /// host-reachable cancel primitive is a `Cancel` control frame against
+    /// the in-flight dispatch, so both motions collapse into it — a wire
+    /// trunk (synod's guest-VM engine) carries this reach directly, and only
+    /// an identity seat can be forked into, so no descendant of one ever
+    /// does.
     Wire(ral_core::transport::ControlSender),
 }
 
@@ -70,11 +77,39 @@ impl EvalReach {
 
     /// End the agent's eval by cancelling its session's durable root.  That
     /// poisons the root permanently, by design: every caller is ending the
-    /// agent, so there is no later run to break.
+    /// agent, so there is no later run to break.  A no-op when `eval_root` is
+    /// absent — the trunk's interrupt-only reach.
     pub(crate) fn terminate(&self, cause: CancelCause) {
         match self {
-            Self::Identity { eval_root, .. } => eval_root.cancel(cause),
+            Self::Identity { eval_root, .. } => {
+                if let Some(root) = eval_root {
+                    root.cancel(cause);
+                }
+            }
             Self::Wire(ctrl) => ctrl.cancel_in_flight(),
+        }
+    }
+
+    /// Weaken a reach so its terminate side can no longer poison a session:
+    /// the trunk's entry must never carry a `DurableRoot`, for two reasons.
+    /// [`terminate_entry`] fires on every entry a cascade visits, the trunk's
+    /// included, and a trunk root would turn that into a permanent kill of the
+    /// whole session rather than a subtree reap.  And the trunk is the one
+    /// seat `/clear` rebuilds in place, minting a fresh root while the entry
+    /// stands, so a root captured at registration would go stale — the
+    /// run-scope cell is host-owned precisely so it survives that rebuild,
+    /// and a root has no such cell.
+    ///
+    /// A wire reach passes through: its only primitive is `Control::Cancel`
+    /// against the in-flight dispatch, which is not permanent, so it carries
+    /// nothing to weaken.
+    fn interrupt_only(self) -> Self {
+        match self {
+            Self::Identity { run_scope, .. } => Self::Identity {
+                eval_root: None,
+                run_scope,
+            },
+            wire @ Self::Wire(_) => wire,
         }
     }
 }
@@ -110,9 +145,10 @@ pub struct Registration {
     pub name: String,
     pub log_dir: PathBuf,
     pub cancel: Token,
-    /// `None` for the trunk, whose session outlives any cancel: an Esc reaches
-    /// its *run* through the published foreground slot, never its eval layer.
-    pub(crate) reach: Option<EvalReach>,
+    /// The seat's own reach into this agent's running eval.  The caller
+    /// states it plainly for every entry; [`AgentRegistry::register`] weakens
+    /// a parentless one to interrupt-only.
+    pub(crate) reach: EvalReach,
     pub mailbox: Mailbox,
     pub provider: ProviderHandle,
 }
@@ -143,8 +179,8 @@ struct Entry {
     cancel: Token,
     /// A tripped [`Token`] alone cannot stop an in-flight `ral` tool call —
     /// `shell_eval`'s `run_shell` blocks until the engine reports — so both
-    /// cancel motions also go through this.  `None` for the trunk.
-    reach: Option<EvalReach>,
+    /// cancel motions also go through this.  The trunk's is interrupt-only.
+    reach: EvalReach,
     mailbox: Mailbox,
     /// Hot-swappable, so a `/model` on the focused agent swaps *its* provider
     /// and disturbs no other.
@@ -224,6 +260,11 @@ impl AgentRegistry {
     /// branch does not (a conversation must not lose an exchange at the hour
     /// mark).
     ///
+    /// A parentless registration — the trunk, the one entry rebuilt in place
+    /// rather than reaped — has its reach weakened to
+    /// [`EvalReach::interrupt_only`] here, at the one door every entry passes,
+    /// so no caller can seat a terminate-capable root on it.
+    ///
     /// # Errors
     /// [`RegisterError::SessionDead`] when `parent` is not, at this instant, a
     /// live and un-terminated entry — a spawn racing a cancel on its own
@@ -263,6 +304,10 @@ impl AgentRegistry {
             drop(g);
             return Err(RegisterError::NameTaken(name));
         }
+        let reach = match parent {
+            Some(_) => reach,
+            None => reach.interrupt_only(),
+        };
         g.entries.insert(
             id,
             Entry {
@@ -485,13 +530,15 @@ impl AgentRegistry {
         Ok(self.cancel(target))
     }
 
-    /// Where Esc and Ctrl-C on a focused sub-agent tab land: unwind exactly
-    /// this entry's in-flight run, cascading to no descendant and removing
-    /// nothing.  The agent drops the run and re-parks; its next one is clean.
+    /// Where Esc and Ctrl-C on the focused tab land, the trunk's included:
+    /// unwind exactly this entry's in-flight run, cascading to no descendant
+    /// and removing nothing.  The agent drops the run and re-parks; its next
+    /// one is clean.
     pub fn interrupt(&self, id: AgentId) {
         let g = self.lock();
         if let Some(e) = g.entries.get(&id) {
-            interrupt_entry(e);
+            e.cancel.cancel(CancelCause::Interrupt);
+            e.reach.interrupt();
         }
     }
 
@@ -649,22 +696,11 @@ fn renew_entry(e: &mut Entry) {
 }
 
 /// Cancel one entry across both terminate-class layers: the cooperative
-/// [`Token`] the attend loop polls between steps and, for a parented agent, its
-/// eval layer.
+/// [`Token`] the attend loop polls between steps and its eval layer — a no-op
+/// on the eval side for the trunk, whose reach is interrupt-only.
 fn terminate_entry(e: &Entry, cause: CancelCause) {
     e.cancel.cancel(cause);
-    if let Some(reach) = &e.reach {
-        reach.terminate(cause);
-    }
-}
-
-/// Unwind one entry's in-flight run without ending the agent.  Neither layer's
-/// terminate side is touched, so the next run is born clean.
-fn interrupt_entry(e: &Entry) {
-    e.cancel.cancel(CancelCause::Interrupt);
-    if let Some(reach) = &e.reach {
-        reach.interrupt();
-    }
+    e.reach.terminate(cause);
 }
 
 #[cfg(test)]
@@ -701,10 +737,10 @@ mod tests {
             name: format!("a{id}"),
             log_dir: PathBuf::from("/tmp"),
             cancel: Token::new(),
-            reach: parent.map(|_| EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: crate::bus::Inbox::new().mailbox(),
             provider: provider(),
         })
@@ -735,10 +771,10 @@ mod tests {
             name: "branch".into(),
             log_dir: PathBuf::from("/tmp"),
             cancel: branch_token.clone(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -750,10 +786,10 @@ mod tests {
             name: "worker".into(),
             log_dir: PathBuf::from("/tmp"),
             cancel: Token::new(),
-            reach: Some(EvalReach::Identity {
-                eval_root: worker_root.clone(),
+            reach: EvalReach::Identity {
+                eval_root: Some(worker_root.clone()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -801,10 +837,10 @@ mod tests {
             name: "worker".into(),
             log_dir: PathBuf::from("/tmp/worker"),
             cancel: token.clone(),
-            reach: Some(EvalReach::Identity {
-                eval_root: eval_root.clone(),
+            reach: EvalReach::Identity {
+                eval_root: Some(eval_root.clone()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -832,7 +868,10 @@ mod tests {
             name: "trunk".into(),
             log_dir: PathBuf::from("/tmp/trunk"),
             cancel: trunk_token.clone(),
-            reach: None,
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
+                run_scope: RunScope::default(),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -844,10 +883,10 @@ mod tests {
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: child_token.clone(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -877,6 +916,45 @@ mod tests {
         );
     }
 
+    /// The other reason the trunk's entry must never carry a `DurableRoot`: a
+    /// `cancel`/`agent-cancel`-class terminate landing on it must not poison
+    /// the session.  The registration below states a full reach, root and
+    /// all, and `register` itself weakens it — the door, not the caller, is
+    /// what keeps a terminate off the root.
+    #[test]
+    fn a_registry_terminate_on_the_trunk_leaves_its_session_root_uncancelled() {
+        let reg = AgentRegistry::new();
+        let root = DurableRoot::default();
+        let trunk_token = Token::new();
+        let _ = reg.register(Registration {
+            id: 0,
+            parent: None,
+            lease: None,
+            name: "trunk".into(),
+            log_dir: PathBuf::from("/tmp/trunk"),
+            cancel: trunk_token.clone(),
+            reach: EvalReach::Identity {
+                eval_root: Some(root.clone()),
+                run_scope: RunScope::default(),
+            },
+            mailbox: mb(),
+            provider: provider(),
+        });
+
+        assert!(reg.cancel(0), "the trunk is a live, cancellable entry");
+
+        assert!(
+            trunk_token.terminated(),
+            "the cooperative token still trips: an in-flight attend loop must still unwind"
+        );
+        assert_eq!(
+            root.as_scope().cause(),
+            None,
+            "register weakened the parentless reach at the door, so terminate never reaches \
+             the root — the session survives a cancel aimed at the trunk"
+        );
+    }
+
     /// Where the `/clear` reap would have left the root live.
     #[test]
     fn remove_subtree_cancels_and_removes_the_root_too() {
@@ -892,10 +970,10 @@ mod tests {
             name: "branch".into(),
             log_dir: PathBuf::from("/tmp/branch"),
             cancel: branch_token.clone(),
-            reach: Some(EvalReach::Identity {
-                eval_root: branch_root.clone(),
+            reach: EvalReach::Identity {
+                eval_root: Some(branch_root.clone()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -906,10 +984,10 @@ mod tests {
             name: "grandchild".into(),
             log_dir: PathBuf::from("/tmp/gc"),
             cancel: child_token.clone(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -946,11 +1024,10 @@ mod tests {
         entry(&reg, 0, None); // the trunk
         let child_token = Token::new();
         let child_root = DurableRoot::default();
-        // What `IdentityTransport::observe_foreground` would write at the start
-        // of the child's in-flight run.
-        let child_run_scope: RunScope = Arc::new(Mutex::new(Some(
-            child_root.foreground(&child_root.worker()),
-        )));
+        // What `IdentityTransport::observe_foreground` would write as the
+        // child's in-flight dispatch was minted: a scope under its session,
+        // whose run frame is born a descendant.
+        let child_run_scope: RunScope = Arc::new(Mutex::new(Some(child_root.worker().child())));
         let grandchild_token = Token::new();
         let _ = reg.register(Registration {
             id: 1,
@@ -959,10 +1036,10 @@ mod tests {
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: child_token.clone(),
-            reach: Some(EvalReach::Identity {
-                eval_root: child_root.clone(),
+            reach: EvalReach::Identity {
+                eval_root: Some(child_root.clone()),
                 run_scope: child_run_scope.clone(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -973,10 +1050,10 @@ mod tests {
             name: "grandchild".into(),
             log_dir: PathBuf::from("/tmp/gc"),
             cancel: grandchild_token.clone(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -996,7 +1073,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .as_ref()
-                .expect("the cell holds the in-flight run's scope")
+                .expect("the cell holds the in-flight dispatch's scope")
                 .is_cancelled(),
             "the interrupt reaches whatever scope the run-scope cell holds"
         );
@@ -1020,8 +1097,8 @@ mod tests {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
         let eval_root = DurableRoot::default();
-        let run_scope: RunScope =
-            Arc::new(Mutex::new(Some(eval_root.foreground(&eval_root.worker()))));
+        let dispatches = eval_root.worker();
+        let run_scope: RunScope = Arc::new(Mutex::new(Some(dispatches.child())));
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
@@ -1029,10 +1106,10 @@ mod tests {
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: Token::new(),
-            reach: Some(EvalReach::Identity {
-                eval_root: eval_root.clone(),
+            reach: EvalReach::Identity {
+                eval_root: Some(eval_root),
                 run_scope: run_scope.clone(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -1043,10 +1120,10 @@ mod tests {
             "the in-flight run did unwind"
         );
 
-        // The next run mints a fresh scope from the same `eval_root` and the
-        // transport republishes it into the same cell, as
+        // The next dispatch mints a fresh scope beside the cancelled one and
+        // republishes it into the same cell, as
         // `IdentityTransport::observe_foreground` does at every dispatch.
-        let next_run = eval_root.foreground(&eval_root.worker());
+        let next_run = dispatches.child();
         *run_scope.lock().unwrap() = Some(next_run.clone());
 
         assert!(
@@ -1068,10 +1145,10 @@ mod tests {
             name: "lint".into(),
             log_dir: PathBuf::from("/log/7"),
             cancel: token.clone(),
-            reach: Some(EvalReach::Identity {
-                eval_root: eval_root.clone(),
+            reach: EvalReach::Identity {
+                eval_root: Some(eval_root.clone()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: crate::bus::Inbox::new().mailbox(),
             provider: provider(),
         });
@@ -1100,7 +1177,10 @@ mod tests {
             name: "r".into(),
             log_dir: "/l".into(),
             cancel: r.clone(),
-            reach: None,
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
+                run_scope: RunScope::default(),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -1111,10 +1191,10 @@ mod tests {
             name: "c".into(),
             log_dir: "/l".into(),
             cancel: c.clone(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -1125,10 +1205,10 @@ mod tests {
             name: "g".into(),
             log_dir: "/l".into(),
             cancel: g.clone(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -1139,10 +1219,10 @@ mod tests {
             name: "s".into(),
             log_dir: "/l".into(),
             cancel: sibling.clone(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -1178,10 +1258,10 @@ mod tests {
             name: "worker".into(),
             log_dir: PathBuf::from("/tmp/worker"),
             cancel: Token::new(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: inbox.mailbox(),
             provider: provider(),
         });
@@ -1243,10 +1323,10 @@ mod tests {
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/3"),
             cancel: Token::new(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: inbox.mailbox(),
             provider: provider(),
         });
@@ -1267,10 +1347,10 @@ mod tests {
             name: "leaf".into(),
             log_dir: PathBuf::from("/tmp/1"),
             cancel: Token::new(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -1282,10 +1362,10 @@ mod tests {
             name: "sibling".into(),
             log_dir: PathBuf::from("/tmp/2"),
             cancel: sibling_token.clone(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -1297,10 +1377,10 @@ mod tests {
             name: "grandchild".into(),
             log_dir: PathBuf::from("/tmp/3"),
             cancel: grandchild_token.clone(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -1352,10 +1432,10 @@ mod tests {
             name: "orphan".into(),
             log_dir: PathBuf::from("/tmp/orphan"),
             cancel: Token::new(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -1382,10 +1462,10 @@ mod tests {
             name: "parent".into(),
             log_dir: PathBuf::from("/tmp/parent"),
             cancel: parent_token.clone(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -1399,10 +1479,10 @@ mod tests {
             name: "late-child".into(),
             log_dir: PathBuf::from("/tmp/late-child"),
             cancel: Token::new(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -1428,10 +1508,10 @@ mod tests {
             name: "helper".into(),
             log_dir: PathBuf::from("/tmp/helper"),
             cancel: Token::new(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -1444,10 +1524,10 @@ mod tests {
             name: "helper".into(),
             log_dir: PathBuf::from("/tmp/helper-2"),
             cancel: Token::new(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -1482,10 +1562,10 @@ mod tests {
             name: "worker".into(),
             log_dir: PathBuf::from("/tmp/worker"),
             cancel: Token::new(),
-            reach: Some(EvalReach::Identity {
-                eval_root: eval_root.clone(),
+            reach: EvalReach::Identity {
+                eval_root: Some(eval_root.clone()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -1528,10 +1608,10 @@ mod tests {
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: Token::new(),
-            reach: Some(EvalReach::Identity {
-                eval_root: eval_root.clone(),
+            reach: EvalReach::Identity {
+                eval_root: Some(eval_root.clone()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -1567,10 +1647,10 @@ mod tests {
                 name: "child".into(),
                 log_dir: PathBuf::from("/tmp/child"),
                 cancel: token.clone(),
-                reach: Some(EvalReach::Identity {
-                    eval_root: DurableRoot::default(),
+                reach: EvalReach::Identity {
+                    eval_root: Some(DurableRoot::default()),
                     run_scope: RunScope::default(),
-                }),
+                },
                 mailbox: mb(),
                 provider: provider(),
             })
@@ -1598,10 +1678,10 @@ mod tests {
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: Token::new(),
-            reach: Some(EvalReach::Identity {
-                eval_root: eval_root.clone(),
+            reach: EvalReach::Identity {
+                eval_root: Some(eval_root.clone()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: mb(),
             provider: provider(),
         });
@@ -1636,10 +1716,10 @@ mod tests {
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: Token::new(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: inbox.mailbox(),
             provider: provider(),
         });
@@ -1674,10 +1754,10 @@ mod tests {
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: Token::new(),
-            reach: Some(EvalReach::Identity {
-                eval_root: DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: inbox.mailbox(),
             provider: provider(),
         });

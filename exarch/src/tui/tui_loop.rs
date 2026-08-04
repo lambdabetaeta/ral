@@ -302,18 +302,22 @@ fn ui_loop(
                     let focused = tui.app.tabs.focused();
                     let steerable = tui.app.is_steerable();
                     match key_action(&k, steerable) {
-                        // Two paths because only the trunk publishes the
-                        // process-wide slot `raise_interrupt` raises; taking
-                        // that path for a sub-agent would unwind the trunk.
-                        // `AgentRegistry::interrupt` cancels the entry's token
-                        // and its current run scope, never the durable root —
-                        // so the exchange dies, its descendants do not, and the
-                        // agent lives to take a next run.
+                        // Every tab interrupts through the registry, which
+                        // cancels the focused entry's token and its current
+                        // dispatch scope by handle — published ahead of the
+                        // engine lock, so the keypress cannot land on a run
+                        // that just ended — and never the durable root: the
+                        // exchange dies, its descendants do not, and the
+                        // agent lives to take a next run. The trunk alone
+                        // also raises the ambient interrupt, gated to it
+                        // because only the trunk publishes the process-wide
+                        // slot; that path alone re-creates the SIGINT for a
+                        // foreground external child and stamps the ambient
+                        // foreground cause, which needs no dispatch to name.
                         KeyAction::Cancel => {
+                            ctx.agents.interrupt(focused);
                             if focused == tui.app.tabs.root() {
                                 cancel::raise_interrupt();
-                            } else {
-                                ctx.agents.interrupt(focused);
                             }
                         }
                         KeyAction::Submit => {

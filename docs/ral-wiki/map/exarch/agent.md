@@ -315,22 +315,31 @@ bumps the generation, so a late result or deferred surface batch from a cleared
 generation is still dropped. Each cancelled node is stopped **across both
 layers**: its cooperative `Token` (read by `deliberate` between steps and
 raced by the provider's mid-stream cancel) *and* the eval layer through the
-entry's `reach: Option<EvalReach>` (`fleet/registry.rs`, minted from the
-seat at registration) — `EvalReach::Identity` holds the session's durable
-root (`Shell::cancel_handle`) for `terminate` and the run-scope cell for
-`interrupt`, while `EvalReach::Wire`'s only host-reachable primitive is
+entry's `reach: EvalReach` (`fleet/registry.rs`, minted from the
+seat at registration — every entry carries one, the trunk included) —
+`EvalReach::Identity` holds the session's durable
+root (`Shell::cancel_handle`) for `terminate` and, for `interrupt`, the cell its
+transport publishes each dispatch's scope into as that dispatch is minted —
+ahead of the engine lock, so an interrupt racing a dispatch still waiting on the
+lock reaches the run about to be born rather than the one just ended
+([[internals/cancellation|cancellation]]) — while `EvalReach::Wire`'s only
+host-reachable primitive is
 `Control::Cancel` on the in-flight dispatch, so both motions resolve to it
 — and a `ral` eval already in flight
 unwinds at the evaluator's poll points instead of grinding to its
-`timeout_secs` wall. The trunk registers no eval-root — its session outlives
-any cancel; Esc reaches its exchange through the ambient foreground cause,
-which only the trunk's session is minted facing
+`timeout_secs` wall. The trunk's reach is *interrupt-only* —
+`EvalReach::interrupt_only` clears its `eval_root` to `None` at registration,
+so a `terminate` there degrades to the `Token` alone: its session outlives any
+cancel, and a captured root would both permanently poison it and go stale at
+the next `/clear`, which rebuilds the trunk's shell in place while an entry is
+registered once, at birth. Esc also reaches the trunk's exchange through the
+ambient foreground cause, which only the trunk's session is minted facing
 ([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]],
 [[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]],
 [[internals/cancellation|cancellation]]). `Esc` / Ctrl-C, by contrast, are a
 **per-tab exchange interrupt**, not a cascade: they stop only the *focused* agent's
-current exchange (`AgentRegistry::interrupt(id)`, or `cancel::raise_interrupt` on
-the trunk), leaving its descendants running
+current exchange (`AgentRegistry::interrupt(id)`, plus `cancel::raise_interrupt`
+on the trunk), leaving its descendants running
 ([[decisions/260705_cancel-per-tab|cancel-per-tab]]); the focused agent's
 sticky token is cleared at each exchange boundary (`Token::reset`).
 

@@ -146,7 +146,7 @@ impl Seat {
                 run_scope,
                 ..
             } => EvalReach::Identity {
-                eval_root: transport.shell_mut().shell.cancel_handle(),
+                eval_root: Some(transport.shell_mut().shell.cancel_handle()),
                 run_scope: run_scope.clone(),
             },
             Self::Wire { transport, .. } => EvalReach::Wire(transport.control().clone()),

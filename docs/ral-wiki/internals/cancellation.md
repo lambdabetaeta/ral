@@ -197,7 +197,7 @@ The same two mechanisms are driven by different keys on different surfaces.
 | **Ctrl-`\`** | ral REPL | SIGQUIT → `sigquit_handler` | `request_root_cancel(RootAbort)` — reaps foreground *and* every detached worker, latching if idle; the REPL loop observes the sticky root and exits |
 | **Ctrl-C** | ral batch / `-c` | SIGINT → `handler` | `request_foreground_cancel(Interrupt)` + ladder `+1`; third press `_exit`s |
 | **SIGTERM / SIGHUP** | any ral host | `handler` (term disposition) | `request_root_cancel(Terminate)` — foreground and detached workers unwind, externals torn down SIGTERM-first, exit 143; ladder `+1`, third delivery `_exit`s |
-| **Ctrl-C / Esc** | exarch TUI, active exchange | `cancel::raise_interrupt` | cancels the published `Token`, `interrupt_foreground_child`, `request_foreground_cancel(Interrupt)` |
+| **Ctrl-C / Esc** | exarch TUI, active exchange | `AgentRegistry::interrupt(focused)`; the trunk also `cancel::raise_interrupt` | cancels the focused entry's `Token` and current run scope; on the trunk, additionally the published `Token`, `interrupt_foreground_child`, `request_foreground_cancel(Interrupt)` |
 | **Ctrl-C / Ctrl-D** | exarch TUI, idle prompt | key table → quit | drops the TUI guard; no cancellation |
 | **Ctrl-C / Ctrl-D / Esc** | exarch TUI overlay | key table → close overlay | returns to the underlying prompt / exchange; no root cancel |
 | **async SIGINT** | exarch | `chained` handler | cancels the `Token`, then forwards into ral's non-escalating `sigint_relay` |
@@ -246,11 +246,30 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
   session's `DurableRoot` (`Shell::cancel_handle`, held per registry entry). The
   token stops the attend loop between steps; the root cancel unwinds a `ral` eval
   already in flight at the evaluator's poll points — without it, a cancelled
-  agent would grind to its tool's `timeout_secs` wall before noticing. The trunk
-  carries no eval-root handle: its session outlives any cancel, and an Esc
-  cancels its *run* through the ambient foreground cause instead — its seat
-  boots the one `Shell::face_signals` session in the process
+  agent would grind to its tool's `timeout_secs` wall before noticing. The
+  trunk's entry carries an *interrupt-only* reach:
+  `EvalReach::interrupt_only` clears its `eval_root` to `None` at registration,
+  so a registry `terminate` there degrades to the `Token` alone and can never
+  poison the one `Shell::face_signals` session the process runs on — a
+  captured root would also go stale at the next `/clear`, which rebuilds the
+  trunk's shell in place while a registry entry is set once, at birth. What the
+  ambient path still uniquely covers on the trunk: the SIGINT re-created for a
+  foreground external child, and the ambient foreground stamp itself, which
+  needs no dispatch handle to land and so reaches a foreground run the
+  transport never dispatched
   ([[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]).
+- **A cancel may precede the run it names.** Both eval-layer channels into an
+  identity transport — a `Control::Cancel` naming a dispatch id, and an
+  observing host's `EvalReach::Identity::interrupt` — land on the scope
+  `IdentityTransport::dispatch` mints *ahead of the engine lock*, never on the
+  run's own frame. That ordering is the whole point: a dispatch parked on the
+  lock has no frame yet, and the cell that named the last run would answer for
+  it. Cancellation being sticky and folded live along the chain, the frame is
+  born a descendant of an already-cancelled scope and unwinds at its first poll
+  point. A cell published only once the frame exists
+  loses exactly the cancels raised in that window; the run then survives its
+  interrupt, and only the cooperative `Token` — read between steps — ends the
+  exchange, a tool's whole `timeout_secs` later.
 - **`install`** chains ral's `term_handler`: the exarch handler `raise`s the token
   then forwards into ral's disposition, so the root-`Terminate` translation and
   the escalation ladder survive. Install order matters — ral's handler first,
@@ -259,7 +278,10 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
 - Raw mode disables `ISIG`, so a TUI keystroke is *not* a kernel signal. The TUI's
   key table (`exarch/src/tui/tui_loop.rs`) separates UI shape from cancellation:
   idle Ctrl-C/Ctrl-D quit, overlays close, and only active-exchange Ctrl-C/Esc
-  route to `raise_interrupt`. `deliver_interrupt` re-creates the SIGINT the kernel would
+  route to `AgentRegistry::interrupt(focused)` — every tab, the trunk included.
+  The trunk's tab additionally raises `raise_interrupt`, since nothing else
+  delivers the foreground external child's SIGINT or stamps the ambient
+  foreground cause. `deliver_interrupt` re-creates the SIGINT the kernel would
   have sent a foreground *external* child via `interrupt_foreground_child`
   (Windows re-injects `CTRL_C_EVENT`).
 
@@ -268,8 +290,9 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
 A deliberate asymmetry worth stating plainly: **the third-signal `_exit` floor is
 unreachable from an interactive prompt.** Interactive SIGINT goes to the relay,
 which never ticks the ladder; the TUI's active-exchange Ctrl-C goes to
-`raise_interrupt`, which writes a flag and a cause but never the ladder.
-Repeated presses re-write the same cause (`fetch_max`), never escalate. The hard
+`AgentRegistry::interrupt` (and, on the trunk, also `raise_interrupt`), neither
+of which ever touches the ladder. Repeated presses re-write the same cause
+(`fetch_max`), never escalate. The hard
 floor exists for batch scripts (`handler`), for external SIGTERM/SIGHUP, and for
 an async signal exarch forwards into ral. Interactive cancellation is cooperative
 by construction; the root-reap gesture is REPL Ctrl-`\`, not a TUI key.

@@ -559,7 +559,7 @@ mod tests {
                 name: "child".into(),
                 log_dir: dir.join("child"),
                 cancel: child.cancel_token().clone(),
-                reach: Some(child.seat.eval_reach()),
+                reach: child.seat.eval_reach(),
                 mailbox: child.mailbox(),
                 provider: child.provider_handle(),
             })
@@ -571,10 +571,10 @@ mod tests {
             name: "direct".into(),
             log_dir: dir.join("direct"),
             cancel: direct_token.clone(),
-            reach: Some(EvalReach::Identity {
-                eval_root: direct_root.clone(),
+            reach: EvalReach::Identity {
+                eval_root: Some(direct_root.clone()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: Inbox::new().mailbox(),
             provider: child.provider.clone(),
         });
@@ -585,10 +585,10 @@ mod tests {
             name: "grandchild".into(),
             log_dir: dir.join("grandchild"),
             cancel: grandchild_token.clone(),
-            reach: Some(EvalReach::Identity {
-                eval_root: ral_core::process::DurableRoot::default(),
+            reach: EvalReach::Identity {
+                eval_root: Some(ral_core::process::DurableRoot::default()),
                 run_scope: RunScope::default(),
-            }),
+            },
             mailbox: Inbox::new().mailbox(),
             provider: child.provider.clone(),
         });
@@ -601,10 +601,10 @@ mod tests {
                 name: "sibling".into(),
                 log_dir: dir.join("sibling"),
                 cancel: sibling_token.clone(),
-                reach: Some(EvalReach::Identity {
-                    eval_root: ral_core::process::DurableRoot::default(),
+                reach: EvalReach::Identity {
+                    eval_root: Some(ral_core::process::DurableRoot::default()),
                     run_scope: RunScope::default(),
-                }),
+                },
                 mailbox: Inbox::new().mailbox(),
                 provider: child.provider.clone(),
             })
@@ -981,7 +981,7 @@ mod tests {
             name: "child".into(),
             log_dir: child.log_dir(),
             cancel: child.cancel_token().clone(),
-            reach: Some(child.seat.eval_reach()),
+            reach: child.seat.eval_reach(),
             mailbox: child.mailbox(),
             provider: child.provider_handle(),
         });

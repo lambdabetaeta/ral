@@ -315,8 +315,11 @@ pub(super) fn route_submit(
             // what the bus still holds `App::handle`'s clear-drain drops.
             // Descendants only — a terminate-class cause on the trunk's own
             // token is permanent, and `/clear` rebuilds the trunk in place.
+            // The pre-blank cancel wants the trunk's in-flight dispatch by
+            // handle too, not only the ambient stamp.
             "/clear" => {
                 crate::agent::cancel::raise_interrupt();
+                ctx.agents.interrupt(root);
                 ctx.agents.cancel_descendants(root);
                 tui.app.clear(info, tui.guard.term())?;
                 push_command(tui, mailbox, "/clear".into());
