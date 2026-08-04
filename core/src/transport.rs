@@ -1033,13 +1033,12 @@ impl IdentityTransport {
     /// touching `self.engine`, so it panics rather than hangs.
     fn check_not_reentrant(&self) {
         let current = std::thread::current().id();
-        if *self.dispatch_thread.lock_ignore_poison() == Some(current) {
-            panic!(
-                "reentrant session access: a desk handler must not take the session lock \
-                 (dispatch/shell_mut/with_shell) — it runs inside the dispatch on the \
-                 dispatching thread and would deadlock under the identity transport"
-            );
-        }
+        assert!(
+            *self.dispatch_thread.lock_ignore_poison() != Some(current),
+            "reentrant session access: a desk handler must not take the session lock \
+             (dispatch/shell_mut/with_shell) — it runs inside the dispatch on the \
+             dispatching thread and would deadlock under the identity transport"
+        );
     }
 
     /// The guard itself, for a caller that must hold shell access across other
