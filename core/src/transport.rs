@@ -653,6 +653,13 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FO
 
 // ── Senders and receivers ─────────────────────────────────────────────
 
+/// The dispatch id and scope an identity transport's `Control::Cancel` arm
+/// reads — written by [`IdentityTransport::dispatch`] ahead of the engine
+/// lock, so a cancel naming that dispatch has a scope to land on before the
+/// run's own frame is born. Replaced each dispatch, never cleared: a cancel
+/// that has outlived its run no longer finds the id it names.
+type DispatchScopeCell = Arc<std::sync::Mutex<Option<(DispatchId, crate::process::ForegroundScope)>>>;
+
 /// Out-of-band control sender.
 #[derive(Clone)]
 pub struct ControlSender {
@@ -664,13 +671,20 @@ pub struct ControlSender {
     /// Shared with the transport's own event-correlation bookkeeping, so
     /// `cancel_current` names a real dispatch rather than a sentinel.
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
+    /// `Some` for an identity sender, `None` for a wire one, whose cancel
+    /// already reaches the run across the wire without a local scope to trip.
+    scope: Option<DispatchScopeCell>,
 }
 
 impl ControlSender {
-    pub(crate) fn new(current_dispatch: Arc<std::sync::atomic::AtomicU64>) -> Self {
+    pub(crate) fn new(
+        current_dispatch: Arc<std::sync::atomic::AtomicU64>,
+        scope: DispatchScopeCell,
+    ) -> Self {
         Self {
             wire: None,
             current_dispatch,
+            scope: Some(scope),
         }
     }
 
@@ -682,6 +696,7 @@ impl ControlSender {
         Self {
             wire: Some((ch, death)),
             current_dispatch,
+            scope: None,
         }
     }
 
@@ -719,11 +734,18 @@ impl ControlSender {
             return;
         }
         match ctrl {
-            Control::Cancel(_id) => {
-                // The same watermark the SIGINT relay stamps, so the in-flight
-                // run observes it at its own poll points — there is no
-                // transport-side sibling scope to trip.
-                crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
+            Control::Cancel(id) => {
+                // Cancellation is sticky and a fold walks the chain live, so a
+                // scope cancelled here before the run's frame exists is still
+                // observed once that frame is minted a descendant of it.
+                if let Some(cell) = &self.scope {
+                    let recorded = cell.lock_ignore_poison();
+                    if let Some((current, scope)) = recorded.as_ref()
+                        && *current == id
+                    {
+                        scope.cancel(crate::process::CancelCause::Explicit);
+                    }
+                }
             }
             Control::Suspend | Control::Resume | Control::Resize(_) => {
                 // The process-level signal machinery already handles these.
@@ -866,9 +888,9 @@ impl SessionLock {
 
 /// The in-process transport: one kernel, one address space.
 ///
-/// `dispatch` runs the engine door synchronously on the calling thread, and
-/// a control frame raises the ambient foreground interrupt rather than
-/// crossing anything.
+/// `dispatch` runs the engine door synchronously on the calling thread; a
+/// `Control::Cancel` trips the scope `dispatch` mints for its own id ahead of
+/// the engine lock, rather than crossing anything.
 pub struct IdentityTransport {
     /// Behind a poison-free [`SessionLock`] so `dispatch` can take `&self`.
     engine: SessionLock,
@@ -885,6 +907,13 @@ pub struct IdentityTransport {
     /// without waiting on the dispatch in flight — how a forked-session host
     /// interrupts one run without touching the session's durable root.
     run_scope: Option<Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>>,
+    /// Minted once at construction; each dispatch hangs a child off it, ahead
+    /// of the engine lock, so a `Control::Cancel` naming that dispatch always
+    /// has a scope to land on.
+    dispatches: crate::process::ForegroundScope,
+    /// The id and scope of the dispatch presently claiming `dispatches` —
+    /// shared with `control`'s `Control::Cancel` arm.
+    dispatch_scope: DispatchScopeCell,
 }
 
 pub struct EngineInner {
@@ -927,7 +956,9 @@ impl IdentityTransport {
             event_tx: event_tx.clone(),
             current_dispatch: current_dispatch.clone(),
         });
-        let control = ControlSender::new(current_dispatch.clone());
+        let dispatches = shell.run_cancel_handle();
+        let dispatch_scope: DispatchScopeCell = Arc::new(std::sync::Mutex::new(None));
+        let control = ControlSender::new(current_dispatch.clone(), dispatch_scope.clone());
         control.clone().publish();
 
         let engine = EngineInner {
@@ -947,6 +978,8 @@ impl IdentityTransport {
             events_recv: Arc::new(EventReceiver::new(event_rx)),
             dispatch_thread: std::sync::Mutex::new(None),
             run_scope: None,
+            dispatches,
+            dispatch_scope,
         }
     }
 
@@ -1044,6 +1077,13 @@ impl crate::run::RunLifecycle for ForegroundCapture {
 impl Transport for IdentityTransport {
     fn dispatch(&self, id: DispatchId, run: Run) {
         self.check_not_reentrant();
+
+        // Minted ahead of the engine lock, so a `Control::Cancel` naming `id`
+        // has a scope to land on even while this call is still waiting to
+        // acquire it.
+        let scope = self.dispatches.child();
+        *self.dispatch_scope.lock_ignore_poison() = Some((id, scope.clone()));
+
         let mut engine = self.engine.lock();
         *self.dispatch_thread.lock_ignore_poison() = Some(std::thread::current().id());
         let _stamp_guard = DispatchStampGuard {
@@ -1069,7 +1109,7 @@ impl Transport for IdentityTransport {
             nursery: engine.nursery.clone(),
             lifecycle,
         };
-        let run_report = engine.shell.run(req);
+        let run_report = engine.shell.run_under(&scope, req);
         let report = run_report.into_report(engine.shell.sources());
 
         engine
@@ -1119,6 +1159,83 @@ impl Transport for IdentityTransport {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod identity_cancel_tests {
+    use super::*;
+    use crate::run::{RequestedTerminalAccess, RunIo, RunStdin};
+    use crate::types::{Capabilities, Shell};
+    use std::time::{Duration, Instant};
+
+    fn sleep_run(src: &str) -> Run {
+        Run {
+            program: Program::Source(src.into()),
+            script_name: "<test>".into(),
+            caps: Capabilities::root(),
+            wall: None,
+            deferred_lease: None,
+            worker_cap: None,
+            io: RunIo::Capture,
+            terminal: RequestedTerminalAccess::Denied,
+            stdin: RunStdin::Empty,
+        }
+    }
+
+    /// A `Control::Cancel` sent while `dispatch` is still waiting on the
+    /// engine lock — before the run's own frame exists — must still settle
+    /// the run promptly rather than let it run to completion. The engine
+    /// lock is held here so `dispatch`, called on another thread, is forced
+    /// to park right after it records its scope and before it ever reaches
+    /// `shell.run_under`; `face_signals` makes the run's frame signal-facing,
+    /// so a failure here is the race and not a plain absence of wiring.
+    #[test]
+    fn a_cancel_racing_a_fresh_dispatch_is_not_dropped() {
+        let _g = crate::process::cancel::REQUEST_SERIAL.lock();
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.face_signals();
+        let transport = Arc::new(IdentityTransport::new(shell));
+
+        let guard = transport.shell_mut();
+
+        let worker = {
+            let transport = transport.clone();
+            std::thread::spawn(move || {
+                transport.dispatch(DispatchId(1), sleep_run("sleep 30"));
+            })
+        };
+
+        // `dispatch` records its scope ahead of the engine lock; wait for
+        // that record rather than guessing at a delay.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if matches!(
+                *transport.dispatch_scope.lock_ignore_poison(),
+                Some((current, _)) if current == DispatchId(1)
+            ) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "dispatch must record its scope before acquiring the engine lock"
+            );
+            std::thread::yield_now();
+        }
+
+        transport.control().send(Control::Cancel(DispatchId(1)));
+        drop(guard);
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            worker.join().expect("dispatch must not panic");
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "a cancel recorded before the run's frame exists must still settle it promptly, \
+             not run `sleep 30` to completion"
+        );
     }
 }
 
