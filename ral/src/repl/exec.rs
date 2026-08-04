@@ -141,12 +141,7 @@ pub(super) fn execute_input(
         transport,
         run,
         |_val| {},
-        |_req| {
-            Err(transport::EnquiryError {
-                message: "this host answers no enquiries".into(),
-                status: 1,
-            })
-        },
+        |_req| Err(transport::EnquiryError::no_desk()),
     );
 
     let Some(report) = report else {

@@ -1208,7 +1208,7 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("worker must send its enquire outcome before settling");
         match outcome {
-            Err(e) => assert_eq!(e.message, "this host answers no enquiries"),
+            Err(e) => assert_eq!(e.message, crate::types::NO_DESK),
             Ok(_) => panic!("a detached worker must never reach the spawning run's desk"),
         }
     }

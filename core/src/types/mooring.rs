@@ -32,9 +32,11 @@ impl EventSink for () {
 /// cannot decide a run is over.
 pub type SurfaceSink = Arc<dyn EventSink>;
 
-/// The refusal a host with no desk answers, spelled once. Both transports, the
-/// engine, and every front-end reach for this rather than their own copy: a run
-/// must not be able to tell which seam refused it by the wording.
+/// The refusal a host with no desk answers, spelled once.
+///
+/// Both transports, the engine, and every front-end reach for this rather than
+/// their own copy: a run must not be able to tell which seam refused it by the
+/// wording.
 pub const NO_DESK: &str = "this host answers no enquiries";
 
 /// The status that refusal carries. Not a failure of the request — the host

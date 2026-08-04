@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use crate::process::ChildHandle;
 use crate::serial::FOValue;
+use crate::sync::LockExt;
 use crate::types::DeferredSink;
 use crate::types::SurfaceSink;
 use std::sync::OnceLock;
@@ -387,8 +388,14 @@ pub trait Transport: Send + Sync {
     /// Read session state at a run boundary, synchronously.
     ///
     /// # Errors
-    /// Returns `Err` if the engine is busy on the rendezvous (the "engine
-    /// busy" error), or if the reading class is unrecognised (naming it).
+    /// The `Err` string conflates two failures different in kind: the
+    /// rendezvous held by an in-flight dispatch ("engine busy", transport
+    /// state) and an unrecognised reading class (a program error, naming
+    /// it). No host may string-match either out of this text — `probe` is
+    /// legal only at a run boundary, so a caller that could observe "engine
+    /// busy" has already broken that rule. This is why
+    /// `exarch/src/agent/probe.rs` treats the whole channel as
+    /// `unreachable!`.
     fn probe(&self, reading: FOValue) -> Result<FOValue, String>;
 
     /// The out-of-band control sender — writable while a dispatch is in
@@ -727,6 +734,15 @@ impl ControlSender {
 
 /// The front-end drains this while a dispatch is outstanding; `Surface` events
 /// are ordered before the `Report`.
+///
+/// Admits exactly one drainer at a time — [`dispatch_to_report`]'s loop and a
+/// desk's own pre-drain (`exarch`'s `DeskBinding::enquire`) never run
+/// together, because the desk call happens synchronously inside
+/// `Transport::dispatch`, on the same thread, strictly before the loop's own
+/// first `recv`. The `stash` and `rx` mutexes exist only to make
+/// `mpsc::Receiver` `Sync` across that single drainer; they do not arbitrate
+/// between two, and nothing here enforces the invariant — it is a scheduling
+/// fact about the callers, not a property of the locks.
 pub struct EventReceiver {
     rx: std::sync::Mutex<mpsc::Receiver<(DispatchId, Event)>>,
     /// Events a probe's drain read past on its way to its own Report — a
@@ -743,27 +759,29 @@ impl EventReceiver {
         }
     }
 
-    /// # Panics
-    /// Panics if the stash or receiver mutex is poisoned.
     pub fn recv(&self) -> Option<(DispatchId, Event)> {
-        let stashed = self.stash.lock().unwrap().pop_front();
+        let stashed = self.stash.lock_ignore_poison().pop_front();
         if let Some(item) = stashed {
             return Some(item);
         }
-        self.rx.lock().unwrap().recv().ok()
+        self.rx.lock_ignore_poison().recv().ok()
     }
 
-    /// Non-blocking drain: the stash first, then the channel. `None` when both
-    /// are empty right now.
+    /// Non-blocking on the channel: the stash first, then one
+    /// `mpsc::Receiver::try_recv`. `None` when both are empty right now.
     ///
-    /// # Panics
-    /// Panics if the stash or receiver mutex is poisoned.
+    /// This is non-blocking only with respect to the channel, not the lock:
+    /// [`Self::recv`] holds the same `rx` mutex across its own blocking
+    /// receive, so a `try_recv` that ran concurrently with an outstanding
+    /// `recv` would park on the mutex for as long as that `recv` blocks.
+    /// Nothing here makes that safe — see the type's own doc for why no two
+    /// callers may drain at once.
     pub fn try_recv(&self) -> Option<(DispatchId, Event)> {
-        let stashed = self.stash.lock().unwrap().pop_front();
+        let stashed = self.stash.lock_ignore_poison().pop_front();
         if let Some(item) = stashed {
             return Some(item);
         }
-        self.rx.lock().unwrap().try_recv().ok()
+        self.rx.lock_ignore_poison().try_recv().ok()
     }
 }
 
@@ -824,10 +842,10 @@ impl crate::types::EventSink for TransportSink {
 
 // ── Identity transport ────────────────────────────────────────────────
 
-/// A session lock that cannot poison-panic. A run that unwinds drops its guard
-/// mid-mutation; recovering the poison rather than unwrapping it means such a
-/// run can never wedge the session, and being the only lock over the engine
-/// state there is no stray `unwrap()` elsewhere to forget.
+/// A session lock that cannot poison-panic, named for the one state it
+/// guards: a run that unwinds drops its guard mid-mutation, and recovering
+/// the poison (via [`LockExt`]) rather than unwrapping it means such a run
+/// can never wedge the session for whatever runs next.
 struct SessionLock(std::sync::Mutex<EngineInner>);
 
 impl SessionLock {
@@ -835,9 +853,7 @@ impl SessionLock {
         Self(std::sync::Mutex::new(inner))
     }
     fn lock(&self) -> std::sync::MutexGuard<'_, EngineInner> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.0.lock_ignore_poison()
     }
     /// Recovers poison the same way `lock` does: an unwound run must not wedge
     /// the move-out either.
@@ -898,10 +914,7 @@ struct DispatchStampGuard<'a> {
 
 impl Drop for DispatchStampGuard<'_> {
     fn drop(&mut self) {
-        *self
-            .slot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *self.slot.lock_ignore_poison() = None;
     }
 }
 
@@ -986,12 +999,7 @@ impl IdentityTransport {
     /// touching `self.engine`, so it panics rather than hangs.
     fn check_not_reentrant(&self) {
         let current = std::thread::current().id();
-        if *self
-            .dispatch_thread
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            == Some(current)
-        {
+        if *self.dispatch_thread.lock_ignore_poison() == Some(current) {
             panic!(
                 "reentrant session access: a desk handler must not take the session lock \
                  (dispatch/shell_mut/with_shell) — it runs inside the dispatch on the \
@@ -1029,10 +1037,7 @@ impl crate::run::RunLifecycle for ForegroundCapture {
         _shell: &mut crate::types::Shell,
         _src: &str,
     ) {
-        *self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(mooring.cancel.clone());
+        *self.0.lock_ignore_poison() = Some(mooring.cancel.clone());
     }
 }
 
@@ -1040,10 +1045,7 @@ impl Transport for IdentityTransport {
     fn dispatch(&self, id: DispatchId, run: Run) {
         self.check_not_reentrant();
         let mut engine = self.engine.lock();
-        *self
-            .dispatch_thread
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::thread::current().id());
+        *self.dispatch_thread.lock_ignore_poison() = Some(std::thread::current().id());
         let _stamp_guard = DispatchStampGuard {
             slot: &self.dispatch_thread,
         };
@@ -1132,6 +1134,12 @@ impl Transport for IdentityTransport {
 /// one. `Err` is handed back so a caller that must react further — the
 /// heartbeat's `Ping` arm breaking its loop — can, without repeating the
 /// severing itself.
+///
+/// Deliberately outside [`LockExt`]'s recover-poison policy: a panic between
+/// `write_frame` and `shutdown` can leave a partial frame already on the
+/// socket, severed by neither `death` nor a shutdown call. Recovering the
+/// poison would let the next writer resume into that torn frame stream, which
+/// is worse than the panic propagating; a poisoned `ch` must stay poisoned.
 fn write_through(
     ch: &Mutex<crate::wire::WireChannel>,
     death: &AtomicBool,
@@ -1258,7 +1266,7 @@ fn spawn_wire_reader(
             }
             match reader_ch.read_frame() {
                 Ok(Some(frame)) => {
-                    *last_seen.lock().unwrap() = Instant::now();
+                    *last_seen.lock_ignore_poison() = Instant::now();
                     // A `Pong`'s whole job is the refresh above.
                     match frame {
                         Frame::Event(id, ev) => {
@@ -1267,7 +1275,7 @@ fn spawn_wire_reader(
                             }
                         }
                         Frame::Session(SessionEvent::DeferredSurface(batch)) => {
-                            if let Some(sink) = deferred_sink.lock().unwrap().as_ref() {
+                            if let Some(sink) = deferred_sink.lock_ignore_poison().as_ref() {
                                 sink.deliver(batch);
                             }
                         }
@@ -1307,7 +1315,7 @@ fn spawn_heartbeat(
             if death.load(Ordering::SeqCst) {
                 break;
             }
-            if last_seen.lock().unwrap().elapsed() >= liveness.deadline {
+            if last_seen.lock_ignore_poison().elapsed() >= liveness.deadline {
                 death.store(true, Ordering::SeqCst);
                 shutdown.shutdown();
                 break;
@@ -1528,7 +1536,7 @@ impl Transport for WireTransport {
                 // Anything that is not this probe's Report — another
                 // dispatch's, a worker's batch settling mid-probe — is stashed
                 // for the ordinary drain rather than dropped.
-                Some(item) => self.events_recv.stash.lock().unwrap().push_back(item),
+                Some(item) => self.events_recv.stash.lock_ignore_poison().push_back(item),
                 None => return Err("engine connection closed".into()),
             }
         }
@@ -1562,7 +1570,7 @@ impl Transport for WireTransport {
         });
         // Only now, with the Attach through the write lock, may the heartbeat
         // start: no Ping may precede the handshake.
-        let pending = self.pending_heartbeat.lock().unwrap().take();
+        let pending = self.pending_heartbeat.lock_ignore_poison().take();
         if let Some(liveness) = pending {
             spawn_heartbeat(
                 self.write_tx.clone(),
@@ -1585,7 +1593,7 @@ impl Transport for WireTransport {
     }
 
     fn set_deferred_sink(&self, sink: Arc<dyn DeferredSink>) {
-        *self.deferred_sink.lock().unwrap() = Some(sink);
+        *self.deferred_sink.lock_ignore_poison() = Some(sink);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1638,7 +1646,7 @@ mod enquiry_tests {
         let err = shell
             .enquire(&Mooring::adrift(), FOValue::Unit)
             .expect_err("no desk is installed");
-        assert_eq!(err.message, "this host answers no enquiries");
+        assert_eq!(err.message, crate::types::NO_DESK);
     }
 
     /// A stub desk that maps `Int{n}` to `Int{n+1}`, otherwise echoes.

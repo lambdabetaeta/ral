@@ -232,14 +232,16 @@ pub fn deferred_sink(
 /// Evaluate `cmd` against `transport` under `caps`, capturing stdout and
 /// stderr.  Everything crosses the transport seam: a `Source` `Run` out, a
 /// stream of surface events drained to the bus, one terminal `Report` back.
+///
+/// `seam` is `None` only in the test harness's bare `IdentityTransport`,
+/// which installs no desk of its own; every real caller has one.
 pub(crate) fn run_shell(
     transport: &dyn ral_core::transport::Transport,
     caps: &ral_core::types::Capabilities,
     cmd: &str,
     timeout_secs: u64,
     emit: &Emitter,
-    pins: Option<&PinDigests>,
-    desk: Option<&Arc<crate::fleet::desk::ExarchDesk>>,
+    seam: Option<&crate::fleet::desk::HostSeam>,
 ) -> Outcome {
     let name = "<tool>";
 
@@ -267,32 +269,35 @@ pub(crate) fn run_shell(
         stdin: RunStdin::Empty,
     };
 
-    // The live sink folds pins into the mirror; a deferred worker's flush
-    // renders identically but never touches it.  Shared with the identity
-    // path's `DeskBinding` adapter so the two cannot diverge.
-    let applier = crate::fleet::desk::SurfaceApplier {
+    // One applier, and `DeskBinding` drains through that same one under the
+    // identity transport: a surfaced value renders identically whichever of
+    // the two reads it off the channel first. A seamless caller — the test
+    // harness's bare `IdentityTransport` — gets a pin-less one rather than a
+    // second way of applying a value, so `SurfaceApplier` stays the only
+    // spelling of how a surfaced value reaches the bus.
+    let seamless = crate::fleet::desk::SurfaceApplier {
         emit: emit.clone(),
-        pins: pins.cloned(),
+        pins: None,
     };
+    let apply = seam.map_or(&seamless, |seam| &seam.apply);
     let report = ral_core::transport::dispatch_to_report(
         transport,
         run,
-        |val| applier.live(val),
+        |val| apply.live(val),
         // Dead under the identity transport, where the desk installed by
         // `set_desk` answers a mid-dispatch `Shell::enquire` directly; live
-        // only for a wire engine's `Event::Enquiry`.  Either way it is the
-        // same `ExarchDesk::handle` that `DeskBinding` wraps.
-        |req| match desk {
-            Some(desk) => desk
+        // only for a wire engine's `Event::Enquiry`.  Either way it is
+        // `seam.desk.handle` — the same desk `DeskBinding` wraps, not a
+        // second one this call could have built differently.
+        |req| match seam {
+            Some(seam) => seam
+                .desk
                 .handle(req)
                 .map_err(|e| ral_core::transport::EnquiryError {
                     status: e.exit_code(),
                     message: e.message,
                 }),
-            None => Err(ral_core::transport::EnquiryError {
-                message: "this host answers no enquiries".into(),
-                status: 1,
-            }),
+            None => Err(ral_core::transport::EnquiryError::no_desk()),
         },
     );
 
@@ -538,7 +543,7 @@ mod tests {
             ral_core::Shell::new(ral_core::io::TerminalState::probe_from_env().1),
         );
         let transport = ral_core::transport::IdentityTransport::new(taken);
-        let outcome = run_shell(&transport, caps, cmd, timeout_secs, emit, None, None);
+        let outcome = run_shell(&transport, caps, cmd, timeout_secs, emit, None);
         // Recover the mutated shell so `let`/`cd`/binding state reaches the
         // caller's next run — the across-calls contract these tests pin.
         *shell = transport.into_shell();

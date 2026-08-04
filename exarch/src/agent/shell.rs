@@ -143,16 +143,22 @@ impl Agent {
         // shared between the seat install and the desk's own capture.
         let nursery = ral_core::types::Nursery::default();
         let reply_cell = ReplyCell::default();
-        let desk = Arc::new(desk::ExarchDesk {
-            services: self.host_services(emit, nursery.clone(), reply_cell.clone()),
+        // Built once and shared by `Arc`: the identity install and
+        // `shell_eval::run_shell`'s own drain reach the very same desk and
+        // the very same applier, so neither seam can be handed one this call
+        // did not also hand the other.
+        let seam = Arc::new(desk::HostSeam {
+            desk: desk::ExarchDesk {
+                services: self.host_services(emit, nursery.clone(), reply_cell.clone()),
+            },
+            apply: desk::SurfaceApplier {
+                emit: emit.clone(),
+                pins: Some(self.pins.clone()),
+            },
         });
         let content = {
             let _guard = self.seat.install_run(RunInstall {
-                desk: desk.clone(),
-                apply: desk::SurfaceApplier {
-                    emit: emit.clone(),
-                    pins: Some(self.pins.clone()),
-                },
+                seam: seam.clone(),
                 // Stamped with the registry generation read now, so a batch
                 // from a worker that settles after a `/clear` is dropped.
                 deferred: shell_eval::deferred_sink(emit, self.id, &self.agents),
@@ -164,8 +170,7 @@ impl Agent {
                 cmd,
                 timeout_secs,
                 emit,
-                Some(&self.pins),
-                Some(&desk),
+                Some(&seam),
             ) {
                 shell_eval::Outcome::Ran(r) => render(&r),
                 shell_eval::Outcome::Static(s) => clip(&s, OPAQUE_CAP),

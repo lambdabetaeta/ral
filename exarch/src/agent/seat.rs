@@ -4,7 +4,7 @@
 
 use crate::agent::event::AgentLog;
 use crate::bootstrap::Scratch;
-use crate::fleet::desk::{AbsentDesk, DeskBinding, ExarchDesk, SurfaceApplier};
+use crate::fleet::desk::{AbsentDesk, DeskBinding, HostSeam};
 use crate::fleet::registry::{EvalReach, RunScope};
 use crate::shell_eval::builtins;
 use ral_core::Shell;
@@ -35,8 +35,7 @@ pub(crate) enum Seat {
 /// One `ral` call's capture set, built fresh per call so nothing a desk
 /// handler captures can go stale.
 pub(crate) struct RunInstall {
-    pub(crate) desk: Arc<ExarchDesk>,
-    pub(crate) apply: SurfaceApplier,
+    pub(crate) seam: Arc<HostSeam>,
     pub(crate) deferred: Arc<dyn ral_core::types::DeferredSink>,
     pub(crate) nursery: ral_core::types::Nursery,
 }
@@ -129,9 +128,8 @@ impl Seat {
                 // Drain-then-handle: a handler's chrome must never jump
                 // ahead of surface output still queued on the channel.
                 transport.set_desk(Arc::new(DeskBinding {
-                    desk: install.desk,
+                    seam: install.seam,
                     events: transport.events_shared(),
-                    apply: install.apply,
                 }));
             }
             Self::Wire { transport } => {
@@ -456,13 +454,15 @@ mod tests {
         let registry = AgentRegistry::new();
 
         let install = RunInstall {
-            desk: Arc::new(ExarchDesk {
-                services: wire_host_services(&emit, &registry),
+            seam: Arc::new(HostSeam {
+                desk: ExarchDesk {
+                    services: wire_host_services(&emit, &registry),
+                },
+                apply: crate::fleet::desk::SurfaceApplier {
+                    emit: emit.clone(),
+                    pins: None,
+                },
             }),
-            apply: crate::fleet::desk::SurfaceApplier {
-                emit: emit.clone(),
-                pins: None,
-            },
             deferred: crate::shell_eval::deferred_sink(&emit, root_id, &registry),
             nursery: Nursery::default(),
         };

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use crate::process::CancelCause;
 use crate::serial::FOValue;
+use crate::sync::LockExt;
 use crate::transport::{
     Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run, SessionEvent,
     answer_probe,
@@ -46,6 +47,11 @@ pub struct EngineInstaller {
 /// enquiry, a report, a `Pong`. None of them may park the reader loop, so a
 /// stalled write becomes exactly the same fatal, non-blocking event a severed
 /// pipe already is.
+///
+/// `writer`'s poison is never recovered, unlike [`WireDesk::slots`] below: a
+/// panic between `write_frame` and `shutdown` can leave a partial frame
+/// already on the socket with `fault` unset, and resuming writes into that
+/// torn stream is worse than the panic propagating.
 fn engine_write(writer: &Mutex<WireChannel>, fault: &AtomicBool, frame: &Frame) -> io::Result<()> {
     let outcome = {
         let mut guard = writer.lock().unwrap();
@@ -148,6 +154,8 @@ struct WireDesk {
     next_eid: AtomicU64,
     /// `None` = parked awaiting an answer, `Some` = answered and awaiting
     /// collection. Absence means the park died; an answer for it is dropped.
+    /// Every mutation is a whole-entry insert/remove/overwrite, so poison
+    /// here is recovered ([`LockExt`]) rather than propagated.
     slots: Mutex<HashMap<EnquiryId, Option<Result<FOValue, EnquiryError>>>>,
     answered: Condvar,
 }
@@ -156,7 +164,7 @@ impl WireDesk {
     /// Called from the reader loop. An answer arriving after its park gave up
     /// finds no slot and is dropped.
     fn fill(&self, eid: EnquiryId, answer: Result<FOValue, EnquiryError>) {
-        let mut slots = self.slots.lock().unwrap();
+        let mut slots = self.slots.lock_ignore_poison();
         if let Some(slot) = slots.get_mut(&eid) {
             *slot = Some(answer);
             self.answered.notify_all();
@@ -172,7 +180,7 @@ impl EnquiryDesk for WireDesk {
     ) -> Result<FOValue, Error> {
         let id = DispatchId(self.current_dispatch.load(Ordering::Relaxed));
         let eid = EnquiryId(self.next_eid.fetch_add(1, Ordering::Relaxed));
-        self.slots.lock().unwrap().insert(eid, None);
+        self.slots.lock_ignore_poison().insert(eid, None);
 
         if engine_write(
             &self.writer,
@@ -181,13 +189,13 @@ impl EnquiryDesk for WireDesk {
         )
         .is_err()
         {
-            self.slots.lock().unwrap().remove(&eid);
+            self.slots.lock_ignore_poison().remove(&eid);
             return Err(Error::new("enquiry lost: the host connection is down", 1));
         }
 
         // The park raises `CancelCause`'s own words, so a cancelled enquiry
         // reads like every other cancelled poll point (`process::check`).
-        let mut slots = self.slots.lock().unwrap();
+        let mut slots = self.slots.lock_ignore_poison();
         loop {
             if let Some(Some(_)) = slots.get(&eid) {
                 let answer = slots.remove(&eid).flatten().expect("slot just seen filled");
@@ -200,7 +208,7 @@ impl EnquiryDesk for WireDesk {
             slots = self
                 .answered
                 .wait_timeout(slots, ENQUIRY_CANCEL_POLL)
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .0;
         }
     }
@@ -671,21 +679,18 @@ mod wire_desk_tests {
             let Frame::Event(_, Event::Enquiry(eid, _)) = frame else {
                 panic!("expected Event::Enquiry, got {frame:?}");
             };
-            filler.fill(
-                eid,
-                Err(EnquiryError {
-                    message: "this host answers no enquiries".into(),
-                    status: 1,
-                }),
-            );
+            filler.fill(eid, Err(EnquiryError::no_desk()));
         });
 
         let err = desk
             .enquire(FOValue::Unit, &CancelScope::default())
             .expect_err("refused");
         front_end.join().expect("front-end thread");
-        assert_eq!(err.message, "this host answers no enquiries");
-        assert_eq!(err.status, crate::types::Status::Code(1));
+        assert_eq!(err.message, crate::types::NO_DESK);
+        assert_eq!(
+            err.status,
+            crate::types::Status::Code(crate::types::NO_DESK_STATUS)
+        );
     }
 
     /// A cancelled park unwinds at its next poll tick and takes its slot with

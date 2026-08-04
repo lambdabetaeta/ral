@@ -3,7 +3,8 @@
 //! [`HostServices`] is all `&Agent` can lend a handler without lending
 //! `&mut Agent`/`&mut Shell`, since the reentrancy law bars a handler from
 //! taking the session lock. [`ExarchDesk`] answers one enquiry against that
-//! capture; [`DeskBinding`] wraps it for the identity transport, where a
+//! capture, paired with its [`SurfaceApplier`] in one [`HostSeam`];
+//! [`DeskBinding`] wraps the seam for the identity transport, where a
 //! handler's chrome would otherwise outrun the run's earlier surface output.
 
 use crate::agent::{Agent, Build, LogCell, ProviderHandle, ReplyCell};
@@ -15,7 +16,9 @@ use crate::shell_eval::{self, PinDigests};
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
 use ral_core::transport::{Event, EventReceiver};
-use ral_core::types::{Capabilities, EnquiryDesk, Error, Nursery, NurseryId};
+use ral_core::types::{
+    Capabilities, EnquiryDesk, Error, NO_DESK, NO_DESK_STATUS, Nursery, NurseryId,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -122,7 +125,7 @@ fn payload_int(v: FOValue, class: &str, field: &str) -> Result<i64, Error> {
     match v {
         FOValue::Int { value } => Ok(value),
         other => Err(Error::new(
-            format!("`{class}`: `{field}` must be an Int, got {other:?}"),
+            format!("`{class}`: `{field}` must be an Int, got {}", other.shape()),
             1,
         )),
     }
@@ -132,7 +135,7 @@ fn payload_string(v: FOValue, class: &str, field: &str) -> Result<String, Error>
     match v {
         FOValue::String { value } => Ok(value),
         other => Err(Error::new(
-            format!("`{class}`: `{field}` must be a Str, got {other:?}"),
+            format!("`{class}`: `{field}` must be a Str, got {}", other.shape()),
             1,
         )),
     }
@@ -145,7 +148,10 @@ fn payload_tag(v: FOValue, class: &str, field: &str) -> Result<String, Error> {
             payload: None,
         } => Ok(label),
         other => Err(Error::new(
-            format!("`{class}`: `{field}` must be a bare variant tag, got {other:?}"),
+            format!(
+                "`{class}`: `{field}` must be a bare variant tag, got {}",
+                other.shape()
+            ),
             1,
         )),
     }
@@ -155,9 +161,19 @@ fn payload_bool(v: FOValue, class: &str, field: &str) -> Result<bool, Error> {
     match v {
         FOValue::Bool { value } => Ok(value),
         other => Err(Error::new(
-            format!("`{class}`: `{field}` must be a Bool, got {other:?}"),
+            format!("`{class}`: `{field}` must be a Bool, got {}", other.shape()),
             1,
         )),
+    }
+}
+
+/// A bare variant tag carrying no payload — the shape `agent-cancel` and
+/// `unschedule` answer with, since the whole of their outcome is which case
+/// obtained.
+fn bare_tag(label: &str) -> FOValue {
+    FOValue::Variant {
+        label: label.to_string(),
+        payload: None,
     }
 }
 
@@ -183,7 +199,10 @@ fn payload_trigger(v: FOValue, class: &str) -> Result<Trigger, Error> {
             Ok(Trigger::After(d))
         }
         other => Err(Error::new(
-            format!("`{class}`: `trigger` must be `cron <expr>` or `after <dur>`, got {other:?}"),
+            format!(
+                "`{class}`: `trigger` must be `cron <expr>` or `after <dur>`, got {}",
+                other.shape()
+            ),
             1,
         )),
     }
@@ -202,7 +221,10 @@ fn payload_label(v: FOValue, class: &str) -> Result<Option<String>, Error> {
             payload: None,
         } if label == "none" => Ok(None),
         other => Err(Error::new(
-            format!("`{class}`: `label` must be `some <str>` or `none`, got {other:?}"),
+            format!(
+                "`{class}`: `label` must be `some <str>` or `none`, got {}",
+                other.shape()
+            ),
             1,
         )),
     }
@@ -234,7 +256,10 @@ impl ExarchDesk {
     pub(crate) fn handle(&self, req: FOValue) -> Result<FOValue, Error> {
         let FOValue::Variant { label, payload } = req else {
             return Err(Error::new(
-                format!("enquiry request must be a variant naming its class, got {req:?}"),
+                format!(
+                    "enquiry request must be a variant naming its class, got {}",
+                    req.shape()
+                ),
                 1,
             ));
         };
@@ -474,7 +499,9 @@ impl ExarchDesk {
     }
 
     /// `` `agent-cancel `` — resolve a live descendant by name and cancel it,
-    /// scoped as [`AgentRegistry::cancel_scoped`] enforces.
+    /// scoped as [`AgentRegistry::cancel_scoped`] enforces. Answers `` `cancelled ``
+    /// or `` `no-such-agent ``: both are successful calls, so the outcome rides
+    /// in the answer rather than in whether the call raised at all.
     fn agent_cancel(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let s = &self.services;
         let [name] = payload_list(payload, "agent-cancel", "[name]")?;
@@ -487,35 +514,35 @@ impl ExarchDesk {
             .registry
             .resolve_name(&name)
             .map_or(Ok(false), |id| s.registry.cancel_scoped(s.parent, id));
-        let (payload, content, ok) = match cancelled {
-            Ok(true) => (String::new(), format!("cancelling agent '{name}'"), true),
+        let (payload, content, answer) = match cancelled {
+            Ok(true) => (
+                String::new(),
+                format!("cancelling agent '{name}'"),
+                Ok(bare_tag("cancelled")),
+            ),
             Ok(false) => (
                 "no live agent by that name".to_string(),
                 format!("no live agent named '{name}'"),
-                true,
+                Ok(bare_tag("no-such-agent")),
             ),
             Err(NotADescendant(_)) => (
                 "refused: not a descendant".to_string(),
                 format!(
                     "agent '{name}' is not an agent you started; agent-cancel may only reach a descendant of yours"
                 ),
-                false,
+                Err(()),
             ),
         };
         s.emit.emit(Kind::HarnessCall {
             verb: "cancel",
             subject: Some(name),
             payload,
-            failed: !ok,
+            failed: answer.is_err(),
         });
         s.emit.emit(Kind::HarnessResult(content.clone()));
-        // A no-op and a real cancel are both successful calls; only a scope
-        // violation raises, and the raise is the model's only copy of it.
-        if ok {
-            Ok(FOValue::Unit)
-        } else {
-            Err(Error::new(content, 1))
-        }
+        // Only a scope violation raises; the raise is the model's only copy
+        // of it. A real cancel and a miss both answer — the tag names which.
+        answer.map_err(|()| Error::new(content, 1))
     }
 
     /// `` `message `` — resolve a live descendant by name and send it a note.
@@ -685,23 +712,30 @@ impl ExarchDesk {
         })
     }
 
-    /// `` `unschedule `` — remove one scheduled wakeup by label.
+    /// `` `unschedule `` — remove one scheduled wakeup by label. Answers
+    /// `` `removed `` or `` `no-such-label ``: both are successful calls, so the
+    /// outcome rides in the answer rather than in whether the call raised.
     fn unschedule(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         self.require_schedule_grant("unschedule")?;
         let s = &self.services;
         let [label] = payload_list(payload, "unschedule", "[label]")?;
         let label = payload_string(label, "unschedule", "label")?;
 
-        // Shaped like `agent-cancel`: an absent label is a successful no-op,
-        // only the grant refusal raises, and the payload column carries the
-        // outcome since the verb takes no argument of its own.
+        // Shaped like `agent-cancel`: only the grant refusal raises, and the
+        // rail's payload column spells out the miss the answer's tag names,
+        // since the verb has no argument of its own to show there.
         let removed = s.schedules.unschedule(&label);
-        let (payload, content) = if removed {
-            (String::new(), format!("unscheduled '{label}'"))
+        let (payload, content, answer) = if removed {
+            (
+                String::new(),
+                format!("unscheduled '{label}'"),
+                bare_tag("removed"),
+            )
         } else {
             (
                 "no live schedule by that label".to_string(),
                 format!("no live schedule labelled '{label}'"),
+                bare_tag("no-such-label"),
             )
         };
         s.emit.emit(Kind::HarnessCall {
@@ -711,7 +745,7 @@ impl ExarchDesk {
             failed: false,
         });
         s.emit.emit(Kind::HarnessResult(content));
-        Ok(FOValue::Unit)
+        Ok(answer)
     }
 
     /// `` `reply `` — stage the payload into the cell [`Agent::deliberate`] lifts
@@ -780,8 +814,10 @@ impl ExarchDesk {
 }
 
 /// Decodes a surfaced value onto the bus, folding a `` `pin ``/`` `unpin ``
-/// into the pin mirror. `shell_eval::run_shell`'s drain loop and [`DeskBinding`]
-/// both go through this one type, so the two paths cannot render differently.
+/// into the pin mirror. [`HostSeam::apply`] is the one instance
+/// `shell_eval::run_shell`'s own drain and [`DeskBinding`]'s both reach
+/// through, so the two paths render off the same applier rather than two that
+/// could drift.
 pub(crate) struct SurfaceApplier {
     pub(crate) emit: Emitter,
     pub(crate) pins: Option<PinDigests>,
@@ -817,13 +853,25 @@ impl SurfaceApplier {
 pub(crate) struct AbsentDesk;
 
 impl EnquiryDesk for AbsentDesk {
+    /// `_cancel` goes unpolled: every answer here is immediate and
+    /// unconditional, so there is no wait for a poll point to interrupt.
     fn enquire(
         &self,
         _req: FOValue,
         _cancel: &ral_core::process::CancelScope,
     ) -> Result<FOValue, Error> {
-        Err(Error::new("this host answers no enquiries", 1))
+        Err(Error::new(NO_DESK, NO_DESK_STATUS))
     }
+}
+
+/// One `ral` call's whole host seam: the desk that answers its enquiries and
+/// the applier that renders its surfaced values, built once per call and
+/// shared by `Arc` between [`DeskBinding`] (the identity install) and
+/// `shell_eval::run_shell`'s own drain — so the two paths through one call can
+/// never be handed different desks, or different appliers, by mistake.
+pub(crate) struct HostSeam {
+    pub(crate) desk: ExarchDesk,
+    pub(crate) apply: SurfaceApplier,
 }
 
 /// The identity transport's drain-then-handle adapter.
@@ -835,12 +883,19 @@ impl EnquiryDesk for AbsentDesk {
 /// [`Self::enquire`] applies them first: answering ahead of them would render a
 /// handler's chrome before output that preceded it.
 pub(crate) struct DeskBinding {
-    pub(crate) desk: Arc<ExarchDesk>,
+    pub(crate) seam: Arc<HostSeam>,
     pub(crate) events: Arc<EventReceiver>,
-    pub(crate) apply: SurfaceApplier,
 }
 
 impl EnquiryDesk for DeskBinding {
+    /// `_cancel` goes unpolled: `ExarchDesk::handle` answers every class from
+    /// its captured `HostServices` without parking on another party — a spawn
+    /// starts a detached worker and returns, a cancel signals a token and
+    /// returns, neither waits for the far side to react. The one arm that
+    /// grows rather than finishing at once is `agent-start`'s `mnemon` copy of
+    /// the parent's inherited context (`ExarchDesk::launch`): still bounded,
+    /// by the conversation so far, but the largest uncancellable window this
+    /// desk ever holds open.
     fn enquire(
         &self,
         req: FOValue,
@@ -848,10 +903,10 @@ impl EnquiryDesk for DeskBinding {
     ) -> Result<FOValue, Error> {
         while let Some((_, event)) = self.events.try_recv() {
             if let Event::Surface(val) = event {
-                self.apply.live(val);
+                self.seam.apply.live(val);
             }
         }
-        self.desk.handle(req)
+        self.seam.desk.handle(req)
     }
 }
 
@@ -1067,9 +1122,11 @@ mod tests {
 
         let (emit, rx) = crate::bus::dummy_emitter();
         let binding = DeskBinding {
-            desk: Arc::new(desk()),
+            seam: Arc::new(HostSeam {
+                desk: desk(),
+                apply: SurfaceApplier { emit, pins: None },
+            }),
             events: transport.events_shared(),
-            apply: SurfaceApplier { emit, pins: None },
         };
 
         let answer = binding

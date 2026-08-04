@@ -183,9 +183,13 @@ error with no room for a didactic message.
   zero.
 - **`agents`** → `F [[name: Str, elapsed-s: Int, log-dir: Str]]`.
   Silent; a recovery poll over live descendants.
-- **`message <name> <text>`** / **`agent-cancel <name>`** → `F Unit`.
-  Descendant-only, resolved by name and enforced at the desk; a pure
-  confirmation, so success is the return and failure raises.
+- **`message <name> <text>`** → `F Unit`. Descendant-only, resolved by name
+  and enforced at the desk; a pure confirmation, so success is the return and
+  failure raises.
+- **`agent-cancel <name>`** → `F <cancelled | no-such-agent>`.
+  Descendant-only, resolved by name and enforced at the desk; the answer
+  distinguishes a real cancellation from a name that reached no live agent, so
+  a scope violation is the only case left to raise.
 - **`schedule <spec>`** → `F [label: Str, next-s: Int]`, taking a single
   closed **record** argument (`[trigger: …, label: …, prompt: …]`) rather
   than three positional arguments — a record literal infers an exact row, so
@@ -200,7 +204,7 @@ error with no room for a didactic message.
 - **`schedules`** → `F [[label: Str, trigger: Str, next-s: Int,
   fires: Int]]`. Silent; `next-s` saturates to `i64::MAX` for a cron with no
   next occurrence.
-- **`unschedule <label>`** → `F Unit`.
+- **`unschedule <label>`** → `F <removed | no-such-label>`.
 - **`pin-read <key>`** → `∀α. F α`. Enquiry over the caller's own pin
   register: the card pinned at `key`, canonically re-encoded
   ([[map/exarch/cards|cards]]) so a kit can destructure it whether or not the

@@ -296,11 +296,34 @@ fn builtin_message(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Sett
     Ok(Value::Unit)
 }
 
+/// The tags `agent-cancel` answers, and `unschedule`'s. Each list is the one
+/// source for both the builtin's type ([`closed_variant`]) and the runtime
+/// check on what the desk actually sent ([`tag_receipt`]), so the row a caller
+/// may match on and the row the host may answer cannot come apart.
+const AGENT_CANCEL_TAGS: [&str; 2] = ["cancelled", "no-such-agent"];
+const UNSCHEDULE_TAGS: [&str; 2] = ["removed", "no-such-label"];
+
+/// Check a host answer is one of the bare tags the builtin's own type admits.
+/// The desk is trusted to answer in shape but never assumed to, as
+/// [`schedule_receipt`] has it: a tag outside the row would reach the caller
+/// as something the scheme promised could not arrive.
+fn tag_receipt(answer: FOValue, verb: &str, tags: &[&str]) -> Settled<Value> {
+    match &answer {
+        FOValue::Variant {
+            label,
+            payload: None,
+        } if tags.contains(&label.as_str()) => Ok(Value::from(answer)),
+        _ => Err(sig(format!(
+            "{verb}: host answered an unexpected shape for its receipt"
+        ))),
+    }
+}
+
 /// `agent-cancel <name>` — enquires `` `agent-cancel ``; resolution and
 /// descendant-scoping are the desk's.
 fn builtin_agent_cancel(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let name = args[0].to_string();
-    shell.enquire(
+    let answer = shell.enquire(
         mooring,
         FOValue::Variant {
             label: "agent-cancel".to_string(),
@@ -309,7 +332,7 @@ fn builtin_agent_cancel(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
             })),
         },
     )?;
-    Ok(Value::Unit)
+    tag_receipt(answer, "agent-cancel", &AGENT_CANCEL_TAGS)
 }
 
 /// Check the `` `schedule `` receipt is the record shape before handing it on.
@@ -386,11 +409,11 @@ fn builtin_schedules(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
     Ok(Value::list(items.into_iter().map(Value::from).collect()))
 }
 
-/// `unschedule <label>` — enquires `` `unschedule ``; resolution (the
-/// unknown label is a no-op) and the grant refusal are the desk's.
+/// `unschedule <label>` — enquires `` `unschedule ``; resolution and the
+/// grant refusal are the desk's.
 fn builtin_unschedule(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let label = args[0].to_string();
-    shell.enquire(
+    let answer = shell.enquire(
         mooring,
         FOValue::Variant {
             label: "unschedule".to_string(),
@@ -399,7 +422,7 @@ fn builtin_unschedule(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
             })),
         },
     )?;
-    Ok(Value::Unit)
+    tag_receipt(answer, "unschedule", &UNSCHEDULE_TAGS)
 }
 
 /// `pin-read <key>` — enquires `` `pin-read ``; the mirror lookup, the miss
@@ -517,9 +540,28 @@ fn scheme_message(_u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `agent-cancel :: Str → F Unit`
+/// A variant type over a closed row of bare tags, each carrying `Ty::Unit` —
+/// [`closed_record`]'s counterpart for an enumeration rather than a set of
+/// fields. `agent-cancel` and `unschedule` each answer one of exactly two
+/// such tags, so the row is closed: a third arm would be a static error,
+/// not a runtime one.
+fn closed_variant(labels: &[&str]) -> Ty {
+    use ral_core::syntax::tag::tag_row_label;
+    let mut row = Row::Empty;
+    for label in labels.iter().rev() {
+        row = Row::Extend(tag_row_label(label), Box::new(Ty::Unit), Box::new(row));
+    }
+    Ty::Variant(row)
+}
+
+/// `agent-cancel :: Str → F <cancelled | no-such-agent>`
 fn scheme_agent_cancel(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::Unit))))
+    scheme(
+        &[],
+        &[],
+        &[],
+        thunk(fun(Ty::String, pure(closed_variant(&AGENT_CANCEL_TAGS)))),
+    )
 }
 
 fn schedule_row_ty() -> Ty {
@@ -568,9 +610,14 @@ fn scheme_schedules(_u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `unschedule :: Str → F Unit`
+/// `unschedule :: Str → F <removed | no-such-label>`
 fn scheme_unschedule(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::Unit))))
+    scheme(
+        &[],
+        &[],
+        &[],
+        thunk(fun(Ty::String, pure(closed_variant(&UNSCHEDULE_TAGS)))),
+    )
 }
 
 /// `reply :: ∀α. α → F Unit` — first-orderness is [`builtin_reply`]'s
@@ -618,7 +665,7 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 10] = [
     BuiltinEntry::new(
         Cow::Borrowed("agent-cancel"),
         BuiltinTypeRule::Scheme(scheme_agent_cancel),
-        "agent-cancel <name>  — cancel the live descendant named `name` (from agents). It is asked to stop at its next checkpoint and then delivers a cancelled result to your inbox; a no-op if no live agent bears that name. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "agent-cancel <name>  — cancel the live descendant named `name` (from agents). It is asked to stop at its next checkpoint and then delivers a cancelled result to your inbox. Answers `cancelled if a live agent bore that name, `no-such-agent if none did — branch on it rather than assuming the name reached anyone. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_agent_cancel),
     ),
     BuiltinEntry::new(
@@ -636,7 +683,7 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 10] = [
     BuiltinEntry::new(
         Cow::Borrowed("unschedule"),
         BuiltinTypeRule::Scheme(scheme_unschedule),
-        "unschedule <label>  — remove a scheduled wakeup by its label (from schedules or a schedule receipt). A no-op if no live schedule bears that label. Requires the self-wakeup grant (--allow-schedule) and is refused without it. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "unschedule <label>  — remove a scheduled wakeup by its label (from schedules or a schedule receipt). Answers `removed if a live schedule bore that label, `no-such-label if none did — branch on it rather than assuming the label reached anything. Requires the self-wakeup grant (--allow-schedule) and is refused without it. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_unschedule),
     ),
     BuiltinEntry::new(
@@ -1146,8 +1193,20 @@ mod tests {
             result.content
         );
         assert!(
+            result.content.contains("`removed"),
+            "a hit must answer `removed, got: {}",
+            result.content
+        );
+        assert!(
             session.schedules.list().is_empty(),
             "unschedule by label must remove the schedule"
+        );
+
+        let miss = session.run_shell("call-3".to_string(), "unschedule 'nightly'", 5, &emit);
+        assert!(
+            miss.content.contains("`no-such-label"),
+            "a miss must answer `no-such-label, got: {}",
+            miss.content
         );
     }
 
