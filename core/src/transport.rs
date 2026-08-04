@@ -182,6 +182,18 @@ pub struct EnquiryError {
     pub status: i32,
 }
 
+impl EnquiryError {
+    /// The refusal of a host that installed no desk, in the one wording
+    /// [`crate::types::NO_DESK`] fixes.
+    #[must_use]
+    pub fn no_desk() -> Self {
+        Self {
+            message: crate::types::NO_DESK.to_string(),
+            status: crate::types::NO_DESK_STATUS,
+        }
+    }
+}
+
 /// Front-end → engine out-of-band control frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Control {

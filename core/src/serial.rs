@@ -339,6 +339,49 @@ fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
     }
 }
 
+impl<X> FOValue<X> {
+    /// The value's shape, named without quoting it.
+    ///
+    /// For a diagnostic that must say what arrived where something else was
+    /// expected. A value that crossed a seam is foreign and unbounded, and the
+    /// text goes on to be read by a model with a finite context, so quoting it
+    /// would let the sender choose how much of that context to spend. Structure
+    /// is what a shape error is about, so structure is all this renders.
+    #[must_use]
+    pub fn shape(&self) -> String {
+        match self {
+            Self::Unit => "unit".to_string(),
+            Self::Bool { .. } => "a Bool".to_string(),
+            Self::Int { .. } => "an Int".to_string(),
+            Self::Float { .. } => "a Float".to_string(),
+            Self::String { .. } => "a Str".to_string(),
+            Self::Bytes { value } => format!("{} bytes", value.len()),
+            Self::List { items } => format!("a list of {}", plural(items.len(), "element")),
+            Self::Map { entries } => format!("a record of {}", plural(entries.len(), "field")),
+            // The label is the host's own alphabet, not caller-supplied text of
+            // arbitrary size, so naming it costs nothing and is what a wrong tag
+            // needs to hear.
+            Self::Variant {
+                label,
+                payload: None,
+            } => format!("the bare tag `{label}`"),
+            Self::Variant {
+                label,
+                payload: Some(p),
+            } => format!("`{label}` carrying {}", p.shape()),
+            Self::Ext(_) => "a value that is not first-order".to_string(),
+        }
+    }
+}
+
+fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
 // ── Value conversions ─────────────────────────────────────────────────────
 
 impl FOValue<Closure> {

@@ -32,6 +32,15 @@ impl EventSink for () {
 /// cannot decide a run is over.
 pub type SurfaceSink = Arc<dyn EventSink>;
 
+/// The refusal a host with no desk answers, spelled once. Both transports, the
+/// engine, and every front-end reach for this rather than their own copy: a run
+/// must not be able to tell which seam refused it by the wording.
+pub const NO_DESK: &str = "this host answers no enquiries";
+
+/// The status that refusal carries. Not a failure of the request — the host
+/// simply has no desk — but a raise all the same, since there is no answer.
+pub const NO_DESK_STATUS: i32 = 1;
+
 /// The host's answer desk for the engine→host answered channel.  `enquire` is
 /// blocking and short by contract: a receipt, a ledger read, a verdict — never
 /// a long-running result.
