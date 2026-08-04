@@ -317,7 +317,8 @@ impl Observation {
         let what = Observed::from_map(m)?;
         #[allow(
             clippy::cast_sign_loss,
-            reason = "line/col were projected from usize and never go negative"
+            clippy::cast_possible_truncation,
+            reason = "line/col were projected from usize source positions"
         )]
         let site = CallSite {
             script: str_at(m, "script")?,
