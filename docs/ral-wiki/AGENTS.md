@@ -227,3 +227,7 @@ Honour the repository's existing authoring rules, which apply here too:
   italicise a technical term on first use, then enumerate the parts as bullets
   rather than a wall of prose. Brevity and detail together — each bullet one
   precise claim, not a paragraph. This is the maintainer's prose register.
+
+## Website
+
+The wiki is published as its own sub-site under `site/wiki/` (e.g. `/ral/wiki/`) by **Quartz v5**, in the same Pages workflow: Quartz is cloned pinned at tag `v5.0.0`, given our `scripts/wiki/quartz.config.yaml`, and pointed at the wiki (`npx quartz build -d docs/ral-wiki -o site/wiki`). `scripts/wiki/build.sh` reproduces this locally (needs Node ≥ 22 / npm; pass `--serve` to preview). `site/wiki/` is gitignored.
