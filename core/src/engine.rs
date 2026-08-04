@@ -578,12 +578,10 @@ fn engine_session(
                     Claimed::WorkerGone => break 0,
                 }
             }
-            Frame::Probe(id, reading) => {
-                match claim(id, WorkItem::Probe(reading)) {
-                    Claimed::Took | Claimed::Busy => {}
-                    Claimed::WorkerGone => break 0,
-                }
-            }
+            Frame::Probe(id, reading) => match claim(id, WorkItem::Probe(reading)) {
+                Claimed::Took | Claimed::Busy => {}
+                Claimed::WorkerGone => break 0,
+            },
             Frame::Answer(eid, answer) => {
                 desk.fill(eid, answer);
             }

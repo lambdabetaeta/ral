@@ -658,7 +658,8 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FO
 /// lock, so a cancel naming that dispatch has a scope to land on before the
 /// run's own frame is born. Replaced each dispatch, never cleared: a cancel
 /// that has outlived its run no longer finds the id it names.
-type DispatchScopeCell = Arc<std::sync::Mutex<Option<(DispatchId, crate::process::ForegroundScope)>>>;
+type DispatchScopeCell =
+    Arc<std::sync::Mutex<Option<(DispatchId, crate::process::ForegroundScope)>>>;
 
 /// Out-of-band control sender.
 #[derive(Clone)]
