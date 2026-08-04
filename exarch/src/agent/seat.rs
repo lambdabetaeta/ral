@@ -394,13 +394,14 @@ mod tests {
             matches!(report, Report::Ran { result: Ok(_), .. }),
             "`surface \\`ping` must settle to Report::Ran {{ Ok }}, got {report:?}"
         );
-        assert_eq!(
-            surfaced,
-            vec![ral_core::serial::FOValue::Variant {
+        // Core also reports an observation per dispatch on this sink; the
+        // kit's own value is the variant among them.
+        assert!(
+            surfaced.contains(&ral_core::serial::FOValue::Variant {
                 label: "ping".into(),
                 payload: None
-            }],
-            "the live surfaced value must reach on_surface, in order, before the Report"
+            }),
+            "the live surfaced value must reach on_surface before the Report, got {surfaced:?}"
         );
 
         let _ = child.kill();
@@ -499,13 +500,15 @@ mod tests {
                 // own exec-summary record ahead of the completion marker, so
                 // this asserts on content rather than length.
                 assert!(
-                    values
-                        .iter()
-                        .any(|v| matches!(v, ral_core::Value::Variant { label, .. } if label == "done")),
+                    values.iter().any(
+                        |v| matches!(v, ral_core::Value::Variant { label, .. } if label == "done")
+                    ),
                     "the batch must carry the worker's completion marker, got {values:?}"
                 );
             }
-            other => panic!("expected the settled batch to surface as Item::Surface, got {other:?}"),
+            other => {
+                panic!("expected the settled batch to surface as Item::Surface, got {other:?}")
+            }
         }
 
         let _ = child.kill();

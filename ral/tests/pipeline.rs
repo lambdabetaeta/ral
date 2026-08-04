@@ -99,11 +99,11 @@ fn audited_external_command_large_stderr_does_not_deadlock() {
 
 #[test]
 fn audit_cli_captures_command_stdout() {
-    // SPEC §10.3: every command node in the emitted execution tree
+    // SPEC §13.3: every command observation in the emitted audit trail
     // populates its `stdout` / `stderr` fields, so `ral --audit` must
     // install `CapturePolicy::Bytes` as the `audit { … }` builtin does;
-    // the default `Off` leaves every node's buffers empty.  The marker
-    // has to land inside the audit-tree JSON's `stdout` field, not
+    // the default `Off` leaves every observation's buffers empty.  The
+    // marker has to land inside the audit dump's `stdout` field, not
     // merely anywhere in stderr — it also leaks into `args` and is
     // forwarded by /bin/echo to the inherited stdout, so a loose
     // substring check would pass with capture off.
@@ -121,8 +121,8 @@ fn audit_cli_captures_command_stdout() {
     assert!(
         o.stderr.contains(&needle),
         "expected substring {needle:?} in audit dump (the command \
-         node's stdout field must carry the captured bytes per \
-         SPEC §10.3); stderr: {}",
+         observation's stdout field must carry the captured bytes per \
+         SPEC §13.3); stderr: {}",
         o.stderr
     );
 }
@@ -1536,8 +1536,8 @@ fn audited_stdout_and_stderr_redirect_does_not_panic() {
 #[test]
 fn audited_failing_helper_preserves_nested_external_audit() {
     // A ral helper that runs a nested external and then fails must
-    // still leave the nested external's audit node in the parent
-    // tree.  Pre-fix `unpack_stage_report` discarded audit nodes on
+    // still leave the nested external's observation in the parent
+    // trail.  Pre-fix `unpack_stage_report` discarded observations on
     // structured-error reports.
     //
     // Shape: a process-staged pipeline (`printf hi` makes it
@@ -1545,7 +1545,7 @@ fn audited_failing_helper_preserves_nested_external_audit() {
     // block runs `/bin/echo nested-record` (audit-captured by the
     // helper), reads the upstream bytes via `from-string`, and then
     // calls `fail` to report a structured failure.  The parent must
-    // extend its audit tree with the nested external before
+    // extend its audit trail with the nested external before
     // surfacing the helper's error.
     let script = r#"
 printf hi | !{ let _s = !{from-string}; let _x = !{/bin/echo nested-record}; fail [status: 1, message: "helper failed"] }

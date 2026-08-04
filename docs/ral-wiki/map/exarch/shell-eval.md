@@ -118,9 +118,10 @@ Five shapes ride the one `surface` channel, tried pin-first:
   `PinDigest`s so the [[map/exarch/agent|nudge]] layer can name pinned state
   without parsing rendered text — the read side reuses the same store rather
   than adding a second one ([[design/pins|pins]]);
-- an `io`-keyed `Map` core emits at a redirect / exec door decodes through
-  `value_to_io` / `io_card` into a `Kind::Io { event, card }`, carrying the raw
-  effect record beside its rendering ([[map/exarch/io-surface|io-surface]]);
+- a `Map` core emits at a redirect, exec, or capability-check door decodes
+  through `Observation::from_value` / `observation_card` into a
+  `Kind::Io { event, card }`, carrying the raw observation beside its
+  rendering ([[map/exarch/io-surface|io-surface]]);
 - a `` `notice `` core's ready-boundary housekeeping pushes (a worker reap, an
   idle-binding prune, a large-binding warning) decodes to
   `Kind::Notice { notice, card }` ([[decisions/260706_enquiry-channel|enquiry-channel]]);

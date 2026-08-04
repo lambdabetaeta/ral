@@ -9,8 +9,8 @@
 use crate::ir::{CommandName, CommandWord};
 use crate::source::Span;
 use crate::types::{
-    Break, BuiltinEntry, HandlerArity, HandlerEntry, HandlerFrame, HandlerLookup, Map, Mooring,
-    Raw, Settled, Shell, Value,
+    Break, BuiltinEntry, CommandOrigin, HandlerArity, HandlerEntry, HandlerFrame, HandlerLookup,
+    Map, Mooring, Raw, Settled, Shell, Value,
 };
 
 use super::command::{self, CommandIdentity, EvalRedirectV};
@@ -73,7 +73,11 @@ fn resolve_handler_then_external(name: &str, shell: &Shell) -> Resolution {
 /// any argument evaluates.  Grants govern exec alone, so the other arms pass
 /// unconditionally.  An `Env` hit also renews that name's binding lease, a cost
 /// dispatch can carry and the pure `Env::get` lookup cannot.
-pub(crate) fn classify_command(head: &CommandWord, shell: &mut Shell) -> Settled<Resolution> {
+pub(crate) fn classify_command(
+    head: &CommandWord,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Resolution> {
     let r = resolve_command_word(head, shell);
     if let Resolution::Env(_) = &r
         && let Some(name) = head.name().bare()
@@ -83,14 +87,14 @@ pub(crate) fn classify_command(head: &CommandWord, shell: &mut Shell) -> Settled
     if let Resolution::External(id) = &r
         && !crate::capability::admits_head(&shell.mobile.context, id)
     {
-        return Err(refuse_head(id, shell));
+        return Err(refuse_head(id, mooring, shell));
     }
     Ok(r)
 }
 
 /// Denial for a head the grant refuses.  One absent from PATH is reported as
 /// missing instead, so nobody hunts for a grant entry to fix.
-fn refuse_head(id: &CommandIdentity, shell: &mut Shell) -> Break {
+fn refuse_head(id: &CommandIdentity, mooring: &Mooring, shell: &mut Shell) -> Break {
     let (msg, hint) = match shell.locate_command(&id.shown) {
         Some(p) => (
             format!(
@@ -107,7 +111,7 @@ fn refuse_head(id: &CommandIdentity, shell: &mut Shell) -> Break {
     };
     let mut fields = Map::new();
     fields.insert("name".into(), Value::String(id.shown.clone()));
-    audit::record_capability(shell, "exec", "denied", fields);
+    audit::record_capability(shell, mooring, "exec", fields);
     shell.err_hint(msg, hint, 1).into()
 }
 
@@ -133,7 +137,7 @@ pub(crate) fn run_call(
         shell.local.audit.call_site = span;
     }
 
-    match classify_command(head, shell)? {
+    match classify_command(head, mooring, shell)? {
         Resolution::Env(value) => with_redirects(redirects, mooring, shell, |shell| {
             crate::evaluator::apply(value, args.to_vec(), mooring, shell).map_err(Into::into)
         }),
@@ -223,11 +227,18 @@ fn run_host_thunk(
     shell: &mut Shell,
     f: impl FnOnce(&[Value], &mut Shell, &audit::Frame) -> Settled<Value>,
 ) -> Raw<Value> {
-    audit::frame_call(name, args, shell, |shell, frame| {
-        with_redirects(redirects, mooring, shell, |shell| {
-            f(args, shell, frame).map_err(Into::into)
-        })
-    })
+    audit::frame_call(
+        name,
+        args,
+        CommandOrigin::Builtin,
+        mooring,
+        shell,
+        |shell, frame| {
+            with_redirects(redirects, mooring, shell, |shell| {
+                f(args, shell, frame).map_err(Into::into)
+            })
+        },
+    )
 }
 
 /// Run an external command.  No `with_redirects` frame, unlike the host arms:
@@ -242,9 +253,14 @@ fn run_external(
 ) -> Raw<Value> {
     let stdin_guard = command::install_stdin_redirect(redirects, mooring, shell)?;
     let shown = id.shown.clone();
-    let result = audit::frame_call(&shown, args, shell, move |shell, _| {
-        command::run(&id, args, redirects, mooring, shell)
-    });
+    let result = audit::frame_call(
+        &shown,
+        args,
+        CommandOrigin::External,
+        mooring,
+        shell,
+        move |shell, _| command::run(&id, args, redirects, mooring, shell),
+    );
     stdin_guard.restore(shell);
     result
 }

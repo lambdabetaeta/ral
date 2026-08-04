@@ -478,14 +478,16 @@ The prelude contains common policies:
     attempt { rm stale.lock }
     succeeds { cargo check -q }             # Bool
 
-`audit` turns success or failure into an execution tree:
+`audit` turns success or failure into an execution report:
 
     let report = audit { make -j4 }
     echo $report[children][0][stderr]
 
-The tree contains each command's arguments, status, stdout, stderr, value,
-source location, timing, and children. `ral --audit script.ral` records the
-whole script; add `--pretty` for indented JSON.
+`report[children]` is the flat list of what ran during the body: each
+command's `argv`, status, origin, stdout, stderr, value, source location, and
+timing, plus any redirect reads or writes and capability-check decisions.
+`ral --audit script.ral` records the whole script; add `--pretty` for indented
+JSON.
 
 ## 9  Concurrency
 
@@ -504,7 +506,7 @@ whole script; add `--pretty` for indented JSON.
 `await`, so put the `await` inside `try` to recover.
 
 `defer` is the prelude form for long work whose failure should be data. It
-spawns `audit { … }`, so the awaited `value` is an execution tree:
+spawns `audit { … }`, so the awaited `value` is an audit report:
 
     let suite = defer { cargo test -q }
 

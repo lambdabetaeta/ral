@@ -85,6 +85,9 @@ pub enum CommandOrigin {
 pub enum Decision {
     Allowed,
     Denied,
+    /// Reported, not enforced: `capability::deputy_prefixes` names a confused
+    /// deputy without refusing it, so the run continues either way.
+    Flagged,
 }
 
 /// How a write door settled.
@@ -122,10 +125,13 @@ impl Decision {
         match self {
             Self::Allowed => "allowed",
             Self::Denied => "denied",
+            Self::Flagged => "flagged",
         }
     }
 
-    /// A check settles as `Denied` exactly when the policy refused it.
+    /// An enforced check settles as `Denied` exactly when the policy refused
+    /// it; `Flagged` belongs to the advisory checks, which never take this
+    /// door.
     pub fn of_allowed(allowed: bool) -> Self {
         if allowed { Self::Allowed } else { Self::Denied }
     }
@@ -134,6 +140,7 @@ impl Decision {
         Some(match s {
             "allowed" => Self::Allowed,
             "denied" => Self::Denied,
+            "flagged" => Self::Flagged,
             _ => return None,
         })
     }
@@ -182,15 +189,7 @@ fn mode_parse(s: &str) -> Option<RedirectMode> {
 /// The projected keys every observation carries, plus the ones a capability
 /// check owns — what [`Observed::Capability`]'s spliced `fields` must not
 /// shadow, and what `from_value` subtracts to recover them.
-const ENVELOPE_KEYS: [&str; 7] = [
-    "kind",
-    "script",
-    "line",
-    "col",
-    "start",
-    "end",
-    "principal",
-];
+const ENVELOPE_KEYS: [&str; 7] = ["kind", "script", "line", "col", "start", "end", "principal"];
 const CAPABILITY_KEYS: [&str; 2] = ["resource", "decision"];
 
 impl Observation {

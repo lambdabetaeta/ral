@@ -97,7 +97,7 @@ pub(crate) fn eval_top_level(
 
 /// Run a thunk body as a block: scope-isolated, mobile discarded on exit, so
 /// `let`, `cd`, module loads, plugin registrations, and env-var changes do
-/// not propagate.  Only `last_status` and audit nodes, which the body posts
+/// not propagate.  Only `last_status` and observations, which the body posts
 /// straight to the shared trail, cross the boundary.
 ///
 /// `captured` is the lexical environment a `Value::Block` carries;

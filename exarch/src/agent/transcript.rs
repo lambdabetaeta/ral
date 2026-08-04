@@ -9,6 +9,7 @@
 //! whoever drains the live bus, so a child muted off the display still records
 //! its full trace.
 
+use crate::bus::card::observation_json;
 use crate::bus::{AgentId, Kind};
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -149,7 +150,7 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
         // Io, Done, Notice, and Resources each carry a raw fact beside the
         // `card` the TUI renders from it; the trace keeps the fact, never the
         // rendering, which lives only in the TUI's `user.log`.
-        Kind::Io { event, .. } => ("io", json!({ "event": event })),
+        Kind::Io { event, .. } => ("io", json!({ "event": observation_json(event) })),
         Kind::Done { outcome, .. } => {
             use crate::bus::card::DoneOutcome;
             match outcome {

@@ -13,14 +13,14 @@ pub mod tools;
 
 use crate::agent::transcript::Transcript;
 use crate::bus::card::{
-    done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin,
+    done_card, observation_card, rail_place, value_to_card, value_to_done, value_to_pin,
 };
 use crate::bus::{AgentId, AgentState, Emitter, Kind, Mailbox, Post};
 use crate::fleet::registry::AgentRegistry;
 use base64::Engine;
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
-use ral_core::types::DeferredSink;
+use ral_core::types::{DeferredSink, Observation};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -117,19 +117,25 @@ pub(crate) fn is_service_pin(key: &str) -> bool {
 /// decoder both delivery regimes share, so the live sink's events and the
 /// deferred sink's later `deliver` cannot drift.
 ///
-/// The five shapes riding the one `surface` channel are disjoint — an io event
-/// is a `Map` tagged by its `io` field, the rest are distinct variant labels —
-/// so the arm order below carries no meaning.  A pin is the odd one: it is
-/// *state*, keyed to a register slot and overwritten in place on re-pin, not an
-/// event appended to scrollback.  Anything else drops to `None`.
+/// The five shapes riding the one `surface` channel are disjoint — an
+/// observation is a `Map` tagged by its `kind` field, the rest are distinct
+/// variant labels — so the arm order below carries no meaning.  A pin is the
+/// odd one: it is *state*, keyed to a register slot and overwritten in place
+/// on re-pin, not an event appended to scrollback.  Anything else drops to
+/// `None`.
 pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
     if let Some((key, body)) = value_to_pin(ev) {
         Some(match body {
             Some(card) => Kind::Pin { key, card },
             None => Kind::Unpin { key },
         })
-    } else if let Some(event) = value_to_io(ev) {
-        let card = io_card(&event);
+    } else if let Some(event) = Observation::from_value(ev) {
+        // Core reports every observation it makes and judges none of them;
+        // `rail_place` is where this host says which it wants.  One core
+        // dispatch is one observation, so a rejected one is dropped outright
+        // rather than offered to the decoders below.
+        rail_place(&event.what)?;
+        let card = observation_card(&event.what);
         Some(Kind::Io { event, card })
     } else if let Some(notice) = crate::bus::card::value_to_notice(ev) {
         let card = crate::bus::card::notice_card(&notice);
@@ -486,7 +492,7 @@ mod tests {
     use crate::bus::{Emitter, Inbox, channel};
     use crate::shell_eval::builtins;
     use ral_core::Shell;
-    use ral_core::types::Capabilities;
+    use ral_core::types::{CallSite, Capabilities, Observed};
 
     /// Render a path without a trailing separator.  Some hosts return
     /// `"/tmp/"` from `std::env::temp_dir()` while `Shell::cwd()` never
@@ -1106,10 +1112,20 @@ keep-bottom
     #[test]
     fn decode_surface_round_trips_each_class() {
         assert!(matches!(
-            decode_surface(&RalValue::map(vec![
-                ("io".into(), RalValue::String("read".into())),
-                ("path".into(), RalValue::String("a.rs".into())),
-            ])),
+            decode_surface(
+                &Observation::instant(
+                    CallSite {
+                        script: "run.ral".into(),
+                        line: 1,
+                        col: 1,
+                    },
+                    "alex".into(),
+                    Observed::Read {
+                        path: "a.rs".into()
+                    },
+                )
+                .to_value()
+            ),
             Some(Kind::Io { .. })
         ));
         assert!(matches!(
@@ -1690,8 +1706,9 @@ return !{{length $hits}}"
     /// snapshots riding along for the card to diff — and inherits that door's
     /// mode, symlink, and durability preservation.
     #[test]
-    fn edit_replace_surfaces_a_write_io_event_with_diff() {
-        use crate::bus::card::{IoEvent, WriteMode, WriteOutcome, io_card};
+    fn edit_replace_surfaces_a_write_observation_with_diff() {
+        use ral_core::syntax::ast::RedirectMode;
+        use ral_core::types::WriteOutcome;
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("edit-replace-io", "b", "hello\nworld\n");
 
@@ -1713,24 +1730,24 @@ return !{{length $hits}}"
             "the edit committed to disk"
         );
 
-        let ios = io_events(&kinds);
+        let obs = observations(&kinds);
         assert_eq!(
-            ios.len(),
+            obs.len(),
             1,
-            "edit-replace raises exactly one write io event, got {ios:?}"
+            "edit-replace raises exactly one write observation, got {obs:?}"
         );
         assert_eq!(
-            ios[0],
-            &IoEvent::Write {
+            obs[0],
+            &Observed::Write {
                 path,
-                mode: WriteMode::Write,
+                mode: RedirectMode::Write,
                 outcome: WriteOutcome::Committed,
                 new_bytes: Some(b"hello\nfriend\n".to_vec()),
                 old_bytes: Some(b"hello\nworld\n".to_vec()),
             },
-            "old/new snapshots ride the write event so the card can diff them"
+            "old/new snapshots ride the write observation so the card can diff them"
         );
-        let card = io_card(ios[0]);
+        let card = observation_card(obs[0]);
         assert!(
             card.has_diff(),
             "the write card renders a diff, not a plain listing; got {card:?}"
@@ -1743,7 +1760,7 @@ return !{{length $hits}}"
     /// sides of the gate, so a cap drifted to either extreme fails one.
     #[test]
     fn edit_over_an_oversized_file_falls_back_to_a_listing_card() {
-        use crate::bus::card::{IoEvent, WriteOutcome, io_card};
+        use ral_core::types::WriteOutcome;
         for (tag, tail, diffed) in [
             ("edit-oversized", "x".repeat(70_000), false),
             ("edit-small", "x".repeat(10), true),
@@ -1767,17 +1784,17 @@ return !{{length $hits}}"
                 "the edit committed to disk"
             );
 
-            let ios = io_events(&kinds);
+            let obs = observations(&kinds);
             assert_eq!(
-                ios.len(),
+                obs.len(),
                 1,
-                "edit-replace raises exactly one write io event, got {ios:?}"
+                "edit-replace raises exactly one write observation, got {obs:?}"
             );
-            let IoEvent::Write {
+            let Observed::Write {
                 outcome, old_bytes, ..
-            } = ios[0]
+            } = obs[0]
             else {
-                panic!("expected a Write event, got {:?}", ios[0])
+                panic!("expected a Write observation, got {:?}", obs[0])
             };
             assert_eq!(*outcome, WriteOutcome::Committed);
             assert_eq!(
@@ -1786,7 +1803,7 @@ return !{{length $hits}}"
                 "only a file within the cap carries its pre-image ({tag})"
             );
             assert_eq!(
-                io_card(ios[0]).has_diff(),
+                observation_card(obs[0]).has_diff(),
                 diffed,
                 "the card diffs exactly when both snapshots fit the cap ({tag})"
             );
@@ -1883,13 +1900,14 @@ return !{{length $hits}}"
         (result, kinds)
     }
 
-    /// The `IoEvent`s carried by the captured `Kind::Io` events, in order,
-    /// dropping the card composed beside each.
-    fn io_events(kinds: &[crate::bus::Kind]) -> Vec<&crate::bus::card::IoEvent> {
+    /// The [`Observed`] fact carried by each captured `Kind::Io` event, in
+    /// order, dropping the envelope (site/time/principal) and the card
+    /// composed beside it.
+    fn observations(kinds: &[crate::bus::Kind]) -> Vec<&Observed> {
         kinds
             .iter()
             .filter_map(|k| match k {
-                Kind::Io { event, .. } => Some(event),
+                Kind::Io { event, .. } => Some(&event.what),
                 _ => None,
             })
             .collect()
@@ -1918,7 +1936,6 @@ return !{{length $hits}}"
     /// event, and no exec card — `from-string` is a builtin, not an image.
     #[test]
     fn bare_read_redirect_surfaces_one_read_card() {
-        use crate::bus::card::IoEvent;
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("cov-read", "a", "hello\n");
 
@@ -1931,16 +1948,16 @@ return !{{length $hits}}"
             String::from_utf8_lossy(&r.stderr)
         );
 
-        let ios = io_events(&kinds);
+        let obs = observations(&kinds);
         assert_eq!(
-            ios.len(),
+            obs.len(),
             1,
-            "a bare `from-string < a` raises exactly one io card, got {ios:?}"
+            "a bare `from-string < a` raises exactly one observation, got {obs:?}"
         );
         assert_eq!(
-            ios[0],
-            &IoEvent::Read { path },
-            "the one io event is a read of the redirect path"
+            obs[0],
+            &Observed::Read { path },
+            "the one observation is a read of the redirect path"
         );
     }
 
@@ -1948,7 +1965,8 @@ return !{{length $hits}}"
     /// raises exactly one committed `Write` event.
     #[test]
     fn bare_write_redirect_surfaces_one_committed_write_card() {
-        use crate::bus::card::{IoEvent, WriteMode, WriteOutcome};
+        use ral_core::syntax::ast::RedirectMode;
+        use ral_core::types::WriteOutcome;
         let mut shell = fresh_shell();
         // No fixture file: the write creates the target.
         let dir = scratch_dir("cov-write");
@@ -1965,23 +1983,23 @@ return !{{length $hits}}"
         );
         assert_eq!(wrote.as_deref(), Some("x"), "the write committed to disk");
 
-        let ios = io_events(&kinds);
+        let obs = observations(&kinds);
         assert_eq!(
-            ios.len(),
+            obs.len(),
             1,
-            "a bare `to-string > b` raises exactly one io card, got {ios:?}"
+            "a bare `to-string > b` raises exactly one observation, got {obs:?}"
         );
         assert_eq!(
-            ios[0],
-            &IoEvent::Write {
+            obs[0],
+            &Observed::Write {
                 path,
-                mode: WriteMode::Write,
+                mode: RedirectMode::Write,
                 outcome: WriteOutcome::Committed,
                 new_bytes: Some(b"x".to_vec()),
                 // A fresh path: nothing existed to diff against.
                 old_bytes: None,
             },
-            "the one io event is a committed write of the redirect path"
+            "the one observation is a committed write of the redirect path"
         );
     }
 
@@ -1991,7 +2009,8 @@ return !{{length $hits}}"
     /// diff, so any `>` redirect gets one with no builtin required.
     #[test]
     fn bare_write_redirect_over_existing_file_surfaces_a_diff_card() {
-        use crate::bus::card::{IoEvent, WriteMode, WriteOutcome, io_card};
+        use ral_core::syntax::ast::RedirectMode;
+        use ral_core::types::WriteOutcome;
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("cov-write-diff", "b", "hello\nworld\n");
 
@@ -2013,17 +2032,17 @@ return !{{length $hits}}"
             "the write committed to disk"
         );
 
-        let ios = io_events(&kinds);
+        let obs = observations(&kinds);
         assert_eq!(
-            ios.len(),
+            obs.len(),
             1,
-            "a bare `to-string > b` raises exactly one io card, got {ios:?}"
+            "a bare `to-string > b` raises exactly one observation, got {obs:?}"
         );
         assert_eq!(
-            ios[0],
-            &IoEvent::Write {
+            obs[0],
+            &Observed::Write {
                 path,
-                mode: WriteMode::Write,
+                mode: RedirectMode::Write,
                 outcome: WriteOutcome::Committed,
                 new_bytes: Some(b"hello\nfriend\n".to_vec()),
                 // Read before the rename: the diff's "before" side.
@@ -2032,7 +2051,7 @@ return !{{length $hits}}"
             "old_bytes carries the pre-existing content, new_bytes the committed one"
         );
 
-        let card = io_card(ios[0]);
+        let card = observation_card(obs[0]);
         assert!(
             card.has_diff(),
             "overwriting an existing file renders a diff card, not a write-preview listing; got {card:?}"
@@ -2045,7 +2064,7 @@ return !{{length $hits}}"
     /// back to the listing preview a brand-new write gets.
     #[test]
     fn bare_write_redirect_over_oversized_existing_file_falls_back_to_listing() {
-        use crate::bus::card::{IoEvent, WriteOutcome, io_card};
+        use ral_core::types::WriteOutcome;
         let mut shell = fresh_shell();
         // Comfortably past the 64KiB read cap.
         let big = "x".repeat(70_000);
@@ -2066,14 +2085,14 @@ return !{{length $hits}}"
             "the write committed to disk"
         );
 
-        let ios = io_events(&kinds);
+        let obs = observations(&kinds);
         assert_eq!(
-            ios.len(),
+            obs.len(),
             1,
-            "a bare `to-string > b` raises exactly one io card, got {ios:?}"
+            "a bare `to-string > b` raises exactly one observation, got {obs:?}"
         );
-        match ios[0] {
-            IoEvent::Write {
+        match obs[0] {
+            Observed::Write {
                 outcome, old_bytes, ..
             } => {
                 assert_eq!(*outcome, WriteOutcome::Committed);
@@ -2082,22 +2101,22 @@ return !{{length $hits}}"
                     "an oversized pre-existing file must not be diffed"
                 );
             }
-            other => panic!("expected a Write event, got {other:?}"),
+            other => panic!("expected a Write observation, got {other:?}"),
         }
 
-        let card = io_card(ios[0]);
+        let card = observation_card(obs[0]);
         assert!(
             !card.has_diff(),
             "an oversized pre-existing file falls back to the listing preview; got {card:?}"
         );
     }
 
-    /// The EXEC door end to end: a bare external raises exactly one `Exec`
-    /// event, carrying the resolved argv and exit status.
+    /// The EXEC door end to end: a bare external raises exactly one `Command`
+    /// observation, carrying the resolved argv and exit status.
     #[cfg(unix)]
     #[test]
     fn bare_external_surfaces_one_exec_card() {
-        use crate::bus::card::{ExecOutcome, IoEvent};
+        use ral_core::types::{AuditIo, CommandOrigin};
         let mut shell = fresh_shell();
 
         let (r, kinds) = run_capturing(&mut shell, "/usr/bin/true");
@@ -2108,20 +2127,23 @@ return !{{length $hits}}"
             String::from_utf8_lossy(&r.stderr)
         );
 
-        let ios = io_events(&kinds);
+        let obs = observations(&kinds);
         assert_eq!(
-            ios.len(),
+            obs.len(),
             1,
-            "a bare external raises exactly one io card, got {ios:?}"
+            "a bare external raises exactly one observation, got {obs:?}"
         );
         assert_eq!(
-            ios[0],
-            &IoEvent::Exec {
+            obs[0],
+            &Observed::Command {
                 argv: vec!["/usr/bin/true".into()],
-                outcome: ExecOutcome::Ok,
                 status: 0,
+                origin: CommandOrigin::External,
+                io: AuditIo::default(),
+                error: None,
+                value: RalValue::Unit,
             },
-            "the one io event is a successful exec of the image"
+            "the one observation is a successful exec of the image"
         );
     }
 
@@ -2131,7 +2153,6 @@ return !{{length $hits}}"
     #[cfg(unix)]
     #[test]
     fn view_is_a_helper_not_an_exec_image() {
-        use crate::bus::card::IoEvent;
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("cov-view", "a", "alpha\nbeta\ngamma\n");
 
@@ -2144,19 +2165,19 @@ return !{{length $hits}}"
             String::from_utf8_lossy(&r.stderr)
         );
 
-        let ios = io_events(&kinds);
-        let reads = ios
+        let obs = observations(&kinds);
+        let reads = obs
             .iter()
-            .filter(|e| matches!(e, IoEvent::Read { .. }))
+            .filter(|e| matches!(e, Observed::Read { .. }))
             .count();
-        let execs = ios
+        let execs = obs
             .iter()
-            .filter(|e| matches!(e, IoEvent::Exec { .. }))
+            .filter(|e| matches!(e, Observed::Command { .. }))
             .count();
         assert_eq!(reads, 1, "view-text surfaces one read card for its file");
         assert_eq!(
             execs, 0,
-            "view-text is a host builtin, not an external image — no exec card, got {ios:?}"
+            "view-text is a host builtin, not an external image — no exec card, got {obs:?}"
         );
     }
 
@@ -2166,7 +2187,7 @@ return !{{length $hits}}"
     #[cfg(unix)]
     #[test]
     fn cat_redirect_surfaces_read_then_exec_in_order() {
-        use crate::bus::card::{ExecOutcome, IoEvent};
+        use ral_core::types::{AuditIo, CommandOrigin};
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("cov-cat", "a", "one\ntwo\n");
 
@@ -2184,23 +2205,26 @@ return !{{length $hits}}"
             "cat echoes the redirected stdin"
         );
 
-        let ios = io_events(&kinds);
+        let obs = observations(&kinds);
         assert_eq!(
-            ios.len(),
+            obs.len(),
             2,
-            "cat < a is two logical operations — one read, one exec — got {ios:?}"
+            "cat < a is two logical operations — one read, one exec — got {obs:?}"
         );
         assert_eq!(
-            ios[0],
-            &IoEvent::Read { path },
+            obs[0],
+            &Observed::Read { path },
             "the read installs first, before the body runs"
         );
         assert_eq!(
-            ios[1],
-            &IoEvent::Exec {
+            obs[1],
+            &Observed::Command {
                 argv: vec!["/bin/cat".into()],
-                outcome: ExecOutcome::Ok,
                 status: 0,
+                origin: CommandOrigin::External,
+                io: AuditIo::default(),
+                error: None,
+                value: RalValue::Unit,
             },
             "then cat execs over that stdin"
         );
@@ -2222,9 +2246,9 @@ return !{{length $hits}}"
             String::from_utf8_lossy(&sr.stderr)
         );
         assert!(
-            io_events(&source_kinds).is_empty(),
+            observations(&source_kinds).is_empty(),
             "code loading is not data I/O — source raises no io card, got {:?}",
-            io_events(&source_kinds)
+            observations(&source_kinds)
         );
 
         let (ur, use_kinds) = run_capturing(&mut shell, &format!("use '{path}'"));
@@ -2236,32 +2260,42 @@ return !{{length $hits}}"
             String::from_utf8_lossy(&ur.stderr)
         );
         assert!(
-            io_events(&use_kinds).is_empty(),
+            observations(&use_kinds).is_empty(),
             "use is code loading too — no io card, got {:?}",
-            io_events(&use_kinds)
+            observations(&use_kinds)
         );
     }
 
     /// `transcript::event_record` is the *operational* view: it keeps the raw
-    /// structural effect the rendered card erases, and drops the card itself,
+    /// structural fact the rendered card erases, and drops the card itself,
     /// which is a presentation and belongs to the TUI's `user.log`.
     #[test]
-    fn io_event_record_carries_structural_event_not_card() {
-        use crate::bus::card::{IoEvent, io_card};
-        let event = IoEvent::Write {
-            path: "b.rs".into(),
-            mode: crate::bus::card::WriteMode::Append,
-            outcome: crate::bus::card::WriteOutcome::Committed,
-            new_bytes: None,
-            old_bytes: None,
-        };
-        let card = io_card(&event);
-        let kind = Kind::Io { event, card };
-        let rec = crate::agent::transcript::event_record(7, 3, &kind).expect("an io event records");
+    fn observation_record_carries_structural_event_not_card() {
+        use ral_core::syntax::ast::RedirectMode;
+        use ral_core::types::WriteOutcome;
+        let obs = Observation::instant(
+            CallSite {
+                script: "t.ral".into(),
+                line: 1,
+                col: 1,
+            },
+            "alex".into(),
+            Observed::Write {
+                path: "b.rs".into(),
+                mode: RedirectMode::Append,
+                outcome: WriteOutcome::Committed,
+                new_bytes: None,
+                old_bytes: None,
+            },
+        );
+        let card = observation_card(&obs.what);
+        let kind = Kind::Io { event: obs, card };
+        let rec =
+            crate::agent::transcript::event_record(7, 3, &kind).expect("an observation records");
 
         assert_eq!(rec["kind"], "io", "the record is tagged io");
         // The mode/outcome enums cross as snake_case strings.
-        assert_eq!(rec["event"]["io"], "write");
+        assert_eq!(rec["event"]["kind"], "write");
         assert_eq!(rec["event"]["path"], "b.rs");
         assert_eq!(rec["event"]["mode"], "append");
         assert_eq!(rec["event"]["outcome"], "committed");

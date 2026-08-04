@@ -1,5 +1,5 @@
 //! Test-only builders mirroring the values the kit and core put on the
-//! `surface` sink; shared by the decoder tests in `decode`, `io`, and `done`.
+//! `surface` sink; shared by the decoder tests in `decode` and `done`.
 
 use ral_core::Value as RalValue;
 
@@ -15,6 +15,9 @@ pub(super) fn card_value(marks: Vec<RalValue>) -> RalValue {
         payload: Some(Box::new(RalValue::list(marks))),
     }
 }
-pub(super) fn io_value(fields: Vec<(&str, RalValue)>) -> RalValue {
+
+/// A bare map — the shape an observation rides the sink as, and so the foil a
+/// variant-labelled decoder must reject.
+pub(super) fn map_value(fields: Vec<(&str, RalValue)>) -> RalValue {
     RalValue::map(fields.into_iter().map(|(k, v)| (k.into(), v)).collect())
 }

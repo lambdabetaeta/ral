@@ -2,8 +2,8 @@
 //! `fold`, `fold-lines` — and the `range` constructor.
 //!
 //! Every combinator's per-element applications land in the enclosing trail
-//! unwrapped: none of them is a tree node in its own right, only the
-//! combinator's own builtin-call node (from `evaluator::audit::frame_call`)
+//! unwrapped: none of them is an observation in its own right, only the
+//! combinator's own command observation (from `evaluator::audit::frame_call`)
 //! is real.
 
 use crate::types::{Break, Mooring, Settled, Shell, Value, as_list, sig};

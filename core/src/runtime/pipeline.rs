@@ -55,7 +55,7 @@ pub(crate) fn run_pipeline(
     // `ChildEvalResponse` frame; collect reads it only after waiting on the
     // helper, since one blocked on a stopped upstream would deadlock us.
     running
-        .collect(shell, started)
+        .collect(mooring, shell, started)
         .finish(shell, plan.last_output)
         .map_err(Into::into)
 }

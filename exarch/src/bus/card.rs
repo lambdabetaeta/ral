@@ -11,8 +11,10 @@
 //! magnitude can never reach hue.
 //!
 //! [`decode`] reads a kit's `` `card `` value into this model; [`diff`] and
-//! [`value`] are the substrates every decoder shares; [`io`], [`done`] and
-//! [`notice`] each decode one class of event core surfaces.
+//! [`value`] are the substrates every decoder shares; [`done`] and [`notice`]
+//! each decode one class of event core surfaces, and [`observation`] composes
+//! cards from core's one observation vocabulary
+//! (`ral_core::types::Observed`), which core itself decodes.
 
 use serde::Serialize;
 
@@ -20,23 +22,25 @@ mod decode;
 mod diff;
 mod done;
 mod encode;
-mod io;
 mod notice;
+mod observation;
 #[cfg(test)]
 mod testkit;
 mod value;
 
 pub use diff::{Hunk, Row, Seg};
 pub use done::DoneOutcome;
-pub use io::{ExecOutcome, IoEvent, WriteMode, WriteOutcome};
 pub use notice::Notice;
 
 pub(crate) use decode::{value_to_card, value_to_pin};
 pub(crate) use diff::hunk_magnitude;
 pub(crate) use done::{done_card, value_to_done};
 pub(crate) use encode::encode_card;
-pub(crate) use io::{ObservationKind, execs_card, greps_card, io_card, reads_card, value_to_io};
 pub(crate) use notice::{notice_card, services_pin_card, value_to_notice};
+pub(crate) use observation::{
+    ObservationKind, RailPlace, execs_card, greps_card, observation_card, observation_json,
+    rail_place, reads_card,
+};
 
 /// The closed nominal role set — the identity channel a [`Span`] may carry.
 /// An unrecognised tag degrades to plain ink rather than dropping the span.

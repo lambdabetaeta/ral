@@ -48,10 +48,10 @@ not the top-level script's. An id the renderer cannot resolve (the placeholder
 indexing an unrelated text. ([[decisions/260614_structural-bug-prevention|structural-bug-prevention]] class 9.)
 
 `CallSite` (`diagnostic.rs`) is the audit-and-wire shape a `Span` resolves
-*to* — script name plus 1-indexed `(line, col)` — which hosts read off audit
-nodes and capability checks. It rides the [[map/core/shell-state|audit
-collector]] rather than the run frame, so a scope node carries the position
-of the node that opened it.
+*to* — script name plus 1-indexed `(line, col)` — which hosts read off every
+observation, command or capability check alike. It rides the
+[[map/core/shell-state|audit collector]] rather than the run frame, so an
+observation carries the position of the dispatch that produced it.
 
 Parse and type errors render against the source they were just handed, so their
 entry points still take `(file, source)` strings: a module's *compile* error is

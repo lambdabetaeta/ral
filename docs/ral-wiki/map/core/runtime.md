@@ -29,8 +29,7 @@ guards
   Submodules: `identity.rs` (`CommandIdentity`, the classify-once
   name/shown/resolved triple), `vet.rs` (existence → argv shape → grant policy,
   yielding a `SpawnPlan` with its `ExecImage`), `process.rs`, `child.rs`,
-  `stdio.rs`, `redirect.rs`, `foreground.rs`, `io_event.rs`, `detach.rs`, plus
-  `uutils.rs`
+  `stdio.rs`, `redirect.rs`, `foreground.rs`, `detach.rs`, plus `uutils.rs`
   for [[map/core/builtins|bundled coreutils]].
   - **`resolved` and the 126/127 verdict are two projections of one `PATH`
     walk.** `identity::walk_path` calls `path::search` once, storing the
@@ -74,12 +73,16 @@ guards
     which the standalone command, the direct pipeline stage, and the ral helper
     stage all route; the tty-inherit predicate (`stdio::inherit_tty`) is
     likewise shared.
-  - `io_event.rs` fixes the wire shape of the runtime I/O doors: the read door
-    (`< file`), the write door (`> / >> / >|`, settled `committed`/`aborted`/
-    `failed` at frame teardown), and the exec door (Host and `BundledTool`
-    completion). Core emits plain `Value::Map`s onto the run's
-    `surface` sink; a host (exarch) decodes them into cards. The event *shapes*
-    and their card rendering live in [[map/exarch/io-surface|io-surface]]
+  - The read door (`< file`), the write door (`> / >> / >|`, settled
+    `committed`/`aborted`/`failed` at frame teardown), and the exec door (Host
+    and `BundledTool` completion) each build an `Observation`
+    (`core/src/types/observation.rs`) and pass it to `observe`
+    (`core/src/evaluator/audit.rs`), the one fan-out door: it reports to the
+    run's `Mooring` and to the open audit trail alike, judging neither — the
+    host filters the rail. Core emits plain `Value::Map`s through
+    `Observation::to_value`; a host (exarch) decodes them back with
+    `Observation::from_value`. The observation *shapes* and their card
+    rendering live in [[map/exarch/io-surface|io-surface]]
     ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
 - `pipeline/` — pipeline planning and execution
   (`pipeline.rs`'s `run_pipeline` is the few-line orchestrator: resolve →

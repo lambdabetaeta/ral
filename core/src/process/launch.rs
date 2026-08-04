@@ -162,7 +162,7 @@ impl Launch {
     pub fn new(program: impl AsRef<OsStr>) -> Self {
         #[allow(
             clippy::disallowed_methods,
-            reason = "[io-door:surface:process-launch] Builds the external exec image at ral's owned launch boundary; command::run emits the user-facing exec card with the resolved argv and status."
+            reason = "[io-door:surface:process-launch] Builds the external exec image at ral's owned launch boundary; `finish_command` builds the exec observation, wrapping the whole dispatch, with the resolved argv and status."
         )]
         let cmd = std::process::Command::new(program);
         Self { cmd, jail: None }

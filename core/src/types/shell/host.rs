@@ -78,8 +78,8 @@ impl Shell {
     }
 
     /// Turn on top-level audit collection (`ral --audit`) under
-    /// `CapturePolicy::Bytes`, as `audit { … }` does: every command node must
-    /// carry its stdout/stderr, which `Off` would leave empty.
+    /// `CapturePolicy::Bytes`, as `audit { … }` does: every command
+    /// observation must carry its stdout/stderr, which `Off` would leave empty.
     pub fn enable_audit(&mut self) {
         self.local
             .audit

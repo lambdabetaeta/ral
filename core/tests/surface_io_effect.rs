@@ -1,10 +1,11 @@
 #![allow(clippy::disallowed_methods)]
 
-//! Structural I/O events: core pushes a plain `Value` onto the run's
-//! `surface` sink at every redirect read/write door and every exec
-//! completion door.  These tests drive the public `Shell::run`
-//! door (exactly as `surface_effect.rs` does) with a recording sink
-//! and assert the emitted `{io: …}` maps.  Decoding these into cards is
+//! Surface observations: core pushes a plain `Value` onto the run's
+//! `surface` sink at every redirect read/write door and every external
+//! command completion door — a builtin dispatch never reaches the rail.
+//! These tests drive the public `Shell::run` door (exactly as
+//! `surface_effect.rs` does) with a recording sink and assert the emitted
+//! observation maps, tagged by `kind`.  Decoding these into cards is
 //! exarch's job and out of scope here — we only check the wire shape.
 
 mod common;
@@ -25,7 +26,7 @@ fn fresh_shell() -> Shell {
 }
 
 /// A sink that records every surfaced value, decoded back to `Value` — every
-/// structural I/O event is first-order data, so the door's `FOValue` encoding
+/// surfaced observation is first-order data, so the door's `FOValue` encoding
 /// is transparent to these tests.
 struct Recorder(Arc<Mutex<Vec<Value>>>);
 
@@ -73,19 +74,20 @@ fn run(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<Value>) {
     (result, events)
 }
 
-/// Extract the single `{io: …}` map among the captured events, asserting
-/// exactly one I/O event fired.  Returns the map for field assertions.
-fn single_io_event(events: &[Value]) -> &ral_core::types::Map {
-    let io_events: Vec<&Value> = events
+/// The single observation of `kind` among the captured events, asserting
+/// exactly one fired.  Core reports every dispatch it makes, so a door test
+/// names the kind it is about rather than counting the whole stream.
+fn single_observation<'a>(events: &'a [Value], kind: &str) -> &'a ral_core::types::Map {
+    let observations: Vec<&Value> = events
         .iter()
-        .filter(|v| matches!(v, Value::Map(m) if m.get("io").is_some()))
+        .filter(|v| matches!(v, Value::Map(m) if m.get("kind") == Some(&s(kind))))
         .collect();
     assert_eq!(
-        io_events.len(),
+        observations.len(),
         1,
-        "exactly one I/O event must fire, got {events:?}"
+        "exactly one {kind} observation must fire, got {events:?}"
     );
-    match io_events[0] {
+    match observations[0] {
         Value::Map(m) => m,
         _ => unreachable!("filtered to maps above"),
     }
@@ -106,10 +108,10 @@ fn scratch(tag: &str) -> std::path::PathBuf {
 
 // ── READ door ────────────────────────────────────────────────────────────
 
-/// `from-string < file` opens the input file and emits one read event
+/// `from-string < file` opens the input file and emits one read observation
 /// carrying the literal redirect path; read has no outcome field.
 #[test]
-fn stdin_redirect_emits_read_event() {
+fn stdin_redirect_emits_read_observation() {
     let dir = scratch("read");
     let input = dir.join("a.txt");
     std::fs::write(&input, "hello\n").unwrap();
@@ -118,8 +120,8 @@ fn stdin_redirect_emits_read_event() {
     let (result, events) = run(&mut shell, &format!("from-string < '{path}'"));
     result.expect("stdin redirect read should succeed");
 
-    let m = single_io_event(&events);
-    assert_eq!(m.get("io"), Some(&s("read")));
+    let m = single_observation(&events, "read");
+    assert_eq!(m.get("kind"), Some(&s("read")));
     assert_eq!(m.get("path"), Some(&s(&path)));
     assert_eq!(m.get("outcome"), None, "read has no outcome field");
     let _ = std::fs::remove_dir_all(&dir);
@@ -128,9 +130,9 @@ fn stdin_redirect_emits_read_event() {
 // ── WRITE door ───────────────────────────────────────────────────────────
 
 /// `to-string "x" > file` commits an atomic write and emits one write
-/// event: mode "write", outcome "committed".
+/// observation: mode "write", outcome "committed".
 #[test]
-fn write_redirect_emits_committed_event() {
+fn write_redirect_emits_committed_observation() {
     let dir = scratch("write");
     let target = dir.join("b.txt");
     let mut shell = fresh_shell();
@@ -138,8 +140,8 @@ fn write_redirect_emits_committed_event() {
     let (result, events) = run(&mut shell, &format!("to-string 'x' > '{path}'"));
     result.expect("write redirect should succeed");
 
-    let m = single_io_event(&events);
-    assert_eq!(m.get("io"), Some(&s("write")));
+    let m = single_observation(&events, "write");
+    assert_eq!(m.get("kind"), Some(&s("write")));
     assert_eq!(m.get("path"), Some(&s(&path)));
     assert_eq!(m.get("mode"), Some(&s("write")));
     assert_eq!(m.get("outcome"), Some(&s("committed")));
@@ -157,8 +159,8 @@ fn append_redirect_emits_append_mode() {
     let (result, events) = run(&mut shell, &format!("to-string 'y' >> '{path}'"));
     result.expect("append redirect should succeed");
 
-    let m = single_io_event(&events);
-    assert_eq!(m.get("io"), Some(&s("write")));
+    let m = single_observation(&events, "write");
+    assert_eq!(m.get("kind"), Some(&s("write")));
     assert_eq!(m.get("mode"), Some(&s("append")));
     assert_eq!(m.get("outcome"), Some(&s("committed")));
     let _ = std::fs::remove_dir_all(&dir);
@@ -174,8 +176,8 @@ fn stream_redirect_emits_stream_mode() {
     let (result, events) = run(&mut shell, &format!("to-string 'z' >~ '{path}'"));
     result.expect("stream redirect should succeed");
 
-    let m = single_io_event(&events);
-    assert_eq!(m.get("io"), Some(&s("write")));
+    let m = single_observation(&events, "write");
+    assert_eq!(m.get("kind"), Some(&s("write")));
     assert_eq!(m.get("mode"), Some(&s("stream")));
     assert_eq!(m.get("outcome"), Some(&s("committed")));
     let _ = std::fs::remove_dir_all(&dir);
@@ -199,8 +201,8 @@ fn write_with_failing_body_emits_aborted() {
     );
     assert!(result.is_err(), "the failing body must surface its error");
 
-    let m = single_io_event(&events);
-    assert_eq!(m.get("io"), Some(&s("write")));
+    let m = single_observation(&events, "write");
+    assert_eq!(m.get("kind"), Some(&s("write")));
     assert_eq!(m.get("path"), Some(&s(&path)));
     assert_eq!(m.get("mode"), Some(&s("write")));
     assert_eq!(m.get("outcome"), Some(&s("aborted")));
@@ -224,45 +226,49 @@ fn write_with_failing_open_emits_failed() {
     let (result, events) = run(&mut shell, &format!("to-string 'x' > '{path}'"));
     assert!(result.is_err(), "a failed open must surface its error");
 
-    let m = single_io_event(&events);
-    assert_eq!(m.get("io"), Some(&s("write")));
+    let m = single_observation(&events, "write");
+    assert_eq!(m.get("kind"), Some(&s("write")));
     assert_eq!(m.get("path"), Some(&s(&path)));
     assert_eq!(m.get("mode"), Some(&s("write")));
     assert_eq!(m.get("outcome"), Some(&s("failed")));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// ── EXEC door ────────────────────────────────────────────────────────────
+// ── COMMAND door ─────────────────────────────────────────────────────────
+//
+// A builtin dispatch never reaches the rail — only a command that actually
+// crossed a door (external, detached) surfaces.  Every test below drives a
+// real external or bundled-external command for exactly that reason.
 
-/// A bare external command (`/usr/bin/true`) emits one exec event with
-/// argv [program], outcome "ok", status 0.
+/// A bare external command (`/usr/bin/true`) emits one command observation
+/// with argv [program], origin "external", status 0.
 #[cfg(unix)]
 #[test]
-fn external_success_emits_ok_exec_event() {
+fn external_success_emits_command_observation() {
     let mut shell = fresh_shell();
     let (result, events) = run(&mut shell, "/usr/bin/true");
     result.expect("/usr/bin/true should succeed");
 
-    let m = single_io_event(&events);
-    assert_eq!(m.get("io"), Some(&s("exec")));
+    let m = single_observation(&events, "command");
+    assert_eq!(m.get("kind"), Some(&s("command")));
     assert_eq!(m.get("argv"), Some(&Value::list(vec![s("/usr/bin/true")])));
-    assert_eq!(m.get("outcome"), Some(&s("ok")));
+    assert_eq!(m.get("origin"), Some(&s("external")));
     assert_eq!(m.get("status"), Some(&Value::Int(0)));
 }
 
-/// A failing external command (`/usr/bin/false`) emits one exec event
-/// with outcome "bad" and a nonzero status.
+/// A failing external command (`/usr/bin/false`) emits one command
+/// observation with origin "external" and a nonzero status.
 #[cfg(unix)]
 #[test]
-fn external_failure_emits_bad_exec_event() {
+fn external_failure_emits_command_observation() {
     let mut shell = fresh_shell();
     let (result, events) = run(&mut shell, "/usr/bin/false");
     assert!(result.is_err(), "/usr/bin/false exits nonzero");
 
-    let m = single_io_event(&events);
-    assert_eq!(m.get("io"), Some(&s("exec")));
+    let m = single_observation(&events, "command");
+    assert_eq!(m.get("kind"), Some(&s("command")));
     assert_eq!(m.get("argv"), Some(&Value::list(vec![s("/usr/bin/false")])));
-    assert_eq!(m.get("outcome"), Some(&s("bad")));
+    assert_eq!(m.get("origin"), Some(&s("external")));
     assert_eq!(m.get("status"), Some(&Value::Int(1)));
 }
 
@@ -275,31 +281,32 @@ fn external_argv_lists_program_then_args() {
     let (result, events) = run(&mut shell, "/bin/echo hi");
     result.expect("/bin/echo should succeed");
 
-    let m = single_io_event(&events);
-    assert_eq!(m.get("io"), Some(&s("exec")));
+    let m = single_observation(&events, "command");
+    assert_eq!(m.get("kind"), Some(&s("command")));
     assert_eq!(
         m.get("argv"),
         Some(&Value::list(vec![s("/bin/echo"), s("hi")]))
     );
-    assert_eq!(m.get("outcome"), Some(&s("ok")));
+    assert_eq!(m.get("origin"), Some(&s("external")));
     assert_eq!(m.get("status"), Some(&Value::Int(0)));
 }
 
-/// A bundled (uutils) command run inline emits exactly one exec event —
-/// the inline door fires and the external door does not double-fire.
-/// `printf ''` produces no output and exits 0.  Portable: the bundled tool
-/// runs in-process on every platform, so the exec-event shape is not
+/// A bundled (uutils) command run inline emits exactly one command
+/// observation — it resolves as an external dispatch same as a PATH binary,
+/// so the inline door fires and no separate door double-fires. `printf ''`
+/// produces no output and exits 0.  Portable: the bundled tool runs
+/// in-process on every platform, so this observation's shape is not
 /// Unix-specific (unlike the `/usr/bin`/`/bin` external tests above).
 #[cfg(feature = "coreutils")]
 #[test]
-fn inline_bundled_emits_single_exec_event() {
+fn inline_bundled_emits_single_command_observation() {
     let mut shell = fresh_shell();
     let (result, events) = run(&mut shell, "printf ''");
     result.expect("bundled printf should succeed");
 
-    let m = single_io_event(&events);
-    assert_eq!(m.get("io"), Some(&s("exec")));
+    let m = single_observation(&events, "command");
+    assert_eq!(m.get("kind"), Some(&s("command")));
     assert_eq!(m.get("argv"), Some(&Value::list(vec![s("printf"), s("")])));
-    assert_eq!(m.get("outcome"), Some(&s("ok")));
+    assert_eq!(m.get("origin"), Some(&s("external")));
     assert_eq!(m.get("status"), Some(&Value::Int(0)));
 }

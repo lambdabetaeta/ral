@@ -36,9 +36,10 @@ realisations:
   construction, never re-sniffed from the thunk's shape — the values cleared
   install-time arity validation on the sender, so hydration does not re-check
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]);
-- *kinds* ride as serde enums — `WireExecNode.kind` is `ExecNodeKind`, not a
-  string — and *floats* ride by IEEE-754 bits (`f64::to_bits`/`from_bits` in the
-  serde mirror), total and exact where JSON's number coerces NaN/±∞ to `null`.
+- *kinds* ride as serde enums — `WireObservation`'s `what` mirrors `Observed`,
+  not a string — and *floats* ride by IEEE-754 bits (`f64::to_bits`/`from_bits`
+  in the serde mirror), total and exact where JSON's number coerces NaN/±∞ to
+  `null`.
 
 ## Value & environment mirror — `core/src/serial.rs`
 
@@ -74,8 +75,9 @@ and its conversions compose strictly (a parent's `from_X` calls its children's,
 never reaching past them):
 
 - `WireMobile` / `WireContext` — the top;
-- `WireExecNode` — the [[design/audit|audit]] tree fragment, living beside the
-  request it rides in `core/src/child_eval.rs` ([[map/core/runtime|runtime]]);
+- `WireObservation` — the [[design/audit|audit]] trail fragment, one flat list
+  with no recursion, living beside the request it rides in
+  `core/src/child_eval.rs` ([[map/core/runtime|runtime]]);
 - `WireHandlerFrame` — a [[internals/handler-dispatch|handler stack]] frame,
   carrying each alias arm's scheme so a re-exec'd helper stage does not strip it
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]);

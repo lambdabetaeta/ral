@@ -361,7 +361,7 @@ fn block_guard_does_not_leak_let_binding() {
     );
 }
 
-/// `audit { body }` records the body's execution tree but the body is
+/// `audit { body }` records the body's audit trail but the body is
 /// still a forced thunk — its mobile is discarded under the same
 /// block rule.
 #[test]
@@ -747,18 +747,27 @@ fn function_body_records_into_enclosing_audit() {
         other => panic!("audit {{ … }} must return a Map; got {other:?}"),
     };
     let saw_echo = children.iter().any(|c| match c {
-        Value::Map(m) => matches!(m.get("cmd"), Some(Value::String(s)) if s == "echo"),
+        Value::Map(m) => {
+            matches!(m.get("kind"), Some(Value::String(k)) if k == "command")
+                && matches!(
+                    m.get("argv"),
+                    Some(Value::List(argv))
+                        if matches!(argv.get(0), Some(Value::String(s)) if s == "echo")
+                )
+        }
         _ => false,
     });
     assert!(
         saw_echo,
-        "the `echo` inside the function body must appear as its own node in the enclosing \
-         audit tree; children = {children:?}"
+        "the `echo` inside the function body must appear as its own observation in the \
+         enclosing audit tree; children = {children:?}"
     );
 }
 
-/// The lone command child of an `audit { … }` tree, as `(cmd, args, status)`.
-fn only_command_child(tree: &Value) -> (String, Vec<Value>, Value) {
+/// The lone command-kind observation among an `audit { … }` tree's children,
+/// as `(argv, status)`.  Filtered by `kind`, since the trail also records
+/// writes and reads alongside commands.
+fn only_command_child(tree: &Value) -> (Vec<Value>, Value) {
     let children = match tree {
         Value::Map(m) => match m.get("children") {
             Some(Value::List(ch)) => ch,
@@ -766,31 +775,33 @@ fn only_command_child(tree: &Value) -> (String, Vec<Value>, Value) {
         },
         other => panic!("audit {{ … }} must return a Map; got {other:?}"),
     };
+    let commands: Vec<_> = children
+        .iter()
+        .filter(|c| {
+            matches!(c, Value::Map(m) if matches!(m.get("kind"), Some(Value::String(k)) if k == "command"))
+        })
+        .collect();
     assert_eq!(
-        children.len(),
+        commands.len(),
         1,
-        "expected exactly one child; got {children:?}"
+        "expected exactly one command observation; got {children:?}"
     );
-    match &children[0] {
+    match commands[0] {
         Value::Map(m) => (
-            match m.get("cmd") {
-                Some(Value::String(s)) => s.clone(),
-                other => panic!("child node must have a String `cmd`; got {other:?}"),
-            },
-            match m.get("args") {
+            match m.get("argv") {
                 Some(Value::List(a)) => a.iter().cloned().collect(),
-                other => panic!("child node must have a List `args`; got {other:?}"),
+                other => panic!("command observation must have a List `argv`; got {other:?}"),
             },
             m.get("status")
                 .cloned()
-                .expect("child node must have `status`"),
+                .expect("command observation must have `status`"),
         ),
         other => panic!("audit child must be a Map; got {other:?}"),
     }
 }
 
 /// Forcing an arity-0 native (`!$cwd`) records exactly the same command
-/// node — same name, args, and status — as applying that native as a
+/// observation — same argv and status — as applying that native as a
 /// command head (`cwd`).  The `!`-force arm must run under its own audit
 /// frame just like the command-dispatch path, not silently unaudited.
 #[test]
@@ -801,6 +812,6 @@ fn forcing_an_arity_zero_native_records_like_applying_it() {
     assert_eq!(
         only_command_child(&forced),
         only_command_child(&applied),
-        "`!$cwd` must record the same command node as `cwd`"
+        "`!$cwd` must record the same command observation as `cwd`"
     );
 }

@@ -1,35 +1,35 @@
-# Test: audit execution tree (§10.3)
+# Test: the audit trail (§13.3)
 
 # Basic audit
 let report = audit { echo 'step one'; echo 'step two' }
 echo $report[status]
 echo !{length $report[children]}
-echo $report[children][0][cmd]
+echo $report[children][0][argv][0]
 echo $report[children][0][value]
 
-# try is transparent: its own node is gone, so the failing `fail` and the
-# handler's `echo` land directly among the audit's children
+# try is transparent: it observes nothing of its own, so the failing `fail`
+# and the handler's `echo` land directly among the audit's children
 let report2 = audit {
     try { fail [status: 1] } { |_| echo 'handled' }
     echo 'continued'
 }
 echo $report2[status]
 echo !{length $report2[children]}
-echo $report2[children][0][cmd]
+echo $report2[children][0][argv][0]
 echo $report2[children][0][status]
-echo $report2[children][1][cmd]
-echo $report2[children][2][cmd]
+echo $report2[children][1][argv][0]
+echo $report2[children][2][argv][0]
 
-# for/map are transparent themselves — no wrapper node for the loop — but
+# for/map are transparent themselves — the loop observes nothing — but
 # `each` (the builtin `for` aliases to in the prelude) is a real builtin
-# call and keeps its own node, recorded last since it only finishes once
-# every iteration has run
+# call and is observed in its own right, recorded last since it only
+# finishes once every iteration has run
 let report3 = audit { for [a, b] { |x| echo $x } }
 echo $report3[status]
 echo !{length $report3[children]}
-echo $report3[children][0][cmd]
-echo $report3[children][1][cmd]
-echo $report3[children][2][cmd]
+echo $report3[children][0][argv][0]
+echo $report3[children][1][argv][0]
+echo $report3[children][2][argv][0]
 
 # Nested audit: the inner audit still returns its own record, but its real
 # commands also flatten into the outer audit's children
@@ -39,24 +39,24 @@ let outer = audit {
 }
 echo $outer[status]
 echo !{length $outer[children]}
-echo $outer[children][0][cmd]
-echo $outer[children][1][cmd]
+echo $outer[children][0][argv][0]
+echo $outer[children][1][argv][0]
 
 # grant is transparent — its body's command lands directly as the audit's
-# child, not nested under a grant wrapper
+# child, with no grant observation framing it
 let grant_report = audit { grant [exec: [echo: 'allow'], audit: true] { echo 'inside' } }
 echo !{length $grant_report[children]}
-echo $grant_report[children][0][cmd]
+echo $grant_report[children][0][argv][0]
 
 # within is transparent too
 let within_report = audit { within [dir: $CWD] { echo 'inside' } }
 echo !{length $within_report[children]}
-echo $within_report[children][0][cmd]
+echo $within_report[children][0][argv][0]
 
 # guard is transparent — both body and cleanup land directly as children
 let gr = audit { guard { echo 'body' } { echo 'cleanup' } }
 echo !{length $gr[children]}
-echo $gr[children][0][cmd]
-echo $gr[children][1][cmd]
+echo $gr[children][0][argv][0]
+echo $gr[children][1][argv][0]
 
 echo 'audit tree tests done'

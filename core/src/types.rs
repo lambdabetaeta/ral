@@ -59,10 +59,8 @@ pub use shell::modules::Modules;
 pub use shell::cwd::Cwd;
 
 mod audit;
-pub(crate) use audit::NodeOutcome;
 pub use audit::{
-    Audit, AuditFragment, AuditIo, AuditTime, CapturePolicy, ExecNode, ExecNodeKind,
-    STDERR_CAP_BYTES, epoch_us, tree_value,
+    Audit, AuditFragment, AuditIo, CapturePolicy, STDERR_CAP_BYTES, epoch_us, tree_value,
 };
 
 mod observation;

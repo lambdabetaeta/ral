@@ -163,7 +163,7 @@ Prelude functions cover common cases:
 
 ## Audit
 
-`audit { … }` evaluates its body and returns an execution tree: a ral record with various fields about the running of the block, including `args` (which arguments it ran with), `children` (any further calls it made), exit `status`, its `stdout` and `stder`, and a ral `value` that it returned. `audit` turns any errors into record data, so it never fails. It also keeps stdout/stderr apart, so you need not `2>&1` to capture stderr. This is how you read a tool whose exit code is *data* (e.g. `grep` exit 1 meaning no match), or deliberate signal like `valgrind --error-exitcode=77`:
+`audit { … }` evaluates its body and returns a report: a ral record with various fields about the running of the block, including `args` (which arguments it ran with), `children` (any further calls it made), exit `status`, its `stdout` and `stder`, and a ral `value` that it returned. `audit` turns any errors into record data, so it never fails. It also keeps stdout/stderr apart, so you need not `2>&1` to capture stderr. This is how you read a tool whose exit code is *data* (e.g. `grep` exit 1 meaning no match), or deliberate signal like `valgrind --error-exitcode=77`:
 
     let r      = audit { valgrind --error-exitcode=77 --leak-check=full ./a.out }
     $r

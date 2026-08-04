@@ -7,8 +7,8 @@
 
 use crate::ir::Val;
 use crate::types::{
-    BodyResult, Break, CapturePolicy, ExecNode, HandlerEntry, HandlerRole, Map, Mooring, Raw,
-    Settled, Shell, Value, as_map, sig, tree_value, validate_handler_arity,
+    BodyResult, Break, CapturePolicy, HandlerEntry, HandlerRole, Map, Mooring, Observation,
+    Observed, Raw, Settled, Shell, Value, as_map, sig, tree_value, validate_handler_arity,
 };
 
 use crate::evaluator::val::eval_val;
@@ -51,8 +51,10 @@ pub(crate) fn error_record(
 }
 
 /// A failed body's position comes from the error's own span; an unspanned
-/// error falls back to the run's call site.
-pub(crate) fn classify(body: &BodyResult, children: &[ExecNode], shell: &Shell) -> Outcome {
+/// error falls back to the run's call site.  Only a [`Observed::Command`]
+/// names the failing command: a capability check's denial no longer
+/// masquerades as one via the old status pun (D4).
+pub(crate) fn classify(body: &BodyResult, children: &[Observation], shell: &Shell) -> Outcome {
     match body {
         BodyResult::Value(v) => Outcome {
             ok: true,
@@ -64,7 +66,10 @@ pub(crate) fn classify(body: &BodyResult, children: &[ExecNode], shell: &Shell) 
             col: 0,
         },
         BodyResult::Error(e) => {
-            let failing = children.iter().rev().find(|n| n.status != 0);
+            let failing = children.iter().rev().find_map(|obs| match &obs.what {
+                Observed::Command { status, argv, .. } if *status != 0 => argv.first().cloned(),
+                _ => None,
+            });
             let site = e
                 .span
                 .map_or_else(|| shell.call_site(), |s| shell.site_of(Some(s)));
@@ -73,7 +78,7 @@ pub(crate) fn classify(body: &BodyResult, children: &[ExecNode], shell: &Shell) 
                 status: e.exit_code(),
                 value: Value::Unit,
                 message: e.message.clone(),
-                cmd: failing.map_or_else(|| "<runtime>".into(), |n| n.cmd.clone()),
+                cmd: failing.unwrap_or_else(|| "<runtime>".into()),
                 line: site.line,
                 col: site.col,
             }

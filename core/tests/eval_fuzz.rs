@@ -2407,6 +2407,21 @@ fn has_cap_check(children: &[Value], resource: &str, decision: &str) -> bool {
     })
 }
 
+/// `argv[0]` of a command observation, or `None` for anything else (a
+/// write, a read, a capability check).
+fn command_argv0(v: &Value) -> Option<String> {
+    if map_field(v, "kind") != Value::String("command".into()) {
+        return None;
+    }
+    match map_field(v, "argv") {
+        Value::List(argv) => argv.into_iter().next().and_then(|a| match a {
+            Value::String(s) => Some(s),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
 #[test]
 fn audit_no_flag_no_recording() {
     let tree = must_succeed("audit { grant [exec: ['/bin/true': 'allow']] { /bin/true } }");
@@ -2495,10 +2510,10 @@ fn audit_fs_write_denied_recorded() {
 // ── Flat-audit structural tests (single-audit-path) ──────────────────────
 //
 // `within`/`grant`/`guard`/`try`/`audit` are collection boundaries, not
-// tree nodes: none of them wraps its body's commands under a node of its
-// own.  These tests assert that flatness directly — a body's real command
-// lands as a direct child of the collecting audit, and no node named after
-// the control operator itself ever appears.
+// observations: none of them wraps its body's commands under an observation
+// of its own.  These tests assert that flatness directly — a body's real command
+// lands as a direct child of the collecting audit, and no observation named
+// after the control operator itself ever appears.
 
 #[cfg(unix)]
 #[test]
@@ -2513,8 +2528,8 @@ fn audit_grant_flattens_exec_capability_allowed_child() {
     assert!(
         !children
             .iter()
-            .any(|c| map_field(c, "cmd") == Value::String("grant".into())),
-        "`grant` is transparent — it must never own a node of its own: {children:?}"
+            .any(|c| command_argv0(c).as_deref() == Some("grant")),
+        "`grant` is transparent — it must never own an observation of its own: {children:?}"
     );
 }
 
@@ -2550,17 +2565,14 @@ fn audit_grant_flattens_sandboxed_fs_allowed_child() {
 fn audit_within_flattens_body_children() {
     let tree = must_succeed("audit { within [env: [X: 'y']] { /bin/true } }");
     let children = children_of(&tree);
+    let cmd_names: Vec<String> = children.iter().filter_map(command_argv0).collect();
     assert!(
-        children
-            .iter()
-            .any(|c| map_field(c, "cmd") == Value::String("/bin/true".into())),
-        "within's body command must be a direct child of the audit root: {children:?}"
+        cmd_names.iter().any(|n| n == "/bin/true"),
+        "within's body command must be a direct child of the audit root: {cmd_names:?}"
     );
     assert!(
-        !children
-            .iter()
-            .any(|c| map_field(c, "cmd") == Value::String("within".into())),
-        "`within` is transparent — it must never own a node of its own: {children:?}"
+        !cmd_names.iter().any(|n| n == "within"),
+        "`within` is transparent — it must never own an observation of its own: {cmd_names:?}"
     );
 }
 
@@ -2568,13 +2580,7 @@ fn audit_within_flattens_body_children() {
 fn audit_guard_flattens_body_and_cleanup_children() {
     let tree = must_succeed("audit { guard { /bin/true } { /bin/echo cleaning } }");
     let children = children_of(&tree);
-    let cmd_names: Vec<String> = children
-        .iter()
-        .filter_map(|c| match map_field(c, "cmd") {
-            Value::String(s) => Some(s),
-            _ => None,
-        })
-        .collect();
+    let cmd_names: Vec<String> = children.iter().filter_map(command_argv0).collect();
     assert!(
         cmd_names.iter().any(|n| n == "/bin/true"),
         "guard's body command must be a direct child of the audit root: {cmd_names:?}"
@@ -2585,7 +2591,7 @@ fn audit_guard_flattens_body_and_cleanup_children() {
     );
     assert!(
         !cmd_names.iter().any(|n| n == "guard"),
-        "`guard` is transparent — it must never own a node of its own: {cmd_names:?}"
+        "`guard` is transparent — it must never own an observation of its own: {cmd_names:?}"
     );
 }
 
@@ -2593,35 +2599,33 @@ fn audit_guard_flattens_body_and_cleanup_children() {
 fn audit_try_flattens_body_children() {
     let tree = must_succeed("audit { try { /bin/true | from-string } { |_e| return 'caught' } }");
     let children = children_of(&tree);
+    let cmd_names: Vec<String> = children.iter().filter_map(command_argv0).collect();
     assert!(
-        children
-            .iter()
-            .any(|c| map_field(c, "cmd") == Value::String("/bin/true".into())),
-        "try's body command must be a direct child of the audit root: {children:?}"
+        cmd_names.iter().any(|n| n == "/bin/true"),
+        "try's body command must be a direct child of the audit root: {cmd_names:?}"
     );
     assert!(
-        !children
-            .iter()
-            .any(|c| map_field(c, "cmd") == Value::String("try".into())),
-        "`try` is transparent — it must never own a node of its own: {children:?}"
+        !cmd_names.iter().any(|n| n == "try"),
+        "`try` is transparent — it must never own an observation of its own: {cmd_names:?}"
     );
 }
 
 /// `^clear` skips the env and resolves external, to the ncurses binary —
-/// proven through the audit tree, since the binary itself may fail for
-/// environmental reasons (no `TERM`).  `try` keeps the tree on either
-/// outcome, but owns no node of its own: `clear` lands as a direct child
-/// of the audit root.
+/// proven through the audit trail, since the binary itself may fail for
+/// environmental reasons (no `TERM`).  `try` keeps the trail on either
+/// outcome, but owns no observation of its own: `clear` lands as a direct
+/// child of the audit root.
 #[cfg(unix)]
 #[test]
 fn caret_clear_resolves_external_not_the_native() {
     let tree = must_succeed("audit { try { ^clear | from-string } { |_e| return '' } }");
     let children = children_of(&tree);
     assert!(
-        children
-            .iter()
-            .any(|c| map_field(c, "cmd") == Value::String("clear".into())),
-        "^clear must record an external command node named `clear` as a direct child of the audit root: {children:?}"
+        children.iter().any(|c| {
+            command_argv0(c).as_deref() == Some("clear")
+                && map_field(c, "origin") == Value::String("external".into())
+        }),
+        "^clear must record a `clear` command observation with origin \"external\" as a direct child of the audit root: {children:?}"
     );
 }
 
@@ -2637,8 +2641,8 @@ fn audit_nested_grants_produce_no_grant_nodes() {
     assert!(
         !children
             .iter()
-            .any(|c| map_field(c, "cmd") == Value::String("grant".into())),
-        "nested grants must not produce any `grant`-named node: {children:?}"
+            .any(|c| command_argv0(c).as_deref() == Some("grant")),
+        "nested grants must not produce any `grant`-named observation: {children:?}"
     );
     assert!(
         has_cap_check(&children, "exec", "allowed"),
@@ -2649,16 +2653,13 @@ fn audit_nested_grants_produce_no_grant_nodes() {
 #[test]
 fn audit_nested_audit_flattens_into_outer_children() {
     // The inner `audit { … }` is a collection boundary like the outer
-    // one, not a tree node of its own: its /bin/true command flattens
+    // one, not an observation of its own: its /bin/true command flattens
     // straight into the outer audit's children, and no `audit`-named
-    // node ever appears.
+    // observation ever appears.
     let tree = must_succeed("audit { audit { /bin/true } }");
     let names: Vec<String> = children_of(&tree)
         .iter()
-        .filter_map(|c| match map_field(c, "cmd") {
-            Value::String(s) => Some(s),
-            _ => None,
-        })
+        .filter_map(command_argv0)
         .collect();
     assert!(
         names.iter().any(|n| n.contains("/bin/true")),
@@ -2666,7 +2667,7 @@ fn audit_nested_audit_flattens_into_outer_children() {
     );
     assert!(
         !names.iter().any(|n| n == "audit"),
-        "audit must never appear as a node of its own: {names:?}"
+        "audit must never appear as an observation of its own: {names:?}"
     );
 }
 
@@ -2674,14 +2675,11 @@ fn audit_nested_audit_flattens_into_outer_children() {
 fn audit_direct_external_pipeline_stage_appears_in_tree() {
     // A `audit { … | … }` body uses pipeline helpers (capture_bytes is
     // off), so the first external stage takes the direct-spawn path.
-    // The synthesised command node must still show up.
+    // The synthesised command observation must still show up.
     let tree = must_succeed("audit { /bin/echo hi | /bin/cat }");
     let cmds: Vec<String> = children_of(&tree)
         .iter()
-        .filter_map(|c| match map_field(c, "cmd") {
-            Value::String(s) => Some(s),
-            _ => None,
-        })
+        .filter_map(command_argv0)
         .collect();
     assert!(
         cmds.iter().any(|c| c.contains("echo")),
@@ -2741,17 +2739,17 @@ fn helper_stage_cd_does_not_flow_back_to_parent() {
     );
 }
 
-/// Audit nodes captured *inside* a helper-eval stage merge back into the
-/// parent's audit tree.  The stage runs an external (`/bin/echo`) in its
-/// own subprocess; that command's audit node travels back in the stage's
+/// Audit observations captured *inside* a helper-eval stage merge back into
+/// the parent's audit tree.  The stage runs an external (`/bin/echo`) in its
+/// own subprocess; that command's observation travels back in the stage's
 /// `ChildEvalResponse` and must appear somewhere under the surrounding
 /// `audit { … }` scope.
 #[cfg(unix)]
 #[test]
-fn helper_stage_audit_nodes_merge_into_parent_tree() {
+fn helper_stage_audit_observations_merge_into_parent_tree() {
     fn collect_cmds(v: &Value, out: &mut Vec<String>) {
-        if let Value::String(s) = map_field(v, "cmd") {
-            out.push(s);
+        if let Some(n) = command_argv0(v) {
+            out.push(n);
         }
         for child in children_of(v) {
             collect_cmds(&child, out);
@@ -2763,7 +2761,7 @@ fn helper_stage_audit_nodes_merge_into_parent_tree() {
     assert!(
         cmds.iter().any(|c| c.contains("/bin/echo")),
         "the external run inside a helper-eval stage must merge its audit \
-         node into the parent tree: {cmds:?}"
+         observation into the parent tree: {cmds:?}"
     );
 }
 

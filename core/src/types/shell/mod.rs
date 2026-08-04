@@ -157,10 +157,10 @@ pub struct SessionState {
 /// Host-local scratch whose members each carry their own flow rule — not a
 /// lifetime category, the residue left once run and session state are named.
 pub struct LocalState {
-    /// The in-flight execution tree and its byte-capture policy.  `grant`,
+    /// The in-flight audit trail and its byte-capture policy.  `grant`,
     /// `within`, `guard`, `try`, and `audit` are collection boundaries, not
-    /// tree nodes; the dispatcher posts one node per real command through
-    /// [`crate::evaluator::audit`].
+    /// observations; the dispatcher posts one observation per real command
+    /// through [`crate::evaluator::audit`].
     pub(crate) audit: Audit,
     /// Flows across neither threads nor IPC; moved across the pipeline-stage
     /// boundary.
@@ -241,7 +241,7 @@ impl Shell {
         Error::new(msg, status).with_hint(hint)
     }
 
-    /// Resolve `span` to the value-typed [`CallSite`] audit nodes and
+    /// Resolve `span` to the value-typed [`CallSite`] observations and
     /// capability checks carry.  [`CallSite::default`] when there is no span,
     /// or its source is not registered in this session.
     pub(crate) fn site_of(&self, span: Option<Span>) -> CallSite {
@@ -259,7 +259,10 @@ impl Shell {
 
     /// [`Self::site_of`] applied to the dispatch register [`Audit`] carries.
     /// Returned by value so the caller may hold `&mut audit` alongside it.
-    pub(crate) fn call_site(&self) -> CallSite {
+    /// `pub`, not `pub(crate)`: a host door that builds its own
+    /// [`crate::types::Observation`] (a grep walk, a read outside any
+    /// redirect) needs the same call site core's own doors stamp.
+    pub fn call_site(&self) -> CallSite {
         self.site_of(self.local.audit.call_site)
     }
 

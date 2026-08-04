@@ -18,10 +18,11 @@ use super::tabs::Tabs;
 use super::terminal::Term;
 use super::viewport::Viewport;
 use crate::agent::resources::{BusFigures, ViewFigures, ViewportFigures};
-use crate::bus::card::IoEvent;
+use crate::bus::card::{RailPlace, rail_place};
 use crate::bus::{AgentId, AgentState, BusReceiver, Event, Inbox, Kind};
 use crate::fleet::registry::{AGENT_DEMOTE_IDLE, AgentRegistry};
 use crate::provider::{Provider, Usage};
+
 use ratatui::{
     crossterm::event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -457,24 +458,29 @@ impl App {
                     self.push_chrome(id, RailShape::Plain, tombstones);
                 }
             }
-            // A write is a barrier that ends the ral block, so it never buffers:
-            // `with_viewport` flushes any pending observation run first and the
-            // write lands after it on the rail.
-            Kind::Io {
-                event: IoEvent::Write { .. },
-                card,
-            } => {
-                self.with_viewport(id, |vp| vp.push_write_card(card));
-            }
-            // A read, exec, or grep. Each lands as its own event, so a burst
-            // reads as `Read…, $…, Read…, $…` clutter — the io buffer collapses
-            // a run, even interleaved, into one block per kind. The `card` is
-            // dropped here: flush rebuilds it grouped, and the structured record
-            // already reached the transcript at `Emitter::emit`.
-            Kind::Io { event, .. } => {
-                self.surface
-                    .absorb_observation(self.tabs.viewports_mut(), id, event);
-            }
+            Kind::Io { event, card } => match rail_place(&event.what) {
+                // A read, exec, or grep. Each lands as its own event, so a burst
+                // reads as `Read…, $…, Read…, $…` clutter — the buffer collapses
+                // a run, even interleaved, into one block per kind. The `card` is
+                // dropped here: flush rebuilds it grouped.
+                Some(RailPlace::Grouped(_)) => {
+                    self.surface
+                        .absorb_observation(self.tabs.viewports_mut(), id, event.what);
+                }
+                // A write ends the ral block, so it never buffers:
+                // `with_viewport` flushes any pending run first and the write
+                // lands after it on the rail.
+                Some(RailPlace::Barrier) => {
+                    self.with_viewport(id, |vp| vp.push_write_card(card));
+                }
+                // A denial — the line a reader of the rail most needs to see,
+                // so it lands whole rather than dissolving into a tally.
+                Some(RailPlace::Standalone) => {
+                    self.with_viewport(id, |vp| vp.push_card(card));
+                }
+                // `decode_surface` already dropped what the rail does not draw.
+                None => {}
+            },
             // A pin is ambient state like `Kind::Usage`, never a scrollback
             // barrier, so it is routed directly rather than through
             // `with_viewport`, which would flush the grouping windows.
@@ -726,6 +732,7 @@ mod tests {
     use crate::bus::card::{Card, Mark};
     use crate::tui::line::plain;
     use crate::tui::palette::READ_W;
+    use ral_core::types::{CallSite, Observation, Observed};
 
     fn app() -> (App, BusReceiver) {
         let (_tx, rx) = crate::bus::channel();
@@ -741,7 +748,11 @@ mod tests {
 
     fn read(path: &str) -> Kind {
         Kind::Io {
-            event: IoEvent::Read { path: path.into() },
+            event: Observation::instant(
+                CallSite::default(),
+                String::new(),
+                Observed::Read { path: path.into() },
+            ),
             card: Card(vec![]),
         }
     }

@@ -92,7 +92,7 @@ pub(crate) fn done_card(outcome: &DoneOutcome) -> Card {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testkit::{card_value, io_value, s};
+    use super::super::testkit::{card_value, map_value, s};
     use super::*;
 
     /// Mirrors core's `done_event`: `cmd` plus a closed outcome variant.
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn value_to_done_rejects_non_done_values() {
         assert!(value_to_done(&card_value(vec![])).is_none());
-        assert!(value_to_done(&io_value(vec![("io", s("read"))])).is_none());
+        assert!(value_to_done(&map_value(vec![("kind", s("read"))])).is_none());
         assert!(value_to_done(&s("plain")).is_none());
     }
 }

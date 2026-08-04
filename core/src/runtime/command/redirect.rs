@@ -2,10 +2,9 @@
 //! shapes a `Sink` cannot model, and the `< file` handoff into `shell.io.stdin`.
 //! The frames in `evaluator::redirect` drive all three.
 
+use crate::evaluator::audit::observe;
 use crate::syntax::ast::RedirectMode;
-use crate::types::{Break, Error, Mooring, Settled, Shell};
-
-use super::io_event;
+use crate::types::{Break, Error, Mooring, Observed, Settled, Shell};
 
 /// A redirect target resolved to a concrete path or fd.
 #[derive(Clone, Debug)]
@@ -249,7 +248,7 @@ pub(crate) fn open_file(
     }
 }
 
-/// The whole `>` recipe with no io event — the caller owns the surface.
+/// The whole `>` recipe with no observation — the caller owns the surface.
 /// exarch's `edit-hash` and `edit-replace` write below the redirect frame and
 /// speak their own card, so they share this door rather than fork a weaker
 /// temp-file write that drops the symlink, mode and fsync steps.
@@ -581,9 +580,9 @@ pub(crate) fn install_stdin_redirect(
             let rp = shell.resolve(word);
             shell.check_fs_read(&rp)?;
             let f = std::fs::File::open(rp.as_path()).map_err(|e| io_error(word, &e))?;
-            // Door 1 — READ, emitted eagerly so the read card precedes the
-            // body or exec it feeds, as in `cat < a`.
-            mooring.emit_io(&io_event::read(word));
+            // Door 1 — READ, recorded eagerly so it precedes the body or
+            // exec it feeds, as in `cat < a`.
+            observe(shell, mooring, Observed::Read { path: word.clone() });
             crate::io::Source::File(f)
         }
         RedirectMode::HereString => {

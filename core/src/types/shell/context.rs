@@ -39,8 +39,9 @@ impl Context {
         }
     }
 
-    /// True when capability checks should emit audit nodes: an active trail
-    /// (`audit { … }` or `ral --audit`) and `audit: true` on some grants layer.
+    /// True when capability checks should emit an observation: an active
+    /// trail (`audit { … }` or `ral --audit`) and `audit: true` on some
+    /// grants layer.
     pub fn should_audit_capabilities(&self, audit: &Audit) -> bool {
         audit.active() && self.grants.any_audits()
     }
@@ -51,7 +52,7 @@ impl Context {
         crate::path::home(&self.env_overrides)
     }
 
-    /// The `$USER` stamped on audit-tree nodes.  Overrides only, with no
+    /// The `$USER` stamped on observations.  Overrides only, with no
     /// host-env fallback, so it stays empty until a front end has run
     /// [`Shell::seed_default_env_vars`](super::Shell::seed_default_env_vars).
     pub fn principal(&self) -> String {

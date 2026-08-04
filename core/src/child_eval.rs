@@ -15,8 +15,8 @@ use crate::serial::{InternCtx, ScopeTable, SerialEnvSnapshot, SerialValue, WireD
 use crate::source::{FileId, SourceDb, Span};
 use crate::subprocess::{WireMobile, bare_child_shell, install_shell_mobile};
 use crate::types::{
-    Break, CapturePolicy, Env, Error, Escape, ExecNode, ExecNodeKind, Mobile, Mooring, Settled,
-    Shell, Status, Tail, Value,
+    Break, CapturePolicy, Env, Error, Escape, Mobile, Mooring, Observation, Settled, Shell, Status,
+    Tail, Value,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -95,100 +95,60 @@ pub(crate) enum WireOutcome {
     },
 }
 
-/// Wire mirror of [`ExecNode`], its value field interned as a [`SerialValue`].
+/// Wire mirror of one [`Observation`].
+///
+/// `CommandOrigin`/`Decision`/`WriteOutcome` carry no serde impls of their
+/// own, and a `Command`'s `value` or a `Capability`'s `fields` may nest a
+/// native or closure that only decodes against a scope table — so rather
+/// than mirror `Observed`'s variants field by field, this rides the same
+/// canonical projection every other consumer reads
+/// ([`Observation::to_value`]/[`Observation::from_value`]), interned as one
+/// [`SerialValue`] exactly as a stage's report value is.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct WireExecNode {
-    pub kind: ExecNodeKind,
-    pub cmd: String,
-    pub args: Vec<String>,
-    pub status: i32,
-    pub script: String,
-    pub line: usize,
-    pub col: usize,
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
-    pub error: Option<String>,
-    pub value: SerialValue,
-    pub children: Vec<Self>,
-    pub start: i64,
-    pub end: i64,
-    pub principal: String,
+pub(crate) struct WireObservation {
+    projected: SerialValue,
 }
 
-impl WireExecNode {
-    pub(crate) fn from_runtime(node: ExecNode, ctx: &mut InternCtx) -> Result<Self, Error> {
-        let mut children = Vec::with_capacity(node.children.len());
-        for child in node.children {
-            children.push(Self::from_runtime(child, ctx)?);
-        }
+impl WireObservation {
+    pub(crate) fn from_runtime(obs: &Observation, ctx: &mut InternCtx) -> Result<Self, Error> {
         Ok(Self {
-            kind: node.kind,
-            cmd: node.cmd,
-            args: node.args,
-            status: node.status,
-            script: node.script,
-            line: node.line,
-            col: node.col,
-            stdout: node.stdout,
-            stderr: node.stderr,
-            error: node.error,
-            value: SerialValue::from_runtime(&node.value, ctx)?,
-            children,
-            start: node.start,
-            end: node.end,
-            principal: node.principal,
+            projected: SerialValue::from_runtime(&obs.to_value(), ctx)?,
         })
     }
 
-    pub(crate) fn into_runtime(self, dec: &WireDecoder) -> Result<ExecNode, Error> {
-        let mut children = Vec::with_capacity(self.children.len());
-        for child in self.children {
-            children.push(child.into_runtime(dec)?);
-        }
-        Ok(ExecNode {
-            kind: self.kind,
-            cmd: self.cmd,
-            args: self.args,
-            status: self.status,
-            script: self.script,
-            line: self.line,
-            col: self.col,
-            stdout: self.stdout,
-            stderr: self.stderr,
-            error: self.error,
-            value: self.value.into_runtime(dec)?,
-            children,
-            start: self.start,
-            end: self.end,
-            principal: self.principal,
-        })
+    pub(crate) fn into_runtime(self, dec: &WireDecoder) -> Result<Observation, Error> {
+        let value = self.projected.into_runtime(dec)?;
+        Observation::from_value(&value)
+            .ok_or_else(|| Error::new("audit observation did not decode off the wire", 1))
     }
 }
 
-/// One audit node plus the scope table it interns against.
+/// One observation plus the scope table it interns against.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct WireAuditNode {
+pub(crate) struct WireAuditObservation {
     pub scope_table: ScopeTable,
-    pub node: WireExecNode,
+    pub observation: WireObservation,
 }
 
-/// Full response emitted by one child.  `audit_nodes` survives a semantic
-/// failure, so work recorded before the failure still reaches the parent.
+/// Full response emitted by one child.  `audit_observations` survives a
+/// semantic failure, so work recorded before the failure still reaches the
+/// parent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ChildEvalResponse {
     pub scope_table: ScopeTable,
     pub outcome: WireOutcome,
     pub last_status: i32,
-    pub audit_nodes: Vec<WireAuditNode>,
+    pub audit_observations: Vec<WireAuditObservation>,
 }
 
 /// Decoded response ready for the pipeline-stage parent.  `signal` is the
-/// body's own outcome ([`None`] on success), returned beside `audit_nodes`
-/// so the parent records audit before surfacing a failure.
+/// body's own outcome ([`None`] on success), returned beside
+/// `audit_observations` so the parent records audit before surfacing a
+/// failure.
 pub(crate) struct DecodedResponse {
     pub value: Option<Value>,
     pub last_status: i32,
-    pub audit_nodes: Vec<ExecNode>,
+    pub audit_observations: Vec<Observation>,
     pub signal: Option<Break>,
 }
 
@@ -242,7 +202,7 @@ pub(crate) fn pack_request(
 /// process boundary.
 struct EvalOutcome {
     result: Settled<Value>,
-    audit_nodes: Vec<ExecNode>,
+    audit_observations: Vec<Observation>,
     last_status: i32,
 }
 
@@ -313,33 +273,33 @@ fn eval_request(
         result
     };
     // Before `return_to`, which would merge the fragment into the outer shell.
-    let audit_nodes = child.local.audit.take_fragment().into_nodes();
+    let audit_observations = child.local.audit.take_fragment().into_observations();
     child.return_to(&mut shell);
 
     crate::dbg_trace!(
         "child-eval",
-        "post-eval: result_ok={} audit_nodes={}",
+        "post-eval: result_ok={} audit_observations={}",
         result.is_ok(),
-        audit_nodes.len()
+        audit_observations.len()
     );
     let last_status = shell.mobile().control.last_status;
     Ok(EvalOutcome {
         result,
-        audit_nodes,
+        audit_observations,
         last_status,
     })
 }
 
-/// Each node interns against its own scope table, independent of the
+/// Each observation interns against its own scope table, independent of the
 /// response's.
-fn pack_audit_nodes(nodes: Vec<ExecNode>) -> Settled<Vec<WireAuditNode>> {
-    let mut out = Vec::with_capacity(nodes.len());
-    for node in nodes {
+fn pack_audit_observations(observations: Vec<Observation>) -> Settled<Vec<WireAuditObservation>> {
+    let mut out = Vec::with_capacity(observations.len());
+    for obs in observations {
         let mut ctx = InternCtx::new();
-        let node = WireExecNode::from_runtime(node, &mut ctx)?;
-        out.push(WireAuditNode {
+        let observation = WireObservation::from_runtime(&obs, &mut ctx)?;
+        out.push(WireAuditObservation {
             scope_table: ctx.scope_table,
-            node,
+            observation,
         });
     }
     Ok(out)
@@ -387,12 +347,12 @@ pub(crate) fn run_child_eval(
     };
     let EvalOutcome {
         result,
-        audit_nodes,
+        audit_observations,
         last_status,
     } = outcome;
 
-    let audit_nodes = match pack_audit_nodes(audit_nodes) {
-        Ok(nodes) => nodes,
+    let audit_observations = match pack_audit_observations(audit_observations) {
+        Ok(observations) => observations,
         Err(b) => return (break_response(b), None),
     };
 
@@ -405,7 +365,7 @@ pub(crate) fn run_child_eval(
                     Ok(serial) => Some(serial),
                     Err(e) => {
                         let outcome = break_to_outcome(Break::Error(transfer_error(&e)));
-                        return finish(ctx, outcome, last_status, audit_nodes, None);
+                        return finish(ctx, outcome, last_status, audit_observations, None);
                     }
                 }
             } else {
@@ -416,7 +376,7 @@ pub(crate) fn run_child_eval(
         Err(b) => (break_to_outcome(b), None),
     };
 
-    finish(ctx, outcome, last_status, audit_nodes, output_value)
+    finish(ctx, outcome, last_status, audit_observations, output_value)
 }
 
 /// Assemble the response from its fully-packed parts.
@@ -424,7 +384,7 @@ fn finish(
     ctx: InternCtx,
     outcome: WireOutcome,
     last_status: i32,
-    audit_nodes: Vec<WireAuditNode>,
+    audit_observations: Vec<WireAuditObservation>,
     output_value: Option<Value>,
 ) -> (ChildEvalResponse, Option<Value>) {
     (
@@ -432,7 +392,7 @@ fn finish(
             scope_table: ctx.scope_table,
             outcome,
             last_status,
-            audit_nodes,
+            audit_observations,
         },
         output_value,
     )
@@ -450,7 +410,7 @@ pub(crate) fn break_response(signal: Break) -> ChildEvalResponse {
         scope_table: ScopeTable::default(),
         outcome: break_to_outcome(signal),
         last_status,
-        audit_nodes: Vec::new(),
+        audit_observations: Vec::new(),
     }
 }
 
@@ -461,10 +421,10 @@ pub(crate) fn decode_response(
     response: ChildEvalResponse,
     shell: &Shell,
 ) -> Settled<DecodedResponse> {
-    let mut audit_nodes = Vec::with_capacity(response.audit_nodes.len());
-    for entry in response.audit_nodes {
+    let mut audit_observations = Vec::with_capacity(response.audit_observations.len());
+    for entry in response.audit_observations {
         let dec = WireDecoder::for_shell(shell, &entry.scope_table)?;
-        audit_nodes.push(entry.node.into_runtime(&dec)?);
+        audit_observations.push(entry.observation.into_runtime(&dec)?);
     }
     let dec = WireDecoder::for_shell(shell, &response.scope_table)?;
     let (value, signal) = match response.outcome {
@@ -504,7 +464,7 @@ pub(crate) fn decode_response(
     Ok(DecodedResponse {
         value,
         last_status: response.last_status,
-        audit_nodes,
+        audit_observations,
         signal,
     })
 }
@@ -551,7 +511,7 @@ mod tests {
         assert_eq!(value, Some(Value::Int(42)));
         assert_eq!(decoded.value, Some(Value::Int(42)));
         assert_eq!(decoded.last_status, 0);
-        assert!(decoded.audit_nodes.is_empty());
+        assert!(decoded.audit_observations.is_empty());
         assert!(decoded.signal.is_none());
     }
 
@@ -560,26 +520,25 @@ mod tests {
         // A response carrying both audit and a failure must surface both, so
         // the user sees what ran before things went wrong.
         let mut ctx = InternCtx::new();
-        let node = WireExecNode::from_runtime(
-            ExecNode::command(
-                "/bin/echo",
-                vec!["hi".into()],
-                0,
-                crate::types::CallSite {
-                    script: "<test>".into(),
-                    line: 1,
-                    col: 1,
-                },
-                crate::types::AuditIo::default(),
-                None,
-                Value::Unit,
-                Vec::new(),
-                crate::types::AuditTime::default(),
-                String::new(),
-            ),
-            &mut ctx,
-        )
-        .expect("wire");
+        let obs = Observation::spanning(
+            crate::types::CallSite {
+                script: "<test>".into(),
+                line: 1,
+                col: 1,
+            },
+            0,
+            0,
+            String::new(),
+            crate::types::Observed::Command {
+                argv: vec!["/bin/echo".into(), "hi".into()],
+                status: 0,
+                origin: crate::types::CommandOrigin::External,
+                io: crate::types::AuditIo::default(),
+                error: None,
+                value: Value::Unit,
+            },
+        );
+        let observation = WireObservation::from_runtime(&obs, &mut ctx).expect("wire");
         let response = ChildEvalResponse {
             scope_table: ScopeTable::default(),
             outcome: WireOutcome::Error {
@@ -589,9 +548,9 @@ mod tests {
                 span: None,
             },
             last_status: 1,
-            audit_nodes: vec![WireAuditNode {
+            audit_observations: vec![WireAuditObservation {
                 scope_table: ctx.scope_table,
-                node,
+                observation,
             }],
         };
         let decoded = decode_response(response, &Shell::default()).expect("decode");
@@ -601,7 +560,7 @@ mod tests {
             decoded.signal
         );
         assert_eq!(
-            decoded.audit_nodes.len(),
+            decoded.audit_observations.len(),
             1,
             "audit must survive the helper failure"
         );
@@ -650,36 +609,39 @@ mod tests {
     }
 
     #[test]
-    fn wire_exec_node_kind_survives_a_json_round_trip() {
-        // The kind crosses as a serde enum, not a string with a defaulting
-        // decode arm, so a new `ExecNodeKind` variant fails the build here
-        // rather than silently degrading to `Command`.
+    fn wire_observation_kind_survives_a_json_round_trip() {
+        // A capability check's `kind` and `decision` cross intact, so a
+        // denial does not silently decode back as some other observation.
         let mut ctx = InternCtx::new();
-        let node = WireExecNode::from_runtime(
-            ExecNode::capability_check(
-                "net",
-                "denied",
-                crate::types::CallSite {
-                    script: "<test>".into(),
-                    line: 1,
-                    col: 1,
-                },
-                String::new(),
-                crate::types::Map::default(),
-            ),
-            &mut ctx,
-        )
-        .expect("wire");
-        assert_eq!(node.kind, crate::types::ExecNodeKind::CapabilityCheck);
+        let obs = Observation::instant(
+            crate::types::CallSite {
+                script: "<test>".into(),
+                line: 1,
+                col: 1,
+            },
+            String::new(),
+            crate::types::Observed::Capability {
+                resource: "net".into(),
+                decision: crate::types::Decision::Denied,
+                fields: crate::types::Map::default(),
+            },
+        );
+        let wire = WireObservation::from_runtime(&obs, &mut ctx).expect("wire");
 
-        let json = serde_json::to_vec(&node).expect("serialise node");
-        let back: WireExecNode = serde_json::from_slice(&json).expect("deserialise node");
+        let json = serde_json::to_vec(&wire).expect("serialise observation");
+        let back: WireObservation = serde_json::from_slice(&json).expect("deserialise observation");
         let dec = WireDecoder::for_shell(&Shell::default(), &ctx.scope_table).expect("decoder");
         let runtime = back.into_runtime(&dec).expect("into runtime");
-        assert_eq!(
-            runtime.kind,
-            crate::types::ExecNodeKind::CapabilityCheck,
-            "the node's kind must survive the wire round-trip"
+        assert_eq!(runtime.what.kind(), "capability-check");
+        assert!(
+            matches!(
+                runtime.what,
+                crate::types::Observed::Capability {
+                    decision: crate::types::Decision::Denied,
+                    ..
+                }
+            ),
+            "the observation's decision must survive the wire round-trip"
         );
     }
 
@@ -775,7 +737,7 @@ mod tests {
                 },
             )))),
             last_status: 0,
-            audit_nodes: Vec::new(),
+            audit_observations: Vec::new(),
         };
 
         let decoded = decode_response(response, &shell)

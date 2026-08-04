@@ -210,7 +210,7 @@ fn serve_stage_core<R: std::io::BufRead + ?Sized, W: std::io::Write + ?Sized>(
             Ok(()) => report,
             Err(err) => {
                 let mut overwritten = break_response(Break::Error(err));
-                overwritten.audit_nodes = report.audit_nodes;
+                overwritten.audit_observations = report.audit_observations;
                 overwritten
             }
         },

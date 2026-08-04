@@ -5,13 +5,15 @@
 //! commands whose redirects are already evaluated.
 
 use super::absorb_tail;
+use super::audit::observe;
 use super::val::eval_val;
 use crate::io::Sink;
 use crate::ir::{RedirectV, ValRedirectTarget};
-use crate::runtime::command::io_event::{self, WriteOutcome};
 use crate::runtime::command::{self, EvalRedirect, EvalRedirectV};
 use crate::syntax::ast::RedirectMode;
-use crate::types::{Break, Control, Error, Mooring, Raw, Settled, Shell, Value};
+use crate::types::{
+    Break, Control, Error, Mooring, Observed, Raw, Settled, Shell, Value, WriteOutcome,
+};
 
 /// Resolves redirect targets to concrete paths or fd numbers. `Exec`
 /// arrives here through `call::eval_call_parts` and hands the result to
@@ -178,15 +180,19 @@ fn install_sink_redirects(
 
 /// Surface every recorded intent as a `failed` write — the frame-entry
 /// error paths, where no body runs and any atomic temp is discarded.
-fn emit_writes_failed(mooring: &Mooring, intents: Vec<WriteIntent>) {
+fn emit_writes_failed(shell: &mut Shell, mooring: &Mooring, intents: Vec<WriteIntent>) {
     for intent in intents {
-        mooring.emit_io(&io_event::write(
-            &intent.path,
-            intent.mode,
-            WriteOutcome::Failed,
-            None,
-            None,
-        ));
+        observe(
+            shell,
+            mooring,
+            Observed::Write {
+                path: intent.path,
+                mode: intent.mode,
+                outcome: WriteOutcome::Failed,
+                new_bytes: None,
+                old_bytes: None,
+            },
+        );
     }
 }
 
@@ -199,7 +205,7 @@ impl<'a> RedirectFrame<'a> {
         let sink_redirects = match install_sink_redirects(redirects, shell, &mut write_intents) {
             Ok(r) => r,
             Err(e) => {
-                emit_writes_failed(mooring, write_intents);
+                emit_writes_failed(shell, mooring, write_intents);
                 stdin_guard.restore(shell);
                 return Err(e);
             }
@@ -207,7 +213,7 @@ impl<'a> RedirectFrame<'a> {
         let fd_guard = match command::apply_redirects(&sink_redirects.unhandled, shell) {
             Ok(g) => g,
             Err(e) => {
-                emit_writes_failed(mooring, write_intents);
+                emit_writes_failed(shell, mooring, write_intents);
                 if let Some(s) = sink_redirects.prev_stdout {
                     shell.io.stdout = s;
                 }
@@ -230,8 +236,8 @@ impl<'a> RedirectFrame<'a> {
     }
 
     /// Fires each atomic commit once the body result is known and the
-    /// sinks are back, surfaces one write event per intent, and returns
-    /// the first commit failure. A failed body aborts every intent,
+    /// sinks are back, surfaces one write observation per intent, and
+    /// returns the first commit failure. A failed body aborts every intent,
     /// dropping its temp file unwritten.
     fn settle_writes(&mut self, body_ok: bool) -> Settled<()> {
         let mut commit_err: Settled<()> = Ok(());
@@ -259,13 +265,17 @@ impl<'a> RedirectFrame<'a> {
                 outcome = WriteOutcome::Committed;
                 new_bytes = None;
             }
-            self.mooring.emit_io(&io_event::write(
-                &intent.path,
-                intent.mode,
-                outcome,
-                new_bytes.as_deref(),
-                old_bytes.as_deref(),
-            ));
+            observe(
+                self.shell,
+                self.mooring,
+                Observed::Write {
+                    path: intent.path,
+                    mode: intent.mode,
+                    outcome,
+                    new_bytes,
+                    old_bytes,
+                },
+            );
         }
         commit_err
     }

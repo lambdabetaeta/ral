@@ -121,7 +121,7 @@ rather than evaluating it directly**
   process exit; the composition itself (load each `.ral` profile, `meet`
   left-to-right, freeze against home/cwd, push one permanent session ceiling)
   lives in core ([[design/grant|grant]]). `--audit` wraps the run in a traced
-  [[map/core/evaluator|execution tree]] emitted as JSON.
+  [[map/core/evaluator|audit trail]] emitted as JSON.
 
 ## Embedding and the baked prelude
 

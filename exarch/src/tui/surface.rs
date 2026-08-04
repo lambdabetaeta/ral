@@ -10,7 +10,8 @@ use std::collections::HashMap;
 
 use super::viewport::Viewport;
 use crate::bus::AgentId;
-use crate::bus::card::{Hunk, IoEvent, ObservationKind};
+use crate::bus::card::{Hunk, ObservationKind};
+use ral_core::types::Observed;
 
 pub(super) struct SurfaceBuffer {
     patch_buf: Option<PatchBuf>,
@@ -24,13 +25,15 @@ struct PatchBuf {
 }
 
 /// Buckets are deduped and order-independent — the user does not care in what
-/// order a burst interleaved.  Holding the typed [`IoEvent`] rather than
-/// rendered spans lets flush reuse [`crate::bus::card`]'s group helpers.
+/// order a burst interleaved.  Holding the typed [`Observed`] fact rather than
+/// rendered spans lets flush reuse [`crate::bus::card`]'s group helpers; the
+/// envelope (site, time, principal) carries nothing a group needs, so only the
+/// fact is kept.
 struct ObservationBuf {
     id: AgentId,
     reads: Vec<String>,
-    execs: Vec<IoEvent>,
-    greps: Vec<IoEvent>,
+    execs: Vec<Observed>,
+    greps: Vec<Observed>,
 }
 
 impl SurfaceBuffer {
@@ -77,7 +80,7 @@ impl SurfaceBuffer {
         &mut self,
         viewports: &mut HashMap<AgentId, Viewport>,
         id: AgentId,
-        event: IoEvent,
+        event: Observed,
     ) {
         if self.observation_buf.as_ref().is_some_and(|b| b.id != id) {
             self.flush_observations(viewports);
@@ -89,35 +92,30 @@ impl SurfaceBuffer {
             greps: Vec::new(),
         });
         match event {
-            IoEvent::Read { path } => {
+            Observed::Read { path } => {
                 if !buf.reads.contains(&path) {
                     buf.reads.push(path);
                 }
             }
-            IoEvent::Exec {
-                argv,
-                outcome,
-                status,
-            } => {
+            Observed::Command { ref argv, .. } => {
                 let dup = buf
                     .execs
                     .iter()
-                    .any(|e| matches!(e, IoEvent::Exec { argv: a, .. } if *a == argv));
+                    .any(|e| matches!(e, Observed::Command { argv: a, .. } if a == argv));
                 if !dup {
-                    buf.execs.push(IoEvent::Exec {
-                        argv,
-                        outcome,
-                        status,
-                    });
+                    buf.execs.push(event);
                 }
             }
-            grep @ IoEvent::Grep { .. } => {
+            grep @ Observed::Grep { .. } => {
                 if !buf.greps.contains(&grep) {
                     buf.greps.push(grep);
                 }
             }
-            IoEvent::Write { .. } => {
+            Observed::Write { .. } => {
                 unreachable!("a write is landed as its own card, never bucketed")
+            }
+            Observed::Capability { .. } => {
+                unreachable!("a capability check renders as its own card, never bucketed")
             }
         }
     }

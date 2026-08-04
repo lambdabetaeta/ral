@@ -32,7 +32,9 @@ everything `crate::types::*`.
   ([[decisions/260514_completion-escape-refactor|completion-escape-refactor]]). No `Option`/null appears;
   optionality is open variants ([[invariants/optionality-via-variants|optionality-via-variants]]).
 - `error.rs` — `Error`, `Status`, and the `BodyResult` split. `audit.rs` — the
-  `Audit` collector and `ExecNode` execution tree. `env.rs` — lexical `Env` and
+  `Audit` collector, over `observation.rs`'s `Observation` / `Observed` — the
+  one vocabulary shared by the trail, the surface rail, `--audit`'s JSON, and
+  the wire. `env.rs` — lexical `Env` and
   `EnvVars` process-env overrides; a scope entry is `Binding { value, scheme }`,
   so the checker's verdict rides next to the value
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).

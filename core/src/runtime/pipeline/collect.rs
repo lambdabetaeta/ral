@@ -6,9 +6,10 @@
 
 use super::super::command;
 use super::launch::StageHandle;
+use crate::evaluator::audit::observe_stamped;
 use crate::types::{
-    AuditFragment, AuditIo, AuditTime, Break, Error, Escape, ExecNode, NodeOutcome, Settled, Shell,
-    Value, epoch_us,
+    AuditFragment, AuditIo, Break, CommandOrigin, Error, Escape, Mooring, Observation, Observed,
+    Settled, Shell, Value, epoch_us,
 };
 
 /// Wait on a direct-spawn external stage and reduce it to a [`StageObservation`].
@@ -55,27 +56,26 @@ fn synth_external_stage_audit(
     }
     let site = shell.call_site();
     let principal = shell.mobile.context.principal();
-    let outcome = match err {
-        Some(e) => NodeOutcome::of_error(e),
-        None => NodeOutcome::of_value(status, Value::Unit),
+    let (status, value, error) = match err {
+        Some(e) => (e.exit_code(), Value::Unit, Some(e.message.clone())),
+        None => (status, Value::Unit, None),
     };
     let now = epoch_us();
-    let node = ExecNode::command(
-        name,
-        Vec::new(),
-        outcome.status,
+    let obs = Observation::spanning(
         site,
-        AuditIo::default(),
-        outcome.error,
-        outcome.value,
-        Vec::new(),
-        AuditTime {
-            start: now,
-            end: now,
-        },
+        now,
+        now,
         principal,
+        Observed::Command {
+            argv: vec![name.to_string()],
+            status,
+            origin: CommandOrigin::External,
+            io: AuditIo::default(),
+            error,
+            value,
+        },
     );
-    AuditFragment::from_nodes(vec![node])
+    AuditFragment::from_observations(vec![obs])
 }
 
 /// Semantic outcome for one stage.
@@ -213,10 +213,21 @@ impl PipelineCollector {
         self.note_control(signal);
     }
 
-    /// The audit merges before the outcome is classified, so a stage that
-    /// fails or escapes still contributes its nodes.
-    fn fold(&mut self, shell: &mut Shell, is_pipeline_final: bool, obs: StageObservation) {
-        shell.local.audit.merge(obs.audit);
+    /// The audit observations broadcast before the outcome is classified, so
+    /// a stage that fails or escapes still contributes what it observed.
+    /// Reporting each rather than merging them in puts a helper stage's writes
+    /// and execs on the rail — though only where the parent already holds a
+    /// trail, since that is what makes a stage collect at all.
+    fn fold(
+        &mut self,
+        mooring: &Mooring,
+        shell: &mut Shell,
+        is_pipeline_final: bool,
+        obs: StageObservation,
+    ) {
+        for observation in obs.audit.into_observations() {
+            observe_stamped(shell, mooring, observation);
+        }
         match obs.outcome {
             StageOutcome::Ok => {}
             StageOutcome::Failure(err) => {
@@ -276,6 +287,7 @@ impl RunningPipeline {
 
     pub(super) fn collect(
         mut self,
+        mooring: &Mooring,
         shell: &mut Shell,
         started: std::time::Instant,
     ) -> PipelineCollector {
@@ -303,7 +315,7 @@ impl RunningPipeline {
                 StageHandle::Helper(h) => h.observe(shell, is_pipeline_final, started),
             };
             let obs = result.unwrap_or_else(StageObservation::from_break);
-            collector.fold(shell, is_pipeline_final, obs);
+            collector.fold(mooring, shell, is_pipeline_final, obs);
         }
         collector
     }
@@ -419,7 +431,12 @@ mod tests {
     fn final_status_recorded_on_success() {
         let mut c = PipelineCollector::new();
         let mut shell = Shell::default();
-        c.fold(&mut shell, true, StageObservation::ok(42));
+        c.fold(
+            &Mooring::adrift(),
+            &mut shell,
+            true,
+            StageObservation::ok(42),
+        );
         assert_eq!(shell.mobile.control.last_status, 42);
         assert!(c.break_.is_none());
     }
@@ -430,6 +447,7 @@ mod tests {
         let mut shell = Shell::default();
         shell.mobile.control.last_status = 0;
         c.fold(
+            &Mooring::adrift(),
             &mut shell,
             true,
             StageObservation {
@@ -463,11 +481,13 @@ mod tests {
         let mut c = PipelineCollector::new();
         let mut shell = Shell::default();
         c.fold(
+            &Mooring::adrift(),
             &mut shell,
             false,
             StageObservation::failure(make_error(7, "stage one boom")),
         );
         c.fold(
+            &Mooring::adrift(),
             &mut shell,
             true,
             StageObservation::from_break(Break::Error(make_error(1, "report pipe: broken"))),

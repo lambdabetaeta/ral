@@ -340,7 +340,7 @@ pub(crate) fn apply_resource_limits(_cmd: &mut Command) {}
 /// Build a [`Command`] for an external program.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:surface:make-command] Builds the external exec image (ExecImage::Host) the model launches. The exec card is fused onto this image at command::run, which emits the exec event with the resolved argv and exit status when the spawn/wait completes."
+    reason = "[io-door:surface:make-command] Builds the external exec image (ExecImage::Host) the model launches. `finish_command` builds the exec observation for this image, wrapping the whole dispatch, with the resolved argv and exit status when the spawn/wait completes."
 )]
 pub fn make_command(name: &str, args: &[String], shell: &Shell) -> Command {
     let mut c = Command::new(name);

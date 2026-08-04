@@ -35,7 +35,7 @@ use std::process::{Command, Stdio};
 /// against the intermediate's `_exit`.  Confinement is otherwise identical.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:surface:bwrap-launch] Builds the bwrap-wrapped external exec image the model launches under a Linux sandbox projection. The exec card is fused onto this image at command::run, which emits the exec event with the resolved argv and exit status when the spawn/wait completes."
+    reason = "[io-door:surface:bwrap-launch] Builds the bwrap-wrapped external exec image the model launches under a Linux sandbox projection. `finish_command` builds the exec observation for this image, wrapping the whole dispatch, with the resolved argv and exit status when the spawn/wait completes."
 )]
 pub(crate) fn make_command_with_policy(
     name: &str,

@@ -67,7 +67,7 @@ snapshot into one request frame and gates the helper on it; the helper
 reconstructs a child shell (`Shell::child_of` over the captured closure env),
 optionally reads one upstream value, applies the body `call::invoke` data-last,
 forces per `force_output`, and ships one response frame carrying the final value,
-status, and audit nodes. This `run_child_eval` runner is the one re-exec'd-child
+status, and the flat list of observations it collected. This `run_child_eval` runner is the one re-exec'd-child
 eval protocol; the grant body no longer re-execs through it — a `grant` evaluates
 locally and confines each external child per-command instead
 ([[internals/capability-enforcement|capability enforcement]];

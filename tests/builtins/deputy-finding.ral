@@ -14,9 +14,9 @@ let deputy = audit {
     }
 }
 echo !{length !{filter { |c| equal $c[kind] 'capability-check' } $deputy[children]}}
-echo $deputy[children][0][cmd]
-echo $deputy[children][0][value][decision]
-echo !{length $deputy[children][0][value][prefixes]}
+echo $deputy[children][0][resource]
+echo $deputy[children][0][decision]
+echo !{length $deputy[children][0][prefixes]}
 
 # Control: with the fs dimension absent the same exec dir is innocent —
 # an unrestricted fs is not read as "everything writable".

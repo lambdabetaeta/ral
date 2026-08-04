@@ -4,9 +4,10 @@
 
 use super::AgentId;
 use crate::agent::event::ProviderErrorRecord;
-use crate::bus::card::{Card, IoEvent};
+use crate::bus::card::Card;
 use crate::bus::post::AgentOutcome;
 use crate::provider::{Tuning, Usage};
+use ral_core::types::Observation;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -183,11 +184,13 @@ pub enum Kind {
         outcome: crate::bus::card::DoneOutcome,
         card: Card,
     },
-    /// A structural I/O effect core surfaced (read, write, exec, grep): a typed
-    /// [`IoEvent`] beside its [`Card`].  The card is what the rail draws;
+    /// A fact core observed at a door (a command settling, a write landing, a
+    /// redirect read, a grep, a capability denial): core's one [`Observation`]
+    /// — carrying the call site, the observation window, and the acting
+    /// principal — beside its [`Card`].  The card is what the rail draws;
     /// `event` keeps the structure the mark tree erases, and that is what traces.
     Io {
-        event: IoEvent,
+        event: Observation,
         card: Card,
     },
     /// State pinned to a keyed register slot: the model's `` `pin [key, body] ``

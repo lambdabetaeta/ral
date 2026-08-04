@@ -233,7 +233,8 @@ impl Sink for TauriSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exarch::bus::card::{DoneOutcome, IoEvent, Notice, Row, Seg};
+    use exarch::bus::card::{DoneOutcome, Notice, Row, Seg};
+    use ral_core::types::{CallSite, Observation, Observed};
 
     #[test]
     fn token_projects_verbatim() {
@@ -275,9 +276,13 @@ mod tests {
     #[test]
     fn io_done_notice_resources_all_collapse_to_process_card() {
         let io = Kind::Io {
-            event: IoEvent::Read {
-                path: "f.rs".to_string(),
-            },
+            event: Observation::instant(
+                CallSite::default(),
+                String::new(),
+                Observed::Read {
+                    path: "f.rs".to_string(),
+                },
+            ),
             card: Card(vec![]),
         };
         let done = Kind::Done {
@@ -333,9 +338,13 @@ mod tests {
         );
 
         let io = project(Kind::Io {
-            event: IoEvent::Read {
-                path: "f.rs".to_string(),
-            },
+            event: Observation::instant(
+                CallSite::default(),
+                String::new(),
+                Observed::Read {
+                    path: "f.rs".to_string(),
+                },
+            ),
             card: Card(vec![]),
         })
         .expect("io projects");

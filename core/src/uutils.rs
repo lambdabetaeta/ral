@@ -305,7 +305,7 @@ fn diff_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
 
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:diff-read] Internal byte-read of the bundled `diff` tool's compared file; the bundled exec is surfaced once at the exec door (command::run) and this internal shuffling rides that visible call, raising no separate read card."
+        reason = "[io-door:silent:diff-read] Internal byte-read of the bundled `diff` tool's compared file; the bundled exec is surfaced once at the exec door (`finish_command`) and this internal shuffling rides that visible call, raising no separate read card."
     )]
     fn read_file_contents(filepath: &OsString) -> io::Result<Vec<u8>> {
         if filepath == "-" {

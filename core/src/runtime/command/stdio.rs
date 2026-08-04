@@ -3,11 +3,10 @@
 //! into the `Launch` per platform conventions.  Pipeline stages take
 //! `pipeline::launch::wire_stage_stdio` and never come here.
 
+use crate::evaluator::audit::observe;
 use crate::syntax::ast::RedirectMode;
-use crate::types::{Break, Error, Mooring, Settled, Shell};
+use crate::types::{Break, Error, Mooring, Observed, Settled, Shell, WriteOutcome};
 
-use super::io_event;
-use super::io_event::WriteOutcome;
 #[cfg(windows)]
 use super::process::pipe_err;
 use super::redirect::{AtomicCommit, EvalRedirect, EvalRedirectV, open_file, stderr_mode};
@@ -165,9 +164,9 @@ pub(super) fn wire_stdin(shell: &mut Shell) -> StdinRoute {
 /// be dup'd pre-spawn from a clone of this same file.
 ///
 /// A non-atomic target (`>>`, `>~`, or a `>` the atomic recipe declined) has
-/// no later commit step, so its write door closes at the open and the event
-/// fires here.  An atomic one waits on the rename in [`super::run`]'s
-/// post-wait commit, which emits it there.
+/// no later commit step, so its write door closes at the open and the
+/// observation is recorded here.  An atomic one waits on the rename in
+/// [`super::run`]'s post-wait commit, which records it there.
 pub(super) fn wire_stdout_file(
     command: &mut crate::process::Launch,
     plan: &RedirectPlan,
@@ -179,13 +178,17 @@ pub(super) fn wire_stdout_file(
     };
     let (file, commit) = open_file(path, *mode, shell)?;
     if commit.is_none() {
-        mooring.emit_io(&io_event::write(
-            path,
-            *mode,
-            WriteOutcome::Committed,
-            None,
-            None,
-        ));
+        observe(
+            shell,
+            mooring,
+            Observed::Write {
+                path: path.clone(),
+                mode: *mode,
+                outcome: WriteOutcome::Committed,
+                new_bytes: None,
+                old_bytes: None,
+            },
+        );
     }
     #[cfg(windows)]
     let stderr_dup = if matches!(plan.stderr_route, Some(StderrRoute::Stdout)) {
@@ -258,13 +261,17 @@ pub(super) fn wire_stderr(
             command.stderr(crate::process::StdioSpec::from_file(file));
             // `stderr_mode` coerces `>` to streaming, so a stderr redirect is
             // never atomic and its write door closes at the open.
-            mooring.emit_io(&io_event::write(
-                path,
-                effective_mode,
-                WriteOutcome::Committed,
-                None,
-                None,
-            ));
+            observe(
+                shell,
+                mooring,
+                Observed::Write {
+                    path: path.clone(),
+                    mode: effective_mode,
+                    outcome: WriteOutcome::Committed,
+                    new_bytes: None,
+                    old_bytes: None,
+                },
+            );
             Ok(false)
         }
         None if !matches!(shell.io.stderr, crate::io::Sink::Stderr) => {

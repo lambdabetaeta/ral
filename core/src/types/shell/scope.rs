@@ -5,7 +5,8 @@
 
 use super::Shell;
 use crate::types::{
-    Binding, Capabilities, ExecNode, HandlerEntry, HandlerRole, Map, Settled, Value,
+    Binding, Capabilities, Decision, HandlerEntry, HandlerRole, Map, Observation, Observed,
+    Settled, Value,
 };
 
 impl Shell {
@@ -35,10 +36,11 @@ impl Shell {
         self.audit_deputy_prefixes();
     }
 
-    /// Emit a `deputy` audit node when the stack just pushed, meet-folded, is
-    /// a confused deputy.  [`crate::capability::deputy_prefixes`] demands the
-    /// fold and only reports, never denies; this is its one call site.  No-op
-    /// unless audit is live and some layer opted into capability auditing.
+    /// Observe a `deputy` capability check when the stack just pushed,
+    /// meet-folded, is a confused deputy.
+    /// [`crate::capability::deputy_prefixes`] demands the fold and only
+    /// reports, never denies; this is its one call site.  No-op unless audit
+    /// is live and some layer opted into capability auditing.
     fn audit_deputy_prefixes(&mut self) {
         if !self
             .mobile
@@ -73,8 +75,18 @@ impl Shell {
                     .collect(),
             ),
         );
-        self.local.audit.push(ExecNode::capability_check(
-            "deputy", "flagged", site, principal, fields,
+        // Pushed rather than sent through `evaluator::audit::observe_stamped`: a
+        // `Flagged` decision has no rail branch in the policy table, so the
+        // trail is the whole of this observation's audience and no `Mooring`
+        // needs reaching this deep into the scope guards.
+        self.local.audit.push(Observation::instant(
+            site,
+            principal,
+            Observed::Capability {
+                resource: "deputy".into(),
+                decision: Decision::Flagged,
+                fields,
+            },
         ));
     }
 

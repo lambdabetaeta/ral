@@ -7,11 +7,14 @@ use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ignore::WalkBuilder;
 use ral_core::builtins::util::regex_err;
+use ral_core::syntax::ast::RedirectMode;
 use ral_core::typecheck::builtins::{
     BuiltinTypeRule, closed_record, fun, mk_scheme as scheme, pure, thunk,
 };
 use ral_core::typecheck::{Scheme, Ty, Unifier};
-use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, sig};
+use ral_core::types::{
+    Break, BuiltinBody, BuiltinEntry, Mooring, Observation, Observed, Settled, WriteOutcome, sig,
+};
 use ral_core::{HostSurface, Shell, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -203,13 +206,19 @@ fn rows_of(body: &str) -> Vec<String> {
     body.split('\n').map(str::to_string).collect()
 }
 
-/// Raise the one `{io:"read", path}` card for a whole-file read: `view-text` reads
-/// in Rust below the ral line, so no redirect frame speaks for it.
-fn surface_read(mooring: &Mooring, path: &str) {
-    mooring.surface(&Value::map(vec![
-        ("io".into(), Value::String("read".into())),
-        ("path".into(), Value::String(path.to_string())),
-    ]));
+/// Raise the one read observation for a whole-file read: `view-text` reads in
+/// Rust below the ral line, so no redirect frame speaks for it.
+fn surface_read(shell: &Shell, mooring: &Mooring, path: &str) {
+    mooring.surface(
+        &Observation::instant(
+            shell.call_site(),
+            shell.principal(),
+            Observed::Read {
+                path: path.to_string(),
+            },
+        )
+        .to_value(),
+    );
 }
 
 fn view_bound(arg: &Value, which: &str) -> Settled<usize> {
@@ -239,7 +248,7 @@ fn builtin_view_text(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     let end = view_bound(&args[2], "end")?;
 
     let body = read_text_file(shell, &path, "view-text")?;
-    surface_read(mooring, &path);
+    surface_read(shell, mooring, &path);
     let rows = rows_of(&body);
     let hashes = window_hashes(&rows);
     let n = rows.len();
@@ -346,11 +355,17 @@ fn search_tree(mooring: &Mooring, shell: &mut Shell, pattern: &str) -> Settled<V
 fn builtin_grep_files(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let pattern = args[0].to_string();
 
-    mooring.surface(&Value::map(vec![
-        ("io".into(), Value::String("grep".into())),
-        ("scope".into(), Value::String(".".into())),
-        ("pattern".into(), Value::String(pattern.clone())),
-    ]));
+    mooring.surface(
+        &Observation::instant(
+            shell.call_site(),
+            shell.principal(),
+            Observed::Grep {
+                scope: ".".to_string(),
+                pattern: pattern.clone(),
+            },
+        )
+        .to_value(),
+    );
 
     let results = search_tree(mooring, shell, &pattern)?
         .into_iter()
@@ -387,8 +402,8 @@ fn has_suspicious_escapes(text: &str) -> bool {
         .any(|i| bytes[i] == b'\\' && SUSPECT_ESCAPE_LETTERS.contains(&(bytes[i + 1] as char)))
 }
 
-/// Note a completed edit on stderr, kept apart from the `write` io event, which
-/// stays the structured record of the commit.
+/// Note a completed edit on stderr, kept apart from the `write` observation,
+/// which stays the structured record of the commit.
 fn note_edit(shell: &mut Shell, path: &str, lines: &str, plural: bool, any_escapes: bool) {
     let word = if plural { "lines" } else { "line" };
     let warning = if any_escapes {
@@ -503,7 +518,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     }
     let final_text = out.join("\n");
     shell.atomic_write(&path, final_text.as_bytes())?;
-    surface_write(mooring, &path, &body, &final_text);
+    surface_write(shell, mooring, &path, &body, &final_text);
 
     let mut line_nums: Vec<usize> = resolved.iter().map(|r| r.at + 1).collect();
     line_nums.sort_unstable();
@@ -524,24 +539,27 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
 /// same file make the identical diff-vs-listing choice.
 const DIFF_SNAPSHOT_CAP: usize = 64 * 1024;
 
-/// Raise the `write` io event an edit commits — the very event a committed `>`
-/// emits, so the card renders `old` against `new` as a whole-file diff.
+/// Raise the `write` observation an edit commits — the very fact a committed
+/// `>` observes, so the card renders `old` against `new` as a whole-file diff.
 /// `old_bytes` is withheld once either side exceeds [`DIFF_SNAPSHOT_CAP`], the
 /// gate core's `old_snapshot_for_diff` applies to the redirect path.
-fn surface_write(mooring: &Mooring, path: &str, old: &str, new: &str) {
+fn surface_write(shell: &Shell, mooring: &Mooring, path: &str, old: &str, new: &str) {
     let fits = old.len() <= DIFF_SNAPSHOT_CAP && new.len() <= DIFF_SNAPSHOT_CAP;
     let new_prefix = new.as_bytes()[..new.len().min(DIFF_SNAPSHOT_CAP)].to_vec();
-    let mut fields = vec![
-        ("io".into(), Value::String("write".into())),
-        ("path".into(), Value::String(path.to_string())),
-        ("mode".into(), Value::String("write".into())),
-        ("outcome".into(), Value::String("committed".into())),
-        ("new_bytes".into(), Value::Bytes(new_prefix)),
-    ];
-    if fits {
-        fields.push(("old_bytes".into(), Value::Bytes(old.as_bytes().to_vec())));
-    }
-    mooring.surface(&Value::map(fields));
+    mooring.surface(
+        &Observation::instant(
+            shell.call_site(),
+            shell.principal(),
+            Observed::Write {
+                path: path.to_string(),
+                mode: RedirectMode::Write,
+                outcome: WriteOutcome::Committed,
+                new_bytes: Some(new_prefix),
+                old_bytes: fits.then(|| old.as_bytes().to_vec()),
+            },
+        )
+        .to_value(),
+    );
 }
 
 /// The witness layer's shared read door, gating on the live grant as a `< path`
@@ -580,7 +598,7 @@ fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
     .map_err(relabel_string_replace)?;
     let final_text = replaced.to_string();
     shell.atomic_write(&path, final_text.as_bytes())?;
-    surface_write(mooring, &path, &body, &final_text);
+    surface_write(shell, mooring, &path, &body, &final_text);
 
     // `string_replace` above already proved `from` matches exactly once, so this
     // relocation for the line-range note needs no second uniqueness check.

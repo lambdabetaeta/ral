@@ -16,7 +16,7 @@ pub use ansi::{set_terminal, use_color};
 // ── Source location ───────────────────────────────────────────────────────
 
 /// A [`Span`] resolved against the session's [`SourceDb`] — script name and
-/// 1-indexed line/column, as it rides out on audit nodes and capability checks.
+/// 1-indexed line/column, as it rides out on observations and capability checks.
 #[derive(Clone, Default, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CallSite {
     pub script: String,

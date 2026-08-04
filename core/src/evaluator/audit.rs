@@ -1,22 +1,26 @@
-//! Audit recording: only two kinds of node are ever built — a real command
-//! (builtin or external, via `frame_call`) and a capability check (via
-//! `record_capability`).
+//! The fan-out door: one observation, broadcast to whoever is listening.
+//!
+//! [`observe_stamped`] reports to both consumers and judges neither: the host
+//! decides what the rail draws, and `audit { }` decides what the trail keeps.
+//! Every evaluator door that settles a fact routes through it.  Three sites
+//! stand outside, each reaching only one consumer: `capability::enforce` and
+//! `Shell::audit_deputy_prefixes` have no [`Mooring`], and exarch's host
+//! doors have no trail.
 //!
 //! `within`, `grant`, `guard`, `try`, and `audit` are all collection
-//! boundaries, not tree nodes: none of them constructs an `ExecNode`.
-//! `try`/`audit` force collection on regardless of the surrounding state via
+//! boundaries, not observations: none of them constructs one.  `try`/`audit`
+//! force collection on regardless of the surrounding state via
 //! [`forced_subtree`], which marks the trail's length before `body` runs and
 //! reads back everything pushed after that mark.
 //!
-//! With `shell.local.audit.active()` false the recorders are no-ops, so the
-//! dispatcher can call them unconditionally; [`forced_subtree`] is the
-//! exception, since `try` and `audit` force collection whether or not audit
-//! is on.
+//! With nobody listening the recorders are no-ops, so the dispatcher can call
+//! them unconditionally; [`forced_subtree`] is the exception, since `try` and
+//! `audit` force collection whether or not audit is on.
 
 use crate::types::{
-    AuditIo, AuditTime, BodyResult, Break, BuiltinEntry, CallSite, CapturePolicy, Control, Escape,
-    ExecNode, Map, Mooring, NodeOutcome, Raw, STDERR_CAP_BYTES, Settled, Shell, Value, epoch_us,
-    split,
+    AuditIo, BodyResult, Break, BuiltinEntry, CallSite, CapturePolicy, CommandOrigin, Control,
+    Decision, Escape, Map, Mooring, Observation, Observed, Raw, STDERR_CAP_BYTES, Settled, Shell,
+    Value, epoch_us, split,
 };
 
 /// Proof that a native body is running inside [`frame_call`]'s dynamic
@@ -24,20 +28,35 @@ use crate::types::{
 /// cannot be reached unframed.
 pub(crate) struct Frame(());
 
-/// Where a command was called from and when it began — the two halves of a
-/// node's stamp, paired so the dispatch site carries one local.
+/// Where a command was called from and when it began — the two halves of an
+/// observation's stamp, paired so the dispatch site carries one local.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AuditStart {
     pub site: CallSite,
     pub time: i64,
 }
 
-/// Open one command's audit record.  An inactive audit gets an empty stamp
-/// and pays for neither the `script` clone nor the `epoch_us` syscall: the
-/// matching `finish_command` will not read it, and audit cannot switch on
-/// mid-command, since every scope that enables it also restores on exit.
-pub(crate) fn start(shell: &Shell) -> AuditStart {
-    if !shell.local.audit.active() {
+/// Report one observation to everyone listening: the surface sink and the
+/// open trail (`Mooring::surface` and `Audit::push` are each already a no-op
+/// when their consumer is absent).  Core does not judge what is worth
+/// hearing — the host filters the rail, and `audit { }` filters the trail.
+pub(crate) fn observe_stamped(shell: &mut Shell, mooring: &Mooring, obs: Observation) {
+    mooring.surface(&obs.to_value());
+    shell.local.audit.push(obs);
+}
+
+/// An instantaneous door: stamped now, at the current dispatch site.
+pub(crate) fn observe(shell: &mut Shell, mooring: &Mooring, what: Observed) {
+    let obs = Observation::instant(shell.call_site(), shell.mobile.context.principal(), what);
+    observe_stamped(shell, mooring, obs);
+}
+
+/// Open one command's audit stamp.  With nobody listening — no trail open and
+/// no sink installed — the stamp is empty and costs neither the `script`
+/// clone nor the `epoch_us` syscall; should the command's own body then open
+/// a trail, the observation carries that empty stamp rather than a late one.
+pub(crate) fn start(shell: &Shell, mooring: &Mooring) -> AuditStart {
+    if !listening(shell, mooring) {
         return AuditStart::default();
     }
     AuditStart {
@@ -46,78 +65,96 @@ pub(crate) fn start(shell: &Shell) -> AuditStart {
     }
 }
 
+/// Whether an observation would reach anyone: a trail collecting it, or a
+/// host on the other end of the sink.
+fn listening(shell: &Shell, mooring: &Mooring) -> bool {
+    shell.local.audit.active() || mooring.has_surface()
+}
+
 fn cap_stderr(buf: &mut Vec<u8>) {
     if buf.len() > STDERR_CAP_BYTES {
         buf.truncate(STDERR_CAP_BYTES);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_command(
     shell: &mut Shell,
+    mooring: &Mooring,
     start: AuditStart,
     cmd: &str,
+    origin: CommandOrigin,
     args: &[Value],
     result: &Settled<Value>,
     stdout: Vec<u8>,
     mut stderr: Vec<u8>,
 ) {
-    if !shell.local.audit.active() {
+    if !listening(shell, mooring) {
         return;
     }
     // Internal builtins go unrecorded: the prelude wrapper that called one is
     // the user-visible event, and it holds the dispatch register meanwhile.
+    // Under one emission door this skip governs the rail too.
     if cmd.starts_with('_') {
         return;
     }
-    let outcome = match result {
-        Ok(v) => NodeOutcome::of_value(shell.mobile.control.last_status, v.clone()),
-        Err(Break::Error(e)) => NodeOutcome::of_error(e),
+    let (status, value, error) = match result {
+        Ok(v) => (shell.mobile.control.last_status, v.clone(), None),
+        Err(Break::Error(e)) => (e.exit_code(), Value::Unit, Some(e.message.clone())),
         Err(_) => return,
     };
     if shell.local.audit.captures_bytes() {
         cap_stderr(&mut stderr);
     }
-    let arg_strs: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
-    let node = ExecNode::command(
-        cmd,
-        arg_strs,
-        outcome.status,
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push(cmd.to_string());
+    argv.extend(args.iter().map(std::string::ToString::to_string));
+    let obs = Observation::spanning(
         start.site,
-        AuditIo { stdout, stderr },
-        outcome.error,
-        outcome.value,
-        Vec::new(),
-        AuditTime {
-            start: start.time,
-            end: epoch_us(),
-        },
+        start.time,
+        epoch_us(),
         shell.mobile.context.principal(),
+        Observed::Command {
+            argv,
+            status,
+            origin,
+            io: AuditIo { stdout, stderr },
+            error,
+            value,
+        },
     );
-    shell.local.audit.push(node);
+    observe_stamped(shell, mooring, obs);
 }
 
 /// Wrap a command body in the audit lifecycle: stamp the start, tee its
-/// stdout and stderr through the capture, finalize the node.
-pub(crate) fn frame_call<F>(cmd: &str, args: &[Value], shell: &mut Shell, body: F) -> Raw<Value>
+/// stdout and stderr through the capture, finalize the observation.
+pub(crate) fn frame_call<F>(
+    cmd: &str,
+    args: &[Value],
+    origin: CommandOrigin,
+    mooring: &Mooring,
+    shell: &mut Shell,
+    body: F,
+) -> Raw<Value>
 where
     F: FnOnce(&mut Shell, &Frame) -> Raw<Value>,
 {
-    let start = start(shell);
+    let start = start(shell, mooring);
     let (result, stdout, stderr) = super::with_audit_capture(shell, |shell| {
         body(shell, &Frame(()))
     })
     .map_err(|e| Control::Break(Break::Error(shell.err(format!("audit capture: {e}"), 1))))?;
-    if shell.local.audit.active() {
-        finish_command(
-            shell,
-            start,
-            cmd,
-            args,
-            &outcome_for_audit(&result),
-            stdout,
-            stderr,
-        );
-    }
+    finish_command(
+        shell,
+        mooring,
+        start,
+        cmd,
+        origin,
+        args,
+        &outcome_for_audit(&result),
+        stdout,
+        stderr,
+    );
     result
 }
 
@@ -129,11 +166,18 @@ pub(crate) fn run_native(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    frame_call(&entry.name, args, shell, |shell, frame| {
-        entry
-            .call_body(frame, args, mooring, shell)
-            .map_err(Control::from)
-    })
+    frame_call(
+        &entry.name,
+        args,
+        CommandOrigin::Builtin,
+        mooring,
+        shell,
+        |shell, frame| {
+            entry
+                .call_body(frame, args, mooring, shell)
+                .map_err(Control::from)
+        },
+    )
 }
 
 impl BuiltinEntry {
@@ -156,32 +200,34 @@ fn outcome_for_audit(raw: &Raw<Value>) -> Settled<Value> {
     }
 }
 
-/// Record one capability-check node — only when a trail is collecting *and*
-/// some enclosing grants layer asked for `audit: true`.  `fields` joins
-/// `resource` and `decision` in the node's value map.
-pub(crate) fn record_capability(shell: &mut Shell, resource: &str, decision: &str, fields: Map) {
-    if !shell.should_audit_capabilities() {
-        return;
-    }
-    let site = shell.call_site();
-    let node = ExecNode::capability_check(
-        resource,
-        decision,
-        site,
+/// Record a denied capability check.  The trail wants one only when some
+/// enclosing grants layer asked for `audit: true`, but the rail always does,
+/// so the gate sits on the push rather than on the observation.
+pub(crate) fn record_capability(shell: &mut Shell, mooring: &Mooring, resource: &str, fields: Map) {
+    let obs = Observation::instant(
+        shell.call_site(),
         shell.mobile.context.principal(),
-        fields,
+        Observed::Capability {
+            resource: resource.to_string(),
+            decision: Decision::Denied,
+            fields,
+        },
     );
-    shell.local.audit.push(node);
+    mooring.surface(&obs.to_value());
+    if shell.should_audit_capabilities() {
+        shell.local.audit.push(obs);
+    }
 }
 
-/// Force collection on for `body` and return the nodes it produced; used by
-/// `try` (to name the failing command) and `audit` (to return the subtree).
-/// The nodes stay in the trail, flat among whatever else it collects.
+/// Force collection on for `body` and return the observations it produced;
+/// used by `try` (to name the failing command) and `audit` (to return the
+/// subtree).  The observations stay in the trail, flat among whatever else it
+/// collects.
 pub(crate) fn forced_subtree(
     shell: &mut Shell,
     capture: CapturePolicy,
     body: impl FnOnce(&mut Shell) -> Settled<Value>,
-) -> Result<(BodyResult, Vec<ExecNode>), Escape> {
+) -> Result<(BodyResult, Vec<Observation>), Escape> {
     let (mark, settled) = with_capture_policy(shell, capture, |shell| {
         let mark = shell.local.audit.force_open();
         (mark, body(shell))

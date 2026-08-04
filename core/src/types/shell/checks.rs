@@ -8,8 +8,8 @@ use crate::capability::FsOp;
 use crate::types::{Audit, CallSite, Context, SandboxProjection, Settled};
 
 impl Shell {
-    /// True when capability checks should emit audit nodes: a live trail and
-    /// an `audit: true` grants layer must both call for them.
+    /// True when capability checks should emit an observation: a live trail
+    /// and an `audit: true` grants layer must both call for it.
     pub fn should_audit_capabilities(&self) -> bool {
         self.mobile
             .context

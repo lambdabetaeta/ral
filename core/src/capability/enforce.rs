@@ -14,8 +14,8 @@ use super::exec::{Admit, ExecNames, ExecVerdict, evaluate_exec};
 use super::fs::{FsOp, allow_region, deny_region};
 use crate::path::Resolver;
 use crate::types::{
-    Audit, CallSite, Capabilities, Context, ExecNode, GrantStack, Map, Settled, Value, sig,
-    sig_hint,
+    Audit, CallSite, Capabilities, Context, Decision, GrantStack, Map, Observation, Observed,
+    Settled, Value, sig, sig_hint,
 };
 
 /// Gate a command and its argv against the stack's exec opinions.  Audits
@@ -239,10 +239,21 @@ fn check_grant_bool(
     Ok(())
 }
 
+/// Record a capability check on the trail, allowed or denied, whenever some
+/// grants layer asked for `audit: true`.
+///
+/// The trail is this door's whole audience: it has no `&Mooring` to surface
+/// through. Its callers ([`check_exec_args`], [`check_fs_op`]) are reached
+/// from `types/shell/checks.rs`, which fans out through
+/// `builtins/{fs,modules,util}.rs`, `runtime/command/{vet,redirect}.rs`, and
+/// exarch's own doors, none of which carry one. So a denial here reaches the
+/// trail alone — unlike a head admission, which broadcasts. A refused
+/// external command still surfaces in its own right, as the failed command
+/// observation its dispatch builds.
 fn emit_capability_audit(
     context: &Context,
-    kind: &str,
-    ok: bool,
+    resource: &str,
+    allowed: bool,
     audit: &mut Audit,
     site: CallSite,
     fill: impl FnOnce(&mut Map),
@@ -250,12 +261,18 @@ fn emit_capability_audit(
     if !context.should_audit_capabilities(audit) {
         return;
     }
-    let decision = if ok { "allowed" } else { "denied" };
-    let principal = context.principal();
     let mut fields = Map::new();
     fill(&mut fields);
-    let node = ExecNode::capability_check(kind, decision, site, principal, fields);
-    audit.push(node);
+    let obs = Observation::instant(
+        site,
+        context.principal(),
+        Observed::Capability {
+            resource: resource.to_string(),
+            decision: Decision::of_allowed(allowed),
+            fields,
+        },
+    );
+    audit.push(obs);
 }
 
 /// Pins for [`GrantStack::admits_fs`]: containment is judged on resolved

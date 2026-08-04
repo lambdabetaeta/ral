@@ -188,7 +188,7 @@ fn within_overrides_survive_tail_recursion() {
 /// `grant` / `within` / `guard`) ended, the trail went inactive while
 /// the flag stayed set.  Inside the *next* `audit { … }` block the
 /// dispatcher saw `take_scope_pushed() == true` for the first
-/// dispatched command and dropped its audit node before recording —
+/// dispatched command and dropped its observation before recording —
 /// silently, with the rest of the program unaffected.
 ///
 /// Fixed in commit `2646ccf` (elaborator: flip control-operator
@@ -199,9 +199,9 @@ fn within_overrides_survive_tail_recursion() {
 /// require restoring at least the flag and the flag-setting variant of
 /// `push_scope`.
 ///
-/// The observable assertion is on the audit tree shape: the second
-/// `audit { echo hi }` must record echo's lowered line writer (`to-line`) as a
-/// child node.  Pre-fix, that child list was empty.
+/// The observable assertion is on the audit trail shape: the second
+/// `audit { echo hi }` must record echo's own command observation as a
+/// child.  Pre-fix, that child list was empty.
 #[test]
 fn audit_recording_survives_consecutive_audit_blocks() {
     let mut shell = fresh_shell();
@@ -226,14 +226,11 @@ fn audit_recording_survives_consecutive_audit_blocks() {
         },
         other => panic!("audit {{ … }} must return a Map; got {other:?}"),
     };
-    let has_echo = children.iter().any(|c| match c {
-        Value::Map(m) => matches!(m.get("cmd"), Some(Value::String(s)) if s == "echo"),
-        _ => false,
-    });
+    let has_echo = children.iter().any(|c| is_command(c, "echo"));
     assert!(
         has_echo,
         "expected the second `audit {{ echo hi }}` to record echo's own \
-         node.  Pre-fix `with_scope` set `scope_pushed=true` \
+         observation.  Pre-fix `with_scope` set `scope_pushed=true` \
          during the first block's `guard`; the flag survived into the \
          second block (trail was inactive in between, so \
          `finish_command` couldn't consume it) and silently dropped \
@@ -440,13 +437,7 @@ fn audit_survives_background_amp() {
         },
         other => panic!("audit {{ … }} must return a Map; got {other:?}"),
     };
-    let echo_count = children
-        .iter()
-        .filter(|c| match c {
-            Value::Map(m) => matches!(m.get("cmd"), Some(Value::String(s)) if s == "echo"),
-            _ => false,
-        })
-        .count();
+    let echo_count = children.iter().filter(|c| is_command(c, "echo")).count();
     assert_eq!(
         echo_count, 2,
         "expected both foreground `echo` commands to be recorded around \
@@ -498,7 +489,8 @@ fn guard_cleanup_does_not_swallow_exit() {
 /// over-rotate: the ordinary finalizer path is unchanged.  The body's
 /// value `7` is read from the `guard`'s own return; that the cleanup ran
 /// is read from the audit tree, where the cleanup `echo` shows up as a
-/// real command node (`guard` is transparent — it owns no node itself).
+/// real command observation (`guard` is transparent — it owns no
+/// observation itself).
 #[test]
 fn guard_normal_runs_cleanup_and_returns_body() {
     let mut shell = fresh_shell();
@@ -515,22 +507,39 @@ fn guard_normal_runs_cleanup_and_returns_body() {
     let tree = top_level(&mut shell, "audit { guard { return 7 } { echo cleaned } }")
         .expect("`audit { guard … }` must succeed");
     assert!(
-        audit_tree_has_cmd(&tree, "echo"),
+        audit_tree_has_command(&tree, "echo"),
         "the `guard` cleanup must have run on the normal path (recording \
-         its `echo cleaned` node); a normal guard returns the body value but \
-         still executes its finalizer.  tree = {tree:?}"
+         its `echo cleaned` observation); a normal guard returns the body \
+         value but still executes its finalizer.  tree = {tree:?}"
     );
 }
 
-/// Depth-first search of an `audit` node for a command node whose `cmd`
-/// field equals `name`.
-fn audit_tree_has_cmd(node: &Value, name: &str) -> bool {
-    let Value::Map(m) = node else { return false };
-    if matches!(m.get("cmd"), Some(Value::String(s)) if s == name) {
+/// Whether `observation` is a `kind: "command"` projection whose `argv[0]`
+/// (the program) equals `name`.
+fn is_command(observation: &Value, name: &str) -> bool {
+    let Value::Map(m) = observation else {
+        return false;
+    };
+    if !matches!(m.get("kind"), Some(Value::String(k)) if k == "command") {
+        return false;
+    }
+    matches!(
+        m.get("argv"),
+        Some(Value::List(argv)) if matches!(argv.get(0), Some(Value::String(s)) if s == name)
+    )
+}
+
+/// Depth-first search of an `audit` tree for a command observation whose
+/// `argv[0]` equals `name`.
+fn audit_tree_has_command(observation: &Value, name: &str) -> bool {
+    if is_command(observation, name) {
         return true;
     }
+    let Value::Map(m) = observation else {
+        return false;
+    };
     match m.get("children") {
-        Some(Value::List(ch)) => ch.iter().any(|c| audit_tree_has_cmd(c, name)),
+        Some(Value::List(ch)) => ch.iter().any(|c| audit_tree_has_command(c, name)),
         _ => false,
     }
 }

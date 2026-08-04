@@ -19,13 +19,6 @@ pub(super) fn str_field(m: &ral_core::types::Map, field: &str) -> Option<String>
     }
 }
 
-pub(super) fn bytes_field(m: &ral_core::types::Map, field: &str) -> Option<Vec<u8>> {
-    match m.get(field) {
-        Some(RalValue::Bytes(b)) => Some(b.clone()),
-        _ => None,
-    }
-}
-
 /// A magnitude — a `Measure` bound, a hunk's start line — clamped into `u32`.
 pub(super) fn count_field(m: &ral_core::types::Map, field: &str) -> Option<u32> {
     match m.get(field) {
@@ -47,20 +40,5 @@ pub(super) fn int_field(m: &ral_core::types::Map, field: &str) -> Option<i64> {
     match m.get(field) {
         Some(RalValue::Int(n)) => Some(*n),
         _ => None,
-    }
-}
-
-/// An `argv`-shaped field; a non-string element falls back to its display, so
-/// a malformed list still shows what ran.
-pub(super) fn strings_field(m: &ral_core::types::Map, field: &str) -> Vec<String> {
-    match m.get(field) {
-        Some(RalValue::List(items)) => items
-            .iter()
-            .map(|v| match v {
-                RalValue::String(s) => s.clone(),
-                other => other.to_string(),
-            })
-            .collect(),
-        _ => Vec::new(),
     }
 }

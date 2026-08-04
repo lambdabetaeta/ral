@@ -42,12 +42,14 @@ logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
 - `view-text <path> <start> <end>` → `[{line, hash, text}]`. The read primitive:
   the half-open line range `[start, end)`, each row carrying its 1-based line
   number, its witness, and its text. Reads the whole file (the witness depends
-  on file-wide uniqueness) and surfaces one `{io:"read", path}` card.
+  on file-wide uniqueness) and surfaces one `Observed::Read { path }`
+  observation.
 - `grep-files <pattern>` → `[{ file, line, text }]`. An ignore-aware Rust
   regex walk of the cwd (`search_tree`, binary detection quits at NUL, each file
   gated by `check_fs_read`, the walk polling the cancel check per entry via the
-  one sanctioned `cancellable` door). Emits exactly one `{io:"grep", scope,
-  pattern}` surface for the whole search ([[map/exarch/io-surface|io-surface]]).
+  one sanctioned `cancellable` door). Surfaces exactly one
+  `Observed::Grep { scope, pattern }` observation for the whole search
+  ([[map/exarch/io-surface|io-surface]]).
 - `edit-hash <path> <edits>` → `Unit`. The edit verb: `edits` is a list of
   `[hash: …, line: …]` records. Read the file once, resolve each hash to the one
   line whose witness matches (zero matches, several matches, a stale witness, or
@@ -56,10 +58,10 @@ logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
   the line, an empty string deletes it), and write back through core's atomic
   write door (`Shell::atomic_write`). Resolving against one snapshot makes the
   batch atomic and non-interfering. The Rust read raises no read card; the atomic
-  write surfaces one committed `write` io event whose old/new snapshots the write
-  card renders as a whole-file diff ([[map/exarch/cards|cards]]). A stderr note
-  names the replaced lines and warns on suspicious `\n`-style escapes (the
-  replacement text is verbatim).
+  write surfaces one committed `Observed::Write` observation whose old/new
+  snapshots the write card renders as a whole-file diff
+  ([[map/exarch/cards|cards]]). A stderr note names the replaced lines and
+  warns on suspicious `\n`-style escapes (the replacement text is verbatim).
 - `edit-replace <path> <from> <to>` → `Unit`. The string-replace sibling:
   replace the one literal occurrence of `from`, erroring (file untouched) on
   zero or several matches; same silent read, same atomic write, same write card.

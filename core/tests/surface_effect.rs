@@ -39,6 +39,18 @@ fn recording() -> (Arc<Mutex<Vec<FOValue>>>, SurfaceSink) {
     (log, sink)
 }
 
+/// The kit's own surfaces.  Core reports an observation per dispatch on the
+/// same sink; this file is about what the `surface` builtin forwards.
+fn kit_events(events: &[FOValue]) -> Vec<FOValue> {
+    events
+        .iter()
+        .filter(
+            |ev| !matches!(ev, FOValue::Map { entries } if fo_map_get(entries, "kind").is_some()),
+        )
+        .cloned()
+        .collect()
+}
+
 /// Look up a key in an [`FOValue::Map`]'s entries — the [`FOValue`] dual of
 /// `Map::get`, since the wire map is a plain assoc-vec, not `imbl::OrdMap`.
 fn fo_map_get<'a>(entries: &'a [(String, FOValue)], key: &str) -> Option<&'a FOValue> {
@@ -96,7 +108,7 @@ fn surface_forwards_the_event_to_the_sink() {
     );
     assert_eq!(out.expect("surface should succeed"), Value::Unit);
 
-    let events = log.lock().unwrap().clone();
+    let events = kit_events(&log.lock().unwrap());
     assert_eq!(events.len(), 1, "exactly one event surfaced");
     let FOValue::Variant { label, payload } = &events[0] else {
         panic!("expected a variant, got {:?}", events[0]);
@@ -138,7 +150,7 @@ emit "ship it""#,
     );
     out.expect("surface from a thunk should succeed");
 
-    let events = log.lock().unwrap().clone();
+    let events = kit_events(&log.lock().unwrap());
     assert_eq!(events.len(), 1, "the thunk's event reached the sink");
     let FOValue::Variant { label, .. } = &events[0] else {
         panic!("expected a variant");

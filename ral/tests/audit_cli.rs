@@ -3,7 +3,8 @@
 // Integration tests for `ral --audit`: the JSON dumped to stderr must be
 // parseable, and its root must be the same envelope the `audit { … }`
 // builtin returns (status / value / error / children) rather than a
-// synthetic command node.  `--pretty` may change the bytes, never the value.
+// synthetic command observation.  `--pretty` may change the bytes, never
+// the value.
 
 mod common;
 
@@ -65,7 +66,8 @@ fn audit_cli_root_is_the_plain_envelope() {
 
     let children = obj["children"].as_array().expect("children array");
     assert_eq!(children.len(), 2, "root: {root}");
-    assert_eq!(children[0]["cmd"], "echo");
+    assert_eq!(children[0]["kind"], "command");
+    assert_eq!(children[0]["argv"][0], "echo");
 }
 
 #[test]

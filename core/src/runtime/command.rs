@@ -8,14 +8,14 @@
 //! `build_command` with it, so both paths resolve and confine a call the
 //! same way.
 
-use crate::types::{Break, Error, Mooring, Raw, Shell, Value};
+use crate::evaluator::audit::observe;
+use crate::types::{Break, Error, Mooring, Observed, Raw, Shell, Value, WriteOutcome};
 
 mod child;
 #[cfg(unix)]
 mod detach;
 mod foreground;
 mod identity;
-pub(crate) mod io_event;
 pub(crate) mod process;
 mod redirect;
 mod stdio;
@@ -116,17 +116,10 @@ pub(crate) fn run(
     let started = std::time::Instant::now();
     let (child, wait_pgid, jail) = match spawn(&mut command, fg.pgid_policy(), shell) {
         Ok(pair) => pair,
-        Err(e) => {
-            // The event's status must agree with what the caller sees, so
-            // read it off the very failure we are about to propagate.
-            let failure = spawn_error(&cmd_name, &e);
-            let status = match &failure {
-                Break::Error(err) => err.exit_code(),
-                Break::Escape(_) => 127,
-            };
-            mooring.emit_io(&io_event::exec(&cmd_name, &rc.args, status));
-            return Err(failure.into());
-        }
+        // `finish_command` builds the `Command{External}` observation from
+        // whatever error reaches it, so a spawn failure needs no emission of
+        // its own here.
+        Err(e) => return Err(spawn_error(&cmd_name, &e).into()),
     };
 
     let child_pid = child.id();
@@ -164,8 +157,8 @@ pub(crate) fn run(
     let outcome = waited.outcome;
 
     // Held rather than `?`-propagated: the bookkeeping below (drain, set
-    // `$?`, emit the exec event) must still run for a command that did
-    // run, even when its commit failed.
+    // `$?`) must still run for a command that did run, even when its
+    // commit failed.
     let commit_result = if let Some(commit) = atomic_commit.take() {
         let (path, mode) = plan
             .stdout_file
@@ -176,35 +169,47 @@ pub(crate) fn run(
             let preview = commit.temp_preview();
             match commit.commit() {
                 Ok(()) => {
-                    mooring.emit_io(&io_event::write(
-                        path,
-                        *mode,
-                        io_event::WriteOutcome::Committed,
-                        preview.as_deref(),
-                        old_bytes.as_deref(),
-                    ));
+                    observe(
+                        shell,
+                        mooring,
+                        Observed::Write {
+                            path: path.clone(),
+                            mode: *mode,
+                            outcome: WriteOutcome::Committed,
+                            new_bytes: preview,
+                            old_bytes,
+                        },
+                    );
                     Ok(())
                 }
                 Err(e) => {
-                    mooring.emit_io(&io_event::write(
-                        path,
-                        *mode,
-                        io_event::WriteOutcome::Failed,
-                        None,
-                        None,
-                    ));
+                    observe(
+                        shell,
+                        mooring,
+                        Observed::Write {
+                            path: path.clone(),
+                            mode: *mode,
+                            outcome: WriteOutcome::Failed,
+                            new_bytes: None,
+                            old_bytes: None,
+                        },
+                    );
                     Err(Break::Error(Error::new(format!("atomic write: {e}"), 1)))
                 }
             }
         } else {
             // `commit` drops uncommitted here, discarding the staged temp.
-            mooring.emit_io(&io_event::write(
-                path,
-                *mode,
-                io_event::WriteOutcome::Aborted,
-                None,
-                None,
-            ));
+            observe(
+                shell,
+                mooring,
+                Observed::Write {
+                    path: path.clone(),
+                    mode: *mode,
+                    outcome: WriteOutcome::Aborted,
+                    new_bytes: None,
+                    old_bytes: None,
+                },
+            );
             Ok(())
         }
     } else {
@@ -216,7 +221,6 @@ pub(crate) fn run(
     waited.drain();
     let code = outcome.to_user_exit_code();
     shell.mobile.control.last_status = code;
-    mooring.emit_io(&io_event::exec(&cmd_name, &rc.args, code));
     commit_result?;
     // A `PipelineStage` forgives SIGPIPE: its reader ended the pipe.
     let forgive_sigpipe = !shell.io.launch_role.is_top_level();

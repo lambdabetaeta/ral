@@ -32,7 +32,7 @@ fn emit_audit_tree(
         exit_code,
         value,
         error,
-        &fragment.into_nodes(),
+        &fragment.into_observations(),
     ));
     let json_str = if pretty {
         serde_json::to_string_pretty(&json_val).unwrap_or_default()

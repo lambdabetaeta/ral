@@ -231,12 +231,22 @@ impl Mooring {
         }
     }
 
-    /// The public door a host builtin surfaces its own events through; inert
-    /// with no sink installed.  Core names no event shape: the caller hands a
-    /// fully-formed [`Value`], encoded here into the first-order
-    /// [`FOValue`](crate::serial::FOValue) the sink carries.  A closure or a
-    /// handle cannot cross the rail, and core has no host vocabulary to report
-    /// that in, so the drop is a `dbg_trace`.
+    /// The one sink door.  Every door core owns reaches it through
+    /// `evaluator::audit::observe_stamped`, which builds the [`Value`] from
+    /// [`crate::types::Observation::to_value`] — the single map shape shared
+    /// by the rail, the audit trail, and `--audit`; a host builtin with no
+    /// vocabulary of its own may still hand in a fully-formed [`Value`]
+    /// directly.  Encoded here into the first-order
+    /// [`FOValue`](crate::serial::FOValue) the sink carries; inert with no
+    /// sink installed.  A closure or a handle cannot cross the rail, and core
+    /// has no host vocabulary to report that in, so the drop is a
+    /// `dbg_trace`.
+    /// Whether anything is on the other end — what lets a door skip building
+    /// an observation nobody would receive.
+    pub(crate) fn has_surface(&self) -> bool {
+        self.surface.is_some()
+    }
+
     pub fn surface(&self, ev: &Value) {
         match crate::serial::FOValue::try_from(ev) {
             Ok(fo) => {
@@ -248,14 +258,6 @@ impl Mooring {
                 crate::dbg_trace!("surface", "dropping non-first-order surface value");
             }
         }
-    }
-
-    /// The single door through which every redirect read/write and every exec
-    /// completion announces itself: a plain [`Value::Map`] shaped `{io: …, …}`,
-    /// built by `runtime::command::io_event` and decoded by the host — core
-    /// names no card type.
-    pub(crate) fn emit_io(&self, ev: &Value) {
-        self.surface(ev);
     }
 
     /// Derive a mooring identical to this one with its terminal authority
