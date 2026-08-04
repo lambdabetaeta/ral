@@ -77,6 +77,16 @@ pub(crate) fn ral_call(id: &str, cmd: &str) -> ToolCall {
 
 /// A trunk through the real `Agent::root` path; `interactive` makes it converse.
 pub(crate) fn trunk(dir: &std::path::Path, interactive: bool) -> Agent {
+    root(dir, interactive, false)
+}
+
+/// The toolless `--chat` trunk, conversing by construction: the flag is
+/// interactive-only.
+pub(crate) fn chat_trunk(dir: &std::path::Path) -> Agent {
+    root(dir, true, true)
+}
+
+fn root(dir: &std::path::Path, interactive: bool, chat: bool) -> Agent {
     // Tagged by the caller's `tmp` dir: `Scratch::for_test` wipes any scratch
     // of the same tag, and the pid alone is shared by concurrent tests.
     let tag = dir
@@ -93,7 +103,7 @@ pub(crate) fn trunk(dir: &std::path::Path, interactive: bool) -> Agent {
             provider_label: "test".into(),
             allow_schedule: false,
             interactive,
-            chat: false,
+            chat,
             disk_warn_bytes: None,
             fuel: SPAWN_FUEL,
             egress: crate::egress::Egress::for_test(),

@@ -155,7 +155,7 @@ impl Agent {
             provider,
             interactive,
             inbox: Inbox::new(),
-            nudges: nudge::Registry::new(),
+            nudges: tool_enabled.then(nudge::Registry::new),
             cancel: cancel::Token::new(),
             tool_enabled,
             search,

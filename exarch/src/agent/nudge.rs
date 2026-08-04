@@ -1,8 +1,8 @@
 //! Inter-attempt nudges.
 //!
-//! After each deliberation, either accept the outcome — surfacing any
-//! attached provider error — or hand back a synthetic prompt for the attend
-//! loop to post to itself as a `Post::Nudge`.
+//! After each deliberation, either accept the outcome or hand back a synthetic
+//! prompt for the attend loop to post to itself as a `Post::Nudge`.  Reporting
+//! the outcome is the attend loop's own step, taken before this one.
 //!
 //! The registry is per-session because the attend loop runs one
 //! `Agent::deliberate` per inbox item, not one per exchange, so this state must
@@ -101,9 +101,8 @@ impl Registry {
         let Some((cause, message)) = RULES.iter().find_map(|&r| r(attempt)) else {
             // Only a clean completion reaches the nudges below; anything else that
             // no rule claimed — an unclassified provider error, a `Cancelled` or
-            // `Capped` end — is reported and accepted as-is.
+            // `Capped` end — is accepted as-is.
             if !matches!(attempt, Ok(deliberate::Outcome::Complete(_))) {
-                surface_provider_error(attempt, emit, log);
                 return None;
             }
             // Two independent obligations, neither suppressing the other: a
@@ -156,7 +155,6 @@ impl Registry {
             let msg = format!("nudge budget exhausted ({BUDGET} attempts; last cause: {cause})");
             let _ = log.record_error(msg.clone());
             emit.emit(Kind::Error(msg));
-            surface_provider_error(attempt, emit, log);
             return None;
         }
         self.used += 1;
@@ -174,17 +172,6 @@ fn record_nudge(emit: &Emitter, log: &mut AgentLog, used: u32, cause: String) {
         max: BUDGET,
         cause,
     });
-}
-
-fn surface_provider_error(
-    attempt: &Result<deliberate::Outcome, ProviderError>,
-    emit: &Emitter,
-    log: &mut AgentLog,
-) {
-    if let Err(e) = attempt {
-        let _ = log.record_provider_error(e);
-        emit.emit(Kind::ProviderError(e.into()));
-    }
 }
 
 /// The headless root's one-shot reply-verification nudge.

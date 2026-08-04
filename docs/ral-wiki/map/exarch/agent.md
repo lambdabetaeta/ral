@@ -90,8 +90,8 @@ zombie; live descendants hold it
 until their results drain; a live self-schedule holds it until cancelled;
 otherwise it terminates at quiescence — the one-shot contract a headless trunk
 and a settled sub-agent both satisfy. `--chat` builds the trunk with no system
-prompt and no tool at all (`tool_enabled: false`) — a bare conversation, the
-same attend loop.
+prompt, no tool at all (`tool_enabled: false`), and no nudge registry — a bare
+conversation, the same attend loop.
 
 ## The attend loop
 
@@ -256,9 +256,16 @@ uniform for every pin kind (tasks, goals, any other pinned state alike) and
 every actionable agent role: budget-free while anything is pinned, independent
 of and additive with `must_reply` — a returning agent that finishes without
 replying while it still holds pinned state is nudged for both after its
-children have landed. Exhausted transport and rate-limit failures are provider
-facts, so they surface as `Kind::ProviderError` and do not post a model-visible
-self-nudge.
+children have landed. Reporting an attempt is not the nudger's job at all:
+`take_up` emits `Kind::ProviderError` for whatever error the attempt carries,
+before it asks for a nudge and whether or not one follows, so `react` decides
+and nothing more.
+
+A `--chat` trunk holds **no nudge registry** (`nudges: Option<Registry>`, `None`
+when the tool is withheld): every nudge steers the model toward a tool it does
+not have, so no rule runs, no reminder fires, and nothing synthetic ever joins
+the conversation. Its provider errors still reach the human, since that report
+is the attend loop's own step.
 
 ## The Fleet
 

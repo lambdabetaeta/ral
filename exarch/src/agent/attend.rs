@@ -166,7 +166,9 @@ impl Agent {
         // Only a genuine boundary clears the latches and a prior exchange's
         // Esc; a self-nudge is the same exchange continuing.
         if item.opens_exchange() {
-            self.nudges.reset();
+            if let Some(nudges) = &mut self.nudges {
+                nudges.reset();
+            }
             self.cancel.reset();
         }
         if let Item::Command(raw) = item {
@@ -210,6 +212,12 @@ impl Agent {
             self.log.lock().quiesce(QuiesceReason::Aborted);
         }
         *final_outcome = agent_outcome(&outcome);
+        // Before any nudge decision, and whether or not one follows: a chat
+        // trunk keeps no registry, and its failures must still reach the human.
+        if let Err(e) = &outcome {
+            let _ = self.log.lock().record_provider_error(e);
+            emit.emit(Kind::ProviderError(e.into()));
+        }
         let waiting_on_children = self.has_live_children();
         let ctx = nudge::NudgeCtx {
             // Exempt while children are live: an un-replied finish there is a
@@ -221,9 +229,10 @@ impl Agent {
             is_headless_root: self.parent.is_none() && !self.interactive,
         };
         let replied = matches!(outcome, Ok(deliberate::Outcome::Replied(_)));
-        let nudge_msg = self
-            .nudges
-            .react(&outcome, &ctx, emit, &mut self.log.lock());
+        let nudge_msg = match &mut self.nudges {
+            Some(nudges) => nudges.react(&outcome, &ctx, emit, &mut self.log.lock()),
+            None => None,
+        };
         if let Some(msg) = &nudge_msg {
             self.inbox
                 .push(Post::Nudge(msg.clone()))
@@ -864,6 +873,36 @@ mod tests {
         assert!(
             view.contains("There is pinned state: ship the reminder"),
             "the reminder must be committed as the next prompt, not dropped: {view}"
+        );
+    }
+
+    /// `--chat` withholds the tool, so nothing is left to steer the model
+    /// toward: the empty turn that
+    /// `nudge::tests::empty_turn_nudges_and_consumes_budget` nudges over here
+    /// stands as the model left it, and no synthetic prompt is committed.
+    #[test]
+    fn chat_trunk_never_nudges() {
+        let mut session = chat_trunk(&tmp("chat-no-nudge"));
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        session.provider =
+            ProviderHandle::new(scripted("test-model", Script::new().then(Reply::empty())));
+        session.seed("hello".into());
+        session.attend_backlog(&emit);
+
+        assert!(
+            !std::iter::from_fn(|| rx.try_recv().ok())
+                .any(|e| matches!(e.kind, Kind::Nudge { .. })),
+            "a chat trunk raises no nudge"
+        );
+        let view = serde_json::to_string(&session.rendered_messages()).unwrap();
+        assert!(
+            view.contains("hello"),
+            "the exchange must have happened at all"
+        );
+        assert!(
+            !view.contains("EXARCH_REMINDER"),
+            "nothing synthetic may join a chat conversation: {view}"
         );
     }
 

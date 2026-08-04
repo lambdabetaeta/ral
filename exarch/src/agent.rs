@@ -89,7 +89,9 @@ pub struct Agent {
     inbox: Inbox,
     /// Its latches reset on a genuine exchange-boundary item, never on a
     /// self-nudge, so a nudge sequence runs to completion within one exchange.
-    nudges: nudge::Registry,
+    /// `None` for a toolless (`--chat`) trunk: every nudge steers an agent
+    /// toward a tool it does not hold, so such a turn is only ever reported.
+    nudges: Option<nudge::Registry>,
     /// One sticky token for this agent's life, registered in the fleet so the
     /// subtree cascade reaches the live exchange.  The attend loop
     /// [`reset`](cancel::Token::reset)s it at each exchange boundary so an Esc
