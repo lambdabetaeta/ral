@@ -25,8 +25,8 @@ use std::time::{Duration, Instant};
 
 use ral_core::io::TerminalState;
 use ral_core::transport::{
-    DispatchId, EnquiryError, Liveness, Program, Report, Run, TerminalEndpoint, Transport,
-    WireTransport, dispatch_to_report,
+    Control, DispatchId, EnquiryError, Event, Liveness, Program, Report, Run, TerminalEndpoint,
+    Transport, WireTransport, dispatch_to_report,
 };
 use ral_core::types::Capabilities;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
@@ -158,6 +158,49 @@ fn an_idle_session_stays_alive_on_the_heartbeat_alone() {
     assert!(
         !transport.dead(),
         "an idle session must stay alive on the heartbeat past its deadline"
+    );
+}
+
+/// A `Cancel` that overtakes the `Dispatch` it names still stops that run.
+///
+/// The host stamps the id it is about to send before it takes the write lock,
+/// so a cancel raised in that window reaches the socket first.  Written by
+/// hand here in that order — no thread race to lose — the engine must hold it
+/// and spend it on the run's scope when the dispatch lands, not drop it for
+/// naming a dispatch it has not yet seen.
+#[test]
+fn a_cancel_that_overtakes_its_dispatch_still_stops_the_run() {
+    let (transport, _child) = engine_over_socketpair(Liveness::default());
+    let _dir = attach(&transport);
+
+    let id = DispatchId(7);
+    transport.control().send(Control::Cancel(id));
+    let started = Instant::now();
+    transport.dispatch(id, source_run("sleep 30"));
+
+    let report = loop {
+        let (did, event) = transport.events().recv().expect("the engine must answer");
+        if did == id
+            && let Event::Report(report) = event
+        {
+            break report;
+        }
+    };
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the overtaking cancel was dropped: the run slept {elapsed:?} of its 30 s"
+    );
+    let Report::Ran { status, .. } = report else {
+        panic!("the run must reach evaluation, got {report:?}");
+    };
+    // 130, not the 143 of a child torn down mid-run: the scope is cancelled
+    // before the run reads it, so `sleep` is never spawned and the eval unwinds
+    // at its first check point.
+    assert_eq!(
+        status, 130,
+        "a run born under a cancelled scope unwinds without spawning"
     );
 }
 

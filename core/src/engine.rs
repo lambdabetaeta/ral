@@ -531,6 +531,10 @@ fn engine_session(
     // never cleared: a cancel that has outlived its run no longer finds the id
     // it names, so it cannot touch the run that followed.
     let mut cancellable: Option<(DispatchId, ForegroundScope)> = None;
+    // The converse: a `Cancel` naming a dispatch not yet arrived. The host
+    // stamps the id before taking the write lock, so a cancel raised in that
+    // window crosses first; it waits here for the `Dispatch` that claims it.
+    let mut foretold: Option<DispatchId> = None;
 
     let exit_code = loop {
         // Armed, park on a `TICK` so silence past the deadline is noticed;
@@ -572,6 +576,9 @@ fn engine_session(
                 // Minted ahead of the handoff, so a `Cancel` arriving while the
                 // worker is still waking finds a scope to land on.
                 let scope = dispatches.child();
+                if foretold.take_if(|pending| *pending == id).is_some() {
+                    scope.cancel(CancelCause::Explicit);
+                }
                 match claim(id, WorkItem::Run(run, scope.clone())) {
                     Claimed::Took => cancellable = Some((id, scope)),
                     Claimed::Busy => {}
@@ -589,10 +596,12 @@ fn engine_session(
                 // The dispatch's own scope, not the interrupt watermark: the
                 // watermark reaches only frames already born, and cancellation
                 // on a scope is sticky, so a run not yet started still reads it.
-                if let Some((id, scope)) = &cancellable
-                    && *id == did
-                {
-                    scope.cancel(CancelCause::Explicit);
+                match &cancellable {
+                    Some((id, scope)) if *id == did => scope.cancel(CancelCause::Explicit),
+                    // Either it overtook the `Dispatch` it names or it names a
+                    // run already reported; ids are minted once, so holding it
+                    // can only ever serve the first.
+                    _ => foretold = Some(did),
                 }
             }
             Frame::Control(Control::Resize(_winsize)) => {
