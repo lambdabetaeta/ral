@@ -12,7 +12,7 @@ use super::repl::ReplScratch;
 use super::workers::ReapCause;
 use crate::exit_hints::ExitHints;
 use crate::io::{Sink, TerminalState};
-use crate::process::{DurableRoot, TerminalLease};
+use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
 use crate::source::SourceDb;
 use crate::types::{AuditFragment, BuiltinEntry, ReapNotice, Value, WorkerEntry, WorkerId};
 use std::io::Write;
@@ -38,6 +38,18 @@ impl Shell {
     /// one this handle is the *only* way to stop a running eval.
     pub fn cancel_handle(&self) -> DurableRoot {
         self.session.root.clone()
+    }
+
+    /// A cancel handle for a run the host has not started yet, to be passed back
+    /// as [`Shell::run_under`]'s `under`.
+    ///
+    /// Cancelling a scope is sticky and every poll re-walks the chain, so a host
+    /// minting this *before* it dispatches the work can record a cancel that
+    /// arrives before the run's own frame exists: the frame is born a descendant
+    /// and reads the flag on its first poll.  Hung under the session anchor like
+    /// every other top-level frame, so session teardown reaches it.
+    pub fn run_cancel_handle(&self) -> ForegroundScope {
+        self.session.anchor.child()
     }
 
     pub fn set_exit_hints(&mut self, hints: ExitHints) {

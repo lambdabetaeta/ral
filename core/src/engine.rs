@@ -13,7 +13,7 @@ use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-use crate::process::CancelCause;
+use crate::process::{CancelCause, ForegroundScope};
 use crate::serial::FOValue;
 use crate::sync::LockExt;
 use crate::transport::{
@@ -394,14 +394,18 @@ fn engine_session(
     // dispatches for free: sent mid-run it gets "engine busy", the same arm a
     // second dispatch gets.
     enum WorkItem {
-        /// Boxed so a probe is not sized to `Run`'s stack footprint.
-        Run(Box<Run>),
+        /// Boxed so a probe is not sized to `Run`'s stack footprint. The scope
+        /// is the one its frame is born under.
+        Run(Box<Run>, ForegroundScope),
         Probe(FOValue),
     }
 
     // Taken before the shell moves into the worker: the teardown must reach the
     // shell's deferred workers without the shell in hand.
     let root = shell.cancel_handle();
+    // Each dispatch hangs a child off this and is cancelled through it, so one
+    // dispatch's cancel cannot reach the next.
+    let dispatches = shell.run_cancel_handle();
 
     // Lowered by the claimed `Dispatch`'s `Drop`, which runs once the worker
     // has written its Report, so "engine busy" means a run genuinely in
@@ -441,7 +445,7 @@ fn engine_session(
             // plumbing, or `answer_probe`'s own lock poisoning, either of which
             // would otherwise kill the thread unreported.
             let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match item {
-                WorkItem::Run(run) => {
+                WorkItem::Run(run, scope) => {
                     // What the desk and the sinks read to stamp their frames.
                     dispatch.stamp.store(id.0, Ordering::Relaxed);
 
@@ -453,7 +457,7 @@ fn engine_session(
                         nursery: None,
                         lifecycle: Box::new(()),
                     };
-                    let run_report = shell.run(req);
+                    let run_report = shell.run_under(&scope, req);
                     run_report.into_report(shell.sources())
                 }
                 WorkItem::Probe(reading) => match answer_probe(&mut shell, &reading) {
@@ -489,12 +493,22 @@ fn engine_session(
     });
 
     // Only the frame that wins the `false → true` flip may hand the worker
-    // work; the rest get the refusal below. False means the worker is gone —
-    // reachable because an unwind lowers the flag on its way out, so a closed
-    // channel here is a dead thread rather than a stale claim.
-    let claim = |id: DispatchId, item: WorkItem| -> bool {
+    // work; the rest get the refusal below. `WorkerGone` is reachable because an
+    // unwind lowers the flag on its way out, so a closed channel here is a dead
+    // thread rather than a stale claim. `Busy` is distinguished from `Took` so a
+    // refused dispatch leaves the in-flight run's cancel handle standing.
+    enum Claimed {
+        Took,
+        Busy,
+        WorkerGone,
+    }
+    let claim = |id: DispatchId, item: WorkItem| -> Claimed {
         if let Some(dispatch) = Dispatch::claim(&busy, &current_dispatch, id) {
-            run_tx.send((dispatch, item)).is_ok()
+            if run_tx.send((dispatch, item)).is_ok() {
+                Claimed::Took
+            } else {
+                Claimed::WorkerGone
+            }
         } else {
             write_report(
                 &writer,
@@ -504,7 +518,7 @@ fn engine_session(
                     diagnostics: crate::transport::Diagnostics::Host("engine busy".into()),
                 },
             );
-            true
+            Claimed::Busy
         }
     };
 
@@ -513,6 +527,10 @@ fn engine_session(
     // from one that ended on corruption.
     let mut armed = false;
     let mut last_frame = Instant::now();
+    // The dispatch a `Cancel` may name and the scope that stops it. Replaced,
+    // never cleared: a cancel that has outlived its run no longer finds the id
+    // it names, so it cannot touch the run that followed.
+    let mut cancellable: Option<(DispatchId, ForegroundScope)> = None;
 
     let exit_code = loop {
         // Armed, park on a `TICK` so silence past the deadline is noticed;
@@ -551,23 +569,32 @@ fn engine_session(
 
         match frame {
             Frame::Dispatch(id, run) => {
-                if !claim(id, WorkItem::Run(run)) {
-                    break 0; // worker died
+                // Minted ahead of the handoff, so a `Cancel` arriving while the
+                // worker is still waking finds a scope to land on.
+                let scope = dispatches.child();
+                match claim(id, WorkItem::Run(run, scope.clone())) {
+                    Claimed::Took => cancellable = Some((id, scope)),
+                    Claimed::Busy => {}
+                    Claimed::WorkerGone => break 0,
                 }
             }
             Frame::Probe(id, reading) => {
-                if !claim(id, WorkItem::Probe(reading)) {
-                    break 0; // worker died
+                match claim(id, WorkItem::Probe(reading)) {
+                    Claimed::Took | Claimed::Busy => {}
+                    Claimed::WorkerGone => break 0,
                 }
             }
             Frame::Answer(eid, answer) => {
                 desk.fill(eid, answer);
             }
             Frame::Control(Control::Cancel(did)) => {
-                // Only the named, still-in-flight dispatch: a cancel that has
-                // outlived its run must not touch the one that followed it.
-                if did.0 != 0 && did.0 == current_dispatch.load(Ordering::Relaxed) {
-                    crate::process::request_foreground_cancel(CancelCause::Explicit);
+                // The dispatch's own scope, not the interrupt watermark: the
+                // watermark reaches only frames already born, and cancellation
+                // on a scope is sticky, so a run not yet started still reads it.
+                if let Some((id, scope)) = &cancellable
+                    && *id == did
+                {
+                    scope.cancel(CancelCause::Explicit);
                 }
             }
             Frame::Control(Control::Resize(_winsize)) => {
@@ -972,16 +999,14 @@ mod engine_session_tests {
         assert_eq!(host.detach_and_join(), 0, "teardown cancels the sleep");
     }
 
-    /// Promptness is what `sleep 30` proves: it could not report inside the
-    /// await ceiling on its own.
+    /// `sleep 30` proves promptness: it could not report inside the await
+    /// ceiling on its own. Cancelling with no delay proves the launch race is
+    /// closed — the scope exists before the worker has the work.
     #[test]
     fn cancel_settles_an_in_flight_run_promptly() {
         let _g = REQUEST_SERIAL.lock();
         let mut host = start();
         host.dispatch(1, "sleep 30");
-        // The cancel is dropped unless the worker has already stamped its
-        // dispatch id and minted its foreground frame.
-        std::thread::sleep(Duration::from_secs(1));
         host.cancel(1);
         host.report(1);
         assert_eq!(host.detach_and_join(), 0);

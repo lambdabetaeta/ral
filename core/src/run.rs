@@ -152,8 +152,8 @@ fn panic_text(payload: &dyn std::any::Any) -> String {
 }
 
 impl Shell {
-    /// Run one whole [`Run`] synchronously and report it — the single run door,
-    /// for a host with no run in hand.
+    /// Run one whole [`Run`] synchronously and report it — the run door for a
+    /// host with no run in hand and nothing to cancel it with but the session.
     ///
     /// Completion is *this call returning*, never a channel disconnecting: a
     /// worker may hold a clone of the surface sink forever without keeping the
@@ -161,6 +161,16 @@ impl Shell {
     /// run restores the [`Mobile`](crate::types::Mobile) checkpointed at entry,
     /// so the shell rolls itself back and no snapshot crosses the host seam.
     pub fn run(&mut self, req: RunRequest<'_>) -> RunReport {
+        let anchor = self.session.anchor.clone();
+        self.run_under(&anchor, req)
+    }
+
+    /// Run `req` with its frame under a scope the host minted with
+    /// [`Shell::run_cancel_handle`] rather than under the session anchor — the
+    /// door a host takes when it must be able to cancel this run from another
+    /// thread, including before the run has begun.  [`Shell::run`] is this door
+    /// with the anchor.
+    pub fn run_under(&mut self, under: &ForegroundScope, req: RunRequest<'_>) -> RunReport {
         // A run is the extent of ral's picture of `PATH`: whatever happened to
         // the filesystem between runs is admitted here, and within a run a
         // walk is paid once per name.  Here and not in `enter` or `dispatch`,
@@ -168,8 +178,7 @@ impl Shell {
         // forgetting there would throw the memo away for exactly the scripts
         // whose bodies enter builtins, which is where it pays most.
         crate::path::forget_located_commands();
-        let anchor = self.session.anchor.clone();
-        self.enter(&anchor, req)
+        self.enter(under, req)
     }
 
     /// Run `req` with its frame a child of `parent` rather than of the session
@@ -643,8 +652,8 @@ mod tests {
         }
     }
 
-    /// A run's frame is minted under the session anchor and dies with the run,
-    /// so the next top-level run is the anchor's child and not the last run's.
+    /// A run's frame descends from the session anchor and dies with the run, so
+    /// the next top-level run hangs off the anchor and not off the last run's.
     #[test]
     fn a_settled_run_leaves_the_anchor_untouched() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
