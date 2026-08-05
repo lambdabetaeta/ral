@@ -10,17 +10,23 @@ formal catalog to `docs/SPEC.md` §16.
 
 ## The layers a head name can be
 
-From most reserved to most peripheral:
+This is a taxonomy of *placement*, not the dispatch order — a head resolves
+env → handlers → external, and which of those three a layer below is reached
+through is the arity partition ([[map/core/runtime|runtime]]). From most
+reserved to most peripheral:
 
 - **Control operators** — `within`, `grant`, `try`, `guard`, `audit` (with the
   syntactic `if` / `case` / `?`). Grammar arms carried as dedicated IR nodes, not
   builtins, because each manipulates dynamic frames or audit ownership that no
   value can observe ([[design/control-operators|control-operators]]).
-- **Core builtins** — Rust atoms in `CORE_BUILTINS`, each a six-facet
-  [[internals/builtins-registry|registry]] entry binding names, type rule, fixed
-  arity ([[invariants/fixed-arity|fixed-arity]]), doc, and body together. What
-  makes a capability one of these, and the shape of the set, is
-  [[design/builtins|builtins]].
+- **Core builtins** — Rust atoms in `CORE_BUILTINS`, each a
+  [[internals/builtins-registry|registry]] entry binding names, type rule, doc,
+  and body together. The manifest is a *boot* manifest, not a resolution layer:
+  a fixed-arity entry seeds the base scope as a native value and is reached as
+  a binding, a variadic one seeds a base frame and is reached as a handler
+  ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
+  [[invariants/fixed-arity|fixed-arity]]). What makes a capability one of these,
+  and the shape of the set, is [[design/builtins|builtins]].
 - **Underscore primitives** — `_type`, `_ansi-ok`, and the host `_ed-*` / `_plugin`:
   internals the prelude wraps, never called directly by user scripts.
 - **Prelude functions** — ordinary ral bindings in scope before user code,

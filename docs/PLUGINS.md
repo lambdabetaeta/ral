@@ -160,8 +160,9 @@ State is per-plugin and is cleared on unload.
 ## 4 `load-plugin` / `unload-plugin`
 
 `load-plugin` and `unload-plugin` are host builtins the ral REPL
-installs into its own shell's builtin table, not core builtins and
-not prelude wrappers around anything else.
+installs into its own shell's manifest — fixed arity, so they seed
+its base scope as natives — not core builtins and not prelude
+wrappers around anything else.
 
 | Builtin | Shape |
 |---|---|

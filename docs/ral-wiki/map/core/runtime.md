@@ -15,11 +15,16 @@ guards
 ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 
 - `command_call.rs` — `run_call`, the single site that resolves a head
-  (env → builtins → handlers → external) and runs the chosen arm; the
-  evaluator's down-seam for a bare command. **Grant admission is an
+  (env → handlers → external) and runs the chosen arm; the evaluator's
+  down-seam for a bare command. There is no builtin arm: a fixed-arity manifest
+  entry is an `Env` hit on a native value, and a variadic one is a `Base` hit on
+  the handler stack's base layer, run by `run_base_frame` with the argv slice
+  ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]).
+  `^name` skips the env, and therefore every native, but still consults
+  handlers; a path-bearing head skips handlers too. **Grant admission is an
   external-command property**: only the `External` arm consults
   `capability::admits_head` before any argument evaluates, refusing the head
-  outright; env, builtin, and handler arms pass through. Handler and alias
+  outright; the env, base, and handler arms pass through. Handler and alias
   thunks are lambdas — a unary `{ |args| … }` or a catch-all `{ |name args| … }`
   — with the calling convention fixed by surface position, not inferred from a
   value's runtime shape

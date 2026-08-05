@@ -359,8 +359,8 @@ pub mod sig {
         }
     }
 
-    /// A `from-*` decoder: nullary and command-only, because the bytes come
-    /// from the channel and there is no value form to η-expand.
+    /// A `from-*` decoder: nullary, because the bytes come from the channel.
+    /// Its value form is a thunk whose forcing reads that channel.
     const fn decoder(result: CompTemplate) -> BuiltinSig {
         BuiltinSig {
             args: ArgSig::Exact(NO_ARGS),

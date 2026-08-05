@@ -59,6 +59,10 @@ The core entries group by what they compute:
   non-blocking probe of a handle — total over a finished block, reporting completion
   or failure as one settle variant rather than blocking or re-raising
   ([[decisions/260615_poll-total-failed-arm|the settle decision]]).
+- **Byte writes** — `echo`: per-argument `str`, single-space intercalation, a
+  trailing newline, typed with `to-line`'s modes so pipelines treat it as the
+  byte write it is. Mixed argument types coexist because each is rendered
+  before any list is formed.
 - **Session & terminal** — `cd` `cwd` `alias` / `unalias` `source` / `use`
   `exit` / `quit` `ask` `clear` `reset` `surface` `help` / `explain`, with the
   underscore probes `_type` / `_ansi-ok`.
@@ -80,29 +84,49 @@ rule whose shape follows from how command-like the builtin is:
   in via `reducer_spec` ([[design/codecs|codecs]]).
 - **`Sig`** — a *command signature*: argv shape and result computation read
   directly, without falling through to command-name classification. This is for
-  builtins whose surface is not a curried value — *nullary* (`clear`, `reset`,
-  `help`), *optional-argument* (`cd`, and the `from-X` codecs, which read stdin
-  when given none),
-  *divergent* (`fail`, result `Never`, carrying the nonzero-status diagnostic —
-  [[design/failure|failure]]), or carrying a compile-time *probe* (`_type`). A
-  `Sig` still exposes a first-class form when it declares a value scheme
-  (`$range`, `$int`).
+  builtins whose surface is not a curried function — *nullary* (`clear`, `reset`,
+  `help`, and the `from-X` codecs, which read the ambient channel),
+  *optional-argument* (`cd`), *open-argv* (`echo`, `detach`), *divergent*
+  (`fail`, result `Never`, carrying the nonzero-status diagnostic —
+  [[design/failure|failure]]), or carrying a compile-time *probe* (`_type`).
+
+A `Sig`'s first-class form is *derived* from it — the `Exact` / `DataLast`
+argument templates become the curry spine and the result template the
+computation — so a value scheme is written by hand only where it states
+something the templates cannot: `_type`, whose scheme correlates argument and
+result (`α → α`). The deriver is undefined exactly on the open and optional argv
+shapes, which is the [[invariants/fixed-arity|arity partition]] holding by
+construction.
 
 Each codec being its own `Sig` rather than one polymorphic `decode` / `encode` is
 what lets `from-json < file` dispatch straight through the command arm with the
 *concrete* return type in view, and a misspelled codec fail at command lookup
 rather than as a runtime "unknown codec" string.
 
-## Reification routes through the name
+## A name is a value or it is handled
 
-A builtin used in value position (`$upper`) is η-expanded into a curried lambda
-whose body is a *name-dispatched* command, not a direct call into the Rust body.
-So a reified primitive is an ordinary closure that composes like a user function,
-and a later `within [handlers: …]` frame or `alias` still intercepts it, because
-dispatch happens by name at application time ([[design/name-resolution|resolution]]).
-Fixed arity ([[invariants/fixed-arity|fixed-arity]]) is what makes the
-η-expansion well-defined; a command-only entry, whose argv shape is variable
-(`cd`, the `from-X` codecs), has no first-class form.
+**The set is not a third kind of name: arity partitions it into ral's two
+existing mechanisms** ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]).
+
+- **Fixed arity → a *native* value.** The entry has a curried function type
+  (arity 0: a thunk type), so it is a first-class value bound in the base scope.
+  `$upper` *is* the entry, not a lambda around a name-dispatched command: it
+  curries by collecting arguments until the entry's arity is reached, prints as
+  `<native NAME>`, is equal by name plus collected arguments, and crosses the
+  scope envelope by name, re-linked against the receiving shell's manifest. Its
+  type is the η-equivalent lambda's, uncurried all the way, so partial
+  application in a typed position goes through a `let` rethunk rather than a
+  provenance-sensitive rule.
+- **Variadic or optional arity → a *base frame*.** The entry has no function
+  type — nothing to curry, no meaning for partial application — so it is only
+  interpretable as command syntax and lives at the bottom of the handler stack
+  (`cd`, `echo`, `detach`, the REPL's `fg`/`bg`/`disown`). A user frame stacks
+  above it and forwards into it ([[internals/handler-dispatch|handler-dispatch]]).
+
+Interception is therefore lexical shadowing rather than admission: a binding
+under a native's name shadows it, a handler under any name installs, and
+`^name` — which skips the env — reaches the handler
+([[design/name-resolution|resolution]]).
 
 See also [[design/syscalls-are-effects|syscalls-are-effects]] (builtins are the pure fragment — not every kernel call is an effect),
 [[design/name-resolution|name-resolution]], [[design/codecs|codecs]],

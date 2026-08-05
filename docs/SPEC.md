@@ -2160,8 +2160,9 @@ do not survive process exit; use `detach` when survival is the requirement.
 
 The core language provides `spawn`, `await`, `poll`, `race`, and `cancel`.
 `watch`, `service`, and `detach` are optional host builtins. If a host does not
-install one, its name is absent from that shell's builtin table and is checked
-and resolved like any other unknown command.
+install one, its name is absent from that shell's base scope (`watch`, `service`)
+or its base frames (`detach`), and is checked and resolved like any other unknown
+command.
 
 #### Live output with `watch`
 

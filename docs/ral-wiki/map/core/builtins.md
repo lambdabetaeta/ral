@@ -1,18 +1,22 @@
 ---
 generated_at_commit: 5ee3d0c
 generated_at_date: 2026-07-31
-covers_paths: [core/src/builtins/, core/src/builtins.rs]
+covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 
 # Map: core / builtins
 
-`core/src/builtins/` are the commands implemented in Rust that run inside the
+`core/src/builtins/` are the primitives implemented in Rust that run inside the
 shell process. `builtins.rs` holds the `builtin_registry!` macro: each entry
-binds its facets at once — `names`, fixed `arity`, [[map/core/typecheck|type
-rule]] (`ty`), `doc` line, and runtime body (`call`) — into the `CORE_BUILTINS`
-static (`&[BuiltinEntry]`), so the facets cannot drift apart, and the macro
-asserts a `Sig` rule's structural arity agrees with the written `arity`. A body
-is a `BuiltinBody` — a `Static` `fn(&[Value], &Mooring, &mut Shell) ->
+binds its facets at once — `names`, [[map/core/typecheck|type rule]] (`ty`),
+`doc` line, and runtime body (`call`) — into the `CORE_BUILTINS` static
+(`&[BuiltinEntry]`), so the facets cannot drift apart. Arity is no facet:
+`BuiltinEntry::fixed_arity` derives it from the type rule and caches it, and that
+derivation is the classification — fixed arity seeds a `Value::Native` in the
+base scope, a variadic or optional argv seeds a base handler frame
+(`native_value`, `seed_natives_and_base` in `types/shell/host.rs`;
+[[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]).
+A body is a `BuiltinBody` — a `Static` `fn(&[Value], &Mooring, &mut Shell) ->
 Settled<Value>`, or a `Captured` closure of the same shape for a host frontend
 with state to carry — so the run's mooring arrives beside the shell
 ([[map/core/shell-state|shell-state]]): it is how a body surfaces an event,
@@ -21,12 +25,15 @@ type-rule facet is a `BuiltinTypeRule` of two arms: `Sig` (a command signature)
 or `Scheme` (a first-class polytype). The streaming reducer `fold-lines`
 registers as an ordinary `Scheme` whose factory bakes the reducer boundary
 directly ([[map/core/typecheck|reducer_spec]]); there is no separate reducer
-arm. Fixed arity is the registry's job ([[invariants/fixed-arity|fixed-arity]]).
+arm. A `Sig`-ruled entry's first-class form is derived from the signature, with
+`_type` the sole hand-written override ([[invariants/fixed-arity|fixed-arity]]).
 Builtins are *shell-scoped*: each shell's session carries a `BuiltinTable`
 ([[map/core/shell-state|shell-state]]) seeded from `CORE_BUILTINS`
 (`core_builtin_table`), and a host's extra sets ride a `HostSurface` into
-`boot::boot_shell` (`core/src/boot.rs`), so the typechecker and the runtime
-read one table — there is no process-global registry. `register` clones the
+`boot::boot_shell` (`core/src/boot.rs`), so the checker's rule table, the base
+scope, and the base frames all come from one manifest — there is no
+process-global registry, and every path that builds or hydrates a shell must
+seed through `install_builtins` or re-link a native by name. `register` clones the
 baked prelude's bindings into each fresh environment. Three builtins sit
 *outside* the macro, implemented in core but installed by a host. Two are a
 pair with the hosts swapped: the public `WATCH_BUILTIN`
@@ -50,7 +57,9 @@ Bodies are grouped by concern, one submodule each:
 - `strings.rs` — string and regex primitives. `dedent` owns the raw-block
   framing rule: blank lines around a multiline block fall away before the
   common margin is stripped, while content-line whitespace is preserved;
-- `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs`;
+- `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs` — the last also home to
+  `builtin_echo`, which is `to-line`'s neighbour by nature: per-argument `str`,
+  single-space intercalation, a newline to the byte channel;
 - `shell.rs` — `cd`, `alias` / `unalias`;
 - `concurrency.rs` — `spawn` / `watch` / `service` / `detach` and the handle
   verbs
@@ -169,8 +178,9 @@ the `from-X`/`to-X` byte↔value typing in `codecs.rs` is [[design/codecs|design
 
 ## Bundled coreutils, diffutils, and ripgrep
 
-`uutils.rs` declares the bundled tools as three feature-gated families and the
-predicate and dispatch that unify them.
+`core/src/uutils.rs` — a top-level module, since every consumer is exec-side and
+the manifest module holds manifest things only — declares the bundled tools as
+three feature-gated families and the predicate and dispatch that unify them.
 
 - **coreutils** — `declare_coreutils!` takes two parallel lists: `cross`
   (always on under the `coreutils` feature) and `unix` (additionally under

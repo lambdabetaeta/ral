@@ -1,5 +1,5 @@
 ---
-status: 'partly implemented — §"Retiring alias" is NOT done (`alias`/`unalias` still the surface, `install_alias` still the API; ~150 occurrences, deferred to its own session). Done 2026-06-27: help→explain, echo→sugar, ArgSig::Variadic retired. Done 2026-07-27: from-* codecs fixed at arity 0.'
+status: 'superseded in part by [[decisions/260801_a-name-is-a-value-or-it-is-handled]] — the function/handler dichotomy stands, but §"Every builtin is a function" resolves the other way: a variadic or optional entry is a host-installed handler at the base of the stack, and `echo` is one of them rather than elaborator sugar. Still open from this ADR: §"Retiring alias" (`alias`/`unalias` still the surface, `install_alias` still the API). Done 2026-06-27: help→explain, ArgSig::Variadic retired. Done 2026-07-27: from-* codecs fixed at arity 0.'
 ---
 
 # Functions and handlers, and the end of "alias"
@@ -250,6 +250,10 @@ confirm, not assume.
   `HandlerArity` are *user*-handler machinery; there was never a
   native-handler-in-stack path to remove. "No builtin is a handler" is conceptual
   clarity here, not code reduction.
+
+Superseded in part by
+[[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
+which keeps the dichotomy and partitions the builtins across it by arity.
 
 Cite: [[design/builtins|builtins]], [[design/name-resolution|name-resolution]],
 [[invariants/fixed-arity|fixed-arity]],
