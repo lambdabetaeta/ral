@@ -11,7 +11,7 @@ use crate::evaluator::call;
 use crate::io::TerminalState;
 use crate::ir::Comp;
 use crate::runtime::pipeline::helper::StageValue;
-use crate::serial::{InternCtx, ScopeTable, SerialEnvSnapshot, SerialValue, WireDecoder};
+use crate::serial::{InternCtx, ScopeTable, SerialEnvSnapshot, SerialValue, WireDecoder, scrub};
 use crate::source::{FileId, SourceDb, Span};
 use crate::subprocess::{WireMobile, bare_child_shell, install_shell_mobile};
 use crate::types::{
@@ -110,9 +110,13 @@ pub(crate) struct WireObservation {
 }
 
 impl WireObservation {
+    /// A `Handle` is scrubbed before `SerialValue::from_runtime` sees it, so
+    /// one untransportable value cannot fail the whole fragment.  Closures
+    /// stay: they intern against the fragment's own scope table and decode
+    /// back live, which is this seam's advantage over a flat one.
     pub(crate) fn from_runtime(obs: &Observation, ctx: &mut InternCtx) -> Result<Self, Error> {
         Ok(Self {
-            projected: SerialValue::from_runtime(&obs.to_value(), ctx)?,
+            projected: SerialValue::from_runtime(&scrub(&obs.to_value(), &is_handle), ctx)?,
         })
     }
 
@@ -121,6 +125,10 @@ impl WireObservation {
         Observation::from_value(&value)
             .ok_or_else(|| Error::new("audit observation did not decode off the wire", 1))
     }
+}
+
+fn is_handle(v: &Value) -> bool {
+    matches!(v, Value::Handle(_))
 }
 
 /// One observation plus the scope table it interns against.
@@ -642,6 +650,94 @@ mod tests {
                 }
             ),
             "the observation's decision must survive the wire round-trip"
+        );
+    }
+
+    /// A `Handle`-bearing observation ships scrubbed rather than
+    /// failing the whole fragment — the bug `pack_audit_observations`
+    /// propagates as a `break_response` when any one observation cannot be
+    /// interned.
+    #[test]
+    fn wire_observation_scrubs_a_handle_instead_of_dying() {
+        use std::sync::Mutex;
+        let handle = Value::Handle(crate::types::HandleInner {
+            result: Arc::new(Mutex::new(None)),
+            cached: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(crate::types::HandleState::Running)),
+            stdout_buf: Arc::new(Mutex::new(Vec::new())),
+            stderr_buf: Arc::new(Mutex::new(Vec::new())),
+            surface_buf: Arc::new(Mutex::new(Vec::new())),
+            joined: Arc::new(Mutex::new(false)),
+            last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
+            cmd: "<test>".into(),
+            cancel: crate::process::CancelScope::default(),
+        });
+        let obs = Observation::instant(
+            crate::types::CallSite {
+                script: "<test>".into(),
+                line: 1,
+                col: 1,
+            },
+            String::new(),
+            crate::types::Observed::Command {
+                argv: vec!["spawn".into()],
+                status: 0,
+                origin: crate::types::CommandOrigin::Builtin,
+                io: crate::types::AuditIo::default(),
+                error: None,
+                value: handle,
+            },
+        );
+
+        let mut ctx = InternCtx::new();
+        let wire = WireObservation::from_runtime(&obs, &mut ctx).expect("must not die on a handle");
+
+        let dec = WireDecoder::for_shell(&Shell::default(), &ctx.scope_table).expect("decoder");
+        let runtime = wire.into_runtime(&dec).expect("into runtime");
+        let crate::types::Observed::Command { value, .. } = runtime.what else {
+            panic!("expected a command")
+        };
+        assert!(
+            matches!(value, Value::Variant { ref label, .. } if label == "opaque"),
+            "the handle must cross as its opaque placeholder, got {value:?}"
+        );
+    }
+
+    /// A closure reachable through an observation still interns against the
+    /// fragment's own scope table and decodes back live — the seam's
+    /// advantage over the flat wire, which opaques closures too.
+    #[test]
+    fn wire_observation_keeps_a_closure_rich() {
+        let mut shell = Shell::default();
+        let thunk = eval_value("{ |x| return $x }", &mut shell);
+        let obs = Observation::instant(
+            crate::types::CallSite {
+                script: "<test>".into(),
+                line: 1,
+                col: 1,
+            },
+            String::new(),
+            crate::types::Observed::Command {
+                argv: vec!["alias".into()],
+                status: 0,
+                origin: crate::types::CommandOrigin::Builtin,
+                io: crate::types::AuditIo::default(),
+                error: None,
+                value: thunk,
+            },
+        );
+
+        let mut ctx = InternCtx::new();
+        let wire = WireObservation::from_runtime(&obs, &mut ctx).expect("wire");
+
+        let dec = WireDecoder::for_shell(&shell, &ctx.scope_table).expect("decoder");
+        let runtime = wire.into_runtime(&dec).expect("into runtime");
+        let crate::types::Observed::Command { value, .. } = runtime.what else {
+            panic!("expected a command")
+        };
+        assert!(
+            matches!(value, Value::Lambda { .. }),
+            "the closure must decode back live, got {value:?}"
         );
     }
 

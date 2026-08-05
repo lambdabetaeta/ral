@@ -132,6 +132,7 @@ pub(super) fn execute_input(
         io: RunIo::Inherit,
         terminal: RequestedTerminalAccess::Leased,
         stdin: RunStdin::Inherit,
+        trail: None,
     };
 
     // Dispatch and drain to the terminal Report.  The REPL renders no live
@@ -166,43 +167,35 @@ pub(super) fn execute_input(
             }
             None
         }
-        Report::Ran {
-            result,
-            status,
-            single_command: _single_command,
-            captured: _captured,
-            timed_out: _timed_out,
-        } => {
-            let exit_code = match result {
-                Ok(sv) => {
-                    print_result(&Value::from(sv));
+        Report::Ran { ending, .. } => {
+            let status = ending.status();
+            let exit_code = match ending {
+                transport::Ending::Settled { value, .. } => {
+                    print_result(&Value::from(value));
                     // The run installed its bindings: record their dependency
                     // edges and effect verdict into the worksheet model.
                     #[cfg(feature = "structural")]
                     transport.with_shell(|shell| worksheet.record(trimmed, shell));
                     None
                 }
-                Err(break_) => match break_ {
-                    transport::Break::Error { rendered, .. } => {
-                        eprint!("{rendered}");
-                        None
-                    }
-                    transport::Break::Exit(code) => Some(crate::platform::exit_byte(code)),
-                    #[cfg(unix)]
-                    transport::Break::Stopped {
+                transport::Ending::Raised { rendered, .. }
+                | transport::Ending::Walled { rendered, .. } => {
+                    eprint!("{rendered}");
+                    None
+                }
+                transport::Ending::Exited(code) => Some(crate::platform::exit_byte(code)),
+                #[cfg(unix)]
+                transport::Ending::Stopped {
+                    pgid, signal_name, ..
+                } => {
+                    let id = job_table.lock().unwrap().add(
                         pgid,
-                        signal: _,
-                        signal_name,
-                    } => {
-                        let id = job_table.lock().unwrap().add(
-                            pgid,
-                            trimmed.to_string(),
-                            crate::jobs::JobState::Stopped,
-                        );
-                        eprintln!("[{id}] stopped\t{trimmed} ({signal_name})");
-                        None
-                    }
-                },
+                        trimmed.to_string(),
+                        crate::jobs::JobState::Stopped,
+                    );
+                    eprintln!("[{id}] stopped\t{trimmed} ({signal_name})");
+                    None
+                }
             };
 
             // Fire post-exec hook.

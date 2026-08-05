@@ -3,7 +3,7 @@
 use ral_core::transport::{Program, Run};
 use ral_core::types::{Break, Escape, Settled};
 use ral_core::{
-    RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, diagnostic,
+    Ending, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, diagnostic,
     elaborator::elaborate, syntax::parser::parse,
 };
 use std::process::ExitCode;
@@ -176,7 +176,7 @@ pub(crate) fn run_batch(
     } else {
         RequestedTerminalAccess::Denied
     };
-    let (result, compact_root) = match shell.run(RunRequest {
+    let (ending, compact_root) = match shell.run(RunRequest {
         run: Run {
             program: Program::Source(source.to_string()),
             script_name: name.to_string(),
@@ -187,6 +187,7 @@ pub(crate) fn run_batch(
             io: RunIo::Inherit,
             terminal: terminal_access,
             stdin: RunStdin::Inherit,
+            trail: None,
         },
         surface: None,
         deferred: None,
@@ -194,16 +195,27 @@ pub(crate) fn run_batch(
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        RunReport::Ran {
-            result,
-            single_command,
-            root,
-            ..
-        } => (result, single_command.then_some(root)),
+        RunReport::Ran { ending, .. } => {
+            let compact_root = match &ending {
+                Ending::Raised {
+                    single_command,
+                    root,
+                    ..
+                }
+                | Ending::Walled {
+                    single_command,
+                    root,
+                    ..
+                } => single_command.then_some(*root),
+                _ => None,
+            };
+            (ending, compact_root)
+        }
         // Batch already typechecked above, so a static report should not occur
         // here; treat it defensively as a fatal run (exit 1).
-        RunReport::Static { .. } => (Err(Break::Escape(Escape::Exit(1))), None),
+        RunReport::Static { .. } => (Ending::Exited(1), None),
     };
+    let result = ending.into_result();
     tick!("evaluate");
 
     let fragment = if audit {

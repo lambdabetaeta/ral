@@ -15,10 +15,6 @@ pub(crate) struct ProbedWorker {
     pub(crate) cmd: String,
     pub(crate) class: ral_core::types::LeaseClass,
     pub(crate) running: bool,
-    /// The engine's own answer, never arithmetic here: core's registry epoch
-    /// and [`Agent::ral_epoch`] are different clocks, and neither number
-    /// crosses the seam.
-    pub(crate) born_this_epoch: bool,
     pub(crate) up_secs: u64,
     pub(crate) idle_secs: u64,
     pub(crate) settled_epoch: Option<u64>,
@@ -76,7 +72,6 @@ impl Agent {
                     other => unreachable!("`workers row `{key} must be a Bool, got {other:?}"),
                 };
                 let running = bool_field("running");
-                let born_this_epoch = bool_field("born-this-epoch");
                 let up_secs = int_field("up-secs");
                 let idle_secs = int_field("idle-secs");
                 let settled_epoch = match field("settled-epoch") {
@@ -105,50 +100,12 @@ impl Agent {
                     cmd,
                     class,
                     running,
-                    born_this_epoch,
                     up_secs,
                     idle_secs,
                     settled_epoch,
                 }
             })
             .collect()
-    }
-
-    /// The sentence a raise owes the model about work that outlived it.
-    ///
-    /// A `defer`red worker is moored to the session root, so the cancel that
-    /// unwound this call never reached it: the work runs on while the handle
-    /// binding that named it is gone.  `None` when this call deferred nothing
-    /// still running — silence is then the whole truth.
-    ///
-    /// Read through the probe, so the registry may live wherever the seat puts
-    /// it, and only ever at a run boundary.
-    pub(super) fn surviving_worker_note(&self) -> Option<String> {
-        /// Enough to name one call's fan-out without crowding the stderr this
-        /// rides on; whatever is left over is counted aloud, never dropped in
-        /// silence.
-        const NAMED: usize = 5;
-
-        let mut cmds = self
-            .probe_workers()
-            .into_iter()
-            .filter(|w| w.running && w.born_this_epoch)
-            .map(|w| format!("`{}`", w.cmd))
-            .collect::<Vec<_>>();
-        if cmds.is_empty() {
-            return None;
-        }
-        let unnamed = cmds.len().saturating_sub(NAMED);
-        cmds.truncate(NAMED);
-        let named = cmds.join(", ");
-        let overflow = match unnamed {
-            0 => String::new(),
-            n => format!(", and {n} more not named here"),
-        };
-        Some(format!(
-            "\nwork this call deferred is still running: {named}{overflow}. Its handle binding went \
-             with the unwind, so you cannot `await` it.\n"
-        ))
     }
 
     /// The `` `env-var `` probe, decoded.  Answers the engine's environment —

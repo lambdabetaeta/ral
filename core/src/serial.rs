@@ -554,6 +554,49 @@ impl TryFrom<&Value> for FOValue {
     }
 }
 
+/// The label a placeholder carries — a `Variant`, never a bare string, so no
+/// genuine string can impersonate one.
+pub const OPAQUE_TAG: &str = "opaque";
+
+/// The leaves [`FOValue::try_from`] rejects.
+pub fn no_wire_form(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Handle(_) | Value::Lambda { .. } | Value::Block { .. } | Value::Native { .. }
+    )
+}
+
+/// Recursively replace every leaf `p` accepts with `` `opaque {type: …} ``.
+///
+/// Every other leaf crosses untouched.  The seams differ only in `p`: a flat
+/// wire scrubs closures as well as handles, the fragment wire keeps them,
+/// since they intern against its scope table and decode back live.
+pub fn scrub(v: &Value, p: &impl Fn(&Value) -> bool) -> Value {
+    if p(v) {
+        return Value::Variant {
+            label: OPAQUE_TAG.to_string(),
+            payload: Some(Box::new(Value::map(vec![(
+                "type".to_string(),
+                Value::String(v.type_name().to_lowercase()),
+            )]))),
+        };
+    }
+    match v {
+        Value::List(items) => Value::list(items.iter().map(|i| scrub(i, p)).collect()),
+        Value::Map(entries) => Value::map(
+            entries
+                .iter()
+                .map(|(k, v)| (k.clone(), scrub(v, p)))
+                .collect(),
+        ),
+        Value::Variant { label, payload } => Value::Variant {
+            label: label.clone(),
+            payload: payload.as_ref().map(|q| Box::new(scrub(q, p))),
+        },
+        other => other.clone(),
+    }
+}
+
 impl From<FOValue> for Value {
     /// Total: first-order values are a subset of `Value`, and `Ext` is
     /// unreachable at `X = NoExt`.

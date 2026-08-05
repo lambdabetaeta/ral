@@ -422,9 +422,10 @@ pub(super) fn call_plugin_hook(
                 },
             };
             let (result, timed_out) = match report {
-                RunReport::Ran {
-                    result, timed_out, ..
-                } => (result, timed_out),
+                RunReport::Ran { ending, .. } => {
+                    let timed_out = matches!(ending, ral_core::Ending::Walled { .. });
+                    (ending.into_result(), timed_out)
+                }
                 RunReport::Static { diagnostics } => {
                     // A host error (hook not found, non-ground arg).
                     let msg = match diagnostics {
@@ -486,6 +487,7 @@ pub(super) fn framed_run_request<'a>(
             io: RunIo::Inherit,
             terminal,
             stdin: RunStdin::Inherit,
+            trail: None,
         },
         surface: None,
         deferred: None,

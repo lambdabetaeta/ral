@@ -152,16 +152,10 @@ pub(crate) fn spawn_async(
         child.seed(p.clone());
     }
     // The dispatch reaches the rail before the spawn, so the user can see every
-    // line the child was asked to act on.
+    // line the child was asked to act on. A harness spawn's own row is
+    // desk-authored at the commitment arm, where the outcome is known.
     let cmd = prompt.unwrap_or_else(|| "(waiting for you)".to_string());
-    if harness {
-        emit.emit(Kind::HarnessCall {
-            verb,
-            subject: Some(name.clone()),
-            payload: cmd,
-            failed: false,
-        });
-    } else {
+    if !harness {
         emit.emit(Kind::ToolCall {
             tool: verb,
             cmd,

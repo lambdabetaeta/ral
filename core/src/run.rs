@@ -19,8 +19,8 @@ use crate::syntax::parser::ParseError;
 use crate::transport::{Program, Run};
 use crate::typecheck::TypeError;
 use crate::types::{
-    Break, Capabilities, DeferredSink, Desk, Escape, Mooring, Nursery, NurseryGuard, Settled,
-    Shell, SurfaceSink, TerminalPolicy, Value,
+    Break, Capabilities, DeferredSink, Desk, Error, Escape, Mooring, Nursery, NurseryGuard,
+    Observation, Settled, Shell, SurfaceSink, TerminalPolicy, TrailScope, Value,
 };
 use crate::{CompileOutcome, compile_and_typecheck};
 use serde::{Deserialize, Serialize};
@@ -118,21 +118,86 @@ pub struct Captured {
     pub stderr: Vec<u8>,
 }
 
-/// One flat result the host matches once. `captured`/`timed_out` live on
-/// `Ran`, where they mean something — a `Static` run never ran.
+/// One report the host matches once — a `Static` run never ran.
 pub enum RunReport {
     /// The run never reached evaluation; the host renders the diagnostics and
     /// treats it as status 1.
     Static { diagnostics: StaticDiagnostics },
-    /// `single_command` and `root` together pick the runtime-error rendering.
     Ran {
-        result: Settled<Value>,
+        ending: Ending,
+        captured: Option<Captured>,
+        /// This dispatch's own trail, filled in by [`Shell::enter`] once the
+        /// scope it held closes; empty when `Run.trail` was `None`.
+        trail: Vec<Observation>,
+    },
+}
+
+/// How a run left evaluation — one arm per way out.
+///
+/// `Ok` beside a timed-out flag is not a state the type can hold.
+/// Unrendered: the error text is rendered once, in
+/// [`Report`](crate::transport::Report), where a
+/// [`SourceDb`](crate::source::SourceDb) is in hand.
+#[derive(Debug)]
+pub enum Ending {
+    Settled {
+        value: Value,
         status: i32,
+    },
+    /// `single_command` and `root` together pick the runtime-error
+    /// rendering.
+    Raised {
+        error: Error,
         single_command: bool,
         root: FileId,
-        captured: Option<Captured>,
-        timed_out: bool,
     },
+    /// A raise the wall itself caused — same shape as [`Self::Raised`], the
+    /// tag alone is what a renderer needs to choose the timeout remedy over
+    /// the exit-code one.
+    Walled {
+        error: Error,
+        single_command: bool,
+        root: FileId,
+    },
+    Exited(i32),
+    #[cfg(unix)]
+    Stopped {
+        pgid: crate::process::Pgid,
+        signal: crate::process::Signal,
+        cmd: String,
+    },
+}
+
+impl Ending {
+    /// The transport status: ambient for [`Self::Settled`] (captured at
+    /// construction, since it reads session state a later run could change),
+    /// a pure function of the escape for every other arm.
+    pub fn status(&self) -> i32 {
+        match self {
+            Self::Settled { status, .. } => *status,
+            Self::Raised { error, .. } | Self::Walled { error, .. } => error.exit_code(),
+            Self::Exited(code) => *code,
+            #[cfg(unix)]
+            Self::Stopped { signal, .. } => 128 + signal.number(),
+        }
+    }
+
+    /// Recover the flat view a caller that only wants pass/fail still wants.
+    ///
+    /// # Errors
+    /// Every non-[`Self::Settled`] arm, folded back into the [`Break`] it
+    /// came from.
+    pub fn into_result(self) -> Settled<Value> {
+        match self {
+            Self::Settled { value, .. } => Ok(value),
+            Self::Raised { error, .. } | Self::Walled { error, .. } => Err(Break::Error(error)),
+            Self::Exited(code) => Err(Break::Escape(Escape::Exit(code))),
+            #[cfg(unix)]
+            Self::Stopped { pgid, signal, cmd } => {
+                Err(Break::Escape(Escape::Stopped { pgid, signal, cmd }))
+            }
+        }
+    }
 }
 
 /// Bind the host's requested `wall` to this run's foreground scope, so the
@@ -194,10 +259,43 @@ impl Shell {
 
     /// Both doors' body, so that the durability wrapper is the only way
     /// through either.
+    ///
+    /// A dispatch that asks for a trail (`req.run.trail: Some`) gets its
+    /// scope held *here*, outside the `catch_unwind` below: the checkpoint
+    /// `dispatch`'s panic arm rolls back does not cover `local.audit`
+    /// (`LocalState` partitions it deliberately), so only a scope the panic
+    /// cannot skip keeps the opener's close law true at dispatch
+    /// granularity. A panic reports `Static` by declaration — the trail
+    /// closes and is discarded, never attached.
     fn enter(&mut self, under: &ForegroundScope, req: RunRequest<'_>) -> RunReport {
         let checkpoint = self.mobile.clone();
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch(under, req))) {
-            Ok(report) => report,
+        let saved_capture = self.local.audit.capture_policy();
+        let scope: Option<TrailScope> = req.run.trail.map(|policy| {
+            self.local
+                .audit
+                .set_capture(crate::evaluator::audit::merge_capture(
+                    saved_capture,
+                    policy,
+                ));
+            self.local.audit.open()
+        });
+
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch(under, req)));
+
+        let trail = scope.map(|scope| {
+            let observations = self.local.audit.close(scope);
+            self.local.audit.set_capture(saved_capture);
+            observations
+        });
+
+        match outcome {
+            Ok(mut report) => {
+                if let (Some(trail), RunReport::Ran { trail: field, .. }) = (trail, &mut report) {
+                    *field = trail;
+                }
+                report
+            }
             Err(payload) => {
                 self.mobile = checkpoint;
                 RunReport::Static {
@@ -367,12 +465,43 @@ impl Shell {
         });
 
         RunReport::Ran {
-            result,
-            status,
+            ending: classify_ending(result, status, single_command, root, timed_out),
+            captured,
+            // Filled in by `enter`, which holds this dispatch's scope.
+            trail: Vec::new(),
+        }
+    }
+}
+
+/// Fold a settled body's raw parts into the one [`Ending`] they describe.
+/// `status` is used only for [`Ending::Settled`] — every other arm's status
+/// is a pure function of the escape, read lazily through [`Ending::status`].
+fn classify_ending(
+    result: Settled<Value>,
+    status: i32,
+    single_command: bool,
+    root: FileId,
+    timed_out: bool,
+) -> Ending {
+    match result {
+        Ok(value) => Ending::Settled { value, status },
+        // The cancel is stamped on the innermost node it unwound through, so
+        // the wall is no exception to the engine's own error rendering —
+        // only the tag distinguishing it from an ordinary raise is new here.
+        Err(Break::Error(error)) if timed_out => Ending::Walled {
+            error,
             single_command,
             root,
-            captured,
-            timed_out,
+        },
+        Err(Break::Error(error)) => Ending::Raised {
+            error,
+            single_command,
+            root,
+        },
+        Err(Break::Escape(Escape::Exit(code))) => Ending::Exited(code),
+        #[cfg(unix)]
+        Err(Break::Escape(Escape::Stopped { pgid, signal, cmd })) => {
+            Ending::Stopped { pgid, signal, cmd }
         }
     }
 }
@@ -569,6 +698,7 @@ mod tests {
                 io: RunIo::Capture,
                 terminal: RequestedTerminalAccess::Denied,
                 stdin: RunStdin::Empty,
+                trail: None,
             },
             surface: None,
             deferred: None,
@@ -583,8 +713,9 @@ mod tests {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run(capture_req("$[1 + 1]")) {
-            RunReport::Ran { result, status, .. } => {
-                assert_eq!(status, 0);
+            RunReport::Ran { ending, .. } => {
+                assert_eq!(ending.status(), 0);
+                let result = ending.into_result();
                 assert!(result.is_ok(), "expected Ok, got {result:?}");
             }
             RunReport::Static { .. } => panic!("clean source must not be Static"),
@@ -626,8 +757,9 @@ mod tests {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run(capture_req("exit 3")) {
-            RunReport::Ran { result, status, .. } => {
-                assert_eq!(status, 3);
+            RunReport::Ran { ending, .. } => {
+                assert_eq!(ending.status(), 3);
+                let result = ending.into_result();
                 assert!(
                     matches!(result, Err(Break::Escape(Escape::Exit(3)))),
                     "expected Escape::Exit(3), got {result:?}"
@@ -842,11 +974,13 @@ mod tests {
             lifecycle: Box::new(CancelInPreExec),
             ..capture_req("let x = 42\nreturn $x")
         }) {
-            RunReport::Ran { result, status, .. } => {
+            RunReport::Ran { ending, .. } => {
                 assert_eq!(
-                    status, 130,
+                    ending.status(),
+                    130,
                     "a foreground cancel observed mid-eval reports 130"
                 );
+                let result = ending.into_result();
                 assert!(
                     matches!(result, Err(Break::Error(_))),
                     "the cancel must unwind into a Break::Error, got {result:?}"
@@ -876,12 +1010,13 @@ mod tests {
             lifecycle: Box::new(CancelInPreExec),
             ..capture_req("try { let x = unit\nreturn $x } { |_| return unit }")
         }) {
-            RunReport::Ran { result, status, .. } => {
+            RunReport::Ran { ending, .. } => {
                 assert_eq!(
-                    status, 130,
+                    ending.status(),
+                    130,
                     "a try handler must not settle a cancelled run at 0"
                 );
-                match result {
+                match ending.into_result() {
                     Err(Break::Error(e)) => assert_eq!(
                         e.message, "interrupted",
                         "the boundary poll must report the cancel cause's own words"
@@ -904,7 +1039,9 @@ mod tests {
             fn pre_exec(&mut self, mooring: &Mooring, shell: &mut Shell, _src: &str) {
                 crate::process::request_foreground_cancel(crate::process::CancelCause::Interrupt);
                 match shell.run_nested(mooring, capture_req("let y = 1\nreturn $y")) {
-                    RunReport::Ran { status, .. } => *self.0.lock().unwrap() = Some(status),
+                    RunReport::Ran { ending, .. } => {
+                        *self.0.lock().unwrap() = Some(ending.status());
+                    }
                     RunReport::Static { .. } => panic!("valid source must reach evaluation"),
                 }
             }
@@ -917,8 +1054,9 @@ mod tests {
             lifecycle: Box::new(NestARun(inner.clone())),
             ..capture_req("let x = 42\nreturn $x")
         }) {
-            RunReport::Ran { status, .. } => assert_eq!(
-                status, 130,
+            RunReport::Ran { ending, .. } => assert_eq!(
+                ending.status(),
+                130,
                 "the outer run must still observe the interrupt the nested run ran under"
             ),
             RunReport::Static { .. } => panic!("valid source must reach evaluation"),
@@ -943,7 +1081,9 @@ mod tests {
             fn pre_exec(&mut self, _mooring: &Mooring, _shell: &mut Shell, _src: &str) {
                 crate::process::request_foreground_cancel(crate::process::CancelCause::Interrupt);
                 match self.0.run(capture_req("let y = 1\nreturn $y")) {
-                    RunReport::Ran { status, .. } => *self.1.lock().unwrap() = Some(status),
+                    RunReport::Ran { ending, .. } => {
+                        *self.1.lock().unwrap() = Some(ending.status());
+                    }
                     RunReport::Static { .. } => panic!("valid source must reach evaluation"),
                 }
             }
@@ -957,8 +1097,9 @@ mod tests {
             lifecycle: Box::new(RunAnAside(aside, hook_status.clone())),
             ..capture_req("let x = 42\nreturn $x")
         }) {
-            RunReport::Ran { status, .. } => assert_eq!(
-                status, 130,
+            RunReport::Ran { ending, .. } => assert_eq!(
+                ending.status(),
+                130,
                 "the interrupt must survive the aside's entry and unwind the run it was aimed at"
             ),
             RunReport::Static { .. } => panic!("valid source must reach evaluation"),
@@ -989,8 +1130,9 @@ mod tests {
             lifecycle: Box::new(CancelInPreExec),
             ..capture_req("let y = 1\nreturn $y")
         }) {
-            RunReport::Ran { status, .. } => assert_eq!(
-                status, 130,
+            RunReport::Ran { ending, .. } => assert_eq!(
+                ending.status(),
+                130,
                 "a Ctrl-C during a hook must unwind the hook it lands in"
             ),
             RunReport::Static { .. } => panic!("valid source must reach evaluation"),
@@ -1012,8 +1154,13 @@ mod tests {
             .cancel(crate::process::CancelCause::Explicit);
 
         match aside.run(capture_req("let y = 1\nreturn $y")) {
-            RunReport::Ran { result, status, .. } => {
-                assert_eq!(status, 130, "the aside's run unwinds with the session");
+            RunReport::Ran { ending, .. } => {
+                assert_eq!(
+                    ending.status(),
+                    130,
+                    "the aside's run unwinds with the session"
+                );
+                let result = ending.into_result();
                 assert!(
                     matches!(result, Err(Break::Error(_))),
                     "the handle cancel must unwind the aside, got {result:?}"
@@ -1046,11 +1193,13 @@ mod tests {
             lifecycle: Box::new(CancelInPreExec),
             ..capture_req("let x = 42\nreturn $x")
         }) {
-            RunReport::Ran { result, status, .. } => {
+            RunReport::Ran { ending, .. } => {
                 assert_eq!(
-                    status, 0,
+                    ending.status(),
+                    0,
                     "a foreground-cancel request must not reach a forked session's run"
                 );
+                let result = ending.into_result();
                 assert!(
                     result.is_ok(),
                     "the forked session's eval completes undisturbed, got {result:?}"
@@ -1070,8 +1219,9 @@ mod tests {
             lifecycle: Box::new(CancelHandleInPreExec(handle)),
             ..capture_req("let x = 42\nreturn $x")
         }) {
-            RunReport::Ran { result, status, .. } => {
-                assert_eq!(status, 130, "a cancelled handle unwinds the run");
+            RunReport::Ran { ending, .. } => {
+                assert_eq!(ending.status(), 130, "a cancelled handle unwinds the run");
+                let result = ending.into_result();
                 assert!(
                     matches!(result, Err(Break::Error(_))),
                     "the handle cancel must unwind into a Break::Error, got {result:?}"
@@ -1104,8 +1254,13 @@ mod tests {
         // later session in the test binary would inherit the abort.
         crate::process::cancel::clear_root_request();
         match report {
-            RunReport::Ran { result, status, .. } => {
-                assert_eq!(status, 130, "a root abort observed mid-eval reports 130");
+            RunReport::Ran { ending, .. } => {
+                assert_eq!(
+                    ending.status(),
+                    130,
+                    "a root abort observed mid-eval reports 130"
+                );
+                let result = ending.into_result();
                 assert!(
                     matches!(result, Err(Break::Error(_))),
                     "the abort must unwind into a Break::Error, got {result:?}"
@@ -1115,10 +1270,10 @@ mod tests {
         }
     }
 
-    /// The hook fires the `Deadline` cause directly, pinning the `timed_out`
+    /// The hook fires the `Deadline` cause directly, pinning the `Walled`
     /// classification without sleeping on the reaper.
     #[test]
-    fn deadline_cancel_reports_timed_out() {
+    fn deadline_cancel_reports_walled() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         struct DeadlineInPreExec;
         impl RunLifecycle for DeadlineInPreExec {
@@ -1138,10 +1293,10 @@ mod tests {
             lifecycle: Box::new(DeadlineInPreExec),
             ..req
         }) {
-            RunReport::Ran { timed_out, .. } => {
+            RunReport::Ran { ending, .. } => {
                 assert!(
-                    timed_out,
-                    "a Deadline foreground cancel must report timed_out"
+                    matches!(ending, Ending::Walled { .. }),
+                    "a Deadline foreground cancel must report Walled"
                 );
             }
             RunReport::Static { .. } => panic!("valid source must reach evaluation"),
@@ -1218,7 +1373,7 @@ mod tests {
         shell.install_builtins(PANIC_BUILTINS);
 
         match shell.run(capture_req("let pre_panic = 1")) {
-            RunReport::Ran { result, .. } => assert!(result.is_ok()),
+            RunReport::Ran { ending, .. } => assert!(matches!(ending, Ending::Settled { .. })),
             RunReport::Static { .. } => panic!("the pre-run binding must evaluate"),
         }
 
@@ -1250,9 +1405,9 @@ mod tests {
         );
 
         match shell.run(capture_req("$pre_panic")) {
-            RunReport::Ran { result, .. } => {
+            RunReport::Ran { ending, .. } => {
                 assert!(
-                    result.is_ok(),
+                    matches!(ending, Ending::Settled { .. }),
                     "the next run must evaluate clean on the same shell"
                 );
             }
@@ -1335,11 +1490,12 @@ mod tests {
     /// The rendered runtime error of a run that must fault.
     fn rendered_fault(shell: &mut Shell, src: &str) -> String {
         let report = shell.run(capture_req(src)).into_report(shell.sources());
-        let crate::transport::Report::Ran { result, .. } = report else {
+        let crate::transport::Report::Ran { ending, .. } = report else {
             panic!("{src:?} must reach evaluation");
         };
-        match result {
-            Err(crate::transport::Break::Error { rendered, .. }) => rendered,
+        match ending {
+            crate::transport::Ending::Raised { rendered, .. }
+            | crate::transport::Ending::Walled { rendered, .. } => rendered,
             other => panic!("{src:?} must fault, got {other:?}"),
         }
     }
@@ -1351,9 +1507,13 @@ mod tests {
     fn a_lambda_faults_against_the_run_that_compiled_it() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        assert!(
-            matches!(shell.run(capture_req("let boom = { |x| $undefined_name }")), RunReport::Ran { result, .. } if result.is_ok())
-        );
+        assert!(matches!(
+            shell.run(capture_req("let boom = { |x| $undefined_name }")),
+            RunReport::Ran {
+                ending: Ending::Settled { .. },
+                ..
+            }
+        ));
         let rendered = crate::ansi::strip(&rendered_fault(&mut shell, "boom 1"));
         assert!(
             rendered.contains("$undefined_name }"),
@@ -1385,15 +1545,108 @@ mod tests {
         ] {
             match shell.run(capture_req(src)) {
                 RunReport::Ran {
-                    single_command,
-                    result,
+                    ending: Ending::Raised { single_command, .. },
                     ..
                 } => {
                     assert_eq!(single_command, shape, "{src:?} misreports its shape");
-                    assert!(result.is_err(), "{src:?} must fault");
                 }
+                RunReport::Ran { ending, .. } => panic!("{src:?} must fault, got {ending:?}"),
                 RunReport::Static { .. } => panic!("{src:?} must reach evaluation"),
             }
+        }
+    }
+
+    // ── The dispatch's own trail ─────────────────────────────────────────
+
+    /// `Run.trail: Some` opens a scope at `enter`, closes it into the
+    /// `RunReport`, and `into_report` projects each observation through
+    /// `to_wire` onto the wire — the whole path a dispatching host takes.
+    #[test]
+    fn a_dispatch_trail_projects_and_round_trips_through_the_wire() {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let req = capture_req("echo hi");
+        let report = shell.run(RunRequest {
+            run: Run {
+                trail: Some(crate::types::CapturePolicy::Off),
+                ..req.run
+            },
+            ..req
+        });
+        let crate::transport::Report::Ran { trail, .. } = report.into_report(shell.sources())
+        else {
+            panic!("valid source must reach evaluation");
+        };
+        assert!(
+            !trail.is_empty(),
+            "the dispatch's own trail must carry its one command"
+        );
+        let round_tripped = trail.iter().any(|fo| {
+            let value = Value::from(fo.clone());
+            let Some(obs) = crate::types::Observation::from_value(&value) else {
+                return false;
+            };
+            matches!(obs.what, crate::types::Observed::Command { .. })
+        });
+        assert!(
+            round_tripped,
+            "a wire `FOValue` must decode back as the `Command` observation it was"
+        );
+    }
+
+    /// `Run.trail: None` neither opens a scope nor collects one — the REPL's
+    /// choice, and every other test's, `capture_req` included.
+    #[test]
+    fn a_dispatch_asking_no_trail_reports_none() {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        match shell.run(capture_req("$[1 + 1]")) {
+            RunReport::Ran { trail, .. } => assert!(
+                trail.is_empty(),
+                "an unasked dispatch must report no trail at all"
+            ),
+            RunReport::Static { .. } => panic!("valid source must reach evaluation"),
+        }
+    }
+
+    /// A panicked dispatch is excluded from the trail law by declaration: it
+    /// reports `Static`, and the scope `enter` held — outside the
+    /// `catch_unwind` the panic escapes through — still drains and closes,
+    /// discarded rather than attached. The next dispatch that asks opens a
+    /// fresh scope and sees nothing left over.
+    #[test]
+    fn a_panicked_dispatch_reports_static_and_leaves_the_next_trail_empty() {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.install_builtins(PANIC_BUILTINS);
+
+        let panicking = capture_req("core-panic-now");
+        match shell.run(RunRequest {
+            run: Run {
+                trail: Some(crate::types::CapturePolicy::Off),
+                ..panicking.run
+            },
+            ..panicking
+        }) {
+            RunReport::Static {
+                diagnostics: StaticDiagnostics::Host(e),
+            } => assert!(e.message.contains("run panicked")),
+            _ => panic!("a panicking dispatch must report Static{{Host}}"),
+        }
+
+        let next = capture_req("$[1 + 1]");
+        match shell.run(RunRequest {
+            run: Run {
+                trail: Some(crate::types::CapturePolicy::Off),
+                ..next.run
+            },
+            ..next
+        }) {
+            RunReport::Ran { trail, .. } => assert!(
+                trail.is_empty(),
+                "the panicked dispatch's scope must not leak into the next one"
+            ),
+            RunReport::Static { .. } => panic!("valid source must reach evaluation"),
         }
     }
 }

@@ -32,6 +32,7 @@ fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
             io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: RunStdin::Inherit,
+            trail: None,
         },
         surface: None,
         deferred: None,
@@ -39,7 +40,7 @@ fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        RunReport::Ran { result, .. } => result,
+        RunReport::Ran { ending, .. } => ending.into_result(),
         RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }
 }
@@ -98,6 +99,7 @@ fn expect_static_reject(source: &str) {
             io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: RunStdin::Inherit,
+            trail: None,
         },
         surface: None,
         deferred: None,
@@ -106,8 +108,8 @@ fn expect_static_reject(source: &str) {
         lifecycle: Box::new(()),
     }) {
         RunReport::Static { .. } => {}
-        RunReport::Ran { result, .. } => {
-            panic!("{source:?}: expected a static type error, but it ran: {result:?}")
+        RunReport::Ran { ending, .. } => {
+            panic!("{source:?}: expected a static type error, but it ran: {ending:?}")
         }
     }
 }

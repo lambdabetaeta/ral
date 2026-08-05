@@ -587,6 +587,7 @@ mod tests {
                 io: crate::run::RunIo::Capture,
                 terminal: crate::run::RequestedTerminalAccess::Denied,
                 stdin: crate::run::RunStdin::Empty,
+                trail: None,
             },
             surface: None,
             deferred: None,

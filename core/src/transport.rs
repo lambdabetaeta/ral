@@ -24,11 +24,12 @@ use std::time::{Duration, Instant};
 use crate::process::ChildHandle;
 use crate::serial::FOValue;
 use crate::sync::LockExt;
+use crate::types::CapturePolicy;
 use crate::types::DeferredSink;
 use crate::types::SurfaceSink;
 use std::sync::OnceLock;
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 static CURRENT_CONTROL: OnceLock<ControlSender> = OnceLock::new();
 
@@ -129,6 +130,11 @@ pub struct Run {
     pub io: crate::run::RunIo,
     pub terminal: crate::run::RequestedTerminalAccess,
     pub stdin: crate::run::RunStdin,
+    /// `Some` delimits this dispatch's own trail, at the given capture
+    /// policy, and carries it home on [`Report::Ran`]; `None` neither opens a
+    /// scope nor collects one. exarch's tool calls ask with
+    /// [`CapturePolicy::Off`]; the REPL never asks.
+    pub trail: Option<CapturePolicy>,
 }
 
 /// What a run runs: source text compiled and typechecked against the live
@@ -248,16 +254,13 @@ pub enum Report {
     Static { diagnostics: Diagnostics },
     /// The run ran to a settled result.
     Ran {
-        /// `Ok` carries an [`FOValue`]; a result that cannot cross the seam —
-        /// a live `Handle`, say — is reported as an error rather than dropped.
-        result: Result<FOValue, Break>,
-        status: i32,
-        /// Picks the runtime-error rendering.
-        single_command: bool,
+        ending: Ending,
         /// `Some` under [`RunIo::Capture`](crate::run::RunIo).
         captured: Option<crate::run::Captured>,
-        /// Whether the wall fired.
-        timed_out: bool,
+        /// The dispatch's own trail, projected; empty unless [`Run::trail`]
+        /// asked. Unbounded by declaration — the wire's frame fuse is the
+        /// shared backstop, exactly as it is for `captured`.
+        trail: Vec<FOValue>,
     },
 }
 
@@ -270,20 +273,38 @@ pub enum Diagnostics {
     Host(String),
 }
 
-/// First-order projection of a settled run's
-/// [`Break`](crate::types::Break).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Break {
-    /// A caught runtime error, already rendered to the string the host prints
-    /// verbatim. `command_exit` says whether the status was an external
-    /// command's non-zero exit rather than a raised error — the one
-    /// classification a host's didactics need from a `Status` that never
-    /// crosses the seam.
-    Error {
+/// How a run left evaluation, wire-shaped.
+///
+/// The protocol projection of the engine's [`Ending`](crate::run::Ending),
+/// rendered against a [`SourceDb`](crate::source::SourceDb) — a live `Error`
+/// cannot cross the seam, so [`Self::Raised`]/[`Self::Walled`] carry the
+/// string it rendered to instead. `status` is carried explicitly wherever it
+/// is not the whole of the arm's payload, since a renderer that has already
+/// discarded the engine `Error` for its `rendered` string has no other way
+/// back to it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Ending {
+    Settled {
+        value: FOValue,
+        status: i32,
+    },
+    /// `command_exit` says whether the status was an external command's
+    /// non-zero exit rather than a raised error — the one classification a
+    /// host's didactics need from a `Status` that never crosses the seam.
+    /// `single_command` picks between the exit-code remedy's two wordings.
+    Raised {
         rendered: String,
         command_exit: bool,
+        single_command: bool,
+        status: i32,
     },
-    Exit(i32),
+    /// A raise the wall itself caused. No `command_exit`/`single_command`:
+    /// the timeout remedy is unconditional, so no renderer reads them here.
+    Walled {
+        rendered: String,
+        status: i32,
+    },
+    Exited(i32),
     #[cfg(unix)]
     Stopped {
         pgid: i32,
@@ -292,36 +313,93 @@ pub enum Break {
     },
 }
 
-/// Project an engine [`Break`](crate::types::Break) onto the transport
-/// [`Break`], rendering a caught runtime error against `sources`.
-/// `compact_root` selects the compact one-liner over the source-span caret,
-/// exactly as the batch host chooses.
-fn render_break(
-    break_: crate::types::Break,
-    sources: &crate::source::SourceDb,
-    compact_root: Option<crate::source::FileId>,
-) -> Break {
-    use crate::types::{Break as EngineBreak, Escape};
-    match break_ {
-        EngineBreak::Error(e) => {
-            let command_exit = matches!(
-                e.status,
-                crate::types::Status::Process(crate::process::CommandFailure::ExitCode(_))
-            );
-            Break::Error {
-                rendered: crate::diagnostic::format_runtime_error_auto(sources, &e, compact_root),
-                command_exit,
+impl Ending {
+    /// The flat status view: the wire's own `status` field for the arms that
+    /// carry one, the whole of the payload for the two that don't.
+    #[must_use]
+    pub fn status(&self) -> i32 {
+        match self {
+            Self::Settled { status, .. }
+            | Self::Raised { status, .. }
+            | Self::Walled { status, .. } => *status,
+            Self::Exited(code) => *code,
+            #[cfg(unix)]
+            Self::Stopped { signal, .. } => 128 + signal,
+        }
+    }
+}
+
+/// Project an engine [`Ending`](crate::run::Ending) onto the wire, rendering
+/// a caught runtime error against `sources` — the one lossy step between the
+/// engine and the seam: the live `Error` renders to the string the host
+/// prints verbatim.
+fn render_ending(ending: crate::run::Ending, sources: &crate::source::SourceDb) -> Ending {
+    use crate::run::Ending as Raw;
+    match ending {
+        Raw::Settled { value, status } => {
+            let status = status.clamp(0, 255);
+            // A top-level result is not an `Observation` — it has no
+            // placeholder vocabulary of its own — so a value the wire cannot
+            // carry (a live `Handle`, say) is reported as an error instead of
+            // silently dropped.
+            match FOValue::try_from(&value) {
+                Ok(value) => Ending::Settled { value, status },
+                Err(_) => Ending::Raised {
+                    rendered: "run result is not transportable across the host seam".into(),
+                    command_exit: false,
+                    single_command: false,
+                    status,
+                },
             }
         }
-        EngineBreak::Escape(esc) => match esc {
-            Escape::Exit(code) => Break::Exit(code.clamp(0, 255)),
-            #[cfg(unix)]
-            Escape::Stopped { pgid, signal, .. } => Break::Stopped {
-                pgid: pgid.as_raw(),
-                signal: signal.number(),
-                signal_name: signal.name().unwrap_or("?").to_string(),
-            },
+        Raw::Raised {
+            error,
+            single_command,
+            root,
+        } => render_raise(&error, single_command, root, sources, false),
+        Raw::Walled {
+            error,
+            single_command,
+            root,
+        } => render_raise(&error, single_command, root, sources, true),
+        Raw::Exited(code) => Ending::Exited(code.clamp(0, 255)),
+        #[cfg(unix)]
+        Raw::Stopped { pgid, signal, .. } => Ending::Stopped {
+            pgid: pgid.as_raw(),
+            signal: signal.number(),
+            signal_name: signal.name().unwrap_or("?").to_string(),
         },
+    }
+}
+
+/// `Raised` and `Walled` differ only in tag: same rendering, same
+/// `command_exit`/`single_command` inputs, distinguished by `walled` alone.
+fn render_raise(
+    error: &crate::types::Error,
+    single_command: bool,
+    root: crate::source::FileId,
+    sources: &crate::source::SourceDb,
+    walled: bool,
+) -> Ending {
+    let status = error.exit_code().clamp(0, 255);
+    let command_exit = matches!(
+        error.status,
+        crate::types::Status::Process(crate::process::CommandFailure::ExitCode(_))
+    );
+    let rendered = crate::diagnostic::format_runtime_error_auto(
+        sources,
+        error,
+        single_command.then_some(root),
+    );
+    if walled {
+        Ending::Walled { rendered, status }
+    } else {
+        Ending::Raised {
+            rendered,
+            command_exit,
+            single_command,
+            status,
+        }
     }
 }
 
@@ -332,6 +410,10 @@ impl crate::run::RunReport {
     /// the last point at which the engine's
     /// [`SourceDb`](crate::source::SourceDb) is in hand; the host receives the
     /// full string — prefix, status, hint, caret — and only has to print it.
+    ///
+    /// # Panics
+    /// Never: [`Observation::to_wire`] is total over exactly the vocabulary
+    /// [`FOValue`] admits.
     pub fn into_report(self, sources: &crate::source::SourceDb) -> Report {
         use crate::run::StaticDiagnostics;
         match self {
@@ -345,35 +427,91 @@ impl crate::run::RunReport {
                 },
             },
             Self::Ran {
-                result,
-                status,
-                single_command,
-                root,
+                ending,
                 captured,
-                timed_out,
+                trail,
             } => Report::Ran {
-                result: match result {
-                    Ok(v) => match FOValue::try_from(&v) {
-                        Ok(fo) => Ok(fo),
-                        Err(_) => Err(Break::Error {
-                            rendered: "run result is not transportable across the host seam".into(),
-                            command_exit: false,
-                        }),
-                    },
-                    Err(break_) => Err(render_break(
-                        break_,
-                        sources,
-                        single_command.then_some(root),
-                    )),
-                },
-                // The single point a raw code becomes a transport code, so
-                // `status` and `Break::Exit` (clamped just above) agree.
-                status: status.clamp(0, 255),
-                single_command,
+                ending: render_ending(ending, sources),
                 captured,
-                timed_out,
+                trail: trail
+                    .iter()
+                    .map(|obs| {
+                        FOValue::try_from(&obs.to_wire())
+                            .expect("Observation::to_wire is total over the wire vocabulary")
+                    })
+                    .collect(),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod ending_wire_round_trip_tests {
+    //! The Report round-trips over every `Ending` arm: whatever a wire engine
+    //! encodes, a front-end decodes back byte-for-byte.
+
+    use super::*;
+
+    fn ran(ending: Ending) -> Report {
+        Report::Ran {
+            ending,
+            captured: None,
+            trail: Vec::new(),
+        }
+    }
+
+    fn round_trips(report: &Report) {
+        let encoded = serde_json::to_string(report).expect("Report must encode");
+        let decoded: Report = serde_json::from_str(&encoded).expect("Report must decode");
+        assert_eq!(&decoded, report, "round trip must be lossless: {encoded}");
+    }
+
+    #[test]
+    fn settled_round_trips() {
+        round_trips(&ran(Ending::Settled {
+            value: FOValue::Int { value: 1 },
+            status: 0,
+        }));
+    }
+
+    #[test]
+    fn raised_round_trips() {
+        round_trips(&ran(Ending::Raised {
+            rendered: "error: boom\n".into(),
+            command_exit: true,
+            single_command: false,
+            status: 7,
+        }));
+    }
+
+    #[test]
+    fn walled_round_trips() {
+        round_trips(&ran(Ending::Walled {
+            rendered: "error: timed out\n".into(),
+            status: 143,
+        }));
+    }
+
+    #[test]
+    fn exited_round_trips() {
+        round_trips(&ran(Ending::Exited(3)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopped_round_trips() {
+        round_trips(&ran(Ending::Stopped {
+            pgid: 1234,
+            signal: 20,
+            signal_name: "SIGTSTP".into(),
+        }));
+    }
+
+    #[test]
+    fn static_round_trips() {
+        round_trips(&Report::Static {
+            diagnostics: Diagnostics::Host("boom".into()),
+        });
     }
 }
 
@@ -578,7 +716,6 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FO
         }
         "workers" => {
             use crate::types::{HandleState, LeaseClass};
-            let now = shell.local.workers.epoch();
             #[allow(
                 clippy::cast_possible_wrap,
                 reason = "worker counts, sequential WorkerId(u64) ids, and u64 uptime/idle/settled-epoch quantities are all far below i64::MAX in any live process"
@@ -615,15 +752,6 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FO
                                 },
                             ),
                             ("running".into(), FOValue::Bool { value: running }),
-                            // A Bool, not the two epochs: a host keeps a clock
-                            // of its own, and the numbers must never be
-                            // compared across the boundary.
-                            (
-                                "born-this-epoch".into(),
-                                FOValue::Bool {
-                                    value: entry.birth_epoch == now,
-                                },
-                            ),
                             (
                                 "up-secs".into(),
                                 FOValue::Int {
@@ -1184,6 +1312,7 @@ mod identity_cancel_tests {
             io: RunIo::Capture,
             terminal: RequestedTerminalAccess::Denied,
             stdin: RunStdin::Empty,
+            trail: None,
         }
     }
 
@@ -1690,15 +1819,18 @@ impl Transport for WireTransport {
             match self.events_recv.recv() {
                 Some((did, Event::Report(report))) if did == id => {
                     return match report {
-                        Report::Ran { result: Ok(v), .. } => Ok(v),
                         Report::Ran {
-                            result: Err(Break::Error { rendered, .. }),
+                            ending: Ending::Settled { value, .. },
+                            ..
+                        } => Ok(value),
+                        Report::Ran {
+                            ending:
+                                Ending::Raised { rendered, .. } | Ending::Walled { rendered, .. },
                             ..
                         } => Err(rendered),
-                        Report::Ran {
-                            result: Err(break_),
-                            ..
-                        } => Err(format!("probe answered abnormally: {break_:?}")),
+                        Report::Ran { ending, .. } => {
+                            Err(format!("probe answered abnormally: {ending:?}"))
+                        }
                         Report::Static { diagnostics } => Err(match diagnostics {
                             Diagnostics::Host(msg) | Diagnostics::Parse(msg) => msg,
                             Diagnostics::Types(errs) => errs.join("\n"),
@@ -1802,6 +1934,7 @@ mod enquiry_tests {
                 io: RunIo::Capture,
                 terminal: RequestedTerminalAccess::Denied,
                 stdin: RunStdin::Empty,
+                trail: None,
             },
             surface: None,
             deferred: None,
@@ -1927,6 +2060,7 @@ mod enquiry_tests {
                     io: RunIo::Capture,
                     terminal: RequestedTerminalAccess::Denied,
                     stdin: RunStdin::Empty,
+                    trail: None,
                 },
             );
             Ok(req)
@@ -2023,6 +2157,7 @@ mod durability_tests {
             io: crate::run::RunIo::Capture,
             terminal: crate::run::RequestedTerminalAccess::Denied,
             stdin: crate::run::RunStdin::Empty,
+            trail: None,
         }
     }
 
@@ -2068,7 +2203,7 @@ mod durability_tests {
         )
         .expect("the next dispatch must still answer");
         match report {
-            Report::Ran { result, .. } => assert!(result.is_ok()),
+            Report::Ran { ending, .. } => assert!(matches!(ending, Ending::Settled { .. })),
             Report::Static { .. } => panic!("the healed session must evaluate"),
         }
     }
@@ -2259,18 +2394,17 @@ mod probe_tests {
 mod runtime_error_seam_tests {
     use super::*;
     use crate::source::SourceDb;
-    use crate::types::{Break as EngineBreak, Error};
+    use crate::types::Error;
 
     #[test]
     fn runtime_error_projects_to_a_full_diagnostic_string() {
         let db = SourceDb::default();
         let err = Error::new("boom", 3).with_hint("try harder");
         // A single command whose error carries no span: the compact one-liner.
-        let compact_root = Some(crate::source::FileId(0));
-        let Break::Error { rendered, .. } =
-            render_break(EngineBreak::Error(err), &db, compact_root)
+        let Ending::Raised { rendered, .. } =
+            render_raise(&err, true, crate::source::FileId(0), &db, false)
         else {
-            panic!("an engine runtime error must project to a transport Break::Error");
+            panic!("an engine runtime error must project to a wire Ending::Raised");
         };
         assert!(
             rendered.contains("error"),
@@ -2528,6 +2662,7 @@ mod wire_liveness_tests {
                 io: crate::run::RunIo::Capture,
                 terminal: crate::run::RequestedTerminalAccess::Denied,
                 stdin: crate::run::RunStdin::Empty,
+                trail: None,
             },
         );
 
@@ -2542,11 +2677,12 @@ mod wire_liveness_tests {
         peer.write_frame(&Frame::Event(
             id,
             Event::Report(Report::Ran {
-                result: Ok(FOValue::Int { value: 2 }),
-                status: 0,
-                single_command: false,
+                ending: Ending::Settled {
+                    value: FOValue::Int { value: 2 },
+                    status: 0,
+                },
                 captured: None,
-                timed_out: false,
+                trail: Vec::new(),
             }),
         ))
         .unwrap();

@@ -289,6 +289,7 @@ mod tests {
             io: RunIo::Capture,
             terminal: RequestedTerminalAccess::Denied,
             stdin: RunStdin::Empty,
+            trail: None,
         }
     }
 
@@ -376,7 +377,8 @@ mod tests {
             generation: 0,
             disk_warn_bytes: None,
             egress: crate::egress::Egress::for_test(),
-            acts: crate::fleet::desk::ActLedger::default(),
+            acts: crate::fleet::desk::ActFragment::default(),
+            principal: ral_core::host::user(),
             pins: None,
         }
     }
@@ -395,7 +397,13 @@ mod tests {
         .expect("the engine must answer the dispatch with a Report");
 
         assert!(
-            matches!(report, Report::Ran { result: Ok(_), .. }),
+            matches!(
+                report,
+                Report::Ran {
+                    ending: ral_core::transport::Ending::Settled { .. },
+                    ..
+                }
+            ),
             "`surface \\`ping` must settle to Report::Ran {{ Ok }}, got {report:?}"
         );
         // Core also reports an observation per dispatch on this sink; the
@@ -437,7 +445,10 @@ mod tests {
         .expect("the engine must answer the dispatch with a Report");
 
         match report {
-            Report::Ran { result: Ok(_), .. } => {}
+            Report::Ran {
+                ending: ral_core::transport::Ending::Settled { .. },
+                ..
+            } => {}
             other => panic!("`agents` must settle through the installed desk, got {other:?}"),
         }
 
@@ -482,7 +493,13 @@ mod tests {
         )
         .expect("the engine must answer the dispatch with a Report");
         assert!(
-            matches!(report, Report::Ran { result: Ok(_), .. }),
+            matches!(
+                report,
+                Report::Ran {
+                    ending: ral_core::transport::Ending::Settled { .. },
+                    ..
+                }
+            ),
             "the spawning statement itself must settle to Report::Ran {{ Ok }}, got {report:?}"
         );
 

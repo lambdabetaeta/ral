@@ -274,7 +274,7 @@ fn instantiate(
             // than outliving the load.
             shell.unregister_hook(&factory_name);
             match report {
-                RunReport::Ran { result, .. } => result,
+                RunReport::Ran { ending, .. } => ending.into_result(),
                 RunReport::Static { .. } => {
                     unreachable!("a thunk plugin factory never compiles source")
                 }

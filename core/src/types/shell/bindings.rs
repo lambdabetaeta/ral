@@ -367,6 +367,7 @@ mod chokepoint_tests {
                 io: RunIo::Inherit,
                 terminal: RequestedTerminalAccess::Leased,
                 stdin: RunStdin::Inherit,
+                trail: None,
             },
             surface: None,
             deferred: None,
@@ -374,7 +375,7 @@ mod chokepoint_tests {
             nursery: None,
             lifecycle: Box::new(()),
         }) {
-            RunReport::Ran { result, .. } => result,
+            RunReport::Ran { ending, .. } => ending.into_result(),
             RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
         }
     }
@@ -393,6 +394,7 @@ mod chokepoint_tests {
                 io: RunIo::Capture,
                 terminal: RequestedTerminalAccess::Leased,
                 stdin: RunStdin::Inherit,
+                trail: None,
             },
             surface: None,
             deferred: None,
@@ -581,6 +583,7 @@ mod chokepoint_tests {
                 io: RunIo::Inherit,
                 terminal: RequestedTerminalAccess::Leased,
                 stdin: RunStdin::Inherit,
+                trail: None,
             },
             surface: None,
             deferred: None,
@@ -647,6 +650,7 @@ mod chokepoint_tests {
                 io: RunIo::Inherit,
                 terminal: RequestedTerminalAccess::Leased,
                 stdin: RunStdin::Inherit,
+                trail: None,
             },
             surface: None,
             deferred: None,
@@ -655,8 +659,8 @@ mod chokepoint_tests {
             lifecycle: Box::new(()),
         });
         match report {
-            RunReport::Ran { result, .. } => {
-                result.expect("the hook body must run");
+            RunReport::Ran { ending, .. } => {
+                ending.into_result().expect("the hook body must run");
             }
             RunReport::Static { .. } => panic!("the registered hook must run"),
         }
@@ -821,6 +825,7 @@ mod chokepoint_tests {
                 io: RunIo::Inherit,
                 terminal: RequestedTerminalAccess::Leased,
                 stdin: RunStdin::Inherit,
+                trail: None,
             },
             surface: None,
             deferred: None,
@@ -828,8 +833,10 @@ mod chokepoint_tests {
             nursery: None,
             lifecycle: Box::new(()),
         }) {
-            RunReport::Ran { result, .. } => {
-                let err = result.expect_err("a pruned name must read as undefined");
+            RunReport::Ran { ending, .. } => {
+                let err = ending
+                    .into_result()
+                    .expect_err("a pruned name must read as undefined");
                 let msg = match err {
                     crate::types::Break::Error(e) => e.message,
                     other @ crate::types::Break::Escape(_) => {

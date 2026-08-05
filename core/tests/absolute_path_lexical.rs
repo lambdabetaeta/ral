@@ -30,6 +30,7 @@ fn top_level(shell: &mut Shell, source: &str) -> String {
             io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: RunStdin::Inherit,
+            trail: None,
         },
         surface: None,
         deferred: None,
@@ -38,7 +39,7 @@ fn top_level(shell: &mut Shell, source: &str) -> String {
         lifecycle: Box::new(()),
     });
     match report {
-        RunReport::Ran { result, .. } => match result.expect("evaluation succeeds") {
+        RunReport::Ran { ending, .. } => match ending.into_result().expect("evaluation succeeds") {
             Value::String(s) => s,
             other => panic!("expected a String, got {other:?}"),
         },

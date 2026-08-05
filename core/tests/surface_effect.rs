@@ -72,6 +72,7 @@ fn run(shell: &mut Shell, source: &str, surface: Option<SurfaceSink>) -> Settled
             io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: RunStdin::Inherit,
+            trail: None,
         },
         surface,
         deferred: None,
@@ -79,7 +80,7 @@ fn run(shell: &mut Shell, source: &str, surface: Option<SurfaceSink>) -> Settled
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        RunReport::Ran { result, .. } => result,
+        RunReport::Ran { ending, .. } => ending.into_result(),
         RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }
 }

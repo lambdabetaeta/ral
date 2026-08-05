@@ -462,21 +462,22 @@ fn engine_session(
                 }
                 WorkItem::Probe(reading) => match answer_probe(&mut shell, &reading) {
                     Ok(v) => Report::Ran {
-                        result: Ok(v),
-                        status: 0,
-                        single_command: false,
+                        ending: crate::transport::Ending::Settled {
+                            value: v,
+                            status: 0,
+                        },
                         captured: None,
-                        timed_out: false,
+                        trail: Vec::new(),
                     },
                     Err(message) => Report::Ran {
-                        result: Err(crate::transport::Break::Error {
+                        ending: crate::transport::Ending::Raised {
                             rendered: message,
                             command_exit: false,
-                        }),
-                        status: 1,
-                        single_command: false,
+                            single_command: false,
+                            status: 1,
+                        },
                         captured: None,
-                        timed_out: false,
+                        trail: Vec::new(),
                     },
                 },
             }))
@@ -860,6 +861,7 @@ mod engine_session_tests {
             io: crate::run::RunIo::Capture,
             terminal: crate::run::RequestedTerminalAccess::Denied,
             stdin: crate::run::RunStdin::Empty,
+            trail: None,
         }
     }
 
@@ -967,7 +969,11 @@ mod engine_session_tests {
     fn ran_int(report: &Report) -> i64 {
         match report {
             Report::Ran {
-                result: Ok(FOValue::Int { value }),
+                ending:
+                    crate::transport::Ending::Settled {
+                        value: FOValue::Int { value },
+                        ..
+                    },
                 ..
             } => *value,
             other => panic!("expected Ran Ok Int, got {other:?}"),

@@ -196,11 +196,11 @@ error with no room for a didactic message.
   a missing or surplus field is a static error naming it, which also
   sidesteps ral's grammar footgun where a nullary tag would otherwise absorb
   the following positional atom. `trigger` is `` `cron '<expr>' `` or
-  `` `after '<dur>' ``; `label` is `` `some '<name>' `` or `` `none `` (the
-  `sched-<n>` default). The label is the schedule's identity — unique among
-  live schedules, the `sched-<n>` namespace reserved for defaults — and the
-  receipt's `next-s` reads back the seconds to first fire. Gated on the
-  `--allow-schedule` grant, refused with a didactic text otherwise.
+  `` `after '<dur>' ``; `label` is a required `Str`. The label is the
+  schedule's identity — unique among live schedules, and always named by the
+  caller — and the receipt's `next-s` reads back the seconds to first fire.
+  Gated on the `--allow-schedule` grant, refused with a didactic text
+  otherwise.
 - **`schedules`** → `F [[label: Str, trigger: Str, next-s: Int,
   fires: Int]]`. Silent; `next-s` saturates to `i64::MAX` for a cron with no
   next occurrence.

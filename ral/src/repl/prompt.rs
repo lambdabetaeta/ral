@@ -69,6 +69,7 @@ fn prompt_run(name: &str) -> RunRequest<'static> {
             io: RunIo::Capture,
             terminal: RequestedTerminalAccess::Denied,
             stdin: RunStdin::Inherit,
+            trail: None,
         },
         surface: None,
         deferred: None,
@@ -128,8 +129,8 @@ pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell) -> String {
         shell.with_preserved_status(
             |shell| match shell.run(prompt_run("__eval_prompt_test__")) {
                 RunReport::Ran {
-                    result, captured, ..
-                } => (result, captured),
+                    ending, captured, ..
+                } => (ending.into_result(), captured),
                 RunReport::Static { .. } => {
                     unreachable!("a thunk prompt body never compiles source")
                 }
@@ -173,8 +174,8 @@ pub(super) fn write_terminal_title(shell: &Shell) {
 pub(super) fn render(shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) -> PromptText {
     let base = match shell.run(prompt_run("prompt")) {
         RunReport::Ran {
-            result, captured, ..
-        } => prompt_text_from(result, captured),
+            ending, captured, ..
+        } => prompt_text_from(ending.into_result(), captured),
         RunReport::Static { .. } => DEFAULT_PROMPT.to_string(),
     };
 

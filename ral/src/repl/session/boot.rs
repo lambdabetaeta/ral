@@ -419,7 +419,7 @@ fn run_startup(path: &str, block: Value, shell: &mut Shell) -> Result<(), String
         },
     );
     match shell.run(req) {
-        RunReport::Ran { result, .. } => match result {
+        RunReport::Ran { ending, .. } => match ending.into_result() {
             Ok(_) | Err(Break::Escape(Escape::Exit(_))) => Ok(()),
             Err(Break::Error(e)) => Err(format!("{path}: startup: {}", e.message)),
             #[cfg(unix)]

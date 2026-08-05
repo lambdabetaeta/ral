@@ -31,6 +31,7 @@ fn run_capture(shell: &mut Shell, src: &str) -> (Settled<Value>, String) {
             io: RunIo::Capture,
             terminal: RequestedTerminalAccess::Leased,
             stdin: RunStdin::Inherit,
+            trail: None,
         },
         surface: None,
         deferred: None,
@@ -39,11 +40,11 @@ fn run_capture(shell: &mut Shell, src: &str) -> (Settled<Value>, String) {
         lifecycle: Box::new(()),
     }) {
         RunReport::Ran {
-            result, captured, ..
+            ending, captured, ..
         } => {
             let stdout = captured.map(|c| c.stdout).unwrap_or_default();
             (
-                result,
+                ending.into_result(),
                 String::from_utf8(stdout).expect("captured stdout is UTF-8"),
             )
         }

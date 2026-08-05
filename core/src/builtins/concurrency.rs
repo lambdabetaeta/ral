@@ -10,14 +10,15 @@
 //! or by the completion delivery, whichever wins the `joined` latch.
 
 use crate::evaluator::absorb_tail;
+use crate::evaluator::audit::observe;
 use crate::evaluator::comp::{eval_comp, with_scope};
 use crate::evaluator::scope::error_record;
 use crate::io::{Sink, new_buffer, peek_buffer, take_buffer};
 use crate::serial::FOValue;
 use crate::types::{
     Break, CapReached, CompletedHandle, DeferredSink, Env, Error, Escape, EventSink, HandleInner,
-    HandleState, LeaseClass, Mooring, Raw, ReapCause, Settled, Shell, SurfaceBuffer, Tail, Value,
-    WorkerEntry, WorkerId, WorkerLease, WorkerRegistry, sig,
+    HandleState, LeaseClass, Mooring, Observed, Raw, ReapCause, Settled, Shell, SurfaceBuffer,
+    Tail, Value, WorkerEntry, WorkerId, WorkerLease, WorkerRegistry, sig,
 };
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
@@ -144,7 +145,7 @@ impl Drop for FlushGuard {
 pub(super) fn spawn_child<F>(
     snap: Arc<Env>,
     mooring: &Mooring,
-    shell: &Shell,
+    shell: &mut Shell,
     io_mode: ChildIoMode,
     class: LeaseClass,
     cmd: &str,
@@ -271,14 +272,16 @@ where
         reservation,
         WorkerEntry {
             id,
-            cmd,
+            cmd: cmd.clone(),
             started: std::time::SystemTime::now(),
             class,
-            birth_epoch: shell.local.workers.epoch(),
             settled_epoch: None,
             handle: handle.clone(),
         },
     );
+    // After the reservation, never before: a cap-refused spawn observes no
+    // birth, so no phantom worker reaches an orphan join.
+    observe(shell, mooring, Observed::Worker { id, cmd, class });
 
     // Armed after `register`, so the id the chain reaps always names an entry
     // that existed.  `keep()`-ed: the worker outlives this call.
@@ -356,7 +359,11 @@ fn worker_body(
 }
 
 /// `spawn <thunk>` -- spawn a concurrent block on a worker thread, return a handle.
-pub(crate) fn builtin_spawn(args: &[Value], mooring: &Mooring, shell: &Shell) -> Settled<Value> {
+pub(crate) fn builtin_spawn(
+    args: &[Value],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     let (body, captured) = expect_thunk(&args[0], "spawn")?;
     spawn_buffered(body, captured, mooring, shell)
 }
@@ -369,7 +376,7 @@ fn spawn_buffered(
     body: Arc<crate::ir::Comp>,
     captured: Arc<Env>,
     mooring: &Mooring,
-    shell: &Shell,
+    shell: &mut Shell,
 ) -> Settled<Value> {
     Ok(Value::Handle(spawn_child(
         captured,
@@ -417,7 +424,7 @@ fn spawn_labelled(
     captured: Arc<Env>,
     label: std::string::String,
     mooring: &Mooring,
-    shell: &Shell,
+    shell: &mut Shell,
 ) -> Settled<Value> {
     Ok(Value::Handle(spawn_child(
         captured,
@@ -1086,14 +1093,14 @@ mod tests {
     /// with `Deadline`, the entry removed, one `Idle` notice left to drain.
     #[test]
     fn unobserved_worker_is_reaped_at_its_idle_lease() {
-        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(40, 10_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<abandoned>",
@@ -1134,13 +1141,13 @@ mod tests {
     /// timer, its settled entry unstamped (the REPL never sweeps), no notices.
     #[test]
     fn spawn_under_interactive_frame_arms_no_lease() {
-        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<test>",
@@ -1185,7 +1192,7 @@ mod tests {
     /// error rather than reach the run's desk.
     #[test]
     fn spawned_worker_never_receives_the_enquiry_desk() {
-        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.desk = Some(Arc::new(EchoDesk) as crate::types::Desk);
         let snap = Arc::new(shell.mobile().scope);
@@ -1193,7 +1200,7 @@ mod tests {
         let handle = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<test>",
@@ -1218,7 +1225,7 @@ mod tests {
     /// `fork_into_nursery` answers the absence error rather than reach one.
     #[test]
     fn spawned_worker_never_receives_the_nursery() {
-        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.nursery = Some(crate::types::Nursery::default());
         let snap = Arc::new(shell.mobile().scope);
@@ -1226,7 +1233,7 @@ mod tests {
         let handle = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<test>",
@@ -1260,7 +1267,7 @@ mod tests {
         let handle = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<babysat>",
@@ -1299,7 +1306,7 @@ mod tests {
         let handle = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<immortal>",
@@ -1330,14 +1337,14 @@ mod tests {
     /// mark ends the chain, so its entry lingers as an unclaimed result.
     #[test]
     fn completed_unobserved_worker_is_not_reaped() {
-        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(100, 10_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<done>",
@@ -1374,14 +1381,14 @@ mod tests {
     /// nothing, so a listed-but-unpolled worker is reaped anyway.
     #[test]
     fn listing_does_not_renew_the_lease() {
-        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(40, 10_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<listed>",
@@ -1412,7 +1419,7 @@ mod tests {
     /// `Durable` birth outlives both bounds while its sibling is reaped.
     #[test]
     fn durable_worker_outlives_both_lease_bounds_while_its_sibling_reaps() {
-        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(40, 150));
 
@@ -1420,7 +1427,7 @@ mod tests {
         let durable = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Durable,
             "<service>",
@@ -1432,7 +1439,7 @@ mod tests {
         let sibling = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<sibling>",
@@ -1481,7 +1488,7 @@ mod tests {
         let handle = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Durable,
             "<service>",
@@ -1529,6 +1536,7 @@ mod tests {
                 io: RunIo::Capture,
                 terminal: RequestedTerminalAccess::Denied,
                 stdin: RunStdin::Empty,
+                trail: None,
             },
             surface: None,
             deferred: None,
@@ -1537,11 +1545,104 @@ mod tests {
             lifecycle: Box::new(()),
         };
         match shell.run(req) {
-            RunReport::Ran { result, .. } => result,
+            RunReport::Ran { ending, .. } => ending.into_result(),
             RunReport::Static { .. } => {
                 panic!("well-formed source must run, not fail statically: {src:?}")
             }
         }
+    }
+
+    /// [`run_source`], with a `worker_cap` the source runs under.
+    fn run_source_capped(shell: &mut Shell, src: &str, worker_cap: usize) -> Settled<Value> {
+        use crate::transport::{Program, Run};
+        use crate::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
+        let req = RunRequest {
+            run: Run {
+                program: Program::Source(src.into()),
+                script_name: "<test>".into(),
+                caps: Capabilities::root(),
+                wall: None,
+                deferred_lease: None,
+                worker_cap: Some(worker_cap),
+                io: RunIo::Capture,
+                terminal: RequestedTerminalAccess::Denied,
+                stdin: RunStdin::Empty,
+                trail: None,
+            },
+            surface: None,
+            deferred: None,
+            desk: None,
+            nursery: None,
+            lifecycle: Box::new(()),
+        };
+        match shell.run(req) {
+            RunReport::Ran { ending, .. } => ending.into_result(),
+            RunReport::Static { .. } => {
+                panic!("well-formed source must run, not fail statically: {src:?}")
+            }
+        }
+    }
+
+    /// The one `` `worker `` child of an `audit { }` tree, panicking if there
+    /// is not exactly one.
+    fn only_birth(children: &crate::types::List) -> Map {
+        let births: Vec<Map> = children
+            .iter()
+            .map(expect_map)
+            .filter(|&m| matches!(m.get("kind"), Some(Value::String(k)) if k == "worker"))
+            .cloned()
+            .collect();
+        match births.as_slice() {
+            [birth] => birth.clone(),
+            other => panic!("expected exactly one worker birth, got {other:?}"),
+        }
+    }
+
+    /// `audit { spawn … }` records the birth among its children: kind
+    /// `worker`, the spawn's own `cmd` and `class`, and the minted `id` — so a
+    /// later reader can join the trail against the registry.
+    #[test]
+    fn audit_over_spawn_carries_the_birth_id_and_all() {
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let tree = run_source(&mut shell, "audit { !{spawn { return 1 }} }")
+            .expect("audit over a plain spawn must succeed");
+        let fields = expect_map(&tree);
+        let Some(Value::List(children)) = fields.get("children") else {
+            panic!("expected a children List, got {fields:?}");
+        };
+        let birth = only_birth(children);
+        assert_eq!(birth.get("cmd"), Some(&Value::String("<block>".into())));
+        assert_eq!(birth.get("class"), Some(&Value::String("worker".into())));
+        assert!(
+            matches!(birth.get("id"), Some(Value::Int(_))),
+            "the birth carries the minted worker id: {birth:?}"
+        );
+    }
+
+    /// A spawn refused at the cap observes no birth: no phantom worker
+    /// reaches an orphan join, though the refused dispatch itself still
+    /// records its own (failing) command entry.
+    #[test]
+    fn cap_refused_spawn_observes_no_birth() {
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let tree = run_source_capped(&mut shell, "audit { !{spawn { return 1 }} }", 0)
+            .expect("audit swallows the refusal as data, not an error");
+        let fields = expect_map(&tree);
+        assert_eq!(
+            fields.get("status"),
+            Some(&Value::Int(1)),
+            "the refused spawn's exit code"
+        );
+        let Some(Value::List(children)) = fields.get("children") else {
+            panic!("expected a children List, got {fields:?}");
+        };
+        assert!(
+            children
+                .iter()
+                .map(expect_map)
+                .all(|m| !matches!(m.get("kind"), Some(Value::String(k)) if k == "worker")),
+            "a spawn refused at the cap must observe no birth: {children:?}"
+        );
     }
 
     fn service_test_shell() -> Shell {
@@ -1803,7 +1904,7 @@ mod tests {
         fn run(
             work: impl FnOnce(&Mooring, &mut Shell) -> Raw<Value> + Send + 'static,
         ) -> Vec<FOValue> {
-            let shell = Shell::new(crate::io::TerminalState::default());
+            let mut shell = Shell::new(crate::io::TerminalState::default());
             let batches = Arc::new(Mutex::new(Vec::new()));
             let mut m = Mooring::adrift();
             m.deferred = Some(Arc::new(RecDeferred(batches.clone())));
@@ -1813,7 +1914,7 @@ mod tests {
             let _handle = spawn_child(
                 snap,
                 &m,
-                &shell,
+                &mut shell,
                 ChildIoMode::Buffered,
                 LeaseClass::Worker,
                 "<block>",
@@ -1857,7 +1958,7 @@ mod tests {
         let handle = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<block>",
@@ -1905,7 +2006,7 @@ mod tests {
         let handle = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<block>",
@@ -1955,7 +2056,7 @@ mod tests {
         let handle = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<block>",
@@ -2001,13 +2102,13 @@ mod tests {
     /// and the registered handle is the returned one — by `Arc::ptr_eq`.
     #[test]
     fn spawn_child_registers_one_entry_with_matching_handle() {
-        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<test-cmd>",
@@ -2030,78 +2131,6 @@ mod tests {
         );
     }
 
-    /// Read one `` `workers `` probe row's `born-this-epoch`, by the `cmd` that
-    /// names it.
-    fn probe_born_this_epoch(shell: &mut Shell, cmd: &str) -> bool {
-        use crate::serial::FOValue;
-        let answer = crate::transport::answer_probe(
-            shell,
-            &FOValue::Variant {
-                label: "workers".into(),
-                payload: None,
-            },
-        )
-        .expect("the `workers probe answers");
-        let FOValue::List { items } = answer else {
-            panic!("the `workers probe must answer a List, got {answer:?}");
-        };
-        let mut rows = items.iter().filter_map(|item| {
-            let FOValue::Map { entries } = item else {
-                panic!("a `workers row must be a Map");
-            };
-            let field = |key: &str| entries.iter().find(|(k, _)| k == key).map(|(_, v)| v);
-            match (field("cmd"), field("born-this-epoch")) {
-                (Some(FOValue::String { value }), Some(FOValue::Bool { value: born }))
-                    if value == cmd =>
-                {
-                    Some(*born)
-                }
-                _ => None,
-            }
-        });
-        let born = rows.next().unwrap_or_else(|| panic!("no row names {cmd}"));
-        assert!(rows.next().is_none(), "exactly one row names {cmd}");
-        born
-    }
-
-    /// The spawn door stamps the registry's clock as it stands, and the probe
-    /// reports that stamp as a Bool rather than a number: true for a worker
-    /// born under the dispatch now running, false once the clock has ticked on.
-    #[test]
-    fn born_this_epoch_is_true_only_under_the_birth_dispatch() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        let m = Mooring::adrift();
-        // Three dispatches before the birth, so a stamp of 0 cannot pass by
-        // accident.
-        tick(&shell, 3);
-        let _handle = spawn_child(
-            Arc::new(shell.mobile().scope),
-            &m,
-            &shell,
-            ChildIoMode::Buffered,
-            LeaseClass::Worker,
-            "<newborn>",
-            |_, _child| Ok(Value::Unit),
-        )
-        .expect("spawn must succeed");
-
-        assert_eq!(
-            shell.local.workers.snapshot()[0].birth_epoch,
-            3,
-            "the spawn door stamps the epoch of the dispatch it was called under"
-        );
-        assert!(
-            probe_born_this_epoch(&mut shell, "<newborn>"),
-            "a worker born under the current dispatch answers born-this-epoch"
-        );
-
-        tick(&shell, 1);
-        assert!(
-            !probe_born_this_epoch(&mut shell, "<newborn>"),
-            "the next dispatch inherits it; born-this-epoch is then false"
-        );
-    }
-
     /// Every eliminator that observes a settled worker removes its entry, while a
     /// `` `pending `` `poll` leaves it: only observation may mutate the registry.
     #[test]
@@ -2114,7 +2143,7 @@ mod tests {
         let h1 = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<a>",
@@ -2129,7 +2158,7 @@ mod tests {
         let h2 = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<b>",
@@ -2145,7 +2174,7 @@ mod tests {
         let h3 = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<c>",
@@ -2172,7 +2201,7 @@ mod tests {
         let h4 = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<d>",
@@ -2207,7 +2236,7 @@ mod tests {
         let winner = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<winner>",
@@ -2222,7 +2251,7 @@ mod tests {
         let loser1 = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<loser1>",
@@ -2237,7 +2266,7 @@ mod tests {
         let loser2 = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<loser2>",
@@ -2273,7 +2302,7 @@ mod tests {
     /// ahead of it; production order is deliberately unordered.
     #[test]
     fn nested_spawn_registers_into_the_owning_shells_registry() {
-        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
         let snap = Arc::new(shell.mobile().scope);
         let (go_tx, go_rx) = mpsc::channel::<()>();
@@ -2281,7 +2310,7 @@ mod tests {
         let _outer = spawn_child(
             snap,
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<outer>",
@@ -2340,7 +2369,7 @@ mod tests {
         let handle = spawn_child(
             Arc::new(shell.mobile().scope),
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<done>",
@@ -2383,13 +2412,13 @@ mod tests {
     /// worker's scope through `LocalState`'s teardown, unaided.
     #[test]
     fn dropping_a_shell_cancels_its_workers() {
-        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
         let (gate_tx, gate_rx) = mpsc::channel::<()>();
         let _handle = spawn_child(
             Arc::new(shell.mobile().scope),
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<gated>",
@@ -2422,12 +2451,12 @@ mod tests {
     /// "retain indefinitely", structural.
     #[test]
     fn unarmed_sweep_retains_settled_entries_indefinitely() {
-        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
         let handle = spawn_child(
             Arc::new(shell.mobile().scope),
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<kept>",
@@ -2455,7 +2484,7 @@ mod tests {
         let handle = spawn_child(
             Arc::new(shell.mobile().scope),
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<claimed>",
@@ -2494,7 +2523,7 @@ mod tests {
         let handle = spawn_child(
             Arc::new(shell.mobile().scope),
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<live>",
@@ -2539,7 +2568,7 @@ mod tests {
             let handle = spawn_child(
                 Arc::new(shell.mobile().scope),
                 &m,
-                &shell,
+                &mut shell,
                 ChildIoMode::Buffered,
                 LeaseClass::Worker,
                 cmd,
@@ -2557,7 +2586,7 @@ mod tests {
         let refused = spawn_child(
             Arc::new(shell.mobile().scope),
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<three>",
@@ -2584,7 +2613,7 @@ mod tests {
         spawn_child(
             Arc::new(shell.mobile().scope),
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<after>",
@@ -2602,7 +2631,7 @@ mod tests {
     /// every class, so one `Durable` and one `Worker` fill a cap of 2.
     #[test]
     fn durable_birth_counts_toward_the_cap() {
-        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.worker_cap = Some(2);
 
@@ -2615,7 +2644,7 @@ mod tests {
             spawn_child(
                 Arc::new(shell.mobile().scope),
                 &m,
-                &shell,
+                &mut shell,
                 ChildIoMode::Buffered,
                 class,
                 cmd,
@@ -2631,7 +2660,7 @@ mod tests {
         let refused = spawn_child(
             Arc::new(shell.mobile().scope),
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<three>",
@@ -2651,13 +2680,13 @@ mod tests {
     /// running workers, not registry entries.
     #[test]
     fn settled_entries_do_not_block_admission() {
-        let shell = Shell::new(crate::io::TerminalState::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.worker_cap = Some(1);
         let first = spawn_child(
             Arc::new(shell.mobile().scope),
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<done>",
@@ -2670,7 +2699,7 @@ mod tests {
         spawn_child(
             Arc::new(shell.mobile().scope),
             &m,
-            &shell,
+            &mut shell,
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<next>",

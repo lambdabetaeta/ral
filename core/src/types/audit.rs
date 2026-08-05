@@ -66,6 +66,14 @@ impl AuditFragment {
     }
 }
 
+/// A claim on the trail returned by [`Audit::open`] and consumed by
+/// [`Audit::close`]. Not `Clone`, not `Copy`: exactly one close ends the
+/// scope it opened.
+pub struct TrailScope {
+    opened: bool,
+    mark: usize,
+}
+
 /// Audit collector — one per `Shell`, collecting exactly while `trail` is
 /// `Some`.
 #[derive(Default, Debug)]
@@ -92,7 +100,7 @@ impl Audit {
         matches!(self.capture, CapturePolicy::Bytes)
     }
 
-    /// Overwrite the capture policy.  A scope wants `with_capture_policy` in
+    /// Overwrite the capture policy.  A scope wants `delimited` in
     /// [`crate::evaluator::audit`], whose merge is monotonic: an inner `try`
     /// must not silence an outer `audit`.
     pub fn set_capture(&mut self, policy: CapturePolicy) {
@@ -130,16 +138,33 @@ impl Audit {
         }
     }
 
-    /// Open a trail if none is open yet, returning its current length as a mark.
-    pub fn force_open(&mut self) -> usize {
-        self.trail.get_or_insert_default().observations.len()
+    /// Open a delimited scope on the trail: install one if none is open, or
+    /// mark the open one's current length. `opened` records which happened,
+    /// so the matching [`Self::close`] knows whether it owns the trail or is
+    /// only reading a suffix of an outer scope's.
+    pub fn open(&mut self) -> TrailScope {
+        let opened = self.trail.is_none();
+        let mark = self.trail.get_or_insert_default().observations.len();
+        TrailScope { opened, mark }
     }
 
-    /// The observations pushed since `mark`.
-    pub fn since(&self, mark: usize) -> Vec<Observation> {
-        self.trail
-            .as_ref()
-            .map_or_else(Vec::new, |t| t.observations[mark..].to_vec())
+    /// End a scope: the opener drains the trail to empty and closes it, for
+    /// every exit — the caller is responsible for reaching this on a panic
+    /// too. A nested scope copies its suffix and leaves the trail open,
+    /// intact, for its own opener to close later.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "a scope is a claim, spent exactly once: taking it by value is the discipline"
+    )]
+    pub fn close(&mut self, scope: TrailScope) -> Vec<Observation> {
+        let TrailScope { opened, mark } = scope;
+        if opened {
+            self.trail.take().map_or_else(Vec::new, |t| t.observations)
+        } else {
+            self.trail
+                .as_ref()
+                .map_or_else(Vec::new, |t| t.observations[mark..].to_vec())
+        }
     }
 
     /// Drain the trail, leaving it open but empty — how a sandbox or pipeline
@@ -205,4 +230,79 @@ pub fn tree_value(
         ("error".into(), Value::String(error.unwrap_or_default())),
         ("children".into(), Value::list(children_list)),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::observation::Observed;
+    use super::*;
+    use crate::diagnostic::CallSite;
+
+    fn dummy(pattern: &str) -> Observation {
+        Observation::instant(
+            CallSite::default(),
+            String::new(),
+            Observed::Grep {
+                scope: String::new(),
+                pattern: pattern.into(),
+            },
+        )
+    }
+
+    fn pattern_of(obs: &Observation) -> &str {
+        match &obs.what {
+            Observed::Grep { pattern, .. } => pattern,
+            _ => unreachable!(),
+        }
+    }
+
+    /// An opener's close drains the trail to `None` — the next scope starts
+    /// from a clean slate rather than inheriting a stale `Some`.
+    #[test]
+    fn opener_close_drains_and_closes() {
+        let mut audit = Audit::default();
+        let scope = audit.open();
+        audit.push(dummy("a"));
+        audit.push(dummy("b"));
+        let drained = audit.close(scope);
+        assert_eq!(
+            drained.iter().map(pattern_of).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert!(
+            !audit.active(),
+            "the opener's close must leave no trail open"
+        );
+    }
+
+    /// A scope opened onto an already-open trail reads only its own suffix
+    /// and leaves the trail open — the flat merge law: an outer scope still
+    /// sees everything a nested one pushed.
+    #[test]
+    fn nested_close_reads_suffix_and_leaves_trail_open() {
+        let mut audit = Audit::default();
+        let outer = audit.open();
+        audit.push(dummy("outer-1"));
+
+        let inner = audit.open();
+        audit.push(dummy("inner-1"));
+        let inner_children = audit.close(inner);
+        assert_eq!(
+            inner_children.iter().map(pattern_of).collect::<Vec<_>>(),
+            ["inner-1"]
+        );
+        assert!(
+            audit.active(),
+            "a nested close must not close the trail its opener still owns"
+        );
+
+        audit.push(dummy("outer-2"));
+        let outer_children = audit.close(outer);
+        assert_eq!(
+            outer_children.iter().map(pattern_of).collect::<Vec<_>>(),
+            ["outer-1", "inner-1", "outer-2"],
+            "the outer scope sees the inner scope's entries too — the flat merge"
+        );
+        assert!(!audit.active());
+    }
 }

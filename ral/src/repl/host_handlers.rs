@@ -319,7 +319,6 @@ mod tests {
             cmd: cmd.to_string(),
             started: std::time::SystemTime::now(),
             class: ral_core::types::LeaseClass::Worker,
-            birth_epoch: 0,
             settled_epoch: None,
             handle: ral_core::types::HandleInner {
                 result: Arc::new(Mutex::new(None)),
@@ -460,6 +459,7 @@ mod tests {
                 io: RunIo::Capture,
                 terminal: RequestedTerminalAccess::Denied,
                 stdin: RunStdin::Empty,
+                trail: None,
             },
             surface: None,
             deferred: None,
@@ -468,7 +468,9 @@ mod tests {
             lifecycle: Box::new(()),
         };
         match shell.run(req) {
-            RunReport::Ran { result, .. } => result.expect("a well-formed source must run"),
+            RunReport::Ran { ending, .. } => {
+                ending.into_result().expect("a well-formed source must run")
+            }
             RunReport::Static { .. } => {
                 panic!("well-formed source must run, not fail statically: {src:?}")
             }

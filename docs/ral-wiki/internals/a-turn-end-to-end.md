@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 19d53bb
 verified_at_date: 2026-07-28
-anchors: [run, run_nested, Program, register_hook, RunRequest, RunReport, RunIo, Mooring, IoLoan, compile_run, build_run, run_framed, eval_top_level, Mobile, compile_and_typecheck]
+anchors: [run, run_nested, enter, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, eval_top_level, Mobile, compile_and_typecheck]
 ---
 
 # A run, end to end
@@ -15,7 +15,7 @@ applied to first-order arguments — a `Block`/`Lambda` the host stored by name
 in the session-lived hook table (`Shell::register_hook`), so the host conveys
 data, never closures, across the dispatch boundary. No host reimplements
 evaluation; each is a *request supplier* that hands the door a `RunRequest` and
-renders the flat `RunReport` its own way
+renders `RunReport` its own way
 ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
 [[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). **Completion is the
 door returning** — never a channel disconnecting — so a detached `spawn`ed
@@ -55,6 +55,9 @@ is exactly the places hosts differ:
   installed only for this run; `None` is the identity.
 - **Lifecycle** — optional pre/post-exec hooks (`Box::new(())` for a host with
   none).
+- **Trail** — `trail: Option<CapturePolicy>` ([[design/audit|audit]]). `Some`
+  delimits this dispatch's own extent as an audit scope and carries it home on
+  `RunReport::Ran`; `None` neither opens a scope nor collects one.
 
 **The spine the door orchestrates is one straight line**, owning resources
 (`Sink`, `Source`, the run's frame, guards, buffers) while the request describes
@@ -110,11 +113,30 @@ module's framed scaffold:
   the transport status, fires the post-exec hook, and the guard drops.
 - Back in `run_built`, the wall is **disarmed before the cause is read**, so a
   reaper tripping in the gap between eval returning and classification cannot
-  misread a run that finished inside its budget as timed out. `timed_out` is
-  then `true` only for a `Deadline` cause that genuinely elapsed; the captured
-  bytes (if any) are drained, and everything flattens into
-  `RunReport::Ran { result, status, single_command, root, captured, timed_out }`,
-  carrying the `Settled<Value>` for the host to render.
+  misread a run that finished inside its budget as timed out. `classify_ending`
+  then folds the settled `Result`, the transport status, `single_command`,
+  `root`, and whether a `Deadline` cause genuinely elapsed into one
+  `run::Ending` — `Settled`, `Raised`, `Walled`, `Exited`, or (unix) `Stopped`
+  — so `Ok` beside a stray "timed out" flag is no longer a state the type can
+  hold. `RunReport::Ran { ending, captured, trail }` carries it home; `trail`
+  starts `Vec::new()` here — `run_built` has no view of the dispatch's own
+  scope, only of what a body opened and closed on its own account.
+- One level up, at `Shell::enter` — the durability wrapper both `run` and
+  `run_nested` funnel through — a `Run.trail: Some` holds a `TrailScope`
+  *outside* the `catch_unwind` that recovers a mid-run panic, opened before
+  `dispatch` runs and closed once it returns, on every exit. That placement is
+  load-bearing: the `Mobile` checkpoint the panic arm rolls back does not
+  cover `local.audit`, so only a scope the panic itself cannot skip keeps
+  the trail's close law true at dispatch granularity. A clean exit's
+  observations land in `RunReport::Ran.trail`; a caught panic's are drained
+  and discarded — the panicked dispatch reports `Static`, never a trail.
+  `RunReport::into_report` then renders the engine's `Ending` against the
+  `SourceDb` — a `Raised`/`Walled` error becomes the string the host prints
+  verbatim, `command_exit`/`status` computed alongside it — onto the wire's own
+  `transport::Ending`, and projects each `Observation` through
+  [[design/audit|`to_wire`]] onto `Report::Ran.trail: Vec<FOValue>`, unbounded
+  by declaration — the wire's frame fuse is the shared backstop, as it already
+  is for `captured`.
 
 **The hosts differ only in the request they supply.**
 
@@ -131,7 +153,8 @@ module's framed scaffold:
   "<tool>"`, its session grant profile, a per-tool `wall` and a 1 h idle
   `deferred_lease` under a 24 h backstop, plus a `worker_cap` on concurrently
   running workers, `RunIo::Capture`, `RequestedTerminalAccess::Denied`,
-  `RunStdin::Empty`; it builds a `Program::Source` `Run` and drains it through
+  `RunStdin::Empty`, `trail: Some(CapturePolicy::Off)`; it builds a
+  `Program::Source` `Run` and drains it through
   `transport::dispatch_to_report`, applying each live surface value onto its
   presentation bus, and renders the capped
   `ToolResult`. **The pushed grant frame *is* the sandbox** — ral's

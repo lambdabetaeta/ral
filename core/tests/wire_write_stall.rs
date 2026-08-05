@@ -46,6 +46,7 @@ fn big_run() -> Run {
         io: RunIo::Capture,
         terminal: RequestedTerminalAccess::Denied,
         stdin: RunStdin::Empty,
+        trail: None,
     }
 }
 

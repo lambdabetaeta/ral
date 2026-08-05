@@ -18,7 +18,7 @@
 #![cfg(unix)]
 
 use ral_core::transport::{IdentityTransport, Program, Report, Run, Transport, dispatch_to_report};
-use ral_core::types::{Capabilities, Shell};
+use ral_core::types::{Capabilities, CapturePolicy, Observed, Shell};
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use std::time::{Duration, Instant};
 
@@ -46,6 +46,7 @@ fn a_cancel_through_the_control_door_stops_an_in_flight_run() {
             io: RunIo::Capture,
             terminal: RequestedTerminalAccess::Denied,
             stdin: RunStdin::Empty,
+            trail: Some(CapturePolicy::Off),
         },
         |_| {},
         |_| unreachable!("no desk is installed"),
@@ -57,14 +58,33 @@ fn a_cancel_through_the_control_door_stops_an_in_flight_run() {
         elapsed < Duration::from_secs(10),
         "the cancel never reached the run: it slept {elapsed:?} of its 30 s"
     );
-    let Report::Ran { status, .. } = report else {
+    let Report::Ran { ending, trail, .. } = report else {
         panic!("the run must reach evaluation, got {report:?}");
     };
     // `terminate_group` reserves SIGINT for `Interrupt` and opens with SIGTERM
     // for every other cause, so the child dies of signal 15 and the run reports
     // the death it actually died of.
     assert_eq!(
-        status, 143,
+        ending.status(),
+        143,
         "an explicitly cancelled child is torn down with SIGTERM"
+    );
+
+    // The cancel unwinds as a `Break::Error`, so the struck `/bin/sleep`
+    // itself still settles into an observation before the unwind reaches the
+    // run door — `Audit::close` reads that prefix regardless of how the run
+    // ended.
+    let struck = trail.into_iter().find_map(|fo| {
+        let obs = ral_core::types::Observation::from_value(&ral_core::Value::from(fo))?;
+        match obs.what {
+            Observed::Command { argv, .. } if argv.first().is_some_and(|a| a.contains("sleep")) => {
+                Some(argv)
+            }
+            _ => None,
+        }
+    });
+    assert!(
+        struck.is_some(),
+        "the Report must carry the struck command in its trail"
     );
 }

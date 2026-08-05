@@ -242,6 +242,12 @@ impl Mooring {
         }
     }
 
+    /// Whether anything is on the other end — what lets a door skip building
+    /// an observation nobody would receive.
+    pub(crate) fn has_surface(&self) -> bool {
+        self.surface.is_some()
+    }
+
     /// The one sink door.  Every door core owns reaches it through
     /// `evaluator::audit::observe_stamped`, which builds the [`Value`] from
     /// [`crate::types::Observation::to_value`] — the single map shape shared
@@ -249,26 +255,20 @@ impl Mooring {
     /// vocabulary of its own may still hand in a fully-formed [`Value`]
     /// directly.  Encoded here into the first-order
     /// [`FOValue`](crate::serial::FOValue) the sink carries; inert with no
-    /// sink installed.  A closure or a handle cannot cross the rail, and core
-    /// has no host vocabulary to report that in, so the drop is a
-    /// `dbg_trace`.
-    /// Whether anything is on the other end — what lets a door skip building
-    /// an observation nobody would receive.
-    pub(crate) fn has_surface(&self) -> bool {
-        self.surface.is_some()
-    }
-
+    /// sink installed.  Total: a `Handle` or a closure reachable through `ev`
+    /// crosses as its `opaque` placeholder rather than being dropped.
+    ///
+    /// # Panics
+    /// Never: the scrub erases exactly the leaves
+    /// [`FOValue::try_from`](crate::serial::FOValue) rejects.
     pub fn surface(&self, ev: &Value) {
-        match crate::serial::FOValue::try_from(ev) {
-            Ok(fo) => {
-                if let Some(sink) = self.surface.as_ref() {
-                    sink.emit(&fo);
-                }
-            }
-            Err(_) => {
-                crate::dbg_trace!("surface", "dropping non-first-order surface value");
-            }
-        }
+        let Some(sink) = self.surface.as_ref() else {
+            return;
+        };
+        let scrubbed = crate::serial::scrub(ev, &crate::serial::no_wire_form);
+        let fo = crate::serial::FOValue::try_from(&scrubbed)
+            .expect("the scrub erases every leaf a first-order value rejects");
+        sink.emit(&fo);
     }
 
     /// Derive a mooring identical to this one with its terminal authority
@@ -312,5 +312,92 @@ impl Drop for NurseryGuard {
         if let Some(nursery) = self.0.as_ref() {
             nursery.clear();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::serial::{FOValue, OPAQUE_TAG};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingSink(Mutex<Vec<FOValue>>);
+
+    impl EventSink for RecordingSink {
+        fn emit(&self, ev: &FOValue) {
+            self.0.lock().unwrap().push(ev.clone());
+        }
+    }
+
+    /// A `Handle` with no worker behind it — just enough to exercise
+    /// [`Mooring::surface`]'s totality, never run.
+    fn dummy_handle() -> Value {
+        use crate::types::{HandleInner, HandleState};
+        Value::Handle(HandleInner {
+            result: Arc::new(Mutex::new(None)),
+            cached: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(HandleState::Running)),
+            stdout_buf: Arc::new(Mutex::new(Vec::new())),
+            stderr_buf: Arc::new(Mutex::new(Vec::new())),
+            surface_buf: Arc::new(Mutex::new(Vec::new())),
+            joined: Arc::new(Mutex::new(false)),
+            last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
+            cmd: "<test>".into(),
+            cancel: crate::process::CancelScope::default(),
+        })
+    }
+
+    fn mooring_with(recorder: Arc<RecordingSink>) -> Mooring {
+        let mut mooring = Mooring::adrift();
+        mooring.surface = Some(recorder);
+        mooring
+    }
+
+    /// A value whose `Handle` reaches the sink as its tagged placeholder
+    /// rather than the whole emission being dropped.
+    #[test]
+    fn surface_scrubs_a_handle_instead_of_dropping() {
+        let recorder = Arc::new(RecordingSink::default());
+        let mooring = mooring_with(recorder.clone());
+
+        mooring.surface(&Value::map(vec![("value".to_string(), dummy_handle())]));
+
+        let emitted = recorder.0.lock().unwrap().clone();
+        assert_eq!(emitted.len(), 1, "the emission must not be dropped");
+        let FOValue::Map { entries } = &emitted[0] else {
+            panic!("a map surfaces as a map")
+        };
+        let (_, value) = entries
+            .iter()
+            .find(|(k, _)| k == "value")
+            .expect("the value key survives");
+        assert_eq!(
+            *value,
+            FOValue::Variant {
+                label: OPAQUE_TAG.to_string(),
+                payload: Some(Box::new(FOValue::Map {
+                    entries: vec![(
+                        "type".to_string(),
+                        FOValue::String {
+                            value: "handle".to_string()
+                        }
+                    )]
+                }))
+            }
+        );
+    }
+
+    /// A first-order value crosses unchanged: totality does not tax the
+    /// common case.
+    #[test]
+    fn surface_leaves_a_first_order_value_untouched() {
+        let recorder = Arc::new(RecordingSink::default());
+        let mooring = mooring_with(recorder.clone());
+
+        mooring.surface(&Value::Int(7));
+
+        let emitted = recorder.0.lock().unwrap().clone();
+        assert_eq!(emitted.as_slice(), [FOValue::Int { value: 7 }]);
     }
 }

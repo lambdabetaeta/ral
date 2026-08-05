@@ -9,7 +9,9 @@
 use ral_core::Value as RalValue;
 use std::borrow::Cow;
 
-use ral_core::types::{CommandOrigin, Decision, Map, Observation, Observed, WriteOutcome};
+use ral_core::types::{
+    CommandOrigin, Decision, LeaseClass, Map, Observation, Observed, WorkerId, WriteOutcome,
+};
 
 use super::diff::whole_file_hunks;
 use super::{Card, Mark, Role, Span};
@@ -66,11 +68,18 @@ pub(crate) fn rail_place(what: &Observed) -> Option<RailPlace> {
             ..
         } => RailPlace::Grouped(ObservationKind::Exec),
         Observed::Write { .. } => RailPlace::Barrier,
+        // A denial reads best whole, not dissolved into a tally; a birth
+        // stays whole for the same reason — kept even where redundant, so
+        // the rail can name what the trail names.
         Observed::Capability {
             decision: Decision::Denied,
             ..
-        } => RailPlace::Standalone,
-        Observed::Command { .. } | Observed::Capability { .. } => return None,
+        }
+        | Observed::Worker { .. } => RailPlace::Standalone,
+        // Desk-fed only: an `Act` never reaches the rail from the engine seam.
+        Observed::Command { .. } | Observed::Capability { .. } | Observed::Act { .. } => {
+            return None;
+        }
     })
 }
 
@@ -116,6 +125,10 @@ pub(crate) fn observation_card(what: &Observed) -> Card {
             decision,
             fields,
         } => capability_spans(resource, *decision, fields),
+        Observed::Worker { id, cmd, class } => worker_spans(*id, cmd, *class),
+        Observed::Act { .. } => {
+            unreachable!("an `Act` never reaches the rail from the engine seam")
+        }
     };
     let mut marks = vec![Mark::Text { spans }];
     marks.extend(body);
@@ -203,6 +216,27 @@ fn capability_spans(resource: &str, decision: Decision, fields: &Map) -> Vec<Spa
         spans.push(Span::new(Role::Muted, capability_fields(fields)));
     }
     spans
+}
+
+fn lease_class_label(class: LeaseClass) -> &'static str {
+    match class {
+        LeaseClass::Worker => "worker",
+        LeaseClass::Durable => "durable",
+    }
+}
+
+/// A worker birth's heading, `worker #id cmd class` — a mark of its own,
+/// never `spawn`'s `$ cmd → status` row, so a birth reads as what it is
+/// rather than as another exec.
+fn worker_spans(id: WorkerId, cmd: &str, class: LeaseClass) -> Vec<Span> {
+    vec![
+        Span::new(Role::Muted, "worker "),
+        Span::new(Role::Path, format!("#{}", id.0)),
+        Span::plain(" "),
+        Span::new(Role::Code, cmd),
+        Span::plain(" "),
+        Span::new(Role::Muted, lease_class_label(class)),
+    ]
 }
 
 fn capability_fields(fields: &Map) -> String {

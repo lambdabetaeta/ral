@@ -973,7 +973,7 @@ mod tests {
             .schedule(
                 crate::fleet::schedule::Trigger::After(std::time::Duration::from_hours(1)),
                 "ping".into(),
-                None,
+                "ping".into(),
                 &agent.inbox.mailbox(),
             )
             .expect("a one-hour `after` trigger must arm");

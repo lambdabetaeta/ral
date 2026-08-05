@@ -71,6 +71,7 @@ fn top_level_under_request(shell: &mut Shell, caps: Capabilities, source: &str) 
             io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: RunStdin::Inherit,
+            trail: None,
         },
         surface: None,
         deferred: None,
@@ -78,7 +79,7 @@ fn top_level_under_request(shell: &mut Shell, caps: Capabilities, source: &str) 
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        RunReport::Ran { result, .. } => result,
+        RunReport::Ran { ending, .. } => ending.into_result(),
         RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }
 }
@@ -197,6 +198,7 @@ fn recovered_try_clears_the_status_register() {
             io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: RunStdin::Inherit,
+            trail: None,
         },
         surface: None,
         deferred: None,
@@ -204,7 +206,7 @@ fn recovered_try_clears_the_status_register() {
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        RunReport::Ran { status, .. } => status,
+        RunReport::Ran { ending, .. } => ending.status(),
         RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     };
 

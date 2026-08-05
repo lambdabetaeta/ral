@@ -36,6 +36,7 @@ fn top_level(shell: &mut Shell, source: &str) -> Value {
             io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: RunStdin::Inherit,
+            trail: None,
         },
         surface: None,
         deferred: None,
@@ -43,7 +44,7 @@ fn top_level(shell: &mut Shell, source: &str) -> Value {
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        RunReport::Ran { result, .. } => result.expect("evaluation succeeds"),
+        RunReport::Ran { ending, .. } => ending.into_result().expect("evaluation succeeds"),
         RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }
 }

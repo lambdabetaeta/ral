@@ -328,23 +328,14 @@ pub struct ScheduleInfo {
     pub fires: u64,
 }
 
-/// What [`ScheduleRegistry::schedule`] answers: the resolved label — the
-/// caller's own, or the minted default — and the delay to the first fire.
+/// What [`ScheduleRegistry::schedule`] answers: the label the caller named,
+/// and the delay to the first fire.
 ///
 /// Model-facing, a schedule is known by its label and nothing else.
 #[derive(Debug)]
 pub struct ScheduleReceipt {
     pub label: String,
     pub next_in: Duration,
-}
-
-/// Whether `label` has the `sched-<digits>` shape minted defaults use.
-/// [`ScheduleRegistry::schedule`] refuses a user label of this shape, which
-/// is what makes every minted default collision-free by construction.
-fn is_reserved_label(label: &str) -> bool {
-    label
-        .strip_prefix("sched-")
-        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// A session's live scheduled wakeups.  Cheap to clone, and the clone shares
@@ -390,42 +381,31 @@ impl ScheduleRegistry {
         }
     }
 
-    /// Add a schedule and arm its first occurrence on the reaper.  `label`
-    /// defaults to `sched-{id}`; a supplied one is refused if a live schedule
-    /// already bears it, or if it has the reserved shape [`is_reserved_label`]
-    /// names.  `mailbox` is the owning session's — a session schedules only
-    /// itself.
+    /// Add a schedule and arm its first occurrence on the reaper.  `label` is
+    /// refused if a live schedule already bears it.  `mailbox` is the owning
+    /// session's — a session schedules only itself.
     ///
     /// # Errors
-    /// A trigger with no next occurrence, or a taken or reserved `label`.
+    /// A trigger with no next occurrence, or a `label` already borne by a
+    /// live schedule.
     pub fn schedule(
         &self,
         trigger: Trigger,
         prompt: String,
-        label: Option<String>,
+        label: String,
         mailbox: &Mailbox,
     ) -> Result<ScheduleReceipt, String> {
-        if let Some(label) = &label
-            && is_reserved_label(label)
-        {
-            return Err(format!(
-                "label '{label}': the sched-<n> form is reserved for default labels — pick another name"
-            ));
-        }
         let delay = trigger
             .next_delay()
             .ok_or_else(|| "this trigger has no next occurrence".to_string())?;
         let mut g = self.lock();
-        if let Some(label) = &label
-            && g.entries.values().any(|e| &e.label == label)
-        {
+        if g.entries.values().any(|e| e.label == label) {
             return Err(format!(
                 "label '{label}' is already borne by a live schedule — pick another, or unschedule it first"
             ));
         }
         let id = g.next_id;
         g.next_id += 1;
-        let label = label.unwrap_or_else(|| format!("sched-{id}"));
         let deadline = self.arm_deadline(id, mailbox, delay);
         g.entries.insert(
             id,
@@ -680,7 +660,7 @@ mod tests {
                     expr: "0 3 * * *".into(),
                 },
                 "run tests".into(),
-                Some("nightly".into()),
+                "nightly".into(),
                 &inbox.mailbox(),
             )
             .unwrap();
@@ -704,7 +684,7 @@ mod tests {
         reg.schedule(
             Trigger::After(Duration::from_mins(1)),
             "x".into(),
-            Some("nightly".into()),
+            "nightly".into(),
             &inbox.mailbox(),
         )
         .unwrap();
@@ -712,7 +692,7 @@ mod tests {
             .schedule(
                 Trigger::After(Duration::from_mins(1)),
                 "y".into(),
-                Some("nightly".into()),
+                "nightly".into(),
                 &inbox.mailbox(),
             )
             .expect_err("a duplicate label must be refused");
@@ -732,36 +712,13 @@ mod tests {
     }
 
     #[test]
-    fn schedule_rejects_a_user_label_shaped_like_a_default() {
-        let reg = ScheduleRegistry::new();
-        let inbox = Inbox::new();
-        let err = reg
-            .schedule(
-                Trigger::After(Duration::from_mins(1)),
-                "x".into(),
-                Some("sched-3".into()),
-                &inbox.mailbox(),
-            )
-            .expect_err("the reserved sched-<n> shape must be refused");
-        assert!(
-            err.contains("sched-3"),
-            "must name the offending label, got: {err}"
-        );
-        assert!(err.contains("reserved"), "must name the rule, got: {err}");
-        assert!(
-            reg.list().is_empty(),
-            "the refused attempt registers nothing"
-        );
-    }
-
-    #[test]
     fn unschedule_by_label_removes_the_match_and_is_a_noop_otherwise() {
         let reg = ScheduleRegistry::new();
         let inbox = Inbox::new();
         reg.schedule(
             Trigger::After(Duration::from_mins(1)),
             "x".into(),
-            Some("nightly".into()),
+            "nightly".into(),
             &inbox.mailbox(),
         )
         .unwrap();
@@ -784,7 +741,7 @@ mod tests {
         reg.schedule(
             Trigger::After(Duration::from_millis(40)),
             "ping".into(),
-            None,
+            "ping".into(),
             &inbox.mailbox(),
         )
         .unwrap();
@@ -820,7 +777,7 @@ mod tests {
                 expr: "0 3 * * *".into(),
             },
             "x".into(),
-            None,
+            "x".into(),
             &inbox.mailbox(),
         )
         .unwrap();

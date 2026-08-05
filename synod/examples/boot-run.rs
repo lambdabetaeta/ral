@@ -112,6 +112,7 @@ fn main() {
             io: RunIo::Capture,
             terminal: RequestedTerminalAccess::Denied,
             stdin: RunStdin::Empty,
+            trail: None,
         },
         |_| {},
         |_| -> Result<_, EnquiryError> { unreachable!("this run raises no enquiry") },
@@ -120,8 +121,9 @@ fn main() {
 
     let passed = matches!(
         &report,
-        Report::Ran { result: Ok(_), captured: Some(c), .. }
-            if String::from_utf8_lossy(&c.stdout).contains(sentinel)
+        Report::Ran { ending, captured: Some(c), .. }
+            if matches!(ending, ral_core::transport::Ending::Settled { .. })
+                && String::from_utf8_lossy(&c.stdout).contains(sentinel)
     );
     if passed
         && let Report::Ran {

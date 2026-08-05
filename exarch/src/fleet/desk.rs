@@ -17,7 +17,8 @@ use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
 use ral_core::transport::{Event, EventReceiver};
 use ral_core::types::{
-    Capabilities, EnquiryDesk, Error, NO_DESK, NO_DESK_STATUS, Nursery, NurseryId,
+    CallSite, Capabilities, EnquiryDesk, Error, NO_DESK, NO_DESK_STATUS, Nursery, NurseryId,
+    Observation, Observed,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -49,6 +50,20 @@ impl DeskAct {
         }
     }
 
+    /// The inverse of [`Self::verb`]: every string this fragment ever carries
+    /// was minted from it, so this never meets a name it does not know.
+    fn from_verb(verb: &str) -> Self {
+        match verb {
+            "spawn" => Self::Spawn,
+            "cancel" => Self::Cancel,
+            "message" => Self::Message,
+            "schedule" => Self::Schedule,
+            "unschedule" => Self::Unschedule,
+            "reply" => Self::Reply,
+            other => unreachable!("desk act fragment carries an unknown verb `{other}`"),
+        }
+    }
+
     /// What the act did, past tense, for an audit read after the fact.
     fn done(self, subject: Option<&str>) -> String {
         let named = |what: &str| match subject {
@@ -68,47 +83,41 @@ impl DeskAct {
     }
 }
 
-/// One committed act, held for the audit.
-struct Act {
-    kind: DeskAct,
-    /// The agent name or schedule label; `None` for [`DeskAct::Reply`].
-    subject: Option<String>,
-}
-
-/// What this `ral` call has already committed, in the order it landed.
+/// What this `ral` call has committed, in the order it landed: one
+/// [`Observation`] per attempt that landed, minted at [`HostServices::commit_act`]
+/// — the door every acting handler funnels through — and read back once a
+/// raise discards the call's bindings but not its acts.
 ///
 /// Effects persist across an unwind: a call the wall cut short still started
 /// what it started and delivered what it delivered, while every binding it made
-/// is gone. The ledger is how the raise says so, since the model's only other
+/// is gone. The fragment is how the raise says so, since the model's only other
 /// in-band signal — the diagnostic — speaks of the failure and not of the acts.
 ///
 /// Only committed acts are recorded. A refused act changed nothing, so it
-/// leaves no entry: this ledger answers *what stands*.
+/// leaves no entry: this fragment answers *what stands*.
 #[derive(Clone, Default)]
-pub(crate) struct ActLedger(Arc<Mutex<Vec<Act>>>);
+pub(crate) struct ActFragment(Arc<Mutex<Vec<Observation>>>);
 
-impl ActLedger {
+impl ActFragment {
+    /// A fragment seeded with `acts` directly, bypassing `commit_act` — for a
+    /// renderer test that needs a settled fragment with no live desk behind it.
+    #[cfg(test)]
+    pub(crate) fn from_acts(acts: Vec<Observation>) -> Self {
+        Self(Arc::new(Mutex::new(acts)))
+    }
+
     /// Never waits: the only thread that could hold this guard is the asker —
     /// a desk handler runs on the attend thread parked in `run_shell`, and the
     /// audit is read on that same thread once the run is back.
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Act>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Observation>> {
         match self.0.try_lock() {
             Ok(guard) => guard,
             Err(std::sync::TryLockError::WouldBlock) => panic!(
-                "act ledger contended: a desk handler may only run while the attend thread is \
+                "act fragment contended: a desk handler may only run while the attend thread is \
                  parked in run_shell"
             ),
-            Err(std::sync::TryLockError::Poisoned(_)) => panic!("act ledger poisoned"),
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("act fragment poisoned"),
         }
-    }
-
-    /// File an act that *landed*, beside the [`Kind::HarnessCall`] that narrates
-    /// it, so the user's row and the model's audit report the one same act.
-    pub(crate) fn record(&self, kind: DeskAct, subject: Option<&str>) {
-        self.lock().push(Act {
-            kind,
-            subject: subject.map(str::to_string),
-        });
     }
 
     /// The sentence an unwind owes the model, or `None` when this call committed
@@ -120,7 +129,12 @@ impl ActLedger {
                 return None;
             }
             acts.iter()
-                .map(|a| a.kind.done(a.subject.as_deref()))
+                .filter_map(|obs| match &obs.what {
+                    Observed::Act { verb, subject, .. } => {
+                        Some(DeskAct::from_verb(verb).done(subject.as_deref()))
+                    }
+                    _ => None,
+                })
                 .collect::<Vec<_>>()
                 .join("; ")
         };
@@ -178,14 +192,47 @@ pub(crate) struct HostServices {
     pub disk_warn_bytes: Option<u64>,
     /// A spawn shares its parent's egress policy, never a fresh one.
     pub egress: egress::Egress,
-    /// What this call has committed so far: minted per `ral` call, and read back
-    /// by [`crate::shell_eval::run_shell`] when a raise discards the bindings but
-    /// not the acts.
-    pub acts: ActLedger,
+    /// What this call has committed so far: minted per `ral` call, and read
+    /// back by [`crate::shell_eval::report::render`] when a raise discards
+    /// the bindings but not the acts.
+    pub acts: ActFragment,
+    /// Who the acts are committed on behalf of, read once at install: the
+    /// desk holds no `Shell` to ask, and a host act's principal is the host's.
+    pub principal: String,
     /// The agent's own pin register, shared verbatim so `pin-read`/`pin-list`
     /// answer from the same mirror the nudge already reads. `None` on a seat
     /// with no mirror of its own — the wire test seat above all.
     pub pins: Option<PinDigests>,
+}
+
+impl HostServices {
+    /// The one door every acting handler commits an attempt through: one
+    /// [`Observation`] built at the arm where the outcome is known, fanned to
+    /// both its readers off that single datum — the rail row always, the
+    /// fragment only when `refused` is false. A verb that reaches here cannot
+    /// draw one reader's row and miss the other's, since there is only the
+    /// one construction either draws from.
+    fn commit_act(&self, act: DeskAct, subject: Option<&str>, payload: String, refused: bool) {
+        let obs = Observation::instant(
+            CallSite::default(),
+            self.principal.clone(),
+            Observed::Act {
+                verb: act.verb().to_string(),
+                subject: subject.map(str::to_string),
+                payload: payload.clone(),
+                refused,
+            },
+        );
+        self.emit.emit(Kind::HarnessCall {
+            verb: act.verb(),
+            subject: subject.map(str::to_string),
+            payload,
+            failed: refused,
+        });
+        if !refused {
+            self.acts.lock().push(obs);
+        }
+    }
 }
 
 /// Answers one [`FOValue`] enquiry against a captured [`HostServices`]. Fresh
@@ -319,23 +366,13 @@ fn payload_trigger(v: FOValue, class: &str) -> Result<Trigger, Error> {
     }
 }
 
-/// `` `none `` decodes to an absent label, not an empty string, so
-/// [`ScheduleRegistry::schedule`] mints its own `sched-{id}` default.
-fn payload_label(v: FOValue, class: &str) -> Result<Option<String>, Error> {
+/// Decode a `schedule` payload's `label`: a required `Str`, since every
+/// caller now names its own schedule.
+fn payload_label(v: FOValue, class: &str) -> Result<String, Error> {
     match v {
-        FOValue::Variant {
-            label,
-            payload: Some(payload),
-        } if label == "some" => Ok(Some(payload_string(*payload, class, "label")?)),
-        FOValue::Variant {
-            label,
-            payload: None,
-        } if label == "none" => Ok(None),
+        FOValue::String { value } => Ok(value),
         other => Err(Error::new(
-            format!(
-                "`{class}`: `label` must be `some <str>` or `none`, got {}",
-                other.shape()
-            ),
+            format!("`{class}`: `label` must be a Str, got {}", other.shape()),
             1,
         )),
     }
@@ -510,8 +547,9 @@ impl ExarchDesk {
         })
         .map_err(|e| Error::new(format!("could not assemble child session: {e}"), 1))?;
 
-        // `spawn_async` emits the spawn's own chrome line, so this handler must
-        // not double it; its `register` is the pre-check's authoritative half.
+        // Held past the move, so the commitment arm can still name the act.
+        let name = spec.name.clone();
+        let prompt = spec.prompt.clone();
         let spawned = crate::shell_eval::tools::agent::spawn_async(
             &s.registry,
             s.parent,
@@ -525,26 +563,22 @@ impl ExarchDesk {
             },
             &s.emit,
         );
+        s.commit_act(DeskAct::Spawn, Some(&name), prompt, spawned.is_err());
         match spawned {
-            Ok(child) => {
-                // The ledger write lives here rather than in `spawn_async`, whose
-                // other caller (`/branch`) is not a desk act at all.
-                s.acts.record(DeskAct::Spawn, Some(&child.name));
-                Ok(FOValue::Variant {
-                    label: "started".to_string(),
-                    payload: Some(Box::new(FOValue::Map {
-                        entries: vec![
-                            ("name".to_string(), FOValue::String { value: child.name }),
-                            (
-                                "log-dir".to_string(),
-                                FOValue::String {
-                                    value: child.log_dir,
-                                },
-                            ),
-                        ],
-                    })),
-                })
-            }
+            Ok(child) => Ok(FOValue::Variant {
+                label: "started".to_string(),
+                payload: Some(Box::new(FOValue::Map {
+                    entries: vec![
+                        ("name".to_string(), FOValue::String { value: child.name }),
+                        (
+                            "log-dir".to_string(),
+                            FOValue::String {
+                                value: child.log_dir,
+                            },
+                        ),
+                    ],
+                })),
+            }),
             Err(reason) => Err(Error::new(reason, 1)),
         }
     }
@@ -630,15 +664,13 @@ impl ExarchDesk {
             .registry
             .resolve_name(&name)
             .map_or(Ok(false), |id| s.registry.cancel_scoped(s.parent, id));
+        let landed = matches!(cancelled, Ok(true));
         let (payload, content, answer) = match cancelled {
-            Ok(true) => {
-                s.acts.record(DeskAct::Cancel, Some(&name));
-                (
-                    String::new(),
-                    format!("cancelling agent '{name}'"),
-                    Ok(bare_tag("cancelled")),
-                )
-            }
+            Ok(true) => (
+                String::new(),
+                format!("cancelling agent '{name}'"),
+                Ok(bare_tag("cancelled")),
+            ),
             Ok(false) => (
                 "no live agent by that name".to_string(),
                 format!("no live agent named '{name}'"),
@@ -652,12 +684,7 @@ impl ExarchDesk {
                 Err(()),
             ),
         };
-        s.emit.emit(Kind::HarnessCall {
-            verb: DeskAct::Cancel.verb(),
-            subject: Some(name),
-            payload,
-            failed: answer.is_err(),
-        });
+        s.commit_act(DeskAct::Cancel, Some(&name), payload, !landed);
         s.emit.emit(Kind::HarnessResult(content.clone()));
         // Only a scope violation raises; the raise is the model's only copy
         // of it. A real cancel and a miss both answer — the tag names which.
@@ -687,10 +714,7 @@ impl ExarchDesk {
                 format!("no live agent named '{name}'; did it finish already?"),
                 false,
             ),
-            Some(Ok(())) => {
-                s.acts.record(DeskAct::Message, Some(&name));
-                (sent, format!("sent message to agent '{name}'"), true)
-            }
+            Some(Ok(())) => (sent, format!("sent message to agent '{name}'"), true),
             Some(Err(MessageError::UnknownSender(n))) => (
                 "refused: sender is no longer live".to_string(),
                 format!("cannot send from agent {n}: it is no longer live"),
@@ -709,12 +733,7 @@ impl ExarchDesk {
                 false,
             ),
         };
-        s.emit.emit(Kind::HarnessCall {
-            verb: DeskAct::Message.verb(),
-            subject: Some(name),
-            payload,
-            failed: !ok,
-        });
+        s.commit_act(DeskAct::Message, Some(&name), payload, !ok);
         s.emit.emit(Kind::HarnessResult(content.clone()));
         // Success is its own confirmation; a refusal raises, and the raise is
         // the model's only copy of it.
@@ -742,8 +761,7 @@ impl ExarchDesk {
     }
 
     /// `` `schedule `` — arm a self-wakeup through [`ScheduleRegistry::schedule`]
-    /// and receipt it as `[label: Str, next-s: Int]`, the label resolved: the
-    /// caller's own, or the registry's minted default.
+    /// and receipt it as `[label: Str, next-s: Int]`.
     fn schedule(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         self.require_schedule_grant("schedule")?;
         let s = &self.services;
@@ -754,36 +772,24 @@ impl ExarchDesk {
         let label = payload_label(label, "schedule")?;
         let prompt = payload_string(prompt, "schedule", "prompt")?;
 
-        // The row goes up after the registry call, so a refusal tiers instead of
-        // reading as one that landed. Its subject stays the caller's own label:
-        // the minted default is the registry's answer, not something the caller
-        // named, so an unlabelled schedule leaves the cell blank.
+        // The row goes up after the registry call, so a refusal tiers instead
+        // of reading as one that landed.
         let described = trigger.describe();
         let result = s
             .schedules
             .schedule(trigger, prompt, label.clone(), &s.mailbox);
-        let content = match &result {
-            Ok(receipt) => {
-                // The resolved label, not the caller's: an unlabelled schedule is
-                // known to the world only by the one the registry minted.
-                s.acts.record(DeskAct::Schedule, Some(&receipt.label));
+        let (payload, content) = match &result {
+            Ok(receipt) => (
+                described,
                 format!(
                     "scheduled '{}' ({}s to first fire)",
                     receipt.label,
                     secs_to_i64(receipt.next_in)
-                )
-            }
-            Err(e) => format!("could not schedule: {e}"),
+                ),
+            ),
+            Err(e) => (format!("refused: {e}"), format!("could not schedule: {e}")),
         };
-        s.emit.emit(Kind::HarnessCall {
-            verb: DeskAct::Schedule.verb(),
-            subject: label,
-            payload: match &result {
-                Ok(_) => described,
-                Err(e) => format!("refused: {e}"),
-            },
-            failed: result.is_err(),
-        });
+        s.commit_act(DeskAct::Schedule, Some(&label), payload, result.is_err());
         s.emit.emit(Kind::HarnessResult(content.clone()));
         match result {
             Ok(receipt) => Ok(FOValue::Map {
@@ -853,7 +859,6 @@ impl ExarchDesk {
         // since the verb has no argument of its own to show there.
         let removed = s.schedules.unschedule(&label);
         let (payload, content, answer) = if removed {
-            s.acts.record(DeskAct::Unschedule, Some(&label));
             (
                 String::new(),
                 format!("unscheduled '{label}'"),
@@ -866,12 +871,7 @@ impl ExarchDesk {
                 bare_tag("no-such-label"),
             )
         };
-        s.emit.emit(Kind::HarnessCall {
-            verb: DeskAct::Unschedule.verb(),
-            subject: Some(label),
-            payload,
-            failed: false,
-        });
+        s.commit_act(DeskAct::Unschedule, Some(&label), payload, !removed);
         s.emit.emit(Kind::HarnessResult(content));
         Ok(answer)
     }
@@ -893,18 +893,13 @@ impl ExarchDesk {
         let [value] = payload_list(payload, "reply", "[value]")?;
         let display =
             shell_eval::ral_value_to_text(&RalValue::from(value.clone())).unwrap_or_default();
+        let payload = if display.is_empty() {
+            "(empty reply)".into()
+        } else {
+            display
+        };
         // No subject: the parent is the only recipient a returning agent has.
-        s.acts.record(DeskAct::Reply, None);
-        s.emit.emit(Kind::HarnessCall {
-            verb: DeskAct::Reply.verb(),
-            subject: None,
-            payload: if display.is_empty() {
-                "(empty reply)".into()
-            } else {
-                display
-            },
-            failed: false,
-        });
+        s.commit_act(DeskAct::Reply, None, payload, false);
         s.reply.set(value);
         Ok(FOValue::Unit)
     }
@@ -1112,7 +1107,8 @@ mod tests {
             generation: 0,
             disk_warn_bytes: None,
             egress: Egress::for_test(),
-            acts: ActLedger::default(),
+            acts: ActFragment::default(),
+            principal: ral_core::host::user(),
             pins: None,
         }
     }
@@ -1250,6 +1246,7 @@ mod tests {
                 io: RunIo::Capture,
                 terminal: RequestedTerminalAccess::Denied,
                 stdin: RunStdin::Empty,
+                trail: None,
             },
         );
 
@@ -2166,9 +2163,8 @@ mod tests {
                             label: "after".into(),
                             payload: Some(Box::new(FOValue::String { value: "1s".into() })),
                         },
-                        FOValue::Variant {
-                            label: "none".into(),
-                            payload: None,
+                        FOValue::String {
+                            value: "nightly".into(),
                         },
                         FOValue::String {
                             value: "wake".into(),
@@ -2218,12 +2214,12 @@ mod tests {
         );
     }
 
-    /// The label reaches the registry absent, not as an empty-string sentinel,
-    /// so the registry mints its own default and the receipt names it.
+    /// A schedule with no label is refused, naming the missing field, and
+    /// registers nothing.
     #[test]
-    fn none_label_takes_the_sched_id_default() {
+    fn schedule_without_a_label_is_refused() {
         let desk = granted_desk();
-        let answer = desk
+        let err = desk
             .handle(FOValue::Variant {
                 label: "schedule".into(),
                 payload: Some(Box::new(FOValue::List {
@@ -2242,23 +2238,16 @@ mod tests {
                     ],
                 })),
             })
-            .expect("a valid schedule with `none` must succeed");
-        let FOValue::Map { entries } = answer else {
-            panic!("expected a receipt record");
-        };
-        let Some(FOValue::String { value: label }) = entries
-            .iter()
-            .find_map(|(k, v)| (k == "label").then_some(v))
-        else {
-            panic!("expected a `label` entry");
-        };
+            .expect_err("a schedule with no label must be refused");
         assert!(
-            label.starts_with("sched-"),
-            "must be the minted default, got: {label}"
+            err.message.contains("label"),
+            "must name the missing field, got: {}",
+            err.message
         );
-        let listing = desk.services.schedules.list();
-        assert_eq!(listing.len(), 1, "exactly one live schedule");
-        assert_eq!(&listing[0].label, label);
+        assert!(
+            desk.services.schedules.list().is_empty(),
+            "the refused attempt registers nothing"
+        );
     }
 
     /// Arm one, see it listed with the fields it was given, remove it by label,
@@ -2275,11 +2264,8 @@ mod tests {
                             label: "after".into(),
                             payload: Some(Box::new(FOValue::String { value: "2h".into() })),
                         },
-                        FOValue::Variant {
-                            label: "some".into(),
-                            payload: Some(Box::new(FOValue::String {
-                                value: "nightly".into(),
-                            })),
+                        FOValue::String {
+                            value: "nightly".into(),
                         },
                         FOValue::String {
                             value: "wake".into(),
@@ -2294,7 +2280,7 @@ mod tests {
         assert!(
             entries.iter().any(|(k, v)| k == "label"
                 && matches!(v, FOValue::String { value } if value == "nightly")),
-            "the receipt must carry the resolved label"
+            "the receipt must carry the given label"
         );
         assert!(
             entries.iter().any(|(k, _)| k == "next-s"),
@@ -2364,11 +2350,8 @@ mod tests {
                     label: "after".into(),
                     payload: Some(Box::new(FOValue::String { value: "1s".into() })),
                 },
-                FOValue::Variant {
-                    label: "some".into(),
-                    payload: Some(Box::new(FOValue::String {
-                        value: label.into(),
-                    })),
+                FOValue::String {
+                    value: label.into(),
                 },
                 FOValue::String {
                     value: "wake".into(),
@@ -2408,11 +2391,8 @@ mod tests {
                     label: "after".into(),
                     payload: Some(Box::new(FOValue::String { value: "1s".into() })),
                 },
-                FOValue::Variant {
-                    label: "some".into(),
-                    payload: Some(Box::new(FOValue::String {
-                        value: "nightly".into(),
-                    })),
+                FOValue::String {
+                    value: "nightly".into(),
                 },
                 FOValue::String {
                     value: "wake".into(),
@@ -2532,7 +2512,7 @@ mod tests {
     /// The audit is the model's only account of what survived an unwind, so it
     /// must name every committed act, in the order the call committed them.
     #[test]
-    fn the_ledger_keeps_committed_acts_in_the_order_they_landed() {
+    fn the_fragment_keeps_committed_acts_in_the_order_they_landed() {
         let desk = granted_desk();
         desk.handle(FOValue::Variant {
             label: "schedule".into(),
@@ -2542,11 +2522,8 @@ mod tests {
                         label: "after".into(),
                         payload: Some(Box::new(FOValue::String { value: "2h".into() })),
                     },
-                    FOValue::Variant {
-                        label: "some".into(),
-                        payload: Some(Box::new(FOValue::String {
-                            value: "nightly".into(),
-                        })),
+                    FOValue::String {
+                        value: "nightly".into(),
                     },
                     FOValue::String {
                         value: "wake".into(),
@@ -2583,10 +2560,10 @@ mod tests {
         );
     }
 
-    /// A refused act changed nothing, so the ledger stays silent: an entry here
-    /// would tell the model to leave standing work it never did.
+    /// A refused act changed nothing, so the fragment stays silent: an entry
+    /// here would tell the model to leave standing work it never did.
     #[test]
-    fn a_refused_act_leaves_the_ledger_empty() {
+    fn a_refused_act_leaves_the_fragment_empty() {
         let desk = desk();
         desk.handle(FOValue::Variant {
             label: "message".into(),
@@ -2603,6 +2580,69 @@ mod tests {
         assert!(
             desk.services.acts.audit().is_none(),
             "a call that committed nothing owes the model no audit"
+        );
+    }
+
+    /// The rail parity a seventh act cannot break by construction: a landed
+    /// and a refused attempt both draw their row, but only the landed one
+    /// reaches the fragment.
+    #[test]
+    fn rail_draws_every_attempt_the_fragment_holds_only_what_landed() {
+        let (emit, rx) = crate::bus::dummy_emitter();
+        let mut desk = granted_desk();
+        desk.services.emit = emit;
+
+        desk.handle(FOValue::Variant {
+            label: "schedule".into(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![
+                    FOValue::Variant {
+                        label: "after".into(),
+                        payload: Some(Box::new(FOValue::String { value: "1s".into() })),
+                    },
+                    FOValue::String {
+                        value: "nightly".into(),
+                    },
+                    FOValue::String {
+                        value: "wake".into(),
+                    },
+                ],
+            })),
+        })
+        .expect("a valid schedule must land");
+        desk.handle(FOValue::Variant {
+            label: "message".into(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![
+                    FOValue::String {
+                        value: "nobody".into(),
+                    },
+                    FOValue::String { value: "hi".into() },
+                ],
+            })),
+        })
+        .expect_err("a message to an unknown name must be refused");
+
+        let mut rows = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let Kind::HarnessCall { verb, failed, .. } = event.kind {
+                rows.push((verb, failed));
+            }
+        }
+        assert_eq!(
+            rows,
+            vec![("schedule", false), ("message", true)],
+            "the rail draws one row per attempt, landed or refused"
+        );
+
+        let audit = desk
+            .services
+            .acts
+            .audit()
+            .expect("the landed schedule owes an audit");
+        assert!(
+            audit.contains("armed the wakeup") && !audit.contains("message"),
+            "the fragment carries the landed schedule alone, got: {audit}"
         );
     }
 

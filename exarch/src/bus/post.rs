@@ -116,7 +116,7 @@ pub(crate) enum Post {
         /// replaces a still-queued one for the same schedule — the inbox's own
         /// guarantee of what `pending` below already gives producer-side.
         id: ScheduleId,
-        /// The schedule's human label, or the minted `sched-<n>`.
+        /// The schedule's own label, always caller-named.
         label: String,
         /// The trigger as text — a cron expression or `after <dur>`.
         trigger: String,

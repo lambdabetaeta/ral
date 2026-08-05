@@ -1161,6 +1161,7 @@ mod tests {
                 io: RunIo::Capture,
                 terminal: RequestedTerminalAccess::Denied,
                 stdin: RunStdin::Empty,
+                trail: None,
             },
             surface: None,
             deferred: None,
@@ -1169,8 +1170,10 @@ mod tests {
             lifecycle: Box::new(()),
         };
         match shell.run(req) {
-            RunReport::Ran { result, .. } => {
-                result.expect("worker-registry fixture source must run cleanly");
+            RunReport::Ran { ending, .. } => {
+                ending
+                    .into_result()
+                    .expect("worker-registry fixture source must run cleanly");
             }
             RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
         }
@@ -1551,6 +1554,7 @@ mod tests {
                     io: RunIo::Capture,
                     terminal: RequestedTerminalAccess::Denied,
                     stdin: RunStdin::Empty,
+                    trail: None,
                 },
                 surface: None,
                 deferred: None,
@@ -1560,9 +1564,9 @@ mod tests {
             };
             match shell.run(req) {
                 RunReport::Ran {
-                    result, captured, ..
+                    ending, captured, ..
                 } => {
-                    result.expect("`help` must run cleanly");
+                    ending.into_result().expect("`help` must run cleanly");
                     String::from_utf8(captured.expect("Capture io yields captured bytes").stdout)
                         .expect("help output is UTF-8")
                 }

@@ -92,12 +92,19 @@ impl Shell {
     /// Turn on top-level audit collection (`ral --audit`) under
     /// `CapturePolicy::Bytes`, as `audit { … }` does: every command
     /// observation must carry its stdout/stderr, which `Off` would leave empty.
+    ///
+    /// The session is its own extent — there is no later `close` to pair
+    /// with this open, only [`Self::take_audit_fragment`] draining what
+    /// accrued.  Unlike `try`/`audit`, which delimit a body inside one run,
+    /// this trail stays open for the process's whole life.
     pub fn enable_audit(&mut self) {
         self.local
             .audit
             .install_active_policy(Some(crate::types::CapturePolicy::Bytes));
     }
 
+    /// Drain what the session trail collected since the last drain, leaving
+    /// it open for the next.
     pub fn take_audit_fragment(&mut self) -> AuditFragment {
         self.local.audit.take_fragment()
     }

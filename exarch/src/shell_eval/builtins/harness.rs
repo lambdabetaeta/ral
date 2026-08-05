@@ -116,38 +116,18 @@ fn schedule_trigger(v: &Value) -> Settled<FOValue> {
     }
 }
 
-/// Decode a `schedule` spec's `label` — `` `some '<name>' `` or `` `none ``
-/// — into the [`FOValue`] the desk expects.
+/// Decode a `schedule` spec's `label`: the wakeup's name, required — every
+/// schedule now names itself, so there is no default to fall back to.
 fn schedule_label(v: &Value) -> Settled<FOValue> {
-    match v {
-        Value::Variant {
-            label,
-            payload: None,
-        } if label == "none" => Ok(FOValue::Variant {
-            label: "none".to_string(),
-            payload: None,
-        }),
-        Value::Variant {
-            label,
-            payload: Some(payload),
-        } if label == "some" => {
-            let Value::String(name) = payload.as_ref() else {
-                return Err(sig(format!(
-                    "schedule: `some`'s payload must be a Str, got {}",
-                    payload.type_name()
-                )));
-            };
-            Ok(FOValue::Variant {
-                label: "some".to_string(),
-                payload: Some(Box::new(FOValue::String {
-                    value: name.clone(),
-                })),
-            })
-        }
-        other => Err(sig(format!(
-            "schedule: label must be `some '<name>'` or `none`, got {other}"
-        ))),
-    }
+    let Value::String(name) = v else {
+        return Err(sig(format!(
+            "schedule: `label` must be a Str naming the wakeup, got {}",
+            v.type_name()
+        )));
+    };
+    Ok(FOValue::String {
+        value: name.clone(),
+    })
 }
 
 /// Unwrap the `` `started `` receipt `agent-start` answers with.
@@ -347,8 +327,8 @@ fn schedule_receipt(answer: FOValue) -> Settled<Value> {
 
 /// `schedule <spec>` — decodes through
 /// [`schedule_trigger`]/[`schedule_label`], then enquires `` `schedule ``.
-/// The self-wakeup grant, label uniqueness, and the reserved `sched-<n>`
-/// namespace are refusals the desk and the schedule registry own.
+/// The self-wakeup grant and label uniqueness are refusals the desk and the
+/// schedule registry own.
 fn builtin_schedule(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let Value::Map(spec) = &args[0] else {
         return Err(sig(format!(
@@ -363,7 +343,7 @@ fn builtin_schedule(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Set
     };
     let Some(label) = spec.get("label") else {
         return Err(sig(
-            "schedule: the spec record needs a `label` field — `some '<name>' or `none",
+            "schedule: the spec record needs a `label` field — a Str naming the wakeup",
         ));
     };
     let Some(prompt) = spec.get("prompt") else {
@@ -577,22 +557,22 @@ fn schedule_receipt_ty() -> Ty {
     closed_record(&[("label", Ty::String), ("next-s", Ty::Int)])
 }
 
-/// `schedule :: ∀ρ1 ρ2. [trigger: Variant ρ1, label: Variant ρ2, prompt: Str] → F [label: Str, next-s: Int]`
+/// `schedule :: ∀ρ. [trigger: Variant ρ, label: Str, prompt: Str] → F [label: Str, next-s: Int]`
 ///
-/// Closed record row, open variant rows within it, for the reason
-/// [`scheme_agent`] gives: an unknown trigger or label must reach
-/// [`schedule_trigger`]/[`schedule_label`], which name the legal shapes.
+/// Closed record row, an open variant row for `trigger` alone, for the reason
+/// [`scheme_agent`] gives: an unknown trigger must reach [`schedule_trigger`],
+/// which names the legal shapes. `label` is a plain `Str` — every schedule
+/// names itself, so there is no shape left to leave open.
 fn scheme_schedule(u: &mut Unifier) -> Scheme {
     let trigger_row = u.fresh_row_var();
-    let label_row = u.fresh_row_var();
     scheme(
         &[],
         &[],
-        &[trigger_row, label_row],
+        &[trigger_row],
         thunk(fun(
             closed_record(&[
                 ("trigger", Ty::Variant(Row::Var(trigger_row))),
-                ("label", Ty::Variant(Row::Var(label_row))),
+                ("label", Ty::String),
                 ("prompt", Ty::String),
             ]),
             pure(schedule_receipt_ty()),
@@ -671,7 +651,7 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 10] = [
     BuiltinEntry::new(
         Cow::Borrowed("schedule"),
         BuiltinTypeRule::Scheme(scheme_schedule),
-        "schedule <spec>  — arm a self-wakeup: at the chosen time a marked item carrying the spec's `prompt` is delivered to your inbox and re-engages you at your next exchange boundary, with no human present. `spec` is a record with exactly three fields: trigger, label, prompt. `trigger` is exactly one of `cron '<expr>'` — a five-field cron expression (minute hour day-of-month month day-of-week) in the host's local timezone, e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00; recurring — or `after '<n><unit>'` — a one-shot relative delay, unit one of s/m/h/d, e.g. `after '30m'`, `after '2h'`; any other shape is refused, naming both. `label` is `some '<name>'` to name the wakeup — the label is its identity: it must not be borne by another live schedule, and the sched-<n> form is reserved for defaults — or `none` to take the default sched-<n>; any other shape is refused, naming both. `prompt` is the natural-language instruction you act on when woken, not code — e.g. schedule [trigger: `after '30m', label: `none, prompt: 'check the build']. Returns a receipt [label: Str, next-s: Int] — next-s is the seconds until the first fire; read it back to catch a cron expression that parsed but does not mean what you meant. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant this call is refused. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "schedule <spec>  — arm a self-wakeup: at the chosen time a marked item carrying the spec's `prompt` is delivered to your inbox and re-engages you at your next exchange boundary, with no human present. `spec` is a record with exactly three fields: trigger, label, prompt. `trigger` is exactly one of `cron '<expr>'` — a five-field cron expression (minute hour day-of-month month day-of-week) in the host's local timezone, e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00; recurring — or `after '<n><unit>'` — a one-shot relative delay, unit one of s/m/h/d, e.g. `after '30m'`, `after '2h'`; any other shape is refused, naming both. `label` is a Str naming the wakeup — its identity: it must not be borne by another live schedule, and you must always supply one. `prompt` is the natural-language instruction you act on when woken, not code — e.g. schedule [trigger: `after '30m', label: 'nightly', prompt: 'check the build']. Returns a receipt [label: Str, next-s: Int] — next-s is the seconds until the first fire; read it back to catch a cron expression that parsed but does not mean what you meant. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant this call is refused. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_schedule),
     ),
     BuiltinEntry::new(
@@ -961,8 +941,8 @@ mod tests {
     //
     // Tag payloads are greedy, but `at_tag_payload_end` in
     // `core/src/syntax/parser.rs` stops one at a comma — so inside a record
-    // literal a nullary `` `none `` cannot swallow its neighbour. That is
-    // why `schedule` takes one spec record, not three positional arguments.
+    // literal a nullary tag cannot swallow its neighbour. That is why
+    // `schedule` takes one spec record, not three positional arguments.
 
     #[test]
     fn bad_cron_expr_errors_before_any_enquiry_crosses() {
@@ -972,7 +952,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            "schedule [trigger: `cron '* * * *', label: `none, prompt: #'wake'#]",
+            "schedule [trigger: `cron '* * * *', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
@@ -995,7 +975,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            "schedule [trigger: `after 'nope', label: `none, prompt: #'wake'#]",
+            "schedule [trigger: `after 'nope', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
@@ -1011,26 +991,6 @@ mod tests {
     }
 
     #[test]
-    fn label_neither_some_nor_none_errors_before_any_enquiry_crosses() {
-        let dir = tmp("bad-label");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
-        let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
-            "schedule [trigger: `after '1s', label: `bogus, prompt: #'wake'#]",
-            5,
-            &emit,
-        );
-        assert!(result.content.contains("some"), "got: {}", result.content);
-        assert!(result.content.contains("none"), "got: {}", result.content);
-        assert!(
-            session.schedules.list().is_empty(),
-            "an unknown label must never register a schedule"
-        );
-    }
-
-    #[test]
     fn trigger_neither_cron_nor_after_errors_before_any_enquiry_crosses() {
         let dir = tmp("bad-trigger");
         let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
@@ -1038,7 +998,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            "schedule [trigger: `bogus 'x', label: `none, prompt: #'wake'#]",
+            "schedule [trigger: `bogus 'x', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
@@ -1060,7 +1020,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            "schedule [trigger: `after '1s', label: `none]",
+            "schedule [trigger: `after '1s', label: 'nightly']",
             5,
             &emit,
         );
@@ -1085,7 +1045,7 @@ mod tests {
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
             "call-1".to_string(),
-            "schedule [trigger: `after '1s', label: `none, prompt: #'wake'#, extra: 1]",
+            "schedule [trigger: `after '1s', label: 'nightly', prompt: #'wake'#, extra: 1]",
             5,
             &emit,
         );
@@ -1112,7 +1072,7 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            "schedule [trigger: `after '1s', label: `none, prompt: #'wake'#]",
+            "schedule [trigger: `after '1s', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );
@@ -1128,14 +1088,10 @@ mod tests {
         );
         let live = session.schedules.list();
         assert_eq!(live.len(), 1, "the schedule must be registered");
+        assert_eq!(live[0].label, "nightly", "must take the given label");
         assert!(
-            live[0].label.starts_with("sched-"),
-            "must take the minted default label, got: {}",
-            live[0].label
-        );
-        assert!(
-            result.content.contains(&live[0].label),
-            "the receipt must carry the resolved label, got: {}",
+            result.content.contains("nightly"),
+            "the receipt must carry the given label, got: {}",
             result.content
         );
 
@@ -1171,7 +1127,7 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            "schedule [trigger: `after '10m', label: `some 'nightly', prompt: #'wake'#]",
+            "schedule [trigger: `after '10m', label: 'nightly', prompt: #'wake'#]",
             5,
             &emit,
         );

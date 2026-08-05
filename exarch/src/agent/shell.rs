@@ -127,8 +127,9 @@ impl Agent {
             disk_warn_bytes: self.disk_warn_bytes,
             egress: self.egress.clone(),
             // Minted here, once per `ral` call: this is the one place a call's
-            // whole desk capture is built, so the ledger's extent is the call's.
-            acts: desk::ActLedger::default(),
+            // whole desk capture is built, so the fragment's extent is the call's.
+            acts: desk::ActFragment::default(),
+            principal: ral_core::host::user(),
             pins: Some(self.pins.clone()),
         }
     }
@@ -179,15 +180,28 @@ impl Agent {
         // Only now, with the dispatch returned and the install dropped: the
         // worker probe below is legal at a run boundary and nowhere else.
         let content = match outcome {
-            shell_eval::Outcome::Ran(mut r) => {
-                // The wall discarded the bindings and left the work running;
-                // nothing else in this stderr tells the model so.
-                if r.timed_out
-                    && let Some(note) = self.surviving_worker_note()
-                {
-                    r.stderr.extend_from_slice(note.as_bytes());
-                }
-                render(&r)
+            shell_eval::Outcome::Ran {
+                stdout,
+                mut stderr,
+                value,
+                ending,
+                trail,
+            } => {
+                let workers = self.probe_workers();
+                let (suffix, exit) = shell_eval::report::render(
+                    &ending,
+                    &trail,
+                    &seam.desk.services.acts,
+                    &workers,
+                    timeout_secs,
+                );
+                stderr.extend_from_slice(suffix.as_bytes());
+                render(&shell_eval::ToolResult {
+                    stdout,
+                    stderr,
+                    value,
+                    exit,
+                })
             }
             shell_eval::Outcome::Static(s) => clip(&s, OPAQUE_CAP),
         };
@@ -412,8 +426,9 @@ mod tests {
     /// A worker `defer`red before the wall outlives it — moored to the session
     /// root, out of the foreground cancel's reach — while the handle binding
     /// that named it is gone with the unwind.  The timeout stderr must say so,
-    /// naming the work, or the model is left unable to `await` and unaware
-    /// there is anything to await.
+    /// naming the work by joining this dispatch's own trail births against the
+    /// live `` `workers `` probe, or the model is left unable to `await` and
+    /// unaware there is anything to await.
     #[cfg(unix)]
     #[test]
     fn the_wall_names_the_workers_that_survived_it() {
@@ -437,7 +452,7 @@ mod tests {
         assert!(
             result
                 .content
-                .contains("work this call deferred is still running: `<block>`"),
+                .contains("work this call spawned is now orphaned: `<block>`"),
             "the surviving worker is named by the `cmd` core filed it under; content was: {}",
             result.content
         );
@@ -460,8 +475,40 @@ mod tests {
         let result = session.run_shell("c0".into(), "let ok = defer { return 1 }", 10, &emit);
 
         assert!(
-            !result.content.contains("work this call deferred"),
+            !result.content.contains("orphaned"),
             "a call that returned holds its own handle; content was: {}",
+            result.content
+        );
+    }
+
+    /// The widening this wave deliberately introduces: the handle is equally
+    /// lost on a routine non-zero exit, not just the wall — so a live birth
+    /// draws the same orphan sentence there too.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_zero_exit_with_a_live_birth_names_the_orphan() {
+        let dir = tmp("exit-names-orphan");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+
+        let result = session.run_shell(
+            "c0".into(),
+            "let deferred = defer { sleep 20 }\n/bin/sh -c 'exit 3'",
+            10,
+            &emit,
+        );
+
+        assert!(
+            result.content.contains("EXIT: 3"),
+            "the command's own exit is the tool exit; content was: {}",
+            result.content
+        );
+        assert!(
+            result
+                .content
+                .contains("work this call spawned is now orphaned: `<block>`"),
+            "a non-zero exit orphans a live birth exactly as the wall does; content was: {}",
             result.content
         );
     }

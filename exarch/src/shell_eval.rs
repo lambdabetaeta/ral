@@ -8,6 +8,7 @@
 //! model could evade.
 
 pub mod builtins;
+pub(crate) mod report;
 pub mod skill;
 pub mod tools;
 
@@ -74,16 +75,24 @@ pub struct ToolResult {
     pub stderr: Vec<u8>,
     pub value: Option<String>,
     pub exit: i32,
-    /// The wall ended this call: set only on the ending the deadline shaped, so
-    /// a run that returned a value never carries it, and no caller need guess
-    /// from `exit`, which a program is free to make 124 itself.
-    pub timed_out: bool,
 }
 
 /// What `run_shell` produces.  `Static` is a parse or type failure: ariadne
 /// text the seam already formatted, with no sections, so it is clipped whole.
-pub enum Outcome {
-    Ran(ToolResult),
+///
+/// `Ran` is deliberately not yet a finished [`ToolResult`]: `ending` and
+/// `trail` are the raw materials `report::render` composes into the model's
+/// stderr and exit code, at the one call site that also holds this call's
+/// [`crate::fleet::desk::ActFragment`] and the boundary's own `` `workers ``
+/// probe read.
+pub(crate) enum Outcome {
+    Ran {
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        value: Option<String>,
+        ending: ral_core::transport::Ending,
+        trail: Vec<FOValue>,
+    },
     Static(String),
 }
 
@@ -255,7 +264,8 @@ pub(crate) fn run_shell(
     #[cfg(debug_assertions)]
     let tool_start = std::time::Instant::now();
 
-    use ral_core::transport::{Break, Program, Report, Run};
+    use ral_core::transport::{Ending, Program, Report, Run};
+    use ral_core::types::CapturePolicy;
     use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 
     let run = Run {
@@ -271,6 +281,7 @@ pub(crate) fn run_shell(
         io: RunIo::Capture,
         terminal: RequestedTerminalAccess::Denied,
         stdin: RunStdin::Empty,
+        trail: Some(CapturePolicy::Off),
     };
 
     // One applier, and `DeskBinding` drains through that same one under the
@@ -320,100 +331,26 @@ pub(crate) fn run_shell(
             }
         }
         Report::Ran {
-            result,
-            status,
-            single_command,
+            ending,
             captured,
-            timed_out: deadline,
+            trail,
         } => {
             let captured = captured.unwrap_or(ral_core::Captured {
                 stdout: Vec::new(),
                 stderr: Vec::new(),
             });
-            let stdout_bytes = captured.stdout;
-            let mut stderr_bytes = captured.stderr;
-
-            let (exit, value, timed_out) = match &result {
-                Ok(sv) => {
-                    let v = Some(RalValue::from(sv.clone()));
-                    (0, v, false)
-                }
-                Err(break_) => {
-                    // Every ending discards this call's bindings, chosen or
-                    // suffered: the ledger says what already stands.  Job
-                    // control is no ending, and keeps them.
-                    let file_acts = |out: &mut Vec<u8>| {
-                        if let Some(audit) = seam.and_then(|seam| seam.desk.services.acts.audit()) {
-                            out.extend_from_slice(audit.as_bytes());
-                        }
-                    };
-                    match break_ {
-                        Break::Error {
-                            rendered,
-                            command_exit,
-                        } => {
-                            // The seam already rendered the whole diagnostic
-                            // against the engine's source map: print it verbatim
-                            // as the REPL does.  A wall is no exception — the
-                            // cancel is stamped on the innermost node it unwound
-                            // through, so this rendering is the only thing naming
-                            // *where* it struck.
-                            stderr_bytes.extend_from_slice(rendered.as_bytes());
-                            if deadline {
-                                let tip = format!(
-                                    "\nthis call timed out after {timeout_secs}s at the point above. The steps \
-                                     before it completed; the step it names did not, and the bindings this call \
-                                     made are gone.\n\
-                                     recovery: if the command is simply slow and there is nothing to overlap it \
-                                     with, retry with a higher `timeout_secs`. If other work can run alongside it, \
-                                     defer it instead (`let h = defer {{ … }}`) and let the run return: the host \
-                                     notifies you at the next exchange boundary when it settles and renders its \
-                                     output on the rail, and `await $h` gives you its value record — you need not \
-                                     poll.\n"
-                                );
-                                stderr_bytes.extend_from_slice(tip.as_bytes());
-                            } else if *command_exit {
-                                let mut tip = String::from(
-                                    "\nrecovery: this non-zero exit raised. If the exit code is the tool own \
-                                     signal rather than a failure (grep no-match=1, diff differs=1, test false=1, \
-                                     valgrind --error-exitcode=N), its stdout/stderr were captured — read them as \
-                                     data with `audit { … }`, which does not raise, or catch with \
-                                     `try { … } { |err| … }`. For a yes/no check use `succeeds { … }`.",
-                                );
-                                if !single_command {
-                                    tip.push_str(
-                                        " A non-zero exit also aborts the rest of this command and discards earlier \
-                                         bindings; wrap risky tools in `audit`/`try`, or split them out.",
-                                    );
-                                }
-                                tip.push('\n');
-                                stderr_bytes.extend_from_slice(tip.as_bytes());
-                            }
-                            file_acts(&mut stderr_bytes);
-                            // 124 is the conventional timeout exit; otherwise the
-                            // status is the engine's, never recomputed here.
-                            let exit = if deadline { 124 } else { status };
-                            (exit, None, deadline)
-                        }
-                        Break::Exit(code) => {
-                            file_acts(&mut stderr_bytes);
-                            (*code, None, false)
-                        }
-                        #[cfg(unix)]
-                        Break::Stopped { .. } => (1, None, false),
-                    }
-                }
+            let value = match &ending {
+                Ending::Settled { value, .. } => Some(RalValue::from(value.clone())),
+                _ => None,
             };
 
-            let value_str = value.as_ref().and_then(ral_value_to_text);
-
-            Outcome::Ran(ToolResult {
-                stdout: stdout_bytes,
-                stderr: stderr_bytes,
-                value: value_str,
-                exit,
-                timed_out,
-            })
+            Outcome::Ran {
+                stdout: captured.stdout,
+                stderr: captured.stderr,
+                value: value.as_ref().and_then(ral_value_to_text),
+                ending,
+                trail,
+            }
         }
     }
 }
@@ -546,17 +483,18 @@ mod tests {
         shell
     }
 
-    /// One tool run through the **real** production `run_shell`, so the test
-    /// path cannot drift from what a live tool call does.  The only thing this
-    /// owns that production does not is the `&mut Shell`, borrowed through a
-    /// throwaway `IdentityTransport` and handed back.
+    /// One tool run through the **real** production `run_shell`, composed via
+    /// `report::render` exactly as the boundary does — with no fragment or
+    /// worker rows to join, since this bare harness installs no desk and
+    /// probes no registry.  Panics on a static failure: every call site below
+    /// expects a completed run.
     fn run_shell_direct(
         shell: &mut ral_core::Shell,
         caps: &Capabilities,
         cmd: &str,
         timeout_secs: u64,
         emit: &Emitter,
-    ) -> Outcome {
+    ) -> ToolResult {
         // The transport owns its `Shell`, so move the live one out behind a
         // placeholder that the swap below discards.
         let taken = std::mem::replace(
@@ -568,19 +506,39 @@ mod tests {
         // Recover the mutated shell so `let`/`cd`/binding state reaches the
         // caller's next run — the across-calls contract these tests pin.
         *shell = transport.into_shell();
-        outcome
+        match outcome {
+            Outcome::Ran {
+                stdout,
+                mut stderr,
+                value,
+                ending,
+                trail,
+            } => {
+                let (suffix, exit) = report::render(
+                    &ending,
+                    &trail,
+                    &crate::fleet::desk::ActFragment::default(),
+                    &[],
+                    timeout_secs,
+                );
+                stderr.extend_from_slice(suffix.as_bytes());
+                ToolResult {
+                    stdout,
+                    stderr,
+                    value,
+                    exit,
+                }
+            }
+            Outcome::Static(s) => panic!("static failure: {s}"),
+        }
     }
 
     /// One tool run under `Capabilities::root()` — exarch's least-restricted
     /// default, so every source here runs without exercising the OS sandbox,
-    /// which `core/tests/top_level_vs_block.rs` covers separately.  Panics on
-    /// a static failure: every call site below expects a `ToolResult`.
+    /// which `core/tests/top_level_vs_block.rs` covers separately.
     fn run_once(shell: &mut ral_core::Shell, cmd: &str) -> ToolResult {
         let (emit, _rx) = crate::bus::dummy_emitter();
-        match run_shell_direct(shell, &Capabilities::root(), cmd, 30, &emit) {
-            Outcome::Ran(r) => r,
-            Outcome::Static(s) => panic!("static failure: {s}"),
-        }
+        run_shell_direct(shell, &Capabilities::root(), cmd, 30, &emit)
     }
 
     /// A restrictive exarch base: the body evaluates locally under an `fs`
@@ -635,18 +593,14 @@ mod tests {
                  let listing = explore-dir 3\n\
                  return [hits: $hits, listing: $listing]"
             );
-            match run_shell_direct(&mut shell, &caps, &cmd, 30, &emit) {
-                Outcome::Ran(r) => {
-                    assert_eq!(
-                        r.exit,
-                        0,
-                        "a denied entry is skipped, never raised; stderr was: {}",
-                        String::from_utf8_lossy(&r.stderr)
-                    );
-                    r.value.expect("both walks return a value")
-                }
-                Outcome::Static(s) => panic!("static failure: {s}"),
-            }
+            let r = run_shell_direct(&mut shell, &caps, &cmd, 30, &emit);
+            assert_eq!(
+                r.exit,
+                0,
+                "a denied entry is skipped, never raised; stderr was: {}",
+                String::from_utf8_lossy(&r.stderr)
+            );
+            r.value.expect("both walks return a value")
         };
 
         // Both directions, so a walk that answers with nothing at all fails one.
@@ -1340,10 +1294,7 @@ keep-bottom
         // test can prove it was reaped.
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
-        let r = match run_shell_direct(&mut shell, &Capabilities::root(), cmd, 2, &emit) {
-            Outcome::Ran(r) => r,
-            Outcome::Static(s) => panic!("static failure: {s}"),
-        };
+        let r = run_shell_direct(&mut shell, &Capabilities::root(), cmd, 2, &emit);
         let elapsed = t0.elapsed();
 
         assert!(
@@ -1388,15 +1339,11 @@ keep-bottom
         let mut shell = fresh_shell();
         let (emit, _rx) = crate::bus::dummy_emitter();
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
-        let r = match run_shell_direct(&mut shell, &Capabilities::root(), cmd, 2, &emit) {
-            Outcome::Ran(r) => r,
-            Outcome::Static(s) => panic!("static failure: {s}"),
-        };
+        let r = run_shell_direct(&mut shell, &Capabilities::root(), cmd, 2, &emit);
         assert_eq!(
             r.exit, 124,
             "a timed-out call reports the timeout exit code"
         );
-        assert!(r.timed_out, "the wall ended this call, and says so");
         let stderr = String::from_utf8_lossy(&r.stderr);
         assert!(
             stderr.contains("timed out after 2s"),
@@ -1418,10 +1365,7 @@ keep-bottom
         let mut shell = fresh_shell();
         let (emit, _rx) = crate::bus::dummy_emitter();
         let cmd = "let before = 1\nsleep 30\nlet after = 2";
-        let r = match run_shell_direct(&mut shell, &Capabilities::root(), cmd, 2, &emit) {
-            Outcome::Ran(r) => r,
-            Outcome::Static(s) => panic!("static failure: {s}"),
-        };
+        let r = run_shell_direct(&mut shell, &Capabilities::root(), cmd, 2, &emit);
         assert_eq!(r.exit, 124, "a timed-out call still exits 124");
         let stderr = String::from_utf8_lossy(&r.stderr);
         assert!(
@@ -1442,16 +1386,13 @@ keep-bottom
     fn command_exit_renders_once_with_true_code_and_tip() {
         let mut shell = fresh_shell();
         let (emit, _rx) = crate::bus::dummy_emitter();
-        let r = match run_shell_direct(
+        let r = run_shell_direct(
             &mut shell,
             &Capabilities::root(),
             "/bin/sh -c 'exit 3'",
             10,
             &emit,
-        ) {
-            Outcome::Ran(r) => r,
-            Outcome::Static(s) => panic!("static failure: {s}"),
-        };
+        );
         assert_eq!(r.exit, 3, "the command's true exit code is the tool exit");
         let stderr = String::from_utf8_lossy(&r.stderr);
         assert_eq!(
@@ -1476,16 +1417,13 @@ keep-bottom
     fn raised_error_carries_no_recovery_tip() {
         let mut shell = fresh_shell();
         let (emit, _rx) = crate::bus::dummy_emitter();
-        let r = match run_shell_direct(
+        let r = run_shell_direct(
             &mut shell,
             &Capabilities::root(),
             "fail [status: 7]",
             10,
             &emit,
-        ) {
-            Outcome::Ran(r) => r,
-            Outcome::Static(s) => panic!("static failure: {s}"),
-        };
+        );
         assert_eq!(r.exit, 7, "the raised error's status is the tool exit");
         let stderr = String::from_utf8_lossy(&r.stderr);
         assert_eq!(
@@ -1499,40 +1437,6 @@ keep-bottom
         );
     }
 
-    /// `timed_out` is the wall's verdict on the ending, not the cancel cause's
-    /// flag: core clears its wall guard before reading that cause, so a run that
-    /// finished just as the reaper tripped can carry it while returning a value.
-    /// A caller keys the "your bindings are gone, your handle is unawaitable"
-    /// sentence off this field, so only an ending the wall shaped may set it —
-    /// which is why an `Ok` and an ordinary raise both answer `false` here.
-    #[test]
-    fn a_call_that_returns_never_carries_the_walls_verdict() {
-        let mut shell = fresh_shell();
-        let returned = run_once(&mut shell, "let n = 1\nreturn $[$n + 1]");
-        assert_eq!(returned.exit, 0, "the call returns normally");
-        assert!(
-            !returned.timed_out,
-            "a call that returned a value did not meet the wall"
-        );
-
-        let (emit, _rx) = crate::bus::dummy_emitter();
-        let raised = match run_shell_direct(
-            &mut shell,
-            &Capabilities::root(),
-            "fail [status: 7]",
-            10,
-            &emit,
-        ) {
-            Outcome::Ran(r) => r,
-            Outcome::Static(s) => panic!("static failure: {s}"),
-        };
-        assert_eq!(raised.exit, 7, "the raised status is the tool exit");
-        assert!(
-            !raised.timed_out,
-            "a raise is an ending, but not the wall's"
-        );
-    }
-
     /// The same timeout must tear down a sandbox-confined eval child.  The
     /// parent is blocked in IPC while the helper runs the body, so cooperative
     /// cancel polling cannot reach it: the tree must be killed out of band.
@@ -1543,10 +1447,7 @@ keep-bottom
         let (emit, _rx) = crate::bus::dummy_emitter();
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
-        let r = match run_shell_direct(&mut shell, &projecting_caps(), cmd, 2, &emit) {
-            Outcome::Ran(r) => r,
-            Outcome::Static(s) => panic!("static failure: {s}"),
-        };
+        let r = run_shell_direct(&mut shell, &projecting_caps(), cmd, 2, &emit);
         let elapsed = t0.elapsed();
         let stderr = String::from_utf8_lossy(&r.stderr);
         if r.exit != 124
@@ -1603,12 +1504,8 @@ keep-bottom
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
         let r = std::thread::scope(|s| {
-            let worker = s.spawn(|| {
-                match run_shell_direct(&mut shell, &Capabilities::root(), cmd, 30, &emit) {
-                    Outcome::Ran(r) => r,
-                    Outcome::Static(msg) => panic!("static failure: {msg}"),
-                }
-            });
+            let worker =
+                s.spawn(|| run_shell_direct(&mut shell, &Capabilities::root(), cmd, 30, &emit));
             // Let the eval reach the blocking external wait, then cancel from
             // outside — the registry cascade's move.
             std::thread::sleep(std::time::Duration::from_millis(300));
@@ -1974,10 +1871,7 @@ return !{{length $hits}}"
     fn run_capturing(shell: &mut Shell, cmd: &str) -> (ToolResult, Vec<crate::bus::Kind>) {
         let (tx, rx) = channel();
         let emit = Emitter::new(tx, 0);
-        let result = match run_shell_direct(shell, &Capabilities::root(), cmd, 30, &emit) {
-            Outcome::Ran(r) => r,
-            Outcome::Static(s) => panic!("static (parse/type) failure: {s}"),
-        };
+        let result = run_shell_direct(shell, &Capabilities::root(), cmd, 30, &emit);
         // Drop the emitter so the channel disconnects and `try_recv` drains to
         // empty rather than blocking.
         drop(emit);

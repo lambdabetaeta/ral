@@ -72,6 +72,7 @@ fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
             io: RunIo::Capture,
             terminal: RequestedTerminalAccess::Leased,
             stdin: RunStdin::Inherit,
+            trail: None,
         },
         surface: None,
         deferred: None,
@@ -81,12 +82,14 @@ fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
     });
     match report {
         RunReport::Ran {
-            result: Ok(Value::Unit),
+            ending: ral_core::Ending::Settled {
+                value: Value::Unit, ..
+            },
             captured: Some(captured),
             ..
         } => serde_json::from_slice(&captured.stdout).expect("`to-json` emits JSON"),
-        RunReport::Ran { result, .. } => {
-            panic!("{call} must return a receipt record, got {result:?}")
+        RunReport::Ran { ending, .. } => {
+            panic!("{call} must return a receipt record, got {ending:?}")
         }
         RunReport::Static { .. } => panic!("{call} must compile"),
     }
@@ -107,6 +110,7 @@ fn refusal(shell: &mut Shell, source: &str) -> String {
             io: RunIo::Capture,
             terminal: RequestedTerminalAccess::Leased,
             stdin: RunStdin::Inherit,
+            trail: None,
         },
         surface: None,
         deferred: None,
@@ -116,10 +120,10 @@ fn refusal(shell: &mut Shell, source: &str) -> String {
     });
     match report {
         RunReport::Ran {
-            result: Err(ral_core::types::Break::Error(e)),
+            ending: ral_core::Ending::Raised { error, .. } | ral_core::Ending::Walled { error, .. },
             ..
-        } => e.to_string(),
-        RunReport::Ran { result, .. } => panic!("{source} must be refused, got {result:?}"),
+        } => error.to_string(),
+        RunReport::Ran { ending, .. } => panic!("{source} must be refused, got {ending:?}"),
         RunReport::Static { .. } => panic!("{source} must compile"),
     }
 }

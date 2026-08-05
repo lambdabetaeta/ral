@@ -79,6 +79,18 @@ user label can never coincide with one by construction.
   scheduling error into an immediate one, the same discipline names give the
   spawn call.
 
+## Amendment (2026-08-06): the label is required, and mints nothing
+
+The `sched-<n>` default this section describes is retired. Once the desk's
+per-call recording unified onto one `subject` field feeding both the rail row
+and the audit sentence, an unlabelled schedule left that one field with two
+possible answers — the caller's (none) and the registry's (the minted
+default) — and the two could disagree. The repository owner ruled that
+`schedule` must always take a label from the model, closing the question at
+its source: [[decisions/260720_harness-calls-are-acts|harness-calls-are-acts]]
+carries the amendment in full. `sched-<n>` is no longer a reserved shape —
+there is nothing left for it to protect.
+
 ## Commitments retired
 
 The protected-commitment feature is deleted whole: the `commit` and

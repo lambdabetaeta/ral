@@ -111,6 +111,7 @@ fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> Settled<
             io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Denied,
             stdin: RunStdin::Empty,
+            trail: None,
         },
         surface: None,
         deferred: None,
@@ -118,7 +119,7 @@ fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> Settled<
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        RunReport::Ran { result, .. } => result,
+        RunReport::Ran { ending, .. } => ending.into_result(),
         RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
     }
 }

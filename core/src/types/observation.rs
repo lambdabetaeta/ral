@@ -7,6 +7,7 @@
 
 use super::audit::{AuditIo, epoch_us};
 use super::map::Map;
+use super::shell::workers::{LeaseClass, WorkerId};
 use super::value::Value;
 use crate::diagnostic::CallSite;
 use crate::syntax::ast::RedirectMode;
@@ -67,6 +68,24 @@ pub enum Observed {
         /// Per-resource detail, spliced into the projected map beside
         /// `resource` and `decision`.
         fields: Map,
+    },
+    /// A worker's birth, filed at `spawn_child` in the same breath as its
+    /// registry entry — after the reservation succeeds, so a spawn the cap
+    /// refused observes nothing.  The fact a later reader joins against the
+    /// registry, or the `` `workers `` probe, to ask what became of it.
+    Worker {
+        id: WorkerId,
+        cmd: String,
+        class: LeaseClass,
+    },
+    /// A harness act, authored host-side at the arm where its outcome is
+    /// known — never by the engine.  `subject` is the agent name or schedule
+    /// label a spawn or nudge names; `None` for a reply.
+    Act {
+        verb: String,
+        subject: Option<String>,
+        payload: String,
+        refused: bool,
     },
 }
 
@@ -182,6 +201,21 @@ fn mode_parse(s: &str) -> Option<RedirectMode> {
         "write" => RedirectMode::Write,
         "append" => RedirectMode::Append,
         "stream" => RedirectMode::StreamWrite,
+        _ => return None,
+    })
+}
+
+fn lease_class_str(class: LeaseClass) -> &'static str {
+    match class {
+        LeaseClass::Worker => "worker",
+        LeaseClass::Durable => "durable",
+    }
+}
+
+fn lease_class_parse(s: &str) -> Option<LeaseClass> {
+    Some(match s {
+        "worker" => LeaseClass::Worker,
+        "durable" => LeaseClass::Durable,
         _ => return None,
     })
 }
@@ -305,8 +339,46 @@ impl Observation {
                 ]);
                 pairs.extend(fields.iter().map(|(k, v)| (k.clone(), v.clone())));
             }
+            Observed::Worker { id, cmd, class } => {
+                #[allow(
+                    clippy::cast_possible_wrap,
+                    reason = "a worker id is minted from a process-global counter, far below i64::MAX"
+                )]
+                pairs.extend([
+                    ("id".into(), Value::Int(id.0 as i64)),
+                    ("cmd".into(), Value::String(cmd.clone())),
+                    (
+                        "class".into(),
+                        Value::String(lease_class_str(*class).into()),
+                    ),
+                ]);
+            }
+            Observed::Act {
+                verb,
+                subject,
+                payload,
+                refused,
+            } => {
+                pairs.push(("verb".into(), Value::String(verb.clone())));
+                if let Some(subject) = subject {
+                    pairs.push(("subject".into(), Value::String(subject.clone())));
+                }
+                pairs.extend([
+                    ("payload".into(), Value::String(payload.clone())),
+                    ("refused".into(), Value::Bool(*refused)),
+                ]);
+            }
         }
         Value::map(pairs)
+    }
+
+    /// The seam-facing projection: total where [`Self::to_value`] is not.
+    /// Every handle or closure reachable through a `value` field crosses as a
+    /// placeholder instead of vanishing; nothing about the envelope or any
+    /// first-order field changes, so a host decoder built against
+    /// [`Self::from_value`] reads it unmodified.
+    pub fn to_wire(&self) -> Value {
+        crate::serial::scrub(&self.to_value(), &crate::serial::no_wire_form)
     }
 
     /// Inverse of [`Self::to_value`]; `None` for anything that is not a map
@@ -343,6 +415,8 @@ impl Observed {
             Self::Read { .. } => "read",
             Self::Grep { .. } => "grep",
             Self::Capability { .. } => "capability-check",
+            Self::Worker { .. } => "worker",
+            Self::Act { .. } => "act",
         }
     }
 
@@ -389,6 +463,21 @@ impl Observed {
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
             },
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "a worker id was projected from u64 and round-trips exactly"
+            )]
+            "worker" => Self::Worker {
+                id: WorkerId(int_at(m, "id")? as u64),
+                cmd: str_at(m, "cmd")?,
+                class: lease_class_parse(&str_at(m, "class")?)?,
+            },
+            "act" => Self::Act {
+                verb: str_at(m, "verb")?,
+                subject: str_at(m, "subject"),
+                payload: str_at(m, "payload")?,
+                refused: bool_at(m, "refused")?,
+            },
             _ => return None,
         })
     }
@@ -404,6 +493,13 @@ fn str_at(m: &Map, key: &str) -> Option<String> {
 fn int_at(m: &Map, key: &str) -> Option<i64> {
     match m.get(key)? {
         Value::Int(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn bool_at(m: &Map, key: &str) -> Option<bool> {
+    match m.get(key)? {
+        Value::Bool(b) => Some(*b),
         _ => None,
     }
 }
@@ -431,6 +527,7 @@ fn strings_at(m: &Map, key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::serial::OPAQUE_TAG;
 
     fn site() -> CallSite {
         CallSite {
@@ -498,6 +595,28 @@ mod tests {
             .into_iter()
             .collect(),
         });
+        round_trips(Observed::Worker {
+            id: WorkerId(7),
+            cmd: "watch build".into(),
+            class: LeaseClass::Worker,
+        });
+        round_trips(Observed::Worker {
+            id: WorkerId(8),
+            cmd: "service tail".into(),
+            class: LeaseClass::Durable,
+        });
+        round_trips(Observed::Act {
+            verb: "spawn".into(),
+            subject: Some("reviewer".into()),
+            payload: "check the diff".into(),
+            refused: false,
+        });
+        round_trips(Observed::Act {
+            verb: "reply".into(),
+            subject: None,
+            payload: "done".into(),
+            refused: true,
+        });
     }
 
     #[test]
@@ -511,6 +630,86 @@ mod tests {
             )]))
             .is_none()
         );
+    }
+
+    /// A `Handle` with no worker behind it — just enough to exercise
+    /// [`Observation::to_wire`]'s totality, never run.
+    fn dummy_handle() -> Value {
+        use crate::types::{HandleInner, HandleState};
+        use std::sync::{Arc, Mutex};
+        Value::Handle(HandleInner {
+            result: Arc::new(Mutex::new(None)),
+            cached: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(HandleState::Running)),
+            stdout_buf: Arc::new(Mutex::new(Vec::new())),
+            stderr_buf: Arc::new(Mutex::new(Vec::new())),
+            surface_buf: Arc::new(Mutex::new(Vec::new())),
+            joined: Arc::new(Mutex::new(false)),
+            last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
+            cmd: "<test>".into(),
+            cancel: crate::process::CancelScope::default(),
+        })
+    }
+
+    /// A `Handle` reachable through `value` projects to its `opaque`
+    /// placeholder rather than vanishing, and the placeholder round-trips
+    /// through `from_value` as the tagged `Variant` it is.
+    #[test]
+    fn to_wire_scrubs_a_handle_and_the_placeholder_round_trips() {
+        let obs = Observation::instant(
+            site(),
+            "alex".into(),
+            Observed::Command {
+                argv: vec!["spawn".into()],
+                status: 0,
+                origin: CommandOrigin::Builtin,
+                io: AuditIo::default(),
+                error: None,
+                value: dummy_handle(),
+            },
+        );
+        let wire = obs.to_wire();
+        let Value::Map(m) = &wire else {
+            panic!("to_wire projects as a map")
+        };
+        assert_eq!(
+            m.get("value"),
+            Some(&Value::Variant {
+                label: OPAQUE_TAG.to_string(),
+                payload: Some(Box::new(Value::map(vec![(
+                    "type".to_string(),
+                    Value::String("handle".to_string())
+                )])))
+            })
+        );
+        let back = Observation::from_value(&wire).expect("the placeholder decodes");
+        let Observed::Command { value, .. } = back.what else {
+            panic!("expected a command")
+        };
+        assert_eq!(value, m.get("value").unwrap().clone());
+    }
+
+    /// A genuine string equal to the placeholder's own tag is never mistaken
+    /// for one: the placeholder is a tagged `Variant`, a string is a plain
+    /// leaf, and `to_wire` leaves the string untouched.
+    #[test]
+    fn a_genuine_string_cannot_impersonate_the_placeholder() {
+        let obs = Observation::instant(
+            site(),
+            "alex".into(),
+            Observed::Command {
+                argv: vec!["echo".into()],
+                status: 0,
+                origin: CommandOrigin::Builtin,
+                io: AuditIo::default(),
+                error: None,
+                value: Value::String(OPAQUE_TAG.to_string()),
+            },
+        );
+        let Value::Map(m) = obs.to_wire() else {
+            panic!("to_wire projects as a map")
+        };
+        assert_eq!(m.get("value"), Some(&Value::String(OPAQUE_TAG.to_string())));
     }
 
     /// A denied check's decision is a field of its own, never an exit status

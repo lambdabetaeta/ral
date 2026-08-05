@@ -64,6 +64,7 @@ fn try_birth_detached() -> Option<u8> {
                 io: crate::RunIo::Inherit,
                 terminal: crate::RequestedTerminalAccess::Leased,
                 stdin: crate::RunStdin::Inherit,
+                trail: None,
             },
             surface: None,
             deferred: None,
@@ -73,7 +74,10 @@ fn try_birth_detached() -> Option<u8> {
         });
         Some(u8::from(!matches!(
             report,
-            crate::RunReport::Ran { result: Ok(_), .. }
+            crate::RunReport::Ran {
+                ending: crate::run::Ending::Settled { .. },
+                ..
+            }
         )))
     }
     #[cfg(not(unix))]

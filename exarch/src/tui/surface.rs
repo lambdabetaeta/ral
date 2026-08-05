@@ -117,6 +117,12 @@ impl SurfaceBuffer {
             Observed::Capability { .. } => {
                 unreachable!("a capability check renders as its own card, never bucketed")
             }
+            Observed::Worker { .. } => {
+                unreachable!("a worker birth is landed as its own card, never bucketed")
+            }
+            Observed::Act { .. } => {
+                unreachable!("an `Act` never reaches the rail from the engine seam")
+            }
         }
     }
 

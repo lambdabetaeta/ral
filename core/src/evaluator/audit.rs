@@ -2,19 +2,21 @@
 //!
 //! [`observe_stamped`] reports to both consumers and judges neither: the host
 //! decides what the rail draws, and `audit { }` decides what the trail keeps.
-//! Every evaluator door that settles a fact routes through it.  Three sites
+//! Every evaluator door that settles a fact routes through it.  Two sites
 //! stand outside, each reaching only one consumer: `capability::enforce` and
-//! `Shell::audit_deputy_prefixes` have no [`Mooring`], and exarch's host
-//! doors have no trail.
+//! `Shell::audit_deputy_prefixes` have no [`Mooring`].
 //!
 //! `within`, `grant`, `guard`, `try`, and `audit` are all collection
 //! boundaries, not observations: none of them constructs one.  `try`/`audit`
 //! force collection on regardless of the surrounding state via
-//! [`forced_subtree`], which marks the trail's length before `body` runs and
-//! reads back everything pushed after that mark.
+//! [`delimited`], which opens a trail scope before `body` runs and closes it
+//! after — draining and closing the trail if `body` is the one that opened
+//! it, reading a suffix and leaving it open otherwise (`Audit::open` /
+//! `Audit::close`, `core/src/types/audit.rs`). The opener owns closing on
+//! every exit, panics included.
 //!
 //! With nobody listening the recorders are no-ops, so the dispatcher can call
-//! them unconditionally; [`forced_subtree`] is the exception, since `try` and
+//! them unconditionally; [`delimited`] is the exception, since `try` and
 //! `audit` force collection whether or not audit is on.
 
 use crate::types::{
@@ -223,34 +225,43 @@ pub(crate) fn record_capability(shell: &mut Shell, mooring: &Mooring, resource: 
 /// used by `try` (to name the failing command) and `audit` (to return the
 /// subtree).  The observations stay in the trail, flat among whatever else it
 /// collects.
-pub(crate) fn forced_subtree(
+///
+/// Opens a scope, runs `body` under `catch_unwind`, and closes the scope
+/// before deciding what to do with the outcome — a panicking `body` still
+/// gets its trail closed, so the delimiter that opened it never leaves the
+/// trail dangling for the next dispatch to inherit. The unwind then resumes:
+/// a harness defect is not this delimiter's to swallow.
+pub(crate) fn delimited(
     shell: &mut Shell,
     capture: CapturePolicy,
     body: impl FnOnce(&mut Shell) -> Settled<Value>,
 ) -> Result<(BodyResult, Vec<Observation>), Escape> {
-    let (mark, settled) = with_capture_policy(shell, capture, |shell| {
-        let mark = shell.local.audit.force_open();
-        (mark, body(shell))
-    });
-    let body_result = split(settled)?;
-    Ok((body_result, shell.local.audit.since(mark)))
+    let saved_capture = shell.local.audit.capture_policy();
+    shell
+        .local
+        .audit
+        .set_capture(merge_capture(saved_capture, capture));
+    let scope = shell.local.audit.open();
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(shell)));
+
+    let children = shell.local.audit.close(scope);
+    shell.local.audit.set_capture(saved_capture);
+
+    match outcome {
+        Ok(settled) => Ok((split(settled)?, children)),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
-/// Install `policy` for `f`, restoring the previous one after.  Capture is
-/// monotonic: an inner `try`'s `Off` must not silence an outer `audit`'s
-/// `Bytes`, hence the merge rather than a plain swap.
-fn with_capture_policy<R>(
-    shell: &mut Shell,
-    policy: CapturePolicy,
-    f: impl FnOnce(&mut Shell) -> R,
-) -> R {
-    let saved = shell.local.audit.capture_policy();
-    let merged = match (saved, policy) {
+/// Capture is monotonic: an inner `try`'s `Off` must not silence an outer
+/// `audit`'s `Bytes`, hence a merge rather than a plain swap.
+///
+/// `pub(crate)`: the run door composes the same way when a dispatch's own
+/// `Run.trail` opens onto a session already under `--audit`.
+pub(crate) fn merge_capture(saved: CapturePolicy, requested: CapturePolicy) -> CapturePolicy {
+    match (saved, requested) {
         (CapturePolicy::Bytes, _) | (_, CapturePolicy::Bytes) => CapturePolicy::Bytes,
         _ => CapturePolicy::Off,
-    };
-    shell.local.audit.set_capture(merged);
-    let r = f(shell);
-    shell.local.audit.set_capture(saved);
-    r
+    }
 }

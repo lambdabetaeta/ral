@@ -60,7 +60,8 @@ pub use shell::cwd::Cwd;
 
 mod audit;
 pub use audit::{
-    Audit, AuditFragment, AuditIo, CapturePolicy, STDERR_CAP_BYTES, epoch_us, tree_value,
+    Audit, AuditFragment, AuditIo, CapturePolicy, STDERR_CAP_BYTES, TrailScope, epoch_us,
+    tree_value,
 };
 
 mod observation;

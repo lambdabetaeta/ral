@@ -226,6 +226,29 @@ already screen-silent, and they stay that way.
   label. The trigger description is captured before the call, so a landed
   schedule's payload is unchanged.
 
+## Amendment (2026-08-06): a required label dissolves the subject conflict
+
+*Written once the desk's recording unified into one [`Observed::Act`] per
+attempt (`verb`, `subject`, `payload`, `refused`), fanned to both the rail row
+and the audit fragment off that single datum
+([[map/exarch/shell-eval|shell-eval]]).* One `subject` field feeding two
+readers exposed a tension this ADR's own "Adopt the minted `sched-<n>`
+default" rejection above had only deferred: the rail wants the caller's own
+label, the audit wants the label `schedule` actually resolved, and the two
+disagree exactly when the caller supplies none and the registry mints a
+`sched-<n>` default in its place. One `subject` field cannot hold two
+different strings.
+
+The repository owner's ruling: `schedule` must always require a label from
+the model. With no minted default left to mint, the rail's label and the
+audit's label are the same string by construction — the conflict is removed
+at its source rather than arbitrated between two readers. The "narrow
+rejection" above, and the unlabelled-schedule case it carved out, are both
+moot: there is no longer an unlabelled schedule to reason about.
+[`ScheduleRegistry::schedule`] drops the minting and the label parameter
+becomes a plain `String`; [`crate::fleet::desk::payload_label`] refuses a
+missing or malformed label at the wire before it ever reaches the registry.
+
 ## Out of scope
 
 Headless (`exarch/src/headless.rs`) is untouched behaviourally. A stderr line has

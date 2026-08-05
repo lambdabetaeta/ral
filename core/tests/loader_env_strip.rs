@@ -70,6 +70,7 @@ fn confined_child_env(src: &str) -> String {
             io: RunIo::Inherit,
             terminal: RequestedTerminalAccess::Denied,
             stdin: RunStdin::Empty,
+            trail: None,
         },
         surface: None,
         deferred: None,
@@ -77,10 +78,13 @@ fn confined_child_env(src: &str) -> String {
         nursery: None,
         lifecycle: Box::new(()),
     });
-    let RunReport::Ran { result, .. } = report else {
+    let RunReport::Ran { ending, .. } = report else {
         panic!("well-formed source must run: {src:?}");
     };
-    match result.expect("a confined bundled printenv must succeed") {
+    match ending
+        .into_result()
+        .expect("a confined bundled printenv must succeed")
+    {
         Value::String(s) => s.to_string(),
         other => panic!("expected printenv's bytes as a string, got {other:?}"),
     }
