@@ -159,7 +159,7 @@ impl Agent {
                 pins: Some(self.pins.clone()),
             },
         });
-        let content = {
+        let outcome = {
             let _guard = self.seat.install_run(RunInstall {
                 seam: seam.clone(),
                 // Stamped with the registry generation read now, so a batch
@@ -167,17 +167,29 @@ impl Agent {
                 deferred: shell_eval::deferred_sink(emit, self.id, &self.agents),
                 nursery,
             });
-            match shell_eval::run_shell(
+            shell_eval::run_shell(
                 self.seat.transport(),
                 &self.caps,
                 cmd,
                 timeout_secs,
                 emit,
                 Some(&seam),
-            ) {
-                shell_eval::Outcome::Ran(r) => render(&r),
-                shell_eval::Outcome::Static(s) => clip(&s, OPAQUE_CAP),
+            )
+        };
+        // Only now, with the dispatch returned and the install dropped: the
+        // worker probe below is legal at a run boundary and nowhere else.
+        let content = match outcome {
+            shell_eval::Outcome::Ran(mut r) => {
+                // The wall discarded the bindings and left the work running;
+                // nothing else in this stderr tells the model so.
+                if r.timed_out
+                    && let Some(note) = self.surviving_worker_note()
+                {
+                    r.stderr.extend_from_slice(note.as_bytes());
+                }
+                render(&r)
             }
+            shell_eval::Outcome::Static(s) => clip(&s, OPAQUE_CAP),
         };
         // `if let`, not an unconditional overwrite: last-wins is a property of
         // the batch, so a later call that stages nothing must leave an earlier
@@ -213,8 +225,9 @@ impl Agent {
 )]
 mod tests {
     //! `run_shell`'s call-boundary bookkeeping — binding-lease pruning, the
-    //! large-binding warning, worker retention — and the panic recovery those
-    //! boundaries rest on.
+    //! large-binding warning, worker retention, the audit and the surviving
+    //! workers a raise owes the model — and the panic recovery those boundaries
+    //! rest on.
 
     use super::*;
     use crate::agent::cancel;
@@ -351,6 +364,105 @@ mod tests {
         assert!(
             !result2.content.contains("large binding"),
             "nothing newly installed must warn again"
+        );
+    }
+
+    /// The audit belongs to every raise, not only to the wall: a call that
+    /// staged its reply and then died on a command's non-zero exit still made
+    /// that reply stand, so the audit rides that stderr too — last, after the
+    /// non-zero-exit branch's own remedy.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_zero_exit_carries_the_audit_of_what_already_stands() {
+        let dir = tmp("audit-on-command-exit");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+
+        let result = session.run_shell(
+            "c0".into(),
+            "reply 'the work stands'\n/bin/sh -c 'exit 3'",
+            10,
+            &emit,
+        );
+
+        assert!(
+            result.content.contains("EXIT: 3"),
+            "the command's own exit is the tool exit; content was: {}",
+            result.content
+        );
+        let (remedy, audit) = (
+            result.content.find("recovery: this non-zero exit raised"),
+            result
+                .content
+                .find("audit: this call had already staged your reply"),
+        );
+        assert!(
+            audit.is_some(),
+            "a committed act must be audited on a non-zero exit too; content was: {}",
+            result.content
+        );
+        assert!(
+            remedy < audit,
+            "the audit comes last, after the branch's own remedy; content was: {}",
+            result.content
+        );
+    }
+
+    /// A worker `defer`red before the wall outlives it — moored to the session
+    /// root, out of the foreground cancel's reach — while the handle binding
+    /// that named it is gone with the unwind.  The timeout stderr must say so,
+    /// naming the work, or the model is left unable to `await` and unaware
+    /// there is anything to await.
+    #[cfg(unix)]
+    #[test]
+    fn the_wall_names_the_workers_that_survived_it() {
+        let dir = tmp("surviving-workers");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+
+        let result = session.run_shell(
+            "c0".into(),
+            "let deferred = defer { sleep 20 }\nsleep 20",
+            2,
+            &emit,
+        );
+
+        assert!(
+            result.content.contains("EXIT: 124"),
+            "the wall exits 124; content was: {}",
+            result.content
+        );
+        assert!(
+            result
+                .content
+                .contains("work this call deferred is still running: `<block>`"),
+            "the surviving worker is named by the `cmd` core filed it under; content was: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("you cannot `await` it"),
+            "the sentence says why the handle is no help; content was: {}",
+            result.content
+        );
+    }
+
+    /// The same probe, on a call the wall did not cut: a completed call's
+    /// worker is nobody's orphan, so nothing is said about it.
+    #[test]
+    fn a_call_that_returns_says_nothing_about_its_workers() {
+        let dir = tmp("no-surviving-note");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+
+        let result = session.run_shell("c0".into(), "let ok = defer { return 1 }", 10, &emit);
+
+        assert!(
+            !result.content.contains("work this call deferred"),
+            "a call that returned holds its own handle; content was: {}",
+            result.content
         );
     }
 

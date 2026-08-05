@@ -109,6 +109,17 @@ pub struct WorkerEntry {
     /// Wall-clock start, display-only: lease math keeps its own clocks.
     pub started: SystemTime,
     pub class: LeaseClass,
+    /// The registry's epoch when the spawn door filed this entry.  The clock
+    /// ticks once per source dispatch, at dispatch entry, so an entry whose
+    /// birth epoch is the registry's current one was born during the dispatch
+    /// that just ran.
+    ///
+    /// The equivalence leaks one way: a worker's own shell shares this registry,
+    /// so a `spawn` reached *inside* a running worker is stamped with whatever
+    /// epoch is current when that thread gets there. A grandchild filed while
+    /// the next dispatch is already in flight is stamped to it, and that
+    /// dispatch reads the work as its own — misattribution, never phantom work.
+    pub birth_epoch: u64,
     /// The ral-call epoch at which [`WorkerRegistry::sweep_retention`] first
     /// observed this entry settled — `None` while it runs, so retention starts
     /// at the next call rather than retroactively.
@@ -298,6 +309,12 @@ impl WorkerRegistry {
         self.0.lock().unwrap().epoch += 1;
     }
 
+    /// The clock [`tick_epoch`](Self::tick_epoch) keeps, read against a
+    /// [`WorkerEntry::birth_epoch`].
+    pub(crate) fn epoch(&self) -> u64 {
+        self.0.lock().unwrap().epoch
+    }
+
     /// Expire settled entries against the armed retention; a no-op unarmed. An
     /// entry is stamped the first sweep that finds it settled and removed with
     /// a [`ReapCause::Retention`] notice `retention` calls later, so retention
@@ -427,6 +444,7 @@ mod tests {
             cmd: cmd.to_string(),
             started: SystemTime::now(),
             class,
+            birth_epoch: 0,
             settled_epoch: None,
             handle: HandleInner {
                 result: Arc::new(Mutex::new(None)),

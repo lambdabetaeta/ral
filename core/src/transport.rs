@@ -578,6 +578,7 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FO
         }
         "workers" => {
             use crate::types::{HandleState, LeaseClass};
+            let now = shell.local.workers.epoch();
             #[allow(
                 clippy::cast_possible_wrap,
                 reason = "worker counts, sequential WorkerId(u64) ids, and u64 uptime/idle/settled-epoch quantities are all far below i64::MAX in any live process"
@@ -614,6 +615,15 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FO
                                 },
                             ),
                             ("running".into(), FOValue::Bool { value: running }),
+                            // A Bool, not the two epochs: a host keeps a clock
+                            // of its own, and the numbers must never be
+                            // compared across the boundary.
+                            (
+                                "born-this-epoch".into(),
+                                FOValue::Bool {
+                                    value: entry.birth_epoch == now,
+                                },
+                            ),
                             (
                                 "up-secs".into(),
                                 FOValue::Int {

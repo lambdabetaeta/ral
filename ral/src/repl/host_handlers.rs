@@ -319,6 +319,7 @@ mod tests {
             cmd: cmd.to_string(),
             started: std::time::SystemTime::now(),
             class: ral_core::types::LeaseClass::Worker,
+            birth_epoch: 0,
             settled_epoch: None,
             handle: ral_core::types::HandleInner {
                 result: Arc::new(Mutex::new(None)),

@@ -214,6 +214,7 @@ mod tests {
             stderr: stderr.as_bytes().to_vec(),
             value: value.map(str::to_string),
             exit,
+            timed_out: false,
         }
     }
 

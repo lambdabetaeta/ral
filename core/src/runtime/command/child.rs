@@ -291,6 +291,9 @@ impl RunningChild {
         // killed and reaped otherwise; plain `try_wait` reports `Ok(None)` on a
         // stop and the loop would spin forever.  `Some(outcome)` therefore means
         // the child is already consumed, and must not be waited on again.
+        // Set exactly when the poll leaves through the cancel branch below, so
+        // whatever status comes back after that is our teardown's doing.
+        let mut torn_down_by: Option<crate::process::CancelCause> = None;
         let early_outcome: Option<crate::process::WaitOutcome> = {
             // Snappy for short-lived children, gentle on CPU for long ones.
             let mut interval = std::time::Duration::from_millis(5);
@@ -340,6 +343,7 @@ impl RunningChild {
                     // never wait on a dead pid.  The Windows group release is
                     // not part of teardown; the `Standalone` branch below still
                     // performs it on the way out.
+                    torn_down_by = Some(cause);
                     break self.terminate_group(&mut child, cause);
                 }
                 std::thread::sleep(interval);
@@ -377,6 +381,13 @@ impl RunningChild {
                 t_enter.elapsed(),
             );
             out
+        };
+        // A death by a signal on our own ladder is our doing, so the report
+        // names the cause rather than the number; anything else the child met in
+        // the grace window stays its own and is reported as such.
+        let outcome = match torn_down_by {
+            Some(cause) => outcome.attribute_to(cause),
+            None => outcome,
         };
         #[cfg(unix)]
         if let crate::process::WaitOutcome::Stopped(signal) = outcome {
@@ -557,6 +568,46 @@ impl Drop for RunningChild {
 mod tests {
     use super::*;
     use crate::process::*;
+
+    /// A wall that expires mid-command must be reported as the time limit it
+    /// was, not as the SIGTERM we happened to send — and reported without
+    /// disturbing the status, which stays the signal's 128 + 15.
+    #[test]
+    fn a_deadline_teardown_reports_the_time_limit_not_the_signal() {
+        let mut cmd = std::process::Command::new("/bin/sleep");
+        cmd.arg("30");
+        let (child, pgid) = spawn_with_pgid(&mut cmd, PgidPolicy::NewLeader)
+            .expect("spawn /bin/sleep under a pgid");
+
+        let scope = CancelScope::root();
+        let running = RunningChild::assemble_with_owner(
+            crate::process::ChildHandle::from_std(child),
+            pgid,
+            "sleep".to_string(),
+            ExternalPlumbing {
+                stdout_pump: None,
+                stderr_pump: None,
+            },
+            false,
+            GroupOwner::None,
+            scope.clone(),
+            None,
+        );
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            scope.cancel(CancelCause::Deadline);
+        });
+
+        let (code, failure) = running.observe(false).expect("wait should not error");
+        canceller.join().expect("canceller thread");
+
+        assert_eq!(code, 128 + libc::SIGTERM, "the status must not shift");
+        let failure = failure.expect("a torn-down child is a failure");
+        assert_eq!(
+            failure.message("sleep"),
+            "sleep: stopped because the call's time limit expired"
+        );
+    }
 
     /// An interrupt opens with the gentler SIGINT, to keep job-control
     /// semantics, and must still bound the whole tree.  Two properties, both

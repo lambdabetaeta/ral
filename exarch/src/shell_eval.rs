@@ -74,6 +74,10 @@ pub struct ToolResult {
     pub stderr: Vec<u8>,
     pub value: Option<String>,
     pub exit: i32,
+    /// The wall ended this call: set only on the ending the deadline shaped, so
+    /// a run that returned a value never carries it, and no caller need guess
+    /// from `exit`, which a program is free to make 124 itself.
+    pub timed_out: bool,
 }
 
 /// What `run_shell` produces.  `Static` is a parse or type failure: ariadne
@@ -251,7 +255,7 @@ pub(crate) fn run_shell(
     #[cfg(debug_assertions)]
     let tool_start = std::time::Instant::now();
 
-    use ral_core::transport::{Program, Report, Run};
+    use ral_core::transport::{Break, Program, Report, Run};
     use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 
     let run = Run {
@@ -320,7 +324,7 @@ pub(crate) fn run_shell(
             status,
             single_command,
             captured,
-            timed_out,
+            timed_out: deadline,
         } => {
             let captured = captured.unwrap_or(ral_core::Captured {
                 stdout: Vec::new(),
@@ -329,50 +333,46 @@ pub(crate) fn run_shell(
             let stdout_bytes = captured.stdout;
             let mut stderr_bytes = captured.stderr;
 
-            let (exit, value) = match &result {
+            let (exit, value, timed_out) = match &result {
                 Ok(sv) => {
                     let v = Some(RalValue::from(sv.clone()));
-                    (0, v)
+                    (0, v, false)
                 }
-                Err(break_) => match break_ {
-                    ral_core::transport::Break::Error {
-                        rendered,
-                        command_exit,
-                    } => {
-                        // The seam already rendered the whole diagnostic against
-                        // the engine's source map: print it verbatim as the REPL
-                        // does.  A wall is no exception — the cancel is stamped
-                        // on the innermost node it unwound through, so this
-                        // rendering is the only thing naming *where* it struck:
-                        // the frontier between the steps that completed and the
-                        // one that did not.
-                        stderr_bytes.extend_from_slice(rendered.as_bytes());
-                        if timed_out {
-                            // 124 is the conventional timeout exit.
-                            let mut tip = format!(
-                                "\nthis call timed out after {timeout_secs}s at the point above. The steps \
-                                 before it completed; the step it names did not, and the bindings this call \
-                                 made are gone.\n\
-                                 recovery: if the command is simply slow and there is nothing to overlap it \
-                                 with, retry with a higher `timeout_secs`. If other work can run alongside it, \
-                                 defer it instead (`let h = defer {{ … }}`) and let the run return: the host \
-                                 notifies you at the next exchange boundary when it settles and renders its \
-                                 output on the rail, and `await $h` gives you its value record — you need not \
-                                 poll.\n"
-                            );
-                            // Effects outlive the unwind that discarded the
-                            // bindings: a retry that repeats them duplicates
-                            // them, so the ledger says what already stands.
-                            if let Some(audit) =
-                                seam.and_then(|seam| seam.desk.services.acts.audit())
-                            {
-                                tip.push_str(&audit);
-                            }
-                            stderr_bytes.extend_from_slice(tip.as_bytes());
-                            (124, None)
-                        } else {
-                            // The status is the engine's, never recomputed here.
-                            if *command_exit {
+                Err(break_) => {
+                    // Every ending discards this call's bindings, chosen or
+                    // suffered: the ledger says what already stands.  Job
+                    // control is no ending, and keeps them.
+                    let file_acts = |out: &mut Vec<u8>| {
+                        if let Some(audit) = seam.and_then(|seam| seam.desk.services.acts.audit()) {
+                            out.extend_from_slice(audit.as_bytes());
+                        }
+                    };
+                    match break_ {
+                        Break::Error {
+                            rendered,
+                            command_exit,
+                        } => {
+                            // The seam already rendered the whole diagnostic
+                            // against the engine's source map: print it verbatim
+                            // as the REPL does.  A wall is no exception — the
+                            // cancel is stamped on the innermost node it unwound
+                            // through, so this rendering is the only thing naming
+                            // *where* it struck.
+                            stderr_bytes.extend_from_slice(rendered.as_bytes());
+                            if deadline {
+                                let tip = format!(
+                                    "\nthis call timed out after {timeout_secs}s at the point above. The steps \
+                                     before it completed; the step it names did not, and the bindings this call \
+                                     made are gone.\n\
+                                     recovery: if the command is simply slow and there is nothing to overlap it \
+                                     with, retry with a higher `timeout_secs`. If other work can run alongside it, \
+                                     defer it instead (`let h = defer {{ … }}`) and let the run return: the host \
+                                     notifies you at the next exchange boundary when it settles and renders its \
+                                     output on the rail, and `await $h` gives you its value record — you need not \
+                                     poll.\n"
+                                );
+                                stderr_bytes.extend_from_slice(tip.as_bytes());
+                            } else if *command_exit {
                                 let mut tip = String::from(
                                     "\nrecovery: this non-zero exit raised. If the exit code is the tool own \
                                      signal rather than a failure (grep no-match=1, diff differs=1, test false=1, \
@@ -389,13 +389,20 @@ pub(crate) fn run_shell(
                                 tip.push('\n');
                                 stderr_bytes.extend_from_slice(tip.as_bytes());
                             }
-                            (status, None)
+                            file_acts(&mut stderr_bytes);
+                            // 124 is the conventional timeout exit; otherwise the
+                            // status is the engine's, never recomputed here.
+                            let exit = if deadline { 124 } else { status };
+                            (exit, None, deadline)
                         }
+                        Break::Exit(code) => {
+                            file_acts(&mut stderr_bytes);
+                            (*code, None, false)
+                        }
+                        #[cfg(unix)]
+                        Break::Stopped { .. } => (1, None, false),
                     }
-                    ral_core::transport::Break::Exit(code) => (*code, None),
-                    #[cfg(unix)]
-                    ral_core::transport::Break::Stopped { .. } => (1, None),
-                },
+                }
             };
 
             let value_str = value.as_ref().and_then(ral_value_to_text);
@@ -405,6 +412,7 @@ pub(crate) fn run_shell(
                 stderr: stderr_bytes,
                 value: value_str,
                 exit,
+                timed_out,
             })
         }
     }
@@ -1388,6 +1396,7 @@ keep-bottom
             r.exit, 124,
             "a timed-out call reports the timeout exit code"
         );
+        assert!(r.timed_out, "the wall ended this call, and says so");
         let stderr = String::from_utf8_lossy(&r.stderr);
         assert!(
             stderr.contains("timed out after 2s"),
@@ -1487,6 +1496,40 @@ keep-bottom
         assert!(
             !stderr.contains("recovery:"),
             "a raised error is not a command exit; stderr was: {stderr}"
+        );
+    }
+
+    /// `timed_out` is the wall's verdict on the ending, not the cancel cause's
+    /// flag: core clears its wall guard before reading that cause, so a run that
+    /// finished just as the reaper tripped can carry it while returning a value.
+    /// A caller keys the "your bindings are gone, your handle is unawaitable"
+    /// sentence off this field, so only an ending the wall shaped may set it —
+    /// which is why an `Ok` and an ordinary raise both answer `false` here.
+    #[test]
+    fn a_call_that_returns_never_carries_the_walls_verdict() {
+        let mut shell = fresh_shell();
+        let returned = run_once(&mut shell, "let n = 1\nreturn $[$n + 1]");
+        assert_eq!(returned.exit, 0, "the call returns normally");
+        assert!(
+            !returned.timed_out,
+            "a call that returned a value did not meet the wall"
+        );
+
+        let (emit, _rx) = crate::bus::dummy_emitter();
+        let raised = match run_shell_direct(
+            &mut shell,
+            &Capabilities::root(),
+            "fail [status: 7]",
+            10,
+            &emit,
+        ) {
+            Outcome::Ran(r) => r,
+            Outcome::Static(s) => panic!("static failure: {s}"),
+        };
+        assert_eq!(raised.exit, 7, "the raised status is the tool exit");
+        assert!(
+            !raised.timed_out,
+            "a raise is an ending, but not the wall's"
         );
     }
 

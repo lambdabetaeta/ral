@@ -56,7 +56,11 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
 ## Process — `core/src/process/`
 
 - `outcome.rs` — `Signal`, `WaitOutcome`, and the user-facing `SpawnFailure` /
-  `CommandFailure` the evaluator surfaces.
+  `CommandFailure` the evaluator surfaces. A death ral itself caused is its own
+  variant (`Cancelled`, carrying the `CancelCause` and the signal we sent), so a
+  torn-down child reports the cause — an expired time limit, a `cancel`, an
+  interrupt, a shutdown — while a signal from outside ral still reports its
+  number. Same status either way.
 - `lease.rs` — `TerminalLease`, the unforgeable authority to hand the
   controlling terminal to a child via `tcsetpgrp`. No public constructor,
   neither `Clone` nor `Copy`: a host cannot forge or duplicate it. Minted at

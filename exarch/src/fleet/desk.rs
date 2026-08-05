@@ -83,8 +83,7 @@ struct Act {
 /// in-band signal — the diagnostic — speaks of the failure and not of the acts.
 ///
 /// Only committed acts are recorded. A refused act changed nothing, so it
-/// leaves no entry: this ledger answers *what stands*, and an entry for an act
-/// that never landed would blunt the one question it exists to answer.
+/// leaves no entry: this ledger answers *what stands*.
 #[derive(Clone, Default)]
 pub(crate) struct ActLedger(Arc<Mutex<Vec<Act>>>);
 
@@ -126,8 +125,7 @@ impl ActLedger {
                 .join("; ")
         };
         Some(format!(
-            "audit: this call had already {done} — harness effects outlive the raise that \
-             discarded its bindings, so that work stands. Do not repeat it.\n"
+            "audit: this call had already {done}; that work stands — do not repeat it.\n"
         ))
     }
 }
@@ -2580,8 +2578,7 @@ mod tests {
             desk.services.acts.audit().as_deref(),
             Some(
                 "audit: this call had already armed the wakeup 'nightly'; removed the wakeup \
-                 'nightly'; staged your reply — harness effects outlive the raise that discarded \
-                 its bindings, so that work stands. Do not repeat it.\n"
+                 'nightly'; staged your reply; that work stands — do not repeat it.\n"
             )
         );
     }

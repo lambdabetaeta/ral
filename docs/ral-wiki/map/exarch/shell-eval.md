@@ -106,7 +106,7 @@ dynamic-context half of the contract lives in [[map/exarch/agent|agent]].
 its bindings and keeps its effects: the child is running, the bytes are in the
 inbox, the wakeup is armed, the staged `reply` is still harvested. Nothing
 rolls back, and a model told only "retry with a higher `timeout_secs`" would
-duplicate every one of them. So the `timed_out` branch writes three things to
+duplicate every one of them. So the `timed_out` branch writes four things to
 stderr, in order, and exits 124:
 
 1. **the engine's rendering, verbatim** — unconditionally, exactly as the
@@ -120,7 +120,13 @@ stderr, in order, and exits 124:
    is simply slow, or `let h = defer { … }` and let the run return, since the
    host notifies at the next exchange boundary and `await $h` yields the value
    record without polling;
-3. **an audit of what already stands**, when there is any. The
+3. **an audit of what already stands**, when there is any — and not the wall's
+   alone: *every* ending that discards the bindings files it, a chosen `exit` as
+   much as a suffered raise, last, after whichever remedy the ending offered,
+   because the asymmetry belongs to the unwind and not to the deadline (a call
+   that staged its `reply` and then died on a command's non-zero exit, or chose
+   `exit 2`, made that reply stand just as surely). `Break::Stopped` is job
+   control rather than an ending, keeps its bindings, and files nothing. The
    [[map/exarch/agent|desk]] keeps an `ActLedger` per `ral` call — minted in
    `Agent::host_services`, the one place a call's whole desk capture is
    assembled, so the ledger's extent *is* the call's — and each acting handler
@@ -133,17 +139,46 @@ stderr, in order, and exits 124:
    entry for work that never happened would blunt it. `DeskAct` names the six
    acts and yields both spellings, the rail's `verb` column and the audit's past
    tense, so a seventh act cannot reach one reader and miss the other
-   ([[decisions/260720_harness-calls-are-acts|harness-calls-are-acts]]).
+   ([[decisions/260720_harness-calls-are-acts|harness-calls-are-acts]]);
+4. **the workers that survived the wall**, named. A `defer`red worker is moored
+   by `Mooring::for_worker` onto the session root precisely so a foreground
+   cancel cannot reach it, so the wall took the handle *binding* and left the
+   work running. The sentence stops there — it says the binding went with the
+   unwind and so the worker cannot be `await`ed, which is also what keeps it
+   from reading as a contradiction of the `recovery:` line's `await $h`; the
+   exchange-boundary promise is already made four lines above and is not made
+   twice. That is a different fact from a committed act, so it is
+   its own sentence and the desk grows no worker view to hold it. The read is
+   the `` `workers `` probe, decoded by `Agent::probe_workers`, and it happens
+   in `Agent::run_shell` *after* `shell_eval::run_shell` returns — a probe is
+   legal only at a run boundary, and going through the probe is what makes this
+   work for a wire seat, whose registry lives in the guest, exactly as for the
+   identity seat. `ToolResult` carries a `timed_out: bool` for the host to
+   key off, set only on the ending the wall actually shaped — not off the
+   report's cancel-cause flag alone, which core reads *after* dropping the wall
+   guard, so an eval that returned a value just as the reaper tripped can still
+   carry it, and this sentence would then tell a successful call its bindings
+   were gone. `exit == 124` is no better: a program may exit 124 itself, and that
+   sentinel is what the field exists to abolish. Which workers are *this* call's is core's
+   answer, not arithmetic across the seam: `WorkerEntry` carries a
+   `birth_epoch` stamped at the spawn door, and the probe row's
+   `born-this-epoch` is a Bool — true when that stamp equals the registry's
+   current epoch, which, the registry ticking once per source dispatch at
+   dispatch entry, means the call that just ran. The raw epochs never cross:
+   `Agent::ral_epoch` and the registry's clock are different clocks. The
+   equivalence leaks one way, and only into misattribution: a worker's shell
+   shares the one registry, so a `spawn` reached *inside* a running worker is
+   stamped when that thread gets there — a grandchild filed while the next call
+   is in flight is stamped to that call, which then names it as its own
+   ([[map/core/shell-state|shell-state]]). The
+   sentence filters to `running && born-this-epoch`, names each survivor by its
+   `cmd`, and counts aloud whatever it does not name — a silent truncation
+   would read as "that was all of them".
 
-Two strata of that audit are deliberately absent. A worker `defer`red before the
-wall *survives* it — `Mooring::for_worker` reparents it onto the session root so
-a foreground cancel cannot reach it — while its handle binding is gone; naming
-those wants a birth epoch on the core worker registry's entries. And core keeps
-no per-stage journal of external commands, only merged `stdout`/`stderr` with no
-statement provenance, so "this command completed, that one was cut" would need a
-run-scoped journal in the runtime. Neither is guessed at in the meantime. The
-wider law is wider than the wall, too: every unwind discards bindings while acts
-stand, and only this branch reads the ledger today.
+One stratum stays absent rather than guessed at: core keeps no per-stage journal
+of external commands, only merged `stdout`/`stderr` with no statement
+provenance, so "this command completed, that one was cut" would need a
+run-scoped journal in the runtime.
 
 **Surface decoding.** `decode_surface` is the single decoder both delivery
 regimes share: the live foreground sink `run_shell` hands `dispatch_to_report`

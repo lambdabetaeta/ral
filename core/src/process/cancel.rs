@@ -59,6 +59,20 @@ impl CancelCause {
         }
     }
 
+    /// What had happened at the moment ral stopped a command, as a clause a
+    /// report can read "stopped because …" into.  Its grammar differs from
+    /// [`message`](Self::message)'s — a bare participle cannot be a clause — but
+    /// the vocabulary is one, and lives here so it cannot drift.
+    pub fn event(self) -> &'static str {
+        match self {
+            Self::Interrupt => "the call was interrupted",
+            Self::Explicit => "the call was cancelled",
+            Self::Deadline => "the call's time limit expired",
+            Self::Terminate => "ral was asked to shut down",
+            Self::RootAbort => "ral was aborted",
+        }
+    }
+
     /// The status paired with [`message`](Self::message): 130 (`128 + SIGINT`)
     /// for every interactive-shaped cancellation, 143 (`128 + SIGTERM`) for a
     /// shutdown request — what a supervisor that sent `SIGTERM` reads back.

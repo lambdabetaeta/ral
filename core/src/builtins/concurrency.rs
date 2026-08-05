@@ -274,6 +274,7 @@ where
             cmd,
             started: std::time::SystemTime::now(),
             class,
+            birth_epoch: shell.local.workers.epoch(),
             settled_epoch: None,
             handle: handle.clone(),
         },
@@ -2026,6 +2027,78 @@ mod tests {
         assert_eq!(
             snapshot[0].handle, handle,
             "the registered handle is the returned handle"
+        );
+    }
+
+    /// Read one `` `workers `` probe row's `born-this-epoch`, by the `cmd` that
+    /// names it.
+    fn probe_born_this_epoch(shell: &mut Shell, cmd: &str) -> bool {
+        use crate::serial::FOValue;
+        let answer = crate::transport::answer_probe(
+            shell,
+            &FOValue::Variant {
+                label: "workers".into(),
+                payload: None,
+            },
+        )
+        .expect("the `workers probe answers");
+        let FOValue::List { items } = answer else {
+            panic!("the `workers probe must answer a List, got {answer:?}");
+        };
+        let mut rows = items.iter().filter_map(|item| {
+            let FOValue::Map { entries } = item else {
+                panic!("a `workers row must be a Map");
+            };
+            let field = |key: &str| entries.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+            match (field("cmd"), field("born-this-epoch")) {
+                (Some(FOValue::String { value }), Some(FOValue::Bool { value: born }))
+                    if value == cmd =>
+                {
+                    Some(*born)
+                }
+                _ => None,
+            }
+        });
+        let born = rows.next().unwrap_or_else(|| panic!("no row names {cmd}"));
+        assert!(rows.next().is_none(), "exactly one row names {cmd}");
+        born
+    }
+
+    /// The spawn door stamps the registry's clock as it stands, and the probe
+    /// reports that stamp as a Bool rather than a number: true for a worker
+    /// born under the dispatch now running, false once the clock has ticked on.
+    #[test]
+    fn born_this_epoch_is_true_only_under_the_birth_dispatch() {
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let m = Mooring::adrift();
+        // Three dispatches before the birth, so a stamp of 0 cannot pass by
+        // accident.
+        tick(&shell, 3);
+        let _handle = spawn_child(
+            Arc::new(shell.mobile().scope),
+            &m,
+            &shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<newborn>",
+            |_, _child| Ok(Value::Unit),
+        )
+        .expect("spawn must succeed");
+
+        assert_eq!(
+            shell.local.workers.snapshot()[0].birth_epoch,
+            3,
+            "the spawn door stamps the epoch of the dispatch it was called under"
+        );
+        assert!(
+            probe_born_this_epoch(&mut shell, "<newborn>"),
+            "a worker born under the current dispatch answers born-this-epoch"
+        );
+
+        tick(&shell, 1);
+        assert!(
+            !probe_born_this_epoch(&mut shell, "<newborn>"),
+            "the next dispatch inherits it; born-this-epoch is then false"
         );
     }
 

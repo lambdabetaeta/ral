@@ -43,6 +43,10 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
   grandchildren included. Every copy of the write end closes, the pump sees EOF,
   the drain joins, and the call returns at the wall with exit 124. The server dies
   with it.
+- The child's own report names the cause, not the signal: the cancel cause
+  travels with the status as `WaitOutcome::Cancelled`, so the command reads
+  `stopped because the call's time limit expired` rather than `killed by signal
+  15`. The status is unchanged — a signal death's 128 + N.
 - This is correct, not a defect: an inline command that never closes its pipe is
   genuinely work the run cannot finish, so the run bounds it and tears down its
   tree. The cancel→drain→collect path is the same one pipelines reap by

@@ -100,8 +100,16 @@ field name *is* the invariant** — joined by `Shell`
   removal under the registry's one lock — pushed by the engine as
   `` `notice `` surface events at each settled run's ready boundary
   (`emit_ready_boundary_notices`; `take_worker_reap_notices` is
-  crate-private, that push its one caller). A settled entry carries a
-  `settled_epoch` stamp: retention is armed once at boot
+  crate-private, that push its one caller). Every entry carries a
+  `birth_epoch`, stamped at the spawn door from the registry's own clock,
+  which is what lets the `` `workers `` probe answer `born-this-epoch`
+  without ever handing a host a raw epoch to compare against its own clock
+  ([[map/exarch/shell-eval|shell-eval]]) — "born this epoch" means "born
+  during the dispatch that just ran" everywhere except for a `spawn` reached
+  *inside* a running worker, which shares this registry and is stamped
+  whenever its thread gets there, so a grandchild can be filed under a later
+  dispatch than the one that begat it. A settled entry carries a
+  `settled_epoch` stamp too: retention is armed once at boot
   (`Shell::arm_worker_retention`, beside the binding lease), the
   registry's own clock ticks once per source dispatch (`tick_epoch`), and
   the ready-boundary sweep (`sweep_retention`) stamps an entry at the
