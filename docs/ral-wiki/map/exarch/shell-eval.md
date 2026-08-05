@@ -54,8 +54,8 @@ and `run_shell` owns only the run it builds and the outcome it formats:
 - **`wall`** — the per-tool deadline, the `ral` tool's `timeout_secs` (60s
   default). Core arms it on the run's foreground scope *before compiling*, so
   it bounds the whole run; only `CancelCause::Deadline` reports `timed_out`,
-  which `run_shell` turns into the timeout-124 message (retry with a higher
-  `timeout_secs`, or `spawn` and overlap), while Esc stays an interrupt. A grant body evaluates locally — no sandbox-IPC
+  which `run_shell` turns into the exit-124 stderr described under *the wall is
+  a place* below, while Esc stays an interrupt. A grant body evaluates locally — no sandbox-IPC
   round trip to interrupt — so cancellation reaches any spawned child through the
   ordinary process-group / cancel-scope path;
 - **`deferred_lease`** — the idle-observation lease for workers the run
@@ -101,6 +101,49 @@ the run's invariant half — surface, deferred sink, desk, nursery, cancel, the
 leases — threads as an immutable `&Mooring` the stack itself restores. Exarch
 brackets only its own per-call desk install (`seat::RunGuard`). The
 dynamic-context half of the contract lives in [[map/exarch/agent|agent]].
+
+**The wall is a place, and the acts before it stand.** A timed-out call unwinds
+its bindings and keeps its effects: the child is running, the bytes are in the
+inbox, the wakeup is armed, the staged `reply` is still harvested. Nothing
+rolls back, and a model told only "retry with a higher `timeout_secs`" would
+duplicate every one of them. So the `timed_out` branch writes three things to
+stderr, in order, and exits 124:
+
+1. **the engine's rendering, verbatim** — unconditionally, exactly as the
+   ordinary-failure branch beside it. A cancel is stamped on the innermost node
+   it unwound through ([[internals/cancellation|cancellation]]), so the
+   diagnostic carries the span that *locates* the wall: the frontier between the
+   steps that completed and the one that did not;
+2. **the asymmetry and the remedy** — it timed out after *n* seconds at the
+   point above; the steps before it completed, the step it names did not, and
+   the bindings are gone. Then `recovery:` — raise `timeout_secs` for work that
+   is simply slow, or `let h = defer { … }` and let the run return, since the
+   host notifies at the next exchange boundary and `await $h` yields the value
+   record without polling;
+3. **an audit of what already stands**, when there is any. The
+   [[map/exarch/agent|desk]] keeps an `ActLedger` per `ral` call — minted in
+   `Agent::host_services`, the one place a call's whole desk capture is
+   assembled, so the ledger's extent *is* the call's — and each acting handler
+   files its act on its **committed** arm: `agent-cancel` on `Ok(true)` alone,
+   `message` on delivery alone, `schedule` on the receipt (bearing the
+   *resolved* label, since an unlabelled wakeup is known to the world only by
+   the one the registry minted), `unschedule` when it removed something, `spawn`
+   on `spawn_async`'s `Ok`, `reply` past the `returns` guard. A refused act
+   leaves no entry: the ledger answers one question — what stands — and an
+   entry for work that never happened would blunt it. `DeskAct` names the six
+   acts and yields both spellings, the rail's `verb` column and the audit's past
+   tense, so a seventh act cannot reach one reader and miss the other
+   ([[decisions/260720_harness-calls-are-acts|harness-calls-are-acts]]).
+
+Two strata of that audit are deliberately absent. A worker `defer`red before the
+wall *survives* it — `Mooring::for_worker` reparents it onto the session root so
+a foreground cancel cannot reach it — while its handle binding is gone; naming
+those wants a birth epoch on the core worker registry's entries. And core keeps
+no per-stage journal of external commands, only merged `stdout`/`stderr` with no
+statement provenance, so "this command completed, that one was cut" would need a
+run-scoped journal in the runtime. Neither is guessed at in the meantime. The
+wider law is wider than the wall, too: every unwind discards bindings while acts
+stand, and only this branch reads the ledger today.
 
 **Surface decoding.** `decode_surface` is the single decoder both delivery
 regimes share: the live foreground sink `run_shell` hands `dispatch_to_report`

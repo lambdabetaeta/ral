@@ -20,8 +20,117 @@ use ral_core::types::{
     Capabilities, EnquiryDesk, Error, NO_DESK, NO_DESK_STATUS, Nursery, NurseryId,
 };
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// The acts a desk verb can commit. One vocabulary for two readers: the rail's
+/// `verb` column and the audit prose an unwind owes the model are both derived
+/// from it, so a new act cannot reach one and miss the other.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) enum DeskAct {
+    Spawn,
+    Cancel,
+    Message,
+    Schedule,
+    Unschedule,
+    Reply,
+}
+
+impl DeskAct {
+    /// The name the rail draws in its verb column.
+    pub(crate) fn verb(self) -> &'static str {
+        match self {
+            Self::Spawn => "spawn",
+            Self::Cancel => "cancel",
+            Self::Message => "message",
+            Self::Schedule => "schedule",
+            Self::Unschedule => "unschedule",
+            Self::Reply => "reply",
+        }
+    }
+
+    /// What the act did, past tense, for an audit read after the fact.
+    fn done(self, subject: Option<&str>) -> String {
+        let named = |what: &str| match subject {
+            Some(s) => format!("{what} '{s}'"),
+            None => what.to_string(),
+        };
+        match self {
+            Self::Spawn => named("started agent"),
+            Self::Cancel => named("cancelled agent"),
+            Self::Message => named("delivered a message to agent"),
+            Self::Schedule => named("armed the wakeup"),
+            Self::Unschedule => named("removed the wakeup"),
+            // The one act with no addressee: a returning agent replies to its
+            // parent and to nobody else.
+            Self::Reply => "staged your reply".to_string(),
+        }
+    }
+}
+
+/// One committed act, held for the audit.
+struct Act {
+    kind: DeskAct,
+    /// The agent name or schedule label; `None` for [`DeskAct::Reply`].
+    subject: Option<String>,
+}
+
+/// What this `ral` call has already committed, in the order it landed.
+///
+/// Effects persist across an unwind: a call the wall cut short still started
+/// what it started and delivered what it delivered, while every binding it made
+/// is gone. The ledger is how the raise says so, since the model's only other
+/// in-band signal — the diagnostic — speaks of the failure and not of the acts.
+///
+/// Only committed acts are recorded. A refused act changed nothing, so it
+/// leaves no entry: this ledger answers *what stands*, and an entry for an act
+/// that never landed would blunt the one question it exists to answer.
+#[derive(Clone, Default)]
+pub(crate) struct ActLedger(Arc<Mutex<Vec<Act>>>);
+
+impl ActLedger {
+    /// Never waits: the only thread that could hold this guard is the asker —
+    /// a desk handler runs on the attend thread parked in `run_shell`, and the
+    /// audit is read on that same thread once the run is back.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Act>> {
+        match self.0.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => panic!(
+                "act ledger contended: a desk handler may only run while the attend thread is \
+                 parked in run_shell"
+            ),
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("act ledger poisoned"),
+        }
+    }
+
+    /// File an act that *landed*, beside the [`Kind::HarnessCall`] that narrates
+    /// it, so the user's row and the model's audit report the one same act.
+    pub(crate) fn record(&self, kind: DeskAct, subject: Option<&str>) {
+        self.lock().push(Act {
+            kind,
+            subject: subject.map(str::to_string),
+        });
+    }
+
+    /// The sentence an unwind owes the model, or `None` when this call committed
+    /// nothing at all — where silence is the whole truth.
+    pub(crate) fn audit(&self) -> Option<String> {
+        let done = {
+            let acts = self.lock();
+            if acts.is_empty() {
+                return None;
+            }
+            acts.iter()
+                .map(|a| a.kind.done(a.subject.as_deref()))
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        Some(format!(
+            "audit: this call had already {done} — harness effects outlive the raise that \
+             discarded its bindings, so that work stands. Do not repeat it.\n"
+        ))
+    }
+}
 
 /// Everything a desk handler may read off `&Agent`, snapshotted fresh at every
 /// [`crate::agent::Agent::run_shell`] install so no capture goes stale mid-call.
@@ -71,6 +180,10 @@ pub(crate) struct HostServices {
     pub disk_warn_bytes: Option<u64>,
     /// A spawn shares its parent's egress policy, never a fresh one.
     pub egress: egress::Egress,
+    /// What this call has committed so far: minted per `ral` call, and read back
+    /// by [`crate::shell_eval::run_shell`] when a raise discards the bindings but
+    /// not the acts.
+    pub acts: ActLedger,
     /// The agent's own pin register, shared verbatim so `pin-read`/`pin-list`
     /// answer from the same mirror the nudge already reads. `None` on a seat
     /// with no mirror of its own — the wire test seat above all.
@@ -407,7 +520,7 @@ impl ExarchDesk {
             s.mailbox.clone(),
             child,
             crate::shell_eval::tools::agent::AsyncSpawn {
-                verb: "spawn",
+                verb: DeskAct::Spawn.verb(),
                 name: spec.name,
                 prompt: Some(spec.prompt),
                 harness: true,
@@ -415,20 +528,25 @@ impl ExarchDesk {
             &s.emit,
         );
         match spawned {
-            Ok(child) => Ok(FOValue::Variant {
-                label: "started".to_string(),
-                payload: Some(Box::new(FOValue::Map {
-                    entries: vec![
-                        ("name".to_string(), FOValue::String { value: child.name }),
-                        (
-                            "log-dir".to_string(),
-                            FOValue::String {
-                                value: child.log_dir,
-                            },
-                        ),
-                    ],
-                })),
-            }),
+            Ok(child) => {
+                // The ledger write lives here rather than in `spawn_async`, whose
+                // other caller (`/branch`) is not a desk act at all.
+                s.acts.record(DeskAct::Spawn, Some(&child.name));
+                Ok(FOValue::Variant {
+                    label: "started".to_string(),
+                    payload: Some(Box::new(FOValue::Map {
+                        entries: vec![
+                            ("name".to_string(), FOValue::String { value: child.name }),
+                            (
+                                "log-dir".to_string(),
+                                FOValue::String {
+                                    value: child.log_dir,
+                                },
+                            ),
+                        ],
+                    })),
+                })
+            }
             Err(reason) => Err(Error::new(reason, 1)),
         }
     }
@@ -515,11 +633,14 @@ impl ExarchDesk {
             .resolve_name(&name)
             .map_or(Ok(false), |id| s.registry.cancel_scoped(s.parent, id));
         let (payload, content, answer) = match cancelled {
-            Ok(true) => (
-                String::new(),
-                format!("cancelling agent '{name}'"),
-                Ok(bare_tag("cancelled")),
-            ),
+            Ok(true) => {
+                s.acts.record(DeskAct::Cancel, Some(&name));
+                (
+                    String::new(),
+                    format!("cancelling agent '{name}'"),
+                    Ok(bare_tag("cancelled")),
+                )
+            }
             Ok(false) => (
                 "no live agent by that name".to_string(),
                 format!("no live agent named '{name}'"),
@@ -534,7 +655,7 @@ impl ExarchDesk {
             ),
         };
         s.emit.emit(Kind::HarnessCall {
-            verb: "cancel",
+            verb: DeskAct::Cancel.verb(),
             subject: Some(name),
             payload,
             failed: answer.is_err(),
@@ -568,7 +689,10 @@ impl ExarchDesk {
                 format!("no live agent named '{name}'; did it finish already?"),
                 false,
             ),
-            Some(Ok(())) => (sent, format!("sent message to agent '{name}'"), true),
+            Some(Ok(())) => {
+                s.acts.record(DeskAct::Message, Some(&name));
+                (sent, format!("sent message to agent '{name}'"), true)
+            }
             Some(Err(MessageError::UnknownSender(n))) => (
                 "refused: sender is no longer live".to_string(),
                 format!("cannot send from agent {n}: it is no longer live"),
@@ -588,7 +712,7 @@ impl ExarchDesk {
             ),
         };
         s.emit.emit(Kind::HarnessCall {
-            verb: "message",
+            verb: DeskAct::Message.verb(),
             subject: Some(name),
             payload,
             failed: !ok,
@@ -641,15 +765,20 @@ impl ExarchDesk {
             .schedules
             .schedule(trigger, prompt, label.clone(), &s.mailbox);
         let content = match &result {
-            Ok(receipt) => format!(
-                "scheduled '{}' ({}s to first fire)",
-                receipt.label,
-                secs_to_i64(receipt.next_in)
-            ),
+            Ok(receipt) => {
+                // The resolved label, not the caller's: an unlabelled schedule is
+                // known to the world only by the one the registry minted.
+                s.acts.record(DeskAct::Schedule, Some(&receipt.label));
+                format!(
+                    "scheduled '{}' ({}s to first fire)",
+                    receipt.label,
+                    secs_to_i64(receipt.next_in)
+                )
+            }
             Err(e) => format!("could not schedule: {e}"),
         };
         s.emit.emit(Kind::HarnessCall {
-            verb: "schedule",
+            verb: DeskAct::Schedule.verb(),
             subject: label,
             payload: match &result {
                 Ok(_) => described,
@@ -726,6 +855,7 @@ impl ExarchDesk {
         // since the verb has no argument of its own to show there.
         let removed = s.schedules.unschedule(&label);
         let (payload, content, answer) = if removed {
+            s.acts.record(DeskAct::Unschedule, Some(&label));
             (
                 String::new(),
                 format!("unscheduled '{label}'"),
@@ -739,7 +869,7 @@ impl ExarchDesk {
             )
         };
         s.emit.emit(Kind::HarnessCall {
-            verb: "unschedule",
+            verb: DeskAct::Unschedule.verb(),
             subject: Some(label),
             payload,
             failed: false,
@@ -766,8 +896,9 @@ impl ExarchDesk {
         let display =
             shell_eval::ral_value_to_text(&RalValue::from(value.clone())).unwrap_or_default();
         // No subject: the parent is the only recipient a returning agent has.
+        s.acts.record(DeskAct::Reply, None);
         s.emit.emit(Kind::HarnessCall {
-            verb: "reply",
+            verb: DeskAct::Reply.verb(),
             subject: None,
             payload: if display.is_empty() {
                 "(empty reply)".into()
@@ -983,6 +1114,7 @@ mod tests {
             generation: 0,
             disk_warn_bytes: None,
             egress: Egress::for_test(),
+            acts: ActLedger::default(),
             pins: None,
         }
     }
@@ -2396,6 +2528,84 @@ mod tests {
             acts,
             ["first", "second"],
             "each reply emits its own act row, carrying the value it staged"
+        );
+    }
+
+    /// The audit is the model's only account of what survived an unwind, so it
+    /// must name every committed act, in the order the call committed them.
+    #[test]
+    fn the_ledger_keeps_committed_acts_in_the_order_they_landed() {
+        let desk = granted_desk();
+        desk.handle(FOValue::Variant {
+            label: "schedule".into(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![
+                    FOValue::Variant {
+                        label: "after".into(),
+                        payload: Some(Box::new(FOValue::String { value: "2h".into() })),
+                    },
+                    FOValue::Variant {
+                        label: "some".into(),
+                        payload: Some(Box::new(FOValue::String {
+                            value: "nightly".into(),
+                        })),
+                    },
+                    FOValue::String {
+                        value: "wake".into(),
+                    },
+                ],
+            })),
+        })
+        .expect("a valid schedule must succeed");
+        desk.handle(FOValue::Variant {
+            label: "unschedule".into(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![FOValue::String {
+                    value: "nightly".into(),
+                }],
+            })),
+        })
+        .expect("unscheduling the label just armed must remove it");
+        desk.handle(FOValue::Variant {
+            label: "reply".into(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![FOValue::String {
+                    value: "done".into(),
+                }],
+            })),
+        })
+        .expect("a returning agent's reply must succeed");
+
+        assert_eq!(
+            desk.services.acts.audit().as_deref(),
+            Some(
+                "audit: this call had already armed the wakeup 'nightly'; removed the wakeup \
+                 'nightly'; staged your reply — harness effects outlive the raise that discarded \
+                 its bindings, so that work stands. Do not repeat it.\n"
+            )
+        );
+    }
+
+    /// A refused act changed nothing, so the ledger stays silent: an entry here
+    /// would tell the model to leave standing work it never did.
+    #[test]
+    fn a_refused_act_leaves_the_ledger_empty() {
+        let desk = desk();
+        desk.handle(FOValue::Variant {
+            label: "message".into(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![
+                    FOValue::String {
+                        value: "nobody".into(),
+                    },
+                    FOValue::String { value: "hi".into() },
+                ],
+            })),
+        })
+        .expect_err("a message to an unknown name must be refused");
+        assert!(
+            desk.services.acts.audit().is_none(),
+            "a call that committed nothing owes the model no audit"
         );
     }
 

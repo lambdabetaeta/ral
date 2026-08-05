@@ -126,6 +126,9 @@ impl Agent {
             generation: self.agents.generation(),
             disk_warn_bytes: self.disk_warn_bytes,
             egress: self.egress.clone(),
+            // Minted here, once per `ral` call: this is the one place a call's
+            // whole desk capture is built, so the ledger's extent is the call's.
+            acts: desk::ActLedger::default(),
             pins: Some(self.pins.clone()),
         }
     }

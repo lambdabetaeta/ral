@@ -339,26 +339,39 @@ pub(crate) fn run_shell(
                         rendered,
                         command_exit,
                     } => {
+                        // The seam already rendered the whole diagnostic against
+                        // the engine's source map: print it verbatim as the REPL
+                        // does.  A wall is no exception — the cancel is stamped
+                        // on the innermost node it unwound through, so this
+                        // rendering is the only thing naming *where* it struck:
+                        // the frontier between the steps that completed and the
+                        // one that did not.
+                        stderr_bytes.extend_from_slice(rendered.as_bytes());
                         if timed_out {
-                            // The model needs the remedy, not the cancellation
-                            // diagnostic, so this replaces the rendering
-                            // wholesale; 124 is the conventional timeout exit.
-                            let msg = format!(
-                                "error: ral tool: timed out after {timeout_secs}s. If the command is simply slow \
-                                 and there is nothing to overlap it with, retry with a higher `timeout_secs`. \
-                                 If other work can run alongside it, defer it instead (`let h = defer {{ … }}`) \
-                                 and let the run return: the host notifies you at the next exchange boundary when \
-                                 it settles and renders its output on the rail, and `await $h` gives you its \
-                                 value record — you need not poll.\n"
+                            // 124 is the conventional timeout exit.
+                            let mut tip = format!(
+                                "\nthis call timed out after {timeout_secs}s at the point above. The steps \
+                                 before it completed; the step it names did not, and the bindings this call \
+                                 made are gone.\n\
+                                 recovery: if the command is simply slow and there is nothing to overlap it \
+                                 with, retry with a higher `timeout_secs`. If other work can run alongside it, \
+                                 defer it instead (`let h = defer {{ … }}`) and let the run return: the host \
+                                 notifies you at the next exchange boundary when it settles and renders its \
+                                 output on the rail, and `await $h` gives you its value record — you need not \
+                                 poll.\n"
                             );
-                            stderr_bytes.extend_from_slice(msg.as_bytes());
+                            // Effects outlive the unwind that discarded the
+                            // bindings: a retry that repeats them duplicates
+                            // them, so the ledger says what already stands.
+                            if let Some(audit) =
+                                seam.and_then(|seam| seam.desk.services.acts.audit())
+                            {
+                                tip.push_str(&audit);
+                            }
+                            stderr_bytes.extend_from_slice(tip.as_bytes());
                             (124, None)
                         } else {
-                            // The seam already rendered the whole diagnostic
-                            // against the engine's source map: print it
-                            // verbatim as the REPL does, and take the status
-                            // the engine computed rather than recomputing it.
-                            stderr_bytes.extend_from_slice(rendered.as_bytes());
+                            // The status is the engine's, never recomputed here.
                             if *command_exit {
                                 let mut tip = String::from(
                                     "\nrecovery: this non-zero exit raised. If the exit code is the tool own \
@@ -1383,6 +1396,32 @@ keep-bottom
         assert!(
             stderr.contains("timeout_secs"),
             "the timeout message names the `timeout_secs` knob; stderr was: {stderr}"
+        );
+    }
+
+    /// The wall is a *place*, not just a budget: the engine's rendering — the
+    /// only thing that names the step the cancel unwound through — survives
+    /// beside the remedy, so the model learns where the frontier fell and what
+    /// to do about it from one stderr.
+    #[cfg(unix)]
+    #[test]
+    fn timeout_keeps_the_engine_diagnostic_beside_the_remedy() {
+        let mut shell = fresh_shell();
+        let (emit, _rx) = crate::bus::dummy_emitter();
+        let cmd = "let before = 1\nsleep 30\nlet after = 2";
+        let r = match run_shell_direct(&mut shell, &Capabilities::root(), cmd, 2, &emit) {
+            Outcome::Ran(r) => r,
+            Outcome::Static(s) => panic!("static failure: {s}"),
+        };
+        assert_eq!(r.exit, 124, "a timed-out call still exits 124");
+        let stderr = String::from_utf8_lossy(&r.stderr);
+        assert!(
+            stderr.contains("sleep 30"),
+            "the engine's rendering names the step the wall struck; stderr was: {stderr}"
+        );
+        assert!(
+            stderr.contains("recovery:") && stderr.contains("defer"),
+            "the remedy rides along with it; stderr was: {stderr}"
         );
     }
 

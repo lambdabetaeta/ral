@@ -23,7 +23,10 @@ through. `shell_eval/tools.rs` shrinks to:
   tool-call block; oversize descriptions are truncated, never rejected). An
   optional `timeout_secs` bounds the call, defaulting to `CALL_TIMEOUT_SECS`
   (60s) — a default, not a cap: raise it for known-long work, or `spawn` what
-  should outlive the run.
+  should outlive the run. A call the wall cuts short loses its bindings and
+  keeps its acts, so its stderr carries the engine's span, the remedy, and an
+  audit of what already stands
+  ([[map/exarch/shell-eval|shell-eval]]).
 - **`shell_eval/tools/agent.rs`** — no longer a tool module, but the
   fork-detach-register spine every launch shares: `spawn_async`, `AsyncSpawn`,
   `SpawnedChild`. Both `/branch`'s `spawn_branch` and the desk's `agent-start`
@@ -32,9 +35,11 @@ through. `shell_eval/tools.rs` shrinks to:
 
 The harness verbs are answered by the `ExarchDesk` (`exarch/src/fleet/desk.rs`),
 installed per `ral` call and reached through `shell.enquire(...)` from the
-builtin's body; acting verbs emit `Kind::HarnessCall`/`HarnessResult`,
-rendered as **acts** — verb, subject, payload rows that never fold into an
-observation run
+builtin's body; acting verbs emit `Kind::HarnessCall`/`HarnessResult` and, on
+the arm where the act genuinely landed, file it in the call's act ledger for the
+audit a timed-out run owes the model ([[map/exarch/shell-eval|shell-eval]]).
+They are rendered as **acts** — verb, subject, payload rows that never fold into
+an observation run
 ([[decisions/260720_harness-calls-are-acts|harness-calls-are-acts]]; spawns
 additionally derive a child tab) — while listings stay silent since
 their value *is* the returned record. There is no `Gate`/`tools_for` axis any

@@ -376,6 +376,7 @@ mod tests {
             generation: 0,
             disk_warn_bytes: None,
             egress: crate::egress::Egress::for_test(),
+            acts: crate::fleet::desk::ActLedger::default(),
             pins: None,
         }
     }
