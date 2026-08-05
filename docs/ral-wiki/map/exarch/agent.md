@@ -247,10 +247,14 @@ that did not fit the `parent` collapse is dropped, not relocated. The nudges tha
 remain — `must_reply` for a returning agent (`returns()`), `continue` on
 truncation, empty/early-stop repair, the one-shot latch that turns a headless
 root's *first* `reply` back for self-verification before honouring the next,
-and the one pinned-state reminder — are
+the one pinned-state reminder, and the context-pressure warning
+([[decisions/260805_context-pressure-is-a-nudge|context-pressure-is-a-nudge]]:
+budget-free, latched once per crossing of the soft line one reserve ahead of
+auto-compaction, re-armed by the compaction itself) — are
 driven off the same `react` rule. Live descendants make the agent wait:
 `must_reply` is suspended, and pin/no-pin reminders wait too, since the agent has
-already delegated the next actionable fact. Once the descendants settle, the
+already delegated the next actionable fact — though the pressure warning does
+not wait, the swelling context being the agent's own. Once the descendants settle, the
 rules resume against the still-live pin register. The pinned-state reminder is
 uniform for every pin kind (tasks, goals, any other pinned state alike) and
 every actionable agent role: budget-free while anything is pinned, independent

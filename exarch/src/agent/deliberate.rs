@@ -286,7 +286,7 @@ impl Agent {
     }
 
     pub(crate) fn compact(
-        &self,
+        &mut self,
         provider: &Arc<Provider>,
         emit: &Emitter,
         requested: bool,
@@ -351,6 +351,9 @@ impl Agent {
                     self.note_error(format!("compact failed: {e}"), emit);
                     return;
                 }
+                // The excursion that was warned about is now behind a summary;
+                // a fresh one past the soft line earns a fresh warning.
+                self.context_warn_latched = false;
                 Self::note(
                     format!(
                         "[Compacted: now {} KB]",

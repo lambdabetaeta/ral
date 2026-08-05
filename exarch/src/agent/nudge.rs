@@ -48,6 +48,11 @@ pub(crate) struct NudgeCtx {
     /// True for the headless root (`parent.is_none() && !interactive`), whose
     /// `reply` reaches an external caller with no parent left to push back on it.
     pub is_headless_root: bool,
+    /// The rendered pressure gauge once the soft line ahead of auto-compaction
+    /// is crossed — `Some` only when that line is crossed *and* unlatched, so
+    /// one excursion draws one reminder.  The attend loop owns the latch;
+    /// this module only ever reports what it was handed.
+    pub pressure: Option<String>,
 }
 
 /// Per-session nudge state; [`Self::react`] is the only post-attempt entry point.
@@ -146,6 +151,14 @@ impl Registry {
                     );
                 }
             }
+            // Context pressure is about this agent's own history, not the
+            // fleet, so it composes whether or not children are still live —
+            // unlike the pin reminders above, it is never gated on
+            // `waiting_on_children`.
+            if let Some(detail) = &ctx.pressure {
+                record_nudge(emit, log, self.used, "context pressure".into());
+                parts.push(format!("Context pressure: {detail}. {PRESSURE_MESSAGE}"));
+            }
             if parts.is_empty() {
                 return None;
             }
@@ -188,6 +201,13 @@ const REPLY_MESSAGE: &str = "You ended your turn without calling `reply`, so you
     markdown report, or a record/list for structured findings; if the value carries `$`, `!`, \
     or a quote, write it as a raw string `#'…'#`. This is the only way to hand your work back; \
     a final message on its own is not delivered.";
+
+/// Shown once [`NudgeCtx::pressure`] crosses its soft line, budget-free like
+/// the pinned-state reminder: durable state belongs in files, not bindings,
+/// so it survives the summary that compaction is about to fold history into.
+const PRESSURE_MESSAGE: &str = "Older history will be auto-compacted into a summary soon. \
+    Preserve what must survive verbatim: write durable state to files and keep the paths — do \
+    not park large values in bindings — and record your intent with `set-goal`/`add-task`.";
 
 fn on_empty(r: &Result<deliberate::Outcome, ProviderError>) -> Option<(String, &'static str)> {
     match r {
@@ -263,6 +283,7 @@ mod tests {
             is_headless_root: false,
             pinned: None,
             waiting_on_children: false,
+            pressure: None,
         };
         assert!(
             reg.react(&attempt(), &ctx(), &emit(), &mut log).is_none(),
@@ -289,6 +310,7 @@ mod tests {
             is_headless_root: false,
             pinned: None,
             waiting_on_children: false,
+            pressure: None,
         };
         for _ in 0..=BUDGET {
             assert!(
@@ -310,6 +332,7 @@ mod tests {
                 is_headless_root: false,
                 pinned: None,
                 waiting_on_children: false,
+                pressure: None,
             },
             &emit(),
             &mut log,
@@ -333,6 +356,7 @@ mod tests {
                         is_headless_root: false,
                         pinned: None,
                         waiting_on_children: false,
+                        pressure: None,
                     },
                     &emit(),
                     &mut log,
@@ -348,6 +372,7 @@ mod tests {
                     is_headless_root: false,
                     pinned: None,
                     waiting_on_children: false,
+                    pressure: None,
                 },
                 &emit(),
                 &mut log,
@@ -368,6 +393,7 @@ mod tests {
             is_headless_root: false,
             pinned: None,
             waiting_on_children: false,
+            pressure: None,
         };
         for _ in 0..BUDGET {
             match reg.react(
@@ -413,6 +439,7 @@ mod tests {
                     is_headless_root: false,
                     pinned: None,
                     waiting_on_children: false,
+                    pressure: None,
                 },
                 &emit(),
                 &mut log,
@@ -431,6 +458,7 @@ mod tests {
             is_headless_root: true,
             pinned: None,
             waiting_on_children: false,
+            pressure: None,
         };
         let msg = reg
             .react(
@@ -457,6 +485,7 @@ mod tests {
             is_headless_root: true,
             pinned: None,
             waiting_on_children: false,
+            pressure: None,
         };
         assert!(
             reg.react(
@@ -500,6 +529,7 @@ mod tests {
                     is_headless_root: false,
                     pinned: None,
                     waiting_on_children: false,
+                    pressure: None,
                 },
                 &emit(),
                 &mut log,
@@ -520,6 +550,7 @@ mod tests {
             is_headless_root: false,
             pinned: Some("tasks 3/8".into()),
             waiting_on_children: false,
+            pressure: None,
         };
         for _ in 0..3 {
             let msg = reg
@@ -551,6 +582,7 @@ mod tests {
                     is_headless_root: false,
                     pinned: Some("tasks 3/8".into()),
                     waiting_on_children: true,
+                    pressure: None,
                 },
                 &emit(),
                 &mut log,
@@ -572,6 +604,7 @@ mod tests {
             is_headless_root: false,
             pinned: Some("tasks 3/8".into()),
             waiting_on_children: false,
+            pressure: None,
         };
         let msg = reg
             .react(
@@ -592,6 +625,121 @@ mod tests {
         assert_eq!(reg.used, 1, "only the reply half spends budget");
     }
 
+    /// The pressure gauge composes on a clean completion, budget-free, and
+    /// carries both the detail and the file-paths-over-bindings guidance.
+    #[test]
+    fn pressure_part_composes_budget_free_on_complete() {
+        let mut reg = Registry::new();
+        let mut log = fresh_log("pressure-budget-free");
+        let ctx = NudgeCtx {
+            must_reply: false,
+            is_headless_root: false,
+            pinned: None,
+            waiting_on_children: false,
+            pressure: Some("400 of 500 tokens".into()),
+        };
+        let msg = reg
+            .react(
+                &Ok(deliberate::Outcome::Complete("done".into())),
+                &ctx,
+                &emit(),
+                &mut log,
+            )
+            .expect("pressure due should nudge");
+        assert!(msg.contains("400 of 500 tokens"), "{msg}");
+        assert!(
+            msg.contains("write durable state to files")
+                && msg.contains("do not park large values in bindings"),
+            "must steer state to files, not bindings: {msg}"
+        );
+        assert_eq!(reg.used, 0, "the pressure nudge is budget-free");
+    }
+
+    /// All three obligations join one message: the returning agent's `reply`,
+    /// its pinned state, and its context pressure — only the first spends
+    /// budget.
+    #[test]
+    fn pressure_composes_alongside_reply_and_pinned_parts() {
+        let mut reg = Registry::new();
+        let mut log = fresh_log("pressure-composes-with-both");
+        let ctx = NudgeCtx {
+            must_reply: true,
+            is_headless_root: false,
+            pinned: Some("tasks 3/8".into()),
+            waiting_on_children: false,
+            pressure: Some("400 of 500 tokens".into()),
+        };
+        let msg = reg
+            .react(
+                &Ok(deliberate::Outcome::Complete("prose, no reply".into())),
+                &ctx,
+                &emit(),
+                &mut log,
+            )
+            .expect("all three obligations should nudge");
+        assert!(msg.contains("`reply`"), "{msg}");
+        assert!(msg.contains("There is pinned state: tasks 3/8"), "{msg}");
+        assert!(msg.contains("400 of 500 tokens"), "{msg}");
+        assert_eq!(reg.used, 1, "only the reply half spends budget");
+    }
+
+    /// A live child suppresses the pin reminder but not the pressure gauge:
+    /// this agent's own context is not the fleet's business to wait on.
+    #[test]
+    fn pressure_fires_even_while_waiting_on_children() {
+        let mut reg = Registry::new();
+        let mut log = fresh_log("pressure-waiting-on-children");
+        let ctx = NudgeCtx {
+            must_reply: false,
+            is_headless_root: false,
+            pinned: Some("tasks 3/8".into()),
+            waiting_on_children: true,
+            pressure: Some("400 of 500 tokens".into()),
+        };
+        let msg = reg
+            .react(
+                &Ok(deliberate::Outcome::Complete(
+                    "waiting on a descendant".into(),
+                )),
+                &ctx,
+                &emit(),
+                &mut log,
+            )
+            .expect("pressure must nudge even while children are live");
+        assert!(msg.contains("400 of 500 tokens"), "{msg}");
+        assert!(
+            !msg.contains("There is pinned state"),
+            "the pin reminder itself still waits for the children: {msg}"
+        );
+    }
+
+    /// A `reply` is accepted (or turned back for verification) on its own
+    /// terms; the pressure gauge never rides along on that path.
+    #[test]
+    fn pressure_is_not_delivered_on_replied() {
+        let mut reg = Registry::new();
+        let mut log = fresh_log("pressure-not-on-replied");
+        let ctx = NudgeCtx {
+            must_reply: false,
+            is_headless_root: false,
+            pinned: None,
+            waiting_on_children: false,
+            pressure: Some("400 of 500 tokens".into()),
+        };
+        assert!(
+            reg.react(
+                &Ok(deliberate::Outcome::Replied(FOValue::String {
+                    value: "done".into(),
+                })),
+                &ctx,
+                &emit(),
+                &mut log,
+            )
+            .is_none(),
+            "a reply is accepted outright; pressure does not apply to it"
+        );
+    }
+
     #[test]
     fn reset_clears_budget() {
         let mut reg = Registry::new();
@@ -601,6 +749,7 @@ mod tests {
             is_headless_root: false,
             pinned: None,
             waiting_on_children: false,
+            pressure: None,
         };
         let _ = reg.react(&Ok(deliberate::Outcome::Empty), &ctx(), &emit(), &mut log);
         assert!(reg.used >= 1);
@@ -619,6 +768,7 @@ mod tests {
             is_headless_root: false,
             pinned: None,
             waiting_on_children: false,
+            pressure: None,
         };
         let mut fires = 0;
         for exchange in 1..=(REMIND_EVERY + 3) {

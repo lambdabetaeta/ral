@@ -9,7 +9,7 @@
 //! `/resources` cannot immortalise the zombies it exists to reveal.
 
 use crate::agent::Agent;
-use crate::agent::digest::COMPACT_THRESHOLD;
+use crate::agent::digest::{COMPACT_THRESHOLD, compaction_trigger};
 use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span};
 use crate::bus::{Emitter, Kind};
 use crate::fleet::registry::{AGENT_DEMOTE_IDLE, AGENT_LEASE_IDLE};
@@ -275,6 +275,41 @@ pub fn dir_size(root: &Path) -> u64 {
         .sum()
 }
 
+/// The compaction-pressure rows, mirroring `Agent::compact`'s own trigger so
+/// the pressure shown is the pressure that fires: a known window compacts on
+/// tokens against that window, and only the unknown-window fallback still
+/// runs on serialised bytes.
+fn pressure_rows(last_input: u64, history_bytes: u64, window: Option<u64>) -> Vec<ProbeRow> {
+    match window {
+        Some(w) if w > 0 => vec![
+            ProbeRow::new(
+                "context.tokens",
+                last_input,
+                Some(compaction_trigger(w)),
+                "evict",
+                Some(format!("auto-compaction trigger; window {w} tokens")),
+            ),
+            ProbeRow::new(
+                "log.bytes",
+                history_bytes,
+                None,
+                "evict",
+                Some(
+                    "model-view bytes (fallback compaction gauge when the window is unknown)"
+                        .to_string(),
+                ),
+            ),
+        ],
+        _ => vec![ProbeRow::new(
+            "log.bytes",
+            history_bytes,
+            Some(COMPACT_THRESHOLD as u64),
+            "evict",
+            Some("auto-compaction threshold; window unknown".to_string()),
+        )],
+    }
+}
+
 impl Agent {
     /// Assemble this agent's half of the fold — one [`ProbeRow`] per
     /// accumulator this attend thread may legally read: the shell's worker
@@ -384,12 +419,10 @@ impl Agent {
             "evict",
             Some("prefix drops with compaction".to_string()),
         ));
-        rows.push(ProbeRow::new(
-            "log.bytes",
+        rows.extend(pressure_rows(
+            self.last_input,
             self.log.lock().history_bytes() as u64,
-            Some(COMPACT_THRESHOLD as u64),
-            "evict",
-            Some("auto-compaction threshold".to_string()),
+            self.current_provider().context_window(),
         ));
 
         let probe_count = |label: &str| match self.seat.transport().probe(FOValue::Variant {
@@ -750,5 +783,61 @@ mod tests {
             .handle
             .cancel
             .cancel(ral_core::process::CancelCause::Explicit);
+    }
+
+    /// The scripted test provider's model has no pricing-catalog entry (the
+    /// catalog is fetched over the network, never populated in a test
+    /// process), so its window reads `None` — the fallback arm nearly every
+    /// other test in this module exercises without knowing it. `log.bytes`
+    /// alone carries the cap, and no `context.tokens` row appears.
+    #[test]
+    fn resource_rows_unknown_window_falls_back_to_capped_log_bytes() {
+        let dir = tmp("resource-rows-unknown-window");
+        let session = Agent::for_test(&dir, "system").unwrap();
+        let rows = session.resource_rows();
+        let bytes = row(&rows, "log.bytes");
+        assert_eq!(
+            bytes.cap,
+            Some(COMPACT_THRESHOLD as u64),
+            "an unknown window falls back to the byte threshold `compact` itself uses"
+        );
+        assert_eq!(bytes.policy, "evict");
+        assert!(
+            !rows.iter().any(|r| r.name == "context.tokens"),
+            "no window means no token-pressure row to show"
+        );
+    }
+
+    /// A known window is the pressure `Agent::compact` actually fires on, so
+    /// that is what the fold must show: `context.tokens` capped at
+    /// `compaction_trigger(w)`, and `log.bytes` demoted to an uncapped
+    /// fallback gauge rather than faking a second, unenforced ceiling.
+    #[test]
+    fn known_window_reports_context_tokens_not_bytes() {
+        let rows = pressure_rows(12_345, 4_096, Some(200_000));
+        let tokens = row(&rows, "context.tokens");
+        assert_eq!(tokens.current, 12_345, "the live input-token numerator");
+        assert_eq!(
+            tokens.cap,
+            Some(compaction_trigger(200_000)),
+            "the same trigger `Agent::compact` fires auto-compaction on"
+        );
+        assert_eq!(tokens.policy, "evict");
+        assert!(
+            tokens.note.as_deref().is_some_and(|n| n.contains("200000")),
+            "the note names the window the trigger was computed from"
+        );
+
+        let bytes = row(&rows, "log.bytes");
+        assert_eq!(bytes.current, 4_096, "the byte gauge still reports");
+        assert_eq!(
+            bytes.cap, None,
+            "log.bytes is no longer where the compaction pressure lives"
+        );
+        assert_eq!(
+            rows.iter().filter(|r| r.name == "log.bytes").count(),
+            1,
+            "log.bytes still rides along as an uncapped gauge, exactly once"
+        );
     }
 }

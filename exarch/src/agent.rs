@@ -48,7 +48,7 @@ use std::sync::{Arc, Mutex};
 
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "each bool gates an independent, orthogonal axis (interactive, returns, allow_schedule, tool_enabled, search, disk_warn_latched); not a candidate for a combined enum"
+    reason = "each bool gates an independent, orthogonal axis (interactive, returns, allow_schedule, tool_enabled, search, disk_warn_latched, context_warn_latched); not a candidate for a combined enum"
 )]
 pub struct Agent {
     pub id: AgentId,
@@ -149,6 +149,11 @@ pub struct Agent {
     /// Latched on crossing the ceiling, so the warning fires once per
     /// excursion rather than once per boundary.
     disk_warn_latched: bool,
+    /// Latched on crossing the pressure soft line ahead of auto-compaction
+    /// ([`digest::pressure_due`]), so the nudge fires once per excursion
+    /// rather than on every clean completion.  Cleared when [`Self::compact`]
+    /// (deliberate.rs) applies a compaction successfully.
+    context_warn_latched: bool,
     /// The IT-set network policy and its audit ledger — shared verbatim by
     /// every fork, like [`Self::disk_warn_bytes`].
     egress: crate::egress::Egress,

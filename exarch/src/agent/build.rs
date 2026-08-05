@@ -170,6 +170,7 @@ impl Agent {
             disk_warn_bytes,
             disk_check_epoch: 0,
             disk_warn_latched: false,
+            context_warn_latched: false,
             egress,
         })
     }
@@ -308,6 +309,8 @@ impl Agent {
         self.seat.clear(&self.log.lock());
         // The rebuilt context is empty: the next step's usage sets this afresh.
         self.last_input = 0;
+        // A fresh context carries no pressure of its own to warn about.
+        self.context_warn_latched = false;
         // Retire the subtree — this agent itself stays registered — then
         // disarm the schedules and drop the queue.  A straggler that composed
         // its message before this call carries its own stamp and is rejected

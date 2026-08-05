@@ -6,13 +6,14 @@
 //! mailbox by the spawn site rather than by this loop.
 
 use crate::agent::cancel;
+use crate::agent::digest::{PRESSURE_THRESHOLD_FALLBACK, pressure_due};
 use crate::agent::event::QuiesceReason;
 use crate::agent::nudge;
 use crate::agent::{Agent, deliberate, panic_msg, render_reply};
 use crate::bus::{
     AgentOutcome, AgentState, Emitter, Item, Kind, ParkMode, Post, WORKER_PANIC_PREFIX,
 };
-use crate::provider::ProviderError;
+use crate::provider::{Provider, ProviderError};
 use crate::shell_eval;
 use ral_core::serial::FOValue;
 
@@ -219,6 +220,9 @@ impl Agent {
             emit.emit(Kind::ProviderError(e.into()));
         }
         let waiting_on_children = self.has_live_children();
+        // `last_input` is fresh off `deliberate`, so the gauge reads this
+        // completion's own pressure, not the one it was called with.
+        let pressure = self.context_pressure(&active);
         let ctx = nudge::NudgeCtx {
             // Exempt while children are live: an un-replied finish there is a
             // legitimate wait on the fleet, not a dropped return, and nagging
@@ -227,6 +231,7 @@ impl Agent {
             pinned: self.pinned_digest(),
             waiting_on_children,
             is_headless_root: self.parent.is_none() && !self.interactive,
+            pressure,
         };
         let replied = matches!(outcome, Ok(deliberate::Outcome::Replied(_)));
         let nudge_msg = match &mut self.nudges {
@@ -237,6 +242,16 @@ impl Agent {
             self.inbox
                 .push(Post::Nudge(msg.clone()))
                 .expect("Nudge is idempotent and never rejects");
+        }
+        // Latch only once the warning actually rode a message out: on the
+        // must-reply budget-exhausted path `react` returns `None` despite
+        // `ctx.pressure` being `Some`, and that warning went undelivered, so
+        // it must stay unlatched to retry on the very next completion.
+        if ctx.pressure.is_some()
+            && nudge_msg.is_some()
+            && matches!(outcome, Ok(deliberate::Outcome::Complete(_)))
+        {
+            self.context_warn_latched = true;
         }
         // `reply` hard-terminates, engagement and armed schedules
         // notwithstanding — unless the nudge layer just turned this very one
@@ -344,6 +359,28 @@ impl Agent {
             key: shell_eval::SERVICES_PIN_KEY.to_string(),
             card,
         });
+    }
+
+    /// The rendered pressure-gauge detail once the soft line ahead of
+    /// auto-compaction ([`crate::agent::digest::pressure_due`]) is crossed, or
+    /// `None` while the excursion is already latched or the line has not been
+    /// reached.  Mirrors [`Self::compact`]'s own two-armed match, one reserve
+    /// earlier: a known window weighs `last_input` against it, an unknown one
+    /// falls back to the byte heuristic.  Never touches the latch itself —
+    /// that is `take_up`'s call, once it knows the warning actually rode a
+    /// nudge out.
+    fn context_pressure(&self, provider: &Provider) -> Option<String> {
+        if self.context_warn_latched {
+            return None;
+        }
+        match provider.context_window() {
+            Some(w) if w > 0 => pressure_due(self.last_input, w)
+                .then(|| format!("{} of {w} tokens", self.last_input)),
+            _ => {
+                let bytes = self.log.lock().history_bytes();
+                (bytes >= PRESSURE_THRESHOLD_FALLBACK).then(|| format!("{} KB", bytes / 1024))
+            }
+        }
     }
 
     /// Warn once per excursion above the operator's disk-warn ceiling, as an

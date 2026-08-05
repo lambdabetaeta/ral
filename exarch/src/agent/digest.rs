@@ -51,6 +51,23 @@ pub fn compaction_due(used: u64, window: u64) -> bool {
     used + reserve_tokens(window) > window
 }
 
+/// The token count past which [`compaction_due`] fires, spelled as a gauge
+/// cap for `/resources`.
+pub fn compaction_trigger(window: u64) -> u64 {
+    window.saturating_sub(reserve_tokens(window))
+}
+
+/// The soft line one full reserve ahead of [`compaction_due`]: room enough
+/// for the model to park what matters in files before the summary takes the
+/// rest.
+pub fn pressure_due(used: u64, window: u64) -> bool {
+    used + 2 * reserve_tokens(window) > window
+}
+
+/// Fallback soft line when the window is unknown: three-quarters of
+/// [`COMPACT_THRESHOLD`].
+pub const PRESSURE_THRESHOLD_FALLBACK: usize = COMPACT_THRESHOLD / 4 * 3;
+
 /// Summary output cap for a known `window`: four-fifths of the reserve,
 /// clamped at both ends.
 ///
@@ -216,6 +233,18 @@ mod tests {
             exit,
             timed_out: false,
         }
+    }
+
+    #[test]
+    fn pressure_line_sits_a_full_reserve_before_the_trigger() {
+        let w = 200_000;
+        let trigger = compaction_trigger(w);
+        assert!(!compaction_due(trigger, w) && compaction_due(trigger + 1, w));
+        assert!(
+            pressure_due(trigger, w),
+            "compaction due implies pressure due"
+        );
+        assert!(!pressure_due(w / 2, w), "half a window is not pressure");
     }
 
     #[test]
