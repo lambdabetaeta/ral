@@ -653,13 +653,14 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FO
 
 // ── Senders and receivers ─────────────────────────────────────────────
 
-/// The dispatch id and scope an identity transport's `Control::Cancel` arm
-/// reads — written by [`IdentityTransport::dispatch`] ahead of the engine
-/// lock, so a cancel naming that dispatch has a scope to land on before the
-/// run's own frame is born. Replaced each dispatch, never cleared: a cancel
-/// that has outlived its run no longer finds the id it names.
-type DispatchScopeCell =
-    Arc<std::sync::Mutex<Option<(DispatchId, crate::process::ForegroundScope)>>>;
+/// What an identity transport's `Control::Cancel` arm aims at: the id and
+/// scope of the dispatch it last minted, written by
+/// [`IdentityTransport::dispatch`] ahead of the engine lock, so a cancel
+/// naming that dispatch has a scope to land on before the run's own frame is
+/// born. Replaced each dispatch, never cleared — so between runs it still
+/// names a settled one, and the id is what lets a cancel that outlived its
+/// run miss rather than strike the successor.
+type CancelTarget = Arc<std::sync::Mutex<Option<(DispatchId, crate::process::ForegroundScope)>>>;
 
 /// Out-of-band control sender.
 #[derive(Clone)]
@@ -674,18 +675,18 @@ pub struct ControlSender {
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
     /// `Some` for an identity sender, `None` for a wire one, whose cancel
     /// already reaches the run across the wire without a local scope to trip.
-    scope: Option<DispatchScopeCell>,
+    cancel_target: Option<CancelTarget>,
 }
 
 impl ControlSender {
     pub(crate) fn new(
         current_dispatch: Arc<std::sync::atomic::AtomicU64>,
-        scope: DispatchScopeCell,
+        cancel_target: CancelTarget,
     ) -> Self {
         Self {
             wire: None,
             current_dispatch,
-            scope: Some(scope),
+            cancel_target: Some(cancel_target),
         }
     }
 
@@ -697,7 +698,7 @@ impl ControlSender {
         Self {
             wire: Some((ch, death)),
             current_dispatch,
-            scope: None,
+            cancel_target: None,
         }
     }
 
@@ -739,8 +740,8 @@ impl ControlSender {
                 // Cancellation is sticky and a fold walks the chain live, so a
                 // scope cancelled here before the run's frame exists is still
                 // observed once that frame is minted a descendant of it.
-                if let Some(cell) = &self.scope {
-                    let recorded = cell.lock_ignore_poison();
+                if let Some(target) = &self.cancel_target {
+                    let recorded = target.lock_ignore_poison();
                     if let Some((current, scope)) = recorded.as_ref()
                         && *current == id
                     {
@@ -903,18 +904,21 @@ pub struct IdentityTransport {
     /// `dispatch`/`shell_mut`/`with_shell` panics instead of deadlocking. A
     /// separate short lock: checking it must not touch `self.engine`.
     dispatch_thread: std::sync::Mutex<Option<std::thread::ThreadId>>,
-    /// Set by [`Self::observe_foreground`]. Outside `engine`'s lock, so a
+    /// The destination a host injects through [`Self::set_interrupt_target`],
+    /// republished with each dispatch's scope. Outside `engine`'s lock, so a
     /// holder of a clone can cancel the *current* dispatch from another thread
     /// without waiting on it — how an observing host interrupts one run
-    /// without touching the session's durable root.
-    run_scope: Option<Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>>,
+    /// without touching the session's durable root. An interrupt names no id,
+    /// so it needs none: it strikes whatever runs now.
+    interrupt_target: Option<Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>>,
     /// Minted once at construction; each dispatch hangs a child off it, ahead
     /// of the engine lock, so a `Control::Cancel` naming that dispatch always
     /// has a scope to land on.
     dispatches: crate::process::ForegroundScope,
-    /// The id and scope of the dispatch presently claiming `dispatches` —
-    /// shared with `control`'s `Control::Cancel` arm.
-    dispatch_scope: DispatchScopeCell,
+    /// The id and scope of the last dispatch to claim `dispatches` — shared
+    /// with `control`'s `Control::Cancel` arm, which uses the id to tell a
+    /// live cancel from one that outlived its run.
+    cancel_target: CancelTarget,
 }
 
 pub struct EngineInner {
@@ -958,8 +962,8 @@ impl IdentityTransport {
             current_dispatch: current_dispatch.clone(),
         });
         let dispatches = shell.run_cancel_handle();
-        let dispatch_scope: DispatchScopeCell = Arc::new(std::sync::Mutex::new(None));
-        let control = ControlSender::new(current_dispatch.clone(), dispatch_scope.clone());
+        let cancel_target: CancelTarget = Arc::new(std::sync::Mutex::new(None));
+        let control = ControlSender::new(current_dispatch.clone(), cancel_target.clone());
         control.clone().publish();
 
         let engine = EngineInner {
@@ -978,9 +982,9 @@ impl IdentityTransport {
             control,
             events_recv: Arc::new(EventReceiver::new(event_rx)),
             dispatch_thread: std::sync::Mutex::new(None),
-            run_scope: None,
+            interrupt_target: None,
             dispatches,
-            dispatch_scope,
+            cancel_target,
         }
     }
 
@@ -990,20 +994,21 @@ impl IdentityTransport {
         self.events_recv.clone()
     }
 
-    /// Arm this transport to publish each dispatch's scope into `cell` as the
-    /// dispatch is minted — ahead of the engine lock, so the cell never names a
-    /// run that has already ended while its successor waits to begin. Call once,
-    /// right after construction: exarch's agent fleet keeps its own clone, so an
+    /// Install `target` as where an interrupt lands. This call writes no scope;
+    /// each later dispatch republishes its own into it as the dispatch is
+    /// minted — ahead of the engine lock, so the target never names a run that
+    /// has already ended while its successor waits to begin. Call once, right
+    /// after construction: exarch's agent fleet keeps its own clone, so an
     /// interrupt cancels the dispatch in flight without touching the durable
     /// root a later run would inherit.
     ///
-    /// The cell outlives any one transport — a `/clear` rebuild republishes into
-    /// the same one — so the host injects it rather than borrowing ours.
-    pub fn observe_foreground(
+    /// The target outlives any one transport — a `/clear` rebuild republishes
+    /// into the same one — so the host injects it rather than borrowing ours.
+    pub fn set_interrupt_target(
         &mut self,
-        cell: Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>,
+        target: Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>>,
     ) {
-        self.run_scope = Some(cell);
+        self.interrupt_target = Some(target);
     }
 
     /// Install the session's enquiry desk. A per-run host calls this before
@@ -1069,12 +1074,12 @@ impl Transport for IdentityTransport {
         // Minted ahead of the engine lock, so a cancel raised in that window —
         // a `Control::Cancel` naming `id`, or an observing host's interrupt —
         // has a scope to land on even while this call is still waiting to
-        // acquire it. Both cells name the same scope; only the control arm
-        // needs the id to tell a live cancel from one that outlived its run.
+        // acquire it. Both targets name the same scope; only the control arm
+        // needs the id, because only a cancel names which dispatch it meant.
         let scope = self.dispatches.child();
-        *self.dispatch_scope.lock_ignore_poison() = Some((id, scope.clone()));
-        if let Some(cell) = &self.run_scope {
-            *cell.lock_ignore_poison() = Some(scope.clone());
+        *self.cancel_target.lock_ignore_poison() = Some((id, scope.clone()));
+        if let Some(target) = &self.interrupt_target {
+            *target.lock_ignore_poison() = Some(scope.clone());
         }
 
         let mut engine = self.engine.lock();
@@ -1200,7 +1205,7 @@ mod identity_cancel_tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if matches!(
-                *transport.dispatch_scope.lock_ignore_poison(),
+                *transport.cancel_target.lock_ignore_poison(),
                 Some((current, _)) if current == DispatchId(1)
             ) {
                 break;
@@ -1228,17 +1233,17 @@ mod identity_cancel_tests {
     }
 
     /// The same race down the other cancel channel: an observing host — exarch's
-    /// fleet, holding a clone of the cell — interrupts by cancelling whatever
-    /// scope it finds there. Published as the dispatch is minted rather than
-    /// once its run frame exists, the cell can never name a run that has already
-    /// ended while its successor waits on the engine lock. The shell is left
+    /// fleet, holding a clone of the interrupt target — interrupts by cancelling
+    /// whatever scope it finds there. Published as the dispatch is minted rather
+    /// than once its run frame exists, the target can never name a run that has
+    /// already ended while its successor waits on the engine lock. The shell is left
     /// deaf to signals here, so nothing but this cancel can settle the run.
     #[test]
     fn an_observed_interrupt_racing_a_fresh_dispatch_is_not_dropped() {
-        let cell: Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>> =
+        let target: Arc<std::sync::Mutex<Option<crate::process::ForegroundScope>>> =
             Arc::new(std::sync::Mutex::new(None));
         let mut transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
-        transport.observe_foreground(cell.clone());
+        transport.set_interrupt_target(target.clone());
         let transport = Arc::new(transport);
 
         let guard = transport.shell_mut();
@@ -1252,7 +1257,7 @@ mod identity_cancel_tests {
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let scope = loop {
-            let published = cell.lock_ignore_poison().clone();
+            let published = target.lock_ignore_poison().clone();
             if let Some(scope) = published {
                 break scope;
             }

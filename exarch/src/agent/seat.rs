@@ -5,7 +5,7 @@
 use crate::agent::event::AgentLog;
 use crate::bootstrap::Scratch;
 use crate::fleet::desk::{AbsentDesk, DeskBinding, HostSeam};
-use crate::fleet::registry::{EvalReach, RunScope};
+use crate::fleet::registry::{EvalReach, InterruptTarget};
 use crate::shell_eval::builtins;
 use ral_core::Shell;
 use ral_core::transport::{IdentityTransport, Transport};
@@ -14,14 +14,14 @@ use std::sync::{Arc, Mutex};
 /// One agent's engine-side attachment; what differs per call already lives
 /// off the [`Transport`] trait, so this stays a closed enum.
 pub(crate) enum Seat {
-    /// In-process.  `/clear` rebuilds it, but onto the *same* `run_scope`:
+    /// In-process.  `/clear` rebuilds it, but onto the *same* `interrupt_target`:
     /// the cell the registry interrupts through must outlive the rebuild.
     Identity {
         transport: Box<IdentityTransport>,
         scratch: Arc<Scratch>,
         cwd: std::path::PathBuf,
         detach: bool,
-        run_scope: RunScope,
+        interrupt_target: InterruptTarget,
     },
     /// Out-of-process, one engine per session, holding nothing per call: a
     /// wire run's desk and applier ride `Agent::run_shell`'s arguments into
@@ -67,14 +67,19 @@ impl Seat {
         detach: bool,
         log: &AgentLog,
     ) -> Self {
-        let run_scope: RunScope = Arc::new(Mutex::new(None));
-        let transport = Box::new(identity_ceremony(shell, log, &run_scope, cwd.clone()));
+        let interrupt_target: InterruptTarget = Arc::new(Mutex::new(None));
+        let transport = Box::new(identity_ceremony(
+            shell,
+            log,
+            &interrupt_target,
+            cwd.clone(),
+        ));
         Self::Identity {
             transport,
             scratch,
             cwd,
             detach,
-            run_scope,
+            interrupt_target,
         }
     }
 
@@ -143,18 +148,18 @@ impl Seat {
         match self {
             Self::Identity {
                 transport,
-                run_scope,
+                interrupt_target,
                 ..
             } => EvalReach::Identity {
                 eval_root: Some(transport.shell_mut().shell.cancel_handle()),
-                run_scope: run_scope.clone(),
+                interrupt_target: interrupt_target.clone(),
             },
             Self::Wire { transport, .. } => EvalReach::Wire(transport.control().clone()),
         }
     }
 
     /// `/clear`'s engine half: reboot from the owned scratch onto the
-    /// *same* run-scope cell.  Replacing the transport drops the outgoing
+    /// same interrupt target.  Replacing the transport drops the outgoing
     /// shell, whose teardown cancels its workers: `/clear` outranks leases.
     pub(crate) fn clear(&mut self, log: &AgentLog) {
         match self {
@@ -163,12 +168,12 @@ impl Seat {
                 scratch,
                 cwd,
                 detach,
-                run_scope,
+                interrupt_target,
             } => {
                 **transport = identity_ceremony(
                     boot_root_shell(scratch, cwd.clone(), *detach),
                     log,
-                    run_scope,
+                    interrupt_target,
                     cwd.clone(),
                 );
             }
@@ -222,7 +227,7 @@ pub(crate) fn boot_root_shell(scratch: &Scratch, cwd: std::path::PathBuf, detach
 fn identity_ceremony(
     mut shell: Shell,
     log: &AgentLog,
-    run_scope: &RunScope,
+    interrupt_target: &InterruptTarget,
     cwd: std::path::PathBuf,
 ) -> IdentityTransport {
     // Must point at the live session's event-log directory, on
@@ -234,7 +239,7 @@ fn identity_ceremony(
     );
     crate::bootstrap::arm_session_ledgers(&mut shell);
     let mut transport = IdentityTransport::new(shell);
-    transport.observe_foreground(run_scope.clone());
+    transport.set_interrupt_target(interrupt_target.clone());
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     transport.attach(
         ral_core::transport::TerminalEndpoint {

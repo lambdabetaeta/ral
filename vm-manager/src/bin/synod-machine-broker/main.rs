@@ -5,7 +5,7 @@
 //! Windows a `LocalSystem` service holds them and hands out machines over a named
 //! pipe.  macOS asks for no such thing — Virtualization.framework starts a
 //! machine in the calling process, given the entitlement synod is signed with —
-//! so there is nothing there to broker and [`vm_manager::broker`] is not even
+//! so there is nothing there to broker and `vm_manager::broker` is not even
 //! compiled.
 //!
 //! The program is still built on both, because a Cargo binary target belongs to

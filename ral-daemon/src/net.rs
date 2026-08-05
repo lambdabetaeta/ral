@@ -1,9 +1,9 @@
 //! The guest's one network interface — a `tun` whose only peer is the host
 //! stack on the other end of the net vsock wire (`crate::packet`).
 //!
-//! Same split as [`crate::sysctl`] and [`crate::mounts`]: [`plan`] turns the
+//! Same split as `crate::sysctl` and `crate::mounts`: [`plan`] turns the
 //! host's [`boot::Net`] into an [`Interface`], a pure fact checkable without
-//! a kernel; [`Interface::apply`] is the thin edge that performs it. That
+//! a kernel; `Interface::apply` is the thin edge that performs it. That
 //! split is why [`plan`] and [`Interface`] are not behind `target_os =
 //! "linux"` the way the rest of this crate's syscall modules are — the
 //! netmask and gateway arithmetic is worth running and testing on the

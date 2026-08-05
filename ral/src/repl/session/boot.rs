@@ -344,7 +344,7 @@ pub(super) fn create_frontend(
 /// map included — is rejected: silently discarding a returned map would
 /// let a misplaced `[theme: …]` in `~/.ral_profile` do nothing without a
 /// word, and configuration belongs in the rc file.  A profile only ever
-/// mutates the shell, so no [`RcCtx`] reaches it.
+/// mutates the shell, so it yields no [`RcSettings`].
 fn source_profile(path: &str, shell: &mut Shell) {
     if let Err(msg) = source_profile_inner(path, shell) {
         diagnostic::cmd_error("ral", &msg);

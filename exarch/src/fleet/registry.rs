@@ -28,16 +28,17 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-/// A live agent's current-dispatch scope, republished by its transport as each
-/// dispatch is minted
-/// ([`ral_core::transport::IdentityTransport::observe_foreground`]).  It sits
+/// Where an interrupt lands: a live agent's current-dispatch scope, republished
+/// by its transport as each dispatch is minted, into the target the host
+/// installed once with
+/// [`ral_core::transport::IdentityTransport::set_interrupt_target`].  It sits
 /// outside the engine lock the run itself holds, so an interrupt can reach the
 /// in-flight run from another thread — and it is published *ahead* of that
 /// lock, so an interrupt raised while a dispatch still waits on it lands on
 /// the scope that dispatch minted: the run's frame is born a descendant and
 /// observes a cancel recorded before it existed.  `None` until the first
 /// dispatch.
-pub(crate) type RunScope = Arc<Mutex<Option<ForegroundScope>>>;
+pub(crate) type InterruptTarget = Arc<Mutex<Option<ForegroundScope>>>;
 
 /// How the registry reaches one agent's running eval, per seat kind — the
 /// eval-layer half of every cancel path, beside the cooperative [`Token`] each
@@ -45,12 +46,12 @@ pub(crate) type RunScope = Arc<Mutex<Option<ForegroundScope>>>;
 pub(crate) enum EvalReach {
     /// The in-process reach: the agent's own shell's durable root (terminate,
     /// and through the cancel-scope ancestor chain its detached workers too),
-    /// and the run-scope cell its transport refreshes each dispatch
+    /// and the interrupt target its transport refreshes each dispatch
     /// (interrupt).  `eval_root` is `None` for the trunk's interrupt-only
     /// reach — see [`Self::interrupt_only`].
     Identity {
         eval_root: Option<DurableRoot>,
-        run_scope: RunScope,
+        interrupt_target: InterruptTarget,
     },
     /// The wire reach: the engine lives in another process, whose only
     /// host-reachable cancel primitive is a `Cancel` control frame against
@@ -66,8 +67,10 @@ impl EvalReach {
     /// durable root, so the next run is born uncancelled.
     pub(crate) fn interrupt(&self) {
         match self {
-            Self::Identity { run_scope, .. } => {
-                if let Some(scope) = run_scope.lock_ignore_poison().as_ref() {
+            Self::Identity {
+                interrupt_target, ..
+            } => {
+                if let Some(scope) = interrupt_target.lock_ignore_poison().as_ref() {
                     scope.cancel(CancelCause::Interrupt);
                 }
             }
@@ -97,17 +100,19 @@ impl EvalReach {
     /// whole session rather than a subtree reap.  And the trunk is the one
     /// seat `/clear` rebuilds in place, minting a fresh root while the entry
     /// stands, so a root captured at registration would go stale — the
-    /// run-scope cell is host-owned precisely so it survives that rebuild,
-    /// and a root has no such cell.
+    /// interrupt target is host-owned precisely so it survives that rebuild,
+    /// and a root has no such target.
     ///
     /// A wire reach passes through: its only primitive is `Control::Cancel`
     /// against the in-flight dispatch, which is not permanent, so it carries
     /// nothing to weaken.
     fn interrupt_only(self) -> Self {
         match self {
-            Self::Identity { run_scope, .. } => Self::Identity {
+            Self::Identity {
+                interrupt_target, ..
+            } => Self::Identity {
                 eval_root: None,
-                run_scope,
+                interrupt_target,
             },
             wire @ Self::Wire(_) => wire,
         }
@@ -739,7 +744,7 @@ mod tests {
             cancel: Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: crate::bus::Inbox::new().mailbox(),
             provider: provider(),
@@ -773,7 +778,7 @@ mod tests {
             cancel: branch_token.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -788,7 +793,7 @@ mod tests {
             cancel: Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(worker_root.clone()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -839,7 +844,7 @@ mod tests {
             cancel: token.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(eval_root.clone()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -870,7 +875,7 @@ mod tests {
             cancel: trunk_token.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -885,7 +890,7 @@ mod tests {
             cancel: child_token.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -935,7 +940,7 @@ mod tests {
             cancel: trunk_token.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(root.clone()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -972,7 +977,7 @@ mod tests {
             cancel: branch_token.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(branch_root.clone()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -986,7 +991,7 @@ mod tests {
             cancel: child_token.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1024,10 +1029,11 @@ mod tests {
         entry(&reg, 0, None); // the trunk
         let child_token = Token::new();
         let child_root = DurableRoot::default();
-        // What `IdentityTransport::observe_foreground` would write as the
-        // child's in-flight dispatch was minted: a scope under its session,
-        // whose run frame is born a descendant.
-        let child_run_scope: RunScope = Arc::new(Mutex::new(Some(child_root.worker().child())));
+        // What the child's own dispatch would publish into its interrupt target
+        // as that dispatch was minted: a scope under its session, whose run
+        // frame is born a descendant.
+        let child_interrupt_target: InterruptTarget =
+            Arc::new(Mutex::new(Some(child_root.worker().child())));
         let grandchild_token = Token::new();
         let _ = reg.register(Registration {
             id: 1,
@@ -1038,7 +1044,7 @@ mod tests {
             cancel: child_token.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(child_root.clone()),
-                run_scope: child_run_scope.clone(),
+                interrupt_target: child_interrupt_target.clone(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1052,7 +1058,7 @@ mod tests {
             cancel: grandchild_token.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1069,13 +1075,13 @@ mod tests {
             "an interrupt is not a terminate cause"
         );
         assert!(
-            child_run_scope
+            child_interrupt_target
                 .lock()
                 .unwrap()
                 .as_ref()
                 .expect("the cell holds the in-flight dispatch's scope")
                 .is_cancelled(),
-            "the interrupt reaches whatever scope the run-scope cell holds"
+            "the interrupt reaches whatever scope the interrupt target holds"
         );
         assert!(
             !child_root.as_scope().is_cancelled(),
@@ -1090,7 +1096,7 @@ mod tests {
     }
 
     /// An interrupted agent's *next* run must run uncancelled: the interrupt
-    /// reaches only the run-scope cell, never `eval_root`, so a foreground
+    /// reaches only the interrupt target, never `eval_root`, so a foreground
     /// scope freshly minted from the root starts clean.
     #[test]
     fn interrupt_never_poisons_the_next_run() {
@@ -1098,7 +1104,7 @@ mod tests {
         entry(&reg, 0, None); // the trunk
         let eval_root = DurableRoot::default();
         let dispatches = eval_root.worker();
-        let run_scope: RunScope = Arc::new(Mutex::new(Some(dispatches.child())));
+        let interrupt_target: InterruptTarget = Arc::new(Mutex::new(Some(dispatches.child())));
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
@@ -1108,7 +1114,7 @@ mod tests {
             cancel: Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(eval_root),
-                run_scope: run_scope.clone(),
+                interrupt_target: interrupt_target.clone(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1116,15 +1122,20 @@ mod tests {
 
         reg.interrupt(1);
         assert!(
-            run_scope.lock().unwrap().as_ref().unwrap().is_cancelled(),
+            interrupt_target
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .is_cancelled(),
             "the in-flight run did unwind"
         );
 
         // The next dispatch mints a fresh scope beside the cancelled one and
-        // republishes it into the same cell, as
-        // `IdentityTransport::observe_foreground` does at every dispatch.
+        // republishes it into the same target, as `IdentityTransport::dispatch`
+        // does every time.
         let next_run = dispatches.child();
-        *run_scope.lock().unwrap() = Some(next_run.clone());
+        *interrupt_target.lock().unwrap() = Some(next_run.clone());
 
         assert!(
             !next_run.is_cancelled(),
@@ -1147,7 +1158,7 @@ mod tests {
             cancel: token.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(eval_root.clone()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: crate::bus::Inbox::new().mailbox(),
             provider: provider(),
@@ -1179,7 +1190,7 @@ mod tests {
             cancel: r.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1193,7 +1204,7 @@ mod tests {
             cancel: c.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1207,7 +1218,7 @@ mod tests {
             cancel: g.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1221,7 +1232,7 @@ mod tests {
             cancel: sibling.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1260,7 +1271,7 @@ mod tests {
             cancel: Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: inbox.mailbox(),
             provider: provider(),
@@ -1325,7 +1336,7 @@ mod tests {
             cancel: Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: inbox.mailbox(),
             provider: provider(),
@@ -1349,7 +1360,7 @@ mod tests {
             cancel: Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1364,7 +1375,7 @@ mod tests {
             cancel: sibling_token.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1379,7 +1390,7 @@ mod tests {
             cancel: grandchild_token.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1434,7 +1445,7 @@ mod tests {
             cancel: Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1464,7 +1475,7 @@ mod tests {
             cancel: parent_token.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1481,7 +1492,7 @@ mod tests {
             cancel: Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1510,7 +1521,7 @@ mod tests {
             cancel: Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1526,7 +1537,7 @@ mod tests {
             cancel: Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1564,7 +1575,7 @@ mod tests {
             cancel: Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(eval_root.clone()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1610,7 +1621,7 @@ mod tests {
             cancel: Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(eval_root.clone()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1649,7 +1660,7 @@ mod tests {
                 cancel: token.clone(),
                 reach: EvalReach::Identity {
                     eval_root: Some(DurableRoot::default()),
-                    run_scope: RunScope::default(),
+                    interrupt_target: InterruptTarget::default(),
                 },
                 mailbox: mb(),
                 provider: provider(),
@@ -1680,7 +1691,7 @@ mod tests {
             cancel: Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(eval_root.clone()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: mb(),
             provider: provider(),
@@ -1718,7 +1729,7 @@ mod tests {
             cancel: Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: inbox.mailbox(),
             provider: provider(),
@@ -1756,7 +1767,7 @@ mod tests {
             cancel: Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: inbox.mailbox(),
             provider: provider(),

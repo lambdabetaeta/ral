@@ -921,7 +921,7 @@ mod tests {
     use crate::agent::testkit::ral_call;
     use crate::bus::{Inbox, channel};
     use crate::egress::Egress;
-    use crate::fleet::registry::{AGENT_LEASE_IDLE, EvalReach, Registration, RunScope};
+    use crate::fleet::registry::{AGENT_LEASE_IDLE, EvalReach, InterruptTarget, Registration};
     use crate::provider::{
         Provider, ProviderKind,
         scripted::{Reply, Script},
@@ -1023,7 +1023,7 @@ mod tests {
             cancel: crate::agent::cancel::Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(ral_core::process::DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: parent_inbox.mailbox(),
             provider: ProviderHandle::new(scripted_provider()),
@@ -1912,7 +1912,7 @@ mod tests {
                 cancel: crate::agent::cancel::Token::new(),
                 reach: EvalReach::Identity {
                     eval_root: Some(ral_core::process::DurableRoot::default()),
-                    run_scope: RunScope::default(),
+                    interrupt_target: InterruptTarget::default(),
                 },
                 mailbox: Inbox::new().mailbox(),
                 provider: ProviderHandle::new(scripted_provider()),
@@ -2469,7 +2469,7 @@ mod tests {
             cancel: crate::agent::cancel::Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(ral_core::process::DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: crate::bus::Inbox::new().mailbox(),
             provider: ProviderHandle::new(scripted_provider()),

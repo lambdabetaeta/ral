@@ -136,9 +136,12 @@ fn raise(cause: CancelCause) {
     }
 }
 
-/// The trunk-only half of Esc/Ctrl-C, beside the registry interrupt every
-/// focused tab gets: `Interrupt` on the published token, then
-/// [`deliver_interrupt`] to unwind the exchange.
+/// The process-wide half of an interrupt.
+///
+/// Beside the registry interrupt every focused tab gets: `Interrupt` on the
+/// published token, then [`deliver_interrupt`] to unwind the exchange.  Neither
+/// reach names a dispatch or an agent, so both are gated to the trunk — the
+/// only tab that publishes the process-wide slot.
 pub fn raise_interrupt() {
     raise(CancelCause::Interrupt);
     deliver_interrupt();

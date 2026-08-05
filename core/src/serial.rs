@@ -99,7 +99,7 @@ pub struct SerialThunk {
     pub captured: SerialEnvSnapshot,
 }
 
-/// Wire mirror of a [`Value::Native`](crate::types::Value::Native): the body
+/// Wire mirror of a [`Value::Native`]: the body
 /// cannot cross, so hydration re-links the name against the receiving
 /// shell's manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -219,7 +219,7 @@ fn value_carries_handle(value: &Value) -> bool {
 type ScopeArcs = Vec<Option<Arc<HashMap<String, Binding>>>>;
 
 /// Decode capability for one wire envelope: the rebuilt scope arcs plus the
-/// [`BuiltinTable`] a captured [`Value::Native`](crate::types::Value::Native)
+/// [`BuiltinTable`] a captured [`Value::Native`]
 /// re-links its name against.
 ///
 /// Constructible only from the [`Shell`] that will run the decoded values,

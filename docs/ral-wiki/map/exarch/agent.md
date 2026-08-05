@@ -12,7 +12,7 @@ canonical [[map/exarch/frontend|event log]] (`AgentLog`), a **seat**
 (`agent/seat.rs`) carrying the transport each run drives through —
 `Seat::Identity`, the persistent in-process [[map/core/shell-state|`Shell`]]
 behind an `IdentityTransport` (plus the session `Scratch`, the re-seed cwd,
-and the run-scope cell the registry interrupts through), or `Seat::Wire`, a
+and the interrupt target the registry interrupts through), or `Seat::Wire`, a
 `WireTransport` driving a remote engine, one process per session
 ([[decisions/260722_session-is-a-process|session-is-a-process]]) — the
 canonical run and probe vocabulary either way
@@ -370,7 +370,7 @@ so the child inherits the model in force at spawn and may diverge afterward.
 it re-runs the seat's ceremony (`Seat::clear`) — the identity seat reboots a
 fresh shell from `boot_root_shell` (`agent/seat.rs`, the cwd- and
 scratch-seeding wrapper over `bootstrap::boot_shell`) onto the *same*
-run-scope cell; a wire session instead clears by killing its engine
+interrupt target; a wire session instead clears by killing its engine
 process and booting a fresh one from the same recipe, so no caller routes
 `/clear` to that seat — truncates and restarts the event log, clears the
 schedule registry, and cascades cancel to its subtree. Replacing the

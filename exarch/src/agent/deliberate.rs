@@ -492,7 +492,7 @@ mod tests {
     use crate::agent::testkit::*;
     use crate::agent::{NoControl, ProviderHandle, fresh_id};
     use crate::bus::{AgentOutcome, Inbox, Post};
-    use crate::fleet::registry::{AGENT_LEASE_IDLE, EvalReach, Registration, RunScope};
+    use crate::fleet::registry::{AGENT_LEASE_IDLE, EvalReach, InterruptTarget, Registration};
     use crate::provider::scripted::{Reply, Script};
     use genai::chat::ChatRole;
     use ral_core::Shell;
@@ -573,7 +573,7 @@ mod tests {
             cancel: direct_token.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(direct_root.clone()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: Inbox::new().mailbox(),
             provider: child.provider.clone(),
@@ -587,7 +587,7 @@ mod tests {
             cancel: grandchild_token.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(ral_core::process::DurableRoot::default()),
-                run_scope: RunScope::default(),
+                interrupt_target: InterruptTarget::default(),
             },
             mailbox: Inbox::new().mailbox(),
             provider: child.provider.clone(),
@@ -603,7 +603,7 @@ mod tests {
                 cancel: sibling_token.clone(),
                 reach: EvalReach::Identity {
                     eval_root: Some(ral_core::process::DurableRoot::default()),
-                    run_scope: RunScope::default(),
+                    interrupt_target: InterruptTarget::default(),
                 },
                 mailbox: Inbox::new().mailbox(),
                 provider: child.provider.clone(),
