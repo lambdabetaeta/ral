@@ -70,6 +70,22 @@ impl Agent {
         control: &mut dyn Control,
         emit: &Emitter,
     ) -> (AgentOutcome, Option<FOValue>) {
+        self.attend_with(control, emit, |_, mode| mode)
+    }
+
+    /// [`Self::attend`] with the park verdict reshaped by `policy` before it
+    /// reaches either of its two readers — the idle-state emission just below
+    /// and `next_or_idle`'s own parking argument — so a frontend's status and
+    /// the loop's actual wait always agree on what an empty inbox means.
+    /// `attend`'s public behavior is this under the identity policy; the only
+    /// other one is [`quiesce_when_childless`], which
+    /// [`crate::headless::converse_settled`] runs under instead.
+    pub(crate) fn attend_with(
+        &mut self,
+        control: &mut dyn Control,
+        emit: &Emitter,
+        policy: impl Fn(&Self, ParkMode) -> ParkMode,
+    ) -> (AgentOutcome, Option<FOValue>) {
         // Only the trunk publishes to the OS-signal slot; a sub-agent's token
         // is reached through the registry cascade instead.
         let _slot = self.parent.is_none().then(|| cancel::publish(&self.cancel));
@@ -86,12 +102,15 @@ impl Agent {
             // hand the agent is not idle for any observable moment, and the
             // deliberation's own transitions are the truth.
             if self.inbox.is_empty() {
-                emit.emit(Kind::State(idle_state(self.park_mode())));
+                emit.emit(Kind::State(idle_state(policy(self, self.park_mode()))));
             }
             // `next_or_idle` recomputes the park verdict on every wake.  An
             // un-engaged idle returning agent breaks here, yet its outcome
             // reaches its parent through the worker epilogue, not this break.
-            let Some(item) = self.inbox.next_or_idle(|| self.park_mode(), &self.cancel) else {
+            let Some(item) = self
+                .inbox
+                .next_or_idle(|| policy(self, self.park_mode()), &self.cancel)
+            else {
                 break;
             };
             if matches!(
@@ -443,6 +462,23 @@ pub(super) fn announce(item: &Item, emit: &Emitter) {
             }
         }
         Item::Nudge(_) | Item::Command(_) => {}
+    }
+}
+
+/// [`Agent::attend_with`]'s park policy for
+/// [`crate::headless::converse_settled`]: a conversing trunk's `park_mode`
+/// always answers [`ParkMode::Held`], blind to its fleet, since a chat trunk
+/// never used to have one worth waiting on. This reshapes exactly that
+/// answer — live children hold as [`ParkMode::HeldByChildren`] instead, and a
+/// childless trunk quiesces at once rather than parking on a human who is not
+/// there to type. Every other verdict passes through unchanged: `Engaged`
+/// requires a `steer` synod never offers, and `UntilCancelled` requires an
+/// armed schedule `converse_settled` already refused at construction.
+pub(crate) fn quiesce_when_childless(agent: &Agent, mode: ParkMode) -> ParkMode {
+    match mode {
+        ParkMode::Held if agent.has_live_children() => ParkMode::HeldByChildren,
+        ParkMode::Held => ParkMode::Quiesce,
+        other => other,
     }
 }
 

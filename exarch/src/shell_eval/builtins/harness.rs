@@ -130,7 +130,7 @@ fn schedule_label(v: &Value) -> Settled<FOValue> {
     })
 }
 
-/// Unwrap the `` `started `` receipt `agent-start` answers with.
+/// Unwrap the `` `started `` receipt `agent-start`/`agent-hatched` answer with.
 fn spawn_receipt(answer: FOValue) -> Settled<Value> {
     let FOValue::Variant {
         label,
@@ -145,6 +145,94 @@ fn spawn_receipt(answer: FOValue) -> Settled<Value> {
         return Err(sig(format!("agent: host refused: {label}")));
     }
     Ok(Value::from(*payload))
+}
+
+/// Decode `agent-start`'s wire arm's `` `hatch [token, port] `` payload.
+fn decode_hatch_answer(payload: FOValue) -> Settled<(u64, u32)> {
+    let FOValue::Map { entries } = payload else {
+        return Err(sig(
+            "agent: host's `hatch answer must be a record carrying token and port",
+        ));
+    };
+    let mut token = None;
+    let mut port = None;
+    for (key, value) in entries {
+        match (key.as_str(), value) {
+            // Bit-preserving: the token rides as whatever i64 bits the desk
+            // minted, never arithmetic on it.
+            ("token", FOValue::Int { value }) => token = Some(value.cast_unsigned()),
+            ("port", FOValue::Int { value }) => port = Some(value),
+            _ => {}
+        }
+    }
+    let token =
+        token.ok_or_else(|| sig("agent: host's `hatch answer is missing `token`".to_string()))?;
+    let port =
+        port.ok_or_else(|| sig("agent: host's `hatch answer is missing `port`".to_string()))?;
+    let port = u32::try_from(port)
+        .map_err(|_| sig("agent: host's `hatch answer carries an out-of-range port".to_string()))?;
+    Ok((token, port))
+}
+
+/// The guest-side hatch itself: spawns the child engine over a fresh vsock
+/// dial to the port the desk named, seeded from the nursery-parked fork.
+/// Only ever reachable inside a Linux guest — the dial primitive means
+/// nothing anywhere else — so a wire trunk built on any other platform
+/// refuses here rather than at a silent no-op.
+#[cfg(target_os = "linux")]
+fn run_hatch(
+    port: u32,
+    token: u64,
+    mooring: &Mooring,
+    session: ral_core::types::NurseryId,
+    grant: String,
+) -> Result<u32, String> {
+    ral_core::hatch::hatch_from_nursery(port, token, mooring, session, grant)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_hatch(
+    _port: u32,
+    _token: u64,
+    _mooring: &Mooring,
+    _session: ral_core::types::NurseryId,
+    _grant: String,
+) -> Result<u32, String> {
+    Err(
+        "agent: this engine has no hatch support outside a Linux guest — a wire trunk's helper \
+         spawn only ever reaches one"
+            .to_string(),
+    )
+}
+
+fn enquire_hatched(mooring: &Mooring, shell: &Shell, token: u64) -> Settled<FOValue> {
+    Ok(shell.enquire(
+        mooring,
+        FOValue::Variant {
+            label: "agent-hatched".to_string(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![FOValue::Int {
+                    value: token.cast_signed(),
+                }],
+            })),
+        },
+    )?)
+}
+
+/// Best effort: the desk drops the pending hatch either way, and there is
+/// nothing more useful to do with a refusal here than with success.
+fn enquire_abort(mooring: &Mooring, shell: &Shell, token: u64) {
+    let _ = shell.enquire(
+        mooring,
+        FOValue::Variant {
+            label: "agent-abort".to_string(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![FOValue::Int {
+                    value: token.cast_signed(),
+                }],
+            })),
+        },
+    );
 }
 
 /// `agent [prompt: …, name: …, type: …, grant: …, search: …]` — validate,
@@ -224,7 +312,7 @@ fn builtin_agent(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
                     FOValue::String { value: prompt },
                     FOValue::String { value: name },
                     FOValue::Variant {
-                        label: grant,
+                        label: grant.clone(),
                         payload: None,
                     },
                     FOValue::Bool { value: *search },
@@ -232,7 +320,37 @@ fn builtin_agent(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
             })),
         },
     )?;
-    spawn_receipt(answer)
+
+    let FOValue::Variant { label, payload } = answer else {
+        return Err(sig(
+            "agent: host answered an unexpected shape for its receipt",
+        ));
+    };
+    if label != "hatch" {
+        return spawn_receipt(FOValue::Variant { label, payload });
+    }
+    // The wire arm: the trunk's own engine hatches the child itself, then
+    // enquires `agent-hatched` to hand the desk its dial to await.
+    let Some(payload) = payload else {
+        return Err(sig("agent: host's `hatch answer carries no payload"));
+    };
+    let (token, port) = decode_hatch_answer(*payload)?;
+    match run_hatch(port, token, mooring, session, grant) {
+        Ok(pid) => match enquire_hatched(mooring, shell, token) {
+            Ok(answer) => spawn_receipt(answer),
+            Err(e) => {
+                // The dial never landed in time, or landed and was refused:
+                // either way the desk has given up, so this engine must not
+                // leave the hatched child dialling into silence.
+                ral_core::hatch::kill_hatched(pid);
+                Err(e)
+            }
+        },
+        Err(reason) => {
+            enquire_abort(mooring, shell, token);
+            Err(sig(format!("agent: {reason}")))
+        }
+    }
 }
 
 /// `agents` — the `` `agent-list `` enquiry's listing, returned as is.
@@ -627,7 +745,7 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 10] = [
     BuiltinEntry::new(
         Cow::Borrowed("agent"),
         BuiltinTypeRule::Scheme(scheme_agent),
-        "agent [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>]  — launch a sub-agent. Launch-only and always asynchronous: returns immediately with a receipt [name: Str, log-dir: Str]; the child's reply is NOT this call's result — it arrives later, as its own marked item in your inbox. `type` selects the child's memory: `amnemon starts blank (no shared history, only a value-snapshot of your shell's bindings/cwd/env); `mnemon inherits your current model-visible conversation and reuses your provider selection for cache locality, receiving `prompt` as its fresh final prompt. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `minimal (working tree + /tmp + network), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all six. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "agent [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>]  — launch a sub-agent. Launch-only and always asynchronous: returns immediately with a receipt [name: Str, log-dir: Str]; the child's reply is NOT this call's result — it arrives later, as its own marked item in your inbox. `type` selects the child's memory: `amnemon starts blank (no shared history, only a value-snapshot of your shell's bindings/cwd/env — the serializable fragment: a live job handle crosses as an opaque placeholder, never as itself); `mnemon inherits your current model-visible conversation and reuses your provider selection for cache locality, receiving `prompt` as its fresh final prompt. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `minimal (working tree + /tmp + network), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all six. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_agent),
     ),
     BuiltinEntry::new(

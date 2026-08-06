@@ -288,11 +288,20 @@ impl Shell {
     /// by the reentrancy law from holding `&mut Shell` itself — later redeems
     /// with `Nursery::adopt`.
     ///
+    /// The one snapshot law lands here: the fork's scope is scrubbed of
+    /// `Value::Handle` bindings before parking, so an identity-adopted child
+    /// and a wire-hatched one — both read out of the same nursery slot —
+    /// resolve every name to the same value or the same absence.
+    ///
     /// # Errors
     /// Returns `Err` if no nursery is installed on this run.
     pub fn fork_into_nursery(&self, mooring: &Mooring) -> crate::types::Settled<NurseryId> {
         match mooring.nursery.as_ref() {
-            Some(nursery) => Ok(nursery.park(self.fork_session())),
+            Some(nursery) => {
+                let mut fork = self.fork_session();
+                fork.mobile.scope = fork.mobile.scope.scrub_handles();
+                Ok(nursery.park(fork))
+            }
             None => Err(crate::types::Break::Error(
                 self.err("this host adopts no forked sessions", 1),
             )),

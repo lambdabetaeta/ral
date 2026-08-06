@@ -20,6 +20,7 @@ pub mod cancel;
 pub mod deliberate;
 pub mod digest;
 pub mod event;
+mod hatchery;
 pub mod nudge;
 mod probe;
 pub mod resources;
@@ -29,9 +30,11 @@ mod shell;
 pub(crate) mod testkit;
 pub mod transcript;
 
+pub(crate) use attend::quiesce_when_childless;
 pub use attend::{Control, NoControl, Verdict};
 pub(crate) use build::{Build, fresh_id};
 pub use build::{RootConfig, RootSeat};
+pub use hatchery::{DIAL_PATIENCE, Hatchery};
 pub(crate) use probe::ProbedWorker;
 pub(crate) use shell::{LogCell, ReplyCell};
 
@@ -39,6 +42,7 @@ use crate::agent::digest::{AGENT_REPLY_CAP, clip};
 use crate::agent::seat::Seat;
 use crate::agent::transcript::Transcript;
 use crate::bus::{AgentId, Inbox, Mailbox};
+use crate::fleet::hatch::PendingHatches;
 use crate::fleet::registry::AgentRegistry;
 use crate::provider::Provider;
 use crate::shell_eval;
@@ -157,12 +161,23 @@ pub struct Agent {
     /// The IT-set network policy and its audit ledger — shared verbatim by
     /// every fork, like [`Self::disk_warn_bytes`].
     egress: crate::egress::Egress,
+    /// The dial-side capability a wire trunk's `agent-start` hands its
+    /// helpers through; `None` on every identity trunk. Shared verbatim by
+    /// every fork, so a wire child's own `agent` call reaches the same
+    /// hatchery its parent did.
+    hatchery: Option<Arc<dyn Hatchery>>,
+    /// Fleet-shared, like [`Self::agents`]: a wire spawn's phase 1 and phase
+    /// 2 enquiries may land on different `ral` calls, so what phase 1
+    /// reserves must outlive that call.
+    pending_hatches: PendingHatches,
 }
 
-/// The depth budget exarch's trunks start with; at zero the desk refuses
-/// `agent-start` ([`crate::fleet::desk::ExarchDesk::launch`]), so a runaway
-/// spawn chain exhausts fuel instead of threads.  Fan-out is unbounded.
-pub(crate) const SPAWN_FUEL: u32 = 3;
+/// The depth budget exarch's trunks start with.
+///
+/// At zero the desk refuses `agent-start`
+/// ([`crate::fleet::desk::ExarchDesk::launch`]), so a runaway spawn chain
+/// exhausts fuel instead of threads.  Fan-out is unbounded.
+pub const SPAWN_FUEL: u32 = 3;
 
 /// A shared, swappable handle to the active provider: live replacement across
 /// the UI / attend thread boundary needs a cell, not an `Arc` the worker owns

@@ -140,6 +140,46 @@ impl Env {
             .map(|mut b| std::mem::replace(&mut b.value, Value::Unit))
     }
 
+    /// The serializable fragment of this scope: every `Value::Handle`
+    /// binding, in every scope of the chain, replaced by its opaque
+    /// placeholder. The natives scope is untouched — it is seeded once at
+    /// boot from language constants, never from a running session, so no
+    /// handle ever reaches it.
+    ///
+    /// The one snapshot law's whole mechanism: an identity fork and a wire
+    /// seed must resolve every name to the same value or the same absence,
+    /// and a handle has no wire form, so both arms scrub it the same way —
+    /// this one, called from the one place both pass through,
+    /// `Shell::fork_into_nursery`.
+    pub(crate) fn scrub_handles(&self) -> Self {
+        let scopes = self
+            .scopes
+            .iter()
+            .map(|scope| {
+                Arc::new(
+                    scope
+                        .iter()
+                        .map(|(name, binding)| {
+                            let value =
+                                crate::serial::scrub(&binding.value, &crate::serial::is_handle);
+                            (
+                                name.clone(),
+                                Binding {
+                                    value,
+                                    scheme: binding.scheme.clone(),
+                                },
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        Self {
+            scopes,
+            natives: self.natives.clone(),
+        }
+    }
+
     pub fn push_scope(&mut self) {
         self.scopes.push_back(Arc::new(HashMap::new()));
     }

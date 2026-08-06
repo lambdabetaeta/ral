@@ -20,7 +20,7 @@ use crate::transport::{
     Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run, SessionEvent,
     answer_probe,
 };
-use crate::types::{DeferredSink, EnquiryDesk, Error, Shell, SurfaceSink};
+use crate::types::{DeferredSink, EnquiryDesk, Error, Nursery, Shell, SurfaceSink};
 use crate::wire::WireChannel;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -377,6 +377,15 @@ fn engine_session(
                     ),
                 ));
             }
+            // A wire-hatched child's whole reason for existing: the parent's
+            // `hatch` named this fd, so a seed is waiting to become this
+            // shell's scope and ceiling before anything else runs.
+            if let Ok(fd) = std::env::var(crate::hatch::RAL_ENGINE_SEED_FD_ENV)
+                && let Err(msg) = crate::hatch::apply_seed(&fd, &mut shell)
+            {
+                eprintln!("engine: {msg}");
+                return 1;
+            }
             shell
         }
         Ok(Some(Frame::Detach) | None) => return 0,
@@ -454,7 +463,13 @@ fn engine_session(
                         surface: Some(surface.clone() as SurfaceSink),
                         deferred: Some(deferred.clone() as Arc<dyn DeferredSink>),
                         desk: Some(worker_desk.clone() as crate::types::Desk),
-                        nursery: None,
+                        // Fresh per dispatch, exactly as the host's own
+                        // `Agent::run_shell` mints one per call: a wire
+                        // trunk's `agent` builtin forks into it and, on the
+                        // hatch arm, adopts straight back out of it within
+                        // this same dispatch — the desk across the wire
+                        // never needs to reach it.
+                        nursery: Some(Nursery::default()),
                         lifecycle: Box::new(()),
                     };
                     let run_report = shell.run_under(&scope, req);
@@ -634,6 +649,7 @@ fn engine_session(
     // root under it, then wait.
     crate::process::request_foreground_cancel(CancelCause::Explicit);
     root.cancel(CancelCause::Explicit);
+    crate::hatch::teardown_hatched();
     let settle_by = Instant::now() + SETTLE_TIMEOUT;
     while busy.load(Ordering::Acquire) && Instant::now() < settle_by {
         std::thread::sleep(SETTLE_POLL);

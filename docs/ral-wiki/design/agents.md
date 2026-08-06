@@ -74,14 +74,17 @@ One call:
 
 - **`fork`s a child `Agent`** through `Shell::fork_session`
   ([[map/core/shell-state|the flow matrix]]). The child snapshots the parent's
-  whole lexical scope, dynamic context (cwd, env, grants, handlers), and the
-  installed builtin table, sets `parent` to the spawning agent's id, takes the
-  spawn's `name` as its identity, and starts fresh in everything else — its own
-  inbox, a fresh cancel token, an owned provider handle seeded from the parent's
-  current model, no terminal authority. This is a **value snapshot**: the
-  child's `cd`, env, and new bindings die with it; there is no flow-back, and the
-  parent receives a string, not the child's bindings. The isolation mirrors a
-  [[design/pipelines|byte-pipeline stage]]'s subshell;
+  **serialisable fragment** of its lexical scope, dynamic context (cwd, env,
+  grants, handlers), and the installed builtin table, sets `parent` to the
+  spawning agent's id, takes the spawn's `name` as its identity, and starts
+  fresh in everything else — its own inbox, a fresh cancel token, an owned
+  provider handle seeded from the parent's current model, no terminal
+  authority. This is a **value snapshot**: the child's `cd`, env, and new
+  bindings die with it; there is no flow-back, and the parent receives a
+  string, not the child's bindings. The isolation mirrors a
+  [[design/pipelines|byte-pipeline stage]]'s subshell — see
+  [[#Wire-seat children: the same snapshot, a different wire|below]] for why
+  "serialisable fragment" is the exact promise rather than "whole scope";
 - **runs it on a detached thread** through the same `attend` loop, returning a
   receipt `[name: Str, log-dir: Str]` at once — a ral record the
   script can bind and fan out over. The child runs off the
@@ -101,6 +104,68 @@ isolation ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]):
   reusing the parent's current provider selection so provider prompt caches can
   hit. If the parent is mid-tool-call, the unanswered assistant tool-call frame is
   not inherited; the child forks the request context, not a dangling protocol.
+
+## Wire-seat children: the same snapshot, a different wire
+
+A `Seat::Wire` trunk ([[map/exarch/agent|agent]]) runs its shell in a guest
+engine, host-side of a vsock connection
+([[decisions/260722_session-is-a-process|session-is-a-process]]) — the desk
+that answers `agent-start` sits in the host process, and cannot reach a
+`Shell` parked in another machine the way it reaches into its own nursery. A
+wire trunk's spawn is therefore **two-phase**, both phases plain `FOValue` on
+the existing enquiry channel, and every authority check the desk runs today
+still runs first, before anything is spawned:
+
+1. `` `agent-start `` — as an identity trunk's, but on a wire trunk the desk
+   mints a token, registers a pending hatch reserving the child's name, and
+   answers `` `hatch [token, port] `` instead of adopting a nursery shell
+   directly.
+2. The builtin, seeing `` `hatch ``, runs the **hatch**: the parent engine
+   dials the host on the named port, writes a 16-byte preamble binding the
+   dial to the token, and spawns `current_exe --engine` with the dial handed
+   down as its protocol socket — the same re-exec shape a wire seat's own
+   construction already uses, one level in. It hands the child an
+   `EngineSeed` — the nursery-parked fork's scope, context, and validated
+   grant tag — over an inherited fd, then enquires `` `agent-hatched [token] ``.
+   The desk correlates the guest's dial by token through the **hatchery**, a
+   capability object the desk holds rather than a dependency on the
+   machine layer directly, adopts the stream as a `Seat::Wire` child exactly
+   as the trunk itself was seated, and hands it to the same `spawn_async` an
+   identity trunk's fork reaches. The enquiring builtin cannot tell which arm
+   served it — the same `` `started [name, log-dir] `` receipt comes back
+   either way.
+
+A hatch that fails — the spawn errors, the dial is refused, the builtin dies
+before either enquiry lands — enquires `` `agent-abort [token] ``, and the
+desk drops the pending hatch and frees the reserved name; an abandoned
+pending hatch also expires on its own clock. Depth beyond one needs nothing
+extra: a wire child's own desk is host-side too, so a helper spawning a
+helper of its own rides the same hatchery, and `fuel` bounds the recursion
+exactly as the in-process lattice does.
+
+**The one snapshot law.** A wire seed cannot carry a `Value::Handle` binding —
+a handle is live authority over a parent-side resource, with no wire form —
+while an in-process fork, left alone, would carry one unfiltered. Rather than
+let `agent` mean two different things depending on which seat answered it,
+`fork_into_nursery` — the one place both an identity fork and a wire hatch
+pass through — scrubs every handle-carrying binding before parking the fork,
+so an identity fork and a wire seed's `EngineSeed` snapshot the same
+**serialisable fragment** of the parent's scope, never the unfiltered whole.
+This is why the fork description above says "serialisable fragment" rather
+than "whole lexical scope": every other line of the fork law already denies a
+child the parent's cancel domain, its terminal authority, its inbox, its
+provider handle — a live handle is exactly that class of authority, and this
+closes the one place it had still been slipping through. A round-trip test
+pins the law: fork a scope in memory, seed the same scope through
+`EngineSeed`, and the two children resolve every name to the same value or
+the same absence.
+
+The hatchery is where the seat asymmetry ends and the fleet's uniformity
+resumes: peer `message`, `agent-cancel`, and the idle-lease reaper all
+address a child by name through the registry, whatever seat it sits on, and
+a wire helper's `message` crosses as an enquiry on its own connection exactly
+as an identity peer's does — sender and recipient never learn each other's
+transport.
 
 ## Returning: the deliberate `reply`
 
@@ -236,4 +301,8 @@ labels, commitments retired),
 [[decisions/260705_cancel-per-tab|cancel-per-tab]] (Esc/Ctrl-C are a per-tab exchange
 interrupt, not a subtree cascade),
 [[decisions/260705_branch-minimal|branch-minimal]] (the conversing parented child
-whose `returns` bit is fixed false at construction).
+whose `returns` bit is fixed false at construction),
+[[map/synod|synod]] (the hatchery's landed home, and the helper surface built
+over wire-seat children),
+[[decisions/260806_exchange-ends-at-fleet-quiescence|synod's exchange ends at
+fleet quiescence]] (the product law a wire-seat fleet's caller must satisfy).

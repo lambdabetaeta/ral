@@ -380,6 +380,9 @@ mod tests {
             acts: crate::fleet::desk::ActFragment::default(),
             principal: ral_core::host::user(),
             pins: None,
+            wire_seat: true,
+            hatchery: None,
+            pending_hatches: crate::fleet::hatch::PendingHatches::new(),
         }
     }
 

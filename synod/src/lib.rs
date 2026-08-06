@@ -30,6 +30,7 @@
 
 pub mod boot;
 pub mod grant;
+pub mod hatchery;
 pub mod prompt;
 pub mod session;
 #[cfg(test)]

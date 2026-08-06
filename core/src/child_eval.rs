@@ -11,7 +11,9 @@ use crate::evaluator::call;
 use crate::io::TerminalState;
 use crate::ir::Comp;
 use crate::runtime::pipeline::helper::StageValue;
-use crate::serial::{InternCtx, ScopeTable, SerialEnvSnapshot, SerialValue, WireDecoder, scrub};
+use crate::serial::{
+    InternCtx, ScopeTable, SerialEnvSnapshot, SerialValue, WireDecoder, is_handle, scrub,
+};
 use crate::source::{FileId, SourceDb, Span};
 use crate::subprocess::{WireMobile, bare_child_shell, install_shell_mobile};
 use crate::types::{
@@ -66,6 +68,47 @@ pub(crate) struct ChildEvalRequest {
     /// So spans the child resolves locally — audit call sites — name the
     /// parent's source instead of `Shell::site_of`'s empty fallback.
     pub script: Option<WireScriptContext>,
+}
+
+/// A nursery-parked shell's scope, wire-ready for `hatch` — the
+/// [`ChildEvalRequest`] shape minus a body, since there is no stage to run:
+/// the child engine that hydrates this one *becomes* the shell it seeds.
+///
+/// What it deliberately does not carry — `Value::Handle` bindings (scrubbed
+/// upstream, at `Shell::fork_into_nursery`, the one place both an identity
+/// fork and a wire seed pass through), terminal authority, the parent's
+/// inbox or cancel token, its provider handle — is the parity argument for
+/// shipping a seed at all: a fork and a seed must mean the same thing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct EngineSeed {
+    pub scope_table: ScopeTable,
+    pub mobile: WireMobile,
+    pub captured: SerialEnvSnapshot,
+    /// The spawn's validated base tag, meet-narrowed against the receiving
+    /// engine's own ceiling once hydrated.
+    pub grant: String,
+}
+
+/// Reify a nursery-parked shell into a wire-ready [`EngineSeed`] — `hatch`'s
+/// only producer. `shell` is expected already scrubbed by
+/// `Shell::fork_into_nursery`; this function trusts that law rather than
+/// re-checking it.
+///
+/// `hatch` is Linux-only, and `crate::hatch`'s own tests are its only other
+/// caller, so a plain non-Linux, non-test build sees this as unreachable —
+/// accurate, not a bug.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+pub(crate) fn pack_seed(shell: &Shell, grant: String) -> Settled<EngineSeed> {
+    let scope = shell.mobile();
+    let mut ctx = InternCtx::new();
+    let captured = SerialEnvSnapshot::from_runtime(&scope.scope, &mut ctx);
+    let mobile = WireMobile::from_runtime(&scope, &mut ctx)?;
+    Ok(EngineSeed {
+        scope_table: ctx.finish()?,
+        mobile,
+        captured,
+        grant,
+    })
 }
 
 /// Structured body outcome returned by the child.
@@ -125,10 +168,6 @@ impl WireObservation {
         Observation::from_value(&value)
             .ok_or_else(|| Error::new("audit observation did not decode off the wire", 1))
     }
-}
-
-fn is_handle(v: &Value) -> bool {
-    matches!(v, Value::Handle(_))
 }
 
 /// One observation plus the scope table it interns against.
@@ -854,5 +893,78 @@ mod tests {
             }
             other => panic!("expected a decoded native, got {other:?}"),
         }
+    }
+
+    /// The one snapshot law: an identity fork and a wire-seeded child, both
+    /// read out of the same nursery slot, resolve every name to the same
+    /// value — and the same absence — because `fork_into_nursery` scrubs
+    /// `Value::Handle` bindings before either arm ever sees the scope.
+    #[test]
+    fn identity_fork_and_wire_seed_agree_on_the_scrubbed_scope() {
+        use crate::types::{Mooring, Nursery};
+        use std::sync::Mutex;
+
+        let mut parent = Shell::default();
+        parent.mobile.scope.set("kept".to_string(), Value::Int(7));
+        parent.mobile.scope.set(
+            "live".to_string(),
+            Value::Handle(crate::types::HandleInner {
+                result: Arc::new(Mutex::new(None)),
+                cached: Arc::new(Mutex::new(None)),
+                state: Arc::new(Mutex::new(crate::types::HandleState::Running)),
+                stdout_buf: Arc::new(Mutex::new(Vec::new())),
+                stderr_buf: Arc::new(Mutex::new(Vec::new())),
+                surface_buf: Arc::new(Mutex::new(Vec::new())),
+                joined: Arc::new(Mutex::new(false)),
+                last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
+                cmd: "<test>".into(),
+                cancel: crate::process::CancelScope::default(),
+            }),
+        );
+
+        let nursery = Nursery::default();
+        let mooring = Mooring {
+            nursery: Some(nursery.clone()),
+            ..Mooring::adrift()
+        };
+
+        // Arm A: identity — adopt straight out of the nursery.
+        let id_a = parent
+            .fork_into_nursery(&mooring)
+            .expect("a nursery is installed");
+        let identity_child = nursery.adopt(id_a).expect("adopt the parked fork");
+
+        // Arm B: wire — pack the (separately parked, equally scrubbed) fork
+        // into an `EngineSeed` and hydrate a fresh shell from it, exactly as
+        // `hatch::apply_seed` does.
+        let id_b = parent
+            .fork_into_nursery(&mooring)
+            .expect("a nursery is installed");
+        let nursery_shell = nursery.adopt(id_b).expect("adopt the parked fork");
+        let seed = pack_seed(&nursery_shell, "confined".to_string()).expect("pack seed");
+        let mut wire_child = bare_child_shell();
+        let dec = WireDecoder::for_shell(&wire_child, &seed.scope_table).expect("decoder");
+        install_shell_mobile(seed.mobile, &mut wire_child, &dec).expect("install mobile");
+        wire_child.mobile.scope = seed.captured.into_runtime(&dec).expect("decode captured");
+
+        assert_eq!(
+            identity_child.mobile.scope.get("kept"),
+            wire_child.mobile.scope.get("kept"),
+            "both arms must resolve a kept binding to the same value"
+        );
+        assert_eq!(
+            identity_child.mobile.scope.get("absent"),
+            wire_child.mobile.scope.get("absent"),
+            "both arms must agree on the same absence"
+        );
+        let opaque = |v: Option<&Value>| matches!(v, Some(Value::Variant { label, .. }) if label == crate::serial::OPAQUE_TAG);
+        assert!(
+            opaque(identity_child.mobile.scope.get("live")),
+            "an identity fork must scrub a handle-carrying binding"
+        );
+        assert!(
+            opaque(wire_child.mobile.scope.get("live")),
+            "a wire seed must scrub the same binding the same way"
+        );
     }
 }

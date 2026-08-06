@@ -27,6 +27,15 @@ impl UsageMeter {
     }
 }
 
+/// Whether a detached async `agent` child cloning this emitter gets a live
+/// tab or streams nowhere.  Display only: a [`Children::Muted`] child still
+/// records through its own [`Transcript`] and still meters.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Children {
+    Muted,
+    Live,
+}
+
 #[derive(Clone)]
 pub struct Emitter {
     tx: BusSender,
@@ -34,10 +43,7 @@ pub struct Emitter {
     /// The owning session's mailbox — root's for the root emitter, the child's
     /// own for a child.  Never another agent's.
     mailbox: Mailbox,
-    /// Whether the channel outlives the spawning exchange, so a detached async
-    /// `agent` child may clone this emitter for a live tab.  Display only: a
-    /// muted child still records and still meters.
-    session_lived: bool,
+    children: Children,
     transcript: Transcript,
     meter: UsageMeter,
 }
@@ -55,7 +61,7 @@ impl Emitter {
             tx,
             id,
             mailbox,
-            session_lived: false,
+            children: Children::Muted,
             transcript: Transcript::none(),
             meter: UsageMeter::default(),
         }
@@ -63,14 +69,15 @@ impl Emitter {
 
     /// A child emitter onto a channel whose receiver is already dropped, so it
     /// streams nowhere, but carrying a live [`Transcript`] and the parent run's
-    /// meter.  What an async `agent` child takes off a per-exchange bus.
+    /// meter.  What an async `agent` child takes off a bus whose children are
+    /// [`Children::Muted`].
     pub(crate) fn muted_child(&self, id: AgentId, transcript: Transcript) -> Self {
         let (tx, _rx) = channel();
         Self {
             tx,
             id,
             mailbox: Inbox::new().mailbox(),
-            session_lived: false,
+            children: Children::Muted,
             transcript,
             meter: self.meter.clone(),
         }
@@ -83,7 +90,7 @@ impl Emitter {
             tx: self.tx.clone(),
             id,
             mailbox,
-            session_lived: self.session_lived,
+            children: self.children,
             transcript,
             meter: self.meter.clone(),
         }
@@ -105,11 +112,12 @@ impl Emitter {
         self.mailbox.clone()
     }
 
-    /// Whether a detached worker may clone this emitter for a live tab — true
-    /// only off [`FleetBus::session`], and read by `agent` to choose between
+    /// Whether a detached worker may clone this emitter for a live tab —
+    /// [`Children::Live`] off [`FleetBus::session`] and
+    /// [`FleetBus::per_exchange_live`], read by `agent` to choose between
     /// [`Self::child`] and [`Self::muted_child`].
-    pub(crate) fn is_session_lived(&self) -> bool {
-        self.session_lived
+    pub(crate) fn spawns_live_children(&self) -> bool {
+        self.children == Children::Live
     }
 
     /// The owning session's trace, likewise for `shell_eval::deferred_sink`: a
@@ -120,36 +128,44 @@ impl Emitter {
     }
 }
 
-/// The event channel and its inbox, in one of two lifetimes: [`Self::session`],
-/// held across the whole REPL session (the TUI), so a detached async child
-/// streams to a live tab; or [`Self::per_exchange`], closing with the exchange
-/// (headless, tests), so such a child stays muted on the display though it
-/// still records.
+/// The event channel and its inbox, over one of two lifetimes crossed with
+/// whether spawned children are live or muted on it: [`Self::session`], held
+/// across the whole REPL session (the TUI) with live children, so a detached
+/// async child streams to a live tab; [`Self::per_exchange`], closing with the
+/// exchange (headless, tests) with muted children, so such a child stays off
+/// the display though it still records; and [`Self::per_exchange_live`], the
+/// same closing lifetime but with live children — what
+/// [`crate::headless::converse_settled`] needs, since Law B (the exchange
+/// waits for the fleet) means no child outlives the exchange its bus does.
 pub(crate) struct FleetBus {
     tx: BusSender,
     rx: BusReceiver,
     mailbox: Mailbox,
-    session_lived: bool,
+    children: Children,
     /// The one meter every emitter minted from this bus shares.
     meter: UsageMeter,
 }
 
 impl FleetBus {
     pub(crate) fn session(inbox: &Inbox) -> Self {
-        Self::build(inbox.mailbox(), true)
+        Self::build(inbox.mailbox(), Children::Live)
     }
 
     pub(crate) fn per_exchange(inbox: &Inbox) -> Self {
-        Self::build(inbox.mailbox(), false)
+        Self::build(inbox.mailbox(), Children::Muted)
     }
 
-    fn build(mailbox: Mailbox, session_lived: bool) -> Self {
+    pub(crate) fn per_exchange_live(inbox: &Inbox) -> Self {
+        Self::build(inbox.mailbox(), Children::Live)
+    }
+
+    fn build(mailbox: Mailbox, children: Children) -> Self {
         let (tx, rx) = channel();
         Self {
             tx,
             rx,
             mailbox,
-            session_lived,
+            children,
             meter: UsageMeter::default(),
         }
     }
@@ -166,7 +182,7 @@ impl FleetBus {
             tx: self.tx.clone(),
             id,
             mailbox: self.mailbox.clone(),
-            session_lived: self.session_lived,
+            children: self.children,
             transcript,
             meter: self.meter.clone(),
         }

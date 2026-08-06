@@ -283,15 +283,23 @@ impl Grant {
         )
     }
 
-    /// What to boot to hold this folder: the granted folder, writable,
-    /// on a machine sized for the heaviest thing the toolbox does —
-    /// converting a document with the office suite running headless.  That is
-    /// [`MachineSpec::for_folder`](vm_manager::MachineSpec::for_folder)
-    /// exactly, so synod takes it rather than restating it and drifting.
+    /// What to boot to hold this folder: the granted folder, writable, on a
+    /// machine sized for the heaviest thing the toolbox does — converting a
+    /// document with the office suite running headless — possibly several
+    /// times over.  A conversing assistant may now spread a batch of
+    /// documents across a few helpers, so "the heaviest thing" is no longer
+    /// singular; synod builds its own spec rather than taking
+    /// [`MachineSpec::for_folder`](vm_manager::MachineSpec::for_folder)'s 4
+    /// vcpus / 4096 MiB, sized for three of that heaviest thing at once.
+    /// Each spawn's own jail still caps a single command's memory well
+    /// under that, so the sum stays honest even at the ceiling.
     ///
     /// The folder is granted writable; the guest mount enforces that.
     pub fn machine_spec(&self) -> vm_manager::MachineSpec {
-        vm_manager::MachineSpec::for_folder(self.root.clone())
+        vm_manager::MachineSpec {
+            memory_mib: 6144,
+            ..vm_manager::MachineSpec::for_folder(self.root.clone())
+        }
     }
 
     /// The capabilities a session over this grant runs under.
@@ -615,6 +623,16 @@ mod tests {
             !spec.workspace.read_only,
             "the agent works in the folder; the accept gate is what makes changes real"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Synod sizes its own machine rather than taking the folder default's
+    /// 4096 MiB, now that a batch of documents may run across a few
+    /// helpers rather than one office-suite conversion at a time.
+    #[test]
+    fn the_machine_is_sized_for_a_few_helpers_at_once() {
+        let (dir, grant) = granted("grant-machine-memory");
+        assert_eq!(grant.machine_spec().memory_mib, 6144);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

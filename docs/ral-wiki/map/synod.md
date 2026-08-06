@@ -71,9 +71,17 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   platform's own owned handles and `ral_core::transport::WireTransport::adopt`
   takes either, so the seam is one function
   ([[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]]).
-  `exchange` drives one message through `exarch::headless::converse_sink`,
+  `exchange` drives one message through `exarch::headless::converse_settled`
+  ([[decisions/260806_exchange-ends-at-fleet-quiescence|exchange-ends-at-fleet-quiescence]]),
   bracketed by the safety net — a checkpoint before, a checkpoint after, even after a
-  failed run; `end` closes the wire, and the guest halts itself. The model
+  failed run; the after-checkpoint waits for fleet quiescence, not merely the
+  trunk's own silence, so a helper still writing to the folder never races the
+  report. `end` closes the wire, and the guest halts itself. The trunk's
+  fuel is `SPAWN_FUEL` (3), the same depth budget exarch's own trunks carry —
+  promoted `pub` for exactly this reuse — and `RootConfig` carries a
+  `Hatchery` implementation over `Machine::accept_agent` (below), so synod's
+  office assistant may delegate to helpers that run concurrently in the
+  same guest, against the same folder, under the same safety net. The model
   picker lives here too: `menu`/`refresh_menu` list what the computer's
   credentials can reach (cached-instant and fetched-complete), and a
   `Choice` names provider, model, and effort. `sign_in` drives exarch's
@@ -115,7 +123,25 @@ changed and put anything back. `commands.rs` holds the folder picker, the
 conversation verbs (start, send, restart, end), the model listing (instant
 from the cache, one background refresh), and opening before/after versions
 with the user's own applications; `sink.rs` is the bridge that streams the
-conversation's narration into the window; `signin.rs` runs the opening screen's
+conversation's narration into the window, and knows the root agent's id so it
+can route by depth rather than by blindly assuming there is only one agent —
+the two comments that once justified id-blindness by `fuel: 0` are retired
+along with the fuel figure. A helper's `Token`/`Thinking`/`State` events are
+dropped (a helper's prose is not the conversation); its `Io`/`Done`/`Notice`/
+`Resources` fold to `ProcessCard` exactly as the root's already do, and its
+`Card` folds in beside them — deliberately, where the root's own `Card` stays
+first-class, since a helper's card is process, not conversation; `Usage`
+still counts, the bill being the exchange's whoever spent it. `Born`/`Died`
+become `SynodEvent::Helpers { live: u32 }`, a counter the sink accumulates and
+emits on change — one fixed-position magnitude mark in the dial region, no
+stream, no animation, nothing entering the transcript. `SubagentDone` — which
+arrives on the *root's* emitter, since `announce` runs in the parent's own
+drain — becomes `SynodEvent::HelperDone { name, ok, elapsed_secs }`, rendered
+as one process line inside the dial's rung; `WaitingOnAgents` maps to a
+status-bar label. Plain register throughout: the window says *helpers*,
+never agent/session/model, and there is deliberately no tab strip — the
+assistant delegates onward, and the window reports the folder, not the org
+chart. `signin.rs` runs the opening screen's
 "Sign in with ChatGPT" button — one sign-in at a time, cancellable, its
 progress and outcome events (`sign-in-step`, `sign-in-done`) rendered beneath
 the button, and the account it wins arriving as the same `models-refreshed`
@@ -191,6 +217,33 @@ backends.
   second ask panics as a caller's bug), and a second guest dial is refused. Booting requires the
   `com.apple.security.virtualization` entitlement — `vz::entitled()` is a
   process check, not a platform check.
+
+  A third listener sits beside the first two: `AGENT_PORT` (1731,
+  `vm-manager/src/lib.rs`), dialed however many times a wire trunk's fleet
+  hatches children — its delegate dups every accepted fd into an
+  `mpsc::Sender` rather than the control and net ports' one-shot announce,
+  since the agent port's whole meaning is that dials keep coming.
+  `Machine::accept_agent` is its `Wires`-style trait method, waiting up to a
+  patience for the next dial; `take_wires` stays one-shot and untouched, and
+  the `socketDevices().count() == 1` test still holds — one more listener
+  on the one socket device, never a second device. Every fresh dial opens
+  with the 16-byte preamble `vm-manager/src/preamble.rs` encodes and decodes
+  — 8-byte magic `b"ralagent"` plus a `u64` token, little-endian — read by
+  the host embedding, not by `vm-manager` itself, which hands back raw
+  handles and stays dumb about what rides them. Reading the preamble and
+  routing by token is synod's **accept pump**: one thread per conversation
+  over `accept_agent`, owned by `Conversation` and joined at `end` (agent
+  first, then net, machine last), reading each dial's preamble and routing
+  by token into a `Mutex<HashMap<u64, Sender<…>>>` — anything failing the
+  magic is closed and counted, never parsed further. This is synod's
+  `Hatchery` implementation ([[map/exarch/agent|agent]]): `await_dial(token,
+  patience)` blocks on the routed channel, `port()` answers `AGENT_PORT`.
+  The port is dialable from inside the guest jail today — the jail is uid +
+  cgroup + `NO_NEW_PRIVS`, with no seccomp filtering `socket(AF_VSOCK)`
+  ([[map/core/io-process|io-process]]) — so the pump treats a dial flood as
+  bounded noise (accept, fail the magic, close, count) and the token, minted
+  from the OS entropy source and single-use, is the standing defense until a
+  seccomp address-family filter closes that gap for real.
 
 ## vm-manager/src/hcs/ — the Windows machine
 
@@ -450,3 +503,15 @@ exarch's cross-by-copy position.
 - [[map/core/transport|core / transport]] — the framed seam the control plane
   rides, whose stream type is std's owner for a connected socket and not a claim
   about the address family.
+- [[map/exarch/agent|exarch / agent]] — the desk's two-phase wire spawn
+  (`agent-start` → `hatch` → `agent-hatched`) synod's fleet rides, and the
+  `Hatchery` trait synod implements above.
+- [[design/agents|agents]] — the one-snapshot law: an identity fork and a
+  wire hatch's `EngineSeed` scrub the same handle-carrying bindings, so
+  `agent` means one thing regardless of seat.
+- [[decisions/260806_exchange-ends-at-fleet-quiescence|exchange-ends-at-fleet-quiescence]]
+  — why synod's after-checkpoint waits for the whole fleet, not just the
+  trunk.
+- [[map/core/io-process|core / io-process]] — the guest spawn jail
+  (`jail.rs`) the agent port's token stands in front of until a seccomp
+  address-family filter lands.

@@ -135,10 +135,11 @@ pub(crate) fn spawn_async(
     };
     // `registry` itself stays free for the unwind path below.
     let worker_registry = AgentRegistry::clone(registry);
-    // Off a per-exchange bus (headless) the child's receiver is already
-    // dropped, so it streams nowhere; either way it carries its own
-    // `Transcript`, and its trace is recorded whether or not anyone watches.
-    let child_emit = if emit.is_session_lived() {
+    // Off a bus whose children are muted (headless's per-exchange default)
+    // the child's receiver is already dropped, so it streams nowhere; either
+    // way it carries its own `Transcript`, and its trace is recorded whether
+    // or not anyone watches.
+    let child_emit = if emit.spawns_live_children() {
         emit.child(agent_id, child.mailbox(), child.transcript())
     } else {
         emit.muted_child(agent_id, child.transcript())

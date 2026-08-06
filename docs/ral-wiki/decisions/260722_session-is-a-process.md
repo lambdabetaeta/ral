@@ -63,11 +63,16 @@ pinned into the protocol.
   protocol: the `agent-start` handler asks the parent engine to spawn a
   child engine (same binary, `--engine`), the snapshot crosses guest-side
   over an inherited fd, the child dials the host on a fresh connection
-  correlated by token, and the new host agent adopts it. None of this
-  lands until exarch's own VM plan calls for it. Synod v1 refuses
-  `agent-start` (fuel 0) and needs one agent, one engine, one vsock — the
-  daemon's fd-3 spawn contract and `Machine::take_control` already are
-  that shape.
+  correlated by token, and the new host agent adopts it. Synod is that
+  caller: it lifts its trunk's fuel off zero and drives the two-phase
+  `agent-start` → `hatch` → `agent-hatched` sequence
+  ([[map/synod|synod]], [[map/exarch/agent|agent]]) over the rendezvous this
+  paragraph fixed, with its own exchange bracketed by
+  [[decisions/260806_exchange-ends-at-fleet-quiescence|synod's exchange
+  ends at fleet quiescence]] rather than exarch's chat-while-they-work
+  model. Before that caller arrived, synod v1 refused `agent-start` (fuel 0)
+  and needed one agent, one engine, one vsock — the daemon's fd-3 spawn
+  contract and `Machine::take_control` already were that shape.
 
 What the multi-session build got right ships without it, none of it
 session-shaped: engine-owned durability (checkpoint and rollback at
@@ -93,7 +98,10 @@ speculation.
 
 - `core/src/engine.rs` is one worker, one desk, one busy flag — plus the
   kept improvements above.
-- `PROTOCOL_VERSION` is 4.
+- `PROTOCOL_VERSION` is 6 (`core/src/transport.rs`), having moved several
+  times since — `Frame::Ping`/`Frame::Pong`
+  ([[decisions/260721_liveness-armed-by-first-ping|liveness-armed-by-first-ping]])
+  among the bumps — while the wire seam stays single-session throughout.
 - The remaining synod increment shrinks to: a wire seat variant covering
   what `headless::run` exercises (dispatch, cancel, the drain loop's
   existing enquiry arm), `session.rs` adopting `take_control` into

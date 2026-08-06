@@ -663,6 +663,16 @@
       text-transform: uppercase;
       color: var(--ink-faint);
     }
+    /* The live-helper count: a fixed station in the dial's own head, not a
+       stream — it holds one number, replaced in place, never animated.
+       Tabular figures keep its width from jittering as the count changes. */
+    .dial-helpers {
+      flex: none;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--ink-faint);
+      font-variant-numeric: tabular-nums;
+    }
     .dial-body {
       border-top: 1px solid var(--line);
       padding: 10px 13px;
@@ -1792,7 +1802,7 @@
     function ensureDial() {
       if (openDial) return openDial;
       streamingProse = null;
-      openDial = { kind: "dial", entries: [], notes: [], rung: 0, rev: 0 };
+      openDial = { kind: "dial", entries: [], notes: [], rung: 0, helpers: 0, rev: 0 };
       blocks.push(openDial);
       return openDial;
     }
@@ -1841,6 +1851,15 @@
       rungLabel.textContent = RUNG_LABELS[block.rung];
       head.append(mark, tip, rungLabel);
 
+      // The live-helper count, shown only while it is a fact — a fixed
+      // mark at the head's own station, not a rung any click reveals.
+      if (block.helpers) {
+        const helpers = document.createElement("span");
+        helpers.className = "dial-helpers";
+        helpers.textContent = block.helpers + (block.helpers === 1 ? " helper" : " helpers");
+        head.appendChild(helpers);
+      }
+
       const body = document.createElement("div");
       body.className = "dial-body";
       for (const entry of block.entries) {
@@ -1866,6 +1885,7 @@
     // of empty rows.
     function renderDialEntry(entry, rung) {
       if (entry.kind === "note") return noteLine(entry);
+      if (entry.kind === "helper") return rung >= 2 ? helperLine(entry) : null;
       const children = [
         rung >= 1 && entry.intent ? entryHeading(entry) : null,
         rung >= 2 ? entryScript(entry) : null,
@@ -1909,6 +1929,13 @@
       return line;
     }
 
+    function helperLine(entry) {
+      const line = document.createElement("div");
+      line.className = "dial-note" + (entry.ok ? "" : " bad");
+      line.textContent = entry.text;
+      return line;
+    }
+
     function dialAddCall(p) {
       const dial = ensureDial();
       dial.entries.push({ kind: "call", intent: p.summary || p.tool, script: p.cmd, cards: [] });
@@ -1947,6 +1974,28 @@
     // provider error) is never swallowed: it joins the entries in temporal
     // order, visible at every rung, and opens a dial when none is, since a
     // failed exchange must never look like a quiet one.
+    // The live-helper count: a fact of the whole exchange, not one call, so
+    // it lands on the dial itself rather than in its list of entries — a
+    // fixed station `renderDialBlock` reads straight off the block.
+    function dialAddHelpers(live) {
+      const dial = ensureDial();
+      dial.helpers = live;
+      bump(dial);
+    }
+
+    // A helper's settling: process, like a `ProcessCard`, so it shows only
+    // at the dial's deepest rung, beside the scripts it kept beneath.
+    function dialAddHelperDone(p) {
+      const dial = ensureDial();
+      dial.entries.push({
+        kind: "helper",
+        ok: Boolean(p.ok),
+        text: "helper \"" + p.name + "\" " + (p.ok ? "finished" : "did not finish")
+          + " (" + p.elapsedSecs.toFixed(1) + "s)",
+      });
+      bump(dial);
+    }
+
     function dialAddNote(text, cls) {
       const urgent = cls === "warn" || cls === "bad";
       const dial = urgent ? ensureDial() : openDial;
@@ -2154,6 +2203,12 @@
           break;
         case "process_card":
           dialAddProcessCard(p.marks || []);
+          break;
+        case "helpers":
+          dialAddHelpers(p.live);
+          break;
+        case "helper_done":
+          dialAddHelperDone(p);
           break;
         case "usage":
           dialAddNote(formatUsage(p), "muted");

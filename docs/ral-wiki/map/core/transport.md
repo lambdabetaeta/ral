@@ -17,7 +17,14 @@ confined per-command — see
 Distinct from all of this is the crate-root `core/src/transport.rs`, the
 transport-parametric *host seam* — the frame algebra between a front-end and
 the engine, with `engine.rs` and the `wire.rs` socket channel —
-[[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]].)
+[[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]].
+A wire-seat child's hatch (`core/src/hatch.rs`,
+[[map/exarch/agent|exarch / agent]]) sits below both seams and reuses this
+one's machinery rather than the host seam's: the 16-byte agent-port preamble
+(8-byte magic `b"ralagent"` + a little-endian `u64` token) is read before a
+single protocol byte is parsed, so a hatch never touches `Frame` or
+`PROTOCOL_VERSION` at all — no new frame, no version bump — and the seed a
+hatch carries is this page's `EngineSeed`, below.)
 
 **Every wire↔runtime hop is an exhaustive, field-complete map: no hop may pass
 through a constructor that defaults a field the wire carries, and no kind may
@@ -94,6 +101,20 @@ eval path — builds its shell through (`Shell::new` + the host's `HostSurface`
 reinstalled via the child-shell-extension hook + `install_shell_mobile`), so it
 cannot drop the host builtins. All
 conversions share the `InternCtx` from `serial.rs`.
+
+`core/src/child_eval.rs` also carries `EngineSeed` — a nursery-parked fork
+reified for a wire-seat hatch, `ChildEvalRequest`'s shape minus a body
+(`scope_table`, `mobile: WireMobile`, `captured: SerialEnvSnapshot`, the
+spawn's validated `grant` tag). `pack_seed` builds one from a `Shell`, and
+`apply_seed` hydrates it into a freshly booted engine through the same
+`WireDecoder::for_shell` `eval_request` already uses, before narrowing the
+shell's capabilities to the seed's grant. The scope it carries is never the
+parent's whole lexical scope: `Shell::fork_into_nursery` scrubs every
+handle-carrying binding before parking the fork (`Value::Handle` has no wire
+form, `serial.rs`'s `value_carries_handle`), so an in-process identity fork
+and a wire hatch's `EngineSeed` snapshot the same serialisable fragment and
+`agent` means one thing regardless of seat
+([[design/agents|agents]]'s one-snapshot law).
 
 ## Framing codec — `core/src/subprocess_codec.rs`
 

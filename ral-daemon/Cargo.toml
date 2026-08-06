@@ -20,3 +20,8 @@ libc = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["process", "mount", "fs", "system", "time"] }
+# Just the vsock dial primitive (`ral_core::vsock::dial_host`), shared with
+# the engine this daemon starts, which dials the same host to hatch a child
+# engine. `default-features = false` skips the regex/coreutils defaults this
+# tiny init has no use for.
+ral-core = { path = "../core", default-features = false }

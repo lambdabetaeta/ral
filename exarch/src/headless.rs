@@ -462,6 +462,64 @@ pub fn converse_sink<S: Sink>(
     }
 }
 
+/// One exchange that ends only at fleet quiescence.
+///
+/// The trunk parked, no live children, and their results drained and
+/// announced — the driver `synod` (and any embedder wanting the same
+/// guarantee) runs instead of [`converse_sink`].
+///
+/// Three differences from [`converse_sink`]: the bus gives a spawned child a
+/// live emitter rather than a muted one
+/// ([`FleetBus::per_exchange_live`](crate::bus::FleetBus::per_exchange_live));
+/// the loop runs under [`crate::agent::quiesce_when_childless`] rather than
+/// the identity policy [`Agent::attend`](crate::agent::Agent::attend) uses, so
+/// a conversing trunk holds on a live fleet instead of parking blind to it;
+/// and it runs the blocking `attend` loop, not `attend_backlog`, since Law B
+/// means the exchange itself must wait out whatever the fleet is still doing.
+/// `converse_sink` stays exactly as it is for exarch's own headless mode.
+///
+/// # Errors
+/// Refuses at once, before touching the bus or seeding `message`, if
+/// `session` holds `allow_schedule`: an armed self-schedule may park past
+/// [`ParkMode::UntilCancelled`](crate::bus::ParkMode), a wait this driver's
+/// policy does not cover and Law B forbids waiting out regardless. Otherwise
+/// returns `Err` if the attend worker panics or the sink's drive fails.
+pub fn converse_settled<S: Sink>(
+    session: &mut Agent,
+    message: String,
+    engine: Arc<Engine>,
+    sink: &mut S,
+) -> Result<(), String> {
+    if session.allow_schedule {
+        return Err(
+            "converse_settled ends an exchange only once the fleet quiesces, and an armed \
+             self-schedule may fire again with nothing to wait it out — refused rather than \
+             parked past quiescence"
+                .to_string(),
+        );
+    }
+    let root_transcript = session.transcript();
+    let fleet = Fleet {
+        agents: session.agents.clone(),
+        bus: FleetBus::per_exchange_live(&session.inbox()),
+        engine,
+    };
+    session.seed(message);
+    let root_id = session.id;
+    let outcome = pump(sink, &fleet.bus, root_id, root_transcript, |emit| {
+        session.attend_with(
+            &mut crate::agent::NoControl,
+            emit,
+            crate::agent::quiesce_when_childless,
+        )
+    });
+    match outcome {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err("worker panicked".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
@@ -469,9 +527,12 @@ pub fn converse_sink<S: Sink>(
 )]
 mod tests {
     use super::*;
-    use crate::agent::{RootConfig, RootSeat};
+    use crate::agent::{RootConfig, RootSeat, SPAWN_FUEL};
+    use crate::bus::{AgentResult, AgentState, Post};
+    use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
     use crate::provider::Tuning;
     use crate::provider::scripted::{Reply, Script};
+    use crate::shell_eval::tools::agent::{AsyncSpawn, spawn_async};
 
     /// A fresh conversing trunk over a scripted provider, in a throwaway run dir.
     fn converse_trunk(tag: &str, script: Script) -> Agent {
@@ -496,6 +557,7 @@ mod tests {
                 disk_warn_bytes: None,
                 fuel: 0,
                 egress: crate::egress::Egress::for_test(),
+                hatchery: None,
             },
             RootSeat::Identity {
                 scratch,
@@ -784,6 +846,241 @@ mod tests {
             sink.0.iter().any(|k| matches!(k, Kind::Step { .. })),
             "the exchange boundary must arrive as a Kind::Step among {} events",
             sink.0.len()
+        );
+    }
+
+    // ── `converse_settled`: the quiescent exchange driver ──────────────────
+
+    /// A conversing trunk with real spawn fuel, so a test may register a
+    /// genuine live child under it — [`converse_trunk`]'s `fuel: 0` exists
+    /// precisely to refuse that.
+    fn settled_trunk(tag: &str, script: Script, allow_schedule: bool) -> Agent {
+        let dir = std::env::temp_dir().join(format!("exarch-settled-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp run dir");
+        let scratch = Arc::new(
+            crate::bootstrap::Scratch::for_test(crate::bootstrap::EXARCH, tag)
+                .expect("scratch dir"),
+        );
+        Agent::root(
+            RootConfig {
+                system: "system".into(),
+                caps: ral_core::types::Capabilities::default(),
+                run_dir: dir,
+                model: "test-model".into(),
+                provider_label: "test".into(),
+                allow_schedule,
+                interactive: true,
+                chat: false,
+                disk_warn_bytes: None,
+                fuel: SPAWN_FUEL,
+                egress: crate::egress::Egress::for_test(),
+                hatchery: None,
+            },
+            RootSeat::Identity {
+                scratch,
+                cwd: std::env::current_dir().expect("test process has a cwd"),
+                detach: false,
+            },
+            Arc::new(Provider::scripted(
+                "test-model",
+                crate::provider::ProviderKind::Openai,
+                script,
+            )),
+        )
+        .expect("root trunk")
+    }
+
+    /// Register a live child of `parent` in the shared registry — the one
+    /// fact [`Agent::has_live_children`] reads — without running any attend
+    /// loop of its own. The caller settles it (or not) on its own clock, so a
+    /// test can hold `parent` on it for exactly as long as it chooses,
+    /// deterministically, rather than racing a real child's own thread
+    /// against a sleep.
+    fn register_live_child(parent: &Agent, name: &str) -> (crate::bus::AgentId, u64) {
+        let child = parent.fork(parent.caps().clone()).expect("fork child");
+        let generation = parent
+            .agents
+            .register(Registration {
+                id: child.id,
+                parent: Some(parent.id),
+                lease: Some(AGENT_LEASE_IDLE),
+                name: name.to_string(),
+                log_dir: child.log_dir(),
+                cancel: child.cancel_token().clone(),
+                reach: child.seat.eval_reach(),
+                mailbox: child.mailbox(),
+                provider: child.provider_handle(),
+            })
+            .expect("registration must succeed: its parent is live");
+        (child.id, generation)
+    }
+
+    struct Collecting(Vec<Kind>);
+    impl Sink for Collecting {
+        fn handle(&mut self, e: Event) {
+            self.0.push(e.kind);
+        }
+    }
+
+    /// Signals `release` the first time it sees [`AgentState::WaitingOnAgents`]
+    /// pass through, so a test's own background thread can settle its child
+    /// exactly once the exchange has genuinely parked on it — never before,
+    /// and with no sleep to race.
+    struct SignalOnWaiting<S> {
+        inner: S,
+        release: std::sync::mpsc::SyncSender<()>,
+    }
+
+    impl<S: Sink> Sink for SignalOnWaiting<S> {
+        fn handle(&mut self, e: Event) {
+            if matches!(e.kind, Kind::State(AgentState::WaitingOnAgents)) {
+                let _ = self.release.try_send(());
+            }
+            self.inner.handle(e);
+        }
+    }
+
+    /// Law B, exercised deterministically: the exchange holds open while a
+    /// live child is registered but not yet settled, and only completes the
+    /// settlement — pushing its result and retiring its registry entry —
+    /// once the sink has observed the exchange genuinely park on it
+    /// ([`AgentState::WaitingOnAgents`]). A driver that quiesced without
+    /// waiting would never signal the release, and the call would hang
+    /// rather than pass, so this also proves the hold is real.
+    #[test]
+    fn converse_settled_holds_for_a_live_child_then_quiesces() {
+        let mut session = settled_trunk(
+            "slow-child",
+            Script::new()
+                .then(Reply::text("on it"))
+                .then(Reply::text("thanks for the update")),
+            false,
+        );
+        let (child_id, generation) = register_live_child(&session, "helper");
+        let parent_mailbox = session.mailbox();
+        let registry = session.agents.clone();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let settler = std::thread::spawn(move || {
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the exchange must park on the child within the timeout");
+            let rejected = parent_mailbox.push(Post::AgentResult(AgentResult {
+                name: "helper".into(),
+                outcome: AgentOutcome::Complete,
+                text: "helper done".into(),
+                elapsed: std::time::Duration::from_millis(1),
+                generation,
+            }));
+            assert!(
+                rejected.is_ok(),
+                "the parent's inbox must accept the result"
+            );
+            assert!(
+                registry.settle(child_id, generation),
+                "settling a still-live registration must succeed"
+            );
+        });
+
+        let engine = Engine::new();
+        let mut sink = SignalOnWaiting {
+            inner: Collecting(Vec::new()),
+            release: release_tx,
+        };
+        converse_settled(&mut session, "please help".into(), engine, &mut sink)
+            .expect("the exchange itself must not fail for want of a reply");
+        settler.join().expect("the settling thread must not panic");
+
+        assert!(
+            sink.inner
+                .0
+                .iter()
+                .any(|k| matches!(k, Kind::State(AgentState::WaitingOnAgents))),
+            "parking on a live child must emit WaitingOnAgents"
+        );
+        assert!(
+            sink.inner.0.iter().any(|k| matches!(
+                k,
+                Kind::SubagentDone { name, text, .. } if name == "helper" && text == "helper done"
+            )),
+            "the settled child's reply must reach the exchange's own sink"
+        );
+    }
+
+    /// A returning child that finishes without ever calling `reply` fails
+    /// honestly — its `SubagentDone` names the failure — and the exchange
+    /// still ends rather than hanging on a child that will never settle
+    /// differently. Driven through the real fork/`spawn_async`/`attend` spine
+    /// rather than a hand-fed outcome, so the nudge-then-fail behavior itself
+    /// is genuine, not asserted; the child's own script has no tool calls, so
+    /// nothing races the parent's independent one.
+    #[test]
+    fn converse_settled_ends_even_when_a_child_never_replies() {
+        let mut session = settled_trunk(
+            "child-no-reply",
+            Script::new()
+                .then(Reply::text("on it"))
+                .then(Reply::text("thanks for the update")),
+            false,
+        );
+        let mut no_reply = Script::new();
+        for _ in 0..8 {
+            no_reply = no_reply.then(Reply::text("prose, but never a reply"));
+        }
+        let mut child = session.fork(session.caps().clone()).expect("fork child");
+        crate::agent::testkit::set_provider(
+            &mut child,
+            crate::agent::testkit::scripted("test-model", no_reply),
+        );
+        child.seed("go".into());
+        let (spawn_emit, _rx) = crate::bus::dummy_emitter();
+        spawn_async(
+            &session.agents,
+            session.id,
+            session.mailbox(),
+            child,
+            AsyncSpawn {
+                verb: "agent",
+                name: "flaky".into(),
+                prompt: None,
+                harness: true,
+            },
+            &spawn_emit,
+        )
+        .expect("spawn must succeed");
+
+        let engine = Engine::new();
+        let mut sink = Collecting(Vec::new());
+        converse_settled(&mut session, "please help".into(), engine, &mut sink)
+            .expect("the exchange itself must not fail merely because a child did");
+
+        assert!(
+            sink.0.iter().any(|k| matches!(
+                k,
+                Kind::SubagentDone { name, outcome, .. }
+                    if name == "flaky" && outcome.breadcrumb("").1.is_some()
+            )),
+            "the child's un-replied finish must surface as a failed SubagentDone"
+        );
+    }
+
+    /// `allow_schedule` is refused at construction, the same class of refusal
+    /// as the missing hatchery: an armed self-schedule may fire again with
+    /// nothing left to wait it out once the fleet quiesces.
+    #[test]
+    fn converse_settled_refuses_an_allow_schedule_trunk() {
+        let mut session = settled_trunk("allow-schedule", Script::new(), true);
+        let engine = Engine::new();
+        let mut sink = Collecting(Vec::new());
+        let err = converse_settled(&mut session, "hello".into(), engine, &mut sink)
+            .expect_err("an allow_schedule trunk must be refused, not run");
+        assert!(
+            err.contains("allow_schedule") || err.to_lowercase().contains("schedule"),
+            "the refusal must name what it refuses: {err}"
+        );
+        assert!(
+            sink.0.is_empty(),
+            "a refused construction must touch no bus"
         );
     }
 }

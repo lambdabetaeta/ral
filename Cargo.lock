@@ -5560,6 +5560,7 @@ name = "ral-daemon"
 version = "0.2.0"
 dependencies = [
  "libc",
+ "ral-core",
  "rustix",
 ]
 
@@ -6834,6 +6835,7 @@ dependencies = [
  "blake3",
  "exarch",
  "guest-net",
+ "libc",
  "ral-core",
  "ral-daemon",
  "serde",

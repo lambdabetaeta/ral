@@ -586,6 +586,13 @@ pub fn no_wire_form(v: &Value) -> bool {
     )
 }
 
+/// Just the leaf a `Handle` has no wire form at all: unlike [`no_wire_form`],
+/// a closure is not one of them, since a fork or a wire seed keeps closures
+/// rich rather than scrubbing them.
+pub(crate) fn is_handle(v: &Value) -> bool {
+    matches!(v, Value::Handle(_))
+}
+
 /// Recursively replace every leaf `p` accepts with `` `opaque {type: …} ``.
 ///
 /// Every other leaf crosses untouched.  The seams differ only in `p`: a flat

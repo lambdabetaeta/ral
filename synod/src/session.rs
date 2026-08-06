@@ -39,7 +39,6 @@ use exarch::provider::{
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use vm_manager::Machine;
 
 /// Synod's own directories.
 ///
@@ -401,7 +400,11 @@ type NetWire = std::net::TcpStream;
 /// first message to the last.
 pub struct Conversation {
     grant: Grant,
-    machine: Box<dyn Machine>,
+    /// The machine, held in trust by the accept pump: [`Conversation::end`]
+    /// recovers it via [`crate::hatchery::MachineHatchery::join`], the only
+    /// other owner being the [`Agent`] this conversation also holds, which
+    /// drops first.
+    hatchery: Arc<crate::hatchery::MachineHatchery>,
     agent: Agent,
     engine: Arc<Engine>,
     history: workspace::HistoryStore,
@@ -523,6 +526,11 @@ impl Conversation {
             let root_seat = control_seat(wires.control, workspace)?;
             let net = net_seat(wires.net, egress.clone())?;
 
+            // The machine itself goes to the accept pump now: nothing else
+            // in this function touches it, and `MachineHatchery` is what
+            // `end` asks for it back once the agent it feeds is gone.
+            let hatchery = Arc::new(crate::hatchery::MachineHatchery::start(machine));
+
             let engine = Engine::new();
             let provider = Arc::new(Provider::build(
                 engine.clone(),
@@ -551,10 +559,13 @@ impl Conversation {
                     interactive: true,
                     chat: false,
                     disk_warn_bytes,
-                    // A conversation is asked and answered, one message at a
-                    // time, never a fleet: no sub-agent may ever start from it.
-                    fuel: 0,
+                    // Every agent may delegate: the office assistant hatches
+                    // helpers that run concurrently in the same guest, and
+                    // the exchange ends only once the whole tree does
+                    // (`converse_settled`'s Law B), not merely the trunk.
+                    fuel: exarch::agent::SPAWN_FUEL,
                     egress,
+                    hatchery: Some(hatchery.clone()),
                 },
                 root_seat,
                 Arc::clone(&provider),
@@ -600,7 +611,7 @@ impl Conversation {
             Ok((
                 Self {
                     grant,
-                    machine,
+                    hatchery,
                     agent,
                     engine,
                     history,
@@ -613,13 +624,16 @@ impl Conversation {
 
     /// Drive one message through the conversation, streaming the bus's
     /// events into the caller's `sink` in order — the same events
-    /// [`exarch::headless::converse_sink`] always drives one exchange
-    /// through.
+    /// [`exarch::headless::converse_settled`] drives through, ending only
+    /// once the whole fleet quiesces: the trunk parked, no live helpers
+    /// left, their results drained.
     ///
     /// Checkpoints what this exchange left behind, cumulatively from the
     /// baseline — taken even after a failed exchange, since whatever
-    /// changed before the failure is still undoable.  Renders no report:
-    /// the window reads one back through [`workspace::job_report`].
+    /// changed before the failure is still undoable. Taking it only after
+    /// quiescence is what keeps a helper's late write from ever landing
+    /// after the checkpoint and being blamed on the user. Renders no
+    /// report: the window reads one back through [`workspace::job_report`].
     ///
     /// # Errors
     /// Returns `Err` if the exchange itself fails; if the exchange
@@ -630,8 +644,12 @@ impl Conversation {
         message: String,
         sink: &mut S,
     ) -> Result<(), String> {
-        let outcome =
-            exarch::headless::converse_sink(&mut self.agent, message, self.engine.clone(), sink);
+        let outcome = exarch::headless::converse_settled(
+            &mut self.agent,
+            message,
+            self.engine.clone(),
+            sink,
+        );
         let after = self
             .history
             .capture(self.grant.root(), workspace::Moment::After);
@@ -645,22 +663,37 @@ impl Conversation {
     /// the machine off from the inside — the same inside-out shutdown
     /// `boot-run`'s own drop-then-stop performs, so the grace window
     /// `machine.shutdown` waits on below normally observes a stop already
-    /// under way rather than forcing one. The net wire follows the control
-    /// wire down, never the other way — a session with its control plane
-    /// gone but its network still live has nothing left to police what that
-    /// network is used for.
+    /// under way rather than forcing one. The accept pump is joined next,
+    /// recovering the machine it held since `begin` — its only other owner
+    /// was the agent just dropped, whose own helpers (if any) are gone too
+    /// by the time an exchange has settled, so this is always the pump's
+    /// last reference. The net wire follows, never before the control wire
+    /// — a session with its control plane gone but its network still live
+    /// has nothing left to police what that network is used for.
     ///
     /// # Errors
     /// Returns `Err` if the machine does not stop cleanly, or if a
     /// guest-net worker panicked — failures this never swallows.
+    ///
+    /// # Panics
+    /// Panics if the accept pump's `Arc` has another owner left once the
+    /// agent is gone — a construction bug, since nothing else in this
+    /// crate clones it — or if the pump thread itself panicked.
     pub fn end(self) -> Result<(), String> {
         let Self {
-            machine,
+            hatchery,
             agent,
             net,
             ..
         } = self;
         drop(agent);
+        let hatchery = Arc::try_unwrap(hatchery).unwrap_or_else(|_| {
+            panic!(
+                "the agent-port pump outlived the agent that was its only other owner — a \
+                 helper must have leaked past the exchange that was supposed to settle it"
+            )
+        });
+        let machine = hatchery.join();
         // Joined, not merely stopped: ending a conversation must leave no
         // guest-net thread behind, and `join` is what reports a worker panic.
         net.stop();

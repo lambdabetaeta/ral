@@ -1,5 +1,4 @@
-//! The guest's one way off the machine, and the only `socket`/`connect` in
-//! this daemon.
+//! The guest's one way off the machine.
 //!
 //! Neither hypervisor gives this guest a network adapter: every channel it
 //! has is an `AF_VSOCK` stream to `VMADDR_CID_HOST` on a port the host named
@@ -22,51 +21,16 @@
 //! there is no accept loop, no readiness handshake, and no listening port
 //! inside the guest for anything to reach.
 //!
-//! The one thing here is therefore [`dial_host`], factored out of the three
-//! callers so that the unsafe pair of syscalls is written once and read once.
+//! The dial itself — the one `socket`/`connect` pair every caller above
+//! shares — lives in [`ral_core::vsock::dial_host`], not here: the engine
+//! this daemon starts dials the same host from inside its own guest, over
+//! the same `AF_VSOCK` port space, to hatch a child engine (`ral_core::hatch`),
+//! so the primitive moved to where both processes can reach it.
 
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd};
 
-/// Open a stream to the host on `port`.
-///
-/// One attempt, no patience: retrying is a policy the caller owns, because
-/// the two callers want different ones — the control plane waits out the
-/// race with the host's listener, while a workspace mount that cannot reach
-/// its 9p server has nothing to wait for.
-///
-/// # Errors
-/// Returns the errno `socket(2)` or `connect(2)` gave, unadorned: the
-/// sentence a user reads is the caller's to write, since only the caller
-/// knows which channel was being opened and what its absence means.
-pub(crate) fn dial_host(port: u32) -> io::Result<OwnedFd> {
-    // SAFETY: a plain `socket(2)`; the returned descriptor is adopted by an
-    // `OwnedFd` immediately, so it is closed on every path out of here.
-    let raw = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
-    if raw < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `raw` is a fresh descriptor this call owns.
-    let socket = unsafe { OwnedFd::from_raw_fd(raw) };
-
-    let addr = libc::sockaddr_vm {
-        svm_family: libc::sa_family_t::try_from(libc::AF_VSOCK)
-            .expect("AF_VSOCK is a small positive address family"),
-        svm_reserved1: 0,
-        svm_port: port,
-        svm_cid: libc::VMADDR_CID_HOST,
-        svm_zero: [0; 4],
-    };
-    let len = libc::socklen_t::try_from(size_of::<libc::sockaddr_vm>())
-        .expect("a socket address is far smaller than socklen_t's range");
-    // SAFETY: `addr` is a fully initialised `sockaddr_vm` and `len` is its
-    // own size, which is what `connect(2)` reads.
-    let rc = unsafe { libc::connect(socket.as_raw_fd(), std::ptr::from_ref(&addr).cast(), len) };
-    if rc < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(socket)
-}
+pub(crate) use ral_core::vsock::dial_host;
 
 /// Ask the kernel for `bytes` of send and receive buffer on `socket`.
 ///

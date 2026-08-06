@@ -101,6 +101,9 @@ impl Agent {
             Seat::Identity { scratch, .. } => Some(scratch.clone()),
             Seat::Wire { .. } => None,
         };
+        // Stated, not inferred from `scratch`'s incidental absence:
+        // `agent-start` chooses its arm on this one fact.
+        let wire_seat = matches!(self.seat, Seat::Wire { .. });
         desk::HostServices {
             registry: self.agents.clone(),
             scratch,
@@ -131,6 +134,9 @@ impl Agent {
             acts: desk::ActFragment::default(),
             principal: ral_core::host::user(),
             pins: Some(self.pins.clone()),
+            wire_seat,
+            hatchery: self.hatchery.clone(),
+            pending_hatches: self.pending_hatches.clone(),
         }
     }
 

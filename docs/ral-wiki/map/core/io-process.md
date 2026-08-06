@@ -149,9 +149,25 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   order — is narrated in
   [[internals/cancellation|cancellation]].
 - `jail.rs` — the *guest spawn jail*'s decision layer: `GuestJail::plan`
-  mints each exec a fresh unprivileged uid/gid off an atomic counter and a
-  fresh transient cgroup under `JailLimits` (memory / pids / CPU), with no
-  syscall in the plan; `jail/linux.rs` is the thin platform edge that
+  mints each exec a fresh unprivileged uid/gid and a fresh transient cgroup
+  under `JailLimits` (memory / pids / CPU), with no syscall in the plan.
+  Each `GuestJail` is one per booted engine — a hatched wire-seat child
+  ([[design/agents|agents]]) installs its own, beside the trunk's — so the
+  sequence number behind both the uid and the cgroup name is minted
+  **guest-globally**, not per-engine: `linux::next_guest_seq` locks a
+  counter file (`/run/ral/jail.seq`, `O_CREAT`, read-increment-write under
+  an exclusive `flock`, released when the file drops) so every booted
+  engine's jail mints off the one number line and two engines' first
+  spawned commands cannot collide on a uid or a cgroup name. The cgroup
+  path carries the engine's own pid as a grouping label, not a uniqueness
+  guarantee (the sequence file already gives that): `ral-exec/engine-<pid>/
+  exec-<seq>`, so a hatched child's teardown stays scoped to its own
+  engine's tree and pid recycling can at worst hand a later engine a dead
+  engine's stale directory name, which its own teardown tolerates. Off a
+  real Linux guest, where `GuestJail` is never actually installed, `plan`
+  falls back to a plain in-process counter so the module's own tests stay
+  portable — `linux.rs` remains the only place a decision reaches the
+  kernel. `jail/linux.rs` is the thin platform edge that
   realises a `JailPlan` — the cgroup mkdir and limit writes, the pre-exec
   supplementary-group clear / `setresgid` / `setresuid` / `NO_NEW_PRIVS`,
   kill-whole via `cgroup.kill`, and `EBUSY`-polled removal. `JailCgroup`
@@ -164,6 +180,19 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   and forks share one counter; only a guest engine (`RAL_GUEST`) installs
   it, and there it replaces the per-command OS projection
   ([[map/core/runtime|runtime]], `docs/SPEC.md` §15.2).
+
+  **The recorded gap.** The jail is uid + cgroup + `NO_NEW_PRIVS` — there is
+  no seccomp filter, and nothing stops a jailed process from calling
+  `socket(AF_VSOCK)` and dialing the host's `AGENT_PORT` itself
+  ([[map/synod|synod]]). A spawned command reaching that port is not yet
+  refused by the jail at all; the standing defense is the port's own
+  preamble token — minted from the OS entropy source, single-use, dead with
+  its pending hatch, so a guess gets one shot at 2⁻⁶⁴ inside a window
+  seconds wide — not confinement. A seccomp address-family filter that
+  closes this for real is unbuilt debt, not a design gap: the jail plan
+  above has room for it (one more syscall-time check beside `NO_NEW_PRIVS`),
+  and nothing about the agent-port design depends on the token being the
+  only defense forever.
 
 Spawning an external command is capability-gated; that gate lives in
 [[map/core/capabilities|capabilities]], and the command/pipeline dispatch that

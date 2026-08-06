@@ -16,6 +16,41 @@ fn mkdir_if_missing(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Read-increment-write the guest-global jail sequence counter under an
+/// exclusive `flock` on the file itself, so every booted engine's
+/// [`super::GuestJail`] mints off the one number line and two never collide
+/// on a uid or a cgroup name. `O_CREAT` makes the file's first open its
+/// birth; the lock is released when `file` drops at the end of this call.
+///
+/// # Errors
+/// Returns the kernel's error for the parent directory's creation, or the
+/// file's open, lock, read, or write.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:jail-seq-file] guest-boot/exec-time jail setup: the guest-global uid/cgroup sequence counter, not model turn-time I/O."
+)]
+pub(crate) fn next_guest_seq(path: &Path) -> io::Result<u64> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    if let Some(dir) = path.parent() {
+        mkdir_if_missing(dir)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    let seq: u64 = text.trim().parse().unwrap_or(0);
+    file.seek(SeekFrom::Start(0))?;
+    file.set_len(0)?;
+    file.write_all((seq + 1).to_string().as_bytes())?;
+    Ok(seq)
+}
+
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:jail-cgroup-write] Cgroup control-file writes are guest-boot/exec-time jail setup, not model turn-time I/O: the limits are policy the host sets, never data the model reads or writes."

@@ -70,7 +70,10 @@ pub(crate) fn build_command(
     }
     #[cfg(target_os = "linux")]
     if let Some(jail) = jail {
-        cmd.apply_guest_jail(&jail.plan())
+        let plan = jail
+            .plan()
+            .map_err(|e| Break::Error(Error::new(format!("guest jail: {e}"), 1)))?;
+        cmd.apply_guest_jail(&plan)
             .map_err(|e| Break::Error(Error::new(format!("guest jail: {e}"), 1)))?;
     }
     Ok(cmd)

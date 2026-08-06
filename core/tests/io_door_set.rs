@@ -76,6 +76,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("core/build.rs", "io-door:silent:prelude-bake-build"),
     ("core/src/capability/load.rs", "io-door:silent:cap-load"),
     ("core/src/boot.rs", "io-door:silent:prelude-bake"),
+    ("core/src/hatch.rs", "io-door:silent:hatch-spawn"),
     ("core/src/host.rs", "io-door:silent:date-launch"),
     ("core/src/host.rs", "io-door:silent:git-launch"),
     ("core/src/path/which.rs", "io-door:silent:which-readdir"),
@@ -87,6 +88,10 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     (
         "core/src/process/jail/linux.rs",
         "io-door:silent:jail-cgroup-write",
+    ),
+    (
+        "core/src/process/jail/linux.rs",
+        "io-door:silent:jail-seq-file",
     ),
     (
         "core/src/process/launch.rs",

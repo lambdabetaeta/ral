@@ -275,7 +275,8 @@ impl Hypervisor for Vz {
         };
         let mount_path = plan.guest_path.clone();
 
-        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<crate::Wires, Error>>(1);
+        let (ready_tx, ready_rx) =
+            mpsc::sync_channel::<Result<(crate::Wires, Receiver<OwnedFd>), Error>>(1);
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
         let thread = thread::Builder::new()
             .name("ral-vz-machine".to_string())
@@ -286,9 +287,10 @@ impl Hypervisor for Vz {
             })?;
 
         match ready_rx.recv() {
-            Ok(Ok(wires)) => Ok(Box::new(Guest {
+            Ok(Ok((wires, agent_rx))) => Ok(Box::new(Guest {
                 mount_path,
                 wires: Some(wires),
+                agent_rx,
                 control: Some(Control {
                     cmd_tx,
                     thread: Some(thread),
@@ -601,7 +603,11 @@ enum Command {
 /// This is the code that needs the entitlement, and so the code this checkout
 /// cannot run: it compiles, and its shape is the contract, but no line of it
 /// past [`build_configuration`] has been exercised on an unentitled test box.
-fn run(plan: &Plan, ready: &SyncSender<Result<crate::Wires, Error>>, commands: &Receiver<Command>) {
+fn run(
+    plan: &Plan,
+    ready: &SyncSender<Result<(crate::Wires, Receiver<OwnedFd>), Error>>,
+    commands: &Receiver<Command>,
+) {
     let config = match build_configuration(plan).and_then(|config| {
         validate(&config)?;
         Ok(config)
@@ -634,17 +640,25 @@ fn run(plan: &Plan, ready: &SyncSender<Result<crate::Wires, Error>>, commands: &
     let net_delegate = SocketReadiness::new(crate::NET_PORT, events_tx.clone());
     let net_listener = new_listener(&net_delegate);
 
+    // The agent port's listener outlives boot: it is not part of the
+    // readiness handshake above, and every hatched child dials it afresh
+    // over the machine's whole life (see `AgentReadiness`).
+    let (agent_tx, agent_rx) = mpsc::channel::<OwnedFd>();
+    let agent_delegate = AgentReadiness::new(agent_tx);
+    let agent_listener = new_agent_listener(&agent_delegate);
+
     let outcome = boot_machine(
         &queue,
         &machine,
         &control_listener,
         &net_listener,
+        &agent_listener,
         &events_tx,
         &events_rx,
     );
     match outcome {
         Ok(wires) => {
-            let _ = ready.send(Ok(wires));
+            let _ = ready.send(Ok((wires, agent_rx)));
             wait_for_stop(&queue, &machine, commands);
         }
         Err(why) => {
@@ -659,6 +673,8 @@ fn run(plan: &Plan, ready: &SyncSender<Result<crate::Wires, Error>>, commands: &
     drop(control_delegate);
     drop(net_listener);
     drop(net_delegate);
+    drop(agent_listener);
+    drop(agent_delegate);
     let _ = remove_session_image(&plan.session);
 }
 
@@ -678,12 +694,14 @@ fn boot_machine(
     machine: &VZVirtualMachine,
     control_listener: &VZVirtioSocketListener,
     net_listener: &VZVirtioSocketListener,
+    agent_listener: &VZVirtioSocketListener,
     events_tx: &Sender<Ready>,
     events_rx: &Receiver<Ready>,
 ) -> Result<crate::Wires, String> {
     let machine_ptr = core::ptr::from_ref(machine);
     let control_listener_ptr = core::ptr::from_ref(control_listener);
     let net_listener_ptr = core::ptr::from_ref(net_listener);
+    let agent_listener_ptr = core::ptr::from_ref(agent_listener);
     let start_tx = events_tx.clone();
     // The completion handler is copied and held by the framework; it captures
     // only the `Send`, `'static` sender.
@@ -699,22 +717,24 @@ fn boot_machine(
 
     on_queue(queue, move || {
         // SAFETY: runs on the machine's own queue.  We fetch the runtime
-        // socket device, attach both readiness listeners to their ports, and
-        // start the machine — every call on the queue it demands, with the
-        // machine and listeners borrowed only for this synchronous block.
-        // One `VZVirtioSocketDeviceConfiguration` already multiplexes both
-        // ports, so this is two listener registrations on the one device,
-        // not a second device.
+        // socket device, attach all three readiness listeners to their
+        // ports, and start the machine — every call on the queue it
+        // demands, with the machine and listeners borrowed only for this
+        // synchronous block.  One `VZVirtioSocketDeviceConfiguration`
+        // already multiplexes every port, so this is three listener
+        // registrations on the one device, not a second device.
         unsafe {
             let machine = &*machine_ptr;
             let control_listener = &*control_listener_ptr;
             let net_listener = &*net_listener_ptr;
+            let agent_listener = &*agent_listener_ptr;
             let devices = machine.socketDevices();
             if let Some(device) = devices.firstObject()
                 && let Ok(socket) = device.downcast::<VZVirtioSocketDevice>()
             {
                 socket.setSocketListener_forPort(control_listener, CONTROL_PORT);
                 socket.setSocketListener_forPort(net_listener, crate::NET_PORT);
+                socket.setSocketListener_forPort(agent_listener, crate::AGENT_PORT);
             }
             machine.startWithCompletionHandler(&completion);
         }
@@ -872,6 +892,18 @@ fn new_listener(readiness: &Retained<SocketReadiness>) -> Retained<VZVirtioSocke
     }
 }
 
+/// A fresh `VZVirtioSocketListener` whose delegate is `readiness` — the
+/// agent port's twin of [`new_listener`], kept separate only because its
+/// delegate is a different Objective-C class.
+fn new_agent_listener(readiness: &Retained<AgentReadiness>) -> Retained<VZVirtioSocketListener> {
+    // SAFETY: as `new_listener` above.
+    unsafe {
+        let listener = VZVirtioSocketListener::new();
+        listener.setDelegate(Some(ProtocolObject::from_ref(&**readiness)));
+        listener
+    }
+}
+
 /// Remove a session disk once its machine is gone, best-effort.
 #[allow(
     clippy::disallowed_methods,
@@ -961,6 +993,61 @@ impl SocketReadiness {
     }
 }
 
+/// The agent port's delegate: [`SocketReadiness`]'s persistent cousin.
+///
+/// Where the control and net ports each announce exactly one connection and
+/// then go quiet, the agent port's whole meaning is that dials keep coming
+/// — every hatched child opens a fresh one over the machine's life — so this
+/// delegate never spends its sender. Each accepted connection's descriptor
+/// is duplicated (VZ may close the connection object once this delegate
+/// returns, precisely as [`SocketReadiness`] guards against) and pushed into
+/// an `mpsc::Sender`, whose other end is [`Guest::accept_agent`]'s receiver.
+struct AgentReadinessIvars {
+    accepted: Sender<OwnedFd>,
+}
+
+define_class!(
+    // SAFETY: as `SocketReadiness` above.
+    #[unsafe(super(NSObject))]
+    #[name = "RalVzAgentReadiness"]
+    #[ivars = AgentReadinessIvars]
+    struct AgentReadiness;
+
+    unsafe impl NSObjectProtocol for AgentReadiness {}
+
+    unsafe impl VZVirtioSocketListenerDelegate for AgentReadiness {
+        #[unsafe(method(listener:shouldAcceptNewConnection:fromSocketDevice:))]
+        fn should_accept(
+            &self,
+            _listener: &VZVirtioSocketListener,
+            connection: &VZVirtioSocketConnection,
+            _device: &VZVirtioSocketDevice,
+        ) -> bool {
+            // SAFETY: as `SocketReadiness::should_accept` — the descriptor is
+            // borrowed only for the duration of this call and duplicated
+            // before the connection object might close.
+            let dup = (unsafe { BorrowedFd::borrow_raw(connection.fileDescriptor()) })
+                .try_clone_to_owned();
+            match dup {
+                // A send failing means nothing is receiving any more — the
+                // machine is tearing down — so refusing is the honest answer.
+                Ok(fd) => self.ivars().accepted.send(fd).is_ok(),
+                Err(_) => false,
+            }
+        }
+    }
+);
+
+impl AgentReadiness {
+    /// A delegate that pushes every accepted connection's duplicated
+    /// descriptor down `accepted`.
+    fn new(accepted: Sender<OwnedFd>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(AgentReadinessIvars { accepted });
+        // SAFETY: as `SocketReadiness::new` above.
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
 /// A booted guest, held open by the thread that owns its machine.
 ///
 /// This type carries no `VZ` object — those live on the machine thread and are
@@ -973,6 +1060,10 @@ pub struct Guest {
     /// The two wires accepted at boot.  Taken out by
     /// [`Machine::take_wires`], which may be called at most once.
     wires: Option<crate::Wires>,
+    /// Every guest dial on the agent port, in the order the machine thread's
+    /// [`AgentReadiness`] delegate accepted them.  Read by
+    /// [`Machine::accept_agent`], which may be called any number of times.
+    agent_rx: Receiver<OwnedFd>,
     control: Option<Control>,
 }
 
@@ -1034,6 +1125,27 @@ impl Machine for Guest {
         self.wires
             .take()
             .expect("a machine's wires are taken at most once")
+    }
+
+    /// Wait up to `patience` for the next guest dial on the agent port.
+    ///
+    /// # Errors
+    /// Returns [`io::ErrorKind::TimedOut`] if none arrives within `patience`,
+    /// or [`io::ErrorKind::BrokenPipe`] if the machine has torn down its
+    /// agent listener (the sender dropped alongside it).
+    fn accept_agent(&mut self, patience: std::time::Duration) -> std::io::Result<crate::AgentDial> {
+        self.agent_rx
+            .recv_timeout(patience)
+            .map_err(|cause| match cause {
+                RecvTimeoutError::Timeout => std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "no guest dialed the agent port within the patience given",
+                ),
+                RecvTimeoutError::Disconnected => std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "the machine's agent listener is gone",
+                ),
+            })
     }
 
     /// Ask the guest daemon to shut down, wait for the machine to reach the
@@ -1204,12 +1316,14 @@ mod tests {
     fn the_wires_are_handed_over_once() {
         let (control, _guest_control) = std::os::unix::net::UnixStream::pair().unwrap();
         let (net, _guest_net) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (_agent_tx, agent_rx) = mpsc::channel();
         let mut guest = Guest {
             mount_path: PathBuf::from(MachineSpec::GUEST_WORKSPACE),
             wires: Some(crate::Wires {
                 control: OwnedFd::from(control),
                 net: OwnedFd::from(net),
             }),
+            agent_rx,
             control: None,
         };
         let _wires = guest.take_wires();
@@ -1222,16 +1336,79 @@ mod tests {
     fn a_second_ask_for_the_wires_panics() {
         let (control, _guest_control) = std::os::unix::net::UnixStream::pair().unwrap();
         let (net, _guest_net) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (_agent_tx, agent_rx) = mpsc::channel();
         let mut guest = Guest {
             mount_path: PathBuf::from(MachineSpec::GUEST_WORKSPACE),
             wires: Some(crate::Wires {
                 control: OwnedFd::from(control),
                 net: OwnedFd::from(net),
             }),
+            agent_rx,
             control: None,
         };
         let _ = guest.take_wires();
         let _ = guest.take_wires();
+    }
+
+    /// A guest with no agent dial waiting times out honestly, rather than
+    /// hanging or panicking — the substrate's proof, independent of a real
+    /// boot, that [`Machine::accept_agent`] behaves when nothing has dialed.
+    #[test]
+    fn accept_agent_times_out_when_nothing_has_dialed() {
+        let (control, _guest_control) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (net, _guest_net) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (_agent_tx, agent_rx) = mpsc::channel();
+        let mut guest = Guest {
+            mount_path: PathBuf::from(MachineSpec::GUEST_WORKSPACE),
+            wires: Some(crate::Wires {
+                control: OwnedFd::from(control),
+                net: OwnedFd::from(net),
+            }),
+            agent_rx,
+            control: None,
+        };
+        let error = guest
+            .accept_agent(Duration::from_millis(20))
+            .expect_err("nothing dialed");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    /// A machine may accept the agent port more than once — the law that
+    /// tells it apart from the one-shot control and net wires. Two dials
+    /// queued ahead of time come back in order, and a caller may go on
+    /// asking after that.
+    #[test]
+    fn accept_agent_hands_back_every_dial_in_order() {
+        let (control, _guest_control) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (net, _guest_net) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (agent_tx, agent_rx) = mpsc::channel();
+        let (first, _first_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (second, _second_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        agent_tx.send(OwnedFd::from(first)).unwrap();
+        agent_tx.send(OwnedFd::from(second)).unwrap();
+        let mut guest = Guest {
+            mount_path: PathBuf::from(MachineSpec::GUEST_WORKSPACE),
+            wires: Some(crate::Wires {
+                control: OwnedFd::from(control),
+                net: OwnedFd::from(net),
+            }),
+            agent_rx,
+            control: None,
+        };
+        guest
+            .accept_agent(Duration::from_millis(20))
+            .expect("the first dial");
+        guest
+            .accept_agent(Duration::from_millis(20))
+            .expect("the second dial");
+        assert_eq!(
+            guest
+                .accept_agent(Duration::from_millis(20))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::TimedOut,
+            "a third ask finds nothing queued"
+        );
     }
 
     /// The backend names itself, for the greeting a user sees.

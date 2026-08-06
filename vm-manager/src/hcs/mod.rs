@@ -616,6 +616,16 @@ impl Machine for Guest {
             .expect("a machine's two wires are taken at most once")
     }
 
+    /// Not yet: the agent wire is gated on a Windows guest witnessing a
+    /// completed boot at all — building it earlier would be code compiled
+    /// by nobody.
+    ///
+    /// # Errors
+    /// Always returns [`std::io::ErrorKind::Unsupported`].
+    fn accept_agent(&mut self, _patience: Duration) -> std::io::Result<crate::AgentDial> {
+        Err(crate::agent_not_supported_yet())
+    }
+
     /// Close the wire, let the guest power itself off, and release the machine.
     ///
     /// # Errors

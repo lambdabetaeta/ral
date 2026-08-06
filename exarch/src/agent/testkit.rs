@@ -63,6 +63,14 @@ pub(crate) fn tmp(tag: &str) -> std::path::PathBuf {
     p
 }
 
+/// Swap `session`'s live provider handle — the test-only door onto what
+/// `/model` mutates in production, so a forked child can run its own
+/// independent script rather than share its spawner's, the way a real
+/// `agent-start` does.
+pub(crate) fn set_provider(session: &mut Agent, provider: Arc<Provider>) {
+    session.provider = ProviderHandle::new(provider);
+}
+
 pub(crate) fn ral_call(id: &str, cmd: &str) -> ToolCall {
     ToolCall {
         call_id: id.into(),
@@ -107,6 +115,7 @@ fn root(dir: &std::path::Path, interactive: bool, chat: bool) -> Agent {
             disk_warn_bytes: None,
             fuel: SPAWN_FUEL,
             egress: crate::egress::Egress::for_test(),
+            hatchery: None,
         },
         RootSeat::Identity {
             scratch: Arc::new(scratch),

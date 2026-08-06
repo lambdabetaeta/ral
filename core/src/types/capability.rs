@@ -500,6 +500,18 @@ impl GrantStack {
     pub fn permits_detach(&self) -> bool {
         self.0.iter().all(|c| c.detach != Some(false))
     }
+
+    /// The whole stack folded to one ceiling, root first: every layer's
+    /// opinion applied through [`Capabilities::meet`], agreeing with every
+    /// per-axis fold above since `None` is `meet`'s identity. What a wire
+    /// seat's own grant-narrowing meets against, since a `GrantStack` itself
+    /// has no wire form.
+    pub fn effective(&self) -> Capabilities {
+        self.0
+            .iter()
+            .cloned()
+            .fold(Capabilities::root(), Capabilities::meet)
+    }
 }
 
 impl<'a> IntoIterator for &'a GrantStack {

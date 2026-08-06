@@ -3,14 +3,15 @@
 //! frontend, in place of the developer-flavoured stderr lines headless
 //! writes.
 //!
-//! [`project`] is the pure heart of this module — a total function from a
-//! bus [`Kind`] to `Option<SynodEvent>` — so its mapping is unit-testable
-//! without a running window; [`TauriSink`] is the thin, untested shim that
-//! hands each projection to `app.emit`.
+//! [`project`] and [`project_helper`] are the pure heart of this module —
+//! total functions from a bus [`Kind`] to `Option<SynodEvent>` — so their
+//! mapping is unit-testable without a running window, as is the id-and-
+//! counter routing between them ([`Router`]); [`TauriSink`] is the thin,
+//! untested shim that hands each routed event to `app.emit`.
 
 use exarch::agent::event::ProviderErrorRecord;
 use exarch::bus::card::{Card, Field, Hunk, Mark, Measure, Span};
-use exarch::bus::{Event, Kind, Sink};
+use exarch::bus::{AgentId, AgentOutcome, Event, Kind, Sink};
 use serde::Serialize;
 
 /// A shadow of [`Mark`] whose byte-carrying variants (`Listing`, `Raw`) hold
@@ -92,6 +93,20 @@ pub enum SynodEvent {
     /// folds it into the dial's deepest rung, never the transcript.
     ProcessCard {
         marks: Vec<MarkDto>,
+    },
+    /// The live helper count, folded from every `Born`/`Died` on the bus
+    /// into one running number — the dial's fixed station for "how many
+    /// are working", emitted only when the count actually changes.
+    Helpers {
+        live: u32,
+    },
+    /// A helper's settling, folded from `Kind::SubagentDone` — one process
+    /// line in the dial's deepest rung, in the helper's own words rather
+    /// than the conversation's.
+    HelperDone {
+        name: String,
+        ok: bool,
+        elapsed_secs: f64,
     },
     Usage {
         input: u64,
@@ -175,22 +190,24 @@ pub fn project(kind: Kind) -> Option<SynodEvent> {
         Kind::Error(message) => SynodEvent::Error { message },
         Kind::ProviderError(record) => SynodEvent::ProviderError { record },
         Kind::Stalled(record) => SynodEvent::Stalled { record },
-        // `fuel: 0` means synod's root never has a sub-agent, so
-        // `SubagentDone` can never arrive on this bus; `Born`/`Died` name a
-        // tab's lifecycle synod has no tab strip for.  `Boundary`,
-        // `Reasoning`, and `UserPromptEcho` are TUI presentation blocks —
-        // the content they carry already round-trips to the model on the
-        // assistant message, so there is nothing here for the window to
-        // add.  A live `Thinking` chunk has no block of its own here and the
-        // status bar already names the wait, so only the committed reasoning
-        // matters, and that reaches the transcript.  `ToolResult`/
-        // `HarnessResult` are forensic pairings for their call, kept in the
-        // transcript for post-mortem, never shown live.  `Pin`/`Unpin` write a
-        // TUI register slot synod does not have.  `Nudge` and `SystemNote` are
-        // the harness minding itself — an empty-turn correction, a truncation
-        // recovery, a compaction's byte counts — named in the operator's terms,
-        // so the window is not told; the state a compaction announces is its
-        // whole user-facing surface.
+        // `Born`/`Died` are a helper's own lifecycle and `SubagentDone` its
+        // settling; `Router::route` reads all three before this projection
+        // ever runs, turning them into `Helpers`/`HelperDone`, so they never
+        // actually reach this arm — it is listed only so this match stays
+        // exhaustive over `Kind`.  `Boundary`, `Reasoning`, and
+        // `UserPromptEcho` are TUI presentation blocks — the content they
+        // carry already round-trips to the model on the assistant message,
+        // so there is nothing here for the window to add.  A live `Thinking`
+        // chunk has no block of its own here and the status bar already
+        // names the wait, so only the committed reasoning matters, and that
+        // reaches the transcript.  `ToolResult`/`HarnessResult` are forensic
+        // pairings for their call, kept in the transcript for post-mortem,
+        // never shown live.  `Pin`/`Unpin` write a TUI register slot synod
+        // does not have.  `Nudge` and `SystemNote` are the harness minding
+        // itself — an empty-turn correction, a truncation recovery, a
+        // compaction's byte counts — named in the operator's terms, so the
+        // window is not told; the state a compaction announces is its whole
+        // user-facing surface.
         Kind::Born { .. }
         | Kind::Died
         | Kind::Boundary
@@ -207,24 +224,103 @@ pub fn project(kind: Kind) -> Option<SynodEvent> {
     })
 }
 
-/// The window's [`Sink`]: projects every bus event and emits it as
-/// `synod-event` through the worker's own gated [`Emitter`](super::commands::Emitter),
-/// silently dropping whatever [`project`] has no use for.
+/// The id-and-counter half of [`TauriSink`]'s routing, split out so it is
+/// testable without a live [`super::commands::Emitter`] — which needs a
+/// running Tauri app to build at all.
+#[derive(Default)]
+struct Router {
+    /// The trunk's own id, learned from the very first event this router
+    /// ever sees.  A fresh conversation's trunk always turns at least
+    /// once — a state transition, a step — before the first `agent` call
+    /// could even reach the model, so the first event a router sees is
+    /// always the trunk's; nothing needs to be told which id that is.
+    root: Option<AgentId>,
+    /// The live helper count, re-emitted as [`SynodEvent::Helpers`] only
+    /// when it changes.
+    helpers_live: u32,
+}
+
+impl Router {
+    /// Route one event: the trunk's own project unchanged, a helper's
+    /// through [`project_helper`] — except `Born`/`Died`/`SubagentDone`,
+    /// which cut across that split (a helper's own lifecycle, a result that
+    /// always drains in the trunk's own loop) and are read here first.
+    fn route(&mut self, e: Event) -> Option<SynodEvent> {
+        let root = *self.root.get_or_insert(e.id);
+        match e.kind {
+            Kind::Born { .. } => Some(self.bump_helpers(1)),
+            Kind::Died => Some(self.bump_helpers(-1)),
+            Kind::SubagentDone {
+                name,
+                outcome,
+                elapsed,
+                ..
+            } => Some(SynodEvent::HelperDone {
+                name,
+                ok: matches!(outcome, AgentOutcome::Complete | AgentOutcome::Empty),
+                elapsed_secs: elapsed.as_secs_f64(),
+            }),
+            kind if e.id == root => project(kind),
+            kind => project_helper(kind),
+        }
+    }
+
+    fn bump_helpers(&mut self, delta: i32) -> SynodEvent {
+        self.helpers_live = if delta > 0 {
+            self.helpers_live + 1
+        } else {
+            self.helpers_live.saturating_sub(1)
+        };
+        SynodEvent::Helpers {
+            live: self.helpers_live,
+        }
+    }
+}
+
+/// A helper's own projection: its prose, tool calls, and state are its own
+/// business, never the conversation's — only its process facts fold into
+/// the dial exactly as the trunk's do, and its usage still counts toward
+/// the one bill.
+fn project_helper(kind: Kind) -> Option<SynodEvent> {
+    match kind {
+        Kind::Usage(u) => Some(SynodEvent::Usage {
+            input: u.input,
+            output: u.output,
+            dollars: u.dollars,
+            unmetered: u.unmetered,
+        }),
+        Kind::Io { card, .. }
+        | Kind::Done { card, .. }
+        | Kind::Notice { card, .. }
+        | Kind::Resources { card, .. }
+        | Kind::Card(card) => Some(SynodEvent::ProcessCard {
+            marks: marks_dto(card),
+        }),
+        _ => None,
+    }
+}
+
+/// The window's [`Sink`]: routes every bus event by whether it came from the
+/// conversation's own trunk or from a helper it spawned, and emits what
+/// survives as `synod-event` through the worker's own gated
+/// [`Emitter`](super::commands::Emitter).
 pub struct TauriSink {
     emitter: super::commands::Emitter,
+    router: Router,
 }
 
 impl TauriSink {
     pub fn new(emitter: super::commands::Emitter) -> Self {
-        Self { emitter }
+        Self {
+            emitter,
+            router: Router::default(),
+        }
     }
 }
 
 impl Sink for TauriSink {
     fn handle(&mut self, e: Event) {
-        // `e.id` is ignored: synod's root runs with `fuel: 0`, so no
-        // sub-agent ever emits on this bus — every event is the root's own.
-        if let Some(dto) = project(e.kind) {
+        if let Some(dto) = self.router.route(e) {
             self.emitter.emit("synod-event", dto);
         }
     }
@@ -233,8 +329,11 @@ impl Sink for TauriSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exarch::bus::AgentState;
     use exarch::bus::card::{DoneOutcome, Notice, Row, Seg};
     use ral_core::types::{CallSite, Observation, Observed};
+    use std::path::PathBuf;
+    use std::time::Duration;
 
     #[test]
     fn token_projects_verbatim() {
@@ -360,5 +459,117 @@ mod tests {
         assert_eq!(call_value["type"], "tool_call");
         assert!(call_value.get("summary").is_some());
         assert_eq!(call_value["summary"], "list files");
+    }
+
+    fn event(id: AgentId, kind: Kind) -> Event {
+        Event { id, kind }
+    }
+
+    #[test]
+    fn the_first_event_seen_names_the_root_whatever_its_id() {
+        let mut router = Router::default();
+        let Some(SynodEvent::Token { text }) = router.route(event(7, Kind::Token("hi".into())))
+        else {
+            panic!("the first event, from whatever id, is the root's own");
+        };
+        assert_eq!(text, "hi");
+    }
+
+    #[test]
+    fn a_helpers_token_and_state_are_dropped_but_its_process_card_folds_in() {
+        let mut router = Router::default();
+        router.route(event(0, Kind::Token("root warms up".into())));
+
+        assert!(
+            router
+                .route(event(1, Kind::Token("a helper's prose".into())))
+                .is_none()
+        );
+
+        let done = event(
+            1,
+            Kind::Done {
+                outcome: DoneOutcome::Ok,
+                card: Card(vec![]),
+            },
+        );
+        let Some(SynodEvent::ProcessCard { marks }) = router.route(done) else {
+            panic!("a helper's structural facts still fold into the dial");
+        };
+        assert!(marks.is_empty());
+    }
+
+    #[test]
+    fn a_helpers_usage_still_counts_toward_the_one_bill() {
+        let mut router = Router::default();
+        router.route(event(0, Kind::State(AgentState::Ready)));
+
+        let usage = exarch::provider::Usage {
+            input: 7,
+            output: 3,
+            dollars: 0.125,
+            ..Default::default()
+        };
+        let Some(SynodEvent::Usage { input, .. }) = router.route(event(1, Kind::Usage(usage)))
+        else {
+            panic!("a helper's usage must still reach the window");
+        };
+        assert_eq!(input, 7);
+    }
+
+    #[test]
+    fn born_and_died_accumulate_into_one_live_helper_count() {
+        let mut router = Router::default();
+        router.route(event(0, Kind::State(AgentState::Ready)));
+
+        let born = |id: AgentId| Kind::Born {
+            log_dir: PathBuf::new(),
+            name: format!("helper-{id}"),
+            parent: 0,
+            branch: false,
+        };
+        let Some(SynodEvent::Helpers { live }) = router.route(event(1, born(1))) else {
+            panic!("a Born must announce the live count");
+        };
+        assert_eq!(live, 1);
+        let Some(SynodEvent::Helpers { live }) = router.route(event(2, born(2))) else {
+            panic!("a second Born must announce the live count");
+        };
+        assert_eq!(live, 2);
+        let Some(SynodEvent::Helpers { live }) = router.route(event(1, Kind::Died)) else {
+            panic!("a Died must announce the live count");
+        };
+        assert_eq!(live, 1);
+    }
+
+    #[test]
+    fn subagent_done_becomes_a_named_helper_done_whatever_its_outcome() {
+        let mut router = Router::default();
+        router.route(event(0, Kind::State(AgentState::Ready)));
+
+        let done = |outcome: AgentOutcome| Kind::SubagentDone {
+            name: "letters".to_string(),
+            outcome,
+            text: String::new(),
+            elapsed: Duration::from_secs(2),
+        };
+        let Some(SynodEvent::HelperDone {
+            name,
+            ok,
+            elapsed_secs,
+        }) = router.route(event(0, done(AgentOutcome::Complete)))
+        else {
+            panic!("expected a HelperDone event");
+        };
+        assert_eq!(name, "letters");
+        assert!(ok);
+        assert!((elapsed_secs - 2.0).abs() < f64::EPSILON);
+
+        let Some(SynodEvent::HelperDone { ok, .. }) =
+            router.route(event(0, done(AgentOutcome::Failed("boom".into()))))
+        else {
+            panic!("expected a HelperDone event");
+        };
+        assert!(!ok);
     }
 }

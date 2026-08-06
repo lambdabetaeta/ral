@@ -46,3 +46,9 @@ tokio      = { version = "1", features = ["rt"] }
 # `TcpStream` on Windows, the same pretence `ral_core::wire::WireStream`
 # makes for the control plane.
 guest-net  = { path = "../guest-net" }
+
+[target.'cfg(unix)'.dependencies]
+# `MachineHatchery`'s accept pump peeks a fresh dial's preamble without
+# consuming it — `UnixStream::peek` is still unstable, so this is one raw
+# `recv(MSG_PEEK)` call rather than a hand-rolled socket layer.
+libc = { workspace = true }

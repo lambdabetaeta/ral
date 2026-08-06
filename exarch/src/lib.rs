@@ -265,6 +265,7 @@ pub fn run() -> Result<(), String> {
             disk_warn_bytes,
             fuel: agent::SPAWN_FUEL,
             egress,
+            hatchery: None,
         },
         agent::RootSeat::Identity {
             scratch: Arc::clone(&scratch),

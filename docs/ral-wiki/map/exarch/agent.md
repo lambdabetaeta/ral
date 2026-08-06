@@ -427,11 +427,14 @@ hand-copying fields after a bare `Shell::new`. It takes the child's
 (the parent's verbatim, or `parent ⊓ base` via [[map/exarch/policy|`policy::narrow`]]).
 The child sets `parent: Some(self.id)` — the tree edge that routes its result and
 drives the subtree cascade — and registers itself in the fleet's shared registry.
-It snapshots the parent's whole lexical scope (prelude, agent library, every
-accumulated binding), its dynamic context (cwd, env, grants, handlers), and the
-installed builtin table, and starts fresh in everything else — fresh control
-counters and a freshly-defaulted `SessionState`, so it holds **no terminal
-authority** (`TerminalAccess::Denied`, no lease — a sub-agent is not the
+It snapshots the **serialisable fragment** of the parent's lexical scope
+(prelude, agent library, every accumulated binding that has a wire form —
+`fork_into_nursery` scrubs `Value::Handle` bindings before parking the fork,
+so an identity fork and a wire hatch's `EngineSeed` agree,
+[[design/agents|agents]]), its dynamic context (cwd, env, grants, handlers),
+and the installed builtin table, and starts fresh in everything else — fresh
+control counters and a freshly-defaulted `SessionState`, so it holds **no
+terminal authority** (`TerminalAccess::Denied`, no lease — a sub-agent is not the
 foreground agent and can never seize the controlling terminal the TUI owns).
 There is no flow-back: the child's `cd`, env, and new bindings die with it. Every
 agent may spawn, but each fork hands the child one less unit of `fuel` than the
@@ -450,7 +453,43 @@ authority ([[decisions/260705_branch-minimal|branch-minimal]]). A builtin
 spawn takes the decomposed path instead: the `agent` verb's body forks the
 session into the run's nursery (`Shell::fork_into_nursery`), and the desk's
 `agent-start` arm adopts it and calls `Agent::assemble` at one less unit of
-fuel ([[map/exarch/builtins|builtins]]). The `` `mnemon `` memory mode
+fuel ([[map/exarch/builtins|builtins]]).
+
+### Wire-seat spawn: the desk's two-phase arm
+
+`Seat::Identity`'s `agent-start` adopts a nursery-parked fork directly, in
+the same process. A `Seat::Wire` trunk's desk cannot: the nursery lives in
+the guest engine, and the desk runs host-side. So the enquiry becomes
+**two-phase**, both phases the same `` `agent-start `` vocabulary an identity
+trunk speaks — the arm is chosen on a stated fact (the seat's kind, read at
+`assemble`), never inferred:
+
+1. `` `agent-start [session, kind, prompt, name, grant, search] `` — every
+   authority check the desk runs today (generation, fuel, name collision,
+   grant-tag validity) runs first, before any process exists. On a wire
+   trunk it mints a token, registers a pending hatch reserving the name, and
+   answers `` `hatch [token, port] ``.
+2. The builtin runs the guest-side **hatch** (core's `core/src/hatch.rs`) —
+   dial the host on the named port, write the 16-byte preamble
+   (`vm-manager/src/preamble.rs`: 8-byte magic `b"ralagent"` + the `u64`
+   token, little-endian), spawn `current_exe --engine` with the dial on its
+   protocol fd and an `EngineSeed` on an inherited one — then enquires
+   `` `agent-hatched [token] ``. The desk's handler awaits the correlated
+   dial through its **hatchery** (`vm_manager`-free by construction — a
+   capability object `RootConfig` carries, `None` for identity trunks),
+   reads and checks the preamble, adopts the stream as `Seat::Wire`, and
+   hands the child to the same `spawn_async` an identity fork reaches, at
+   `fuel = parent - 1`. A wire trunk with fuel > 0 and no hatchery is a
+   construction error, refused at `Agent::root` with a sentence.
+
+A refused phase 1 spawns nothing; a phase 2 that times out kills and reaps
+the hatched child before reporting the desk's refusal; a hatch that fails
+guest-side enquires `` `agent-abort [token] `` so the desk frees the
+reservation. The enquiring builtin cannot tell which arm served it — both
+answer the same `` `started [name, log-dir] `` receipt. See
+[[design/agents|agents]] for the seed's isolation law and
+[[map/synod|synod]] for the hatchery's landed implementation (synod's
+accept-pump over `Machine::accept_agent`). The `` `mnemon `` memory mode
 additionally forks
 the parent's `AgentLog` and imports its model-visible context before assembly
 ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]); `AgentLog`
@@ -490,4 +529,8 @@ desk answers), [[map/exarch/frontend|frontend]] (the bus, the inbox, the
 registry, and the two frontends), [[map/exarch/provider|provider]],
 [[map/exarch/policy|policy]], [[map/exarch|exarch]],
 [[design/residency|residency]] (the resident ledger this cascade and the
-worker/schedule teardown edge are chapters of).
+worker/schedule teardown edge are chapters of),
+[[decisions/260722_session-is-a-process|session-is-a-process]] (why a wire
+seat is one engine process, one connection),
+[[map/synod|synod]] (the hatchery, `AGENT_PORT`, and synod's own helper
+surface built over the wire-seat spawn above).
