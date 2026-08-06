@@ -130,11 +130,13 @@ Two `Sink` implementations:
    so the settled transcript above stays a finished image until a fence-safe
    break commits the real `Block::markdown`. Reasoning differs: each phase
    seats its own `∴` block at its first streamed delta
-   (`Viewport::push_thinking`), collapsed to a header whose magnitude ticks in
-   place — dialing it open shows the deltas streaming — and the final
-   `Reasoning` event supersedes them with the authoritative text in that same
-   block (`Viewport::commit_thinking`). The next phase opens a new block, so a
-   turn's thinking reads interleaved with the tool calls it preceded.
+   (`Viewport::push_thinking`), arriving *open* — the trace streams as the
+   deltas land — and the final `Reasoning` event supersedes them with the
+   authoritative text in that same block (`Viewport::commit_thinking`). The
+   next phase opens a new block, so a turn's thinking reads interleaved with
+   the tool calls it preceded. A thinking block has two rungs only — its
+   grain header, or the whole trace — the dial hopping over `Context`
+   (`Block::rung_up`/`rung_down`), which for a trace would be a dead detent.
  - **a surfaced general card as a bounded object.** A diff-less
    `CardOrigin::Surfaced` card — the model's deliberate "look at this" —
    renders through `line::render_card_framed` as an indented framed box, its

@@ -242,14 +242,14 @@ pub(super) struct Block {
 }
 
 impl Block {
-    /// Build at the kind's default rung: tool calls, subagent results, acts and
-    /// thinking arrive collapsed to their headers, every other kind full.
+    /// Build at the kind's default rung: tool calls, subagent results and acts
+    /// arrive collapsed to their headers, every other kind — thinking
+    /// included, so a trace streams in the open — full.
     fn new(kind: BlockKind, fidelity: Fidelity) -> Self {
         let level = match kind {
             BlockKind::DiallableTool { .. }
             | BlockKind::Subagent { .. }
-            | BlockKind::Act { .. }
-            | BlockKind::Thinking(_) => Reveal::Summary,
+            | BlockKind::Act { .. } => Reveal::Summary,
             _ => Reveal::Full,
         };
         Self {
@@ -587,13 +587,33 @@ impl Block {
         }
     }
 
+    /// The rung above this block's, kind-aware: thinking has no `Context`
+    /// reading — a trace is one thing, shown whole or as its header — so the
+    /// dial hops straight between `Summary` and `Full`.
+    fn rung_up(&self) -> Reveal {
+        match (self.is_thinking(), self.level.up()) {
+            (true, Reveal::Context) => Reveal::Full,
+            (_, next) => next,
+        }
+    }
+
+    /// The rung below, floored per kind and hopping `Context` like
+    /// [`Self::rung_up`].
+    fn rung_down(&self) -> Reveal {
+        let next = self.level.down().max(self.floor());
+        match (self.is_thinking(), next) {
+            (true, Reveal::Context) => Reveal::Summary,
+            _ => next,
+        }
+    }
+
     /// One wheel notch — up reveals, down reduces — saturating at the band's edges.
     pub(super) fn dial(&mut self, delta: i8) {
         if self.dialable() {
             let next = if delta >= 0 {
-                self.level.up()
+                self.rung_up()
             } else {
-                self.level.down().max(self.floor())
+                self.rung_down()
             };
             self.set_level(next);
         }
@@ -606,7 +626,7 @@ impl Block {
             let next = if self.level == Reveal::Full {
                 self.floor()
             } else {
-                self.level.up()
+                self.rung_up()
             };
             self.set_level(next);
         }
@@ -734,6 +754,7 @@ impl Block {
                 )]
                 let think_lines = (t.text.lines().count() + t.provisional.lines().count()) as u32;
                 let mut ls = line::thinking_header(think_chars, think_lines, t.answer_chars);
+                // Two rungs only: the header alone, or the whole trace.
                 if level >= Reveal::Context {
                     ls.push(Line::default());
                     // Exactly one of the pair is ever non-empty: the streamed
@@ -743,12 +764,7 @@ impl Block {
                     } else {
                         &t.text
                     };
-                    let shadow = md::render_reasoning(src, width, MD_INDENT);
-                    ls.extend(if level >= Reveal::Full {
-                        shadow
-                    } else {
-                        first_rows(shadow, N)
-                    });
+                    ls.extend(md::render_reasoning(src, width, MD_INDENT));
                 }
                 ls
             }

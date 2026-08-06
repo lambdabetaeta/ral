@@ -475,8 +475,8 @@ impl Viewport {
     }
 
     /// Stream a live reasoning delta into the phase's `∴` block, seating one at
-    /// the first delta.  The block arrives collapsed: only its magnitude ticks
-    /// until the reader dials it open and watches the text grow.
+    /// the first delta.  The block arrives open, its trace growing as the
+    /// deltas land; a dial shuts it to its header.
     pub(super) fn push_thinking(&mut self, text: &str) {
         if let Some(idx) = self.live_thinking() {
             self.blocks[idx].block.push_provisional_thinking(text);
@@ -1068,7 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn live_thinking_header_precedes_streamed_markdown_without_showing_trace() {
+    fn live_thinking_streams_its_trace_before_the_answer() {
         let mut vp = viewport();
         vp.push_thinking("considering the shape\n");
         vp.push_token("First paragraph.\n\nSecond paragraph still streaming", 0);
@@ -1080,8 +1080,8 @@ mod tests {
             "fence-safe markdown still commits while thinking is live: {all:?}"
         );
         assert!(
-            !all.contains("considering the shape"),
-            "live thinking hides the trace prose until it commits: {all:?}"
+            all.contains("considering the shape"),
+            "a live trace streams in the open: {all:?}"
         );
 
         let thinking = rail_rows(&w.lines, "∴ ");
@@ -1157,6 +1157,10 @@ mod tests {
             "thinking block stays before the answer block: {all:?}"
         );
 
+        assert!(
+            all.contains("final trace"),
+            "a committed trace stays in the open: {all:?}"
+        );
         let idx = vp
             .block_at(w.offset + thinking[0])
             .expect("thinking rail row maps to its block");
@@ -1164,8 +1168,12 @@ mod tests {
         let w = vp.render_window(READ_W, 24);
         let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
         assert!(
-            all.contains("final trace"),
-            "dialing the committed thinking block reveals the trace: {all:?}"
+            !all.contains("final trace"),
+            "one click shuts the trace to its header: {all:?}"
+        );
+        assert!(
+            !rail_rows(&w.lines, "∴ ").is_empty(),
+            "the header keeps its rail when shut: {all:?}"
         );
     }
 
