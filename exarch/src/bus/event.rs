@@ -85,15 +85,15 @@ pub enum Kind {
     },
     Died,
     Token(String),
-    /// A live reasoning token, accumulated into a provisional seat until
-    /// [`Kind::Reasoning`] commits the real thinking block.
+    /// A live reasoning token, streamed into the phase's own `∴` block until
+    /// [`Kind::Reasoning`] lands the authoritative text.
     Thinking(String),
     /// Ends the streaming step: the frontend commits whatever `Token`/`Thinking`
     /// text is still open.  Chrome — untraced, and carries no content itself.
     Boundary,
-    /// The step's final model reasoning, committed as a standalone dialable
-    /// block.  `answer_chars` is *this step's* answer length, which the frontend
-    /// accumulates into the block's deliberation-grain denominator.
+    /// The step's final model reasoning, superseding the phase's streamed
+    /// deltas in its dialable block.  `answer_chars` is *this step's* answer
+    /// length, the block's deliberation-grain denominator.
     Reasoning {
         text: String,
         answer_chars: u32,

@@ -9,7 +9,7 @@
 use super::block::{AgentSlot, Block, RailShape, Reveal, append_visual_rows};
 use super::fidelity::{self, Fidelity};
 use super::group;
-use super::line::{self, is_blank, plain, size_bar};
+use super::line::{is_blank, plain, size_bar};
 use super::palette::READ_W;
 use super::rail::{self, RailKind};
 use super::select::plain_slice;
@@ -64,10 +64,9 @@ pub(super) struct Viewport {
     /// Assistant text since the last fence-safe paragraph break.  It never
     /// streams as prose: only its magnitude shows ([`Self::streaming_seat`])
     /// until a break or the turn's end commits it as a [`Block::markdown`].
+    /// Reasoning has no such seat: each phase streams into its own live
+    /// `∴` block from the first delta ([`Self::push_thinking`]).
     open: String,
-    /// In-flight reasoning, likewise shown as magnitude only, cleared when
-    /// [`Self::commit_thinking`] lands the authoritative [`Block::thinking`].
-    thinking: String,
     /// Top visible visual row, per-viewport so each tab keeps its place.
     offset: usize,
     /// Follow the tail.  Cleared by a scroll either way, re-armed at the bottom.
@@ -132,25 +131,14 @@ struct Entry {
     rows: usize,
 }
 
-/// Memoised whole-buffer flatten: block lines wrapped to `width`, `row_block[i]`
-/// naming the block row `i` came from, and the `virtual_think_*` record of the
-/// live thinking seat — rows the render splices in that back no text.
+/// Memoised whole-buffer flatten: block lines wrapped to `width`, with
+/// `row_block[i]` naming the block row `i` came from.
 #[derive(Default)]
 struct Flat {
     width: u16,
     rows: Vec<Line<'static>>,
     row_block: Vec<usize>,
     dirty: bool,
-    virtual_think_at: usize,
-    virtual_think_len: usize,
-    virtual_think_widths: Vec<usize>,
-}
-
-/// Where a visual row lands relative to the spliced thinking seat: in the
-/// committed flatten (re-indexed if it falls past the seat), or in the seat.
-enum RowSite {
-    Committed(usize),
-    Seat(usize),
 }
 
 /// The byte index just past the last `\n\n` at fence depth zero, so
@@ -222,7 +210,6 @@ impl Viewport {
             agent,
             usage: Usage::default(),
             open: String::new(),
-            thinking: String::new(),
             offset: 0,
             sticky: true,
             flat: Flat::default(),
@@ -332,7 +319,6 @@ impl Viewport {
         });
         self.blocks = Vec::new();
         self.open = String::new();
-        self.thinking = String::new();
         self.flat = Flat::default();
         self.pins = Vec::new();
         self.log = io::BufWriter::new(Box::new(io::sink()));
@@ -458,49 +444,54 @@ impl Viewport {
         }
     }
 
-    /// Commit a reasoning phase into the turn's coalescing `∴` block
-    /// ([`Self::thinking_target`]), superseding its provisional deltas, or into
-    /// a fresh block before the trailing markdown run.  `answer_chars` is the
-    /// say-side of the deliberation ratio.
+    /// Land a phase's authoritative reasoning: into its live `∴` block
+    /// ([`Self::live_thinking`]), superseding the streamed deltas, or — when
+    /// nothing streamed — into a fresh block before the trailing markdown run.
+    /// `answer_chars` is the say-side of the deliberation ratio.
     pub(super) fn commit_thinking(&mut self, text: String, answer_chars: u32) {
-        let preserve_scrollback = self.looking_at_pushed_thinking();
-        self.thinking.clear();
-        self.upsert_thinking(text, answer_chars);
-        if preserve_scrollback {
-            self.sticky = false;
+        if text.trim().is_empty() {
+            return;
+        }
+        if let Some(idx) = self.live_thinking() {
+            self.blocks[idx].block.commit_thinking(text, answer_chars);
+            self.rewrite_log();
+            self.flat.dirty = true;
+            return;
+        }
+        match self.trailing_markdown_start() {
+            Some(at) => {
+                self.blocks.insert(
+                    at,
+                    Entry {
+                        block: Block::thinking(text, answer_chars),
+                        rows: 0,
+                    },
+                );
+                self.rewrite_log();
+                self.flat.dirty = true;
+            }
+            None => self.push_block(Block::thinking(text, answer_chars)),
         }
     }
 
-    /// Whether the view is parked on scrollback the live thinking seat pushed
-    /// down; turning that seat into a real block must then not re-arm
-    /// tail-follow and yank those rows back up under the reader.
-    fn looking_at_pushed_thinking(&self) -> bool {
-        !self.sticky
-            && self.flat.virtual_think_len > 0
-            && self.offset <= self.flat.virtual_think_at + self.flat.virtual_think_len
-    }
-
-    /// Append a live reasoning delta: into the coalescing `∴` block's
-    /// provisional buffer when the turn has one ([`Self::thinking_target`]), so
-    /// its magnitude ticks in place and nothing moves, else into the seat.
+    /// Stream a live reasoning delta into the phase's `∴` block, seating one at
+    /// the first delta.  The block arrives collapsed: only its magnitude ticks
+    /// until the reader dials it open and watches the text grow.
     pub(super) fn push_thinking(&mut self, text: &str) {
-        if let Some(idx) = self.thinking_target() {
+        if let Some(idx) = self.live_thinking() {
             self.blocks[idx].block.push_provisional_thinking(text);
+            self.flat.dirty = true;
         } else {
-            self.thinking.push_str(text);
+            self.push_block(Block::thinking_live(text.to_string()));
         }
-        self.flat.dirty = true;
     }
 
-    /// The block the turn's reasoning coalesces into: the latest `∴` block with
-    /// no prose or prompt after it.  Tool calls do not break the run — only
-    /// having spoken to the reader, or a new human turn, seeds a fresh block.
-    fn thinking_target(&self) -> Option<usize> {
-        let idx = self.blocks.iter().rposition(|e| e.block.is_thinking())?;
-        let unbroken = !self.blocks[idx + 1..]
+    /// The still-streaming phase's block.  Each phase seats its own, so this is
+    /// simply the newest with no authoritative text yet — at most one exists.
+    fn live_thinking(&self) -> Option<usize> {
+        self.blocks
             .iter()
-            .any(|e| e.block.is_markdown() || e.block.is_prompt());
-        unbroken.then_some(idx)
+            .rposition(|e| e.block.is_live_thinking())
     }
 
     /// Push streamed text, committing any fence-safe paragraph at `context_floor`.
@@ -509,12 +500,15 @@ impl Viewport {
         self.flush_complete_paragraphs(context_floor);
     }
 
-    /// End a streaming step: commit the pending reasoning, then `open`.
+    /// End a streaming step: seal a still-live reasoning phase — its deltas
+    /// stand as the text when no commit arrived — then commit `open`.
     pub(super) fn close_boundary(&mut self, context_floor: u8) {
-        if !self.thinking.trim().is_empty() {
-            let text = std::mem::take(&mut self.thinking);
-            let answer_chars = self.current_answer_chars();
-            self.commit_thinking(text, answer_chars);
+        if let Some(idx) = self.live_thinking() {
+            if !self.blocks[idx].block.seal_thinking() {
+                self.blocks.remove(idx);
+            }
+            self.rewrite_log();
+            self.flat.dirty = true;
         }
         self.flush_open(context_floor);
     }
@@ -587,53 +581,6 @@ impl Viewport {
         }
     }
 
-    fn current_answer_chars(&self) -> u32 {
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "committed markdown char count; feeds deliberation ratio, u32 headroom"
-        )]
-        let committed = self
-            .blocks
-            .iter()
-            .rev()
-            .map_while(|e| e.block.markdown_src())
-            .fold(0u32, |n, text| {
-                n.saturating_add(text.chars().count() as u32)
-            });
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "committed markdown char count; feeds deliberation ratio, u32 headroom"
-        )]
-        let open_chars = self.open.chars().count() as u32;
-        committed.saturating_add(open_chars)
-    }
-
-    fn upsert_thinking(&mut self, text: String, answer_chars: u32) {
-        if text.trim().is_empty() {
-            return;
-        }
-        if let Some(idx) = self.thinking_target() {
-            self.blocks[idx].block.append_thinking(&text, answer_chars);
-            self.rewrite_log();
-            self.flat.dirty = true;
-            return;
-        }
-        match self.trailing_markdown_start() {
-            Some(at) => {
-                self.blocks.insert(
-                    at,
-                    Entry {
-                        block: Block::thinking(text, answer_chars),
-                        rows: 0,
-                    },
-                );
-                self.rewrite_log();
-                self.flat.dirty = true;
-            }
-            None => self.push_block(Block::thinking(text, answer_chars)),
-        }
-    }
-
     /// Tee a block to `user.log`, collapsing blanks exactly as the screen
     /// flatten does, and return its line count — the row cap reuses that rather
     /// than paying a second pass over the block.
@@ -693,45 +640,21 @@ impl Viewport {
 
     // ── interaction ──────────────────────────────────────────────────────
 
-    /// The one statement of the seat-splice arithmetic; [`Self::block_at`],
-    /// [`Self::flat_row`], and [`Self::row_width`] are one-liners over it.
-    fn row_site(&self, row: usize) -> RowSite {
-        let think_at = self.flat.virtual_think_at;
-        let think_len = self.flat.virtual_think_len;
-        if think_len == 0 || row < think_at {
-            RowSite::Committed(row)
-        } else if row < think_at + think_len {
-            RowSite::Seat(row - think_at)
-        } else {
-            RowSite::Committed(row - think_len)
-        }
-    }
-
     /// The block owning visual row `row` — valid only against the most recent
-    /// [`Self::render_window`], which is what fixed the seat's position.
+    /// [`Self::render_window`].
     pub(super) fn block_at(&self, row: usize) -> Option<usize> {
-        match self.row_site(row) {
-            RowSite::Committed(r) => self.flat.row_block.get(r).copied(),
-            RowSite::Seat(_) => None,
-        }
+        self.flat.row_block.get(row).copied()
     }
 
-    /// Visual row to index in `flat.rows`, or `None` inside the thinking seat
-    /// (no backing text) or past the end.
+    /// Visual row to index in `flat.rows`, or `None` past the end.
     fn flat_row(&self, row: usize) -> Option<usize> {
-        match self.row_site(row) {
-            RowSite::Committed(r) => (r < self.flat.rows.len()).then_some(r),
-            RowSite::Seat(_) => None,
-        }
+        (row < self.flat.rows.len()).then_some(row)
     }
 
     /// Rendered cell width of visual row `row` — its content's extent, not the
     /// pane's, so a gesture binds tight to the text and ignores the dead margin.
     pub(super) fn row_width(&self, row: usize) -> Option<usize> {
-        match self.row_site(row) {
-            RowSite::Committed(r) => self.flat.rows.get(r).map(Line::width),
-            RowSite::Seat(s) => self.flat.virtual_think_widths.get(s).copied(),
-        }
+        self.flat.rows.get(row).map(Line::width)
     }
 
     /// Whether the block at `idx` is dialable — a property of its kind, not its
@@ -845,27 +768,6 @@ impl Viewport {
 
     // ── rendering ────────────────────────────────────────────────────────
 
-    /// The provisional seat for in-flight reasoning, matching the committed
-    /// block's collapsed header row for row so committing shifts nothing: a
-    /// blank, then the deliberation grain beside a [`size_bar`] — no prose.
-    fn thinking_seat(&self) -> Vec<Line<'static>> {
-        if self.thinking.trim().is_empty() {
-            return vec![];
-        }
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
-        )]
-        let think_chars = self.thinking.chars().count() as u32;
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
-        )]
-        let think_lines = self.thinking.lines().count() as u32;
-        let answer_chars = self.current_answer_chars();
-        line::thinking_header(think_chars, think_lines, answer_chars)
-    }
-
     fn trailing_markdown_start(&self) -> Option<usize> {
         let start = self
             .blocks
@@ -876,17 +778,6 @@ impl Viewport {
             .get(start)
             .is_some_and(|e| e.block.is_markdown())
             .then_some(start)
-    }
-
-    fn provisional_thinking_row(&self) -> usize {
-        let Some(start) = self.trailing_markdown_start() else {
-            return self.flat.rows.len();
-        };
-        self.flat
-            .row_block
-            .iter()
-            .position(|&block| block >= start)
-            .unwrap_or(self.flat.rows.len())
     }
 
     /// The trailing seat for the in-flight response: one row projecting only the
@@ -912,43 +803,14 @@ impl Viewport {
     /// re-arms once it reaches the bottom.
     pub(super) fn render_window(&mut self, width: u16, height: usize) -> RenderWindow {
         self.reflow(width);
-        // The thinking seat renders *before* the trailing answer run, so
-        // paragraphs keep committing live without jumping ahead of the
-        // deliberation they follow.
-        let mut think = self.thinking_seat();
-        if !think.is_empty() {
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
-            )]
-            let think_lines = self.thinking.lines().count() as u32;
-            if let Some(idx) = think.iter().position(|l| !is_blank(l)) {
-                think[idx].spans.insert(
-                    0,
-                    rail::span(RailKind::Thinking, self.agent, Some(think_lines)),
-                );
-            }
-        }
         let mut seat: Vec<Line<'static>> = self.streaming_seat().into_iter().collect();
         let committed = self.flat.rows.len();
-        // Following a thinking seat or a non-markdown block, the streaming seat
-        // opens a fresh run, so it wears the blank separator a committing lead
-        // paragraph would.
-        if !seat.is_empty()
-            && self.trailing_markdown_start().is_none()
-            && committed + think.len() > 0
-        {
+        // Following a non-markdown block, the streaming seat opens a fresh run,
+        // so it wears the blank separator a committing lead paragraph would.
+        if !seat.is_empty() && self.trailing_markdown_start().is_none() && committed > 0 {
             seat.insert(0, Line::default());
         }
-        let think_at = if think.is_empty() {
-            committed
-        } else {
-            self.provisional_thinking_row()
-        };
-        self.flat.virtual_think_at = think_at;
-        self.flat.virtual_think_len = think.len();
-        self.flat.virtual_think_widths = think.iter().map(Line::width).collect();
-        let total = committed + think.len() + seat.len();
+        let total = committed + seat.len();
         let max_off = total.saturating_sub(height);
         if self.sticky {
             self.offset = max_off;
@@ -962,11 +824,10 @@ impl Viewport {
         )]
         let scroll_pct =
             (max_off > 0).then(|| (self.offset.min(max_off) * 100 / max_off).min(100) as u16);
-        let split = think_at.min(committed);
-        let lines: Vec<Line<'static>> = self.flat.rows[..split]
+        let lines: Vec<Line<'static>> = self
+            .flat
+            .rows
             .iter()
-            .chain(&think)
-            .chain(&self.flat.rows[split..])
             .chain(&seat)
             .skip(self.offset)
             .take(height)
@@ -1036,9 +897,6 @@ impl Viewport {
             rows,
             row_block,
             dirty: false,
-            virtual_think_at: 0,
-            virtual_think_len: 0,
-            virtual_think_widths: Vec::new(),
         };
     }
 
@@ -1277,7 +1135,7 @@ mod tests {
         let mut vp = viewport();
         vp.push_thinking("draft trace\n");
         vp.push_token("First paragraph.\n\nSecond paragraph.", 0);
-        vp.commit_thinking("final trace\nline two".into(), vp.current_answer_chars());
+        vp.commit_thinking("final trace\nline two".into(), 30);
         vp.close_boundary(0);
 
         assert_eq!(
@@ -1393,7 +1251,7 @@ mod tests {
             !live_thinking.is_empty(),
             "live thinking has its rail: {live_text:?}"
         );
-        vp.commit_thinking("considering the shape\n".into(), vp.current_answer_chars());
+        vp.commit_thinking("considering the shape\n".into(), 30);
         vp.close_boundary(0);
         let committed = vp.render_window(READ_W, 8);
         let committed_text = committed

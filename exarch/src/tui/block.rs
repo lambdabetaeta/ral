@@ -55,11 +55,11 @@ pub(super) enum CardOrigin {
     Surfaced,
 }
 
-/// A turn's reasoning.  `answer_chars` is its answer mass, the deliberation
-/// grain's denominator.  `provisional` holds the live phase's streamed deltas —
-/// they tick the header's magnitude in place and are dropped wholesale once
-/// [`Block::append_thinking`] commits the phase's authoritative text; only
-/// `text` is ever revealed or logged.
+/// One reasoning phase.  `answer_chars` is its answer mass, the deliberation
+/// grain's denominator.  `provisional` holds the phase's streamed deltas —
+/// revealed live wherever the block is dialed open — until
+/// [`Block::commit_thinking`] lands the authoritative `text` and supersedes
+/// them.  An empty `text` is what marks the phase still streaming.
 pub(super) struct Thinking {
     pub(super) text: String,
     pub(super) answer_chars: u32,
@@ -308,6 +308,18 @@ impl Block {
             Fidelity::default(),
         )
     }
+    /// Seat a reasoning phase from its first streamed delta; its answer mass is
+    /// unknown until [`Self::commit_thinking`] lands it.
+    pub(super) fn thinking_live(delta: String) -> Self {
+        Self::new(
+            BlockKind::Thinking(Thinking {
+                text: String::new(),
+                answer_chars: 0,
+                provisional: delta,
+            }),
+            Fidelity::default(),
+        )
+    }
     /// `fidelity` is root's, so the revealed markdown degrades as its prose does.
     pub(super) fn subagent(
         name: String,
@@ -489,22 +501,36 @@ impl Block {
         matches!(self.kind, BlockKind::Thinking(_))
     }
 
-    /// Append to the trace, accumulating `answer_chars` into the grain's
-    /// denominator; this text supersedes whatever deltas streamed ahead of it.
-    pub(super) fn append_thinking(&mut self, more: &str, answer_chars: u32) {
+    /// A reasoning phase still streaming — no authoritative text has landed.
+    pub(super) fn is_live_thinking(&self) -> bool {
+        matches!(&self.kind, BlockKind::Thinking(t) if t.text.is_empty())
+    }
+
+    /// Land the phase's authoritative text, superseding the streamed deltas and
+    /// sealing the block; the next phase seats its own.
+    pub(super) fn commit_thinking(&mut self, text: String, answer_chars: u32) {
         if let BlockKind::Thinking(t) = &mut self.kind {
+            t.text = text;
             t.provisional.clear();
-            if !t.text.is_empty() && !more.is_empty() {
-                t.text.push('\n');
-            }
-            t.text.push_str(more);
-            t.answer_chars = t.answer_chars.saturating_add(answer_chars);
+            t.answer_chars = answer_chars;
             self.cache = None;
         }
     }
 
-    /// Stream a live reasoning delta: the header's magnitude ticks in place
-    /// while the block itself never moves.
+    /// End the phase without a commit — a stall, or reasoning that never
+    /// arrived whole: the streamed deltas become the text.  Returns whether the
+    /// sealed trace amounts to anything worth keeping.
+    pub(super) fn seal_thinking(&mut self) -> bool {
+        if let BlockKind::Thinking(t) = &mut self.kind {
+            t.text = std::mem::take(&mut t.provisional);
+            self.cache = None;
+            return !t.text.trim().is_empty();
+        }
+        true
+    }
+
+    /// Stream a live reasoning delta: the header's magnitude ticks in place,
+    /// and the text grows under it wherever the block is dialed open.
     pub(super) fn push_provisional_thinking(&mut self, more: &str) {
         if let BlockKind::Thinking(t) = &mut self.kind {
             t.provisional.push_str(more);
@@ -710,7 +736,14 @@ impl Block {
                 let mut ls = line::thinking_header(think_chars, think_lines, t.answer_chars);
                 if level >= Reveal::Context {
                     ls.push(Line::default());
-                    let shadow = md::render_reasoning(&t.text, width, MD_INDENT);
+                    // Exactly one of the pair is ever non-empty: the streamed
+                    // deltas until the commit, the authoritative text after.
+                    let src = if t.text.is_empty() {
+                        &t.provisional
+                    } else {
+                        &t.text
+                    };
+                    let shadow = md::render_reasoning(src, width, MD_INDENT);
                     ls.extend(if level >= Reveal::Full {
                         shadow
                     } else {
