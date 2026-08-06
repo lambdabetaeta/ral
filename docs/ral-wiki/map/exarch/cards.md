@@ -158,7 +158,10 @@ a bare ral REPL. The tasks library holds the small constructor so the mark
 grammar lives in one ral place: `tasks-card` in `exarch/data/agent.ral` (the
 tasks section; the kit owns the status→role mapping, since the host knows
 only the closed role set), paired with `decode-tasks`, its inverse over the
-same shape. Every mutator reads the register through `decode-tasks
+same shape. It leads with a strong `text` heading — the same mark `set-goal`
+writes — so the framed renderer lifts `tasks` into the top rule and the gauge
+below it counts what is `completed`, rather than the label doing double duty as
+a title. Every mutator reads the register through `decode-tasks
 !{pin-read "tasks"}`, computes the new list, and writes it back through
 `sync-tasks` — one write point wrapping `pin-set`/`pin-clear`
 ([[map/exarch/builtins|builtins]];

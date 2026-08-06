@@ -76,13 +76,16 @@ let render-task = { |t|
 }
 
 # --- the tasks card, and its inverse ------------------------------------------
-# `tasks-card` and `decode-tasks` are the kit's serialization pair: a
-# `measure` gauge over a `fields` matrix, one row per task, `label: "#<id>"`,
-# `value` a `text` of exactly four positionally-decoded spans — status word
-# (chrome by status: done->ok, doing->warn, blocked->bad, open->muted), the
-# two-space-led description, the tag list (empty or " [a,b]"), and the notes
-# (empty or " -- text").  Rendering tags and notes is what a readable register
-# demands: a field the card never shows cannot survive a read back.
+# `tasks-card` and `decode-tasks` are the kit's serialization pair: a strong
+# `text` heading, a `measure` gauge, then a `fields` matrix, one row per task,
+# `label: "#<id>"`, `value` a `text` of exactly four positionally-decoded
+# spans — status word (chrome by status: done->ok, doing->warn, blocked->bad,
+# open->muted), the two-space-led description, the tag list (empty or " [a,b]"),
+# and the notes (empty or " -- text").  Rendering tags and notes is what a
+# readable register demands: a field the card never shows cannot survive a read
+# back.  The heading is the card's own label, the way `set-goal` writes one: a
+# leading one-line `text` mark is what the framed renderer lifts into the top
+# rule, so the gauge counts what is completed rather than doubling as the title.
 
 let tasks-card = { |ts|
   let row = { |t|
@@ -100,12 +103,14 @@ let tasks-card = { |ts|
       [role: "", text: $note-str],
     ]]]
   }
-  `card [`measure [label: "tasks", value: !{length !{filter { |t| equal $t[status] `done} $ts}}, max: !{length $ts}], `fields [rows: !{map $row $ts}]]
+  `card [`text [spans: [[role: "strong", text: "tasks"]]],
+         `measure [label: "completed", value: !{length !{filter { |t| equal $t[status] `done} $ts}}, max: !{length $ts}],
+         `fields [rows: !{map $row $ts}]]
 }
 
-## `marks` is one homogeneous list, so two single-tag `case`s over different
+## `marks` is one homogeneous list, so single-tag `case`s over different
 ## elements would close its element type around whichever table ran first;
-## the one `describe` case names both tags, keeping the list one type.
+## the one `describe` case names every tag, keeping the list one type.
 let decode-tasks = { |v|
   if !{equal $v unit} { [] }
   else {
@@ -113,12 +118,14 @@ let decode-tasks = { |v|
       case $v [
         `card: { |marks|
           let describe = { |m| case $m [
+            `text:    { |_|          [kind: "text",    rows: []] },
             `measure: { |_|          [kind: "measure", rows: []] },
             `fields:  { |[rows: rs]| [kind: "fields",  rows: $rs] },
           ] }
-          let [d0, d1] = map $describe $marks
-          if !{equal $d0[kind] "measure"} { unit } else { fail [status: 1, message: "not task-shaped"] }
-          if !{equal $d1[kind] "fields"}  { unit } else { fail [status: 1, message: "not task-shaped"] }
+          let [d0, d1, d2] = map $describe $marks
+          if !{equal $d0[kind] "text"}    { unit } else { fail [status: 1, message: "not task-shaped"] }
+          if !{equal $d1[kind] "measure"} { unit } else { fail [status: 1, message: "not task-shaped"] }
+          if !{equal $d2[kind] "fields"}  { unit } else { fail [status: 1, message: "not task-shaped"] }
           map { |r|
             let [label: lbl, value: valv] = $r
             case $valv [
@@ -142,11 +149,11 @@ let decode-tasks = { |v|
                   status: $status, tags: $tags, notes: $notes ]
               },
             ]
-          } $d1[rows]
+          } $d2[rows]
         },
       ]
     } { |_|
-      fail [status: 1, message: "tasks: the card under the 'tasks' pin is not task-shaped — expected `measure [label, value, max] then `fields [rows: [[label: \"#<id>\", value: `text [spans: [status, desc, tags, notes]]], …]], four spans per row"]
+      fail [status: 1, message: "tasks: the card under the 'tasks' pin is not task-shaped — expected `text [spans: [heading]] then `measure [label, value, max] then `fields [rows: [[label: \"#<id>\", value: `text [spans: [status, desc, tags, notes]]], …]], four spans per row"]
     }
   }
 }

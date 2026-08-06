@@ -289,9 +289,11 @@ let pin-set   = { |key card| surface `pin [key: $key, body: $card] }
 let pin-clear = { |key|      surface `unpin [key: $key] }
 ```
 
-**The tasks card, normatively.** Marks: a `` `measure `` gauge then a
-`` `fields `` matrix — `[`measure [label: "tasks", value: <done>,
-max: <total>], `fields [rows: …]]`. One row per task:
+**The tasks card, normatively.** Marks: a `` `text `` heading, a
+`` `measure `` gauge, then a `` `fields `` matrix —
+`[`text [spans: [[role: "strong", text: "tasks"]]],
+`measure [label: "completed", value: <done>, max: <total>],
+`fields [rows: …]]`. One row per task:
 
 - `label`: `"#<id>"`.
 - `value`: `` `text `` of **exactly four spans**, positionally decoded:
@@ -310,13 +312,18 @@ max: <total>], `fields [rows: …]]`. One row per task:
 This renders `tags` and `notes`, which the old rollup dropped — WYSIWYG
 requires it (Context §3).
 
+The heading is the same mark `set-goal` writes, and for the same reason: a
+leading one-line `` `text `` mark is what the framed renderer lifts into the
+top rule, so the two pins read alike — a titled box — instead of the gauge's
+label standing in for a title on one of them (amended, 2026-08-06).
+
 **The serialization pair and the write point:**
 
 - `tasks-card ts` — the list to the card above.
 - `decode-tasks v` — `unit` → `[]`; a card of the exact shape above → the
   task records; anything else →
   `fail "tasks: the card under the 'tasks' pin is not task-shaped — …"`,
-  spelling out the expected marks and row form.
+  spelling out the expected three marks and the row form.
 - `sync-tasks ts` — `pin-clear "tasks"` when `ts` is empty or every task is
   `` `done ``, else `pin-set "tasks" !{tasks-card $ts}`. Every mutator ends
   in it. This keeps today's `surface-progress` ergonomics: no outstanding
