@@ -35,7 +35,6 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 blake3     = "1"
 sha2       = "0.10"
-zstd       = "0.13"
 tokio      = { version = "1", features = ["rt"] }
 
 # The guest's whole network: `session::net_seat` hands the net wire beside
@@ -46,6 +45,11 @@ tokio      = { version = "1", features = ["rt"] }
 # `TcpStream` on Windows, the same pretence `ral_core::wire::WireStream`
 # makes for the control plane.
 guest-net  = { path = "../guest-net" }
+
+# `boot::inflate` decompresses the shipped rootfs into the cache. A pure-Rust
+# decoder, deliberately: only decompression is ever needed, and the C-backed
+# `zstd` cannot build under a cross-check with no C toolchain for the target.
+ruzstd     = "0.9"
 
 [target.'cfg(unix)'.dependencies]
 # `MachineHatchery`'s accept pump peeks a fresh dial's preamble without

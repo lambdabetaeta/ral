@@ -195,7 +195,7 @@ fn inflate(archive: &Path, out: &Path) -> Result<u64, String> {
             archive.display()
         )
     })?;
-    let mut decoder = zstd::stream::read::Decoder::new(std::io::BufReader::new(source))
+    let mut decoder = ruzstd::decoding::StreamingDecoder::new(std::io::BufReader::new(source))
         .map_err(|e| format!("the guest image {} is not readable: {e}", archive.display()))?;
     let file = File::create(out).map_err(|e| {
         format!(
