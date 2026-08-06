@@ -261,6 +261,22 @@ Denied-terminal tool runs while admitting them for `_ed-tui`-style children.
 The notification-center carve-out is named in the POSIX shared-memory namespace
 (`ipc-posix-name "apple.shm.notification_center"`), matching Apple's profiles.
 
+`net: false` on macOS is enforced by *absence*: `build_profile` emits `(allow
+network*)` only under `net: true`, and the base admits `network-outbound` for
+nothing. That silence is what closes DNS, because `getaddrinfo` reaches
+mDNSResponder over the UNIX socket `/private/var/run/mDNSResponder`, which
+Seatbelt gates as `network-outbound` rather than as `mach-lookup` — measured on
+Darwin 25.5.0: denying `mach-lookup` outright still resolves names, and
+admitting that socket alone resolves them with `mach-lookup` denied. So the
+base's unfiltered `(allow mach-lookup)`, which dyld needs before `main()`, is
+not a resolver door and scoping it would buy nothing here. The invariant worth
+keeping is the narrower one: admit `network-outbound` for no local socket, or a
+hostname becomes an egress channel — an attacker-chosen query label leaves via
+the resolver daemon, which is outside the sandbox — while `net: false` still
+reads as closed. `mac_profile_denies_network_when_disabled` asserts it over
+every rule in the rendered profile, with a `net: true` positive control so the
+denial cannot pass vacuously.
+
 Path-scoped *exec* confinement is unenforced on Linux (no landlock backend) —
 [[decisions/260530_linux-exec-confinement|linux-exec-confinement]].
 

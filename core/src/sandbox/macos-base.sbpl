@@ -39,8 +39,18 @@
 
 ;; dyld talks to launchd over Mach to locate the dyld shared cache;
 ;; without it `(allow process-exec)` is not enough — the child aborts
-;; before main().
+;; before main().  This is not a resolver door: `getaddrinfo` reaches
+;; mDNSResponder over the UNIX socket /private/var/run/mDNSResponder,
+;; which Seatbelt gates as `network-outbound`, not as `mach-lookup`.
 (allow mach-lookup)
+
+;; No network rule appears in this file, and that silence is what closes
+;; DNS under `net: false`: with `network-outbound` denied by default the
+;; resolver socket cannot be opened, so a hostname cannot carry bytes out
+;; as a query label.  Allowing that form for *any* local socket would
+;; reopen the channel while `net: false` still reads as closed — hence
+;; the profile admits `network-outbound` for nothing at all, and only
+;; `net: true` emits the wholesale `(allow network*)`.
 
 ;; process-exec without process-fork yields EPERM at spawn time:
 ;; Seatbelt gates fork() separately from execve().

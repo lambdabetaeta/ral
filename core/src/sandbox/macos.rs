@@ -581,6 +581,12 @@ mod tests {
         }
     }
 
+    /// `net: false` closes DNS only because *no* network rule reaches the
+    /// profile: the resolver talks to mDNSResponder over a UNIX socket, which
+    /// Seatbelt gates as `network-outbound`.  Admitting that form for any
+    /// local socket would reopen hostname-label egress while `net: false`
+    /// still read as closed, so the denial is asserted over every rule the
+    /// profile carries, not just the wholesale `(allow network*)`.
     #[test]
     fn mac_profile_denies_network_when_disabled() {
         let profile = build_profile(&SandboxProjection {
@@ -588,7 +594,21 @@ mod tests {
             ..SandboxProjection::default()
         })
         .unwrap();
-        assert!(!profile.contains("(allow network*)"));
+        for rule in profile.lines().filter(|l| !l.trim_start().starts_with(";;")) {
+            assert!(
+                !rule.contains("network"),
+                "net: false admitted a network rule: {rule}\n{profile}"
+            );
+        }
+        let open = build_profile(&SandboxProjection {
+            net: true,
+            ..SandboxProjection::default()
+        })
+        .unwrap();
+        assert!(
+            open.contains("(allow network*)"),
+            "net: true emitted no network rule, so the denial above proves nothing:\n{open}"
+        );
     }
 
     #[test]
