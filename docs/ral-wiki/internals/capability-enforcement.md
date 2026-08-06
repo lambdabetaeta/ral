@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 74e7a46
-verified_at_date: 2026-07-30
-anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant]
+verified_at_commit: 11b9ebd
+verified_at_date: 2026-08-06
+anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant, policy_names, deny_names_from, longest_dir_match, deputy_prefixes]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -47,6 +47,28 @@ stay a [[invariants/single-binary|single binary]].
 
 Canonicalising *before* matching is why a directory scoped by a grant cannot be
 escaped through a symlink or `..`.
+
+**A command head is judged by three identities, and the two directions of the
+gate read different numbers of them.** A head carries the surface spelling, the
+`PATH`-walked form, and the file both canonicalise to
+(`runtime/command/identity.rs`). *Admission* reads the spellings alone
+(`policy_names`), so a planted `/tmp/evil/rg` cannot inherit an outer grant's
+bare `rg: allow`. *Every veto* reads all three plus their basenames
+(`deny_names_from`), so a bare `bash: deny` stops an absolute `/bin/bash` and a
+symlink to it alike — and `longest_dir_match` takes the same asymmetry down to
+directories, matching `allow_dirs` against the narrow set and `deny_dirs`
+against the broad one. The rule is that **widening a veto must never widen
+admission**; both directions are pinned by mirrored tests.
+
+The limit is worth knowing rather than discovering: **a name veto is not a
+containment boundary.** A *copy* of a denied binary under another name is a
+different file, carrying no trace of the name refused, and an allow dir admits
+it — on the gate and, since Seatbelt's `(deny process-exec (regex #"/bash$"))`
+also sees only the new name, in the macOS profile too. What holds there is the
+confused-deputy property: an exec-admitted directory must not be writable
+(`capability/deputy.rs`), which is reported only when a grant restricts *both*
+dimensions, since an unrestricted `fs` is not "everything writable"
+([[decisions/260806_a-head-has-three-identities|a-head-has-three-identities]]).
 
 **The in-process gate covers what ral dispatches; the OS sandbox covers what a
 spawned process does on its own.**

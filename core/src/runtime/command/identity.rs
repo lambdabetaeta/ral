@@ -24,6 +24,9 @@ pub(crate) struct CommandIdentity {
     /// for a path or tilde head, which `PATH` never searched and whose absence
     /// the kernel reports at spawn.
     pub(crate) search: Option<PathSearch>,
+    /// The *file* the two spellings name, symlinks followed — the head's third
+    /// identity.  Only [`deny_names_from`](Self::deny_names_from) reads it.
+    canonical: Option<String>,
 }
 
 impl CommandIdentity {
@@ -31,11 +34,13 @@ impl CommandIdentity {
     pub(crate) fn resolve(name: CommandName, ctx: &Context) -> Self {
         let shown = render(&name, ctx);
         let (resolved, search) = walk_path(&name, ctx);
+        let canonical = canonicalise(&resolved, ctx);
         Self {
             name,
             shown,
             resolved,
             search,
+            canonical,
         }
     }
 
@@ -93,24 +98,37 @@ impl CommandIdentity {
     }
 
     /// The broad identity set: `names`, a fresh
-    /// [`policy_names`](Self::policy_names), widened with the basenames of the
-    /// resolved and as-invoked forms.  Only a `Deny` consults it.
+    /// [`policy_names`](Self::policy_names), widened with the canonical path
+    /// and with the basenames of all three forms.  Only a `Deny` consults it.
     ///
-    /// A veto must see through both of a command's identities, admission
-    /// through only one.  So a bare `bash: deny` still stops a `Path` head
-    /// `/bin/bash` that a covering `/bin/` allow dir would otherwise admit,
-    /// while a planted `/tmp/evil/rg` still cannot inherit a bare `rg: allow`
-    /// — the basename lands here and never in `policy_names`.  It takes the
-    /// narrow set rather than rebuilding it because both callers,
+    /// A veto must see through every identity a command has, admission through
+    /// only one.  So a bare `bash: deny` still stops a `Path` head `/bin/bash`
+    /// that a covering `/bin/` allow dir would otherwise admit, and a symlink
+    /// `/tmp/b -> /bin/bash` under an allowed `/tmp/` is denied by the file it
+    /// names rather than admitted by the name it wears — while a planted
+    /// `/tmp/evil/rg` still cannot inherit a bare `rg: allow`, because these
+    /// names land here and never in `policy_names`.
+    ///
+    /// A *copy* of `bash` under another name is beyond any of this: it is a
+    /// different file, and no resolution recovers the name that was denied.
+    /// A name veto narrows the allow set; it is not a containment boundary,
+    /// and the one that holds there is keeping an exec-admitted directory
+    /// unwritable — the property `crate::capability::deputy` reports on.
+    ///
+    /// It takes the narrow set rather than rebuilding it because both callers,
     /// `capability::admits_head` and `super::vet`, need both, and the PATH
     /// walk should be paid once.
     pub(crate) fn deny_names_from(&self, mut names: Vec<String>) -> Vec<String> {
-        for base in [
-            crate::path::basename(&self.resolved),
-            crate::path::basename(&self.shown),
-        ] {
-            if !names.iter().any(|n| n == base) {
-                names.push(base.to_string());
+        let canonical = self.canonical.as_deref();
+        let widened = [
+            canonical,
+            Some(crate::path::basename(&self.resolved)),
+            Some(crate::path::basename(&self.shown)),
+            canonical.map(crate::path::basename),
+        ];
+        for name in widened.into_iter().flatten() {
+            if !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
             }
         }
         names
@@ -161,6 +179,24 @@ fn walk_path(name: &CommandName, ctx: &Context) -> (String, Option<PathSearch>) 
     (resolved, Some(search))
 }
 
+/// The file `resolved` names once symlinks are followed, or `None` when there
+/// is no such file — a `PATH` miss, or a head the kernel will refuse at spawn.
+/// Nothing absent can owe a veto.
+///
+/// One `realpath(3)` per external dispatch, taken here rather than in
+/// [`CommandIdentity::deny_names_from`] so the several vetting passes a single
+/// command makes share it.  It anchors through `Context::resolver`, the same
+/// "here" the walk and [`absolutize`] use: canonicalised against another cwd,
+/// a relative head names another file entirely.
+fn canonicalise(resolved: &str, ctx: &Context) -> Option<String> {
+    let file = ctx
+        .resolver()
+        .resolve(resolved)
+        .canonicalise_strict()
+        .ok()?;
+    Some(file.to_string_lossy().into_owned())
+}
+
 /// Lexically resolve a relative path against ral's effective cwd, folding
 /// `.` and `..`.  `None` when `s` is already absolute — the caller needs no
 /// second candidate then.
@@ -187,7 +223,7 @@ fn absolutize(s: &str, ctx: &Context) -> Option<String> {
 )]
 mod tests {
     use super::*;
-    use crate::types::Shell;
+    use crate::types::{ExecPolicy, Shell};
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
 
@@ -328,6 +364,139 @@ mod tests {
             !admits_for_test(&ctx.grants, &deny_refs, &allow_refs),
             "bare rg: allow must not admit a Path-invoked planted rg",
         );
+    }
+
+    /// The gate's verdict on `id`, over the two identity sets it builds.
+    fn admits(ctx: &Context, id: &CommandIdentity) -> bool {
+        let allow = id.policy_names(ctx);
+        let deny = id.deny_names_from(allow.clone());
+        let allow: Vec<&str> = allow.iter().map(String::as_str).collect();
+        let deny: Vec<&str> = deny.iter().map(String::as_str).collect();
+        crate::capability::admits_for_test(&ctx.grants, &deny, &allow)
+    }
+
+    /// A context whose sole grant layer is `exec`.
+    fn under(exec: crate::types::ExecMap) -> Context {
+        use crate::types::{Capabilities, GrantStack};
+        let mut grants = GrantStack::root();
+        grants.push(Capabilities {
+            exec: Some(exec),
+            ..Capabilities::root()
+        });
+        let mut ctx = Context::default();
+        ctx.grants = grants;
+        ctx
+    }
+
+    /// `bin/bash` real, `planted/b` a symlink to it: the shape the evasion
+    /// takes.  Returns both directories and the link.
+    #[cfg(unix)]
+    fn planted_symlink(tmp: &Path) -> (std::path::PathBuf, std::path::PathBuf, String) {
+        let bin = tmp.join("bin");
+        let planted = tmp.join("planted");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::create_dir(&planted).unwrap();
+        plant(&bin, "bash");
+        let link = planted.join("b");
+        std::os::unix::fs::symlink(bin.join("bash"), &link).unwrap();
+        (bin, planted, link.to_string_lossy().into_owned())
+    }
+
+    /// The symlink half of the deny-by-name evasion: `planted/b` wears a name
+    /// the allow dir admits and names a file the grant denies.  The veto reads
+    /// the file, so the link is denied by the basename of what it points at.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_under_an_allow_dir_meets_the_bare_deny_of_its_target() {
+        use crate::path::NormalizedPrefix;
+        use crate::types::ExecMap;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (_bin, planted, link) = planted_symlink(tmp.path());
+        let ctx = under(ExecMap {
+            literals: BTreeMap::from([("bash".into(), ExecPolicy::Deny)]),
+            allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface(&planted)]),
+            deny_dirs: BTreeSet::new(),
+        });
+
+        let id = CommandIdentity::resolve(CommandName::Path(link), &ctx);
+        assert!(
+            !id.policy_names(&ctx).iter().any(|n| n.ends_with("bash")),
+            "the file a link names is a veto identity only, never an admitting one",
+        );
+        assert!(!admits(&ctx, &id));
+    }
+
+    /// The directory half of the same hole: no literal deny at all, only a
+    /// denied *region* the link points into.  A deny dir is a veto, so it
+    /// reads the broad set for the same reason a deny literal does.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_out_of_a_deny_dir_is_vetoed_by_the_file_it_names() {
+        use crate::path::NormalizedPrefix;
+        use crate::types::ExecMap;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (bin, planted, link) = planted_symlink(tmp.path());
+        let ctx = under(ExecMap {
+            literals: BTreeMap::new(),
+            allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface(&planted)]),
+            deny_dirs: BTreeSet::from([NormalizedPrefix::from_surface(&bin)]),
+        });
+
+        let id = CommandIdentity::resolve(CommandName::Path(link), &ctx);
+        assert!(!admits(&ctx, &id));
+    }
+
+    /// The mirror, as for basenames: widening the veto must not widen
+    /// admission.  An `allow` on the target does not reach a link to it —
+    /// the link is a spelling the grant never named.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_does_not_inherit_the_allow_on_its_target() {
+        use crate::types::ExecMap;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (bin, _planted, link) = planted_symlink(tmp.path());
+        let target = std::fs::canonicalize(bin.join("bash")).unwrap();
+        let ctx = under(ExecMap {
+            literals: BTreeMap::from([(target.to_string_lossy().into_owned(), ExecPolicy::Allow)]),
+            allow_dirs: BTreeSet::new(),
+            deny_dirs: BTreeSet::new(),
+        });
+
+        let id = CommandIdentity::resolve(CommandName::Path(link), &ctx);
+        assert!(!admits(&ctx, &id));
+    }
+
+    /// Where the scheme stops, pinned rather than left to be rediscovered: a
+    /// *copy* is a different file, holding no trace of the name that was
+    /// denied, and an allow dir admits it.  No resolution can close this — the
+    /// boundary that does is keeping an exec-admitted directory unwritable,
+    /// the property `crate::capability::deputy` reports.
+    #[test]
+    fn a_copy_under_a_new_name_is_a_different_file_and_is_admitted() {
+        use crate::path::NormalizedPrefix;
+        use crate::types::ExecMap;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        let planted = tmp.path().join("planted");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::create_dir(&planted).unwrap();
+        let name = plant(&bin, "bash");
+        let copy = planted.join("b");
+        std::fs::copy(bin.join(&name), &copy).unwrap();
+
+        let ctx = under(ExecMap {
+            literals: BTreeMap::from([("bash".into(), ExecPolicy::Deny)]),
+            allow_dirs: BTreeSet::from([NormalizedPrefix::from_surface(&planted)]),
+            deny_dirs: BTreeSet::new(),
+        });
+
+        let id =
+            CommandIdentity::resolve(CommandName::Path(copy.to_string_lossy().into_owned()), &ctx);
+        assert!(admits(&ctx, &id));
     }
 
     /// An executable a *bare-name* walk finds in `dir`: off Unix a bare name

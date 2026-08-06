@@ -48,12 +48,12 @@ pub(super) enum LayerExec {
 }
 
 /// The two identity sets a command carries into the gate, consulted
-/// asymmetrically.  `deny` is broad — the policy names plus the
-/// basenames of the resolved and as-invoked forms — so a bare
-/// `bash: deny` still vetoes an absolute `/bin/bash`.  `allow` is
-/// exactly the policy names, so a planted `/tmp/evil/rg` cannot inherit
-/// an outer grant's bare `rg: allow`.  Both are built in
-/// `runtime::command::identity`.
+/// asymmetrically.  `deny` is broad — the policy names, the file they
+/// name with symlinks followed, and every basename among them — so a
+/// bare `bash: deny` vetoes an absolute `/bin/bash` and a symlink to
+/// it alike.  `allow` is exactly the policy names, so a planted
+/// `/tmp/evil/rg` cannot inherit an outer grant's bare `rg: allow`.
+/// Both are built in `runtime::command::identity`.
 #[derive(Clone, Copy)]
 pub(super) struct ExecNames<'a> {
     pub(super) deny: &'a [&'a str],
@@ -94,8 +94,7 @@ pub(super) fn evaluate_exec(grants: &GrantStack, names: ExecNames) -> ExecVerdic
 /// Decide one layer.  A literal `Deny` on any broad name goes first
 /// because it must beat a covering allow dir; then a literal admission
 /// on the narrow names; then the deepest covering dir; else deny by
-/// default.  Dirs match only absolute names, and the basenames the
-/// broad set adds are bare, so the narrow set suffices there.
+/// default.
 pub(super) fn layer_exec_verdict(exec: &ExecMap, names: ExecNames) -> LayerExec {
     if literal_vetoes(&exec.literals, names.deny) {
         return LayerExec::Denied;
@@ -107,7 +106,7 @@ pub(super) fn layer_exec_verdict(exec: &ExecMap, names: ExecNames) -> LayerExec 
             ExecPolicy::Subcommands(s) => LayerExec::Allowed(Admit::Subcommands(s)),
         };
     }
-    match longest_dir_match(exec, names.allow) {
+    match longest_dir_match(exec, names) {
         Some(true) => LayerExec::Allowed(Admit::Any),
         Some(false) | None => LayerExec::Denied,
     }
@@ -219,10 +218,17 @@ fn names_match(literal: &str, candidate: &str, windows: bool) -> bool {
 /// holds — so the two loops break the tie in opposite directions: allow
 /// displaces `best` on strictly greater depth, deny on greater-or-equal.
 /// A gate's ambiguity must resolve to deny.
-fn longest_dir_match(exec: &ExecMap, names: &[&str]) -> Option<bool> {
+///
+/// Each side reads the identity set its polarity earns, exactly as the
+/// literals above do: an allow dir admits, so it sees the narrow
+/// spellings alone; a deny dir vetoes, so it also sees the canonical
+/// path, and a symlink planted under an allowed dir cannot launder a
+/// binary out of a denied one.  Bare basenames in the broad set fall to
+/// the `is_absolute` filter — a directory covers no bare name.
+fn longest_dir_match(exec: &ExecMap, names: ExecNames) -> Option<bool> {
     let mut best: Option<(usize, bool)> = None;
-    let mut consider = |dir: &str, allow: bool, wins_tie: bool| {
-        let matches_any = names
+    let mut consider = |dir: &str, allow: bool, wins_tie: bool, candidates: &[&str]| {
+        let matches_any = candidates
             .iter()
             .any(|n| path::is_absolute(n) && path::path_within_str(n, dir));
         if !matches_any {
@@ -235,10 +241,10 @@ fn longest_dir_match(exec: &ExecMap, names: &[&str]) -> Option<bool> {
         }
     };
     for dir in &exec.allow_dirs {
-        consider(dir.as_str(), true, false);
+        consider(dir.as_str(), true, false, names.allow);
     }
     for dir in &exec.deny_dirs {
-        consider(dir.as_str(), false, true);
+        consider(dir.as_str(), false, true, names.deny);
     }
     best.map(|(_, allow)| allow)
 }
@@ -336,7 +342,16 @@ mod tests {
                 path::Namespace::Host,
             )]),
         };
-        assert_eq!(longest_dir_match(&exec, &[candidate]), Some(false));
+        assert_eq!(
+            longest_dir_match(
+                &exec,
+                ExecNames {
+                    deny: &[candidate],
+                    allow: &[candidate]
+                }
+            ),
+            Some(false)
+        );
     }
 
     /// A deny on `/tmp/bin` and an allow on its firmlink alias
@@ -353,7 +368,16 @@ mod tests {
             allow_dirs: BTreeSet::from([path::NormalizedPrefix::from_surface("/private/tmp/bin")]),
             deny_dirs: BTreeSet::from([path::NormalizedPrefix::from_surface("/tmp/bin")]),
         };
-        assert_eq!(longest_dir_match(&exec, &["/tmp/bin/evil"]), Some(false));
+        assert_eq!(
+            longest_dir_match(
+                &exec,
+                ExecNames {
+                    deny: &["/tmp/bin/evil"],
+                    allow: &["/tmp/bin/evil"]
+                }
+            ),
+            Some(false)
+        );
     }
 
     /// `/tmp/a/b` nests three deep; `/private/tmp` is an alias of the
@@ -368,7 +392,16 @@ mod tests {
             allow_dirs: BTreeSet::from([path::NormalizedPrefix::from_surface("/private/tmp")]),
             deny_dirs: BTreeSet::from([path::NormalizedPrefix::from_surface("/tmp/a/b")]),
         };
-        assert_eq!(longest_dir_match(&exec, &["/tmp/a/b/x"]), Some(false));
+        assert_eq!(
+            longest_dir_match(
+                &exec,
+                ExecNames {
+                    deny: &["/tmp/a/b/x"],
+                    allow: &["/tmp/a/b/x"]
+                }
+            ),
+            Some(false)
+        );
     }
 
     #[test]
