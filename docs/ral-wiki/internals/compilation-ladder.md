@@ -1,7 +1,7 @@
 ---
-verified_at_commit: f7cf93a
-verified_at_date: 2026-07-25
-anchors: [compile, compile_and_typecheck, CompileOutcome, SessionSchemes, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, Wire, stage_types]
+verified_at_commit: 1e9fea4
+verified_at_date: 2026-08-06
+anchors: [compile, compile_and_typecheck, CompileOutcome, SessionSchemes, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, Wire, stage_types, Capture, ArmWalk, eta_expand_captured]
 ---
 
 # The compilation ladder: source to typed IR
@@ -26,27 +26,65 @@ artifact. `core/src/lib.rs` exposes the whole descent as two functions: `compile
   lower to `LetRec` / `Rec`. What it emits carries no parser syntax
   ([[invariants/ir-pure-cbpv|ir-pure-cbpv]]). ([[map/core/elaboration|elaboration]])
 - **IR → typed IR.** Hindley–Milner inference annotates the `Val` / `Comp` tree
-  ([[design/types|types]]), generalising at each `Bind` along the SCC structure
-  the elaborator already found — non-recursive groups generalise at their binding
-  point, recursive groups stay monomorphic until their fixed point. The checker
-  is a *transformation* (`annotate`): it returns an annotated IR carrying three
-  kinds of verdict. Each top-level name-bind takes the generalised `Scheme` it
-  inferred, closed against the empty environment so the scheme outlives the
-  per-run unifier
-  ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]);
-  every `Pipeline` stage and `Bind` RHS — at any depth — takes its *ground mode
-  wire*, the checker's resolved `F[input, output]` with the unification variable
-  defaulted away, which the evaluator reads instead of re-inferring
-  ([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]); and each
-  `Pipeline` carries `stage_types`, one resolved value type per stage parallel to
-  its wires — the data flowing between stages, retained for the structural REPL's
-  typed spine, never read by the evaluator. With the second mode-inference engine
-  retired ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]),
-  this rung is the *only* source of the evaluator's modes: the pass runs on every
-  evaluated path, so the wires are never re-derived at runtime. A node inference
-  never visited keeps the elaborator's placeholder — `Empty` for a wire, `Unit`
-  for a stage type. The verdict rides inside the comp; `CompileOutcome` is
-  unchanged in shape. ([[map/core/typecheck|typecheck]])
+  ([[design/types|types]]). The checker is a transformation, `annotate`. It
+  rebuilds the inferred tree once, carrying a demand at each position. A
+  demand is a value read here, or a value discarded here. The rebuild returns
+  an annotated tree carrying four verdicts.
+
+  - Each top-level name-bind carries the generalised `Scheme` it inferred,
+    closed against the empty environment so the scheme outlives the per-run
+    unifier
+    ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
+  - Each `Pipeline` stage carries its *ground mode wire*: the checker's
+    resolved input and output modes, with every unification variable defaulted
+    away. The evaluator reads this wire instead of re-inferring it
+    ([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]).
+  - Each `Pipeline` carries `stage_types`, one resolved value type per stage,
+    parallel to its wires. Only the structural REPL's typed spine reads a
+    stage type.
+  - The rebuild wraps a node in a `Capture` node wherever a value demand meets
+    a result mode that grounds `Bytes`
+    ([[internals/output-capture-and-detachment|output-capture-and-detachment]]).
+
+  Generalisation happens at each `Bind`, along the SCC structure the
+  elaborator already found. A non-recursive group generalises at its own
+  binding point. A mutually recursive group stays monomorphic until its fixed
+  point.
+
+  A value demand reaches:
+
+  - a `Seq`'s tail;
+  - a `Bind`'s RHS;
+  - each arm of an `If`, a fallback chain, or a `try`;
+  - the body of a force of a syntactic thunk.
+
+  Every other position is a discard. A discarded value never wraps in
+  `Capture`.
+
+  A join needs one further rule for an arm that grounds `None` at type `Unit`,
+  inside an otherwise byte-payload join. `ArmWalk::Wrap` (`annotate.rs`) wraps
+  that whole arm in `Capture`. Its own payload then reads as the empty string.
+  Its bytes still reach the outer stream as effect. The arm rebuilds at its
+  own, ordinary discard demand inside the wrap.
+
+  A scope's arm is a `Val`, not a `Comp`. It may be opaque. An opaque arm
+  needing a value payload η-expands through `eta_expand_captured`
+  (`annotate.rs`) into `{ |e| capture (force $h e) }`. The expansion is sound
+  because a scope forces its arm exactly once and never returns it. The arm's
+  own identity is therefore never observed, so nothing can compare, print, or
+  send the wrapper elsewhere.
+
+  Demand propagation stops at a leaf, at an opaque force, and at an opaque
+  scope arm. `case` stays strict and uncoerced. Its arms are fields of a
+  record, with no fixed arity for a demand to walk.
+
+  With the second mode-inference engine retired
+  ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]), this
+  rung is the *only* source of the evaluator's modes and `Capture` nodes. The
+  pass runs on every evaluated path. Neither is ever re-derived at runtime.
+  A node inference never visited keeps the elaborator's placeholder — `Empty`
+  for a wire, `Unit` for a stage type. The verdict rides inside the comp;
+  `CompileOutcome` is unchanged in shape. ([[map/core/typecheck|typecheck]])
 
 Each run's check is seeded from the live session — one `SessionSchemes`, the
 scope's name→scheme map plus the alias arms' schemes — so a binding made in one

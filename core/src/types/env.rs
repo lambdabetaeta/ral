@@ -272,15 +272,12 @@ impl Drop for Binding {
         // honest fallback.
         let Ok(value) = DISMANTLE_QUEUE.try_with(|slot| {
             let mut q = slot.borrow_mut();
-            match q.as_mut() {
-                Some(queue) => {
-                    queue.push(value);
-                    None
-                }
-                None => {
-                    *q = Some(Vec::new());
-                    Some(value)
-                }
+            if let Some(queue) = q.as_mut() {
+                queue.push(value);
+                None
+            } else {
+                *q = Some(Vec::new());
+                Some(value)
             }
         }) else {
             return;
@@ -299,7 +296,7 @@ impl Drop for Binding {
         let mut next = Some(value);
         while let Some(v) = next {
             drop(v);
-            next = DISMANTLE_QUEUE.with(|slot| slot.borrow_mut().as_mut().and_then(|q| q.pop()));
+            next = DISMANTLE_QUEUE.with(|slot| slot.borrow_mut().as_mut().and_then(Vec::pop));
         }
     }
 }

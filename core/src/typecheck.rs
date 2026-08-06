@@ -19,7 +19,9 @@ mod unify;
 pub use self::builtins::builtin_type_hint;
 pub use self::env::{InferCtx, TyEnv};
 pub use self::error::{CompDiff, Reason, TypeError, TypeErrorKind};
-pub use self::fmt::{FmtCtx, fmt_mode, fmt_mode_ctx, fmt_scheme, fmt_ty, fmt_ty_ctx};
+pub use self::fmt::{
+    FmtCtx, fmt_comp_ty_ctx, fmt_mode, fmt_mode_ctx, fmt_scheme, fmt_ty, fmt_ty_ctx,
+};
 pub use self::scheme::{CachedFreeVars, Scheme};
 pub use self::ty::{
     ByteMode, CompTy, CompTyVar, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar,

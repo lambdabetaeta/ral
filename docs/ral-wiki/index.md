@@ -31,7 +31,7 @@ A guided path through the system, *why* before *how*:
 
 - [[design/syscalls-are-effects|syscalls-are-effects]] — the foundational principle: a system call is an algebraic-effect operation, separated from its OS interpretation; handlers and reified continuations are orthogonal layers on top.
 - [[design/cbpv|cbpv]] — call-by-push-value: values vs commands, the two sigils, thunks, immutable bindings.
-- [[design/types|types]] — Hindley–Milner with byte-mode computation types and let-polymorphism; pipeline modes.
+- [[design/types|types]] — Hindley–Milner with let-polymorphism over graded computation types `⟨input, output, result⟩ A`; the result mode names the conduit that carries a computation's payload — the return value or the byte channel, never both.
 - [[design/effects-handlers|effects-handlers]] — algebraic effects; deep, self-masking, tail-resumptive handlers; no first-class `resume`.
 - [[design/grant|grant]] — capabilities; authority attenuated by intersection; exarch's sandbox.
 - [[design/capability-freeze|capability-freeze]] — one always-frozen `Capabilities`, resolved at decode time; the freeze pass is the one-way door and the xdg-escape guard a per-profile invariant.
@@ -39,10 +39,10 @@ A guided path through the system, *why* before *how*:
 - [[design/capability-carriers|capability-carriers]] — why authority needs three forms, not one: the rule you write, the live act of judging, and the flat checklist for the blunt OS guard.
 - [[design/row-types|row-types]] — open-row-polymorphic records with scoped labels and spread shadowing.
 - [[design/records-and-maps|records-and-maps]] — one runtime carrier, two static types: heterogeneous static-label records vs homogeneous runtime-key maps; the key space, the indexing split, the forgetful Record→Map coercion.
-- [[design/pipelines|pipelines]] — `|` as dataflow; the edge type selects byte-process vs value-fold execution.
+- [[design/pipelines|pipelines]] — `|` as dataflow; the edge type selects byte-process vs value-fold execution; the final stage's result mode decides where the pipeline's own result is.
 - [[design/name-resolution|name-resolution]] — where a capability lives: the layering of head names; effects→coreutils, queries→builtins, conveniences→prelude.
 - [[design/builtins|builtins]] — the structured primitive set: the three kinds of irreducibility (reaches a syscall/shell state · base computation · undelivable type), the families, the `Sig`/`Scheme` rules with the derived value form, and the arity partition — a name is a native value or a base frame.
-- [[design/codecs|codecs]] — `from-X`/`to-X` as the typed byte↔value crossing: `decode` `F[Bytes,∅]` vs `encode` `F[∅,Bytes]`; strict structured decode vs lossy line streams.
+- [[design/codecs|codecs]] — `from-X`/`to-X` as the typed byte↔value crossing: a decoder `⟨Bytes,∅,∅⟩ A`, an encoder `A → ⟨∅,Bytes,Bytes⟩ Unit`; strict structured decode vs lossy line streams.
 - [[design/control-operators|control-operators]] — the five reserved operators vs control flow as library; audit ownership.
 - [[design/failure|failure]] — failure is status, not truth; `?` fallback chains, `try` as recovery and the only `||`, a `Bool` is data.
 - [[design/scoping|scoping]] — lexical scoping for data, dynamic scoping for ambient authority.

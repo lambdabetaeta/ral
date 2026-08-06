@@ -1,9 +1,17 @@
 # Pipelines: byte processes and value folds
 
-**`|` is dataflow: it threads each stage's output into the next, and what it does
-at runtime is decided by the type of the connecting edge, not by any keyword.**
-The byte modes of [[design/types|computation types]] select one of two execution
-models.
+**`|` is dataflow.** The pipe threads each stage's output into the next stage.
+The type of the connecting edge decides the runtime behaviour: the byte modes
+of [[design/types|computation types]] select one of two execution models. The
+result mode of the final stage decides where the pipeline's own result is:
+
+- a final stage on the value edge gives the pipeline a value payload;
+- a byte-wired final stage puts the pipeline's result on the wire, so the
+  pipeline's type is `⟨…, Bytes, Bytes⟩ Unit` and, by WF-2, the pipeline has
+  no value component.
+
+At a bind, the boundary inserts the [[design/types|capture]] coercion, so the
+binding receives the decoded text.
 
 Failure is a separate axis. A pipeline propagates a stage's failure, but the
 pipe never *reacts* to it: recovering from failure is `?`'s and `try`'s job, and

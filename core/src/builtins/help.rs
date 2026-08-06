@@ -257,37 +257,28 @@ fn name_matches(pattern: &str, name: &str) -> bool {
 }
 
 /// A command-only builtin has no first-class scheme for `builtin_type_hint`
-/// to format, so the fallback reads a pipeline shape off its signature.
+/// to format, so the fallback builds the `CompTy` its signature describes and
+/// renders it through [`fmt_comp_ty_ctx`], the same renderer a type error
+/// uses — one notation for both, result mode included.
 fn type_for(name: &str, table: &crate::types::BuiltinTable) -> String {
     builtin_type_hint(table, name).unwrap_or_else(|| {
-        use crate::typecheck::builtins::{BuiltinTypeRule, CompTemplate, ModeTemplate};
+        use crate::typecheck::builtins::{
+            BuiltinTypeRule, CompTemplate, lines_step_ty, sig_pipe_spec, ty_of_template,
+        };
+        use crate::typecheck::{CompTy, FmtCtx, Unifier, fmt_comp_ty_ctx};
         match table.get(name).map(|e| e.type_rule) {
-            Some(BuiltinTypeRule::Sig(sig)) => match sig.result {
-                CompTemplate::Return {
-                    input: ModeTemplate::None,
-                    output: ModeTemplate::Bytes,
-                    ..
-                } => "F[none, bytes]".into(),
-                CompTemplate::Return {
-                    input: ModeTemplate::Bytes,
-                    output: ModeTemplate::None,
-                    ..
-                }
-                | CompTemplate::LinesStep => "F[bytes, none] Value".into(),
-                CompTemplate::Return {
-                    input: ModeTemplate::Bytes,
-                    output: ModeTemplate::Bytes,
-                    ..
-                } => "F[bytes, bytes]".into(),
-                CompTemplate::Pure(_)
-                | CompTemplate::Return {
-                    input: ModeTemplate::None,
-                    output: ModeTemplate::None,
-                    ..
-                }
-                | CompTemplate::Return { .. } => "F[none, none] Value".into(),
-                CompTemplate::Never => "∀ types. F[I, O] Type".into(),
-            },
+            Some(BuiltinTypeRule::Sig(sig)) => {
+                let mut u = Unifier::new();
+                let pipe = sig_pipe_spec(&sig.result, &mut u);
+                let value = match sig.result {
+                    CompTemplate::Pure(t) | CompTemplate::Return { value: t, .. } => {
+                        ty_of_template(t, &mut u)
+                    }
+                    CompTemplate::Never => u.fresh_ty(),
+                    CompTemplate::LinesStep => lines_step_ty(&mut u),
+                };
+                fmt_comp_ty_ctx(&CompTy::Return(pipe, Box::new(value)), &FmtCtx::default())
+            }
             _ => "—".into(),
         }
     })

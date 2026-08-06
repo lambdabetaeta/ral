@@ -1086,8 +1086,12 @@ fn arg_template_ty(template: ArgTemplate, u: &mut Unifier) -> Ty {
 }
 
 /// A [`TyTemplate`]'s type, standalone from an [`Inferencer`] context.
-/// [`Inferencer::ty_from_template`] delegates here.
-fn ty_of_template(template: TyTemplate, u: &mut Unifier) -> Ty {
+///
+/// [`Inferencer::ty_from_template`] delegates here. Public alongside
+/// [`mode_of_template`], its mode-side twin, so a caller outside the checker
+/// (`help`/`explain`'s fallback) can lower a signature's result to a `Ty`
+/// too.
+pub fn ty_of_template(template: TyTemplate, u: &mut Unifier) -> Ty {
     match template {
         TyTemplate::String => Ty::String,
         TyTemplate::Int => Ty::Int,
@@ -1103,8 +1107,16 @@ fn ty_of_template(template: TyTemplate, u: &mut Unifier) -> Ty {
 
 /// The value `from-lines` returns, standalone from an [`Inferencer`] context:
 /// a recursive Step stream of Strings, the recursion closing through a comp
-/// var.  [`Inferencer::lines_step_ty`] delegates here.
-pub(super) fn lines_step_ty(u: &mut Unifier) -> Ty {
+/// var.
+///
+/// [`Inferencer::lines_step_ty`] delegates here.  Public for the same reason
+/// as [`ty_of_template`]: `help`/`explain`'s fallback needs it too.
+///
+/// # Panics
+///
+/// Never: the self-referential unification it performs is between a fresh
+/// comp var and the type built from it, which cannot fail.
+pub fn lines_step_ty(u: &mut Unifier) -> Ty {
     use crate::stream::{HEAD_FIELD, TAIL_FIELD, done_tag, more_tag};
     let tail_comp = u.fresh_comp_ty();
     let payload = Ty::Record(Row::Extend(

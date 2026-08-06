@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 5ee3d0c
-generated_at_date: 2026-07-31
+generated_at_commit: 1e9fea4
+generated_at_date: 2026-08-06
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -57,9 +57,13 @@ Bodies are grouped by concern, one submodule each:
 - `strings.rs` — string and regex primitives. `dedent` owns the raw-block
   framing rule: blank lines around a multiline block fall away before the
   common margin is stripped, while content-line whitespace is preserved;
-- `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs` — the last also home to
-  `builtin_echo`, which is `to-line`'s neighbour by nature: per-argument `str`,
-  single-space intercalation, a newline to the byte channel;
+- `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs` — the last is also
+  home to `builtin_echo`, `to-line`'s neighbour by nature: per-argument
+  `str`, single-space intercalation, a newline to the byte channel.
+  `write_encoded` (`codecs.rs:216`) writes its bytes to stdout and returns
+  `Value::Unit`, so `to-csv`, `to-bytes`, `to-string`, `to-lines`, and
+  `to-json` are writers: each types `A → ⟨∅, Bytes, Bytes⟩ Unit`, and its
+  encoded bytes are its sole payload;
 - `shell.rs` — `cd`, `alias` / `unalias`;
 - `concurrency.rs` — `spawn` / `watch` / `service` / `detach` and the handle
   verbs

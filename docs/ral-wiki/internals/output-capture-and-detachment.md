@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 6ef14dd
-verified_at_date: 2026-07-26
-anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::reaper, WorkerLease, WorkerRegistry, lease_fire, Resident, spawn_detached, DetachPolicy]
+verified_at_commit: 1e9fea4
+verified_at_date: 2026-08-06
+anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::reaper, WorkerLease, WorkerRegistry, lease_fire, Resident, spawn_detached, DetachPolicy, Capture, decode_utf8_strict, eval_seq]
 ---
 
 # Output capture and detachment
@@ -13,6 +13,36 @@ the run onto a root-parented, byte-bounded, lease-bound worker.** A long-running
 server is the canonical instance: run inline it stalls the call to the deadline
 and is killed with its tree; spawned it returns instantly and survives, reaped
 only for neglect — or never, if born a `service`.
+
+## The `Capture` node: a computation's own byte payload
+
+**This section names a different mechanism from the drain-to-EOF story
+below, though both swap in a `Sink::Buffer`.** The evaluator's `Capture` node
+is inserted by [[internals/compilation-ladder|annotate]] wherever a value
+demand meets a byte-payload result mode. A command substitution is the
+canonical example: `let v = echo hi`. It does not inspect the operand's
+produced value. The operand's type already says `result = Bytes`, so there
+is nothing left to discriminate.
+
+- `eval_capture` (`core/src/evaluator/comp.rs`) installs the buffer through
+  `with_capture` (`core/src/evaluator/capture.rs`). It swaps `shell.io.stdout`
+  to a fresh `Sink::Buffer` for the run of its operand.
+- On success, it strips one trailing newline and decodes the buffer strictly
+  with `decode_utf8_strict`. A decode failure names `| from-bytes` as the
+  route for output that is not valid UTF-8.
+- On failure, it releases whatever bytes the operand already wrote to the
+  outer stream, before the error propagates. A failed operand's partial
+  output is therefore not silently lost.
+- An operand may contain an external child. That child's stdout still drains
+  through the ordinary pump-to-EOF machinery below. It lands in the
+  `Capture` buffer rather than in the terminal.
+
+**Flush-through routes a non-final write past the innermost buffer.**
+`eval_seq` (`core/src/evaluator/comp.rs`) flushes every non-final part's
+bytes to the sink one level out. Only the sequence's tail is its payload.
+This is what keeps a syntactic thunk and an opaque one in agreement:
+`!{M}` and `let b = {M}; !$b` observe the same bytes in a capturing context.
+They differ only in buffering latency.
 
 ## Capture is a drain to EOF
 

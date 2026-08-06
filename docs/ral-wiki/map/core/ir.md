@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: 1e9fea4
+generated_at_date: 2026-08-06
 covers_paths: [core/src/ir.rs]
 ---
 
@@ -32,8 +32,11 @@ slots are not optional: "the checker has not run yet" is not a representable sta
   each stage. The elaborator fills `wires` with `Wire::EMPTY` and `stage_types` with `Unit`
   placeholders that the annotation pass overwrites wherever inference visited
   ([[map/core/typecheck|typecheck]]).
-- `CompKind::Bind` carries `rhs_output: ByteMode` — the bound computation's ground
-  output mode, the one bit `eval_bind_rhs` reads to decide stdout capture.
+- `CompKind::Capture(Arc<Comp>)` (`ir.rs:463`) is the checker's one payload
+  coercion: run the body, capture its bytes, decode them as a `String`
+  value. No surface syntax produces it; [[map/core/typecheck|typecheck]]'s
+  `annotate` pass inserts it as demand propagation. `referenced_names`'s walk
+  descends into it at `ir.rs:253`.
 
 A `Wire { input, output }` and `ByteMode { Bytes, Empty }` live in
 `core/src/mode.rs`: the two-valued image of a `PipeSpec` with the `PipeMode::Var`

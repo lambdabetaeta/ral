@@ -25,9 +25,9 @@ irreducibility:
 - **It is a base computation** — an operation the prelude has no smaller pieces to
   build from: a regex engine, the string transforms, structural comparison
   dispatched on the runtime value, scalar coercion.
-- **Its type cannot be given to an ordinary binding** — the codec byte-modes
-  `F[Bytes, ∅]` / `F[∅, Bytes]` ([[design/codecs|codecs]]) and `fail`'s divergent,
-  open-row result.
+- **Its type cannot be given to an ordinary binding** — the codec specs
+  `⟨Bytes, ∅, ∅⟩` / `⟨∅, Bytes, Bytes⟩` ([[design/codecs|codecs]]) and `fail`'s
+  divergent, open-row result.
 
 Filesystem *effects* are deliberately none of these: there is no `copy-file` or
 `make-dir`, because `cp` / `mv` / `rm` / `mkdir` already own that and a second

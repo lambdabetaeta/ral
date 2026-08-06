@@ -1,84 +1,101 @@
 # Codecs: the typed crossing between bytes and values
 
-**The `from-X` / `to-X` family is where a program deliberately moves a
-[[design/pipelines|pipeline]] edge between the byte channel and structured
-values, and the move is a *typing* fact: every `from-X` has computation type
-`F[Bytes, ∅] A` and every `to-X` has `F[∅, Bytes] Bytes`.** These are the two
-asymmetric [[design/types|byte modes]] — `mode.rs` names them `decode` and
-`encode`, right beside `none` and `ext` — so the codecs are simply the builtins
-that carry a byte mode on one side and `∅` on the other.
+**The `from-X` / `to-X` builtins move a [[design/pipelines|pipeline]] edge
+between the byte channel and structured values, and the move is a typing
+fact.** A decoder reads the byte channel and returns a value. An encoder takes
+one value, writes the encoded bytes, and those bytes are its result:
+
+- every decoder has the computation type `from-X : ⟨Bytes, ∅, ∅⟩ A`;
+- every encoder has the type `to-X : A → ⟨∅, Bytes, Bytes⟩ Unit`.
+
+The encoder's result mode is `Bytes`, so by WF-2 its return type is `Unit`
+([[design/types|types]]). The two types are inverse: an encoder puts on the
+channel what the matching decoder reads from it.
 
 ## Byte modes make the crossing checkable
 
-A computation has type `F[I,O] A` over an input and output byte mode, each `∅`,
-`Bytes`, or a mode variable `μ` ([[design/types|types]]). Four `PipeSpec` shapes
-name themselves in `mode.rs`:
+A computation has the type `⟨i, o, r⟩ A` over an input mode, an output mode,
+and a result mode ([[design/types|types]]). Four spec shapes classify the
+builtins:
 
-- `none` — `F[∅, ∅]` — a pure value builtin; no byte channel touched.
-- `ext` — `F[Bytes, Bytes]` — an external command or byte filter.
-- `decode` — `F[Bytes, ∅]` — **consume the byte channel, return a value.**
-- `encode` — `F[∅, Bytes]` — **consume a value, emit on the byte channel.**
+- `⟨∅, ∅, ∅⟩` — a pure value builtin; it touches no byte channel.
+- `⟨Bytes, Bytes, Bytes⟩` — an external command or a byte filter.
+- `⟨Bytes, ∅, ∅⟩` — a decoder: it consumes the byte channel and returns a value.
+- `⟨∅, Bytes, Bytes⟩` — an encoder: it consumes a value argument and writes the byte channel.
 
-`from-X` *is* `decode`; `to-X` *is* `encode`. The asymmetry is the whole point.
-Because the [[design/pipelines|pipe]] connects two stages only when the left
-output mode equals the right input mode, the modes admit `cmd | from-json`
-(`Bytes` meets `Bytes`) and `to-json $x | cmd` (`Bytes` meets `Bytes`) and reject
-threading a value where bytes are due — the boundary cannot be crossed by
-accident, only by naming a codec. Decoding is therefore typed *at* the crossing:
-`from-json` yields a fresh value type the inferencer threads onward, and a
-misspelled codec fails at command lookup rather than as a runtime "unknown
-codec" string ([[design/builtins|why each codec is its own builtin]]).
+`PipeSpec::none` and `PipeSpec::decode` in `core/src/mode.rs` build the two
+value-payload shapes; `ret_bytes` in `core/src/typecheck/builtins.rs` builds
+the two byte-payload shapes for builtins, and `external_exec_comp_ty` in
+`core/src/typecheck/infer.rs` builds the external-command shape. The [[design/pipelines|pipe]] connects two
+stages only when the left output mode equals the right input mode. The modes
+therefore admit `cmd | from-json` and `to-json $x | cmd` (`Bytes` meets
+`Bytes`), and they reject a value where bytes are due. A program crosses the
+boundary only when it names a codec. The decode is typed at the crossing:
+`from-json` yields a fresh value type, and the inferencer threads that type
+onward. A misspelled codec fails at command lookup
+([[design/builtins|why each codec is its own builtin]]).
 
 ## The two directions
 
-`from-X` takes **no value argument** — it reads the byte channel, whether that
-channel is a `< file` redirect or the left stage of a pipeline. Each decoder is
-declared arity 0, so passing a value is a *type* error raised before the call
-runs (`` `from-json` takes no argument — it reads the byte channel ``) whose
-hint names the fix: to decode a value already in hand, pipe it through the
-matching `to-X` encoder, so the bytes re-enter the channel a decoder reads —
+A decoder takes no value argument. It reads the byte channel, whether that
+channel is a `< file` redirect or the left stage of a pipeline. Each decoder
+is declared with arity 0, so a passed value is a type error, raised before the
+call runs (`` `from-json` takes no argument — it reads the byte channel ``).
+The error's hint names the fix: pipe the value through the matching encoder,
+so the bytes enter the channel that a decoder reads —
 `to-string $s | from-json` for JSON in a `String`, `to-bytes $b | from-string`
-for a `Bytes` value (e.g. `$r[stdout]` from `await`). The decoders:
+for a `Bytes` value (for example `$r[stdout]` from `await`). The decoders:
 
-- `from-bytes` → `Bytes`, the raw escape hatch;
+- `from-bytes` → `Bytes`; the bytes pass through with no decode;
 - `from-string` → `String`, **strict** UTF-8;
-- `from-line` → `String`, strict, one trailing `\n` / `\r\n` stripped;
-- `from-json` → a decoded value, strict UTF-8 then JSON;
-- `from-csv` → a list of records keyed by the header row, every field a
-  `String` (CSV is untyped — coerce with `int` / `float`); the underlying
-  reader handles quoted fields, embedded commas, and embedded newlines;
+- `from-line` → `String`, strict, with one trailing `\n` / `\r\n` stripped;
+- `from-json` → a decoded value: strict UTF-8, then JSON;
+- `from-csv` → a list of records keyed by the header row; every field is a
+  `String`, because CSV is untyped — coerce with `int` / `float`; the reader
+  handles quoted fields, embedded commas, and embedded newlines;
 - `from-lines` → a line stream (below).
 
-`to-X` takes one value and writes its encoded form to the byte channel.
-`to-bytes`, `to-string`, `to-lines` (newline-join a list), `to-json`, and
-`to-csv` return the `Bytes` they wrote; `to-line` is the line-writer used by
-`echo` and returns `Unit`, so a value boundary captures its final line as a
-`String`. All share the `encode` mode. `to-csv` takes a list of records and emits a header plus one row each;
-columns are the first record's keys in sorted order (maps are key-ordered, so
-there is no original column order to recover) and a record missing a column
-contributes an empty field.
-`to-json` maps a ral value to JSON structurally: a record or `[String:A]` map
-becomes an object, a list an array, `Unit` becomes `null`, and a variant
-`` `tag payload `` becomes `{"tag": "tag", "payload": …}` — the `payload` key
-omitted for a niladic tag. `Bytes` serialises as an array of byte integers; a
-`Lambda`, `Block`, or `Handle` has no JSON image and is an error.
+An encoder takes one value and writes its encoded form to the byte channel.
+`to-bytes`, `to-string`, `to-lines` (which joins a list with newlines),
+`to-json`, `to-csv`, and `to-line` (the line writer that `echo` uses) all
+return `Unit`; the written bytes are the result (`write_encoded` in
+`core/src/builtins/codecs.rs`). In a pipeline, the write feeds the wire:
+`to-json $x | cmd` gives `cmd` the encoded bytes. At a bind, the
+[[design/types|capture]] coercion applies: `let e = to-json $x` binds the
+encoded text as a `String`.
+
+`to-csv` takes a list of records and writes a header row plus one row for each
+record. The columns are the first record's keys in sorted order, because maps
+are key-ordered and hold no original column order. A record that misses a
+column contributes an empty field.
+
+`to-json` maps a ral value to JSON structurally. A record or a `[String:A]`
+map becomes an object; a list becomes an array; `Unit` becomes `null`. A
+variant `` `tag payload `` becomes `{"tag": "tag", "payload": …}`, and the
+`payload` key is absent for a niladic tag. A `Bytes` value serialises as an
+array of byte integers. A `Lambda`, a `Block`, or a `Handle` has no JSON image
+and is an error.
 
 ## Whole-buffer vs. streaming
 
 The structured decoders (`from-string`, `from-line`, `from-json`) read all of
-stdin and then decode — whole-buffer. So does `from-lines`, despite its
-stream-shaped result: it yields a `Step` stream — a `more [head, tail]` /
-`done` open variant whose tail is a thunk
-([[invariants/optionality-via-variants|open variants]]) — but the whole chain
-is built eagerly from stdin read to EOF, so the *interface* is incremental
-while the memory profile matches the other decoders. One codec is genuinely
-*streaming*, the way to process unbounded input without holding it:
+stdin and then decode: they are whole-buffer. `from-lines` is also
+whole-buffer, despite its stream-shaped result. It yields a `Step` stream — a
+`more [head, tail]` / `done` open variant whose tail is a thunk
+([[invariants/optionality-via-variants|open variants]]) — but it builds the
+whole chain eagerly, from the stdin read to EOF. The interface is incremental;
+the memory profile matches the other decoders. One codec streams, and it is
+the way to process unbounded input without holding it:
 
-- `fold-lines <fn> <init>` folds over stdin line by line. Its type is
-  *parametric in the output mode*, `F[Bytes, μ] α`: a pure fold stays a
-  `decode` (`μ = ∅`), but a callback that emits bytes per line lifts the whole
-  stage to `F[Bytes, Bytes] α` — a decoder that re-encodes is back to `ext`.
-  The mode is inferred from what the callback does, not declared.
+- `fold-lines <fn> <init>` folds over stdin line by line. Its output mode is
+  parametric:
+  `fold-lines : ∀ α μ ρ. U (α → String → ⟨∅, μ, ρ⟩ α) → α → ⟨Bytes, μ, ∅⟩ α`.
+  A pure fold keeps `μ = ∅` and has the decoder shape. A callback that writes
+  bytes per line lifts the stage to `⟨Bytes, Bytes, ∅⟩ α`, and the fold's
+  result stays the reduced value. The inferencer takes `μ` from the callback;
+  no declaration is needed. The callback slot carries the quantified
+  result-mode variable `ρ`, as [[design/types|types]] describes for signature
+  slots (`reducer_spec` in `core/src/typecheck/builtins.rs`).
 
 ## Strict values, lossy lines
 

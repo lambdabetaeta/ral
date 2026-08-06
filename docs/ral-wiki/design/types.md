@@ -15,21 +15,92 @@ open-row-polymorphic; that fragment is its own page,
 [[design/row-types|row-types]]. Records and maps share one runtime carrier but
 answer different static questions — [[design/records-and-maps|records-and-maps]].
 
-**Computation types carry byte modes.** A computation has type `F[I,O] A`: it
-produces a value of type `A` while consuming input bytes `I` and emitting output
-bytes `O` on the byte channel, where each mode is `∅`, `Bytes`, or a mode
-variable `μ`. A parameterised block has type `{A → B}`.
+**Computation types carry a three-mode spec.** A computation has the type
+`⟨i, o, r⟩ A`, where `A` is a value type: the computation returns a value of
+type `A` under the spec. The spec is `PipeSpec` in `core/src/mode.rs`:
 
-- **The modes are *pipeline modes*** the inferencer infers and unifies
-  (`PipeMode` / `ModeVar` in `core/src/mode.rs`): they make a stage's pipe
-  behaviour visible to the checker, so adjacent stages connect only when the left
-  output mode equals the right input mode.
-- **This is where the value/command distinction becomes a *typing* discipline.**
-  An external command has shape `F[I, Bytes] String` — bytes on the output
-  channel, return type still `String`.
-- **Decoding to that `String` is strict UTF-8 conversion,** deferred to the
-  `let` boundary rather than performed inside the pipe. Invalid text fails with
-  a hint to keep the bytes via `from-bytes`.
+- `i` is the input mode: `Bytes` when the computation reads the byte channel, `∅` when it does not;
+- `o` is the output mode: `Bytes` when the computation writes the byte channel, `∅` when it does not;
+- `r` is the result mode: the conduit that carries the computation's result.
+
+Each mode is `∅`, `Bytes`, or a mode variable. The three modes share one
+unification, generalisation, and display machinery. Adjacent
+[[design/pipelines|pipeline]] stages connect only when the left output mode
+equals the right input mode. A parameterised block has the type `{A → B}`.
+
+**The result mode locates the payload.** `result = Bytes` means: the
+computation's result is the bytes that it writes. `result = ∅` means: the
+computation's result is its return value. Two well-formedness conditions
+constrain the spec:
+
+- **WF-1** — `result ⊑ output`;
+- **WF-2** — `result = Bytes` implies that the return type is `Unit`.
+
+The checker asserts both conditions at each site that builds a `Return` type,
+in `core/src/typecheck/scope.rs`, `core/src/typecheck/builtins.rs`, and
+`core/src/typecheck/infer.rs`. A computation therefore has one payload: its
+return value or its byte channel, never both. For example:
+
+- `echo hi : ⟨∅, Bytes, Bytes⟩ Unit` — the bytes are the payload;
+- `return 5 : ⟨∅, ∅, ∅⟩ Int` — the return value is the payload;
+- `audit { echo hi } : ⟨Bytes, Bytes, ∅⟩ Record` — the computation writes bytes, and the record is the payload;
+- `from-json : ⟨Bytes, ∅, ∅⟩ A` — a decoder reads bytes and returns a value.
+
+The third example shows that a computation can write bytes and keep a value
+payload. `audit` needs no special case in the checker or in the evaluator. An
+external command has the type `⟨i, Bytes, Bytes⟩ Unit` with a fresh input mode
+`i` (`external_exec_comp_ty` in `core/src/typecheck/infer.rs`), so `echo` and
+`^echo` show the checker one shape.
+
+**The result mode is ground at every source-tree node.** An introduction rule
+sets it; propagation copies it; a join computes it; a shape-forcing
+expectation grounds it. A payload decision against an unresolved result mode
+pins the mode to `∅`. Result-mode variables appear only in declared signature
+slots:
+
+- the computation-typed argument of a builtin, for example `spawn`, `each`, `map`, and `fold`;
+- the expected arm shape of a scope.
+
+A slot variable is quantified like every other mode variable, for example
+`spawn : ∀ i o r β. U (⟨i, o, r⟩ β) → Handle β`. No elaboration decision reads
+a slot variable.
+
+**One subsumption rule has one instance.** The type `⟨i, o, ∅⟩ Unit` is also
+the type `⟨i, o, Bytes⟩ Unit` when `o ⊒ Bytes`. The rule applies at the top of
+a computation type only:
+
+- it does not descend through `Thunk`, `Fun`, or rows;
+- it is not a unification rule — `unify_mode` demands equality on ground modes.
+
+The join over the arms of `if`, `?`, and `try` applies the instance:
+
+- a join with a byte-payload arm lands wholly on the byte side;
+- a `∅`-at-`Unit` arm subsumes into the byte side;
+- a byte-payload arm beside a `∅`-non-`Unit` arm is a type error, and the explicit spelling is `echo hi | from-string`.
+
+`guard`, `within`, and `grant` pass their body's type through and need no arm
+rule.
+
+**One coercion, `capture`, moves a byte payload to a value.** The checker
+inserts `capture M : ⟨i, o, ∅⟩ String` where `M : ⟨i, o, Bytes⟩ Unit`, for
+example at the right-hand side of a `let`. The precondition is
+`result = Bytes`, which is a type, so no runtime value test remains. `capture`
+is an IR node (`CompKind::Capture` in `core/src/ir.rs`) with one evaluation
+rule (`core/src/evaluator/capture.rs`):
+
+- run `M` with the output captured;
+- strip the trailing newline;
+- decode the bytes as strict UTF-8 — `| from-bytes` keeps bytes that are not valid UTF-8.
+
+`capture M` is close to the pipe `M | from-string`, which a user can write.
+
+**The calculus is a graded call-by-push-value.** The spec is the grading; `F`
+remains a functor from value types to computation types, and the adjunction
+with `U` is unchanged. Three properties hold:
+
+- the result mode of a computation is stable under substitution and under abstraction;
+- elaboration is total and type-preserving;
+- coherence follows from one subsumption instance and one coercion.
 
 Inference is annotation-free; generalisation happens at the `Bind` boundary. Its
 soundness rests on two independent legs:

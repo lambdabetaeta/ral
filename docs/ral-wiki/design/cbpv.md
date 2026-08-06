@@ -8,6 +8,9 @@ from *commands*:**
 - a thunk `{M}` suspends a command as a value; `!` forces it back into a
   command.
 
+The typed calculus is a graded call-by-push-value: the three-mode spec of a
+command's type is the grading ([[design/types|types]]).
+
 Two sigils keep retrieval and forcing distinct:
 
 - `$name` dereferences a binding to its value without side effect;

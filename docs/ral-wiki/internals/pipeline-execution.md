@@ -1,7 +1,7 @@
 ---
-verified_at_commit: f7cf93a
-verified_at_date: 2026-07-25
-anchors: [run_pipeline, resolve_pipeline, StageLaunch, value_edge_in, force_pipe_value, run_child_eval, PipelineGroup, Launch, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, park_on_stop]
+verified_at_commit: 1e9fea4
+verified_at_date: 2026-08-06
+anchors: [run_pipeline, resolve_pipeline, StageLaunch, value_edge_in, force_pipe_value, run_child_eval, PipelineGroup, Launch, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, park_on_stop, PipeSpec, Capture, infer_pipeline]
 ---
 
 # Pipeline execution: value folds, process groups, and the resolve-time launch
@@ -16,8 +16,8 @@ reduces a single-stage pipeline to its inner computation and hands the rest to
 collect — are the spine below.
 
 **Resolve freezes a `StageLaunch` per stage from resolve-time facts.**
-`resolve_pipeline` (`pipeline/resolve.rs`) reads each stage's `F[input, output]`
-off the ground `Vec<Wire>` the checker wrote onto the `Pipeline` node
+`resolve_pipeline` (`pipeline/resolve.rs`) reads each stage's input and output
+modes off the ground `Vec<Wire>` the checker wrote onto the `Pipeline` node
 ([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]) — never
 re-inferring it — and, from the unified modes, the redirects, the terminal plan,
 and whether a `!{…}` audit is capturing bytes, commits one decision per stage:
@@ -31,6 +31,23 @@ and whether a `!{…}` audit is capturing bytes, commits one decision per stage:
 Launch reads this decision; it does not re-derive it. A whole pipeline whose every
 edge is on the value channel resolves to `PipelineKind::PureValue`; anything
 touching bytes is `ProcessStaged`.
+
+**A byte-wired final stage carries the pipeline's own payload on the wire.**
+The pipeline's last stage may go unconsumed as a value, with its own output
+mode grounding `Bytes`. The checker then types the whole pipeline as
+`⟨input, output, Bytes⟩ Unit` (`infer_pipeline`, `core/src/typecheck/infer.rs`).
+By WF-2, that type carries no value component. The last stage's own return
+value — for example the record `audit` builds — is therefore not the
+pipeline's payload. `PipelineCollector::finish` (`pipeline/collect.rs`)
+returns `Value::Unit` for a byte-tailed pipeline, matching the checker's
+verdict rather than discarding a value the type still claimed.
+
+At a bind, the boundary reads a value demand against a `result` of `Bytes`
+and inserts `Capture` ([[internals/compilation-ladder|compilation-ladder]]).
+`let v = echo a | audit { /bin/cat }` binds the text `/bin/cat` wrote, not
+the `audit` record. `pipeline_value_edges.rs` (`ral/tests/`) pins this case.
+`force_pipe_value` is untouched by this typing. It forces exactly one value
+crossing a value edge, and a byte-tailed pipeline has none.
 
 **The value-edge judgment has one definition.** Whether stage *i* carries a value
 on its input or output edge is `value_edge_in` / `value_edge_out`

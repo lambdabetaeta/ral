@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: 1e9fea4
+generated_at_date: 2026-08-06
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
 
@@ -53,13 +53,20 @@ shares belong to [[map/core/shell-state|shell-state]].
 
 Internals:
 
-- `trampoline.rs` — loops on `Control::Tail` for O(1) tail-call space and hosts
-  `apply`; the `Value::Thunk` arm delegates to the block contract `eval_block`,
-  and `apply_lambda_frame` runs a lambda body in place via `with_thunk_body`.
-  `comp.rs` — the `Comp` step functions; `val.rs` — the side-effect-free `Val`
-  layer (`eval_val`); `expr.rs` — the primitive operators the elaborator's
-  expression desugaring emits (`eval_not` / `eval_binary`) and value indexing
-  (`index_value`); `call.rs` — the application step (`invoke`).
+- `trampoline.rs` loops on `Control::Tail` for O(1) tail-call space and hosts
+  `apply`. Its `Value::Thunk` arm delegates to the block contract
+  `eval_block`; `apply_lambda_frame` runs a lambda body in place through
+  `with_thunk_body`. `comp.rs` holds the `Comp` step functions, including
+  `eval_capture` — the `Capture` node's evaluation rule. `eval_capture`
+  installs a buffer through `capture.rs`'s `with_capture`, strips one
+  trailing newline, and decodes the bytes strictly with
+  `builtins::util::decode_utf8_strict`. `comp.rs`'s `eval_seq` flushes each
+  non-final part's bytes past the innermost capture buffer to the outer
+  sink, so a `Capture` node drains only its tail's bytes. `val.rs` holds the
+  side-effect-free `Val` layer (`eval_val`); `expr.rs` holds the primitive
+  operators the elaborator's expression desugaring emits (`eval_not` /
+  `eval_binary`) and value indexing (`index_value`); `call.rs` holds the
+  application step (`invoke`).
 - `scope.rs` — dynamic frames implementing [[design/scoping|scoping]] and the five
   [[design/control-operators|control operators]]. The `within` form installs
   command handlers: a per-name handler and every alias must be a unary lambda
