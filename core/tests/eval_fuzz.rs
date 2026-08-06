@@ -643,7 +643,6 @@ fn upper_lower() {
     );
 }
 
-#[cfg(feature = "grep")]
 #[test]
 fn replace_basic() {
     assert_eq!(
@@ -667,7 +666,6 @@ fn string_replace_errors_when_absent() {
     must_fail("!{string-replace 'zzz' 'qqq' 'hello world'}");
 }
 
-#[cfg(feature = "grep")]
 #[test]
 fn split_and_join() {
     must_succeed("let parts = re-split '/' '/usr/local/bin'\necho !{intercalate '-' $parts}");
@@ -1367,7 +1365,6 @@ fn spread_in_command() {
 
 // ── New prelude functions ───────────────────────────────────────────────
 
-#[cfg(feature = "grep")]
 #[test]
 fn words_splits_on_space() {
     assert_eq!(

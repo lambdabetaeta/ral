@@ -3,12 +3,8 @@
 use crate::types::{Settled, Shell, Value, as_list, sig, sig_hint};
 use std::borrow::Cow;
 
-#[cfg(feature = "grep")]
 use super::util::regex_err;
 use super::util::{arg0_str, f64_to_i64};
-
-#[cfg(not(feature = "grep"))]
-const NO_GREP: &str = "regex operations require the grep feature — rebuild with --features grep";
 
 /// Parse a `Value` as a `usize` index; junk errors rather than coercing to zero.
 fn as_index(v: &Value, ctx: &str) -> Settled<usize> {
@@ -91,28 +87,18 @@ pub(super) fn builtin_shell_quote(args: &[Value]) -> Settled<Value> {
     Ok(Value::String(quoted.into_owned()))
 }
 
-#[cfg(feature = "grep")]
 fn compile_regex(ctx: &str, pattern: &str) -> Settled<regex::Regex> {
     regex::Regex::new(pattern).map_err(|e| sig(regex_err(ctx, pattern, &e.to_string())))
 }
 
-/// Compile `args[0]`, hand the regex to `f`.  The `grep` gate lives here so
-/// the six regex builtins need not each repeat the `NO_GREP` refusal.
+/// Compile `args[0]`, hand the regex to `f`.
 fn with_regex(
     ctx: &'static str,
     args: &[Value],
     f: impl FnOnce(&regex::Regex, &[Value]) -> Settled<Value>,
 ) -> Settled<Value> {
-    #[cfg(feature = "grep")]
-    {
-        let re = compile_regex(ctx, &args[0].to_string())?;
-        f(&re, args)
-    }
-    #[cfg(not(feature = "grep"))]
-    {
-        let _ = f;
-        Err(sig(NO_GREP))
-    }
+    let re = compile_regex(ctx, &args[0].to_string())?;
+    f(&re, args)
 }
 
 /// Errors unless the pattern matches exactly once, like its literal counterpart

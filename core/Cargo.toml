@@ -8,8 +8,11 @@ license.workspace = true
 workspace = true
 
 [features]
-# The regex builtins (re-match / re-split / re-replace-all) are core to a
-# shell, so grep is on by default.  Opt out with --no-default-features.
+# The regex builtins (re-match / re-split / re-replace-all) always compile —
+# `regex` is a plain dependency, not gated.  `grep` here is the heavier
+# ripgrep-style content search (the `grep` crate + `walkdir`), on by default
+# but droppable with --no-default-features for a leaner build (e.g. the
+# guest initramfs via ral-daemon's `default-features = false`).
 default = ["grep"]
 
 # Cross-platform bundled coreutils tools.  Every uu_* listed here must
@@ -39,7 +42,7 @@ coreutils-unix-only = [
     "dep:uu_test", "dep:uu_tac",
 ]
 diffutils = ["dep:diffutils", "dep:same-file"]
-grep      = ["dep:grep", "dep:regex", "dep:walkdir"]
+grep      = ["dep:grep", "dep:walkdir"]
 ripgrep   = ["dep:ral-ripgrep-core"]
 
 # Opt-in gate for the heavier sandbox integration tests (the macOS
@@ -51,7 +54,7 @@ test-util = []
 os_pipe       = "1"
 glob          = "0.3"
 imbl          = { version = "7", features = ["serde"] }
-regex         = { version = "1", optional = true }
+regex         = "1"
 shlex         = { workspace = true }
 ignore        = "0.4"
 tempfile      = "3.27"

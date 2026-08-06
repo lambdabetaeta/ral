@@ -316,7 +316,6 @@ pub fn for_each_stdin_line(
     Ok(())
 }
 
-#[cfg(feature = "grep")]
 /// Dig the cause line out of the regex crate's multi-line parse error.
 pub fn regex_err(ctx: &str, pattern: &str, full: &str) -> String {
     let cause = full
