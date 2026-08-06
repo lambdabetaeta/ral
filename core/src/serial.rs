@@ -649,7 +649,10 @@ impl SerialEnvSnapshot {
     /// Infallible: interning reserves ids, and any encoding failure surfaces
     /// at [`InternCtx::finish`].
     pub fn from_runtime(env: &Env, ctx: &mut InternCtx) -> Self {
-        let scopes = env.scope_iter().map(|scope| ctx.intern_scope(scope)).collect();
+        let scopes = env
+            .scope_iter()
+            .map(|scope| ctx.intern_scope(scope))
+            .collect();
         Self { scopes }
     }
 

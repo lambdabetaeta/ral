@@ -594,7 +594,10 @@ mod tests {
             ..SandboxProjection::default()
         })
         .unwrap();
-        for rule in profile.lines().filter(|l| !l.trim_start().starts_with(";;")) {
+        for rule in profile
+            .lines()
+            .filter(|l| !l.trim_start().starts_with(";;"))
+        {
             assert!(
                 !rule.contains("network"),
                 "net: false admitted a network rule: {rule}\n{profile}"
