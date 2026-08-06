@@ -55,7 +55,7 @@ pub(crate) fn pack_stage_value(value: &Value) -> Result<StageValue, Error> {
     let mut ctx = InternCtx::new();
     let value = SerialValue::from_runtime(value, &mut ctx).map_err(|e| transfer_error(&e))?;
     Ok(StageValue {
-        scope_table: ctx.scope_table,
+        scope_table: ctx.finish().map_err(|e| transfer_error(&e))?,
         value,
     })
 }

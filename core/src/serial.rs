@@ -122,21 +122,28 @@ pub struct SerialBinding {
     pub scheme: Option<crate::typecheck::Scheme>,
 }
 
-/// One row per `Arc`-shared scope, in DFS intern order;
+/// One row per `Arc`-shared scope, in discovery order;
 /// [`WireDecoder::for_shell`] rebuilds it into scope arcs on the receiving
 /// side.
 pub type ScopeTable = Vec<Vec<(String, SerialBinding)>>;
 
 // ── Interning context ─────────────────────────────────────────────────────
 //
-// Scopes intern in DFS order, but their references are unordered: a scope may
-// hold a closure whose captured env points back at an earlier-interned sibling.
-// `WireDecoder::for_shell` therefore sorts by dependency rather than trusting
-// id order.
+// Scope references are unordered: a scope may hold a closure whose captured
+// env points at a scope interned before or after it.  `WireDecoder::for_shell`
+// therefore sorts by dependency rather than trusting id order.
 
 pub struct InternCtx {
-    pub scope_table: ScopeTable,
-    pub ptr_to_id: HashMap<usize, u32>,
+    scope_table: ScopeTable,
+    ptr_to_id: HashMap<usize, u32>,
+    /// Scopes with an id but no row yet.  A stream is a chain of closures —
+    /// block → captured env → scope → binding → block — so encoding a scope's
+    /// bindings inside `intern_scope` would recurse once per link and bound
+    /// stream length by the stack.  Interning only *reserves*; [`Self::finish`]
+    /// encodes from this queue, a worklist in place of that recursion.  The
+    /// held `Arc`s also keep every interned pointer alive, so an id cannot be
+    /// claimed by a reused allocation mid-encode.
+    pending: Vec<(u32, Arc<HashMap<std::string::String, Binding>>)>,
 }
 
 impl InternCtx {
@@ -144,16 +151,14 @@ impl InternCtx {
         Self {
             scope_table: Vec::new(),
             ptr_to_id: HashMap::new(),
+            pending: Vec::new(),
         }
     }
 
-    fn intern_scope(
-        &mut self,
-        scope: &Arc<HashMap<std::string::String, Binding>>,
-    ) -> Result<u32, Error> {
+    fn intern_scope(&mut self, scope: &Arc<HashMap<std::string::String, Binding>>) -> u32 {
         let ptr = Arc::as_ptr(scope) as usize;
         if let Some(&id) = self.ptr_to_id.get(&ptr) {
-            return Ok(id);
+            return id;
         }
         #[allow(
             clippy::cast_possible_truncation,
@@ -161,26 +166,41 @@ impl InternCtx {
         )]
         let id = self.scope_table.len() as u32;
         self.ptr_to_id.insert(ptr, id);
-        self.scope_table.push(Vec::new()); // reserve the row: recursion may reach this id
-        let mut entries = Vec::with_capacity(scope.len());
-        for (k, b) in scope.iter() {
-            // A binding reaching a `Handle` cannot cross a process boundary.
-            // Drop it rather than fail the snapshot: an unrelated handle must
-            // not poison a stage that never names it, and one that does name
-            // it gets a clean unbound-name error instead.
-            if value_carries_handle(&b.value) {
-                continue;
+        self.scope_table.push(Vec::new()); // reserve the row; `finish` fills it
+        self.pending.push((id, Arc::clone(scope)));
+        id
+    }
+
+    /// Encode every pending scope's bindings — each may intern further scopes,
+    /// which join the queue rather than the stack — and yield the table.
+    /// Nothing ships without passing through here: the table has no other
+    /// accessor.
+    ///
+    /// # Errors
+    /// Encoding one of a scope's bindings fails; handle-bearing bindings are
+    /// dropped rather than raised.
+    pub fn finish(mut self) -> Result<ScopeTable, Error> {
+        while let Some((id, scope)) = self.pending.pop() {
+            let mut entries = Vec::with_capacity(scope.len());
+            for (k, b) in scope.iter() {
+                // A binding reaching a `Handle` cannot cross a process boundary.
+                // Drop it rather than fail the snapshot: an unrelated handle must
+                // not poison a stage that never names it, and one that does name
+                // it gets a clean unbound-name error instead.
+                if value_carries_handle(&b.value) {
+                    continue;
+                }
+                entries.push((
+                    k.clone(),
+                    SerialBinding {
+                        value: SerialValue::from_runtime(&b.value, &mut self)?,
+                        scheme: b.scheme.clone(),
+                    },
+                ));
             }
-            entries.push((
-                k.clone(),
-                SerialBinding {
-                    value: SerialValue::from_runtime(&b.value, self)?,
-                    scheme: b.scheme.clone(),
-                },
-            ));
+            self.scope_table[id as usize] = entries;
         }
-        self.scope_table[id as usize] = entries;
-        Ok(id)
+        Ok(self.scope_table)
     }
 }
 
@@ -424,11 +444,11 @@ impl FOValue<Closure> {
             } => Self::Ext(Closure::Lambda(SerialLambda {
                 param: param.clone(),
                 body: Arc::clone(body),
-                captured: SerialEnvSnapshot::from_runtime(captured, ctx)?,
+                captured: SerialEnvSnapshot::from_runtime(captured, ctx),
             })),
             Value::Block { body, captured } => Self::Ext(Closure::Block(SerialThunk {
                 body: Arc::clone(body),
-                captured: SerialEnvSnapshot::from_runtime(captured, ctx)?,
+                captured: SerialEnvSnapshot::from_runtime(captured, ctx),
             })),
             Value::Native { entry, applied } => Self::Ext(Closure::Native(SerialNative {
                 name: entry.name.as_ref().to_string(),
@@ -626,16 +646,11 @@ impl From<FOValue> for Value {
 
 impl SerialEnvSnapshot {
     /// Intern every scope of `env` into `ctx`, recording their table ids.
-    ///
-    /// # Errors
-    /// Encoding one of a scope's bindings fails; handle-bearing bindings are
-    /// dropped rather than raised.
-    pub fn from_runtime(env: &Env, ctx: &mut InternCtx) -> Result<Self, Error> {
-        let scopes = env
-            .scope_iter()
-            .map(|scope| ctx.intern_scope(scope))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { scopes })
+    /// Infallible: interning reserves ids, and any encoding failure surfaces
+    /// at [`InternCtx::finish`].
+    pub fn from_runtime(env: &Env, ctx: &mut InternCtx) -> Self {
+        let scopes = env.scope_iter().map(|scope| ctx.intern_scope(scope)).collect();
+        Self { scopes }
     }
 
     /// Rebuild an [`Env`] from this snapshot's scope ids; `dec`'s manifest
@@ -811,6 +826,45 @@ mod tests {
         }
     }
 
+    /// Encoding walks the chain as a queue, so a quarter-megabyte stack
+    /// encodes fifty thousand links.  (Regression: `intern_scope` and
+    /// `from_runtime` recursed into each other once per link, and a helper
+    /// stage died on a few hundred lines of `from-lines`.)
+    #[test]
+    fn deep_stream_chain_encodes_on_a_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let chain = crate::types::deep_block_chain(50_000);
+                let mut ctx = InternCtx::new();
+                SerialValue::from_runtime(&chain, &mut ctx).expect("encode");
+                let table = ctx.finish().expect("finish");
+                assert_eq!(table.len(), 50_000, "one scope row per link");
+            })
+            .expect("spawn")
+            .join()
+            .expect("a deep chain must encode without exhausting the stack");
+    }
+
+    /// The deferred table still decodes: `for_shell` resolves the row
+    /// dependencies and `into_runtime` rebuilds every link.
+    #[test]
+    fn deep_stream_chain_round_trips() {
+        let chain = crate::types::deep_block_chain(500);
+        let mut ctx = InternCtx::new();
+        let ipc = SerialValue::from_runtime(&chain, &mut ctx).expect("encode");
+        let table = ctx.finish().expect("finish");
+        let dec = WireDecoder::for_shell(&Shell::default(), &table).expect("decoder");
+        let back = ipc.into_runtime(&dec).expect("decode");
+        let mut depth = 0;
+        let mut cur = &back;
+        while let Value::Block { captured, .. } = cur {
+            depth += 1;
+            cur = captured.get("tail").expect("each link binds the next");
+        }
+        assert_eq!(depth, 500, "every link survives the round-trip");
+    }
+
     #[test]
     fn ipc_value_roundtrips_simple_values() {
         let value = Value::map(vec![
@@ -819,7 +873,8 @@ mod tests {
         ]);
         let mut ctx = InternCtx::new();
         let ipc = SerialValue::from_runtime(&value, &mut ctx).expect("to serial");
-        let dec = WireDecoder::for_shell(&Shell::default(), &ctx.scope_table).expect("decoder");
+        let table = ctx.finish().expect("finish");
+        let dec = WireDecoder::for_shell(&Shell::default(), &table).expect("decoder");
         assert_eq!(ipc.into_runtime(&dec).expect("from serial"), value);
     }
 }

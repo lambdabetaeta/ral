@@ -189,13 +189,10 @@ pub(crate) fn pack_request(
     sources: &SourceDb,
 ) -> Settled<ChildEvalRequest> {
     let mut ctx = InternCtx::new();
-    let captured = match captured {
-        Some(env) => Some(SerialEnvSnapshot::from_runtime(env, &mut ctx)?),
-        None => None,
-    };
+    let captured = captured.map(|env| SerialEnvSnapshot::from_runtime(env, &mut ctx));
     let mobile = WireMobile::from_runtime(mobile, &mut ctx)?;
     Ok(ChildEvalRequest {
-        scope_table: ctx.scope_table,
+        scope_table: ctx.finish()?,
         body,
         mobile,
         captured,
@@ -306,7 +303,7 @@ fn pack_audit_observations(observations: Vec<Observation>) -> Settled<Vec<WireAu
         let mut ctx = InternCtx::new();
         let observation = WireObservation::from_runtime(&obs, &mut ctx)?;
         out.push(WireAuditObservation {
-            scope_table: ctx.scope_table,
+            scope_table: ctx.finish()?,
             observation,
         });
     }
@@ -387,7 +384,9 @@ pub(crate) fn run_child_eval(
     finish(ctx, outcome, last_status, audit_observations, output_value)
 }
 
-/// Assemble the response from its fully-packed parts.
+/// Assemble the response from its fully-packed parts.  A scope table that
+/// fails to encode voids the outcome the same way an unserialisable value
+/// does: the response carries the transfer error and no value crosses.
 fn finish(
     ctx: InternCtx,
     outcome: WireOutcome,
@@ -395,9 +394,17 @@ fn finish(
     audit_observations: Vec<WireAuditObservation>,
     output_value: Option<Value>,
 ) -> (ChildEvalResponse, Option<Value>) {
+    let (scope_table, outcome, output_value) = match ctx.finish() {
+        Ok(table) => (table, outcome, output_value),
+        Err(e) => (
+            ScopeTable::default(),
+            break_to_outcome(Break::Error(transfer_error(&e))),
+            None,
+        ),
+    };
     (
         ChildEvalResponse {
-            scope_table: ctx.scope_table,
+            scope_table,
             outcome,
             last_status,
             audit_observations,
@@ -557,7 +564,7 @@ mod tests {
             },
             last_status: 1,
             audit_observations: vec![WireAuditObservation {
-                scope_table: ctx.scope_table,
+                scope_table: ctx.finish().expect("finish"),
                 observation,
             }],
         };
@@ -590,7 +597,7 @@ mod tests {
         let mut ctx = InternCtx::new();
         let wire = WireMobile::from_runtime(&mobile, &mut ctx).expect("to wire");
         let request = ChildEvalRequest {
-            scope_table: ctx.scope_table,
+            scope_table: ctx.finish().expect("finish"),
             body: compile_one("return unit"),
             mobile: wire,
             captured: None,
@@ -638,7 +645,8 @@ mod tests {
 
         let json = serde_json::to_vec(&wire).expect("serialise observation");
         let back: WireObservation = serde_json::from_slice(&json).expect("deserialise observation");
-        let dec = WireDecoder::for_shell(&Shell::default(), &ctx.scope_table).expect("decoder");
+        let table = ctx.finish().expect("finish");
+        let dec = WireDecoder::for_shell(&Shell::default(), &table).expect("decoder");
         let runtime = back.into_runtime(&dec).expect("into runtime");
         assert_eq!(runtime.what.kind(), "capability-check");
         assert!(
@@ -692,7 +700,8 @@ mod tests {
         let mut ctx = InternCtx::new();
         let wire = WireObservation::from_runtime(&obs, &mut ctx).expect("must not die on a handle");
 
-        let dec = WireDecoder::for_shell(&Shell::default(), &ctx.scope_table).expect("decoder");
+        let table = ctx.finish().expect("finish");
+        let dec = WireDecoder::for_shell(&Shell::default(), &table).expect("decoder");
         let runtime = wire.into_runtime(&dec).expect("into runtime");
         let crate::types::Observed::Command { value, .. } = runtime.what else {
             panic!("expected a command")
@@ -730,7 +739,8 @@ mod tests {
         let mut ctx = InternCtx::new();
         let wire = WireObservation::from_runtime(&obs, &mut ctx).expect("wire");
 
-        let dec = WireDecoder::for_shell(&shell, &ctx.scope_table).expect("decoder");
+        let table = ctx.finish().expect("finish");
+        let dec = WireDecoder::for_shell(&shell, &table).expect("decoder");
         let runtime = wire.into_runtime(&dec).expect("into runtime");
         let crate::types::Observed::Command { value, .. } = runtime.what else {
             panic!("expected a command")

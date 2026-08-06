@@ -54,7 +54,11 @@ carries. Around it:
   helper stage preserves the binding's scheme across the round-trip
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
 - An interning table, `InternCtx`, deduplicates shared scopes, so a captured
-  environment with shared frames cannot unfold into an O(2^N) tree.
+  environment with shared frames cannot unfold into an O(2^N) tree. Interning
+  only *reserves* an id and queues the scope; `finish` — the table's sole
+  accessor — drains the queue, so encoder stack depth is bounded by data
+  nesting inside one scope, not by stream length
+  ([[decisions/260806_depth-proof-env-seam|depth-proof-env-seam]]).
 - `from_runtime` walks a `Value`/`Env` into its serial form against the intern
   context; the inverse rebuilds runtime values from the snapshot.
 

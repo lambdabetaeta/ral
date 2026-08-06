@@ -137,7 +137,7 @@ impl Env {
         self.scopes
             .back_mut()
             .and_then(|scope| Arc::make_mut(scope).remove(name))
-            .map(|b| b.value)
+            .map(|mut b| std::mem::replace(&mut b.value, Value::Unit))
     }
 
     pub fn push_scope(&mut self) {
@@ -233,6 +233,77 @@ impl Default for Env {
     }
 }
 
+thread_local! {
+    /// `Some` while a dismantling [`Binding::drop`] is looping on this thread.
+    /// A binding drop reached from inside that loop pushes its value here
+    /// instead of letting drop glue recurse into it.
+    static DISMANTLE_QUEUE: std::cell::RefCell<Option<Vec<Value>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+impl Drop for Binding {
+    /// A stream is a chain of closures — block → captured env → scope →
+    /// binding → block — so plain drop glue recurses once per link and bounds
+    /// stream length by the stack.  Every link passes through a `Binding`, so
+    /// the chain is cut here, with a trampoline rather than a hand-rolled
+    /// walk: glue still does all traversal — a shared spine stays one
+    /// refcount decrement, nothing is cloned to be destroyed — but a binding
+    /// dying *inside* another binding's drop hands its value to that
+    /// dismantler's queue and returns, keeping the stack between any two
+    /// links constant.
+    fn drop(&mut self) {
+        // A value with no interior can reach no binding: let glue have it.
+        if matches!(
+            self.value,
+            Value::Unit
+                | Value::Bool(_)
+                | Value::Int(_)
+                | Value::Float(_)
+                | Value::String(_)
+                | Value::Bytes(_)
+                | Value::Variant { payload: None, .. }
+        ) {
+            return;
+        }
+        let value = std::mem::replace(&mut self.value, Value::Unit);
+        // Hand the value to a dismantler above us, or become one.  If the
+        // queue is already torn down (a binding dying during thread-local
+        // destruction), the unrun closure drops `value` — glue alone, the
+        // honest fallback.
+        let Ok(value) = DISMANTLE_QUEUE.try_with(|slot| {
+            let mut q = slot.borrow_mut();
+            match q.as_mut() {
+                Some(queue) => {
+                    queue.push(value);
+                    None
+                }
+                None => {
+                    *q = Some(Vec::new());
+                    Some(value)
+                }
+            }
+        }) else {
+            return;
+        };
+        // Enqueued: the dismantler above owns it now.
+        let Some(value) = value else { return };
+        /// Disarms the queue even on unwind; leftovers then elect fresh
+        /// leaders of their own.
+        struct Disarm;
+        impl Drop for Disarm {
+            fn drop(&mut self) {
+                let _ = DISMANTLE_QUEUE.try_with(|slot| slot.borrow_mut().take());
+            }
+        }
+        let _disarm = Disarm;
+        let mut next = Some(value);
+        while let Some(v) = next {
+            drop(v);
+            next = DISMANTLE_QUEUE.with(|slot| slot.borrow_mut().as_mut().and_then(|q| q.pop()));
+        }
+    }
+}
+
 /// Persistent string→string map of env-var overrides, cheap to clone.
 ///
 /// `Serialize` / `Deserialize` are required because
@@ -315,5 +386,20 @@ where
             m.insert(k.into(), v.into());
         }
         Self(m)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// (Regression: drop glue recursed once per link, and a sixty-thousand
+    /// line stream aborted the process at teardown.)
+    #[test]
+    fn deep_closure_chain_drops_on_a_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| drop(crate::types::deep_block_chain(100_000)))
+            .expect("spawn")
+            .join()
+            .expect("a deep chain must drop without exhausting the stack");
     }
 }

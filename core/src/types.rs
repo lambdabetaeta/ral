@@ -18,6 +18,8 @@ pub use capability::{
 
 mod value;
 pub use value::{Value, fmt_lambda, fmt_native};
+#[cfg(test)]
+pub(crate) use value::deep_block_chain;
 
 mod handler;
 pub use handler::{

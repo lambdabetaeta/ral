@@ -137,7 +137,7 @@ impl WireMobile {
     /// Inverse of [`Self::into_runtime`].
     pub(crate) fn from_runtime(mobile: &Mobile, ctx: &mut InternCtx) -> Result<Self, Error> {
         Ok(Self {
-            scope: SerialEnvSnapshot::from_runtime(&mobile.scope, ctx)?,
+            scope: SerialEnvSnapshot::from_runtime(&mobile.scope, ctx),
             control: WireControl::from_runtime(&mobile.control),
             context: WireContext::from_runtime(&mobile.context, ctx)?,
         })

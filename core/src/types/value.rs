@@ -312,6 +312,26 @@ pub fn fmt_lambda(param: &crate::ir::IrPattern, body: &crate::ir::Comp) -> Strin
     format!("<|{}| block>", params.join(" "))
 }
 
+/// A chain of `n` blocks, each capturing the next in a one-binding env — the
+/// skeleton of a `from-lines` stream.  Fixture for the two walks that cross
+/// the captured-env seam once per link: the serial encoder and `Env`'s drop.
+#[cfg(test)]
+pub(crate) fn deep_block_chain(n: usize) -> Value {
+    let body = Arc::new(crate::source::Spanned::synthetic(
+        crate::ir::CompKind::Return(crate::ir::Val::Unit),
+    ));
+    let mut v = Value::Unit;
+    for _ in 0..n {
+        let mut env = Env::new();
+        env.set("tail".into(), v);
+        v = Value::Block {
+            body: Arc::clone(&body),
+            captured: Arc::new(env),
+        };
+    }
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

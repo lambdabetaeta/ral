@@ -224,6 +224,18 @@ fn mixed_pipeline_first_external_stage_does_not_inherit_tty_stdin() {
 }
 
 #[test]
+fn deep_stream_crosses_the_stage_wire() {
+    // A stream is one closure per line, and the helper stage ships it to the
+    // parent through the serial encoder.  Two thousand lines must cross and
+    // then drop without exhausting either process's stack.  (Regression: the
+    // encoder recursed per link, so the helper died once `from-lines` saw a
+    // few hundred lines.)
+    let o = run("let s = !{seq 1 2000 | from-lines}; echo done");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert!(o.stdout.contains("done"), "stdout: {}", o.stdout);
+}
+
+#[test]
 fn pipeline_stage_redirect_to_file_is_honored() {
     // `cmd > file | next` must redirect cmd's stdout to file (not into the
     // pipe).  Bash's behavior: the pipe gets EOF; the file gets the bytes.
