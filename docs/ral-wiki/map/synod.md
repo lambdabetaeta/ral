@@ -71,13 +71,29 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   platform's own owned handles and `ral_core::transport::WireTransport::adopt`
   takes either, so the seam is one function
   ([[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]]).
-  `exchange` drives one message through `exarch::headless::converse_settled`
+  Before any of that, `begin` stat-measures the folder
+  (`workspace::manifest::measure`) and composes the large-folder warning —
+  including a free-space sentence off `workspace::history::free_bytes` —
+  before a single byte is read, then opens the store and spawns the
+  before-checkpoint on its own thread as a `Baseline`
+  (`Pending`/`Ready`/`Failed`/`Crashed`/`Settling`); `begin` never joins that
+  thread itself, so the boot runs alongside the walk rather than after it and
+  the conversation opens the moment the boot is done
+  ([[decisions/260807_store-lives-as-long-as-the-conversation|store-lives-as-long-as-the-conversation]]).
+  `exchange` settles the baseline first — joining the capture thread on its
+  first call, every call after finding it already settled — before it drives
+  anything, since the guest must never write into a folder whose baseline is
+  still being read, then drives one message through
+  `exarch::headless::converse_settled`
   ([[decisions/260806_exchange-ends-at-fleet-quiescence|exchange-ends-at-fleet-quiescence]]),
   bracketed by the safety net — a checkpoint before, a checkpoint after, even after a
   failed run; the after-checkpoint waits for fleet quiescence, not merely the
   trunk's own silence, so a helper still writing to the folder never races the
-  report. `end` closes the wire, and the guest halts itself. The trunk's
-  fuel is `SPAWN_FUEL` (3), the same depth budget exarch's own trunks carry —
+  report. `end` closes the wire — the guest halts itself — and only then
+  joins a baseline still `Pending` (a conversation closed before its first
+  message) and wipes the store: closing the window is accepting the folder
+  as it stands, so undo ends with the conversation. The trunk's fuel is
+  `SPAWN_FUEL` (3), the same depth budget exarch's own trunks carry —
   promoted `pub` for exactly this reuse — and `RootConfig` carries a
   `Hatchery` implementation over `Machine::accept_agent` (below), so synod's
   office assistant may delegate to helpers that run concurrently in the
@@ -97,12 +113,31 @@ The module the product's guarantee lives in, all host-side, exercised under
 ordinary `cargo test`:
 
 - `manifest.rs` — a folder's state at one moment: path, kind, size, blake3
-  hash; empty folders and symlink targets recorded, links never followed; a
-  cheap `measure` for the large-folder warning (~2 GiB).
+  hash, `mtime_ns` beside it — the stat facts a capture checks before it
+  reopens a file. A path that vanishes between listing and reading is a
+  deletion to record, never an error to raise (`WalkError::Vanished`
+  internally; `hash_file` itself answers `Ok(None)` for a file gone by the
+  time it is opened); empty folders and symlink targets recorded, links
+  never followed. A cheap `measure` — stat only, no bytes read — feeds the
+  large-folder warning (~2 GiB) before the real walk starts.
 - `history.rs` — the per-folder store: content-addressed `objects/`
   (identical bytes kept once, ever) plus `checkpoints/<id>.json`, with
-  `Before`, `After`, and `Undo` moments. Every byte a job or an undo replaces
-  is in the store before it is touched.
+  `Before`, `After`, and `Undo` moments. `capture` is a stat walk once a
+  baseline exists: an entry whose size and `mtime_ns` match the folder's
+  latest checkpoint, and whose mtime is strictly older than that
+  checkpoint's own `taken_at_ms` (git's racy guard, stamped at walk start,
+  not walk end), reuses the recorded hash without reopening the file. Every
+  byte a job or an undo replaces is in the store before it is touched. Every
+  open store holds a shared advisory lock on a `lock` file beside it
+  (`flock` on unix, `LockFileEx` on Windows, one `lock_imp` per platform);
+  `wipe` drops that lock and removes the store's directory whole at a clean
+  `Conversation::end`, and `sweep_stale` — called once from `main.rs` before
+  any conversation can open its own store — probes every `<slug>/history`
+  with a non-blocking exclusive lock and removes only the ones nothing
+  holds, a crashed session's leavings; a live shared hold always refuses the
+  probe, so a running conversation is never swept. `free_bytes` (`statvfs`
+  on unix, `GetDiskFreeSpaceExW` on Windows) feeds the large-folder
+  warning's free-space sentence.
 - `changes.rs` — the delta between two manifests: created, modified, deleted,
   renamed (a deleted and a created file with identical bytes, paired).
 - `restore.rs` — the conflict-checked driver: a path edited *after* the job

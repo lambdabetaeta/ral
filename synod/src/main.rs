@@ -91,6 +91,9 @@ fn main() {
     if let Some(code) = exarch::dispatch_pre_main() {
         std::process::exit(i32::from(code));
     }
+    // Before any conversation can open its own store: collect whatever a
+    // crashed run left behind.
+    synod::workspace::history::sweep_stale();
     let accounts = Accounts(synod::session::prepare().map(|store| {
         let catalog = Mutex::new(ModelCatalog::new(
             LiveSource::new(&store),

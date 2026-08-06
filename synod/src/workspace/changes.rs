@@ -113,6 +113,7 @@ mod tests {
             size: bytes.len() as u64,
             hash: ContentHash::of_bytes(bytes),
             mode: 0o644,
+            mtime_ns: 0,
         }
     }
 

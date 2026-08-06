@@ -6857,6 +6857,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tokio",
  "vm-manager",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

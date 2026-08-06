@@ -407,9 +407,151 @@ pub struct Conversation {
     hatchery: Arc<crate::hatchery::MachineHatchery>,
     agent: Agent,
     engine: Arc<Engine>,
-    history: workspace::HistoryStore,
+    baseline: Baseline,
     /// The guest's whole network, running on its own threads since before
     /// the first exchange — see [`net_seat`].
+    net: guest_net::Session<NetWire>,
+}
+
+/// The folder's baseline capture: started the moment [`Conversation::begin`]
+/// opens the store, alongside the machine's boot, and joined the first time
+/// [`Conversation::exchange`] or [`Conversation::end`] needs the settled
+/// store — never before, since the guest must not touch the folder while
+/// its baseline is still being read.
+enum Baseline {
+    Pending(std::thread::JoinHandle<CaptureResult>),
+    Ready(workspace::HistoryStore),
+    /// The capture itself failed — a read error, a full disk — but the
+    /// store it was capturing into came back regardless, since
+    /// [`workspace::HistoryStore::capture`] only borrows it; `end` still
+    /// has something to wipe.
+    Failed(workspace::HistoryStore, String),
+    /// The capture thread panicked outright, taking its store down with
+    /// it: unwinding dropped that store's lock the same as a clean return
+    /// would have, so the directory it leaves behind is unlocked, not
+    /// leaked — [`workspace::history::sweep_stale`] collects it at the next
+    /// start.
+    Crashed(String),
+    /// [`Baseline::settle`]'s placeholder for the instant between taking
+    /// `Pending`'s handle and joining it — never observed outside that
+    /// call.
+    Settling,
+}
+
+/// What the capture thread hands back: the store it captured into,
+/// regardless of outcome, and the capture's own result.
+type CaptureResult = (
+    workspace::HistoryStore,
+    Result<workspace::history::Checkpoint, String>,
+);
+
+impl Baseline {
+    /// The settled store, joining the capture thread the first time this is
+    /// asked; every call after the first finds the settled state already
+    /// waiting, so a settled baseline never blocks or re-reads anything.
+    ///
+    /// # Errors
+    /// The capture's own error, or a plain sentence if its thread panicked
+    /// before finishing.
+    fn store(&mut self) -> Result<&workspace::HistoryStore, String> {
+        self.settle();
+        match self {
+            Self::Ready(store) => Ok(store),
+            Self::Failed(_, e) | Self::Crashed(e) => Err(e.clone()),
+            Self::Pending(_) | Self::Settling => unreachable!("settled just above"),
+        }
+    }
+
+    /// Join the capture thread the first time this is called, settling
+    /// into [`Self::Ready`], [`Self::Failed`], or [`Self::Crashed`]; a call
+    /// once already settled does nothing.
+    fn settle(&mut self) {
+        if let Self::Pending(_) = self {
+            let Self::Pending(handle) = std::mem::replace(self, Self::Settling) else {
+                unreachable!("just matched Pending above")
+            };
+            *self = match handle.join() {
+                Ok((store, Ok(_before))) => Self::Ready(store),
+                Ok((store, Err(e))) => Self::Failed(store, e),
+                Err(_) => Self::Crashed(
+                    "Synod's safety copy of the folder crashed while it was being read."
+                        .to_string(),
+                ),
+            };
+        }
+    }
+
+    /// The store [`Conversation::end`] wipes, settling first so a
+    /// still-running capture is joined rather than abandoned — `None` only
+    /// for [`Self::Crashed`], the one case with no store to hand back.
+    fn into_store(mut self) -> Option<workspace::HistoryStore> {
+        self.settle();
+        match self {
+            Self::Ready(store) | Self::Failed(store, _) => Some(store),
+            Self::Crashed(_) | Self::Pending(_) | Self::Settling => None,
+        }
+    }
+}
+
+/// Abandon a baseline capture the rest of [`Conversation::begin`] never got
+/// to use: joins its thread so no walk outlives the conversation that
+/// started it, discarding whatever it found — the conversation is already
+/// failing for its own reason. The store it was capturing into drops with
+/// it, releasing the store's lock; [`workspace::history::sweep_stale`]
+/// collects the now-unlocked directory at the next start.
+fn abandon_baseline(handle: std::thread::JoinHandle<CaptureResult>) {
+    let _ = handle.join();
+}
+
+/// The line to show before a conversation's one, unavoidable full read of
+/// its folder — its store never survives past the conversation that opened
+/// it, so this fires on nothing but the folder's own size.
+///
+/// Composed from a stat-only [`workspace::manifest::measure`], so it can
+/// arrive before a single byte is read or copied.
+fn opening_warning(measure: workspace::manifest::Measure, store_dir: &Path) -> Option<String> {
+    if measure.bytes <= workspace::LARGE_FOLDER_BYTES {
+        return None;
+    }
+    use std::fmt::Write as _;
+    let mut line = format!(
+        "This folder holds about {} across {} files.  Synod keeps a copy of \
+         everything before starting, which can take a while — possibly minutes \
+         on a shared drive.",
+        as_gb(measure.bytes),
+        measure.files
+    );
+    if let Some(free) = workspace::history::free_bytes(store_dir)
+        && free < measure.bytes
+    {
+        let _ = write!(
+            line,
+            "  There may not be room for that safety copy: the folder holds about \
+             {} but the disk has about {} free.",
+            as_gb(measure.bytes),
+            as_gb(free)
+        );
+    }
+    Some(line)
+}
+
+/// `bytes` as a one-decimal gigabyte figure, the large-folder warning's unit
+/// throughout.
+fn as_gb(bytes: u64) -> String {
+    let tenths = bytes / 100_000_000;
+    format!("{}.{} GB", tenths / 10, tenths % 10)
+}
+
+/// Everything [`Conversation::begin`]'s boot-and-start closure produces,
+/// besides the baseline capture running alongside it — split out so the
+/// closure's own errors can be joined against the still-running capture
+/// before they are reported, while `grant` (borrowed throughout the
+/// closure) and the capture's `handle` (untouched by it) stay with the
+/// caller.
+struct Booted {
+    hatchery: Arc<crate::hatchery::MachineHatchery>,
+    agent: Agent,
+    engine: Arc<Engine>,
     net: guest_net::Session<NetWire>,
 }
 
@@ -432,11 +574,12 @@ impl Conversation {
     /// named one has vanished), if the chosen effort names no rung on
     /// [`provider::EFFORT_LADDER`], if the scratch or log directories cannot
     /// be made, if the system prompt cannot be assembled, if the agent
-    /// cannot be started, if the before-checkpoint — the safety copy every
-    /// undo returns to — cannot be taken, or if guest networking cannot
-    /// start. Guest networking does not start degraded; a conversation with
-    /// no network it can trust is refused outright rather than opened
-    /// quietly without one.
+    /// cannot be started, or if guest networking cannot start. Guest
+    /// networking does not start degraded; a conversation with no network
+    /// it can trust is refused outright rather than opened quietly without
+    /// one. The before-checkpoint itself is not among these: its capture
+    /// runs on past `begin`'s return, and [`Conversation::exchange`] reports
+    /// its failure instead.
     ///
     /// # Panics
     /// Panics if the chosen provider is absent from `store` — an invariant
@@ -480,25 +623,30 @@ impl Conversation {
             .map_err(|e| format!("could not make a log folder: {e}"))?;
         let config_dir = SYNOD.xdg_dir(ral_core::path::basedir::XdgKind::Config);
 
+        // The store is fresh at every `begin` — it never outlives its own
+        // conversation — so this folder's one full read is paid here every
+        // time, and the large-folder warning below fires purely on size.
+        let history = workspace::HistoryStore::open_for(grant.root())?;
+        let measure = workspace::manifest::measure(grant.root())?;
+        let large_folder_line = opening_warning(measure, history.dir());
+
         // The two slow arms of an opening wait on different things
         // entirely: the boot on a guest kernel coming up, the
         // before-checkpoint on every byte of the folder being read and
         // kept.  Neither needs the other, and nothing touches the folder
-        // until the first exchange, so they run side by side and the
-        // conversation opens when the slower one finishes.  A failure on
-        // this thread still waits for the walk before reporting — the
-        // scope leaks no running walk — a rare slower failure traded for
-        // an always-faster start.
-        std::thread::scope(|scope| {
-            let checkpoint = {
-                let root = grant.root().to_path_buf();
-                scope.spawn(move || {
-                    let history = workspace::HistoryStore::open_for(&root)?;
-                    let before = history.capture(&root, workspace::Moment::Before)?;
-                    Ok::<_, String>((history, before))
-                })
-            };
+        // until the first exchange, so the capture starts now, before the
+        // boot, and the conversation opens the moment the boot is done —
+        // the capture goes on running, joined only once an exchange or
+        // `end` needs the settled store. Every error path below still joins
+        // it before reporting, so no walk is ever left running past the
+        // conversation that started it.
+        let root = grant.root().to_path_buf();
+        let handle = std::thread::spawn(move || {
+            let result = history.capture(&root, workspace::Moment::Before);
+            (history, result)
+        });
 
+        let booted = (|| -> Result<Booted, String> {
             let mut machine = hypervisor.boot(&grant.machine_spec()).map_err(|e| {
                 format!(
                     "could not start a machine for {}: {e}",
@@ -572,54 +720,41 @@ impl Conversation {
             )
             .map_err(|e| format!("could not start the assistant: {e}"))?;
 
-            // The checkpoint the walk took while the machine booted: the
-            // baseline every exchange's report is judged against, and the
-            // state every undo returns to.  Taken once, for the whole
-            // conversation.  Its manifest already knows every file's size, so
-            // the large-folder warning costs no walk of its own.
-            let (history, before) = checkpoint.join().map_err(|_| {
-                "Synod could not finish its safety copy of the folder.".to_string()
-            })??;
-            let (files, bytes) =
-                before
-                    .manifest
-                    .entries
-                    .values()
-                    .fold((0u64, 0u64), |(files, bytes), entry| match entry {
-                        workspace::EntryKind::File { size, .. } => (files + 1, bytes + size),
-                        _ => (files, bytes),
-                    });
-            let large_folder_line = (bytes > workspace::LARGE_FOLDER_BYTES).then(|| {
-                let tenths = bytes / 100_000_000;
-                format!(
-                    "This folder holds about {}.{} GB across {} files.  Synod keeps a \
-                 copy of everything before starting, which can take a while — \
-                 possibly minutes on a shared drive.",
-                    tenths / 10,
-                    tenths % 10,
-                    files
-                )
-            });
+            Ok(Booted {
+                hatchery,
+                agent,
+                engine,
+                net,
+            })
+        })();
 
-            let opening = Opening {
-                account,
-                model: announced_model,
-                effort: announced_effort,
-                large_folder_line,
-            };
-
-            Ok((
+        match booted {
+            Ok(Booted {
+                hatchery,
+                agent,
+                engine,
+                net,
+            }) => Ok((
                 Self {
                     grant,
                     hatchery,
                     agent,
                     engine,
-                    history,
+                    baseline: Baseline::Pending(handle),
                     net,
                 },
-                opening,
-            ))
-        })
+                Opening {
+                    account,
+                    model: announced_model,
+                    effort: announced_effort,
+                    large_folder_line,
+                },
+            )),
+            Err(e) => {
+                abandon_baseline(handle);
+                Err(e)
+            }
+        }
     }
 
     /// Drive one message through the conversation, streaming the bus's
@@ -628,35 +763,40 @@ impl Conversation {
     /// once the whole fleet quiesces: the trunk parked, no live helpers
     /// left, their results drained.
     ///
-    /// Checkpoints what this exchange left behind, cumulatively from the
-    /// baseline — taken even after a failed exchange, since whatever
-    /// changed before the failure is still undoable. Taking it only after
-    /// quiescence is what keeps a helper's late write from ever landing
-    /// after the checkpoint and being blamed on the user. Renders no
-    /// report: the window reads one back through [`workspace::job_report`].
+    /// Settles the baseline first — joining its capture thread if this is
+    /// the first exchange — before the guest touches anything, since the
+    /// folder must never be read and written at once. Checkpoints what this
+    /// exchange left behind, cumulatively from the baseline — taken even
+    /// after a failed exchange, since whatever changed before the failure is
+    /// still undoable. Taking it only after quiescence is what keeps a
+    /// helper's late write from ever landing after the checkpoint and being
+    /// blamed on the user. Renders no report: the window reads one back
+    /// through [`workspace::job_report`].
     ///
     /// # Errors
-    /// Returns `Err` if the exchange itself fails; if the exchange
-    /// succeeded but the after-checkpoint could not be taken, that error
-    /// is returned instead.
+    /// Returns `Err` if the baseline capture failed or its thread panicked;
+    /// otherwise if the exchange itself fails; otherwise if the exchange
+    /// succeeded but the after-checkpoint could not be taken, that error is
+    /// returned instead.
     pub fn exchange<S: exarch::bus::Sink>(
         &mut self,
         message: String,
         sink: &mut S,
     ) -> Result<(), String> {
+        let history = self.baseline.store()?;
         let outcome = exarch::headless::converse_settled(
             &mut self.agent,
             message,
             self.engine.clone(),
             sink,
         );
-        let after = self
-            .history
-            .capture(self.grant.root(), workspace::Moment::After);
+        let after = history.capture(self.grant.root(), workspace::Moment::After);
         outcome.and_then(|()| after.map(drop))
     }
 
-    /// Shut the machine down, ending the conversation.
+    /// Shut the machine down, ending the conversation — and, its store
+    /// having no life left to serve, wipe it: closing the window is
+    /// accepting the folder as it stands, so undo ends here too.
     ///
     /// Drops the agent first: under a real VM its seat owns the wire, and
     /// closing that end is what makes the guest's engine see EOF and power
@@ -669,11 +809,21 @@ impl Conversation {
     /// by the time an exchange has settled, so this is always the pump's
     /// last reference. The net wire follows, never before the control wire
     /// — a session with its control plane gone but its network still live
-    /// has nothing left to police what that network is used for.
+    /// has nothing left to police what that network is used for. The wipe
+    /// comes last, and runs whatever state the baseline settled into — a
+    /// `Failed` baseline may still have left partial objects behind, and
+    /// those are exactly what a wipe is for. A wipe cut short by the
+    /// window's own close timeout is not a leak: the directory it left
+    /// unlocked is exactly what [`workspace::history::sweep_stale`] collects
+    /// at the next start.
     ///
     /// # Errors
     /// Returns `Err` if the machine does not stop cleanly, or if a
-    /// guest-net worker panicked — failures this never swallows.
+    /// guest-net worker panicked — failures this never swallows. A baseline
+    /// still `Pending` (the user closed before ever sending a message) is
+    /// joined too; if it alone failed, that error surfaces, but a failed
+    /// shutdown always wins over it. A wipe failure surfaces only once
+    /// everything above it has succeeded.
     ///
     /// # Panics
     /// Panics if the accept pump's `Arc` has another owner left once the
@@ -684,6 +834,7 @@ impl Conversation {
             hatchery,
             agent,
             net,
+            mut baseline,
             ..
         } = self;
         drop(agent);
@@ -698,10 +849,19 @@ impl Conversation {
         // guest-net thread behind, and `join` is what reports a worker panic.
         net.stop();
         let net_end = net.join();
-        machine
+        let shutdown = machine
             .shutdown()
             .map_err(|e| format!("the machine did not stop cleanly: {e}"))
-            .and(net_end)
+            .and(net_end);
+        // Only after the machine is down: a conversation can end before its
+        // first exchange, and joining a still-running walk must not hold a
+        // dead-to-the-user window open ahead of the shutdown that ends it.
+        let baseline_err = baseline.store().err();
+        let wipe_err = baseline.into_store().and_then(|store| store.wipe().err());
+        match (shutdown, baseline_err) {
+            (Err(e), _) | (Ok(()), Some(e)) => Err(e),
+            (Ok(()), None) => wipe_err.map_or(Ok(()), Err),
+        }
     }
 }
 

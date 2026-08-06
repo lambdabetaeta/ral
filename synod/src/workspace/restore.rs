@@ -231,11 +231,24 @@ mod tests {
         );
         assert_eq!(outcome.removed, ["made/new.txt", "made"]);
         assert_eq!(
-            Manifest::of_folder(&folder).expect("rereads"),
-            baseline.manifest,
-            "the folder must match its baseline exactly"
+            without_mtimes(Manifest::of_folder(&folder).expect("rereads")),
+            without_mtimes(baseline.manifest),
+            "the folder must match its baseline exactly, bytes and mode; a restore \
+             writes fresh bytes and so a fresh mtime, which is not part of its promise"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A restore's promise is bytes and mode; the stat clock a quick
+    /// capture leans on is not part of it, so a comparison of "the folder
+    /// matches its baseline" must look past mtime.
+    fn without_mtimes(mut manifest: Manifest) -> Manifest {
+        for kind in manifest.entries.values_mut() {
+            if let EntryKind::File { mtime_ns, .. } = kind {
+                *mtime_ns = 0;
+            }
+        }
+        manifest
     }
 
     /// The core law: a file edited after the job is never silently

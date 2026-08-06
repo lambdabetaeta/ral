@@ -10,8 +10,20 @@
 #![allow(clippy::disallowed_methods)]
 
 use std::os::unix::fs::PermissionsExt;
-use synod::workspace::manifest::Manifest;
+use synod::workspace::manifest::{EntryKind, Manifest};
 use synod::workspace::{HistoryStore, Moment, Resolution, undo_all};
+
+/// A restore's promise is bytes and mode; the stat clock a quick capture
+/// leans on is not part of it, so "the folder matches its baseline" must
+/// look past mtime.
+fn without_mtimes(mut manifest: Manifest) -> Manifest {
+    for kind in manifest.entries.values_mut() {
+        if let EntryKind::File { mtime_ns, .. } = kind {
+            *mtime_ns = 0;
+        }
+    }
+    manifest
+}
 
 #[test]
 fn an_undo_puts_back_a_link_as_a_link_and_a_file_at_its_recorded_mode() {
@@ -59,9 +71,9 @@ fn an_undo_puts_back_a_link_as_a_link_and_a_file_at_its_recorded_mode() {
         "a restored file must carry the mode it was recorded with, not the copy's"
     );
     assert_eq!(
-        Manifest::of_folder(&folder).expect("rereads"),
-        before.manifest,
-        "the folder must match its baseline exactly"
+        without_mtimes(Manifest::of_folder(&folder).expect("rereads")),
+        without_mtimes(before.manifest),
+        "the folder must match its baseline exactly, bytes and mode"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

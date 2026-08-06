@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io;
 use std::path::Path;
 
 /// Warn before checkpointing a folder bigger than this.
@@ -12,9 +13,16 @@ use std::path::Path;
 /// user deserves a heads-up before it starts.
 pub const LARGE_FOLDER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-/// How a walk turns a file into its size and hash — the history store
-/// hooks in here to keep the bytes while it hashes them.
-pub(crate) type FileEntry<'a> = &'a mut dyn FnMut(&Path) -> Result<(u64, ContentHash), String>;
+/// How a walk turns a file into its size and hash — the history store hooks
+/// in here to keep the bytes while it hashes them, or to reuse a hash
+/// already on record when the stat facts say the bytes cannot have moved.
+///
+/// Given the entry's `/`-joined key, its path, and the size and mtime the
+/// walk already read from `symlink_metadata`, it answers the size and hash
+/// to record — or `None` when the file vanished between the walk's listing
+/// and the hook's own read of it, in which case the walk records nothing.
+pub(crate) type FileEntry<'a> =
+    &'a mut dyn FnMut(&str, &Path, u64, u64) -> Result<Option<(u64, ContentHash)>, String>;
 
 /// A blake3 hash of a file's bytes, hex-encoded.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -48,6 +56,12 @@ pub enum EntryKind {
         /// same mode it recorded — not the object store's own default.
         /// `0` on a non-Unix host, where no mode is ever read or applied.
         mode: u32,
+        /// Nanoseconds since the Unix epoch, from the walk's own
+        /// `symlink_metadata`; `0` on a platform that yields none, or for
+        /// a record written before this field existed — either way, honest
+        /// for "unknown, always re-read".
+        #[serde(default)]
+        mtime_ns: u64,
     },
     Folder,
     /// A symbolic link, recorded by its target text and never followed.
@@ -70,14 +84,16 @@ impl Manifest {
     /// # Errors
     /// A plain sentence when something in the folder cannot be read.
     pub fn of_folder(root: &Path) -> Result<Self, String> {
-        Self::of_folder_via(root, &mut hash_file)
+        Self::of_folder_via(root, &mut |_key, path, _size, _mtime_ns| hash_file(path))
     }
 
     /// Like [`Manifest::of_folder`], but `file_entry` decides how each
     /// file's size and hash are produced.
     pub(crate) fn of_folder_via(root: &Path, file_entry: FileEntry<'_>) -> Result<Self, String> {
         let mut entries = BTreeMap::new();
-        walk(root, "", &mut entries, file_entry)?;
+        if let Err(WalkError::Other(message)) = walk(root, "", &mut entries, file_entry) {
+            return Err(message);
+        }
         Ok(Self { entries })
     }
 }
@@ -85,14 +101,18 @@ impl Manifest {
 /// Hash a file's bytes, streaming.
 ///
 /// # Errors
-/// A plain sentence when the file cannot be read.
-pub(crate) fn hash_file(path: &Path) -> Result<(u64, ContentHash), String> {
-    let mut file = std::fs::File::open(path)
-        .map_err(|e| format!("Synod could not read {}: {e}.", path.display()))?;
+/// A plain sentence when the file cannot be read for a reason other than
+/// having vanished — a vanished file answers `Ok(None)`.
+pub(crate) fn hash_file(path: &Path) -> Result<Option<(u64, ContentHash)>, String> {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Synod could not read {}: {e}.", path.display())),
+    };
     let mut hasher = blake3::Hasher::new();
     let size = std::io::copy(&mut file, &mut hasher)
         .map_err(|e| format!("Synod could not read {}: {e}.", path.display()))?;
-    Ok((size, ContentHash::from(hasher.finalize())))
+    Ok(Some((size, ContentHash::from(hasher.finalize()))))
 }
 
 /// A file's Unix permission bits; `0` on a host with no such notion.
@@ -107,22 +127,48 @@ fn file_mode(_meta: &std::fs::Metadata) -> u32 {
     0
 }
 
+/// A file's modification time, in nanoseconds since the Unix epoch; `0`
+/// when the platform or filesystem yields none.
+fn mtime_ns(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+}
+
+/// A subfolder vanishing mid-walk is not the same as a real read failure:
+/// it tells the caller to remove the `Folder` entry it just inserted and
+/// move on, rather than fail the whole capture.
+enum WalkError {
+    Vanished,
+    Other(String),
+}
+
 fn walk(
     dir: &Path,
     rel: &str,
     entries: &mut BTreeMap<String, EntryKind>,
     file_entry: FileEntry<'_>,
-) -> Result<(), String> {
-    let could_not = |e| format!("Synod could not look inside {}: {e}.", dir.display());
-    let listing = std::fs::read_dir(dir).map_err(could_not)?;
+) -> Result<(), WalkError> {
+    let could_not = |e| {
+        WalkError::Other(format!(
+            "Synod could not look inside {}: {e}.",
+            dir.display()
+        ))
+    };
+    let listing = match std::fs::read_dir(dir) {
+        Ok(listing) => listing,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(WalkError::Vanished),
+        Err(e) => return Err(could_not(e)),
+    };
     for item in listing {
         let item = item.map_err(could_not)?;
         let name = item.file_name();
         let Some(name) = name.to_str() else {
-            return Err(format!(
+            return Err(WalkError::Other(format!(
                 "A file in {} has a name this computer cannot read; please rename it first.",
                 dir.display()
-            ));
+            )));
         };
         let key = if rel.is_empty() {
             name.to_string()
@@ -130,17 +176,33 @@ fn walk(
             format!("{rel}/{name}")
         };
         let path = item.path();
-        let meta = std::fs::symlink_metadata(&path)
-            .map_err(|e| format!("Synod could not look at {}: {e}.", path.display()))?;
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(WalkError::Other(format!(
+                    "Synod could not look at {}: {e}.",
+                    path.display()
+                )));
+            }
+        };
         if meta.file_type().is_symlink() {
-            let target = std::fs::read_link(&path)
-                .map_err(|e| format!("Synod could not read the link {}: {e}.", path.display()))?;
+            let target = match std::fs::read_link(&path) {
+                Ok(target) => target,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(WalkError::Other(format!(
+                        "Synod could not read the link {}: {e}.",
+                        path.display()
+                    )));
+                }
+            };
             let Some(target) = target.to_str() else {
-                return Err(format!(
+                return Err(WalkError::Other(format!(
                     "The link {} points at a name this computer cannot read; \
                      please fix or remove it first.",
                     path.display()
-                ));
+                )));
             };
             entries.insert(
                 key,
@@ -150,23 +212,98 @@ fn walk(
             );
         } else if meta.is_dir() {
             entries.insert(key.clone(), EntryKind::Folder);
-            walk(&path, &key, entries, file_entry)?;
+            match walk(&path, &key, entries, file_entry) {
+                Ok(()) => {}
+                Err(WalkError::Vanished) => {
+                    entries.remove(&key);
+                }
+                Err(e) => return Err(e),
+            }
         } else if meta.is_file() {
-            let (size, hash) = file_entry(&path)?;
-            entries.insert(
-                key,
-                EntryKind::File {
-                    size,
-                    hash,
-                    mode: file_mode(&meta),
-                },
-            );
+            let size = meta.len();
+            let file_mtime_ns = mtime_ns(&meta);
+            if let Some((size, hash)) =
+                file_entry(&key, &path, size, file_mtime_ns).map_err(WalkError::Other)?
+            {
+                entries.insert(
+                    key,
+                    EntryKind::File {
+                        size,
+                        hash,
+                        mode: file_mode(&meta),
+                        mtime_ns: file_mtime_ns,
+                    },
+                );
+            }
         } else {
-            return Err(format!(
+            return Err(WalkError::Other(format!(
                 "{} is not an ordinary file, folder, or link, so synod could not \
                  promise to put it back; please move it out of the folder first.",
                 path.display()
-            ));
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// How much a folder holds, without reading a single file's bytes — the
+/// large-folder warning's pre-walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Measure {
+    pub files: u64,
+    pub bytes: u64,
+}
+
+/// Stat-walk `root` to count its regular files and sum their sizes.
+///
+/// Symlinks and folders cost nothing; a path that vanishes mid-walk is
+/// simply not counted, the same as a capture would treat it.
+///
+/// # Errors
+/// A plain sentence when the folder cannot be looked inside.
+pub fn measure(root: &Path) -> Result<Measure, String> {
+    let mut measure = Measure::default();
+    if let Err(WalkError::Other(message)) = measure_walk(root, &mut measure) {
+        return Err(message);
+    }
+    Ok(measure)
+}
+
+fn measure_walk(dir: &Path, out: &mut Measure) -> Result<(), WalkError> {
+    let could_not = |e| {
+        WalkError::Other(format!(
+            "Synod could not look inside {}: {e}.",
+            dir.display()
+        ))
+    };
+    let listing = match std::fs::read_dir(dir) {
+        Ok(listing) => listing,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(WalkError::Vanished),
+        Err(e) => return Err(could_not(e)),
+    };
+    for item in listing {
+        let item = item.map_err(could_not)?;
+        let path = item.path();
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(WalkError::Other(format!(
+                    "Synod could not look at {}: {e}.",
+                    path.display()
+                )));
+            }
+        };
+        if meta.file_type().is_symlink() {
+            // Zero-cost: a link is its target text, never its bytes.
+        } else if meta.is_dir() {
+            match measure_walk(&path, out) {
+                Ok(()) | Err(WalkError::Vanished) => {}
+                Err(e) => return Err(e),
+            }
+        } else if meta.is_file() {
+            out.files += 1;
+            out.bytes += meta.len();
         }
     }
     Ok(())
@@ -217,6 +354,31 @@ mod tests {
                 target: "nowhere/at-all".into(),
             })
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hash_file_on_a_missing_path_answers_gone_rather_than_erring() {
+        let dir = workshop("manifest-hash-missing");
+        let missing = dir.join("never-existed.txt");
+        assert_eq!(
+            hash_file(&missing).expect("a missing file is not an error"),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn measure_counts_files_and_bytes_without_reading_them() {
+        let dir = workshop("manifest-measure");
+        std::fs::write(dir.join("a.txt"), b"dear all").expect("fixture");
+        std::fs::create_dir(dir.join("sub")).expect("fixture");
+        std::fs::write(dir.join("sub").join("b.txt"), b"gone").expect("fixture");
+        std::fs::create_dir(dir.join("empty")).expect("fixture");
+
+        let measure = measure(&dir).expect("an ordinary folder measures");
+        assert_eq!(measure.files, 2);
+        assert_eq!(measure.bytes, 8 + 4);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

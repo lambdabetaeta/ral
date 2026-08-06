@@ -56,3 +56,14 @@ ruzstd     = "0.9"
 # consuming it — `UnixStream::peek` is still unstable, so this is one raw
 # `recv(MSG_PEEK)` call rather than a hand-rolled socket layer.
 libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# `workspace::history::free_bytes`'s free-space probe (GetDiskFreeSpaceExW)
+# and `workspace::history::lock_imp`'s advisory file lock (LockFileEx, plus
+# the OVERLAPPED it takes and the ERROR_LOCK_VIOLATION a refused exclusive
+# probe reports).
+windows-sys = { workspace = true, features = [
+    "Win32_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_System_IO",
+] }
