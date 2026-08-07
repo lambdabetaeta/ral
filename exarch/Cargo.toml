@@ -66,6 +66,10 @@ similar    = { version = "3", features = ["inline", "unicode"] }
 # to the same built crate at zero marginal cost.
 jiff       = "0.2"
 gray_matter = { version = "0.3", default-features = false, features = ["yaml"] }
+# The computer's own credential manager (Keychain / Credential Manager /
+# Secret Service), behind one entry type; `provider::keychain` is the only
+# caller.
+keyring    = "4.1"
 
 # Unix-only bundled tools (id / kill / stat / timeout / test / tac).  Pulled
 # in through `ral-core/coreutils-unix-only` only on Unix targets — the

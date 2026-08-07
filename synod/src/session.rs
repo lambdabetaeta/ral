@@ -48,10 +48,12 @@ use std::sync::{Arc, Mutex};
 /// scratch tmpfs ([`crate::grant::GUEST_SCRATCH`]), no host directory.
 pub const SYNOD: bootstrap::App = bootstrap::App::new("synod");
 
-/// Resolve the credential store, once, at startup.
+/// Resolve the credential store, once, at startup — see
+/// [`crate::accounts::prepare`], which is where synod's accounts actually
+/// come from.
 ///
 /// # Errors
-/// Returns `Err` if the user's config cannot be read.
+/// Returns `Err` if synod's own provider settings cannot be read.
 ///
 /// # Panics
 /// This function must be called while the process is still
@@ -59,8 +61,7 @@ pub const SYNOD: bootstrap::App = bootstrap::App::new("synod");
 /// that is only safe before any other thread — the transport runtime, a
 /// session's worker threads — has been created.
 pub fn prepare() -> Result<CredentialStore, String> {
-    let custom = exarch::config::load()?;
-    Ok(CredentialStore::resolve_and_scrub(custom))
+    crate::accounts::prepare()
 }
 
 /// One model offered for a provider, and whether it takes a reasoning-effort
@@ -784,12 +785,8 @@ impl Conversation {
         sink: &mut S,
     ) -> Result<(), String> {
         let history = self.baseline.store()?;
-        let outcome = exarch::headless::converse_settled(
-            &mut self.agent,
-            message,
-            self.engine.clone(),
-            sink,
-        );
+        let outcome =
+            exarch::headless::converse_settled(&mut self.agent, message, self.engine.clone(), sink);
         let after = history.capture(self.grant.root(), workspace::Moment::After);
         outcome.and_then(|()| after.map(drop))
     }

@@ -16,7 +16,7 @@
 use crate::provider::{ChatGptAccount, CustomProvider, ProviderId, ProviderKind};
 use crate::sync::LockExt;
 use clap::ValueEnum;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 /// The inert bearer bound to a keyless custom provider.
@@ -55,6 +55,20 @@ pub struct CredentialStore {
     /// preserves: famous in [`ProviderKind`] declaration order, then `ChatGPT`
     /// accounts by label, then custom in config order.
     all: Vec<ProviderId>,
+    /// Those whose key arrived through [`Self::admit_key`] — handed in by the
+    /// embedding application — rather than swept from the environment.
+    /// Recorded at the binding: only the store knows which of its two doors
+    /// a key came through.
+    admitted: BTreeSet<ProviderId>,
+    /// What the environment sweep found, kept as the layer *beneath*
+    /// [`Self::ready`] rather than overwritten by an admission.
+    ///
+    /// The sweep scrubs what it reads and so can never run twice. Without
+    /// this layer, admitting a key over an environment-supplied one would
+    /// destroy it for the life of the process, and withdrawing the admitted
+    /// key would leave the provider unbound rather than falling back to the
+    /// variable that was there all along.
+    environment: BTreeMap<ProviderId, Credential>,
 }
 
 impl CredentialStore {
@@ -117,11 +131,22 @@ impl CredentialStore {
             }
         }
 
+        // Taken before the logins are folded in: a plan login is not an
+        // environment key, and must never be what a withdrawn key falls back
+        // to. A keyless custom provider's inert bearer is, though — reverting
+        // to it is exactly what forgetting that key means.
+        let environment = ready.clone();
+
         for (id, token) in accounts {
             ready.insert(id, Credential::OAuth(Arc::new(Mutex::new(token))));
         }
 
-        Self { ready, all }
+        Self {
+            ready,
+            all,
+            admitted: BTreeSet::new(),
+            environment,
+        }
     }
 
     /// The credential bound to `id`, or `None` when it is not available.
@@ -189,6 +214,58 @@ impl CredentialStore {
         (new_id, credential)
     }
 
+    /// Every provider this store knows of, available or not — a provider
+    /// with no key yet is precisely the one an accounts screen exists for.
+    pub fn known(&self) -> &[ProviderId] {
+        &self.all
+    }
+
+    /// Bind `key` to `id`, replacing whatever it was bound to.
+    ///
+    /// The mid-session counterpart of the startup sweep, as
+    /// [`Self::add_oauth`] is for a login — which matters because
+    /// [`Self::resolve_and_scrub`] can never be run twice in one process.
+    /// A provider not yet in [`Self::all`] — a custom endpoint declared
+    /// moments ago — is admitted at the end, where custom providers belong.
+    pub fn admit_key(&mut self, id: &ProviderId, key: String) -> Credential {
+        let credential = Credential::ApiKey(key);
+        if !self.all.contains(id) {
+            self.all.push(id.clone());
+        }
+        self.ready.insert(id.clone(), credential.clone());
+        self.admitted.insert(id.clone());
+        credential
+    }
+
+    /// Whether `id`'s key was handed in by the application rather than
+    /// swept from the environment — only the first kind is a window's to
+    /// withdraw.
+    pub fn was_admitted(&self, id: &ProviderId) -> bool {
+        self.admitted.contains(id)
+    }
+
+    /// Withdraw the key [`Self::admit_key`] bound, revealing the environment
+    /// layer beneath it — so a provider the launching environment supplied
+    /// all along goes back to that key rather than becoming unavailable, and
+    /// one the environment never supplied is left known but unbound.
+    pub fn forget(&mut self, id: &ProviderId) {
+        self.admitted.remove(id);
+        match self.environment.get(id) {
+            Some(credential) => self.ready.insert(id.clone(), credential.clone()),
+            None => self.ready.remove(id),
+        };
+    }
+
+    /// Drop `id` from the store entirely, credential and identity both —
+    /// what a *withdrawn declaration* means, as against [`Self::forget`]'s
+    /// merely-unbound key. Nothing is left to fall back to.
+    pub fn retire(&mut self, id: &ProviderId) {
+        self.ready.remove(id);
+        self.admitted.remove(id);
+        self.environment.remove(id);
+        self.all.retain(|known| known != id);
+    }
+
     /// Insert an account where [`Self::all`]'s ordering requires: after every
     /// famous provider and every account whose label sorts before it, before
     /// the first custom provider.
@@ -224,12 +301,19 @@ fn read_env_key(var: &str) -> EnvKey {
     let Ok(raw) = std::env::var(var) else {
         return EnvKey::Absent;
     };
-    let key = raw.trim().to_string();
-    if key.is_empty() || key.bytes().any(|b| b < 0x20 || b == 0x7f) {
-        EnvKey::Malformed
-    } else {
-        EnvKey::Valid(key)
-    }
+    well_formed_key(&raw).map_or(EnvKey::Malformed, EnvKey::Valid)
+}
+
+/// A key as it will actually be used, or `None` when it authenticates
+/// nothing: blank, or carrying a control character — a newline copied along
+/// with the key being the usual way.
+///
+/// One rule wherever a key arrives, so a secret refused at one door is not
+/// quietly accepted at another: the environment here, a window, or the
+/// computer's credential manager ([`crate::provider::keychain`]).
+pub fn well_formed_key(raw: &str) -> Option<String> {
+    let key = raw.trim();
+    (!key.is_empty() && !key.bytes().any(|b| b < 0x20 || b == 0x7f)).then(|| key.to_string())
 }
 
 #[cfg(test)]
@@ -260,6 +344,58 @@ mod tests {
         }))
     }
 
+    /// One rule at every door: surrounding whitespace is not part of a key,
+    /// and a key carrying a pasted newline authenticates nothing.
+    #[test]
+    fn a_key_is_trimmed_or_refused_outright() {
+        assert_eq!(well_formed_key(" sk-real ").as_deref(), Some("sk-real"));
+        assert_eq!(well_formed_key("   "), None);
+        assert_eq!(well_formed_key(""), None);
+        assert_eq!(well_formed_key("sk-real\nGET /"), None);
+        assert_eq!(well_formed_key("sk\u{7f}real"), None);
+    }
+
+    /// A window may withdraw the key it put away; it may not thereby destroy
+    /// the one the launching environment supplied, which no later sweep could
+    /// ever recover.
+    #[test]
+    fn forgetting_an_admitted_key_reveals_the_environment_beneath_it() {
+        let id = ProviderId::Famous(ProviderKind::Anthropic);
+        let mut store = CredentialStore {
+            ready: BTreeMap::from([(id.clone(), Credential::ApiKey("from-env".into()))]),
+            all: vec![id.clone()],
+            admitted: BTreeSet::new(),
+            environment: BTreeMap::from([(id.clone(), Credential::ApiKey("from-env".into()))]),
+        };
+
+        store.admit_key(&id, "from-window".into());
+        assert!(store.was_admitted(&id));
+        assert!(matches!(store.get(&id), Some(Credential::ApiKey(k)) if k == "from-window"));
+
+        store.forget(&id);
+        assert!(!store.was_admitted(&id));
+        assert!(matches!(store.get(&id), Some(Credential::ApiKey(k)) if k == "from-env"));
+    }
+
+    /// With nothing underneath, the same withdrawal leaves the provider known
+    /// but unbound — still a service, simply with nothing to speak to it with.
+    #[test]
+    fn forgetting_a_key_the_environment_never_supplied_leaves_it_unbound() {
+        let id = custom("house-llm");
+        let mut store = CredentialStore {
+            ready: BTreeMap::new(),
+            all: vec![id.clone()],
+            admitted: BTreeSet::new(),
+            environment: BTreeMap::new(),
+        };
+
+        store.admit_key(&id, "typed".into());
+        store.forget(&id);
+
+        assert!(store.get(&id).is_none());
+        assert_eq!(store.known(), [id]);
+    }
+
     #[test]
     fn add_oauth_new_account_sorts_after_famous_and_before_custom() {
         let llama = custom("local-llama");
@@ -275,6 +411,8 @@ mod tests {
                 ),
             ]),
             all: vec![ProviderId::Famous(ProviderKind::Anthropic), llama.clone()],
+            admitted: BTreeSet::new(),
+            environment: BTreeMap::new(),
         };
 
         let (bravo, _) = store.add_oauth(&oauth_token("acc_b", Some("bravo@work")));
@@ -303,6 +441,8 @@ mod tests {
         let mut store = CredentialStore {
             ready: BTreeMap::from([(id.clone(), Credential::OAuth(Arc::clone(&cell)))]),
             all: vec![id.clone()],
+            admitted: BTreeSet::new(),
+            environment: BTreeMap::new(),
         };
         let before = store.available();
 
@@ -336,6 +476,8 @@ mod tests {
         let mut store = CredentialStore {
             ready: BTreeMap::from([(old_id.clone(), Credential::OAuth(Arc::clone(&cell)))]),
             all: vec![old_id.clone()],
+            admitted: BTreeSet::new(),
+            environment: BTreeMap::new(),
         };
 
         let (new_id, returned_credential) =

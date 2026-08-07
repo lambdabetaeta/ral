@@ -55,16 +55,112 @@ pub fn load() -> Result<Vec<CustomProvider>, String> {
     let path = crate::bootstrap::EXARCH
         .xdg_dir(ral_core::path::basedir::XdgKind::Config)
         .join(CONFIG_FILE);
-    let Some(source) = read_optional_file(&path, LABEL)? else {
+    load_declared(&path, LABEL)
+}
+
+/// The provider declarations in `path`, an absent file being the empty list.
+///
+/// [`load`]'s body over a path the caller names, so a second product's
+/// declarations parse through this one decoder.  `label` opens every
+/// complaint, so the file says what it is ("exarch config", "provider
+/// settings") before it says what is wrong.
+///
+/// # Errors
+/// A present file that is unreadable, that raises, or that fails to decode is
+/// a hard error: a mistyped endpoint is a misdirected agent, not a recoverable
+/// default.
+pub fn load_declared(path: &std::path::Path, label: &str) -> Result<Vec<CustomProvider>, String> {
+    let Some(source) = read_optional_file(path, label)? else {
         return Ok(Vec::new());
     };
     let source = ral_core::source::normalize_source_text(source);
     let display = path.to_string_lossy().into_owned();
     let mut shell = Shell::new(ral_core::io::TerminalState::default());
     decode(
-        evaluate_no_authority(&mut shell, &source, &display, LABEL)?,
+        evaluate_no_authority(&mut shell, &source, &display, label)?,
         &display,
+        label,
     )
+}
+
+/// Write `providers` back to `path` as the very source [`load_declared`]
+/// reads — a file a program wrote and a person can still edit.
+///
+/// A `key` field is written only for a provider that names an environment
+/// variable; a key held in this computer's credential manager
+/// ([`crate::provider::keychain`]) is not written here at all, so this file
+/// carries no secret and needs no special permissions.
+///
+/// # Errors
+/// Returns a plain sentence if a label or endpoint could not be written as a
+/// quoted string without lying about its contents, or if the file could not
+/// be created.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:config-write] writes the provider declarations back to the app's own config directory; configuration, not turn-time model data I/O"
+)]
+pub fn save_declared(
+    path: &std::path::Path,
+    providers: &[CustomProvider],
+    label: &str,
+) -> Result<(), String> {
+    let declarations: String = providers
+        .iter()
+        .map(|provider| -> Result<String, String> {
+            let name = quoted(&provider.label, "name", label)?;
+            let endpoint = quoted(&provider.endpoint, "address", label)?;
+            let key = match &provider.key_env {
+                Some(key_env) => format!(", key: {}", quoted(key_env, "key", label)?),
+                None => String::new(),
+            };
+            let protocol = protocol_for_adapter(provider.adapter).ok_or_else(|| {
+                format!(
+                    "{label}: '{}' speaks a protocol this file has no name for — \
+                     it can only hold one of {}.",
+                    provider.label,
+                    protocols().join(", ")
+                )
+            })?;
+            Ok(format!(
+                "  {name}: [endpoint: {endpoint}{key}, protocol: '{protocol}'],\n"
+            ))
+        })
+        .collect::<Result<_, _>>()?;
+    let source = format!("{PREAMBLE}return [\n{declarations}]\n");
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("could not make {}: {e}", parent.display()))?;
+    }
+    std::fs::write(path, source).map_err(|e| format!("could not write {}: {e}", path.display()))
+}
+
+const PREAMBLE: &str = "\
+# Written by the accounts screen, and safe to edit by hand.
+# Each entry is one service to talk to: where it lives, and how it speaks.
+";
+
+/// `text` as a single-quoted ral string — refused outright if it holds a
+/// quote, a backslash, or a control character.  Escaping them would be easy
+/// and wrong: these are names and addresses a person typed into a window, and
+/// a service whose name contains a quote is a typo to ask about, not a string
+/// to encode.
+fn quoted(text: &str, field: &str, label: &str) -> Result<String, String> {
+    if text.is_empty() {
+        return Err(format!(
+            "{label}: the {field} is empty — what should it be?"
+        ));
+    }
+    if text
+        .bytes()
+        .any(|b| b == b'\'' || b == b'\\' || b < 0x20 || b == 0x7f)
+    {
+        return Err(format!(
+            "{label}: the {field} '{text}' contains a quote, a backslash, or a control \
+             character — is that really part of it?"
+        ));
+    }
+    Ok(format!("'{text}'"))
 }
 
 /// Read a trusted `.ral` config or policy file, `Ok(None)` when it is absent. A
@@ -108,23 +204,28 @@ pub(crate) fn evaluate_no_authority(
 
 /// Decode the config's terminal map of `name → declaration` into
 /// [`CustomProvider`]s.
-fn decode(value: Value, display: &str) -> Result<Vec<CustomProvider>, String> {
+fn decode(value: Value, display: &str, label: &str) -> Result<Vec<CustomProvider>, String> {
     let Value::Map(map) = value else {
         return Err(format!(
-            "exarch config {display}: expected a map of provider declarations \
+            "{label} {display}: expected a map of provider declarations \
              (`[name: [endpoint: ..., key: ..., protocol: ...]]`), got {}",
             value.type_name()
         ));
     };
     let mut providers = Vec::with_capacity(map.len());
     for (name, decl) in &map {
-        providers.push(decode_one(name, decl, display)?);
+        providers.push(decode_one(name, decl, display, label)?);
     }
     Ok(providers)
 }
 
-fn decode_one(name: &str, decl: &Value, display: &str) -> Result<CustomProvider, String> {
-    let where_ = format!("exarch config {display}: provider '{name}'");
+fn decode_one(
+    name: &str,
+    decl: &Value,
+    display: &str,
+    label: &str,
+) -> Result<CustomProvider, String> {
+    let where_ = format!("{label} {display}: provider '{name}'");
     let Value::Map(fields) = decl else {
         return Err(format!(
             "{where_}: expected a map [endpoint: ..., key: ..., protocol: ...], got {}",
@@ -179,17 +280,54 @@ fn optional_string_field(
     }
 }
 
-/// The three wire protocols the config admits: `completions` is `OpenAI` v1,
-/// `responses` is `OpenAI` v2, `anthropic` the Anthropic native protocol.
-fn adapter_for_protocol(protocol: &str, where_: &str) -> Result<AdapterKind, String> {
-    match protocol {
-        "completions" => Ok(AdapterKind::OpenAI),
-        "responses" => Ok(AdapterKind::OpenAIResp),
-        "anthropic" => Ok(AdapterKind::Anthropic),
-        other => Err(format!(
-            "{where_}: unknown protocol '{other}' — expected completions, responses, or anthropic"
-        )),
-    }
+/// The wire protocols a declaration may name, and the adapter each means:
+/// `completions` is `OpenAI` v1, `responses` is `OpenAI` v2, `anthropic` the
+/// Anthropic native protocol.
+///
+/// One table read in both directions, so a protocol written out is the one
+/// that was read in and neither direction can drift from the other. It is
+/// also the list a window offers, in the order it should offer them — most
+/// familiar first.
+const PROTOCOL_ADAPTERS: &[(&str, AdapterKind)] = &[
+    ("completions", AdapterKind::OpenAI),
+    ("responses", AdapterKind::OpenAIResp),
+    ("anthropic", AdapterKind::Anthropic),
+];
+
+/// The adapter `protocol` names.
+///
+/// # Errors
+/// Returns a sentence naming the admissible protocols, so a window can hand a
+/// typed-in one straight here rather than keeping a second list of its own.
+pub fn adapter_for_protocol(protocol: &str, where_: &str) -> Result<AdapterKind, String> {
+    PROTOCOL_ADAPTERS
+        .iter()
+        .find(|(name, _)| *name == protocol)
+        .map(|(_, adapter)| *adapter)
+        .ok_or_else(|| {
+            format!(
+                "{where_}: unknown protocol '{protocol}' — expected {}",
+                protocols().join(", ")
+            )
+        })
+}
+
+/// The protocol keyword an adapter was decoded from.
+///
+/// `None` for an adapter no declaration could have named: [`save_declared`]
+/// refuses to write one rather than silently filing it under the wrong
+/// protocol.
+pub fn protocol_for_adapter(adapter: AdapterKind) -> Option<&'static str> {
+    PROTOCOL_ADAPTERS
+        .iter()
+        .find(|(_, known)| *known == adapter)
+        .map(|(name, _)| *name)
+}
+
+/// The protocol keywords a window offers, most familiar first — the one table
+/// above, read as a list.
+pub fn protocols() -> Vec<&'static str> {
+    PROTOCOL_ADAPTERS.iter().map(|(name, _)| *name).collect()
 }
 
 #[cfg(test)]
@@ -203,7 +341,68 @@ mod tests {
         decode(
             evaluate_no_authority(&mut shell, &source, "<test:config>", LABEL)?,
             "<test:config>",
+            LABEL,
         )
+    }
+
+    /// What a window writes, the decoder reads back — the same three fields,
+    /// the same protocol, and a keyless entry still keyless.
+    #[test]
+    fn declarations_round_trip_through_the_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "exarch-declared-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("providers.ral");
+
+        let written = vec![
+            CustomProvider {
+                label: "house-llm".into(),
+                key_env: Some("HOUSE_LLM_KEY".into()),
+                endpoint: "https://llm.house.example/v1/".into(),
+                adapter: AdapterKind::OpenAIResp,
+            },
+            CustomProvider {
+                label: "ollama".into(),
+                key_env: None,
+                endpoint: "http://localhost:11434/v1/".into(),
+                adapter: AdapterKind::OpenAI,
+            },
+        ];
+        save_declared(&path, &written, LABEL).expect("write");
+        let read = load_declared(&path, LABEL).expect("read back");
+        assert_eq!(read, written);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An absent file is no providers, not a failure — the state every
+    /// computer starts in.
+    #[test]
+    fn an_absent_file_declares_nothing() {
+        let path = std::env::temp_dir().join("exarch-declared-absent-none.ral");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(load_declared(&path, LABEL), Ok(Vec::new()));
+    }
+
+    /// A name with a quote in it is asked about, not escaped into the file.
+    #[test]
+    fn a_quote_in_a_name_is_refused_with_a_question() {
+        let path = std::env::temp_dir().join("exarch-declared-quote.ral");
+        let err = save_declared(
+            &path,
+            &[CustomProvider {
+                label: "it's-llm".into(),
+                key_env: None,
+                endpoint: "https://x.example/v1/".into(),
+                adapter: AdapterKind::OpenAI,
+            }],
+            LABEL,
+        )
+        .unwrap_err();
+        assert!(err.contains("is that really part of it?"), "got: {err}");
     }
 
     /// Map iteration is sorted by key, so the providers come back in label order.

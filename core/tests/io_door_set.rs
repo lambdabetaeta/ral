@@ -235,14 +235,24 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
         "exarch/src/provider/oauth/mod.rs",
         "io-door:silent:token-remove",
     ),
+    // The owner-only secret writer the ChatGPT token store and the credential
+    // fallback file share; moved here out of `oauth`, where the two doors
+    // above it used to live.
     (
-        "exarch/src/provider/oauth/mod.rs",
-        "io-door:silent:token-write",
+        "exarch/src/provider/secret_file.rs",
+        "io-door:silent:secret-write",
     ),
     (
-        "exarch/src/provider/oauth/mod.rs",
-        "io-door:silent:token-write-windows",
+        "exarch/src/provider/secret_file.rs",
+        "io-door:silent:secret-write-windows",
     ),
+    // The fallback key file, written only where this computer offers no
+    // credential manager to keep the key in instead.
+    ("exarch/src/provider/keychain.rs", "io-door:silent:key-read"),
+    ("exarch/src/provider/keychain.rs", "io-door:silent:key-write"),
+    // Provider declarations written back to the app's own config directory by
+    // synod's accounts screen; addresses and protocols, never keys.
+    ("exarch/src/config.rs", "io-door:silent:config-write"),
     ("core/src/path/git.rs", "io-door:silent:git-dir-discovery"),
     ("core/src/path/lex.rs", "io-door:silent:mount-shape"),
     ("exarch/src/prompt.rs", "io-door:silent:system-prompt-files"),

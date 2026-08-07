@@ -45,7 +45,7 @@ and the `/model` picker — and three arms supply it:
   dimension. It holds only the account label and id; the live tokens live in
   the [[map/exarch/agent|credential]] store's `OAuth` cell, not here. On disk
   the login store is persisted through one door, `write_private`
-  (`provider/oauth/mod.rs`), and the file is *born* owner-private: the Unix arm opens
+  (`provider/secret_file.rs`), and the file is *born* owner-private: the Unix arm opens
   it mode `0600`; the Windows arm passes an owner-only, inheritance-protected
   DACL in the `SECURITY_ATTRIBUTES` of `CreateFileW` itself, so at no instant
   does the token file wear the parent directory's inherited ACL.
@@ -55,6 +55,50 @@ turn carries no per-token price, and a provider reaches that state two ways:
 opencode Go is a flat $10/mo gateway flagged by `ProviderKind::flat_rate`,
 while a ChatGPT plan rides its OAuth login cell instead — so a ChatGPT account
 is *not* `flat_rate`. `Transport::metered` is false when either holds.
+
+## Two sources for a key, and one door to each
+
+Environment resolution is exarch's own story: `CredentialStore::resolve_and_scrub`
+sweeps the conventional key variables once, at single-threaded startup, and
+scrubs what it found so no child of a tool call inherits a live key. The
+sweep is therefore un-repeatable by construction, which is why every
+mid-session admission has its own door.
+
+The **other** source is the computer's own credential manager, and it exists
+for [[map/synod|synod]]'s sake — **exarch calls none of it**:
+
+- `provider/keychain.rs` — `Keychain::for_app(App)` reaches the macOS
+  Keychain, the Windows Credential Manager, or a Linux desktop's Secret
+  Service through one `keyring` entry named `(app, provider-label)`, so two
+  products' keys are two entries exactly as their config directories are two
+  directories. `Entry::store_status()` is asked first; a computer with no
+  credential manager falls back to an owner-only file beside the app's
+  configuration, and `vault()` answers where secrets actually land in a
+  sentence a window prints verbatim rather than implying a protection that is
+  not there. A blank or control-bearing entry reads as *no key*, the rule
+  `credential.rs` already applies to a key read from the environment.
+- `provider/secret_file.rs` — `write_private`, the owner-only writer the
+  `ChatGPT` token store and that fallback file share: one implementation of
+  the `0600`-at-`open` and owner-only-DACL-at-`CreateFileW` promise instead of
+  two copies.
+
+`credential.rs` carries four mid-session mutators that exist for a *window*,
+not for exarch: `known` (every provider, bound or not — the list an accounts
+screen is drawn from, since one with no key is precisely the one a user has
+come to give a key to), `admit_key` (bind a key now, `add_oauth`'s sibling for
+the un-repeatable sweep), `forget` (unbind, leaving the provider known), and
+`retire` (drop it entirely — what withdrawing a declaration means). The store
+also remembers which door each key came through (`was_admitted`), because only
+it knows, and an application re-deriving that by interrogating its vault would
+pay a round trip per provider every time it drew a list. See
+[[decisions/260807_synod-keeps-its-own-accounts|synod-keeps-its-own-accounts]].
+
+`config.rs` is likewise generalised without changing exarch's path: `load()`
+is now `load_declared(path, label)` over exarch's own file, and `save_declared`
+writes the same `.ral` source back — a file a program wrote and a person can
+still edit, which is the whole reason declarations are `.ral` and not an
+opaque blob. A label or address carrying a quote is refused with a question
+rather than escaped.
 
 ## Building the transport
 

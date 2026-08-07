@@ -105,7 +105,27 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   fresh account to the live store and catalog, so a ChatGPT plan signed in
   from the window is usable without a restart — the credential store is
   behind a `Mutex` for exactly that reason, taken only for an account list
-  or an admission, never across a fetch or a boot.
+  or an admission, never across a fetch or a boot. `prepare` itself only
+  delegates: where synod's accounts come from is `accounts.rs`.
+- `accounts.rs` — **synod's own credential story**, and the one place it
+  stops borrowing exarch's. A key reaches exarch through the environment
+  because exarch is started from a shell; synod is double-clicked, inherits
+  the desktop's environment, and faces someone with no `.zshrc` to export
+  from. So there are two sources in one order: the computer's credential
+  manager (`exarch::provider::keychain`, entries named `(synod, label)`)
+  first, because it is the one a person can see and change from inside
+  synod, and the environment underneath it — the same sweep and scrub as
+  exarch, still run first because it is the step that must happen while the
+  process is single-threaded. Which services *exist* is a third thing and no
+  secret: the famous ones are `ProviderKind`'s list, and further endpoints
+  are declared in `$XDG_CONFIG_HOME/synod/providers.ral` — synod's file, in
+  synod's directory, holding addresses and protocols but never keys. An
+  `Account` row carries a label, a kind, where the credential in force came
+  from, and at most the key's last four characters; the `source` is read off
+  the store's own record of which door the key came through, so drawing the
+  list costs the vault nothing. A keyless local server is reported as
+  `no-key` outright rather than left to be inferred from a missing hint.
+  See [[decisions/260807_synod-keeps-its-own-accounts|synod-keeps-its-own-accounts]].
 
 ## synod/src/workspace/ — the safety net
 
@@ -157,7 +177,11 @@ job; watch the assistant work, its narration streamed in; then read what
 changed and put anything back. `commands.rs` holds the folder picker, the
 conversation verbs (start, send, restart, end), the model listing (instant
 from the cache, one background refresh), and opening before/after versions
-with the user's own applications; `sink.rs` is the bridge that streams the
+with the user's own applications; `keys.rs` is the accounts screen's five
+commands — list, save or forget a key, declare or withdraw an endpoint — each
+returning the fresh list and ending in the same `models-refreshed` event a
+sign-in ends in, so the picker converges the same way whichever door a
+credential arrived through; `sink.rs` is the bridge that streams the
 conversation's narration into the window, and knows the root agent's id so it
 can route by depth rather than by blindly assuming there is only one agent —
 the two comments that once justified id-blindness by `fuel: 0` are retired

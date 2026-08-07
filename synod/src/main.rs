@@ -50,7 +50,7 @@
 
 mod shell;
 
-use shell::{commands, review, signin};
+use shell::{commands, keys, review, signin};
 
 use exarch::provider::credential::CredentialStore;
 use exarch::provider::models::{LiveSource, ModelCatalog};
@@ -75,6 +75,15 @@ use tauri::Manager;
 /// account list, a cached model list, an admission — never across a network
 /// call or a machine boot.
 struct Accounts(Result<(Mutex<CredentialStore>, Mutex<ModelCatalog<LiveSource>>), String>);
+
+impl Accounts {
+    /// The store and catalog, or a fresh copy of the startup failure that
+    /// left this run with neither — every command answers with the same
+    /// sentence rather than each restating how to unwrap it.
+    fn resolved(&self) -> Result<&(Mutex<CredentialStore>, Mutex<ModelCatalog<LiveSource>>), String> {
+        self.0.as_ref().map_err(Clone::clone)
+    }
+}
 
 /// Whether this run has already started its one background model refresh.
 ///
@@ -117,6 +126,11 @@ fn main() {
             commands::send_message,
             commands::open_file,
             commands::open_url,
+            keys::list_accounts,
+            keys::save_key,
+            keys::forget_key,
+            keys::save_endpoint,
+            keys::forget_endpoint,
             signin::sign_in,
             signin::cancel_sign_in,
             review::open_earlier,

@@ -8,6 +8,7 @@
 pub mod credential;
 mod error;
 mod identity;
+pub mod keychain;
 pub mod listing;
 pub mod models;
 pub mod oauth;
@@ -15,6 +16,7 @@ pub mod pricing;
 mod request;
 mod retry;
 pub mod scripted;
+mod secret_file;
 pub mod state;
 mod stream;
 pub mod tls;

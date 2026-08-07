@@ -231,7 +231,7 @@
       transform: rotate(45deg) translate(1px, 1px);
     }
     .select-shell:has(select:disabled)::after { opacity: 0.5; }
-    #assistant-select, #effort-select {
+    #assistant-select, #effort-select, #add-protocol {
       appearance: none;
       -webkit-appearance: none;
       display: block;
@@ -249,15 +249,17 @@
       box-shadow: var(--shadow-soft), inset 0 1px 0 color-mix(in srgb, #fff 7%, transparent);
       transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.08s ease;
     }
-    #assistant-select:not(:disabled):hover, #effort-select:not(:disabled):hover {
+    #assistant-select:not(:disabled):hover, #effort-select:not(:disabled):hover,
+    #add-protocol:not(:disabled):hover {
       border-color: var(--accent);
       transform: translateY(-1px);
       box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 16%, transparent),
                   inset 0 1px 0 color-mix(in srgb, #fff 7%, transparent);
     }
-    #assistant-select:active, #effort-select:active { transform: translateY(0); }
+    #assistant-select:active, #effort-select:active, #add-protocol:active { transform: translateY(0); }
     /* The focus ring follows the pill rather than the shared 8px corner. */
-    #assistant-select:focus-visible, #effort-select:focus-visible { border-radius: 999px; }
+    #assistant-select:focus-visible, #effort-select:focus-visible,
+    #add-protocol:focus-visible { border-radius: 999px; }
     #effort-select:disabled { cursor: default; opacity: 0.5; }
 
     /* The two ways in: choose a folder, or sign in first. Only one of them
@@ -282,15 +284,15 @@
     #no-account.show { display: block; }
     /* The sign-in's own line: what it is waiting for, and — when the browser
        could not be opened — the link the user has to follow themselves. */
-    #sign-in-say {
+    #sign-in-say, #accounts-say {
       font-size: 14px;
       line-height: 1.55;
       color: var(--ink-soft);
       margin: 14px 0 0;
       display: none;
     }
-    #sign-in-say.show { display: block; }
-    #sign-in-link {
+    #sign-in-say.show, #accounts-say.show { display: block; }
+    .sign-in-link {
       display: inline-block;
       margin-top: 4px;
       font-family: var(--mono);
@@ -301,7 +303,7 @@
       overflow-wrap: anywhere;
       user-select: text;
     }
-    #start-error {
+    #start-error, #accounts-error {
       margin-top: 18px;
       padding: 12px 16px;
       border-radius: 11px;
@@ -312,7 +314,7 @@
       line-height: 1.5;
       display: none;
     }
-    #start-error.show { display: block; }
+    #start-error.show, #accounts-error.show { display: block; }
 
     /* --- buttons, shared -------------------------------------------- */
     button {
@@ -1047,6 +1049,111 @@
     }
     .banner.show { display: block; }
 
+    /* --- accounts screen: the services, and the keys they are spoken to
+       with. One card per service, each saying the same three things: who
+       it is, whether a key is in force, and what may be done about it. --- */
+    #screen-accounts {
+      height: 100%;
+      flex-direction: column;
+      align-items: center;
+      overflow-y: auto;
+      padding: 28px 20px 56px;
+    }
+    #screen-accounts .wrap {
+      flex: none;
+      width: 100%;
+      max-width: 560px;
+      animation: rise 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+    }
+    .accounts-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .accounts-head h1 { margin: 0; }
+    .accounts-lede {
+      font-size: 14.5px;
+      line-height: 1.6;
+      color: var(--ink-soft);
+      margin: 8px 0 24px;
+    }
+    .accounts-empty {
+      font-size: 14.5px;
+      line-height: 1.6;
+      color: var(--ink-faint);
+      margin: 0 0 20px;
+    }
+    .account, .add-service {
+      background: var(--raised);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-bottom: 12px;
+      text-align: left;
+    }
+    .account-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .account-name {
+      font-family: var(--serif);
+      font-weight: 600;
+      font-size: 17px;
+      margin: 0;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .account-state {
+      flex: none;
+      font-family: var(--mono);
+      font-size: 12.5px;
+      color: var(--ink-soft);
+    }
+    .account-note {
+      margin: 6px 0 0;
+      font-size: 13px;
+      line-height: 1.55;
+      color: var(--ink-faint);
+      overflow-wrap: anywhere;
+    }
+    .account-form { margin-top: 12px; }
+    .account-form .field-label { margin-bottom: 6px; }
+    .row-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+    .text-input {
+      display: block;
+      width: 100%;
+      font-family: var(--sans);
+      font-size: 14.5px;
+      color: var(--ink);
+      background: var(--raised-2);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .text-input::placeholder { color: var(--ink-faint); }
+    .add-service h2 {
+      font-family: var(--serif);
+      font-weight: 600;
+      font-size: 18px;
+      margin: 0 0 4px;
+    }
+    .add-service .field { margin: 14px 0 0; }
+    .add-service .field-label { margin-bottom: 6px; }
+    .add-note {
+      margin: 10px 0 0;
+      font-size: 13px;
+      line-height: 1.55;
+      color: var(--ink-faint);
+    }
+
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation: none !important; transition: none !important; }
     }
@@ -1077,13 +1184,73 @@
           <span class="select-shell"><select id="effort-select"></select></span>
         </div>
         <p id="no-account">No assistant account is set up on this computer yet.
-          Sign in with your ChatGPT plan to begin.</p>
+          Sign in with your ChatGPT plan to begin, or add an API key under Accounts.</p>
         <div class="actions" id="actions">
           <button type="button" class="btn-primary" id="pick-folder">Choose a folder…</button>
           <button type="button" class="btn-quiet" id="sign-in">Sign in with ChatGPT</button>
         </div>
         <p id="sign-in-say"></p>
+        <div class="actions">
+          <button type="button" class="btn-quiet" id="open-accounts">Accounts…</button>
+        </div>
         <div id="start-error"></div>
+      </div>
+    </section>
+
+    <!-- ============ ACCOUNTS: the services, and their keys ============ -->
+    <section id="screen-accounts" class="screen">
+      <div class="wrap">
+        <div class="accounts-head">
+          <h1 class="title">Accounts</h1>
+          <button type="button" class="btn-quiet" id="accounts-done">Done</button>
+        </div>
+        <p class="accounts-lede" id="accounts-vault"></p>
+
+        <div id="accounts-list"></div>
+
+        <div class="account">
+          <div class="account-head">
+            <h2 class="account-name">ChatGPT plan</h2>
+          </div>
+          <p class="account-note" id="accounts-plan-note">If you pay for ChatGPT, you
+            can use that plan here instead of a key.</p>
+          <div class="row-actions">
+            <button type="button" class="btn-quiet" id="accounts-sign-in">Sign in with ChatGPT</button>
+          </div>
+          <p id="accounts-say"></p>
+        </div>
+
+        <form class="add-service" id="add-service">
+          <h2>Add another service</h2>
+          <p class="add-note">For a service that isn't in the list above, or a
+            program running on this computer.</p>
+          <div class="field">
+            <label class="field-label" for="add-name">Name</label>
+            <input class="text-input" type="text" id="add-name" autocomplete="off"
+              placeholder="What you'd like to call it" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="add-address">Address</label>
+            <input class="text-input" type="text" id="add-address" autocomplete="off"
+              spellcheck="false" placeholder="https://…" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="add-protocol">Way of speaking</label>
+            <span class="select-shell"><select id="add-protocol"></select></span>
+          </div>
+          <div class="field">
+            <label class="field-label" for="add-key">Key</label>
+            <input class="text-input" type="password" id="add-key" autocomplete="off"
+              spellcheck="false" placeholder="Paste the key here" />
+          </div>
+          <p class="add-note">Leave the key empty if this is a program running on
+            your own computer that asks for none.</p>
+          <div class="row-actions">
+            <button type="submit" class="btn-primary" id="add-save">Add this service</button>
+          </div>
+        </form>
+
+        <div id="accounts-error"></div>
       </div>
     </section>
 
@@ -1390,7 +1557,11 @@
     const listen = TAURI ? TAURI.event.listen : async () => () => {};
 
     const $ = (id) => document.getElementById(id);
-    const screens = { start: $("screen-start"), conversation: $("screen-conversation") };
+    const screens = {
+      start: $("screen-start"),
+      accounts: $("screen-accounts"),
+      conversation: $("screen-conversation"),
+    };
 
     function show(name) {
       for (const [key, el] of Object.entries(screens)) el.classList.toggle("active", key === name);
@@ -1584,23 +1755,38 @@
     // the backend refuses the second anyway.
     let signingIn = false;
 
+    // The one sign-in stands on two screens at once, so both buttons and
+    // both lines say the same thing throughout.
+    const SIGN_IN_BUTTONS = ["sign-in", "accounts-sign-in"];
+    const SIGN_IN_LINES = ["sign-in-say", "accounts-say"];
+
     function setSigningIn(running) {
       signingIn = running;
-      $("sign-in").textContent = running ? "Stop signing in" : "Sign in with ChatGPT";
+      const label = running ? "Stop signing in" : "Sign in with ChatGPT";
+      for (const id of SIGN_IN_BUTTONS) $(id).textContent = label;
+    }
+
+    // An error belongs on whichever screen the user is looking at.
+    function showSignInError(text) {
+      if (screens.accounts.classList.contains("active")) showAccountsError(text);
+      else showStartError(text);
     }
 
     // The sign-in's own line: a sentence, and — only when the browser could
     // not be opened for the user — the link they have to follow themselves,
     // both clickable and selectable so either door works.
     function saySignIn(text, link) {
-      const el = $("sign-in-say");
+      for (const id of SIGN_IN_LINES) fillSignInLine($(id), text, link);
+    }
+
+    function fillSignInLine(el, text, link) {
       el.textContent = text || "";
       if (text && link) {
         const anchor = document.createElement("span");
-        anchor.id = "sign-in-link";
+        anchor.className = "sign-in-link";
         anchor.textContent = link;
         anchor.addEventListener("click", () => {
-          invoke("open_url", { url: link }).catch((err) => showStartError(String(err)));
+          invoke("open_url", { url: link }).catch((err) => showSignInError(String(err)));
         });
         el.appendChild(document.createElement("br"));
         el.appendChild(anchor);
@@ -1608,12 +1794,13 @@
       el.classList.toggle("show", Boolean(text));
     }
 
-    $("sign-in").addEventListener("click", async () => {
+    async function startSignIn() {
       if (signingIn) {
-        invoke("cancel_sign_in").catch((err) => showStartError(String(err)));
+        invoke("cancel_sign_in").catch((err) => showSignInError(String(err)));
         return;
       }
       $("start-error").classList.remove("show");
+      clearAccountsError();
       setSigningIn(true);
       saySignIn("Opening your browser…");
       try {
@@ -1621,9 +1808,11 @@
       } catch (err) {
         setSigningIn(false);
         saySignIn("");
-        showStartError(String(err));
+        showSignInError(String(err));
       }
-    });
+    }
+
+    for (const id of SIGN_IN_BUTTONS) $(id).addEventListener("click", startSignIn);
 
     listen("sign-in-step", (event) => {
       const step = event.payload || {};
@@ -1642,11 +1831,235 @@
             ? "Signed in again as " + done.account + "."
             : "Signed in as " + done.account + "."
         );
+        if (screens.accounts.classList.contains("active")) loadAccounts();
       } else {
         saySignIn("");
-        showStartError(done.reason || "The sign-in did not finish.");
+        showSignInError(done.reason || "The sign-in did not finish.");
       }
     });
+
+    // ---- Accounts screen -------------------------------------------------
+    //
+    // A key travels one way only: what comes back from the backend is its
+    // last four characters and where it is kept, so no stored key is ever
+    // put into an input here.
+
+    function showAccountsError(text) {
+      $("accounts-error").textContent = text;
+      $("accounts-error").classList.add("show");
+    }
+
+    function clearAccountsError() {
+      $("accounts-error").classList.remove("show");
+    }
+
+    async function loadAccounts() {
+      try {
+        renderAccounts(await invoke("list_accounts"));
+      } catch (err) {
+        showAccountsError(String(err));
+      }
+    }
+
+    // Every command that changes something answers with the whole list as
+    // it now stands, so the screen redraws from what is true rather than
+    // from what it hoped. `true` means the change went through.
+    async function accountCommand(command, args) {
+      clearAccountsError();
+      try {
+        renderAccounts(await invoke(command, args));
+        return true;
+      } catch (err) {
+        showAccountsError(String(err));
+        return false;
+      }
+    }
+
+    function renderAccounts(list) {
+      const accounts = (list && list.accounts) || [];
+      const vault = (list && list.vault) || "";
+      $("accounts-vault").textContent = vault
+        ? "Keys are kept in " + vault + ". Once saved, a key is never shown here again."
+        : "";
+
+      const holder = $("accounts-list");
+      holder.innerHTML = "";
+      if (accounts.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "accounts-empty";
+        empty.textContent = "No services are set up on this computer yet.";
+        holder.appendChild(empty);
+      }
+      accounts.forEach((account, i) => holder.appendChild(accountRow(account, i)));
+
+      // The plan's card stands whether or not anyone is signed in; it says
+      // which of the two rather than coming and going.
+      $("accounts-plan-note").textContent = accounts.some((a) => a.kind === "chatgpt")
+        ? "You are signed in with your ChatGPT plan. Signing in again replaces it."
+        : "If you pay for ChatGPT, you can use that plan here instead of a key.";
+
+      // A part-filled add form keeps whatever the user had already chosen.
+      const select = $("add-protocol");
+      const chosen = select.value;
+      const protocols = (list && list.protocols) || [];
+      select.innerHTML = "";
+      for (const protocol of protocols) {
+        const option = document.createElement("option");
+        option.value = protocol;
+        option.textContent = protocol;
+        select.appendChild(option);
+      }
+      if (protocols.includes(chosen)) select.value = chosen;
+    }
+
+    function accountRow(account, i) {
+      const row = document.createElement("div");
+      row.className = "account";
+
+      const head = document.createElement("div");
+      head.className = "account-head";
+      const name = document.createElement("h2");
+      name.className = "account-name";
+      name.textContent = account.label;
+      const state = document.createElement("span");
+      state.className = "account-state";
+      state.textContent = keyState(account);
+      head.append(name, state);
+      row.appendChild(head);
+
+      for (const line of accountNotes(account)) {
+        const note = document.createElement("p");
+        note.className = "account-note";
+        note.textContent = line;
+        row.appendChild(note);
+      }
+
+      // Every service that authenticates with a key gets the key input —
+      // a declared endpoint included, since a key rotated at the far end
+      // has to be retypeable at this one.
+      if (account.kind !== "chatgpt" && account.source !== "no-key") {
+        row.appendChild(keyForm(account, i));
+      }
+      if (account.kind === "endpoint") {
+        const actions = document.createElement("div");
+        actions.className = "row-actions";
+        actions.appendChild(actionButton("Remove", "btn-mini", () =>
+          accountCommand("forget_endpoint", { label: account.label })));
+        row.appendChild(actions);
+      }
+      return row;
+    }
+
+    // "Used without a key" is a state the backend states outright, never
+    // inferred from a missing hint: a service that wants no key must not
+    // be read as one still waiting for one.
+    function keyState(account) {
+      if (account.kind === "chatgpt") return "Signed in";
+      if (account.source === "no-key") return "Used without a key";
+      return account.hint ? "•••• " + account.hint : "No key yet";
+    }
+
+    function accountNotes(account) {
+      if (account.kind === "chatgpt") {
+        return ["You are signed in with your ChatGPT plan, so this one needs no key."];
+      }
+      if (account.kind === "endpoint") {
+        const notes = [];
+        if (account.endpoint) notes.push("Address: " + account.endpoint);
+        if (account.protocol) notes.push("Way of speaking: " + account.protocol);
+        if (account.source === "no-key") {
+          notes.push("This one asks for no key, so there is none to type.");
+        }
+        return notes;
+      }
+      if (account.source === "no-key") {
+        return ["This one asks for no key, so there is none to type."];
+      }
+      if (account.source === "environment") {
+        return [
+          "This key came from the environment synod was started in"
+            + (account.envVar ? ", as " + account.envVar : "")
+            + ". It cannot be changed or removed from this window, but a key typed"
+            + " here is used instead of it.",
+        ];
+      }
+      if (account.source === "none") {
+        return ["Paste the key this service gave you to start using it."];
+      }
+      return [];
+    }
+
+    // The one input a key is ever typed into: it starts empty and is thrown
+    // away with the card on the redraw a save brings, so a saved key is
+    // never left sitting in the window.
+    function keyForm(account, i) {
+      const form = document.createElement("form");
+      form.className = "account-form";
+      const inputId = "account-key-" + i;
+
+      const label = document.createElement("label");
+      label.className = "field-label";
+      label.htmlFor = inputId;
+      label.textContent = account.hint
+        ? "Replace the key for " + account.label
+        : "Key for " + account.label;
+
+      const input = document.createElement("input");
+      input.type = "password";
+      input.id = inputId;
+      input.className = "text-input";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.placeholder = "Paste the key here";
+
+      const actions = document.createElement("div");
+      actions.className = "row-actions";
+      const save = document.createElement("button");
+      save.type = "submit";
+      save.className = "btn-mini keep";
+      save.textContent = "Save";
+      actions.appendChild(save);
+      // Only a key this window put away can this window take back.
+      if (account.source === "keychain") {
+        actions.appendChild(actionButton("Forget", "btn-mini", () =>
+          accountCommand("forget_key", { label: account.label })));
+      }
+
+      form.append(label, input, actions);
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        save.disabled = true;
+        const saved = await accountCommand("save_key", { label: account.label, key: input.value });
+        // A save redraws the whole list, this card with it; a refusal leaves
+        // the typed key where it is, to be corrected rather than retyped.
+        if (!saved) save.disabled = false;
+      });
+      return form;
+    }
+
+    $("add-service").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const key = $("add-key").value.trim();
+      $("add-save").disabled = true;
+      const added = await accountCommand("save_endpoint", {
+        label: $("add-name").value,
+        endpoint: $("add-address").value,
+        protocol: $("add-protocol").value,
+        key: key === "" ? null : key,
+      });
+      $("add-save").disabled = false;
+      if (added) {
+        for (const id of ["add-name", "add-address", "add-key"]) $(id).value = "";
+      }
+    });
+
+    $("open-accounts").addEventListener("click", () => {
+      clearAccountsError();
+      show("accounts");
+      loadAccounts();
+    });
+
+    $("accounts-done").addEventListener("click", () => show("start"));
 
     // ---- Conversation screen --------------------------------------------
 
