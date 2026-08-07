@@ -397,8 +397,8 @@ fn guard_cleanup_bytes_output_dominates_pure_body() {
 
 #[test]
 fn guard_input_joins_bytes_dominant_when_either_always_arm_reads() {
-    // Both arms always run, so input folds via `join_byte_mode`, not
-    // `union_mode`: an upstream byte producer satisfies the guard even
+    // Both arms always run, so input joins bytes-dominant rather than
+    // alternating: an upstream byte producer satisfies the guard even
     // though only one of the two arms actually reads it.
     ok("echo hi | guard { from-string } { return unit }");
     ok("echo hi | guard { return unit } { from-string }");
@@ -821,6 +821,21 @@ fn stream_combinator_taking_value_unifies() {
          let s = !{ from-lines }\n\
          let mapped = !{ smap { |x| return $x } $s }\n\
          echo !{ stream-to-list $mapped }",
+    );
+}
+
+#[test]
+fn recursive_sibling_arm_outputs_stay_independent_under_the_join() {
+    // A `case` over one recursive group: `f` turns out byte-emitting, `g`
+    // silent.  The arms' output join is bytes-dominant on the *case* only;
+    // it must not equate the two still-open sibling outputs at visit time,
+    // or `f`'s later `echo` grounds `g`'s output `Bytes` and `g`'s pure body
+    // fails its own group unification.
+    ok(
+        "let h = { |v| case $v [ `go: { |_| !{f 0} }, `alt: { |_| !{g 0} }, `stop: { |_| return unit } ] }\n\
+        let f = { |n| return $h; echo x; return unit }\n\
+        let g = { |n| return $h; return unit }\n\
+        return unit",
     );
 }
 
@@ -1511,6 +1526,66 @@ fn chain_byte_arms_join_to_byte_output() {
     );
 }
 
+#[test]
+fn seq_forcing_a_thunk_generalises_with_its_output_mode_quantified() {
+    // `∅ ⊔ μ = μ`: the sequence's output stays an open, quantified mode
+    // variable, not `∅` stamped for good because nothing was ground `Bytes`
+    // at visit time.  The variable is the sequence's own — an opaque
+    // statement contributes no attachment to `t`'s channels, since tying
+    // them down would force `t` into stage shape and reject a lambda
+    // argument.
+    use ral_core::typecheck::PipeMode;
+    let comp = annotated("let k = { |t| !$t; return unit }; return unit");
+    let mut scheme = None;
+    common::walk_comp(&comp, &mut |c| {
+        if let CompKind::Bind {
+            pattern: IrPattern::Name(name),
+            scheme: Some(s),
+            ..
+        } = &c.item
+            && name == "k"
+        {
+            scheme = Some(s.clone());
+        }
+    });
+    let scheme = scheme.expect("a scheme on the spine bind of `k`");
+    let Ty::Thunk(body) = &scheme.ty else {
+        panic!("k is a thunk, got {:?}", scheme.ty);
+    };
+    let CompTy::Fun(_, seq) = body.as_ref() else {
+        panic!("k's body takes a parameter, got {body:?}");
+    };
+    let CompTy::Return(spec, _) = seq.as_ref() else {
+        panic!("k's sequence is a Return, got {seq:?}");
+    };
+    let PipeMode::Var(output) = spec.output else {
+        panic!("the sequence's output must stay a mode variable, got {spec:?}");
+    };
+    assert!(
+        scheme.mode_vars.contains(&output),
+        "the output mode must be quantified, scheme: {scheme:?}"
+    );
+}
+
+#[test]
+fn seq_tail_still_unknown_may_become_a_function() {
+    // The tail gives the sequence its value and may be a function: with
+    // every statement silent, `!$f` must stay free to resolve `Fun` at the
+    // call site rather than be forced into stage shape at visit time.
+    ok("let apply = { |f| return unit; !$f }; apply { |x| return $x }");
+}
+
+#[test]
+fn seq_tail_carries_a_settled_byte_demand() {
+    // A statement's settled byte demand needs a stage spec to live on, so
+    // the same tail is forced to `Return` shape and a function argument is
+    // rejected.
+    has_error(
+        "let apply = { |f| let x = from-string; !$f }; apply { |x| return $x }",
+        "one is a function",
+    );
+}
+
 // ─── Observed-value arm join (if / `?` / try) ─────────────────────────────────
 //
 // One boundary judgment for arm joins: arms that all resolve to
@@ -1553,6 +1628,85 @@ fn if_byte_arm_alongside_value_arm_is_rejected() {
 #[test]
 fn try_byte_body_alongside_value_handler_is_rejected() {
     has_error("try { echo hi } { |_| return 's' }", "result conduit");
+}
+
+#[test]
+fn sibling_arms_grounding_apart_report_under_the_joins_own_reason() {
+    // Both recursive arms are still open when the `case` is visited; `f`
+    // grounds `Bytes` and `g` grounds `∅`-at-`Int` only at their own bodies.
+    // The clash is the join's to report — a conduit mismatch under
+    // `CaseArms` — not a mismatch surfacing at whichever group unification
+    // next touches a variable the join had eagerly equated.
+    let errs = raw_errors(
+        "let h = { |v| case $v [ `a: { |_| return unit }, `b: { |_| !{f 0} }, `c: { |_| !{g 0} } ] }\n\
+         let f = { |n| return $h; echo done }\n\
+         let g = { |n| return $h; return 5 }\n\
+         return unit",
+    );
+    assert!(
+        errs.iter().any(|e| {
+            matches!(e.reason, Some(ral_core::typecheck::Reason::CaseArms))
+                && e.kind.render_message().contains("result conduit")
+        }),
+        "expected the join's own conduit mismatch under CaseArms, got: {errs:?}"
+    );
+}
+
+#[test]
+fn inner_bind_does_not_collapse_the_enclosing_groups_join() {
+    // The sibling-arms program with one tail's arithmetic hoisted by the
+    // elaborator into a gensym `Bind`.  That inner boundary owns none of
+    // the `case`'s variables, so the join must ride to the group fixpoint
+    // and report there — the same conduit mismatch under `CaseArms` as the
+    // unhoisted program, not a shape clash at the group unification.
+    let errs = raw_errors(
+        "let h = { |v| case $v [ `a: { |_| return unit }, `b: { |_| !{f 0} }, `c: { |_| !{g 0} } ] }\n\
+         let f = { |n| return $h; echo done }\n\
+         let g = { |n| return $h; return $[$n + 1] }\n\
+         return unit",
+    );
+    assert!(
+        errs.iter().any(|e| {
+            matches!(e.reason, Some(ral_core::typecheck::Reason::CaseArms))
+                && e.kind.render_message().contains("result conduit")
+        }),
+        "expected the join's own conduit mismatch under CaseArms, got: {errs:?}"
+    );
+}
+
+#[test]
+fn inner_bind_does_not_foreclose_a_siblings_subsumption() {
+    // `g` ends `∅`-at-`Unit`, which subsumes beside `f`'s byte arm — but
+    // only if the hoisted `Bind` inside `g`'s body leaves the still-open
+    // join alone instead of concluding it early and pinning `g`'s arm
+    // `Bytes` before its own body has spoken.
+    ok(
+        "let h = { |v| case $v [ `b: { |_| !{f 0} }, `c: { |_| !{g 0} } ] }\n\
+         let f = { |n| return $h; echo done }\n\
+         let g = { |n| return $h; let w = $[$n + 1]; return unit }\n\
+         return unit",
+    );
+}
+
+#[test]
+fn late_byte_arm_beside_value_payload_arm_is_a_conduit_mismatch_under_try_arms() {
+    // The handler is `∅`-at-`Int` from the start; the body's `Bytes` result
+    // arrives only when `f`'s own body is inferred.  The join must still be
+    // open at that point, so the verdict is its conduit mismatch under
+    // `TryArms` — not an early value-side pin of the body's result whose
+    // clash then surfaces at the group unification.
+    let errs = raw_errors(
+        "let h = { |v| try { !{f $v} } { |_| return 5 } }\n\
+         let f = { |n| return $h; echo x }\n\
+         return unit",
+    );
+    assert!(
+        errs.iter().any(|e| {
+            matches!(e.reason, Some(ral_core::typecheck::Reason::TryArms))
+                && e.kind.render_message().contains("result conduit")
+        }),
+        "expected the join's own conduit mismatch under TryArms, got: {errs:?}"
+    );
 }
 
 #[test]

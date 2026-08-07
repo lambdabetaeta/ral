@@ -304,42 +304,10 @@ impl Inferencer<'_> {
         self.comp_end_mode(cty, |s| s.output)
     }
 
-    /// The mode of two arms only one of which runs, so a clash is not a
-    /// contradiction but an unknown: it yields a fresh variable a downstream
-    /// stage can pin.  Used for branch arms' input end — the arms read the
-    /// same shared stdin, but only one runs, so a mismatch is not fatal.
-    pub(super) fn union_mode(&mut self, a: PipeMode, b: PipeMode) -> PipeMode {
-        if self.ctx.unifier.unify_mode(&a, &b).is_err() {
-            self.ctx.unifier.fresh_mode()
-        } else {
-            a
-        }
-    }
-
-    /// Bytes-dominant join: `Bytes` if either end may emit bytes, `None` if
-    /// both are silent.  `∅` is the join's identity, so a silent end beside a
-    /// still-open one doesn't decide — the open end does, later; pinning it
-    /// here would foreclose an arm holding a recursive call, whose mode is
-    /// its own function's, still under inference.  Two open ends unify via
-    /// [`Self::union_mode`].  Direction-agnostic — used for both input and
-    /// output ends, wherever any one arm's bytes should dominate the whole.
-    pub(super) fn join_byte_mode(&mut self, a: PipeMode, b: PipeMode) -> PipeMode {
-        match (
-            self.ctx.unifier.resolve_mode(&a),
-            self.ctx.unifier.resolve_mode(&b),
-        ) {
-            (PipeMode::Bytes, _) | (_, PipeMode::Bytes) => PipeMode::Bytes,
-            (PipeMode::None, PipeMode::None) => PipeMode::None,
-            (PipeMode::None, _) => b,
-            (_, PipeMode::None) => a,
-            _ => self.union_mode(a, b),
-        }
-    }
-
     /// Merge a conditional's or chain's arms over their result modes: input
-    /// unions via [`Self::union_mode`] (only one arm runs), output joins via
-    /// bytes-dominant [`Self::join_byte_mode`]. All-or-nothing: if any arm
-    /// isn't `Return`, every arm instead unifies strictly via `unify_comp_ty`.
+    /// alternates over the arms — only one runs — and output joins bytes-
+    /// dominant. All-or-nothing: if any arm isn't `Return`, every arm instead
+    /// unifies strictly via `unify_comp_ty`.
     fn merge_branches(&mut self, arms: Vec<CompTy>, why: &Reason) -> CompTy {
         if arms.is_empty() {
             return CompTy::pure(self.ctx.unifier.fresh_ty());
@@ -374,117 +342,29 @@ impl Inferencer<'_> {
             return acc;
         }
 
-        let mut input = None;
-        let mut output = None;
+        let mut inputs = Vec::with_capacity(arms.len());
+        let mut outputs = Vec::with_capacity(arms.len());
         let mut per_arm = Vec::with_capacity(arms.len());
         for cty in &arms {
             let CompTy::Return(spec, ty) = self.ctx.unifier.resolve_comp_ty(cty) else {
                 unreachable!("checked all_return above")
             };
-            input = Some(match input {
-                None => spec.input,
-                Some(acc) => self.union_mode(acc, spec.input),
-            });
-            output = Some(match output {
-                None => spec.output,
-                Some(acc) => self.join_byte_mode(acc, spec.output),
-            });
+            inputs.push(spec.input);
+            outputs.push(spec.output);
             per_arm.push((spec, *ty));
         }
-        let output = output.unwrap();
-
-        let (result, observed_acc) = self.join_arm_results(&per_arm, why);
-        debug_assert!(
-            result != PipeMode::Bytes || self.ctx.unifier.resolve_mode(&output) == PipeMode::Bytes,
-            "WF-1: result ⊑ output"
-        );
+        let input = self.ctx.alt_modes(inputs, why.clone());
+        let output = self.ctx.join_modes(outputs, why.clone());
+        let (result, observed_acc) = self.ctx.join_arm_results(per_arm, why.clone());
 
         CompTy::Return(
             PipeSpec {
-                input: input.unwrap(),
+                input,
                 output,
                 result,
             },
             Box::new(observed_acc),
         )
-    }
-
-    /// The result-mode join at the heart of every arm merge (`If`/`Chain`/
-    /// `Case` here, `try` in `scope.rs`). No arm ground `Bytes`: a `∅`-at-
-    /// `Unit` arm is the join's identity — the one subsumption instance lets
-    /// it ride a byte side chosen later — so still-open arms unify with each
-    /// other and stay open, pinned to `∅` only by an arm with a value
-    /// payload. Some arm ground `Bytes`: every arm must land on the byte
-    /// side, a ground `∅` arm subsuming there only if its value is `Unit`.
-    pub(super) fn join_arm_results(
-        &mut self,
-        per_arm: &[(PipeSpec, Ty)],
-        why: &Reason,
-    ) -> (PipeMode, Ty) {
-        let any_bytes = per_arm
-            .iter()
-            .any(|(spec, _)| self.ctx.unifier.resolve_mode(&spec.result) == PipeMode::Bytes);
-
-        if !any_bytes {
-            let mut open = Vec::new();
-            let mut value_payload = false;
-            for (spec, ty) in per_arm {
-                match self.ctx.unifier.resolve_mode(&spec.result) {
-                    PipeMode::Var(_) => open.push(spec.result),
-                    PipeMode::None => {
-                        value_payload |= !matches!(self.ctx.unifier.resolve_ty(ty), Ty::Unit);
-                    }
-                    PipeMode::Bytes => unreachable!("any_bytes ruled this out"),
-                }
-            }
-            let joined_result = match open.split_first() {
-                Some((first, rest)) if !value_payload => {
-                    for r in rest {
-                        self.ctx.unify_mode(first, r, Reason::ResultPin);
-                    }
-                    *first
-                }
-                _ => {
-                    for r in &open {
-                        self.ctx.unify_mode(r, &PipeMode::None, Reason::ResultPin);
-                    }
-                    PipeMode::None
-                }
-            };
-            let mut iter = per_arm.iter().map(|(_, ty)| ty.clone());
-            let first = iter.next().expect("a join always has at least one arm");
-            for ty in iter {
-                self.ctx.unify_ty(&first, &ty, why.clone());
-            }
-            return (joined_result, first);
-        }
-
-        for (spec, ty) in per_arm {
-            match self.ctx.unifier.resolve_mode(&spec.result) {
-                PipeMode::Bytes => debug_assert!(
-                    matches!(self.ctx.unifier.resolve_ty(ty), Ty::Unit),
-                    "WF-2: every arm landing on the byte side returns Unit"
-                ),
-                PipeMode::Var(_) => {
-                    self.ctx
-                        .unify_mode(&spec.result, &PipeMode::Bytes, Reason::ResultPin);
-                }
-                PipeMode::None if matches!(self.ctx.unifier.resolve_ty(ty), Ty::Unit) => {}
-                PipeMode::None => {
-                    let expected = CompTy::Return(
-                        PipeSpec {
-                            input: spec.input,
-                            output: spec.output,
-                            result: PipeMode::Bytes,
-                        },
-                        Box::new(Ty::Unit),
-                    );
-                    let actual = CompTy::Return(*spec, Box::new(ty.clone()));
-                    self.ctx.unify_comp_ty(&expected, &actual, why.clone());
-                }
-            }
-        }
-        (PipeMode::Bytes, Ty::Unit)
     }
 
     /// Eventual return type, peering past `Fun` arrows as
@@ -697,6 +577,7 @@ impl Inferencer<'_> {
             );
         }
         let thunk_ty = Ty::Thunk(Box::new(cty));
+        self.ctx.solve_at_boundary(self.env);
         super::generalize::generalize(&mut self.ctx.unifier, self.env, &thunk_ty)
     }
 
@@ -918,9 +799,9 @@ impl Inferencer<'_> {
         empty: Ty,
     ) -> CompTy {
         let mut last = CompTy::pure(empty);
-        let mut emits_bytes = false;
-        let mut reads_bytes = false;
-        for part in parts {
+        let mut inputs = Vec::with_capacity(parts.len());
+        let mut outputs = Vec::with_capacity(parts.len());
+        for (i, part) in parts.iter().enumerate() {
             let mut alias_already_typed = false;
             match alias_statement_shape(part) {
                 Ok(Some((name, thunk))) => {
@@ -954,31 +835,58 @@ impl Inferencer<'_> {
             } else {
                 self.infer_comp(part)
             };
-            let out = self.comp_output_mode(&last);
-            emits_bytes |= self.ctx.unifier.resolve_mode(&out) == PipeMode::Bytes;
-            let inp = self.comp_input_mode(&last);
-            reads_bytes |= self.ctx.unifier.resolve_mode(&inp) == PipeMode::Bytes;
+            // The tail's ends are `lift_channels`' to weigh — a statement
+            // runs for its effect, the tail gives the sequence its shape.
+            if i + 1 < parts.len() {
+                inputs.push(self.comp_input_mode(&last));
+                outputs.push(self.comp_output_mode(&last));
+            }
         }
-        self.lift_modes(last, reads_bytes, emits_bytes)
+        self.lift_channels(last, inputs, outputs)
     }
 
-    /// A sequence's two channels are everything its statements read and write,
-    /// so each mode joins over the whole run, not just the last statement — a
-    /// body that `echo`es per line is byte-output, and one that reads stdin
-    /// before its final statement is byte-input.  Only those modes lift, and a
-    /// `Fun`-tailed sequence yields a function, not a stage, so it keeps its
-    /// shape.
-    fn lift_modes(&mut self, last: CompTy, reads_bytes: bool, emits_bytes: bool) -> CompTy {
-        if !(reads_bytes || emits_bytes)
-            || matches!(self.ctx.unifier.resolve_comp_ty(&last), CompTy::Fun(..))
-        {
-            return last;
+    /// A sequence's two channels are everything its statements read and
+    /// write, so each end joins over the whole run, not just the last
+    /// statement — a body that `echo`es per line is byte-output, and one
+    /// that reads stdin before its final statement is byte-input.  A
+    /// `Fun`-tailed sequence yields a function, not a stage, and keeps its
+    /// shape untouched; a `Return` tail joins its own ends with the
+    /// statements' into the rebuilt `Return`.
+    ///
+    /// A tail whose shape is still unknown may yet become either, so it is
+    /// forced into stage shape only when some statement's end has settled
+    /// `Bytes` — that demand needs a spec to live on — and is otherwise left
+    /// exactly as it is, silent statements dropping out.  Like
+    /// [`Self::consumes_value_arg`], this is a shape verdict read off
+    /// settled modes, not a join: a statement whose demand grounds only
+    /// later keeps the tail's freedom, the price of not foreclosing a
+    /// function tail.
+    fn lift_channels(
+        &mut self,
+        last: CompTy,
+        mut inputs: Vec<PipeMode>,
+        mut outputs: Vec<PipeMode>,
+    ) -> CompTy {
+        match self.ctx.unifier.resolve_comp_ty(&last) {
+            CompTy::Fun(..) => return last,
+            CompTy::Var(_) => {
+                let settled_bytes = inputs
+                    .iter()
+                    .chain(outputs.iter())
+                    .any(|end| matches!(self.ctx.unifier.resolve_mode(end), PipeMode::Bytes));
+                if !settled_bytes {
+                    return last;
+                }
+            }
+            CompTy::Return(..) => {}
         }
         let (ret, input, output, result) = self.extract_return(&last);
+        inputs.push(input);
+        outputs.push(output);
         CompTy::Return(
             PipeSpec {
-                input: if reads_bytes { PipeMode::Bytes } else { input },
-                output: if emits_bytes { PipeMode::Bytes } else { output },
+                input: self.ctx.join_modes(inputs, Reason::SeqChannels),
+                output: self.ctx.join_modes(outputs, Reason::SeqChannels),
                 result,
             },
             Box::new(ret),
@@ -1587,6 +1495,7 @@ impl Inferencer<'_> {
             self.env.unbind(name);
         }
         let mut schemes: Vec<(String, Scheme)> = Vec::with_capacity(bindings.len());
+        self.ctx.solve_at_boundary(self.env);
         for ((name, _), beta) in bindings.iter().zip(betas.iter()) {
             let thunk_ty = Ty::Thunk(Box::new(beta.clone()));
             let scheme = generalize(&mut self.ctx.unifier, self.env, &thunk_ty);
@@ -1626,15 +1535,14 @@ impl Inferencer<'_> {
                 let inner_ty = self.infer_comp(inner);
                 // A `Fun` RHS is a lambda: evaluating it builds a closure and
                 // emits nothing, so its output is `∅`.
-                // Its bytes *out* may be captured into the bound value, but its
+                // Its bytes *out* are captured into the bound value, but its
                 // bytes *in* are a demand on the one stdin the binder shares
                 // with `rest`, so they lift out of the capture.
-                let (bound_ty, rhs_reads) =
+                let (bound_ty, rhs_input) =
                     if let CompTy::Fun(..) = self.ctx.unifier.resolve_comp_ty(&inner_ty) {
-                        (Ty::Thunk(Box::new(inner_ty)), false)
+                        (Ty::Thunk(Box::new(inner_ty)), PipeMode::None)
                     } else {
                         let (ty, input, _, result) = self.extract_return(&inner_ty);
-                        let reads = self.ctx.unifier.resolve_mode(&input) == PipeMode::Bytes;
                         if matches!(result, PipeMode::Var(_)) {
                             self.ctx
                                 .unify_mode(&result, &PipeMode::None, Reason::ResultPin);
@@ -1644,7 +1552,7 @@ impl Inferencer<'_> {
                         } else {
                             ty
                         };
-                        (observed, reads)
+                        (observed, input)
                     };
 
                 if let IrPattern::Name(_) = pattern {
@@ -1652,10 +1560,11 @@ impl Inferencer<'_> {
                         .bind_tys
                         .insert(std::ptr::from_ref::<Comp>(comp) as usize, bound_ty.clone());
                 }
+                self.ctx.solve_at_boundary(self.env);
                 let concrete = self.ctx.unifier.apply_ty(&bound_ty);
                 self.bind_pattern(pattern, &concrete, BindMode::Let);
                 let rest_ty = self.infer_comp(rest);
-                self.lift_modes(rest_ty, rhs_reads, false)
+                self.lift_channels(rest_ty, vec![rhs_input], vec![])
             }
             CompKind::App { head, args } => {
                 let head_ty = self.infer_comp(head);

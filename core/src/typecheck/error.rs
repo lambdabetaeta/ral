@@ -100,6 +100,10 @@ pub enum Reason {
     /// `Bind` RHS, a join's non-byte or byte side) so a later grounding
     /// becomes an honest mismatch rather than silent divergence.
     ResultPin,
+    /// A `Seq`'s channel join over its statements' ends.
+    SeqChannels,
+    /// A scope's channel join/alt over its arms' ends.
+    ScopeArms,
 }
 
 /// The structural cause of a type error, raised by the unifier or inferencer.

@@ -11,6 +11,7 @@ mod explain;
 mod fmt;
 mod generalize;
 pub(crate) mod infer;
+mod mode_solver;
 mod scheme;
 mod scope;
 mod ty;
@@ -104,6 +105,7 @@ pub fn typecheck(comp: &Comp, schemes: SessionSchemes) -> Result<Comp, Vec<TypeE
     seed_env(&mut env, schemes);
 
     infer::infer_comp(&mut ctx, &mut env, comp);
+    ctx.solve_and_finalize();
     if ctx.errors.is_empty() {
         Ok(annotate::annotate(comp, &mut ctx, true))
     } else {
@@ -192,6 +194,7 @@ pub fn alias_arm_scheme(
     let cty = inferencer.infer_alias_arm(Some(param), body);
     inferencer.pin_arm_to_head(head, &cty)?;
     let thunk_ty = Ty::Thunk(Box::new(cty));
+    ctx.solve_and_finalize();
     let scheme = generalize(&mut ctx.unifier, &TyEnv::new(), &thunk_ty);
     self::generalize::debug_assert_scheme_closed(
         &mut ctx.unifier,
@@ -222,6 +225,7 @@ pub fn binding_value_scheme(
     };
     let cty = inferencer.infer_binding_value(param, body);
     let thunk_ty = Ty::Thunk(Box::new(cty));
+    ctx.solve_and_finalize();
     let scheme = generalize(&mut ctx.unifier, &TyEnv::new(), &thunk_ty);
     self::generalize::debug_assert_scheme_closed(
         &mut ctx.unifier,

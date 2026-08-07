@@ -36,10 +36,14 @@ constrain the spec:
 - **WF-1** — `result ⊑ output`;
 - **WF-2** — `result = Bytes` implies that the return type is `Unit`.
 
-The checker asserts both conditions at each site that builds a `Return` type,
-in `core/src/typecheck/scope.rs`, `core/src/typecheck/builtins.rs`, and
-`core/src/typecheck/infer.rs`. A computation therefore has one payload: its
-return value or its byte channel, never both. For example:
+Both conditions are the mode solver's to keep
+(`core/src/typecheck/mode_solver.rs`), checked per arm wherever a join lands on
+the byte side. WF-2 is enforced there rather than merely asserted: the byte
+side ties every arm's value to `Unit`, arms whose conduit was still open
+included. `core/src/typecheck/builtins.rs` keeps its own assertions, which
+guard hand-written signature tables at construction rather than any join. A
+computation therefore has one payload: its return value or its byte channel,
+never both. For example:
 
 - `echo hi : ⟨∅, Bytes, Bytes⟩ Unit` — the bytes are the payload;
 - `return 5 : ⟨∅, ∅, ∅⟩ Int` — the return value is the payload;
@@ -85,6 +89,26 @@ The join over the arms of `if`, `?`, `case`, and `try` applies the instance:
 
 `guard`, `within`, and `grant` pass their body's type through and need no arm
 rule.
+
+**Three relations, not one.** Equality is only one of them, and the other two
+are solved rather than folded
+([[decisions/260807_modes-solved-by-deferred-joins|modes-solved-by-deferred-joins]]).
+Pipeline adjacency is equality: ground `∅` never meets ground `Bytes`. A
+compound form's channel end is the *join* `⊔` of its parts' ends — `∅` the
+identity, `Bytes` absorbing — constraining the compound's end alone and never
+writing back into a part's. A branch's or scope's input end *alternates*
+instead, because only one arm runs, so arms that disagree on stdin leave the
+input unknown for a downstream stage to pin rather than clashing. The arm
+result is the third: which conduit carries the payload, decided under the one
+subsumption instance above.
+
+A join whose informative arms are all still open is not decided on the spot;
+it is stored and re-examined at the generalisation boundary that owns its
+variables — an inner binding leaves an enclosing group's joins alone — and
+there a residue equates rather than defaults. So an arm holding a recursive
+call — whose mode is its own function's, still under inference — no longer
+forces an answer before it has one, and mode polymorphism survives
+(`∅ ⊔ μ = μ`).
 
 **One coercion, `capture`, moves a byte payload to a value.** The checker
 inserts `capture M : ⟨i, o, ∅⟩ String` where `M : ⟨i, o, Bytes⟩ Unit`, for

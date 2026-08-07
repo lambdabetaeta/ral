@@ -494,6 +494,8 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         | Reason::AutoderefHead
         | Reason::TypeProbe
         | Reason::LetRecSelf
-        | Reason::LinesStepSelf => None,
+        | Reason::LinesStepSelf
+        | Reason::SeqChannels
+        | Reason::ScopeArms => None,
     }
 }

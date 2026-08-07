@@ -74,6 +74,9 @@ monomorphic to keep generalisation sound.
 Internals:
 
 - `infer.rs` — the `Inferencer`; `infer_comp`;
+- `mode_solver.rs` — the deferred-join solver: owns `InferCtx::mode_constraints`,
+  the only logic in the checker that computes a join by casing on a mode's
+  groundness;
 - `unify.rs` — `Unifier`;
 - `ty.rs` — the data-only type definitions (`Ty`, `CompTy`, rows);
 - `scheme.rs` — `Scheme`;
@@ -121,7 +124,7 @@ ordinary `BuiltinTypeRule::Scheme`.
 The byte-output mode of the streaming reducers `map-lines`/`filter-lines`/`each-line`
 (prelude wrappers over `fold-lines`) follows from the body: `fold-lines` is
 mode-polymorphic in its callback's output, and a `Seq`'s byte-output is a join over
-its statements (`infer.rs::lift_seq_output`) — bytes if *any* statement emits bytes.
+its statements (`infer.rs::lift_channels`) — bytes if *any* statement emits bytes.
 A value edge is unconditionally data-last application — `x | f = f !{x}` — with
 no structural recognition of streams ([[decisions/260609_pure-pipe-equation|pure-pipe-equation]]):
 `consumes_value_arg` is the discriminator. When it holds, the value producer
@@ -143,36 +146,101 @@ explicit `stream-each` / `stream-map` / `stream-to-list` eliminators —
 diagnostic-only, never shaping the types
 ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
 
-The `if`/`case` branch-mode *union* (`infer.rs::union_mode`/`merge_branches`)
-widens a `Bytes`-vs-`∅` branch clash to a fresh variable rather than rejecting it,
-since only one branch runs. Whether to keep this leniency or go equality-strict is
-**open**, pending maintainer review (same decision page). A `?` fallback chain
-(`infer.rs::infer_chain`) unions its arms' input and output modes the same way —
-only one arm wins — while leaving the chain's value type a fresh variable, so a
-chain of byte-output arms reads as byte-output
+The `if`/`case` branch-mode *alternation* — `InferCtx::alt_modes`
+(`mode_solver.rs`), reached through `merge_branches` — widens a
+`Bytes`-vs-`∅` branch clash to a fresh variable rather than rejecting it,
+since only one branch runs. Whether to keep this leniency or go
+equality-strict is **open**, now restated in the constraint vocabulary under
+"Deliberately not decided here"
+([[decisions/260807_modes-solved-by-deferred-joins|modes-solved-by-deferred-joins]]).
+A `?` fallback chain (`infer.rs::infer_chain`) alternates its arms' input the
+same way — only one arm wins — and joins their output bytes-dominant, while
+leaving the chain's value type a fresh variable, so a chain of byte-output
+arms reads as byte-output
 ([[decisions/260606_alias-head-defines-its-modes|a fresh head defines its own modes]]).
+
+## The mode solver
+
+`mode_solver.rs` owns `InferCtx::mode_constraints` (`env.rs:155`) and is the
+**only** logic in the checker that computes a join by casing on a mode's
+groundness; the reads that remain outside — `infer_pipeline`'s byte-tail
+verdict, `Bind`'s result pin, `consumes_value_arg`, `lift_channels`'
+tail-shape verdict — are shape decisions against settled state, not joins
+([[decisions/260807_modes-solved-by-deferred-joins|modes-solved-by-deferred-joins]]).
+Every join site — a `Seq`'s channel over its statements, a scope's channel
+over its arms, the arm-result conduit an `if`/`?`/`case`/`try` agrees on —
+emits one of three constraint forms instead of casing on the unifier's state
+at visit time:
+
+- **`Join`** (`⊔`, bytes-dominant) — a form's channel end is the join of its
+  parts' ends; `∅` is the identity, `Bytes` absorbs, and the constraint
+  constrains the target only, never writing back into an end.
+- **`Alt`** — arms of which only one runs; ground and equal ends agree,
+  ground and disagreeing ends leave the target free, since a clash between
+  arms that never both run is an unknown, not a contradiction.
+- **`ArmResults`** — the arms agreeing on which conduit carries the payload,
+  under the one subsumption instance `∅@Unit ⊑ Bytes@Unit`; unlike the
+  channel join, this one disciplines the arms, pinning open results and
+  tying byte-side values to `Unit`.
+
+`InferCtx::join_modes` (`mode_solver.rs:86`), `alt_modes`
+(`mode_solver.rs:105`), and `join_arm_results` (`mode_solver.rs:130`) are the
+three emission points: each first tries to *conclude* against the unifier's
+current state, applying the conclusion immediately when one exists — sound
+because a mode only ever moves `Var → ground`, never back — and otherwise
+stores an open constraint and returns a fresh target variable. The store
+drains through two entry points, and ownership is the difference.
+`InferCtx::solve_at_boundary` (`mode_solver.rs:176`) runs at every
+in-inference point that produces a `Scheme` (`infer.rs`'s `Bind`
+let-generalisation, `infer_letrec` group fixpoint, and `handler_comp_scheme`)
+and solves only the constraints touching a mode variable not free in the
+environment — the variables that boundary is about to quantify, computed by
+`generalize.rs::env_free_vars` over writable positions
+(`owned_by_env`, `mode_solver.rs:239`); a constraint wholly owned by the
+environment is left untouched, neither collapsed nor retried, for its owning
+boundary. `InferCtx::solve_and_finalize` (`mode_solver.rs:156`) is the
+terminal drain — the end of `typecheck` before `annotate`, plus
+`alias_arm_scheme` and `binding_value_scheme`, which generalise against an
+empty environment — and collapses everything. Each drain retries to
+quiescence, since a conclusion can unblock a sibling, then collapses what it
+owns: ground-directed residues first (`writes_ground`, `collapse_ground` —
+a `Join`/`Alt` whose target grounded `Bytes` is satisfied and drops, a `∅`
+target pins open ends, an `ArmResults` follows its grounded result's side),
+one at a time with the worklist re-run between; then the all-open residue
+equates (`collapse_open`) rather than defaulting, so a collapsed variable can
+still ground `Bytes` later. No constraint outlives the generalisation of its
+variables.
 
 ## The result mode
 
 `PipeSpec` (`core/src/mode.rs:31`) carries three modes: `input`, `output`,
 and `result`. `result` is a `PipeMode`, decided — `None`, `Bytes`, or left
-open by a join whose informative arms are still under inference, grounding
-at the binding group's fixed point — at every source-tree node. `result`
-names which conduit carries a computation's
-payload: `Bytes` for the byte channel, `None` for the return value.
-`result` rides the same unification, generalisation, and display code as
-`input` and `output`.
+open behind a deferred join, settled no later than the drain that owns its
+variables — at every source-tree node. `result` names which
+conduit carries a computation's payload: `Bytes` for the byte channel,
+`None` for the return value. `result` rides the same unification,
+generalisation, and display code as `input` and `output`.
 
 Two well-formedness conditions guard every `Return` type the checker
 builds. WF-1 states `result ⊑ output`: a byte payload needs a byte channel.
 WF-2 states that `result = Bytes` implies a `Unit` return type: a byte
-payload leaves no separate value. The checker asserts both where it
-constructs a `Return` type: `Inferencer::seal` (`scope.rs:79`), `ret_bytes`
-and `builtin_sig_result` (`builtins.rs:337`, `builtins.rs:1184`), and
-`merge_branches`, `join_arm_results`, and `infer_pipeline` (`infer.rs:368`,
-`infer.rs:427`, `infer.rs:1231`). `external_exec_comp_ty` (`infer.rs:849`)
-satisfies WF-1 by inspection: an external command's `output` and `result`
-are both the literal `Bytes`.
+payload leaves no separate value. Both live in the solver
+(`mode_solver.rs`'s `conclude_arm_results`), asserted and enforced per arm
+at the moment an `ArmResults` lands on the byte side, rather than
+debug-asserted at each constructing site
+([[decisions/260807_modes-solved-by-deferred-joins|modes-solved-by-deferred-joins]]).
+`infer_pipeline` (`infer.rs:1076`) keeps its own two assertions
+(`infer.rs:1170`, `infer.rs:1175`): it decides a byte tail by reading
+settled modes, not by joining. `ret_bytes` and `builtin_sig_result`
+(`builtins.rs:336`, `builtins.rs:1187`) keep theirs too — they check
+hand-written signature tables at construction, and have nothing to do with
+joins. `external_exec_comp_ty` (`infer.rs:769`) satisfies WF-1 by
+inspection: an external command's `output` and `result` are both the
+literal `Bytes`. `lift_channels` (`infer.rs:864`) holds the sequence's
+shape verdict — a `Fun` tail keeps its shape, a `Return` tail joins its
+ends with the statements', and a still-unknown tail is forced into stage
+shape only when a statement's end has settled `Bytes` — a read of settled
+modes beside `consumes_value_arg`, not a join.
 
 `Unifier::unify_mode` equates two `Return` types' `result` modes alongside
 `input` and `output` (`unify.rs`); a ground `result` clash is an ordinary
@@ -182,32 +250,43 @@ for a head whose modes are not yet known. `typecheck::builtins::sig_pipe_spec`
 maps a command signature's own `result: ByteMode` field onto the built
 `PipeSpec`'s `result`.
 
-A `result` variable is never minted by a source typing rule. It appears
-only in declared arm-shape slots: a builtin's computation-typed
-argument (`ArgTemplate::BlockOrLambda`, for `spawn`, `each`, `map`, `fold`,
-and their neighbours), a scope's expected arm shape (`infer_try`,
-`infer_guard`, and their neighbours in `scope.rs`), and a `case` handler's
-expected shape (`check_case_arm`). Each slot mints a bare
-fresh `CompTy`; `Inferencer::extract_return` then mints the free `result`
-mode, quantified in the surrounding scheme like any other mode variable.
-No elaboration decision reads a slot variable.
+A deferred `ArmResults` mints a result-mode target of its own, so the
+restriction is stated over lifetime rather than origin: **no result-mode
+variable outlives its owning drain except as an alias of a declared slot
+variable or of a ground mode**
+([[decisions/260807_modes-solved-by-deferred-joins|modes-solved-by-deferred-joins]]).
+The target is either concluded to a ground mode or collapsed onto the arms'
+own variables; nothing downstream ever sees an unattached one. Declared
+slots are otherwise unchanged: a builtin's computation-typed argument
+(`ArgTemplate::BlockOrLambda`, for `spawn`, `each`, `map`, `fold`, and their
+neighbours), a scope's expected arm shape (`infer_try`, `infer_guard`, and
+their neighbours in `scope.rs`), and a `case` handler's expected shape
+(`check_case_arm`). Each slot mints a bare fresh `CompTy`;
+`Inferencer::extract_return` then mints the free `result` mode, quantified
+in the surrounding scheme like any other mode variable. No elaboration
+decision reads a slot variable.
 
-`join_arm_results` (`infer.rs`) computes a branch join's `result`. A
-byte-payload arm pins every free-result arm to `Bytes` and accepts each
-`∅`-at-`Unit` arm by subsumption; a `∅`-result arm whose value type is not
-`Unit` fails to unify, a genuine conduit mismatch rather than a coercion.
-With no byte-payload arm, a `∅`-at-`Unit` arm is the join's identity:
-still-open arms unify with one another and stay open, pinned to `∅` only by
-an arm with a value payload. `merge_branches` first forces a still-bare-
-variable arm — a recursive call — to `Return` shape when any arm already is,
-so it joins instead of strict-unifying.
-`infer_pipeline` (`infer.rs:1129`) grounds a byte-tailed final stage's own
-`result` onto the whole pipeline: with no downstream consumer, such a
-pipeline returns `Unit` and its `result` is `Bytes`, so a bound pipeline
-value captures the last stage's bytes.
+`InferCtx::join_arm_results` (`mode_solver.rs:130`) computes a branch
+join's `result`, deferred rather than decided against whatever the unifier
+happens to show at visit time. A byte-payload arm pins every free-result
+arm to `Bytes` and accepts each `∅`-at-`Unit` arm by subsumption; a
+`∅`-result arm whose value type is not `Unit` fails to unify, a genuine
+conduit mismatch rather than a coercion. With no byte-payload arm, a
+`∅`-at-`Unit` arm is the join's identity: still-open arms unify with one
+another and stay open, pinned to `∅` only by an arm with a value payload. An
+arm still open when the join is raised is retried — and, failing that,
+collapsed — at the drain that owns its variables, so an arm that grounds
+`Bytes` later still reopens the byte-side check rather than being read once
+and never revisited. `merge_branches` (`infer.rs:311`) first forces a still-
+bare-variable arm — a recursive call — to `Return` shape when any arm already
+is, so it joins instead of strict-unifying. `infer_pipeline` (`infer.rs:1076`)
+grounds a byte-tailed final stage's own `result` onto the whole pipeline
+(`infer.rs:1162`): with no downstream consumer, such a pipeline returns
+`Unit` and its `result` is `Bytes`, so a bound pipeline value captures the
+last stage's bytes.
 
 `CompKind::Capture(body)` types through `Inferencer::infer_comp`
-(`infer.rs:1709`): its own `result` and `output` ground `None`, its `input`
+(`infer.rs:1675`): its own `result` and `output` ground `None`, its `input`
 is `body`'s, and its value type is `String`. This rule fires only when
 re-inferring a tree that already carries `annotate`-inserted `Capture`
 nodes — a stored handler or thunk re-checked at a later install.

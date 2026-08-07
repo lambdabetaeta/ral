@@ -1,6 +1,7 @@
 //! Typing environment and inference context.
 
 use super::error::{Reason, TypeError, TypeErrorKind};
+use super::mode_solver::ModeConstraint;
 use super::scheme::Scheme;
 use super::ty::{CompTy, PipeMode, PipeSpec, Ty};
 use super::unify::Unifier;
@@ -149,6 +150,9 @@ pub struct InferCtx {
     /// A scope arm's (`Val`-keyed) own `result`, the `Val`-level analogue of
     /// [`Self::results`] — scope arms have no `Comp` node of their own.
     pub val_results: HashMap<usize, PipeMode>,
+    /// Joins and arm-result merges not yet determined, awaiting
+    /// [`Self::solve_and_finalize`](super::mode_solver); see `mode_solver`.
+    pub(super) mode_constraints: Vec<ModeConstraint>,
 }
 
 impl Default for InferCtx {
@@ -168,6 +172,7 @@ impl InferCtx {
             stage_types: HashMap::new(),
             results: HashMap::new(),
             val_results: HashMap::new(),
+            mode_constraints: Vec::new(),
         }
     }
 

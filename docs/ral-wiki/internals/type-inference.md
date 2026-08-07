@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 1e9fea4
 verified_at_date: 2026-08-06
-anchors: [Inferencer, Unifier, Pairs, unify_row, unify_mode, generalize, instantiate, annotate, SessionSchemes, PipeMode, PipeSpec, extract_return, join_arm_results]
+anchors: [Inferencer, Unifier, Pairs, unify_row, unify_mode, generalize, instantiate, annotate, SessionSchemes, PipeMode, PipeSpec, extract_return, InferCtx, join_modes, alt_modes, join_arm_results, solve_at_boundary, solve_and_finalize, ModeConstraint]
 ---
 
 # Type inference: the algorithm
@@ -52,8 +52,9 @@ source-tree node grounds its own result mode:
 - An introduction rule sets a ground result mode where it builds a node's type.
 - Propagation copies a result mode from a sub-term.
 - A join over branches computes a result mode from its arms
-  (`join_arm_results`); a join whose only informative arms are still open
-  stays open, and the enclosing binding group's fixed point grounds it.
+  (`join_arm_results`), deferred as a stored constraint the moment the arms
+  can't yet decide it; `InferCtx::solve_at_boundary` revisits it at the
+  scheme boundary that owns its variables.
 - `extract_return`'s shape-forcing expectation grounds an otherwise-unresolved
   result mode.
 
@@ -72,44 +73,114 @@ step. A computation of type `⟨i, o, None⟩ Unit` also has type
 `⟨i, o, Bytes⟩ Unit` when `o` permits bytes. The rule fires only at the top of
 a `Return` type. It needs no variance clause through `Thunk`, `Fun`, or a row.
 
-**A result-mode variable exists only in a declared signature slot.** No source
-typing rule mints a free result-mode variable. Two kinds of slot carry one:
+**A declared signature slot is still the only place a result-mode variable is
+quantified.** Two kinds of slot carry one:
 
 - a builtin's computation-typed argument, for example the callback passed to
   `spawn`, `each`, `map`, or `fold`;
 - a scope's expected arm shape.
 
 Each such variable is quantified in its `Scheme` beside the other mode
-variables. `instantiate` refreshes it at each use like any other variable. No
-elaboration step reads a slot variable on its own. A call site's actual
-argument grounds it. Otherwise it stays quantified inside an arrow that
-nothing consults.
+variables; `instantiate` refreshes it at each use like any other variable, a
+call site's actual argument grounds it, and otherwise it stays quantified
+inside an arrow that nothing consults.
 
-Because of this restriction, a tree node's principal type holds
-unconditionally. No typing decision depends on the order the solver visits
-constraints.
+A deferred `join_arm_results` does mint a result-mode variable of its own —
+the target it hands back while the arms are undecided — so the restriction is
+stated over lifetime rather than origin: **no result-mode variable outlives
+its owning drain except as an alias of a declared slot variable or of a
+ground mode.** The target is either concluded to a ground mode or collapsed
+onto the arms' own variables; nothing downstream sees an unattached one.
 
-**A join over branches computes one result mode for all its arms**
-(`join_arm_results`, reached from `merge_branches` for `if`, a `?` fallback
-chain, and `case`, and from the `try` rule). An arm whose computation type is
-still a bare variable — a call to a function under inference, as in a
-recursive branch — is first forced to `Return` shape by `extract_return`, so
-it joins with the other arms instead of strict-unifying against them.
+**Principality holds for mode constraints, with its limits stated.** Typing
+verdicts do not depend on the order the solver emits, retries, or collapses
+constraints: every join — `join_modes` and `alt_modes` included — is a
+constraint stored and re-examined at the scheme boundary that owns its
+variables rather than a decision read off a partially-solved store;
+conclusions are monotone on a height-1 lattice, ground-directed collapses are
+serialised through the worklist, and the all-open residue equates by pure
+union-find merges. Two limits are part of the claim: still-open ends joined
+under one binding equate at the boundary that owns them (the completeness
+frontier priced below), and two still-open `join_arm_results` sharing value
+*type* variables at one boundary could in principle observe each other's
+value unifications in collapse order — a corner no source program has been
+made to reach. Shape verdicts — `consumes_value_arg`, the sequence tail —
+sit outside the claim; they are introduction-rule choices, not joins.
 
-- A join with any byte-payload arm lands wholly on the byte side.
-- A ground `None` arm subsumes there only if its own return type is `Unit`.
-- A still-unresolved arm's result mode pins to `Bytes`.
-- With no byte-payload arm, a ground `None` arm at `Unit` is the join's
-  identity — it decides nothing, because subsumption lets it ride either
-  side. Still-open arms unify with one another and stay open; only an arm
-  with a value payload (`None` at non-`Unit`) pins them to `None`. An open
-  join grounds later, at its binding group's fixed point or at the first
-  payload decision.
+**Three named join operations live in `core/src/typecheck/mode_solver.rs`,**
+the only module permitted to case on a mode's groundness. Equality stays
+`Unifier::unify_mode`, above; beside it stand:
+
+- `join_modes` (`⊔`, bytes-dominant) — a form's channel end is the least
+  upper bound of its parts': a `Seq`'s channel over its statements, a
+  scope's over its arms. `∅` is the identity and `Bytes` is absorbing, and
+  the join constrains the *target* only — it never writes back into an end,
+  so a statement's still-open mode is never pinned by the sequence around
+  it. Which ends a `Seq` even contributes is `lift_channels`' shape verdict,
+  not a join: a `Fun` tail keeps the sequence a function, a `Return` tail
+  joins its ends with the statements', and a still-unknown tail is forced
+  into stage shape only when some statement's end has settled `Bytes` —
+  otherwise the sequence is exactly its tail, free to become a function at
+  its call site. An opaque statement (`force $t`) contributes fresh
+  unattached ends, not `t`'s own: attaching them would force `t` into stage
+  shape and reject a lambda argument.
+- `alt_modes` — arms of which only one runs, so a clash is an unknown for a
+  downstream stage to pin rather than a contradiction: ground and equal ends
+  agree, ground and disagreeing ends leave the target free.
+- `join_arm_results` — the result-mode join at the heart of every arm merge
+  (reached from `merge_branches` for `if`, a `?` fallback chain, and `case`,
+  and from `infer_try`), under the one subsumption instance
+  `∅@Unit ⊑ Bytes@Unit`. An arm whose computation type is still a bare
+  variable — a call to a function under inference, as in a recursive branch
+  — is first forced to `Return` shape by `extract_return`, so it joins with
+  the other arms instead of strict-unifying against them. A join with any
+  byte-payload arm lands wholly on the byte side and ties every arm's value
+  to `Unit`; with no byte-payload arm, a ground `None` arm at `Unit` is the
+  identity, still-open arms unify with one another and stay open, and only
+  an arm with a value payload (`None` at non-`Unit`) pins them to `None`.
 
 A byte-payload arm alongside a ground `None` arm at a non-`Unit` type is a
 type error. The two arms disagree about which conduit carries the payload.
 The fix is an explicit pipe, for example `echo hi | from-string`, and not an
 inserted coercion.
+
+**Conclude, store, solve-what-you-own.** Each call above applies whatever
+conclusion is already determined and defers the rest as a stored
+`ModeConstraint` — applying early is sound because a mode only ever moves
+`Var → ground`, never back, so an early conclusion can't be invalidated
+later. `InferCtx::solve_at_boundary(env)` runs at every in-inference point
+that produces a scheme — the `Bind` let-generalisation, `infer_letrec`'s
+group fixpoint, `handler_comp_scheme` — and solves exactly the constraints
+touching a mode variable not free in `env`: the variables about to be
+quantified, which a constraint must not outlive. A constraint whose every
+writable variable is still free in the environment belongs to an enclosing
+binding and is left entirely untouched — not retried either, since a
+conclusion's side effects pin arms still under inference elsewhere, so
+running it at a boundary a syntactic accident placed (any inner `let`, the
+elaborator's hoisted binds included) would foreclose a sibling's `∅@Unit`
+subsumption or move the join's error onto the group unification.
+`InferCtx::solve_and_finalize` is the terminal drain — end of check before
+`annotate`, plus the empty-environment `alias_arm_scheme` and
+`binding_value_scheme` — where everything collapses. Each drain propagates to
+quiescence, since one conclusion can determine a sibling, then collapses what
+it owns. **Collapse is directed by the target, then equates; it never
+defaults**: a `join_modes`/`alt_modes` residue whose target grounded `Bytes`
+from outside is satisfied and drops without touching its ends, a `∅` target
+pins the open ends `∅`, and a `join_arm_results` whose result grounded lands
+on that side with the side's full protocol. These ground-writing collapses
+run one at a time with the worklist re-run between; only the all-open residue
+then equates — open ends with each other and with the target — and a
+collapsed variable can still ground `Bytes` afterwards, with the target
+riding along. Defaulting stays exactly where it always lived, in
+`InferCtx::ground`, at annotation time.
+
+**The price of deferral:** two open ends joined under one binding equate at
+the collapse of the boundary that owns them, so mode polymorphism holds *up
+to joined ends sharing a variable* —
+`{|t,u| if $c { force $t } else { force $u }}` comes out with one shared `μ`
+rather than two independent ones. See
+[[decisions/260807_modes-solved-by-deferred-joins|modes-solved-by-deferred-joins]]
+for the full account of what the solver replaced and why.
 
 **Generalisation is at the binding boundary** (`generalize.rs`). At each `Bind`
 the inferencer takes the type's free variables minus those still free in the

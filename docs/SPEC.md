@@ -4074,22 +4074,46 @@ annotation pass writes one ground `(input, output)` verdict and one value type
 for each stage into the IR. Evaluation consumes these annotations; it does not
 repeat type-directed mode inference.
 
-Several compound forms join modes. Define the bytes-dominant join:
+Several compound forms join modes. The bytes-dominant join `⊔b` is the least
+upper bound under `none ⊑ bytes`: `none` is its identity and `bytes` absorbs.
 
 ```text
 bytes ⊔b μ     = bytes
-none  ⊔b none  = none
-μ     ⊔b ν     = their unifier when one exists, otherwise a fresh mode
+none  ⊔b μ     = μ
+μ     ⊔b μ     = μ
 ```
 
-For mutually exclusive arms, input uses the conditional union `⊔?`: preserve
-the unified mode when the two modes unify, otherwise use a fresh mode that
-surrounding context may pin. Output uses `⊔b`, because any selected arm that
-writes bytes makes the compound byte-producing.
+A join constrains the compound's own end and nothing else. It never writes
+back into a part's end, so a part whose mode is not yet known stays unknown
+and the compound's end is settled by whatever that part turns out to be. A
+join still undecided is discharged at the binding whose generalisation
+closes over its unknown modes; a binding nested inside that one leaves it
+alone. At that discharge, a compound end already known `bytes` satisfies the
+join outright and its unknown parts stay unknown; one already known `none`
+makes every unknown part `none`; otherwise the parts still unknown are made
+equal and the compound's end rides them. Nothing is defaulted, so a mode
+still unknown at that point remains available to a later `bytes`.
 
-For a sequence, an input byte demand or byte output in any element is lifted
-to the sequence. Its value type is the final element's. For `if` and `?`, arm
-inputs fold with `⊔?` and outputs fold with `⊔b`.
+For mutually exclusive arms, the input end uses the conditional union `⊔?`
+instead: arms that agree give that mode, and arms that disagree give an
+unknown mode the surrounding context may pin, because only one arm runs and a
+disagreement is therefore not a contradiction. Output uses `⊔b`, because any
+selected arm that writes bytes makes the compound byte-producing.
+
+Whether a branch's input end ought to join rather than alternate is an open
+question. Under `⊔?`, a form with one byte-reading arm places no byte demand
+upstream, so `if c { from-json } else { return 5 }` fed by a value pipe is
+accepted and the byte-reading arm finds no channel to read.
+
+A sequence's ends are each the join `⊔b` over its elements' ends, so a
+sequence reads bytes when any element does and writes bytes when any element
+does. Its value type is the final element's. A sequence whose final element
+is a function is that function, and carries no pipe ends of its own. A final
+element whose shape is not yet known is committed to pipe shape `F[i,o] A`
+only when an earlier element's end is already known `bytes` — that demand
+must appear on the sequence's ends — and otherwise the sequence's type is
+exactly the final element's, still free to turn out a function. For `if` and
+`?`, arm inputs fold with `⊔?` and outputs fold with `⊔b`.
 
 ### 17.5. Observation at a binding boundary
 

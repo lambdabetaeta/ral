@@ -50,37 +50,25 @@ impl Inferencer<'_> {
     /// scope is channel-transparent, and this is the only place permitted to
     /// build a scope's computation type.
     ///
-    /// Output is bytes-dominant: any arm that may emit bytes makes the scope
-    /// byte-emitting, via `join_byte_mode` folded over every arm's output.
-    /// Input follows suit only when every arm always runs, since they all
-    /// read the same shared stdin; once an arm is `OnFailure`, a clash
-    /// between it and an always-arm is not a contradiction but an unknown a
-    /// neighbouring stage can pin, so input folds via `union_mode` instead.
+    /// Output is a bytes-dominant join over every arm's output. Input joins
+    /// the same way only when every arm always runs, since they all read the
+    /// same shared stdin; once an arm is `OnFailure`, a clash between it and
+    /// an always-arm is not a contradiction but an unknown a neighbouring
+    /// stage can pin, so input alternates instead.
     pub(super) fn seal(&mut self, sig: ScopeSig) -> CompTy {
         let all_always = sig
             .arms
             .iter()
             .all(|arm| matches!(arm.runs, ArmRuns::Always));
+        let (inputs, outputs): (Vec<PipeMode>, Vec<PipeMode>) =
+            sig.arms.iter().map(|arm| (arm.input, arm.output)).unzip();
 
-        let mut arms = sig.arms.into_iter();
-        let first = arms.next().expect("a scope always has at least one arm");
-        let mut input = first.input;
-        let mut output = first.output;
-
-        for arm in arms {
-            output = self.join_byte_mode(output, arm.output);
-            input = if all_always {
-                self.join_byte_mode(input, arm.input)
-            } else {
-                self.union_mode(input, arm.input)
-            };
-        }
-
-        debug_assert!(
-            self.ctx.unifier.resolve_mode(&sig.result) != PipeMode::Bytes
-                || self.ctx.unifier.resolve_mode(&output) == PipeMode::Bytes,
-            "WF-1: result ⊑ output"
-        );
+        let output = self.ctx.join_modes(outputs, Reason::ScopeArms);
+        let input = if all_always {
+            self.ctx.join_modes(inputs, Reason::ScopeArms)
+        } else {
+            self.ctx.alt_modes(inputs, Reason::ScopeArms)
+        };
 
         CompTy::Return(
             PipeSpec {
@@ -188,8 +176,8 @@ impl Inferencer<'_> {
         }
     }
 
-    /// `try` joins body and handler via [`Inferencer::join_arm_results`], the
-    /// same rule [`Inferencer::merge_branches`] uses for `if`/`?` arms.
+    /// `try` joins body and handler via [`super::env::InferCtx::join_arm_results`],
+    /// the same rule [`Inferencer::merge_branches`] uses for `if`/`?` arms.
     pub(super) fn infer_try(&mut self, body: &Val, handler: &Val) -> ScopeSig {
         let body_cty = self.infer_scope_body_passthrough(body);
         let (body_raw, body_in, body_out, body_result) = self.extract_return(&body_cty);
@@ -220,7 +208,7 @@ impl Inferencer<'_> {
             .val_results
             .insert(std::ptr::from_ref::<Val>(handler) as usize, handler_result);
 
-        let per_arm = [
+        let per_arm = vec![
             (
                 PipeSpec {
                     input: body_in,
@@ -238,7 +226,7 @@ impl Inferencer<'_> {
                 handler_raw,
             ),
         ];
-        let (result, value) = self.join_arm_results(&per_arm, &Reason::TryArms);
+        let (result, value) = self.ctx.join_arm_results(per_arm, Reason::TryArms);
 
         ScopeSig {
             arms: vec![
