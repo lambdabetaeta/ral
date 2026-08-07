@@ -155,8 +155,10 @@ chain of byte-output arms reads as byte-output
 ## The result mode
 
 `PipeSpec` (`core/src/mode.rs:31`) carries three modes: `input`, `output`,
-and `result`. `result` is a `PipeMode`, ground to `None` or `Bytes` at every
-source-tree node. `result` names which conduit carries a computation's
+and `result`. `result` is a `PipeMode`, decided — `None`, `Bytes`, or left
+open by a join whose informative arms are still under inference, grounding
+at the binding group's fixed point — at every source-tree node. `result`
+names which conduit carries a computation's
 payload: `Bytes` for the byte channel, `None` for the return value.
 `result` rides the same unification, generalisation, and display code as
 `input` and `output`.
@@ -181,18 +183,24 @@ maps a command signature's own `result: ByteMode` field onto the built
 `PipeSpec`'s `result`.
 
 A `result` variable is never minted by a source typing rule. It appears
-only in two declared signature slots: a builtin's computation-typed
+only in declared arm-shape slots: a builtin's computation-typed
 argument (`ArgTemplate::BlockOrLambda`, for `spawn`, `each`, `map`, `fold`,
-and their neighbours) and a scope's expected arm shape (`infer_try`,
-`infer_guard`, and their neighbours in `scope.rs`). Both slots mint a bare
+and their neighbours), a scope's expected arm shape (`infer_try`,
+`infer_guard`, and their neighbours in `scope.rs`), and a `case` handler's
+expected shape (`check_case_arm`). Each slot mints a bare
 fresh `CompTy`; `Inferencer::extract_return` then mints the free `result`
 mode, quantified in the surrounding scheme like any other mode variable.
 No elaboration decision reads a slot variable.
 
-`join_arm_results` (`infer.rs:386`) computes a branch join's `result`. A
+`join_arm_results` (`infer.rs`) computes a branch join's `result`. A
 byte-payload arm pins every free-result arm to `Bytes` and accepts each
 `∅`-at-`Unit` arm by subsumption; a `∅`-result arm whose value type is not
 `Unit` fails to unify, a genuine conduit mismatch rather than a coercion.
+With no byte-payload arm, a `∅`-at-`Unit` arm is the join's identity:
+still-open arms unify with one another and stay open, pinned to `∅` only by
+an arm with a value payload. `merge_branches` first forces a still-bare-
+variable arm — a recursive call — to `Return` shape when any arm already is,
+so it joins instead of strict-unifying.
 `infer_pipeline` (`infer.rs:1129`) grounds a byte-tailed final stage's own
 `result` onto the whole pipeline: with no downstream consumer, such a
 pipeline returns `Unit` and its `result` is `Bytes`, so a bound pipeline
@@ -206,7 +214,8 @@ nodes — a stored handler or thunk re-checked at a later install.
 
 `annotate.rs` inserts `Capture` during its write-back walk, as demand
 propagation. A `Demand` is `Value` or `Discard`. It reaches a `Seq`'s tail,
-a `Bind`'s `rhs`, each arm of an `If`, `Chain`, or `Try`, and the body of a
+a `Bind`'s `rhs`, each arm of an `If`, `Chain`, `Try`, or `Case` handler
+table (`annotate_case_table`), and the body of a
 force of a syntactic thunk. Where a `Value` demand meets a node whose
 recorded `result` grounds `Bytes`, `annotate_demand` wraps it in `Capture`.
 `ArmWalk` (`annotate.rs:37-48`: `Plain`, `Descend`, `Wrap`)

@@ -18,6 +18,7 @@ use crate::ir::{
 use crate::mode::{ByteMode, Wire};
 use crate::source::Spanned;
 use crate::syntax::ast::MapPatternEntry;
+use crate::syntax::tag::is_tag_label;
 use std::sync::Arc;
 
 /// What a demand-carrying position wants from the node it reaches.
@@ -157,6 +158,16 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, spine: bool, demand: Demand)
             );
             return Spanned::with_span(comp.span, item);
         }
+        CompKind::Case { scrutinee, table } => {
+            let item = CompKind::Case {
+                scrutinee: annotate_spanned_val(scrutinee, ctx),
+                table: Spanned::with_span(
+                    table.span,
+                    annotate_case_table(comp, &table.item, ctx, demand),
+                ),
+            };
+            return Spanned::with_span(comp.span, item);
+        }
         CompKind::Scope(op) => return annotate_scope(comp, op, ctx, demand),
         _ => {}
     }
@@ -251,10 +262,6 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
                     .collect(),
             ),
         },
-        CompKind::Case { scrutinee, table } => CompKind::Case {
-            scrutinee: annotate_spanned_val(scrutinee, ctx),
-            table: annotate_spanned_val(table, ctx),
-        },
         // `Capture` is checker-inserted only, by this very pass; the rest are
         // walked directly by `annotate_demand` and never reach here.
         CompKind::Capture(_)
@@ -262,6 +269,7 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
         | CompKind::Bind { .. }
         | CompKind::If { .. }
         | CompKind::Chain(_)
+        | CompKind::Case { .. }
         | CompKind::Scope(_) => unreachable!("not a plain-rebuild node"),
     }
 }
@@ -280,6 +288,35 @@ fn annotate_join_arm(join: &Comp, arm: &Comp, ctx: &mut InferCtx, demand: Demand
         );
     }
     annotate_demand(arm, ctx, false, demand)
+}
+
+/// A `case` handler table: every literal tag entry is a join arm, dispatched
+/// like a `try` handler — the `case` node's own result decides byte-side-or-
+/// not, each handler's decides descend-vs-wrap.  A table that is not a literal
+/// map (it came from a parameter) has no arms to reach here and rebuilds flat.
+fn annotate_case_table(join: &Comp, table: &Val, ctx: &mut InferCtx, demand: Demand) -> Val {
+    let Val::Map(entries) = table else {
+        return annotate_val(table, ctx);
+    };
+    Val::Map(
+        entries
+            .iter()
+            .map(|entry| match entry {
+                ValMapEntry::Entry(key @ Val::String(label), value @ Val::Thunk(_))
+                    if is_tag_label(label) =>
+                {
+                    ValMapEntry::Entry(
+                        annotate_val(key, ctx),
+                        annotate_scope_val(join, value, ctx, true, demand),
+                    )
+                }
+                ValMapEntry::Entry(key, value) => {
+                    ValMapEntry::Entry(annotate_val(key, ctx), annotate_val(value, ctx))
+                }
+                ValMapEntry::Spread(val) => ValMapEntry::Spread(annotate_val(val, ctx)),
+            })
+            .collect(),
+    )
 }
 
 /// A scope arm/body `Val`, dispatched the way [`annotate_join_arm`]

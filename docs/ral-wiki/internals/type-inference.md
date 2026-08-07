@@ -51,7 +51,9 @@ source-tree node grounds its own result mode:
 
 - An introduction rule sets a ground result mode where it builds a node's type.
 - Propagation copies a result mode from a sub-term.
-- A join over branches computes a result mode from its arms (`join_arm_results`).
+- A join over branches computes a result mode from its arms
+  (`join_arm_results`); a join whose only informative arms are still open
+  stays open, and the enclosing binding group's fixed point grounds it.
 - `extract_return`'s shape-forcing expectation grounds an otherwise-unresolved
   result mode.
 
@@ -88,12 +90,21 @@ unconditionally. No typing decision depends on the order the solver visits
 constraints.
 
 **A join over branches computes one result mode for all its arms**
-(`join_arm_results`, reached from `merge_branches` for `if` and a fallback
-chain, and from the `try` rule).
+(`join_arm_results`, reached from `merge_branches` for `if`, a `?` fallback
+chain, and `case`, and from the `try` rule). An arm whose computation type is
+still a bare variable — a call to a function under inference, as in a
+recursive branch — is first forced to `Return` shape by `extract_return`, so
+it joins with the other arms instead of strict-unifying against them.
 
 - A join with any byte-payload arm lands wholly on the byte side.
 - A ground `None` arm subsumes there only if its own return type is `Unit`.
 - A still-unresolved arm's result mode pins to `Bytes`.
+- With no byte-payload arm, a ground `None` arm at `Unit` is the join's
+  identity — it decides nothing, because subsumption lets it ride either
+  side. Still-open arms unify with one another and stay open; only an arm
+  with a value payload (`None` at non-`Unit`) pins them to `None`. An open
+  join grounds later, at its binding group's fixed point or at the first
+  payload decision.
 
 A byte-payload arm alongside a ground `None` arm at a non-`Unit` type is a
 type error. The two arms disagree about which conduit carries the payload.

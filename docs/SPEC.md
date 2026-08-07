@@ -1425,7 +1425,10 @@ let result = case $reply [
 
 The scrutinee must be a variant. `case` selects the handler whose record key
 matches the variant tag and calls it with the payload. A nullary variant passes
-`unit`. Handler result types must agree.
+`unit`. Handler result types must be compatible, exactly as for `if` branches
+and `?` alternatives: either every handler produces a value of one type, or
+every handler writes to the byte channel, with a handler that ends silently at
+`unit` (say, in `exit`) admitted beside byte-writing ones.
 
 When the handler table is a record literal, the typechecker verifies that it
 covers every tag known in the scrutinee's variant type and reports a missing

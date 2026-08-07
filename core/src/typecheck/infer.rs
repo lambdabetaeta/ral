@@ -37,11 +37,18 @@ fn collect_extends(row: &Row) -> Vec<(String, Ty)> {
     }
 }
 
-/// Each `case` arm's tag label paired with its handler body's span, so an
-/// arm-local complaint underlines the arm and not the whole `case` form.
-/// Anything but a literal tag key over a `Val::Thunk` is skipped, and the
-/// caller falls back to the `case` span.
-fn collect_handler_spans(table: &Val) -> std::collections::HashMap<String, crate::source::Span> {
+/// One `case` arm as it was written: the handler value itself, whose address
+/// keys the result `annotate` reads back, and its body's span, so an arm-local
+/// complaint underlines the arm and not the whole `case` form.
+struct ArmSyntax<'a> {
+    span: Option<crate::source::Span>,
+    val: &'a Val,
+}
+
+/// Each `case` arm's tag label paired with its [`ArmSyntax`].  Anything but a
+/// literal tag key over a `Val::Thunk` is skipped, and the caller falls back
+/// to the `case` span.
+fn collect_handler_arms(table: &Val) -> std::collections::HashMap<String, ArmSyntax<'_>> {
     fn handler_body_span(inner: &Comp) -> Option<crate::source::Span> {
         match &inner.item {
             // A `Lam`'s own span is the enclosing statement; the body's is the arm.
@@ -65,9 +72,13 @@ fn collect_handler_spans(table: &Val) -> std::collections::HashMap<String, crate
             continue;
         }
         let Val::Thunk(inner) = value else { continue };
-        if let Some(span) = handler_body_span(inner) {
-            out.insert(raw_key.to_string(), span);
-        }
+        out.insert(
+            raw_key.to_string(),
+            ArmSyntax {
+                span: handler_body_span(inner),
+                val: value,
+            },
+        );
     }
     out
 }
@@ -306,9 +317,12 @@ impl Inferencer<'_> {
     }
 
     /// Bytes-dominant join: `Bytes` if either end may emit bytes, `None` if
-    /// both are silent, else [`Self::union_mode`].  Direction-agnostic — used
-    /// for both input and output ends, wherever any one arm's bytes should
-    /// dominate the whole.
+    /// both are silent.  `∅` is the join's identity, so a silent end beside a
+    /// still-open one doesn't decide — the open end does, later; pinning it
+    /// here would foreclose an arm holding a recursive call, whose mode is
+    /// its own function's, still under inference.  Two open ends unify via
+    /// [`Self::union_mode`].  Direction-agnostic — used for both input and
+    /// output ends, wherever any one arm's bytes should dominate the whole.
     pub(super) fn join_byte_mode(&mut self, a: PipeMode, b: PipeMode) -> PipeMode {
         match (
             self.ctx.unifier.resolve_mode(&a),
@@ -316,6 +330,8 @@ impl Inferencer<'_> {
         ) {
             (PipeMode::Bytes, _) | (_, PipeMode::Bytes) => PipeMode::Bytes,
             (PipeMode::None, PipeMode::None) => PipeMode::None,
+            (PipeMode::None, _) => b,
+            (_, PipeMode::None) => a,
             _ => self.union_mode(a, b),
         }
     }
@@ -327,6 +343,21 @@ impl Inferencer<'_> {
     fn merge_branches(&mut self, arms: Vec<CompTy>, why: &Reason) -> CompTy {
         if arms.is_empty() {
             return CompTy::pure(self.ctx.unifier.fresh_ty());
+        }
+
+        // A still-undecided arm — say, a call to a function under inference,
+        // as in a recursive branch — joins with the `Return` arms rather than
+        // strict-unifying against them, so force it to `Return` shape first,
+        // as `try` does for both its arms.
+        if arms
+            .iter()
+            .any(|cty| matches!(self.ctx.unifier.resolve_comp_ty(cty), CompTy::Return(..)))
+        {
+            for cty in &arms {
+                if matches!(self.ctx.unifier.resolve_comp_ty(cty), CompTy::Var(_)) {
+                    let _ = self.extract_return(cty);
+                }
+            }
         }
 
         let all_return = arms
@@ -378,11 +409,13 @@ impl Inferencer<'_> {
         )
     }
 
-    /// The result-mode join at the heart of every arm merge (`If`/`Chain`
-    /// here, `try` in `scope.rs`). No arm ground `Bytes`: still-`Var` arms
-    /// pin to `∅` if any arm is, else all unify with each other. Some arm
-    /// ground `Bytes`: every arm must land on the byte side, a ground `∅`
-    /// arm subsuming there only if its value is `Unit`.
+    /// The result-mode join at the heart of every arm merge (`If`/`Chain`/
+    /// `Case` here, `try` in `scope.rs`). No arm ground `Bytes`: a `∅`-at-
+    /// `Unit` arm is the join's identity — the one subsumption instance lets
+    /// it ride a byte side chosen later — so still-open arms unify with each
+    /// other and stay open, pinned to `∅` only by an arm with a value
+    /// payload. Some arm ground `Bytes`: every arm must land on the byte
+    /// side, a ground `∅` arm subsuming there only if its value is `Unit`.
     pub(super) fn join_arm_results(
         &mut self,
         per_arm: &[(PipeSpec, Ty)],
@@ -393,24 +426,30 @@ impl Inferencer<'_> {
             .any(|(spec, _)| self.ctx.unifier.resolve_mode(&spec.result) == PipeMode::Bytes);
 
         if !any_bytes {
-            let all_var = per_arm.iter().all(|(spec, _)| {
-                matches!(
-                    self.ctx.unifier.resolve_mode(&spec.result),
-                    PipeMode::Var(_)
-                )
-            });
-            let mut results = per_arm.iter().map(|(spec, _)| spec.result);
-            let joined_result = if all_var {
-                let first = results.next().expect("a join always has at least one arm");
-                for r in results {
-                    self.ctx.unify_mode(&first, &r, Reason::ResultPin);
+            let mut open = Vec::new();
+            let mut value_payload = false;
+            for (spec, ty) in per_arm {
+                match self.ctx.unifier.resolve_mode(&spec.result) {
+                    PipeMode::Var(_) => open.push(spec.result),
+                    PipeMode::None => {
+                        value_payload |= !matches!(self.ctx.unifier.resolve_ty(ty), Ty::Unit);
+                    }
+                    PipeMode::Bytes => unreachable!("any_bytes ruled this out"),
                 }
-                first
-            } else {
-                for r in results {
-                    self.ctx.unify_mode(&r, &PipeMode::None, Reason::ResultPin);
+            }
+            let joined_result = match open.split_first() {
+                Some((first, rest)) if !value_payload => {
+                    for r in rest {
+                        self.ctx.unify_mode(first, r, Reason::ResultPin);
+                    }
+                    *first
                 }
-                PipeMode::None
+                _ => {
+                    for r in &open {
+                        self.ctx.unify_mode(r, &PipeMode::None, Reason::ResultPin);
+                    }
+                    PipeMode::None
+                }
             };
             let mut iter = per_arm.iter().map(|(_, ty)| ty.clone());
             let first = iter.next().expect("a join always has at least one arm");
@@ -1336,19 +1375,20 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Check one `case` arm against the case form's `result_cty` and the
-    /// scrutinee's resolved per-label payload row `scrut_payloads`.
+    /// Check one `case` arm against its own `arm_cty` — the arms join, they do
+    /// not unify — and the scrutinee's resolved per-label payload row
+    /// `scrut_payloads`.
     fn check_case_arm(
         &mut self,
         label: &str,
         handler_ty: &Ty,
-        result_cty: &CompTy,
+        arm_cty: &CompTy,
         scrut_payloads: &std::collections::HashMap<String, Ty>,
     ) -> Ty {
         let payload_ty = self.ctx.unifier.fresh_ty();
         let expected = Ty::Thunk(Box::new(CompTy::Fun(
             Box::new(payload_ty.clone()),
-            Box::new(result_cty.clone()),
+            Box::new(arm_cty.clone()),
         )));
         if self.ctx.unifier.unify_ty(handler_ty, &expected).is_err() {
             let expected_resolved = self.ctx.unifier.apply_ty(&expected);
@@ -1393,9 +1433,8 @@ impl Inferencer<'_> {
         let table_span = table.span;
         let scrut_ty = self.with_span(scrutinee_span, |this| this.infer_val(&scrutinee.item));
         let table_ty = self.with_span(table_span, |this| this.infer_val(&table.item));
-        let result_cty = self.ctx.unifier.fresh_comp_ty();
 
-        let handler_spans = collect_handler_spans(&table.item);
+        let arm_syntax = collect_handler_arms(&table.item);
 
         // A scrutinee that is concretely not a variant gets a sentence: the raw
         // row mismatch prints `[...ρ]`, which a beginner cannot read.
@@ -1435,14 +1474,27 @@ impl Inferencer<'_> {
         let scrut_payloads: std::collections::HashMap<String, Ty> =
             collect_extends(&scrut_resolved_row).into_iter().collect();
 
-        // Each handler at `l` is a thunk of `payload_l → result_cty`; the
-        // closed scrutinee row is built from those payloads as we go.
+        // Each handler at `l` is a thunk of `payload_l → arm_l`, every arm
+        // with its own computation type: exactly one arm runs, so the arms
+        // join like `if`'s branches rather than unifying.  Each arm's result
+        // mode is recorded for `annotate` — a var now, ground once the join
+        // settles it.  The closed scrutinee row is built from the payloads as
+        // we go.
         let mut closed_scrut = Row::Empty;
+        let mut arms = Vec::with_capacity(handler_labels.len());
         for (label, handler_ty) in handler_labels.iter().rev() {
-            let arm_span = handler_spans.get(label.as_str()).copied();
-            let closed_payload = self.with_span(arm_span, |this| {
-                this.check_case_arm(label, handler_ty, &result_cty, &scrut_payloads)
+            let arm = arm_syntax.get(label.as_str());
+            let arm_cty = self.ctx.unifier.fresh_comp_ty();
+            let closed_payload = self.with_span(arm.and_then(|a| a.span), |this| {
+                this.check_case_arm(label, handler_ty, &arm_cty, &scrut_payloads)
             });
+            if let Some(arm) = arm {
+                let (_, _, _, result) = self.extract_return(&arm_cty);
+                self.ctx
+                    .val_results
+                    .insert(std::ptr::from_ref::<Val>(arm.val) as usize, result);
+            }
+            arms.push(arm_cty);
             closed_scrut = Row::Extend(
                 label.clone(),
                 Box::new(closed_payload),
@@ -1475,7 +1527,12 @@ impl Inferencer<'_> {
             self.ctx.diagnose(translated);
         }
 
-        result_cty
+        // No visible arms — the table came from a parameter — constrains
+        // nothing here; the case's type is the caller's to pin.
+        if arms.is_empty() {
+            return self.ctx.unifier.fresh_comp_ty();
+        }
+        self.merge_branches(arms, &Reason::CaseArms)
     }
 
     /// Bind each name to a self-referential mono thunk, infer every RHS in that

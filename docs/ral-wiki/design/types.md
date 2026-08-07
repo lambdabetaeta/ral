@@ -52,11 +52,16 @@ external command has the type `⟨i, Bytes, Bytes⟩ Unit` with a fresh input mo
 `i` (`external_exec_comp_ty` in `core/src/typecheck/infer.rs`), so `echo` and
 `^echo` show the checker one shape.
 
-**The result mode is ground at every source-tree node.** An introduction rule
-sets it; propagation copies it; a join computes it; a shape-forcing
+**The result mode is decided at every source-tree node.** An introduction
+rule sets it; propagation copies it; a join computes it; a shape-forcing
 expectation grounds it. A payload decision against an unresolved result mode
-pins the mode to `∅`. Result-mode variables appear only in declared signature
-slots:
+pins the mode to `∅`. One decision is a deferral: a join computes its mode
+from the arms that carry information, and a `∅`-at-`Unit` arm carries none —
+it is the join's identity, compatible with either side by the subsumption
+instance below. A join whose only informative arms are still open — say a
+recursive call, whose mode is its own function's — therefore stays open, and
+grounds at the binding group's fixed point or at the first payload decision.
+Result-mode variables otherwise appear only in declared signature slots:
 
 - the computation-typed argument of a builtin, for example `spawn`, `each`, `map`, and `fold`;
 - the expected arm shape of a scope.
@@ -72,7 +77,7 @@ a computation type only:
 - it does not descend through `Thunk`, `Fun`, or rows;
 - it is not a unification rule — `unify_mode` demands equality on ground modes.
 
-The join over the arms of `if`, `?`, and `try` applies the instance:
+The join over the arms of `if`, `?`, `case`, and `try` applies the instance:
 
 - a join with a byte-payload arm lands wholly on the byte side;
 - a `∅`-at-`Unit` arm subsumes into the byte side;

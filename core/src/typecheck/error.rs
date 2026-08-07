@@ -65,6 +65,8 @@ pub enum Reason {
     ScopeBody,
     /// An arm handler's payload against the scrutinee's payload at that tag.
     CaseArmPayload,
+    /// The `case` arms against one another, where exactly one of them runs.
+    CaseArms,
     CaseScrutinee,
     /// A handler table against the record-of-thunks shape `case` requires.
     CaseTable,

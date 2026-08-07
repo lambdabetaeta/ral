@@ -390,6 +390,14 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
              type the scrutinee constructs at that tag"
                 .to_string(),
         ),
+        Reason::CaseArms => Some(
+            "every arm of a `case` must agree on where its payload lives: \
+             either every arm produces a value of the same type, or every arm \
+             writes to the byte channel — a mix of the two cannot join, so \
+             pipe the byte-payload arm through a decoder (`| from-string`) to \
+             bring it onto the value side"
+                .to_string(),
+        ),
         Reason::ForceOperand => Some(
             "the `!` operator runs a block — its operand must be a \
              block value (something built with `{ ... }`), not data"
