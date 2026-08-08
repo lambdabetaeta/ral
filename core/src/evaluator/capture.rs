@@ -15,10 +15,21 @@ struct CaptureScope<'a> {
 }
 
 impl<'a> CaptureScope<'a> {
+    /// A discarded statement's bytes reach the nearest enclosing *visible*
+    /// stream, never an enclosing capture buffer, however deep the brackets
+    /// nest.  So `capture_outer` names that visible stream, and only the
+    /// outermost bracket gets to name it: a nested bracket keeps whatever is
+    /// already there, since the sink it displaced is another buffer.  Install
+    /// the displaced stdout only when the slot is empty — at the top level, or
+    /// in the fresh shell of a pipeline stage, whose visible stream is its
+    /// wire.
     fn enter(shell: &'a mut Shell, buffer_sink: Sink) -> Self {
         let saved_stdout = std::mem::replace(&mut shell.io.stdout, buffer_sink);
-        let saved_capture_outer =
-            std::mem::replace(&mut shell.io.capture_outer, saved_stdout.try_clone().ok());
+        let saved_capture_outer = shell.io.capture_outer.take();
+        shell.io.capture_outer = match &saved_capture_outer {
+            Some(visible) => visible.try_clone().ok(),
+            None => saved_stdout.try_clone().ok(),
+        };
         Self {
             shell,
             saved_stdout: Some(saved_stdout),
@@ -40,9 +51,10 @@ impl Drop for CaptureScope<'_> {
 
 /// Swap stdout for an in-memory buffer, run `f`, restore, return `(result, bytes)`.
 ///
-/// The displaced sink is left in `shell.io.capture_outer`, where `eval_seq`
-/// flushes a sequence's non-final bytes, so what drains here is the final value
-/// alone.  `try` deliberately captures nothing; `audit` uses the tee below.
+/// The enclosing *visible* stream is left in `shell.io.capture_outer`, where
+/// `eval_seq` flushes a sequence's non-final bytes, so what drains here is the
+/// final value alone and the rest is seen.  `try` deliberately captures
+/// nothing; `audit` uses the tee below.
 pub fn with_capture<R, F>(shell: &mut Shell, f: F) -> (R, Vec<u8>)
 where
     F: FnOnce(&mut Shell) -> R,

@@ -1518,6 +1518,33 @@ fn if_arm_echo_alongside_pure_return_arm_joins_to_byte_output() {
 }
 
 #[test]
+fn bind_rhs_writing_bytes_before_a_value_result_joins_to_byte_output() {
+    // Running `M to x. N` runs `M`, so `M`'s own byte output is the binder's
+    // too.  Here `M`'s payload rides the value conduit (`return 5`), so no
+    // `Capture` swallows its `echo` — the bytes reach the shared channel and
+    // the binder's output spec must say so.
+    ok("!{ let x = !{ echo hi; return 5 }; return unit } | from-string");
+}
+
+#[test]
+fn captured_bind_rhs_keeps_its_bytes_off_the_channel() {
+    // The other side of the same join: a byte-*result* RHS is wrapped in
+    // `Capture`, which swallows its bytes into `x`, so the binder writes
+    // nothing and feeding a byte consumer stays the adjacency error it was.
+    let errs = raw_errors("!{ let x = echo hi; length $x } | from-string");
+    assert!(
+        errs.iter().any(|e| matches!(
+            e.kind,
+            ral_core::typecheck::TypeErrorKind::ModeMismatch { .. }
+        )),
+        "expected a ModeMismatch feeding bytes to a captured-bind block, got: {:?}",
+        errs.iter()
+            .map(|e| e.kind.render_message())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn chain_byte_arms_join_to_byte_output() {
     // Both arms emit bytes, so the chain's output channel is `Bytes`.
     assert_eq!(

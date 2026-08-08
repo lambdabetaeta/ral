@@ -111,8 +111,9 @@ forces an answer before it has one, and mode polymorphism survives
 (`∅ ⊔ μ = μ`).
 
 **One coercion, `capture`, moves a byte payload to a value.** The checker
-inserts `capture M : ⟨i, o, ∅⟩ String` where `M : ⟨i, o, Bytes⟩ Unit`, for
-example at the right-hand side of a `let`. The precondition is
+inserts `capture M : ⟨i, ∅, ∅⟩ String` where `M : ⟨i, o, Bytes⟩ Unit`, for
+example at the right-hand side of a `let`: the capture swallows `M`'s byte
+output into the result, so only the stdin demand rides through. The precondition is
 `result = Bytes`, which is a type, so no runtime value test remains. `capture`
 is an IR node (`CompKind::Capture` in `core/src/ir.rs`) with one evaluation
 rule (`core/src/evaluator/capture.rs`):

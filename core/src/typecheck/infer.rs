@@ -1535,24 +1535,26 @@ impl Inferencer<'_> {
                 let inner_ty = self.infer_comp(inner);
                 // A `Fun` RHS is a lambda: evaluating it builds a closure and
                 // emits nothing, so its output is `∅`.
-                // Its bytes *out* are captured into the bound value, but its
-                // bytes *in* are a demand on the one stdin the binder shares
-                // with `rest`, so they lift out of the capture.
-                let (bound_ty, rhs_input) =
+                // A byte-result RHS is wrapped in `Capture`, which swallows
+                // every byte it writes into the bound value, so it too
+                // contributes no output; a value-result RHS is not, so the
+                // bytes it writes on the way to its value reach the shared
+                // channel and are the binder's output as much as `rest`'s.
+                // Either way its bytes *in* are a demand on the one stdin the
+                // binder shares with `rest`, so they lift out of the capture.
+                let (bound_ty, rhs_input, rhs_output) =
                     if let CompTy::Fun(..) = self.ctx.unifier.resolve_comp_ty(&inner_ty) {
-                        (Ty::Thunk(Box::new(inner_ty)), PipeMode::None)
+                        (Ty::Thunk(Box::new(inner_ty)), PipeMode::None, PipeMode::None)
                     } else {
-                        let (ty, input, _, result) = self.extract_return(&inner_ty);
+                        let (ty, input, output, result) = self.extract_return(&inner_ty);
                         if matches!(result, PipeMode::Var(_)) {
                             self.ctx
                                 .unify_mode(&result, &PipeMode::None, Reason::ResultPin);
                         }
-                        let observed = if self.ctx.ground(result) == ByteMode::Bytes {
-                            Ty::String
-                        } else {
-                            ty
-                        };
-                        (observed, input)
+                        let captured = self.ctx.ground(result) == ByteMode::Bytes;
+                        let observed = if captured { Ty::String } else { ty };
+                        let escaping = if captured { PipeMode::None } else { output };
+                        (observed, input, escaping)
                     };
 
                 if let IrPattern::Name(_) = pattern {
@@ -1564,7 +1566,7 @@ impl Inferencer<'_> {
                 let concrete = self.ctx.unifier.apply_ty(&bound_ty);
                 self.bind_pattern(pattern, &concrete, BindMode::Let);
                 let rest_ty = self.infer_comp(rest);
-                self.lift_channels(rest_ty, vec![rhs_input], vec![])
+                self.lift_channels(rest_ty, vec![rhs_input], vec![rhs_output])
             }
             CompKind::App { head, args } => {
                 let head_ty = self.infer_comp(head);
