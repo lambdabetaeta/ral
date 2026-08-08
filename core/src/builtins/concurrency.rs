@@ -213,7 +213,10 @@ where
         worker_surface.clone(),
         snap,
         move |mooring, child_env| {
-            child_env.io.capture_outer = None;
+            // A worker's visible stream *is* its handle buffer: nobody is
+            // watching it until `await` drains one, so both conduits land
+            // there and a discarded statement is held rather than interleaved.
+            child_env.io.ambient = stdout.try_clone().unwrap_or(crate::io::Sink::Terminal);
             child_env.io.stdout = stdout;
             child_env.io.stderr = stderr;
             // `spawn_thread` builds the worker from a defaulted `Io`, whose stdin

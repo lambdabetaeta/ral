@@ -159,38 +159,6 @@ impl Sink {
         })
     }
 
-    /// Move a `Buffer`'s bytes to `target` and clear it; a no-op otherwise.
-    /// `Comp::Seq` uses it so a non-final command's output still reaches the
-    /// visible stdout that an enclosing capture displaced into `capture_outer`.
-    ///
-    /// # Errors
-    /// Returns `Err` if cloning `target` or writing to it fails; a failed write
-    /// puts the drained bytes back.
-    pub fn flush_to(&self, target: &Self) -> io::Result<()> {
-        if let Self::Buffer(buf) = self
-            && let Ok(mut g) = buf.lock()
-            && !g.is_empty()
-        {
-            let mut t = target.try_clone()?;
-            let bytes = std::mem::take(&mut *g);
-            drop(g);
-            if let Err(e) = t.write_all(&bytes) {
-                // Put them back for a later `take_buffer`.  The lock is retaken
-                // after the write, never held across that blocking IO.
-                if let Ok(mut g) = buf.lock() {
-                    let tail = std::mem::take(&mut *g);
-                    *g = bytes;
-                    g.extend(tail);
-                }
-                return Err(e);
-            }
-            // `t` is about to be dropped, and a `LineFramed` clone owns its
-            // `pending`: nobody else would ever emit an unterminated tail.
-            t.flush_pending()?;
-        }
-        Ok(())
-    }
-
     /// Duplicate this sink, sharing the same ultimate destination.
     ///
     /// # Errors
@@ -221,8 +189,16 @@ impl Sink {
 /// are recorded and still seen.  `with_audit_capture` in `evaluator::capture` is
 /// the caller; it drains the buffer once every writer has closed.
 pub(crate) fn tee_with_buffer(base: Sink) -> (Sink, ByteBuffer) {
-    let (buffer_sink, buf) = new_buffer();
-    (Sink::Tee(Box::new(buffer_sink), Box::new(base)), buf)
+    let buf: ByteBuffer = Arc::new(Mutex::new(Vec::new()));
+    let sink = tee_into(base, &buf);
+    (sink, buf)
+}
+
+/// The same tee, into a [`ByteBuffer`] that already exists: two conduits
+/// recorded as one stream, which is what `audit` wants of a command's stdout
+/// and the ambient sink beside it.
+pub(crate) fn tee_into(base: Sink, buf: &ByteBuffer) -> Sink {
+    Sink::Tee(Box::new(Sink::Buffer(buf.clone())), Box::new(base))
 }
 
 /// A fresh [`ByteBuffer`] and the sink that writes into it: callers wire the

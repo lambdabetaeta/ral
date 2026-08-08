@@ -247,14 +247,16 @@ fn eval_index(target: &Val, keys: &[Spanned<Val>], shell: &mut Shell) -> Raw<Val
 
 /// `capture M` — run `M` with its byte channel captured, decode the bytes as
 /// its value; `M`'s value is `Unit` by typing (WF-2), so no inspection is
-/// needed. On failure, flush what `M` already wrote to the enclosing sink
-/// before propagating — a partial write (`echo half; exit 3`) stays visible.
+/// needed. On failure the payload was never a value, so what `M` already wrote
+/// is seen exactly where a discarded statement's bytes are — the nearest
+/// visible stream, not the buffer one bracket out. A partial write
+/// (`echo half; exit 3`) stays visible however deep the brackets nest.
 fn eval_capture(body: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
     let (result, mut bytes) =
         super::capture::with_capture(shell, |shell| eval_comp(body, mooring, shell, Tail::No));
     if result.is_err() && !bytes.is_empty() {
-        shell
-            .write_stdout(&bytes)
+        super::capture::with_ambient_stdout(shell, |shell| shell.write_stdout(&bytes))
+            .and_then(std::convert::identity)
             .map_err(|e| shell.err(format!("capture flush: {e}"), 1))?;
     }
     debug_assert!(
@@ -363,23 +365,23 @@ fn eval_if(
 }
 
 /// Sequence of computations — the last value is the result, and only it
-/// inherits the sequence's tail position. Flush-through: non-final parts'
-/// bytes are effect, so they route past the innermost `Capture`.
+/// inherits the sequence's tail position.  A non-final part's value is
+/// discarded, so its bytes are effect and it runs against the ambient sink:
+/// the destination is fixed by the writer's position in its own block, before
+/// a byte is written, and never revised.
 fn eval_seq(comps: &[Arc<Comp>], tail: Tail, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
     let mut result = Value::Unit;
     let len = comps.len();
     for (i, c) in comps.iter().enumerate() {
         crate::process::check(mooring)?;
-        let last = i == len - 1;
-        let elem_tail = if last { tail } else { Tail::No };
-        result = eval_comp(c, mooring, shell, elem_tail)?;
-        if !last && let Some(outer) = &shell.io.capture_outer {
-            shell
-                .io
-                .stdout
-                .flush_to(outer)
-                .map_err(|e| shell.err(format!("seq flush: {e}"), 1))?;
-        }
+        result = if i + 1 == len {
+            eval_comp(c, mooring, shell, tail)?
+        } else {
+            super::capture::with_ambient_stdout(shell, |shell| {
+                eval_comp(c, mooring, shell, Tail::No)
+            })
+            .map_err(|e| shell.err(format!("statement sink: {e}"), 1))??
+        };
     }
     Ok(result)
 }

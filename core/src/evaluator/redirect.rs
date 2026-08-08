@@ -77,6 +77,7 @@ struct RedirectFrame<'a> {
     stdin_guard: Option<command::StdinRedirectGuard>,
     fd_guard: Option<command::RedirectGuard>,
     prev_stdout: Option<Sink>,
+    prev_ambient: Option<Sink>,
     prev_stderr: Option<Sink>,
     write_intents: Vec<WriteIntent>,
 }
@@ -84,6 +85,7 @@ struct RedirectFrame<'a> {
 struct SinkRedirects {
     unhandled: Vec<EvalRedirectV>,
     prev_stdout: Option<Sink>,
+    prev_ambient: Option<Sink>,
     prev_stderr: Option<Sink>,
 }
 
@@ -168,12 +170,20 @@ fn install_sink_redirects(
         }
     }
 
+    // A redirect changes where bytes go, not which conduit they are on, so the
+    // ambient sink follows stdout: under `!{ … } > f`, a discarded statement's
+    // bytes belong in the file, which is now the visible stream.
+    let prev_ambient = stdout_changed
+        .then(|| clone_redirect_sink(&stdout, "redirect ambient"))
+        .transpose()?
+        .map(|amb| std::mem::replace(&mut shell.io.ambient, amb));
     let prev_stdout = stdout_changed.then(|| std::mem::replace(&mut shell.io.stdout, stdout));
     let prev_stderr = stderr_changed.then(|| std::mem::replace(&mut shell.io.stderr, stderr));
 
     Ok(SinkRedirects {
         unhandled,
         prev_stdout,
+        prev_ambient,
         prev_stderr,
     })
 }
@@ -217,6 +227,9 @@ impl<'a> RedirectFrame<'a> {
                 if let Some(s) = sink_redirects.prev_stdout {
                     shell.io.stdout = s;
                 }
+                if let Some(s) = sink_redirects.prev_ambient {
+                    shell.io.ambient = s;
+                }
                 if let Some(s) = sink_redirects.prev_stderr {
                     shell.io.stderr = s;
                 }
@@ -230,6 +243,7 @@ impl<'a> RedirectFrame<'a> {
             stdin_guard: Some(stdin_guard),
             fd_guard: Some(fd_guard),
             prev_stdout: sink_redirects.prev_stdout,
+            prev_ambient: sink_redirects.prev_ambient,
             prev_stderr: sink_redirects.prev_stderr,
             write_intents,
         })
@@ -293,6 +307,9 @@ impl<'a> RedirectFrame<'a> {
         let _ = self.shell.io.stderr.flush();
         if let Some(s) = self.prev_stdout.take() {
             self.shell.io.stdout = s;
+        }
+        if let Some(s) = self.prev_ambient.take() {
+            self.shell.io.ambient = s;
         }
         if let Some(s) = self.prev_stderr.take() {
             self.shell.io.stderr = s;

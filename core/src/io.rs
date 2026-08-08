@@ -11,7 +11,7 @@ mod terminal;
 pub use sink::{ByteBuffer, ChildStdioPlan, ExternalWrite, Sink};
 pub(crate) use sink::{
     new_buffer, peek_buffer, str_strip_one_terminator, strip_trailing_newline, take_buffer,
-    tee_with_buffer,
+    tee_into, tee_with_buffer,
 };
 pub use source::{Source, SourceReader};
 pub use terminal::{InteractiveMode, TerminalState};
@@ -50,7 +50,12 @@ impl LaunchRole {
 /// All pipeline-stage IO state for a single Shell.
 pub struct Io {
     pub stdin: Source,
+    /// Where the running computation's own payload goes.
     pub stdout: Sink,
+    /// The nearest enclosing *visible* stream: where a discarded statement
+    /// writes.  Never a capture buffer, so however deep the brackets nest
+    /// there is no rule about which one wins.
+    pub ambient: Sink,
     /// `spawn` installs a buffer sink here, so a worker's errors are held in
     /// its handle and drained on `await`, never interleaved with the parent's.
     pub stderr: Sink,
@@ -59,11 +64,6 @@ pub struct Io {
     /// Probed once at startup; nothing re-queries the OS mid-session.
     pub terminal: TerminalState,
     pub launch_role: LaunchRole,
-    /// The stdout displaced by the enclosing `with_capture`.  `Comp::Seq`
-    /// flushes non-final commands' bytes here, so their side effects stay
-    /// visible instead of vanishing into the captured value.  `None` outside a
-    /// capture.
-    pub capture_outer: Option<Sink>,
 }
 
 impl Io {
@@ -78,15 +78,11 @@ impl Io {
         Ok(Self {
             stdin: Source::Terminal,
             stdout: self.stdout.try_clone()?,
+            ambient: self.ambient.try_clone()?,
             stderr: self.stderr.try_clone()?,
             interactive: self.interactive,
             terminal: self.terminal,
             launch_role: self.launch_role,
-            capture_outer: self
-                .capture_outer
-                .as_ref()
-                .map(Sink::try_clone)
-                .transpose()?,
         })
     }
 
@@ -98,11 +94,8 @@ impl Io {
     /// child shares with that parent anyway.
     pub fn inherit_from(&mut self, parent: &mut Self) {
         self.stdout = parent.stdout.try_clone().unwrap_or(Sink::Terminal);
+        self.ambient = parent.ambient.try_clone().unwrap_or(Sink::Terminal);
         self.stderr = parent.stderr.try_clone().unwrap_or(Sink::Stderr);
-        self.capture_outer = parent
-            .capture_outer
-            .as_ref()
-            .and_then(|s| s.try_clone().ok());
         self.terminal = parent.terminal;
         self.interactive = parent.interactive;
         self.launch_role = parent.launch_role;
@@ -123,11 +116,11 @@ impl Default for Io {
         Self {
             stdin: Source::Terminal,
             stdout: Sink::Terminal,
+            ambient: Sink::Terminal,
             stderr: Sink::Stderr,
             interactive: false,
             terminal: TerminalState::default(),
             launch_role: LaunchRole::default(),
-            capture_outer: None,
         }
     }
 }

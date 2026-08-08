@@ -574,6 +574,9 @@ pub(crate) fn build_run(shell: &Shell, capture: Option<(Sink, Sink)>, stdin: Sou
     });
     run_io.stdin = stdin;
     if let Some((stdout, stderr)) = capture {
+        // The run's buffer is the whole of what the world sees of it, so it is
+        // the visible stream as well as the payload sink.
+        run_io.ambient = stdout.try_clone().unwrap_or(Sink::Terminal);
         run_io.stdout = stdout;
         run_io.stderr = stderr;
     }
