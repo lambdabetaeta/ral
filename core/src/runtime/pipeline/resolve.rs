@@ -40,10 +40,17 @@ pub(super) enum PipelineKind {
 }
 
 impl PipelineKind {
+    /// A stage disqualifies the fold if bytes touch it anywhere: on its
+    /// upstream, on its payload — which is what its edge carries — or as
+    /// chatter, since chatter needs a stage's own ambient conduit to escape
+    /// through and the in-parent fold has none of its own.  Keeping chatter in
+    /// the test is also what stops `… | {|x| echo note; $x}` flipping from a
+    /// helper to the parent, a `cd`-visibility change no repeal should make.
     fn from_specs(specs: &[StageSpec]) -> Self {
         let pure_value = specs.iter().all(|spec| {
             spec.comp_type.input != crate::mode::PipeMode::Bytes
                 && spec.comp_type.output != crate::mode::PipeMode::Bytes
+                && spec.comp_type.result != crate::mode::PipeMode::Bytes
         });
         if pure_value {
             Self::PureValue
@@ -84,7 +91,7 @@ pub(super) enum StageLaunch {
 
 /// Per-stage analysis.  Edge transport is deliberately absent: the allocator
 /// `route::open_stage_routes` derives each edge from the stage's position and
-/// `comp_type.output`, which the checker already unified across the edge.
+/// `comp_type.result`, which the checker already unified across the edge.
 #[derive(Clone, Debug)]
 pub(super) struct StageSpec {
     pub(super) comp_type: crate::mode::PipeSpec,
@@ -202,7 +209,9 @@ pub(super) struct PipelinePlan {
     pub(super) kind: PipelineKind,
     pub(super) specs: Vec<StageSpec>,
     pub(super) terminal: TerminalPlan,
-    pub(super) last_output: crate::mode::PipeMode,
+    /// Which conduit the pipeline's own payload rides, read off the last
+    /// stage: `Bytes` and there is no value to hand back.
+    pub(super) last_result: crate::mode::PipeMode,
 }
 
 fn resolve_terminal_plan(mooring: &Mooring, shell: &Shell) -> TerminalPlan {
@@ -232,8 +241,9 @@ fn resolve_terminal_plan(mooring: &Mooring, shell: &Shell) -> TerminalPlan {
     }
 }
 
-/// Adjacency holds by construction — the checker unified the wires it emitted —
-/// so a debug build only asserts it.
+/// Adjacency holds by construction — the checker unified each producer's
+/// payload against its consumer's input — so a debug build only asserts it.
+/// A stage's `output` is not part of it: chatter escapes the pipeline.
 fn specs_from_wires(
     stages: &[Arc<Comp>],
     wires: &[crate::mode::Wire],
@@ -243,7 +253,7 @@ fn specs_from_wires(
     debug_assert_eq!(wires.len(), stages.len());
     for i in 1..wires.len() {
         debug_assert_eq!(
-            wires[i - 1].output,
+            wires[i - 1].result,
             wires[i].input,
             "adjacent pipeline wires disagree at stage {i}"
         );
@@ -276,14 +286,14 @@ pub(super) fn resolve_pipeline(
     // to `eval_comp`, so this is reached only with ≥2.  Pin the invariant rather
     // than fabricate a `Mode::None` fallback that lies about an empty pipeline.
     let last = specs.last().expect("pipeline has at least one stage");
-    let last_output = last.comp_type.output;
+    let last_result = last.comp_type.result;
     let kind = PipelineKind::from_specs(&specs);
 
     Ok(PipelinePlan {
         kind,
         specs,
         terminal,
-        last_output,
+        last_result,
     })
 }
 

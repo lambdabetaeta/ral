@@ -277,22 +277,22 @@ impl Inferencer<'_> {
         }
     }
 
-    /// A stage's own channel signature, for the annotation pass.  A stage
-    /// consumed as a value argument takes its upstream off the value edge, so
-    /// its input is `∅`; its output is that of the application result, which
-    /// `infer_pipeline` has already rewritten the stage's type to.
+    /// A stage's own channel signature, for the annotation pass.  All three
+    /// ends are the stage's own: the runtime routes its wire by `result`, the
+    /// payload conduit, and lets `output` escape to the ambient stream.  A
+    /// stage consumed as a value argument takes its upstream off the value
+    /// edge, so its input is `∅`; its other two ends are the application
+    /// result's, which `infer_pipeline` has already rewritten the stage's type
+    /// to.
     fn stage_own_spec(&mut self, cty: &CompTy, consumed_as_value: bool) -> PipeSpec {
-        if consumed_as_value {
-            return PipeSpec {
-                input: PipeMode::None,
-                output: self.comp_output_mode(cty),
-                result: PipeMode::None,
-            };
-        }
         PipeSpec {
-            input: self.comp_input_mode(cty),
+            input: if consumed_as_value {
+                PipeMode::None
+            } else {
+                self.comp_input_mode(cty)
+            },
             output: self.comp_output_mode(cty),
-            result: PipeMode::None,
+            result: self.comp_result_mode(cty),
         }
     }
 
@@ -302,6 +302,10 @@ impl Inferencer<'_> {
 
     fn comp_output_mode(&mut self, cty: &CompTy) -> PipeMode {
         self.comp_end_mode(cty, |s| s.output)
+    }
+
+    fn comp_result_mode(&mut self, cty: &CompTy) -> PipeMode {
+        self.comp_end_mode(cty, |s| s.result)
     }
 
     /// Merge a conditional's or chain's arms over their result modes: input
@@ -612,20 +616,27 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Unify the arm's `PipeSpec` against head `name`'s, leaving its value type
-    /// free.  The only failure is a ground mode clash, returned rather than
-    /// reported so `alias_arm_scheme` in `typecheck.rs` can refuse the install
-    /// while `handler_comp_scheme` merely positions it.
+    /// Unify the arm's *connectable* ends against head `name`'s, leaving its
+    /// value type free.  Those are `input` and `result`: what a pipeline joins
+    /// to a neighbour is the head's upstream and its payload conduit, and an
+    /// arm that moved either would not be reinterpreting the same head.
+    /// `output` is deliberately not pinned — chatter is nobody's contract, so
+    /// an arm may log where its head does not (`echo: { |args| echo
+    /// intercepted; echo ...$args }`) without changing what it is.
+    ///
+    /// The only failure is a ground mode clash, returned rather than reported
+    /// so `alias_arm_scheme` in `typecheck.rs` can refuse the install while
+    /// `handler_comp_scheme` merely positions it.
     pub(super) fn pin_arm_to_head(
         &mut self,
         name: &str,
         arm: &CompTy,
     ) -> Result<(), crate::mode::ModeMismatch> {
         let body = self.alias_arm_body(arm);
-        let (_, arm_input, arm_output, _) = self.extract_return(&body);
+        let (_, arm_input, _, arm_result) = self.extract_return(&body);
         let head = self.head_pipe_spec(name);
         self.ctx.unifier.unify_mode(&arm_input, &head.input)?;
-        self.ctx.unifier.unify_mode(&arm_output, &head.output)
+        self.ctx.unifier.unify_mode(&arm_result, &head.result)
     }
 
     /// Instantiate `scheme` and strip the outer `Thunk` schemes carry; a
@@ -765,14 +776,17 @@ impl Inferencer<'_> {
         self.external_exec_comp_ty(args)
     }
 
-    // WF-1 (result ⊑ output) holds by inspection: both are the literal `Bytes` below.
+    /// An external's bytes are its payload, not chatter: they belong to
+    /// whoever consumes the command, and nothing escapes past them.  Only a
+    /// statement boundary turns a payload loose (see
+    /// [`Self::infer_seq_with_alias_bindings`]).
     fn external_exec_comp_ty(&mut self, args: &crate::ir::Args) -> CompTy {
         self.infer_args(args);
         let input = self.ctx.unifier.fresh_mode();
         CompTy::Return(
             PipeSpec {
                 input,
-                output: PipeMode::Bytes,
+                output: PipeMode::None,
                 result: PipeMode::Bytes,
             },
             Box::new(Ty::Unit),
@@ -837,9 +851,16 @@ impl Inferencer<'_> {
             };
             // The tail's ends are `lift_channels`' to weigh — a statement
             // runs for its effect, the tail gives the sequence its shape.
+            //
+            // Discarding a computation is what turns a payload loose: nobody
+            // is left to consume it, so a statement's `result` escapes
+            // alongside its `output`.  This is the sole producer of chatter,
+            // and the statement boundary is where the rule belongs — the same
+            // fact `eval_seq` acts on, in the same place, for the same reason.
             if i + 1 < parts.len() {
                 inputs.push(self.comp_input_mode(&last));
                 outputs.push(self.comp_output_mode(&last));
+                outputs.push(self.comp_result_mode(&last));
             }
         }
         self.lift_channels(last, inputs, outputs)
@@ -1082,7 +1103,7 @@ impl Inferencer<'_> {
             stages.iter().map(|stage| self.infer_comp(stage)).collect();
         // A stage consumed as a value argument is the data-last fold's
         // function: its upstream arrives as the final argument, so its input
-        // channel is `∅` while its output is whatever its body emits.  The
+        // channel is `∅` while its payload is whatever its body produces.  The
         // rewrite below replaces such a stage's type with its application body,
         // so record the fact here, while the original shape is still visible.
         let mut consumed_as_value = vec![false; stage_tys.len()];
@@ -1091,7 +1112,11 @@ impl Inferencer<'_> {
             // caret follows whatever `ctx.pos` the last-inferred stage left, so
             // a clash on an early edge would point at the final stage.
             let edge_span = stages[i + 1].span.or(stages[i].span);
-            let out = self.comp_output_mode(&stage_tys[i]);
+            // The wire carries the producer's *payload*.  A stage's chatter
+            // escapes to the pipeline's ambient stream instead, so it takes no
+            // part in adjacency: `{ echo warn ; from-line } | f` hands `f` a
+            // value while `warn` goes to whoever is watching.
+            let out = self.comp_result_mode(&stage_tys[i]);
             let out_resolved = self.ctx.unifier.resolve_mode(&out);
 
             // A value producer feeding a value-arg consumer is the data-last
@@ -1100,7 +1125,7 @@ impl Inferencer<'_> {
             // channel edge, so `∅`-into-`Bytes` is rejected: values do not
             // silently cross a byte edge, they must be encoded and decoded.
             //
-            // An unresolved output is the diverging producer (`{ fail … }`,
+            // An unresolved payload is the diverging producer (`{ fail … }`,
             // whose modes are fresh and quantified).  `InferCtx::ground` will
             // settle it to `∅`, so count it a value edge already; otherwise the
             // producer's *thunk* type meets the consumer's parameter and the
@@ -1122,25 +1147,25 @@ impl Inferencer<'_> {
             });
         }
 
-        // Input from the first stage, output and return type from the last.  A
+        // Input from the first stage, payload and return type from the last.  A
         // `Fun` tail is the byte-pipe-into-value-arg case (`cat foo | length`),
         // not modelled structurally, so drill past the arrows.  A `Var` tail is
         // unified back against the synthesized `Return`, or the pipeline's own
         // consumers would see an unrelated fresh variable.
         let input = self.comp_input_mode(&stage_tys[0]);
-        let last_consumed = consumed_as_value[stage_tys.len() - 1];
         let last = stage_tys
             .last()
             .expect("≥2 stages by invariant above")
             .clone();
-        let output = self.stage_own_spec(&last, last_consumed).output;
+        let last_output = self.comp_output_mode(&last);
+        let last_result = self.comp_result_mode(&last);
         let ret_ty = self.comp_return_ty(&last);
         if matches!(self.ctx.unifier.resolve_comp_ty(&last), CompTy::Var(_)) {
             let bound = CompTy::Return(
                 PipeSpec {
                     input: self.comp_input_mode(&last),
-                    output,
-                    result: self.ctx.unifier.fresh_mode(),
+                    output: last_output,
+                    result: last_result,
                 },
                 Box::new(ret_ty.clone()),
             );
@@ -1149,40 +1174,37 @@ impl Inferencer<'_> {
 
         // For the annotation pass, keyed by node address; still-unresolved
         // modes and vars settle once the whole walk's constraints are in.
+        let mut chatter = Vec::with_capacity(stages.len());
         for (i, (stage, ty)) in stages.iter().zip(&stage_tys).enumerate() {
             let spec = self.stage_own_spec(ty, consumed_as_value[i]);
             let value_ty = self.comp_return_ty(ty);
             let key = std::ptr::from_ref::<Comp>(stage.as_ref()) as usize;
             self.ctx.stage_specs.insert(key, spec);
             self.ctx.stage_types.insert(key, value_ty);
+            chatter.push(spec.output);
         }
 
-        // Byte-tailed (matching `PipelineCollector::finish`): value is `Unit`,
-        // result is `Bytes`. Value-tailed keeps the last stage's own `result`.
-        let byte_tailed =
-            !last_consumed && self.ctx.unifier.resolve_mode(&output) == PipeMode::Bytes;
+        // No stage's chatter rides the wire — every stage writes it to the
+        // pipeline's own ambient stream — so the pipeline escapes what all of
+        // its stages escape, not just the last one's.
+        let output = self.ctx.join_modes(chatter, Reason::PipelineChatter);
+
+        // Byte-tailed (matching `PipelineCollector::finish`): the payload rides
+        // the byte channel, so there is no value to report and the type is
+        // `Unit`.  Value-tailed keeps the last stage's own return type.
+        let byte_tailed = self.ctx.unifier.resolve_mode(&last_result) == PipeMode::Bytes;
         let pipeline_ret_ty = if byte_tailed { Ty::Unit } else { ret_ty };
-        let pipeline_result = if byte_tailed {
-            PipeMode::Bytes
-        } else {
-            self.comp_end_mode(&last, |s| s.result)
-        };
         debug_assert!(
-            self.ctx.unifier.resolve_mode(&pipeline_result) != PipeMode::Bytes
+            self.ctx.unifier.resolve_mode(&last_result) != PipeMode::Bytes
                 || matches!(self.ctx.unifier.resolve_ty(&pipeline_ret_ty), Ty::Unit),
             "WF-2: a Bytes-result pipeline returns Unit"
-        );
-        debug_assert!(
-            self.ctx.unifier.resolve_mode(&pipeline_result) != PipeMode::Bytes
-                || self.ctx.unifier.resolve_mode(&output) == PipeMode::Bytes,
-            "WF-1: result ⊑ output"
         );
 
         CompTy::Return(
             PipeSpec {
                 input,
                 output,
-                result: pipeline_result,
+                result: last_result,
             },
             Box::new(pipeline_ret_ty),
         )
@@ -1535,13 +1557,13 @@ impl Inferencer<'_> {
                 let inner_ty = self.infer_comp(inner);
                 // A `Fun` RHS is a lambda: evaluating it builds a closure and
                 // emits nothing, so its output is `∅`.
-                // A byte-result RHS is wrapped in `Capture`, which swallows
-                // every byte it writes into the bound value, so it too
-                // contributes no output; a value-result RHS is not, so the
-                // bytes it writes on the way to its value reach the shared
-                // channel and are the binder's output as much as `rest`'s.
-                // Either way its bytes *in* are a demand on the one stdin the
-                // binder shares with `rest`, so they lift out of the capture.
+                // Otherwise the binder consumes the RHS's *payload* — a
+                // byte payload through the `Capture` coercion, as the bound
+                // `String`; a value payload directly — and consumes only
+                // that.  The RHS's chatter is nobody's payload by definition,
+                // so it escapes past the binder and is the binder's output as
+                // much as `rest`'s.  Its bytes *in* are a demand on the one
+                // stdin the binder shares with `rest`, so they lift out too.
                 let (bound_ty, rhs_input, rhs_output) =
                     if let CompTy::Fun(..) = self.ctx.unifier.resolve_comp_ty(&inner_ty) {
                         (Ty::Thunk(Box::new(inner_ty)), PipeMode::None, PipeMode::None)
@@ -1553,8 +1575,7 @@ impl Inferencer<'_> {
                         }
                         let captured = self.ctx.ground(result) == ByteMode::Bytes;
                         let observed = if captured { Ty::String } else { ty };
-                        let escaping = if captured { PipeMode::None } else { output };
-                        (observed, input, escaping)
+                        (observed, input, output)
                     };
 
                 if let IrPattern::Name(_) = pattern {
@@ -1671,16 +1692,18 @@ impl Inferencer<'_> {
             // Inserted by `annotate`'s write-back pass, so it is absent from a
             // freshly elaborated tree but present in every tree re-inferred
             // from a live value — a handler arm vetted at install, a bound
-            // lambda's body.  The bytes the body would have emitted become
-            // this node's `String` result: the byte channel ends here, while
-            // the body's stdin demand still rides through.
+            // lambda's body.  It is a coercion on one conduit, not a bracket
+            // over a subterm: the body's *payload* becomes this node's
+            // `String`, while its chatter passes straight through, as does its
+            // stdin demand.  So a capture over an opaque force says what it
+            // has always done — `!{ !$fa }` lets `fa`'s statements be seen.
             CompKind::Capture(body) => {
                 let body_ty = self.infer_comp(body);
-                let (_, input, _, _) = self.extract_return(&body_ty);
+                let (_, input, output, _) = self.extract_return(&body_ty);
                 CompTy::Return(
                     PipeSpec {
                         input,
-                        output: PipeMode::None,
+                        output,
                         result: PipeMode::None,
                     },
                     Box::new(Ty::String),

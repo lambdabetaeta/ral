@@ -454,16 +454,18 @@ let to-jsonl = { |items| each { |x| to-json $x; echo "" } $items }
 
 # Streaming (stdin, line by line).  `fold-lines` is a builtin; `map-lines`
 # and `filter-lines` are ergonomic wrappers around it.
+#
+# Each `echo` below is its callback's *tail*, not a statement before one, and
+# that is what makes these stages produce bytes rather than chatter: a
+# statement's write escapes to the visible stream, a tail's write is the
+# computation's payload and so is what a downstream stage reads.
 ## Map a function over stdin lines, echoing results.
 let map-lines = { |f|
-    fold-lines { |_ line| echo !{$f $line}; return unit } unit
+    fold-lines { |_ line| echo !{$f $line} } unit
 }
 ## Filter stdin lines by a predicate.
 let filter-lines = { |pred|
-    fold-lines { |_ line|
-        if !{$pred $line} { echo $line }
-        return unit
-    } unit
+    fold-lines { |_ line| if !{$pred $line} { echo $line } } unit
 }
 ## Apply a function to each stdin line.
 let each-line = { |f|

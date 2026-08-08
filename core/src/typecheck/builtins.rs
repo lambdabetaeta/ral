@@ -188,12 +188,12 @@ pub fn sig_pipe_spec(result: &CompTemplate, u: &mut Unifier) -> PipeSpec {
 }
 
 /// The boundary [`PipeSpec`] of a streaming reducer (`fold-lines`): bytes in,
-/// output follows the callback's mode, result ground `None` (the reduction).
-pub fn reducer_spec(callback_output: PipeMode) -> PipeSpec {
+/// and both conduits out inherited from the callback, each as itself.
+pub fn reducer_spec(callback_output: PipeMode, callback_result: PipeMode) -> PipeSpec {
     PipeSpec {
         input: PipeMode::Bytes,
         output: callback_output,
-        result: PipeMode::None,
+        result: callback_result,
     }
 }
 
@@ -332,15 +332,13 @@ pub mod sig {
     }
 
     /// Like [`ret`], but the byte channel *is* the result: `result: Bytes`,
-    /// so `value` must be `Unit` (WF-2).
-    const fn ret_bytes(input: ModeTemplate, output: ModeTemplate) -> CompTemplate {
-        debug_assert!(
-            matches!(output, ModeTemplate::Bytes),
-            "WF-1: result ⊑ output"
-        );
+    /// so `value` must be `Unit` (WF-2).  Those bytes are the builtin's
+    /// payload and belong to whoever consumes it, so nothing escapes:
+    /// `output` is `∅` until a statement boundary turns the payload loose.
+    const fn ret_bytes(input: ModeTemplate) -> CompTemplate {
         CompTemplate::Return {
             input,
-            output,
+            output: ModeTemplate::None,
             value: TyTemplate::Unit,
             result: ByteMode::Bytes,
         }
@@ -372,7 +370,7 @@ pub mod sig {
 
     pub const TERMINAL_CONTROL: BuiltinSig = command(
         ArgSig::Exact(NO_ARGS),
-        ret_bytes(ModeTemplate::Fresh, ModeTemplate::Bytes),
+        ret_bytes(ModeTemplate::Fresh),
         None,
     );
 
@@ -397,25 +395,25 @@ pub mod sig {
 
     pub const TO_BYTES: BuiltinSig = command(
         ArgSig::DataLast(TO_BYTES_ARGS),
-        ret_bytes(ModeTemplate::None, ModeTemplate::Bytes),
+        ret_bytes(ModeTemplate::None),
         None,
     );
 
     pub const TO_ANY_BYTES: BuiltinSig = command(
         ArgSig::DataLast(ONE_ANY),
-        ret_bytes(ModeTemplate::None, ModeTemplate::Bytes),
+        ret_bytes(ModeTemplate::None),
         None,
     );
 
     pub const TO_LINE: BuiltinSig = command(
         ArgSig::DataLast(ONE_ANY),
-        ret_bytes(ModeTemplate::None, ModeTemplate::Bytes),
+        ret_bytes(ModeTemplate::None),
         None,
     );
 
     pub const TO_LINES: BuiltinSig = command(
         ArgSig::DataLast(TO_LINES_ARGS),
-        ret_bytes(ModeTemplate::None, ModeTemplate::Bytes),
+        ret_bytes(ModeTemplate::None),
         None,
     );
 
@@ -437,13 +435,13 @@ pub mod sig {
 
     pub const HELP: BuiltinSig = command(
         ArgSig::Exact(NO_ARGS),
-        ret_bytes(ModeTemplate::Fresh, ModeTemplate::Bytes),
+        ret_bytes(ModeTemplate::Fresh),
         None,
     );
 
     pub const EXPLAIN: BuiltinSig = command(
         ArgSig::Exact(ONE_STR),
-        ret_bytes(ModeTemplate::Fresh, ModeTemplate::Bytes),
+        ret_bytes(ModeTemplate::Fresh),
         None,
     );
 
@@ -460,7 +458,7 @@ pub mod sig {
     /// pipeline typing treats it as the byte write it is.
     pub const ECHO: BuiltinSig = command(
         ArgSig::Any,
-        ret_bytes(ModeTemplate::None, ModeTemplate::Bytes),
+        ret_bytes(ModeTemplate::None),
         None,
     );
 
@@ -865,12 +863,17 @@ pub mod scheme {
 
     // ── Streaming reducers ───────────────────────────────────────────────
 
-    /// `fold-lines :: ∀α μ. U(α → Str → F[∅,μ] α) → α → F[Bytes,μ] α`
+    /// `fold-lines :: ∀α μ ρ. U(α → Str → F[∅,μ,ρ] α) → α → F[Bytes,μ,ρ] α`
     ///
-    /// The callback's output mode is the reducer's: `return $acc` keeps `μ = ∅`
-    /// and the stage stays a decode, while a callback that echoes per line — as
-    /// `map-lines`, `filter-lines`, and `each-line` in `prelude.ral` do — lifts
-    /// the whole stage to `F[Bytes,Bytes] α`.
+    /// Both of the callback's conduits out are the reducer's, each staying the
+    /// conduit it was.  Its chatter `μ` is the reducer's chatter: a callback
+    /// that logs per line logs from inside the fold, and those bytes escape.
+    /// Its payload `ρ` is the reducer's payload, so a callback whose *tail* is
+    /// a byte write — `map-lines` and `filter-lines` in `prelude.ral` — makes
+    /// the whole stage a byte producer feeding downstream, while `return $acc`
+    /// keeps `ρ = ∅` and the accumulator comes home as a value.  WF-2 survives
+    /// the forwarding: at `ρ = Bytes` the callback's own value is `Unit`, and
+    /// `α` is what the reducer returns.
     pub fn fold_lines(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
@@ -892,7 +895,10 @@ pub mod scheme {
                 thunk(fun(a.clone(), fun(Ty::String, callback_result))),
                 fun(
                     a.clone(),
-                    CompTy::Return(reducer_spec(PipeMode::Var(mu)), Box::new(a)),
+                    CompTy::Return(
+                        reducer_spec(PipeMode::Var(mu), PipeMode::Var(mr)),
+                        Box::new(a),
+                    ),
                 ),
             )),
         )

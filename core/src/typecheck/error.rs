@@ -51,6 +51,8 @@ pub enum Reason {
     },
     /// The byte-channel modes of two adjacent stages, at the edge between them.
     PipelineEdge,
+    /// A pipeline's chatter join over every stage's escaping output.
+    PipelineChatter,
     /// An unresolved computation forced to `Return` shape to read its value and modes.
     ReturnShape,
     /// An arm's pipeline modes against those of the head it reinterprets.

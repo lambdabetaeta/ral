@@ -1,11 +1,13 @@
-//! The pipeline-mode lattice: the `I` and `O` of a stage's computation type
-//! `F[I,O] A` — `None` for a value edge, `Bytes` for a raw byte channel,
+//! The pipeline-mode lattice: the ends of a stage's computation type
+//! `F[I,O,R] A` — `None` for a value edge, `Bytes` for a raw byte channel,
 //! `Var` for a variable inference resolves.
 //!
-//! Connecting two stages demands *equality* of the producer's output mode and
+//! Connecting two stages demands *equality* of the producer's result mode and
 //! the consumer's input, so no value silently crosses a byte edge; that rule
 //! lives on the checker's `Unifier::unify_mode`, whose annotation pass grounds
-//! every stage into the [`Wire`] the evaluator reads off the IR.
+//! every stage into the [`Wire`] the evaluator reads off the IR.  A stage's
+//! `output` takes no part in that: chatter escapes the pipeline rather than
+//! riding its wire.
 //!
 //! These types ride inside a [`crate::typecheck::Scheme`] into the
 //! postcard-baked prelude, which carries no schema of its own; the serde
@@ -25,13 +27,18 @@ pub enum PipeMode {
     Var(ModeVar),
 }
 
-/// A command's computation type: `F[input, output]` plus which conduit
-/// carries its result.
+/// A command's computation type: `F[input, output, result]`.  `output` and
+/// `result` are the two byte conduits out and name different streams —
+/// `output` is chatter, the bytes that *escape* to whoever is watching;
+/// `result` is the payload, which belongs to whoever consumes the
+/// computation.  Neither bounds the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PipeSpec {
     pub input: PipeMode,
+    /// The chatter that escapes: bytes a discarded statement wrote, seen by
+    /// the nearest enclosing visible stream and never the payload of anything.
     pub output: PipeMode,
-    /// Which conduit carries this computation's result: `Bytes` for the byte
+    /// Which conduit carries this computation's payload: `Bytes` for the byte
     /// channel, `None` for the return value. Ground at every source-tree
     /// node — a payload decision pins an unresolved variable to `None`;
     /// variables appear in declared signature slots and shape expectations,
@@ -85,6 +92,7 @@ impl From<ByteMode> for PipeMode {
 pub struct Wire {
     pub input: ByteMode,
     pub output: ByteMode,
+    pub result: ByteMode,
 }
 
 impl Wire {
@@ -94,6 +102,7 @@ impl Wire {
     pub const EMPTY: Self = Self {
         input: ByteMode::Empty,
         output: ByteMode::Empty,
+        result: ByteMode::Empty,
     };
 
     /// Lift back into the lattice for `runtime::pipeline::resolve`, which
@@ -102,7 +111,7 @@ impl Wire {
         PipeSpec {
             input: self.input.into(),
             output: self.output.into(),
-            result: PipeMode::None,
+            result: self.result.into(),
         }
     }
 }

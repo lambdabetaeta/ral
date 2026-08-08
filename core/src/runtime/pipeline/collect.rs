@@ -252,7 +252,7 @@ impl PipelineCollector {
     pub(super) fn finish(
         self,
         shell: &mut Shell,
-        last_output: crate::mode::PipeMode,
+        last_result: crate::mode::PipeMode,
     ) -> Settled<Value> {
         if let Some(br) = self.break_ {
             return Err(match br {
@@ -263,7 +263,7 @@ impl PipelineCollector {
                 }
             });
         }
-        match last_output {
+        match last_result {
             crate::mode::PipeMode::Bytes => Ok(Value::Unit),
             _ => Ok(self.final_value.unwrap_or(Value::Unit)),
         }

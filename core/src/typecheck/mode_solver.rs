@@ -354,17 +354,16 @@ impl InferCtx {
     fn conclude_byte_side(&mut self, arms: &[(PipeSpec, Ty)], why: &Reason) -> (PipeMode, Ty) {
         for (spec, ty) in arms {
             match self.unifier.resolve_mode(&spec.result) {
-                // WF-1 (result ⊑ output) and WF-2 (a byte result returns
-                // Unit) are enforced, not assumed: a sibling join may have
-                // pinned this arm's result `Bytes` without touching its
-                // output or value, so unify both rather than assert.
+                // WF-2 (a byte result returns Unit) is enforced, not assumed:
+                // a sibling join may have pinned this arm's result `Bytes`
+                // without touching its value, so unify rather than assert.
+                // The arm's `output` is its chatter and independent of where
+                // its payload rides, so the join leaves it alone.
                 PipeMode::Bytes => {
-                    self.unify_mode(&spec.output, &PipeMode::Bytes, why.clone());
                     self.unify_ty(ty, &Ty::Unit, why.clone());
                 }
                 PipeMode::Var(_) => {
                     self.unify_mode(&spec.result, &PipeMode::Bytes, Reason::ResultPin);
-                    self.unify_mode(&spec.output, &PipeMode::Bytes, why.clone());
                     self.unify_ty(ty, &Ty::Unit, why.clone());
                 }
                 PipeMode::None if matches!(self.unifier.resolve_ty(ty), Ty::Unit) => {
@@ -651,12 +650,12 @@ mod tests {
         matches!(m, PipeMode::Var(_))
     }
 
-    /// A byte-tailed arm spec: `output` ground `Bytes` so a later `Bytes`
-    /// result never trips the WF-1 assertion regardless of test order.
+    /// An arm spec carrying only a payload conduit: chatter is independent of
+    /// where the payload rides, so these joins never consult `output`.
     fn spec(result: PipeMode) -> PipeSpec {
         PipeSpec {
             input: PipeMode::None,
-            output: PipeMode::Bytes,
+            output: PipeMode::None,
             result,
         }
     }

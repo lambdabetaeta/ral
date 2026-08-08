@@ -17,9 +17,11 @@ pub(super) fn value_edge_in(i: usize, comp_type: crate::mode::PipeSpec) -> bool 
 }
 
 /// The dual of [`value_edge_in`]: stage `i` of `n` emits a value iff it has a
-/// downstream and non-`Bytes` output.
+/// downstream and a non-`Bytes` payload.  Transport follows the payload, never
+/// the chatter — a stage's `output` escapes to the pipeline's ambient stream
+/// rather than crossing the edge.
 pub(super) fn value_edge_out(i: usize, n: usize, comp_type: crate::mode::PipeSpec) -> bool {
-    i + 1 < n && comp_type.output != crate::mode::PipeMode::Bytes
+    i + 1 < n && comp_type.result != crate::mode::PipeMode::Bytes
 }
 
 /// Stdin source for one stage.
@@ -41,7 +43,8 @@ pub(super) enum ByteOut {
 }
 
 /// Whether the stage's `ChildEvalResponse` carries the pipeline's final value.
-/// Only the last value-typed ral stage reports one.
+/// Only the last stage whose *payload* is a value reports one — a chatty
+/// decoder tail (`{ echo warn ; from-line }`) still has a value to report.
 pub(super) enum FinalValue {
     Report,
     Ignore,
@@ -88,7 +91,7 @@ pub(super) fn open_stage_routes(plan: &PipelinePlan) -> Settled<Vec<StageRoute>>
             Inbound::Bytes(r) => (ByteIn::Upstream(r), None),
             Inbound::Value(ch) => (ByteIn::Parent, Some(ch)),
         };
-        let final_value = if i + 1 == n && spec.comp_type.output != crate::mode::PipeMode::Bytes {
+        let final_value = if i + 1 == n && spec.comp_type.result != crate::mode::PipeMode::Bytes {
             FinalValue::Report
         } else {
             FinalValue::Ignore

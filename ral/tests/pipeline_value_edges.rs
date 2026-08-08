@@ -608,12 +608,19 @@ fn audit_receives_upstream_piped_bytes() {
     assert_eq!(o.stdout.trim(), "hi");
 }
 
+/// Pins: `v` binds the record `audit` returns — its payload — while `cat`'s
+/// bytes go where `cat` was already writing them, the pipeline's own stdout.
+///
+/// This test used to pin the opposite, and the reason is the whole of the
+/// WF-1 repeal: an audit-tailed pipeline had `output = Bytes`, the runtime
+/// read that field as "the payload is bytes", and so threw the record away.
+/// The two facts now live in two fields and neither is mistaken for the
+/// other.
 #[test]
-fn pipeline_ending_in_audit_binds_the_piped_string() {
-    // Pins: `v` binds the piped text, not the record `audit` returns.
-    let o = run_pipe("let v = echo hi | audit { cat }\necho $v");
+fn pipeline_ending_in_audit_binds_the_audit_record() {
+    let o = run_pipe("let v = echo hi | audit { cat }\necho $v[status]");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "hi");
+    assert_eq!(o.stdout.lines().collect::<Vec<_>>(), vec!["hi", "0"]);
 }
 
 #[test]

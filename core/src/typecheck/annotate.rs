@@ -200,6 +200,7 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
                         .map_or(*placeholder, |spec| Wire {
                             input: ctx.ground(spec.input),
                             output: ctx.ground(spec.output),
+                            result: ctx.ground(spec.result),
                         })
                 })
                 .collect();

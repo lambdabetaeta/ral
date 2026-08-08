@@ -246,7 +246,10 @@ impl Inferencer<'_> {
         }
     }
 
-    /// `guard`'s value and result pass through from its body; `cleanup` contributes neither.
+    /// `guard`'s value and result pass through from its body; `cleanup`
+    /// contributes neither, so — having no consumer for a payload — it escapes
+    /// whatever it writes, on either conduit, exactly as a discarded statement
+    /// does.
     pub(super) fn infer_guard(&mut self, body: &Val, cleanup: &Val) -> ScopeSig {
         let body_cty = self.infer_scope_body_passthrough(body);
         let (body_value, body_in, body_out, body_result) = self.extract_return(&body_cty);
@@ -255,7 +258,11 @@ impl Inferencer<'_> {
             .insert(std::ptr::from_ref::<Val>(body) as usize, body_result);
 
         let cleanup_cty = self.infer_scope_body_passthrough(cleanup);
-        let (_cleanup_value, cleanup_in, cleanup_out, _) = self.extract_return(&cleanup_cty);
+        let (_cleanup_value, cleanup_in, cleanup_chatter, cleanup_payload) =
+            self.extract_return(&cleanup_cty);
+        let cleanup_out = self
+            .ctx
+            .join_modes(vec![cleanup_chatter, cleanup_payload], Reason::ScopeArms);
 
         ScopeSig {
             arms: vec![

@@ -287,12 +287,15 @@ impl Unifier {
     pub fn fresh_mode(&mut self) -> PipeMode {
         PipeMode::Var(self.fresh_modevar())
     }
-    /// The unconstrained `F[μ, ν]`, for a head whose modes are not yet known; `result` grounds `∅`.
+    /// The unconstrained `F[μ, ν, ρ]`, for a head whose modes are not yet
+    /// known.  `result` is open like the rest: this stands for a signature
+    /// nobody declared, so it must constrain nothing — an alias over an
+    /// unknown head is free to put its payload on either conduit.
     pub fn fresh_spec(&mut self) -> PipeSpec {
         PipeSpec {
             input: self.fresh_mode(),
             output: self.fresh_mode(),
-            result: PipeMode::None,
+            result: self.fresh_mode(),
         }
     }
 

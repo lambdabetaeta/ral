@@ -51,12 +51,12 @@ pub(crate) fn run_pipeline(
     // end of scope, so they outlive `finish`.
     let (_group, running) = launch_pipeline(stages, &plan, mooring, shell)?;
 
-    // The last value-typed helper carries its value home in its
+    // The last value-payloaded helper carries its value home in its
     // `ChildEvalResponse` frame; collect reads it only after waiting on the
     // helper, since one blocked on a stopped upstream would deadlock us.
     running
         .collect(mooring, shell, started)
-        .finish(shell, plan.last_output)
+        .finish(shell, plan.last_result)
         .map_err(Into::into)
 }
 

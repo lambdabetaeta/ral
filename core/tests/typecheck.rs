@@ -392,7 +392,17 @@ fn guard_body_bytes_output_dominates_pure_cleanup() {
 
 #[test]
 fn guard_cleanup_bytes_output_dominates_pure_body() {
-    ok("guard { return unit } { echo hi } | from-string");
+    // The cleanup's value is dropped, so its bytes have no consumer and
+    // escape as the guard's chatter.  The guard's own payload stays the
+    // body's — a value here — so this is chatter, not a byte edge.
+    assert_eq!(
+        first_stage_wire("guard { return unit } { echo hi } | cat"),
+        Wire {
+            input: ByteMode::Empty,
+            output: ByteMode::Bytes,
+            result: ByteMode::Empty
+        }
+    );
 }
 
 #[test]
@@ -423,9 +433,14 @@ fn audit_record_value_field_is_body_raw_value_not_invented() {
     );
 }
 
+/// Pins: `v` observes the record `audit` returns — its payload — not the
+/// piped `String`.  This test asserted the opposite until WF-1 was repealed,
+/// and the reversal is the repeal's point: an audit-tailed pipeline had
+/// `output = Bytes`, the runtime read that field as "the payload is bytes",
+/// and threw the record away.  `cat`'s bytes still reach the pipeline's
+/// stdout; they are simply not what `v` binds.
 #[test]
-fn pipeline_ending_in_audit_binds_the_piped_string_not_the_record() {
-    // Pins: `v` observes the piped `String`, not the record `audit` returns.
+fn pipeline_ending_in_audit_binds_the_audit_record() {
     let comp = annotated("let v = echo a | audit { cat }; return unit");
     let mut bound = None;
     common::walk_comp(&comp, &mut |c| {
@@ -439,7 +454,17 @@ fn pipeline_ending_in_audit_binds_the_piped_string_not_the_record() {
             bound = Some(scheme.ty.clone());
         }
     });
-    assert_eq!(bound, Some(Ty::String));
+    let Some(Ty::Record(row)) = bound else {
+        panic!("`v` must bind `audit`'s record, got: {bound:?}");
+    };
+    let mut labels = Vec::new();
+    let mut cur = &row;
+    while let ral_core::typecheck::Row::Extend(label, _, rest) = cur {
+        labels.push(label.clone());
+        cur = rest;
+    }
+    labels.sort();
+    assert_eq!(labels, ["children", "error", "status", "value"]);
 }
 
 #[test]
@@ -1361,6 +1386,17 @@ fn all_pipeline_wires(comp: &Comp) -> Vec<(usize, Vec<Wire>)> {
     out
 }
 
+/// The ground wire of `src`'s first stage — the checker's whole verdict on
+/// one computation's three channel ends, chatter and payload apart.  `| cat`
+/// is the neutral consumer that makes a bare form into a stage: an external's
+/// input is an open mode, so it accepts either conduit without pinning it.
+fn first_stage_wire(src: &str) -> Wire {
+    let comp = annotated(src);
+    let pipelines = all_pipeline_wires(&comp);
+    assert_eq!(pipelines.len(), 1, "expected exactly one pipeline in {src:?}");
+    pipelines[0].1[0]
+}
+
 /// Every `Pipeline` node's `stage_types` slot, reachable anywhere.
 fn all_pipeline_stage_types(comp: &Comp) -> Vec<(usize, Vec<Ty>)> {
     let mut out = Vec::new();
@@ -1398,20 +1434,23 @@ fn top_level_pipeline_carries_ground_wires() {
     let (stage_count, wires) = &pipelines[0];
     assert_eq!(*stage_count, 2, "two-stage pipeline");
     assert_eq!(wires.len(), *stage_count, "one wire per stage");
-    // `/bin/echo` emits bytes with an open input (defaulted to `Empty`);
-    // the adjacency unifies `/bin/cat`'s input to `Bytes`.
+    // `/bin/echo`'s bytes are its *payload* with an open input (defaulted to
+    // `Empty`); the adjacency unifies `/bin/cat`'s input to `Bytes`.  Neither
+    // stage chatters, so both `output`s are `Empty`.
     assert_eq!(
         wires[0],
         Wire {
             input: ByteMode::Empty,
-            output: ByteMode::Bytes
+            output: ByteMode::Empty,
+            result: ByteMode::Bytes
         }
     );
     assert_eq!(
         wires[1],
         Wire {
             input: ByteMode::Bytes,
-            output: ByteMode::Bytes
+            output: ByteMode::Empty,
+            result: ByteMode::Bytes
         }
     );
 }
@@ -1506,24 +1545,51 @@ fn if_value_branches_join_to_value_output() {
 
 #[test]
 fn if_arm_writing_bytes_before_its_return_joins_to_byte_output() {
-    // The `then` arm's channel output is `Bytes` from `echo hi`, even though
-    // its final statement is a pure `return` — the node's output spec must
-    // still see it.
-    ok("if true { echo hi; return 1 } else { return 2 } | from-string");
+    // The `then` arm's chatter is `Bytes` from `echo hi`, even though its
+    // final statement is a pure `return` — the node's output spec must still
+    // see it.  Its *payload* is the `Int` either arm returns, and that is the
+    // conduit a downstream stage would read, so the two must not be confused:
+    // `| from-string` here is now the adjacency error it always was.
+    assert_eq!(
+        first_stage_wire("if true { echo hi; return 1 } else { return 2 } | cat"),
+        Wire {
+            input: ByteMode::Empty,
+            output: ByteMode::Bytes,
+            result: ByteMode::Empty
+        }
+    );
+    has_error(
+        "if true { echo hi; return 1 } else { return 2 } | from-string",
+        "pipeline channels don't agree",
+    );
 }
 
 #[test]
 fn if_arm_echo_alongside_pure_return_arm_joins_to_byte_output() {
-    ok("if true { echo a; return 1 } else { echo b; return 2 } | from-string");
+    assert_eq!(
+        first_stage_wire("if true { echo a; return 1 } else { echo b; return 2 } | cat"),
+        Wire {
+            input: ByteMode::Empty,
+            output: ByteMode::Bytes,
+            result: ByteMode::Empty
+        }
+    );
 }
 
 #[test]
 fn bind_rhs_writing_bytes_before_a_value_result_joins_to_byte_output() {
-    // Running `M to x. N` runs `M`, so `M`'s own byte output is the binder's
-    // too.  Here `M`'s payload rides the value conduit (`return 5`), so no
-    // `Capture` swallows its `echo` — the bytes reach the shared channel and
-    // the binder's output spec must say so.
-    ok("!{ let x = !{ echo hi; return 5 }; return unit } | from-string");
+    // Running `M to x. N` runs `M`, so `M`'s own chatter is the binder's too.
+    // Here `M`'s payload rides the value conduit (`return 5`), so no
+    // `Capture` swallows its `echo` — those bytes escape, and the binder's
+    // output spec must say so while its payload stays a value.
+    assert_eq!(
+        first_stage_wire("!{ let x = !{ echo hi; return 5 }; return unit } | cat"),
+        Wire {
+            input: ByteMode::Empty,
+            output: ByteMode::Bytes,
+            result: ByteMode::Empty
+        }
+    );
 }
 
 #[test]
@@ -1809,8 +1875,8 @@ fn decoder_with_an_argument_is_a_type_error() {
     }
 }
 
-/// As a pipeline's last stage a decoder reads `Bytes` and emits nothing on
-/// the channel.
+/// As a pipeline's last stage a decoder reads `Bytes`, chatters nothing, and
+/// carries its payload as a value.
 #[test]
 fn nullary_decoder_keeps_its_byte_modes() {
     let comp = annotated("echo hi | from-json");
@@ -1821,7 +1887,8 @@ fn nullary_decoder_keeps_its_byte_modes() {
         wires[1],
         Wire {
             input: ByteMode::Bytes,
-            output: ByteMode::Empty
+            output: ByteMode::Empty,
+            result: ByteMode::Empty
         }
     );
 }
