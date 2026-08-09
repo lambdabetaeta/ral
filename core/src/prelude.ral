@@ -463,13 +463,18 @@ let to-jsonl = { |items| each { |x| to-json $x; echo "" } $items }
 # that is what makes these stages produce bytes rather than chatter: a
 # statement's write escapes to the visible stream, a tail's write is the
 # computation's payload and so is what a downstream stage reads.
+#
+# `filter-lines` spells its empty branch out for that reason.  An `if` with no
+# `else` is a statement form — it runs its branch for effect and returns unit —
+# so the `echo` would be chatter, and a filter whose output escapes instead of
+# riding the payload cannot feed a downstream stage.
 ## Map a function over stdin lines, echoing results.
 let map-lines = { |f|
     fold-lines { |_ line| echo !{$f $line} } unit
 }
 ## Filter stdin lines by a predicate.
 let filter-lines = { |pred|
-    fold-lines { |_ line| if !{$pred $line} { echo $line } } unit
+    fold-lines { |_ line| if !{$pred $line} { echo $line } else {} } unit
 }
 ## Apply a function to each stdin line.
 let each-line = { |f|
