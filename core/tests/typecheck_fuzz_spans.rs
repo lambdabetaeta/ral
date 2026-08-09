@@ -127,8 +127,8 @@ fn span_cases() -> Vec<SpanCase> {
         c("return [1, hello]", "[1, hello]", "return-value-narrowing"),
         // A mode mismatch on an *early* edge of a 3-stage pipeline must
         // underline that edge's consumer, not the last stage.  `'abc'` is a
-        // value producer (∅ output) and `from-json` reads Bytes: the clash
-        // is at edge 0, so the caret lands on `from-json`, not `upper`.
+        // value producer and `from-json` reads Bytes: the clash is at edge 0,
+        // so the caret lands on `from-json`, not `upper`.
         c(
             "'abc' | from-json | upper",
             "from-json",

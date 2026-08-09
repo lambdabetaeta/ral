@@ -8,7 +8,7 @@
 let [pct] = $ARGS
 let threshold = int $pct
 
-let rows = df -P | from-lines | stream-drop 1 | stream-to-list
+let rows = stream-to-list !{stream-drop 1 !{df -P | from-lines}}
 
 let stats = map { |line|
     let cols = words $line

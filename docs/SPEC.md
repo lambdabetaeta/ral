@@ -1,4 +1,4 @@
-<!-- verified_at_commit: 001c8410 -->
+<!-- verified_at_commit: 40e6d77 -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -123,30 +123,25 @@ let branch = git branch --show-current
 If the bytes are not UTF-8, decode them explicitly or keep them as `Bytes`.
 A command that returns another value binds that value directly.
 
-The `|` decides what passes between two stages. A byte pipe passes the byte
-output and discards the first stage's return value. A value pipe passes the
-first stage's return value.
+The `|` connects a stage's payload to the next stage's input. Every interior
+pipeline edge carries `Bytes`; a producer's returned value is not an implicit
+payload. The final stage's return remains separate from its output and may be
+any value.
 
-### 2.4. Pipelines carry bytes or values
+### 2.4. Pipelines carry bytes
 
-A pipeline uses one kind of pipe at each `|`.
+A pipeline uses an operating-system-style byte channel at every `|`:
 
-- A **byte pipe** streams bytes, as in a Unix pipeline:
+```ral
+printf 'one\ntwo\n' | wc -l
+```
 
-  ```ral
-  printf 'one\ntwo\n' | wc -l
-  ```
-
-- A **value pipe** passes a value as the next command's final argument:
-
-  ```ral
-  [1, 2, 3] | length
-  ```
-
-ral determines the pipe kind from the commands on both sides. It reports
-an error before execution if the two sides do not agree. Codecs such as
-`from-json` and `to-json` cross between bytes and structured values
-explicitly.
+The typechecker requires the producer's pipeline result and the next stage's
+input to be `Bytes`. A value cannot be sent through `|`; `[1, 2, 3] | length`
+is a type error. Use ordinary application, such as `length [1, 2, 3]`, or bind
+the result and apply a function to it. Codecs such as `from-json` and `to-json`
+cross explicitly between byte channels and values. A decoder may be the final
+stage, so `cat data.json | from-json` returns a decoded value.
 
 ### 2.5. Failure is not false
 
@@ -1095,7 +1090,7 @@ within [handler: { |name args| log-call $name $args }] {
 ```
 
 ral checks handler arity when the handler is installed. It also checks that the
-handler preserves the command's byte-pipe and value-pipe behavior. A handler
+handler preserves the command's byte-channel and result behavior. A handler
 for `echo`, for example, must still produce byte output.
 
 Handlers are self-masking. While a selected handler runs, its own frame is
@@ -1183,9 +1178,10 @@ A command can return a ral value and emit bytes independently.
 - On the right-hand side of `let`, ral binds the returned value. When the final
   result is byte output without a separate value, ral captures it, decodes it
   as UTF-8, and removes one trailing newline.
-- In a byte pipe, bytes pass to the next stage. A non-final stage's returned
-  value is discarded.
-- In a value pipe, the returned value becomes the next stage's final argument.
+- In a pipeline, the producer's payload passes to the next stage as bytes. A
+  non-final stage's returned value is not sent to the next stage.
+- Value-style composition is ordinary application or bind. The `|` operator
+  does not apply a returned value as another stage's argument.
 - A redirect changes where emitted bytes go. It does not make those bytes the
   returned value.
 
@@ -1203,56 +1199,80 @@ not UTF-8.
 
 ## 7. Pipelines and input/output
 
-A pipeline connects computations with `|`. The typechecker decides how each connection carries data. A **value pipe** carries a ral value. A **byte pipe** carries bytes, like a Unix pipe.
+A pipeline connects computations with `|`. Every interior connection is a byte
+channel: the producer's pipeline result and the next stage's input are both
+`Bytes`. The final stage's result is not an interior edge and may be an
+ordinary ral value. ral never inserts a codec or silently turns a returned
+value into a pipeline payload; a mismatch is a type error reported before any
+stage starts.
 
-The choice follows from the stages’ types. ral never guesses by converting a value to text. A mismatch is a type error, reported before any stage starts.
+### 7.1. Byte edges and value composition
 
-### 7.1. Value pipes and byte pipes
-
-A pipeline made entirely of value pipes is a **value pipeline**. It runs from left to right in the current evaluator. The value from the left becomes the last argument of the stage on the right:
+The following is a byte pipeline. Its stages may be builtins, external
+commands, or ral code, but each interior handoff is bytes:
 
 ```ral
-$items | map $f
-# means: map $f $items
+to-json $record | jq '.name' | from-line
 ```
 
-The producer is evaluated exactly once. A value pipeline does not create processes, use operating-system pipes, or enter job control. Changes to ral state have the same scope as they would outside the pipeline.
+An external command cannot receive a structured value by accident. The encoder
+takes its value as an ordinary argument, so the pipeline begins with bytes; the
+decoder ends it.
 
-If any stage needs bytes, the whole pipeline is **process-staged**. Every stage then runs in a child process, including stages written in ral. Byte pipes use operating-system pipes; value pipes between child stages use ral’s typed value transport. Byte-producing and byte-consuming stages can run at the same time.
+Every multi-stage pipeline is process-staged. Each stage runs in its own child,
+and every `|` uses an operating-system byte pipe. State changes made by a stage
+are private to that child: its working directory, environment changes, aliases,
+loaded modules, and bindings do not alter the parent. Only pipe contents, the
+final result, and recorded observations cross the process boundary.
 
-State changes made by a process-staged stage are private to that child. Its working directory, environment changes, aliases, loaded modules, and bindings do not alter the parent. Only pipe contents, the final result, and recorded observations cross the process boundary.
-
-An external command cannot receive a structured value by accident. Encode the value before a byte pipe, and decode bytes before a value pipe:
+Value-style composition stays in the ordinary evaluator. Use application or
+bind rather than a second kind of pipe:
 
 ```ral
-$record | to-json | jq '.name' | from-line
+let items = range 0 5
+let squares = map { |n| return $[$n * $n] } $items
 ```
 
 ### 7.2. Output and results
 
 Each stage has two distinct effects:
 
-- its **output** is connected to the next stage;
-- its **result** is returned to the surrounding expression.
+- its **output** is ambient chatter visible to the surrounding stream;
+- its **result** is the payload: it is connected to the next stage when the
+  stage is non-final, and returned at the pipeline boundary when it is final.
 
-Only the final stage’s result can become the pipeline’s result. A non-final stage’s separate result is discarded. A value pipe passes its value to the next stage. A byte pipe passes only bytes.
+Only the final stage's result can become the pipeline's result. A non-final
+stage's separate return value is discarded; its payload is routed as bytes.
+The final result may be a byte payload (`result = Bytes`, with return type
+`Unit`) or an ordinary returned value (`result = none`).
 
 In statement position, final byte output goes to standard output unless a redirect sends it elsewhere.
 
-At a value boundary, such as the right-hand side of `let` or a captured block, ral captures final byte output. If the computation’s own result is `Unit`, the captured bytes become a `String`:
+At a value boundary, such as the right-hand side of `let` or a captured block,
+ral observes the final payload. If the computation's result mode is `Bytes`,
+WF-2 makes its return type `Unit` and the captured bytes become a `String`:
 
 - decoding is strict UTF-8;
 - one final `LF`, or one final `CRLF`, is removed;
 - no other bytes are changed.
 
-If the computation returns another value, that value wins; the captured copy of its bytes is not also returned. Invalid UTF-8 is an error. Use `from-bytes` when the output is binary.
+If the result mode is `none`, the computation's returned value wins; its
+ambient output is not also returned. Invalid UTF-8 is an error. Use `from-bytes`
+when the byte payload is binary.
+
+When the final stage returns a value in a process-staged pipeline, the value
+is still collected through the helper-staged final-value report path for now:
+the child evaluates the stage and returns its value in `ChildEvalResponse`,
+selected by `FinalValue::Report`. A future decision may move this tail into the
+parent, but it is not part of the current pipeline model.
 
 ```ral
 let greeting = echo hello       # "hello"
 let data = command | from-bytes # Bytes
 ```
 
-Within a captured block, only the last command’s byte output becomes the block value. Earlier commands remain visible through the surrounding output stream:
+Within a captured block, only the last command's byte payload becomes the block
+value. Earlier commands remain visible through the surrounding output stream:
 
 ```ral
 let answer = !{ echo visible; echo captured }
@@ -1277,6 +1297,18 @@ Codecs make every conversion between values and bytes visible in the source. A d
 | `from-csv` | a list of records | Uses the header row as record keys. Fields are strings; duplicate headers are rejected. |
 
 Decoders are nullary command forms. They read the preceding byte pipe, or standard input when there is no preceding stage.
+
+A decoder is a legal pipeline tail:
+
+```ral
+let document = cat data.json | from-json
+length $document
+```
+
+The decoder consumes bytes and returns a value as the pipeline's final result.
+It cannot be followed by another `|` stage, because that would require a value
+on an interior edge. Bind the result and use ordinary application, or encode it
+again explicitly before another byte pipeline.
 
 An encoder takes a value in data-last position and writes bytes:
 
@@ -1346,7 +1378,7 @@ large-producer | head
 
 ral treats that signal as success for a non-final stage. The same condition in the final stage remains a failure. Windows applies the equivalent rule to its pipe-closing status.
 
-On Unix, an interactive process-staged pipeline receives the foreground terminal as one process group only when the session owns a terminal lease and final standard output is attached to that terminal. A captured pipeline normally writes to a buffer, so the parent keeps terminal ownership. A pure value pipeline never enters terminal job control.
+On Unix, an interactive process-staged pipeline receives the foreground terminal as one process group only when the session owns a terminal lease and final standard output is attached to that terminal. A captured pipeline normally writes to a buffer, so the parent keeps terminal ownership. Ordinary application and bind do not create a pipeline process group.
 
 Windows has no POSIX foreground-terminal handoff. Pipeline members share the console and are supervised as one job.
 
@@ -1359,7 +1391,7 @@ message. This distinction is fundamental: `if` examines a `Bool`, while `?`
 and `try` examine whether a computation succeeded.
 
 Commands and control forms are checked before execution. Branches must agree
-on their result type and on compatible byte-pipe and value-pipe behavior. A
+on their result type and on compatible byte-channel behavior. A
 branch that is not selected is not evaluated.
 
 ### 8.1. Sequencing and `return`
@@ -1404,8 +1436,8 @@ the first true condition runs. If none is true, the `else` body runs. The
 selected body has a fresh lexical scope, so bindings made inside it do not leak
 into the surrounding scope.
 
-With `else`, all bodies must have a compatible result type. Their byte-pipe and
-value-pipe behavior is joined into the type of the whole conditional. Without
+With `else`, all bodies must have a compatible result type. Their byte-channel
+behavior is joined into the type of the whole conditional. Without
 `else`, the conditional is for effects: its result is always `unit`, whether
 the body runs or not.
 
@@ -1544,9 +1576,9 @@ does not replace the body's outcome. A cleanup control escape, such as `exit`
 or a stopped job, does take priority and propagates; discarding a stopped-job
 escape would lose the process group needed to resume or reap it.
 
-Both blocks contribute to the guard's byte-pipe and value-pipe type. Output
-from cleanup is real output and is not silently captured. Bindings created in
-either block remain local to that block.
+Both blocks contribute to the guard's byte-channel modes and result type.
+Output from cleanup is real output and is not silently captured. Bindings
+created in either block remain local to that block.
 
 ### 8.8. Exiting the session
 
@@ -1718,7 +1750,7 @@ Every value in `handlers` must be a unary lambda `{ |args| ... }`. It receives o
 
 The singular `handler` field is a catch-all and must be a binary lambda `{ |name args| ... }`. It receives the command name as a `String` and its arguments as a `List`.
 
-A bare block, non-lambda value, or lambda with the wrong number of parameters is rejected when the frame is installed. A named handler must also preserve the command head’s byte-pipe/value-pipe modes when that head already has a known mode. A handler may change the returned value, but it cannot silently turn a byte-producing command into a value-only command or otherwise invalidate surrounding pipelines; use an explicit codec when conversion is intended.
+A bare block, non-lambda value, or lambda with the wrong number of parameters is rejected when the frame is installed. A named handler must also preserve the command head's byte-channel modes when that head already has a known mode. A handler may change the returned value, but it cannot silently remove a byte payload from a command or otherwise invalidate surrounding pipelines; use an explicit codec when conversion is intended.
 
 Handlers are command operations, not first-class names. They are invoked in command position and cannot be fetched with `$name`.
 
@@ -1768,7 +1800,7 @@ Boundary rules are deliberately specific:
 
 - A forced block enters with the caller’s current status and returns only its final status; cwd and bindings remain private.
 - An ordinary lambda call enters with status 0. Its final status and logical cwd flow back to its caller, while its lexical locals remain private. Inside a surrounding `within dir`, that dynamic directory override still wins, and the enclosing block ultimately contains the cwd change.
-- A value pipeline runs sequentially in the evaluator, so it follows the ordinary function and block rules.
+- Ordinary application and bind run sequentially in the evaluator, so they follow the ordinary function and block rules and do not create pipeline stages.
 - Each stage of a process-staged pipeline runs in a child process with a snapshot of the active lexical and dynamic context. Stage-local bindings, cwd changes, environment changes, aliases, and handlers do not return. If every stage succeeds, the final stage determines the pipeline status. Otherwise the first stage failure observed in launch order is propagated; a control escape takes priority over an ordinary failure. Returned values and audit data cross only through their defined channels.
 - A spawned worker receives the closure’s lexical capture and a snapshot of the dynamic context, including directory, environment, handlers, arguments, and grants. It starts with status 0. Its cwd, bindings, and later dynamic changes remain private, while its result returns through the handle.
 - An external process receives the effective cwd and environment at launch. It cannot mutate ral’s shell state.
@@ -1989,10 +2021,9 @@ that created it does not cancel the worker. The worker's standard input is
 empty rather than inherited from the terminal, so detached work cannot steal
 interactive input.
 
-Byte pipes and value pipes retain their ordinary meaning inside a worker. A
-byte pipe still connects byte-producing and byte-consuming stages; a value
-pipe still folds typed values. Concurrency changes lifetime, not pipeline
-typing.
+Pipelines inside a worker still use byte edges between stages. Value-style
+composition remains ordinary application and bind. Concurrency changes
+lifetime, not the byte-edge typing of a pipeline.
 
 ### 11.2. Handles and eliminators
 
@@ -2263,8 +2294,8 @@ prints a notice such as:
 ```
 
 When any stage of a byte-pipe process pipeline stops, ral stops the remaining
-stages so the pipeline is parked as one job. A pure value pipe is evaluated as
-an in-process fold and has no process group to stop.
+stages so the pipeline is parked as one job. Ordinary application and bind have
+no pipeline process group to stop.
 
 The interactive builtins are:
 
@@ -2661,9 +2692,9 @@ of a failure is therefore not inserted into the command's captured `stderr`;
 it lives in an error record, a diagnostic, or an observation's separate `error`
 field.
 
-Byte pipes and value pipes preserve the same separation. A byte pipe transports
-bytes between stages. A value pipe transports typed values between stages.
-Neither is an implicit diagnostic or audit channel.
+Byte pipelines preserve the same separation: their edges transport bytes
+between stages, while diagnostics and audit data use their own channels. A
+pipeline edge is never an implicit diagnostic or audit channel.
 
 ### 13.1. Runtime errors
 
@@ -2768,7 +2799,7 @@ Batch-mode exit status distinguishes static phases:
 | runtime error or explicit `exit` | the resulting status, clamped to 0–255 |
 
 Successful execution returns the shell's final status. Diagnostics are not
-values and do not flow through byte pipes or value pipes.
+pipeline payloads and do not flow through byte edges.
 
 ### 13.3. The audit trail
 
@@ -2787,7 +2818,7 @@ echo $report[children][0][argv][0]
 
 Auditing is observational. Captured output is teed into the tree while the
 same bytes continue to their ordinary fd 1 and fd 2 destinations. `audit`
-does not turn a byte pipe into a value pipe, or a value pipe into a byte pipe.
+does not change a byte edge or turn a returned value into pipeline payload.
 Process-staged pipeline fragments are transported back and merged into the
 surrounding collection; crossing a process boundary does not make a stage
 disappear from the nearest real audit parent.
@@ -2989,9 +3020,9 @@ within [handlers: [fetch-clock: { |args| return '12:00' }]] {
 
 The handler receives one list containing the command's evaluated arguments.
 Per-name handlers follow the ordinary command-dispatch rules, including inside
-pipelines using byte pipes. A value pipe remains a typed function application, so tests
-should mock its functions as values rather than pretending it is a byte
-command channel.
+byte pipelines. Returned values are composed by ordinary application and bind,
+so tests should mock those functions as values rather than pretending they are
+byte command channels.
 
 `audit` is the execution-observation testing surface. It can assert the
 observation sequence, statuses, values, raw output, capability decisions, and
@@ -3037,8 +3068,8 @@ exarch adds agent tools and a small helper library. Host additions are not part
 of the portable core environment.
 
 The standard environment is typed. A builtin that consumes or produces bytes
-declares that in its type, so the typechecker distinguishes its byte pipes from
-value pipes before execution.
+declares that in its type, so the typechecker records byte-edge and result modes
+before execution.
 
 ### 14.1. Discovering the live environment
 
@@ -3084,11 +3115,12 @@ The primitive collection family includes:
 - `equal`, `lt`, and `gt`.
 
 ```ral
-let squares = range 0 5 | map { |n| return $[$n * $n] }
+let items = range 0 5
+let squares = map { |n| return $[$n * $n] } $items
 let names = keys $record
 ```
 
-These are value operations: ordinary composition uses value pipes. Higher-order
+These are value operations: ordinary composition uses application and bind. Higher-order
 operations stop and propagate an error if their callback fails. Lists remain
 homogeneous, and the typechecker rejects a callback or accumulator with an
 incompatible type.
@@ -3167,7 +3199,7 @@ The codec families are the named boundary between values and bytes:
 
 ```ral
 cat data.json | from-json
-$record | to-json > data.json
+to-json $record > data.json
 ```
 
 The core environment provides `from-bytes`, `from-string`, `from-line`,
@@ -3266,8 +3298,8 @@ registered as commands that can never run.
 ## 15. Interactive use and extensions
 
 Interactive editing is a service of the `ral` program, not part of the core
-language. A portable ral program may rely on values, commands, byte pipes,
-value pipes, types, and the core builtin surface. It must not assume that its
+language. A portable ral program may rely on values, commands, byte pipelines,
+types, and the core builtin surface. It must not assume that its
 host has a prompt, history, completion, job control, plugins, or editor
 builtins.
 
@@ -3302,8 +3334,9 @@ parse error, type error, or runtime error is reported and the next prompt is
 shown; `exit` ends the session.
 
 The interactive evaluator is the ordinary language evaluator. In particular,
-a byte pipe still transports bytes and a value pipe still transports typed
-values. The frontend does not reinterpret either kind of pipe.
+a byte pipeline still transports bytes at every interior edge, while ordinary
+application and bind compose values. The frontend does not reinterpret the
+pipeline operator.
 
 After a successful run, `Unit` prints nothing and `Bytes` are written without a
 prefix. Other values are displayed with the REPL renderer. Lists and maps use
@@ -3342,8 +3375,8 @@ In a full frontend, Ctrl-C at the prompt abandons the current input and redraws;
 Ctrl-D on an empty prompt exits cleanly. Ctrl-D within non-empty input performs
 the editor's ordinary delete operation. Ctrl-C while a command is running
 interrupts that foreground run. Unix Ctrl-Z and job-control behaviour are
-specified with concurrency and jobs; a pure value pipe has no process group to
-stop. Windows has no Unix stopped-job path.
+specified with concurrency and jobs; ordinary application and bind have no
+process group to stop. Windows has no Unix stopped-job path.
 
 ### 15.3. Startup files and RC configuration
 
@@ -3636,7 +3669,7 @@ them.
 
 ## 16. Invocation, interoperability, and platforms
 
-The ral language and the `ral` executable are separate contracts. The language defines ral source, values, byte pipes, value pipes, and effects. The executable chooses where source comes from, prepares a session, reports diagnostics, and maps the result to an operating-system exit status.
+The ral language and the `ral` executable are separate contracts. The language defines ral source, values, byte pipelines, and effects. The executable chooses where source comes from, prepares a session, reports diagnostics, and maps the result to an operating-system exit status.
 
 Direct invocations always parse ral syntax:
 
@@ -3680,7 +3713,7 @@ Script arguments are available through `$ARGS` and the positional forms such as 
 
 ### 16.2. Batch processing
 
-A batch run parses, elaborates, typechecks, and only then evaluates. Typechecking is always performed because it also annotates the program with the byte-pipe and value-pipe modes used during evaluation.
+A batch run parses, elaborates, typechecks, and only then evaluates. Typechecking is always performed because it also annotates the program with the byte-edge, chatter, and result modes used during evaluation.
 
 The batch-only inspection flags are:
 
@@ -3702,7 +3735,10 @@ open audit trail. Each call node carries its evaluated arguments, outcome,
 status, source location, timing, and principal, plus captured bytes when the
 active audit capture policy requests them.
 
-Batch stdout and stderr remain ordinary byte streams. A program’s final ral value is not an operating-system pipe protocol: value pipes exist between ral stages inside the evaluator, while external programs exchange bytes. Explicit adapters perform any conversion between values and bytes.
+Batch stdout and stderr remain ordinary byte streams. A program's final ral
+value is not an operating-system pipe protocol: interior pipeline stages
+exchange bytes, while final values are reported through the ral result boundary.
+Explicit adapters perform any conversion between values and bytes.
 
 ### 16.3. Results, diagnostics, and exit status
 
@@ -3785,7 +3821,12 @@ On Unix, install `ral-sh` as the login shell instead. It interprets no source; i
 
 **Windows.** A bare invocation defaults to the interactive mode because the CLI does not infer stdin-script mode from Windows terminal state; use `-s` for source redirected on stdin. ral enables virtual-terminal processing where available. Unix job-control and stopped-job behavior do not exist. Direct execution refuses `.bat` and `.cmd` images because their additional `cmd.exe` quoting pass has no safe general argument encoding; invoke `cmd.exe` explicitly only if that risk is acceptable. `ral-sh` is a Unix login-shell bridge and is not a usable Windows shell dispatcher.
 
-On every host, external commands communicate through operating-system byte pipes. Value pipes are a ral runtime facility and do not silently become a cross-language wire format. Paths, executable lookup, path-list separators, default system paths, and sandbox enforcement otherwise follow the host rules described in their respective sections.
+On every host, external commands communicate through operating-system byte
+pipes. A pipeline has no typed-value wire format: values cross only through the
+final ral result boundary or ordinary application/bind, and explicit adapters
+perform conversions between values and bytes. Paths, executable lookup,
+path-list separators, default system paths, and sandbox enforcement otherwise
+follow the host rules described in their respective sections.
 
 ## 17. Formal language definition
 
@@ -3979,7 +4020,7 @@ A, B ::= Unit | Bool | Int | Float | String | Bytes
 
 ρ ::= · | l : A, ρ | r
 
-C, D ::= F[μin, μout] A | A -> C | β
+C, D ::= F[μin, μout, μresult] A | A -> C | β
 
 μ ::= none | bytes | m
 ```
@@ -3989,11 +4030,12 @@ C, D ::= F[μin, μout] A | A -> C | β
 and tag labels occupy distinct alphabets and do not unify. A nullary variant
 has payload type `Unit`.
 
-`U C` classifies a suspended computation. `F[μin, μout] A` classifies a
-computation that may consume according to `μin`, may produce according to
-`μout`, and returns an `A`. `none` is the ground mode for a value pipe;
-`bytes` is the ground mode for a byte pipe. Mode variables are solved by
-unification and any unconstrained mode is grounded to `none` before execution.
+`U C` classifies a suspended computation. `F[μin, μout, μresult] A` classifies a
+computation that may consume according to `μin`, may emit chatter according to
+`μout`, has a payload conduit according to `μresult`, and returns an `A`.
+`none` is the ground mode for an absent byte conduit; `bytes` is the ground
+mode for a byte conduit. Mode variables are solved by unification and any
+unconstrained mode is grounded to `none` before execution.
 
 The checker is Hindley-Milner with value-, computation-, row-, and mode-level
 unification variables. Let-bound names are generalized against the current
@@ -4023,7 +4065,7 @@ Representative rules are:
 ```text
 Γ ⊢v v : A
 ---------------------------- Return
-Γ ⊢c return v : F[none,none] A
+Γ ⊢c return v : F[none,none,none] A
 
 Γ ⊢v v : U C
 ---------------------------- Force
@@ -4053,26 +4095,32 @@ bytes ~ bytes
 m     ~ μ       binds m to μ
 ```
 
-`none` and `bytes` do not unify. No implicit codec is inserted between a value
-pipe and a byte pipe.
+`none` and `bytes` do not unify. No implicit codec is inserted at a pipeline
+edge; value-style composition uses the ordinary application and bind rules.
 
 For adjacent stages `Mi | Mi+1`, inference first obtains their computation
 types. After following any leading function arrows to the returned
-computation, let `out(Mi)` and `in(Mi+1)` be their modes.
+computation, let `result(Mi)` be the producer's payload mode and
+`input(Mi+1)` be the consumer's input mode. The interior edge rule is:
 
-- If the producer has a value-pipe output and the consumer can accept another
-  argument, composition is data-last application. The producer's value type
-  must unify with that parameter type. A thunk producer whose body returns a
-  value is forced exactly once for this transfer.
-- Otherwise the producer's output mode must unify with the consumer's input
-  mode. Ground `bytes`/`bytes` adjacency becomes an operating-system byte pipe;
-  ground `none` adjacency is a value pipe.
+```text
+Γ ⊢c Mi     : F[i, oi, bytes] A       Γ ⊢c Mi+1 : F[bytes, oi+1, r] B
+-------------------------------------------------------------------------- Pipe
+Γ ⊢c Mi | Mi+1 : F[i, oi ⊔b oi+1, r] B
+```
 
-The whole pipeline takes its input mode from the first stage, and its output
-mode and value type from the final stage after any data-last application. The
-annotation pass writes one ground `(input, output)` verdict and one value type
-for each stage into the IR. Evaluation consumes these annotations; it does not
-repeat type-directed mode inference.
+The producer's `A` is `Unit` whenever its payload mode is `bytes` (WF-2). The
+consumer receives bytes through its input conduit; its returned `B` is the
+pipeline's result only if `Mi+1` is the final stage. A decoder may therefore be
+the final stage and return a value, but it cannot be followed by another `|`
+stage without an explicit encoder. `x | f` is not a value application; write
+`f x` or bind `x` and apply the next function.
+
+The whole pipeline takes its input mode from the first stage, joins all
+stages' chatter modes for its output, and takes its result mode and value type
+from the final stage. The annotation pass writes one ground `(input, output,
+result)` verdict and one value type for each stage into the IR. Evaluation
+consumes these annotations; it does not repeat type-directed mode inference.
 
 Several compound forms join modes. The bytes-dominant join `⊔b` is the least
 upper bound under `none ⊑ bytes`: `none` is its identity and `bytes` absorbs.
@@ -4102,39 +4150,39 @@ selected arm that writes bytes makes the compound byte-producing.
 
 Whether a branch's input end ought to join rather than alternate is an open
 question. Under `⊔?`, a form with one byte-reading arm places no byte demand
-upstream, so `if c { from-json } else { return 5 }` fed by a value pipe is
-accepted and the byte-reading arm finds no channel to read.
+upstream, so `if c { from-json } else { return 5 }` can still be accepted as a
+branch whose selected byte-reading arm has no channel to read. This is a branch
+input question, not a second kind of pipeline edge.
 
-A sequence's ends are each the join `⊔b` over its elements' ends, so a
-sequence reads bytes when any element does and writes bytes when any element
-does. Its value type is the final element's. A sequence whose final element
-is a function is that function, and carries no pipe ends of its own. A final
-element whose shape is not yet known is committed to pipe shape `F[i,o] A`
-only when an earlier element's end is already known `bytes` — that demand
-must appear on the sequence's ends — and otherwise the sequence's type is
-exactly the final element's, still free to turn out a function. For `if` and
-`?`, arm inputs fold with `⊔?` and outputs fold with `⊔b`.
+A sequence's input and chatter ends are each the join `⊔b` over its elements'
+ends, while its result conduit and value type come from the final element. A
+sequence whose final element is a function is that function, and carries no
+pipe ends of its own. A final element whose shape is not yet known is
+committed to pipe shape `F[i,o,r] A` only when an earlier element's end is
+already known `bytes` — that demand must appear on the sequence's ends — and
+otherwise the sequence's type is exactly the final element's, still free to
+turn out a function. For `if` and `?`, arm inputs fold with `⊔?`, chatter folds
+with `⊔b`, and result payloads use the result-arm rule.
 
 ### 17.5. Observation at a binding boundary
 
-A byte-producing computation normally returns its explicit runtime value as
-well as writing bytes. When a `let` binding captures such a computation, the
+A computation's result mode identifies its payload at a binding boundary. The
 implemented observation function is:
 
 ```text
-observe(Unit, bytes) = String
-observe(A, μ)         = A        otherwise
+observe(Unit, Bytes) = String
+observe(A, none)     = A
 ```
 
-At runtime, the first case captures standard output, removes one trailing
-newline, decodes strict UTF-8, and binds the resulting `String`. If the
-computation fails, bytes already written are flushed before the failure
+At runtime, the first case captures the final byte payload, removes one
+trailing newline, decodes strict UTF-8, and binds the resulting `String`. If
+the computation fails, bytes already written are flushed before the failure
 propagates.
 
 Branch result types are compared after observation under the compound form's
-joined final output, not independently under each arm's local output. This is
-why byte-writing `Unit` arms can agree with other arms whose captured result is
-`String`. `audit` is the exception: its `value` field retains the body's raw
+result-arm rule, not independently under each arm's local result conduit. This
+is why byte-payload `Unit` arms can agree with other arms whose captured result
+is `String`. `audit` is the exception: its `value` field retains the body's raw
 value type, while its byte fields contain captured bytes.
 
 ### 17.6. Branch and variant rules
@@ -4143,10 +4191,10 @@ For a two-armed conditional:
 
 ```text
 Γ ⊢v v : Bool
-Γ ⊢c M : F[i1,o1] A1    Γ ⊢c N : F[i2,o2] A2
-observe(A1,o) ~ observe(A2,o) = A    o = o1 ⊔b o2
----------------------------------------------------------------- If
-Γ ⊢c if v then M else N : F[i1 ⊔? i2,o] A
+Γ ⊢c M : F[i1,o1,r1] A1    Γ ⊢c N : F[i2,o2,r2] A2
+observe(A1,r1) ~ observe(A2,r2) = A    o = o1 ⊔b o2
+--------------------------------------------------------------- If
+Γ ⊢c if v then M else N : F[i1 ⊔? i2,o,r] A
 ```
 
 Additional `elsif` arms fold by the same rule. A conditional without `else`
@@ -4176,13 +4224,13 @@ Scope operators are typed in two steps. Each rule first produces a scope
 signature:
 
 ```text
-S = ([(run1,i1,o1), ..., (runn,in,on)], A)
+S = ([(run1,i1,o1,r1), ..., (runn,in,on,rn)], A)
 run ::= always | on-failure
 ```
 
-The signature records which arms can execute, their live pipe modes, and the
-value produced by the scope. A single sealing operation then constructs
-`F[i,o] A`:
+The signature records which arms can execute, their live input, chatter, and
+result modes, and the value produced by the scope. A single sealing operation
+then constructs `F[i,o,r] A`:
 
 - outputs fold with `⊔b`;
 - inputs fold with `⊔b` when every arm is `always`;
@@ -4198,25 +4246,25 @@ Let `E` be the closed `try` error record
 scope signatures are:
 
 ```text
-body : U F[ib,ob] A
+body : U F[ib,ob,rb] A
 -------------------------------- Within / Grant
-within opts body : ([(always,ib,ob)], A)
-grant  caps body : ([(always,ib,ob)], A)
+within opts body : ([(always,ib,ob,rb)], A)
+grant  caps body : ([(always,ib,ob,rb)], A)
 
-body    : U F[ib,ob] A
-handler : U (E -> F[ih,oh] B)
-observe(A,o) ~ observe(B,o) = R,  o = ob ⊔b oh
+body    : U F[ib,ob,rb] A
+handler : U (E -> F[ih,oh,rh] B)
+observe(A,o) ~ observe(B,o) = R,  o = ob ⊔b oh,  r = rb ⊔? rh
 -------------------------------- Try
-try body handler : ([(always,ib,ob), (on-failure,ih,oh)], R)
+try body handler : ([(always,ib,ob,rb), (on-failure,ih,oh,rh)], R)
 
-body    : U F[ib,ob] A
-cleanup : U F[ic,oc] B
+body    : U F[ib,ob,rb] A
+cleanup : U F[ic,oc,rc] B
 -------------------------------- Guard
-guard body cleanup : ([(always,ib,ob), (always,ic,oc)], observe(A,ob))
+guard body cleanup : ([(always,ib,ob,rb), (always,ic,oc,rc)], observe(A,ob))
 
-body : U F[ib,ob] A
+body : U F[ib,ob,rb] A
 -------------------------------- Audit
-audit body : ([(always,ib,ob)], AuditRecord A)
+audit body : ([(always,ib,ob,rb)], AuditRecord A)
 ```
 
 `within` additionally types known option fields and installs schemes for
@@ -4238,8 +4286,8 @@ q ::= exit n | stopped job | tail call
 
 `Σ` contains lexical bindings, session state, current directory, environment,
 handlers, capabilities, status, and audit state. `κ` contains the current byte
-pipe or value pipe endpoints and cancellation scope. Ordinary errors are
-recoverable; escapes are a separate control channel.
+endpoints and cancellation scope. Ordinary errors are recoverable; escapes are
+a separate control channel.
 
 The central rules are:
 
@@ -4305,9 +4353,9 @@ children are torn down and reaped before their cancelled computation returns.
 
 Successful checking is followed by annotation. All remaining type, row,
 computation, and mode substitutions are applied; quantified schemes are closed;
-unconstrained pipe modes ground to value pipes; each pipeline stage receives a
-ground wire description; and each `let` node records the final output mode of
-its right-hand side.
+unconstrained modes ground to `none` as ordinary absent-channel modes; each
+pipeline stage receives a ground `(input, output, result)` wire description;
+and each `let` node records the final result mode of its right-hand side.
 
 Evaluation begins only from this annotated IR. A mode mismatch is therefore a
 static error, not a request for the runtime to guess a codec. Runtime checks

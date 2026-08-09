@@ -13,15 +13,15 @@
 
 use std::os::fd::AsRawFd;
 
-use super::super::helper::{JOB_FD_ENV, REPORT_FD_ENV, VALUE_IN_FD_ENV, VALUE_OUT_FD_ENV};
+use super::super::helper::{JOB_FD_ENV, REPORT_FD_ENV};
 use super::common::{EnvNames, pipe_error};
 use crate::types::{Break, Settled};
 
 /// One end of a socketpair, owned, carrying blocking length-prefixed frames.
 pub(crate) type Channel = std::os::unix::net::UnixStream;
 
-/// Allocate one socketpair.  Re-exported as `create_value_pair` for the
-/// value edges and the anchor, which want a bare pair with no `FrameGate`.
+/// Allocate one socketpair.  The anchor and the frame protocol both want a
+/// bare pair with no `FrameGate`.
 pub(crate) fn pair() -> Result<(Channel, Channel), Break> {
     Channel::pair().map_err(pipe_error)
 }
@@ -42,6 +42,4 @@ pub(crate) fn pass(cmd: &mut crate::process::Launch, env: &str, ch: &Channel) ->
 pub(crate) const ENV: EnvNames = EnvNames {
     job: JOB_FD_ENV,
     report: REPORT_FD_ENV,
-    value_in: VALUE_IN_FD_ENV,
-    value_out: VALUE_OUT_FD_ENV,
 };

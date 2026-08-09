@@ -1,5 +1,6 @@
 ---
-status: active
+status: superseded
+superseded_by: decisions/260809_byte-only-pipelines
 ---
 
 # Value-edge judgments live where their facts live

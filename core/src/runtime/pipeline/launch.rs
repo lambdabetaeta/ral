@@ -1,9 +1,8 @@
 //! Process-staged pipeline orchestrator: every stage spawns into one
 //! process group behind a gate that opens only once the last has spawned
-//! and the terminal handoff has settled.  Pure-value pipelines fold in
-//! the parent evaluator and never arrive here.  [`PipelineBuild`] owns
-//! every transient resource — group, stage handles, unconsumed routes,
-//! unreleased gates — so a leaked pipe end is a borrow error.
+//! and the terminal handoff has settled.  [`PipelineBuild`] owns every
+//! transient resource — group, stage handles, unconsumed routes, unreleased
+//! gates — so a leaked pipe end is a borrow error.
 
 use super::super::command;
 use super::collect::RunningPipeline;
@@ -81,10 +80,6 @@ pub(super) fn wire_stage_stdout(
                 .map_err(super::protocol::pipe_error)?;
             cmd.stdout(plan.stdio);
             Ok(plan.pump)
-        }
-        ByteOut::Null => {
-            cmd.stdout(crate::process::StdioSpec::null());
-            Ok(None)
         }
     }
 }
@@ -335,9 +330,9 @@ impl PipelineBuild {
     }
 }
 
-/// Spawn a pure external stage with no helper in front of it.  Admitted by
-/// `resolve::direct_spawnable` alone: no value edge, no redirect, no
-/// byte-capturing audit, no terminal to hand over.
+/// Spawn an external stage with no helper in front of it.  Admitted by
+/// `resolve::direct_spawnable` alone: no redirect, no byte-capturing audit,
+/// and no terminal to hand over.
 fn launch_external_stage_direct(
     ext: &ExternalStage,
     route: StageRoute,
@@ -346,9 +341,6 @@ fn launch_external_stage_direct(
     group: &mut PipelineGroup,
     park_on_stop: bool,
 ) -> Result<command::RunningChild, Break> {
-    // A value-carrying stage never gets here, so the route is byte ends only.
-    debug_assert!(route.value_in.is_none() && route.value_out.is_none());
-
     let rc = command::vet(&ext.id, &ext.args, shell)?;
     let mut cmd = command::build_command(
         &rc,

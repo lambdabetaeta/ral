@@ -123,7 +123,7 @@ fn value_producer_into_decoder_is_static_mode_mismatch_in_run() {
 
 // ─── (2) byte producer into byte consumer typechecks via harvested scheme ────
 
-/// `let f = { echo hi }` then `$f | wc -l`: the harvested scheme for `f`
+/// `let f = { echo hi }` then `f | wc -l`: the harvested scheme for `f`
 /// is `F[∅,Bytes]`, so the byte channel connects to `wc`'s byte input.
 /// The checker sees the scheme, not a fresh mode variable.
 #[test]
@@ -131,9 +131,9 @@ fn byte_producer_into_byte_consumer_typechecks() {
     let mut sh = shell();
     run(&mut sh, "let f = { echo hi }").unwrap();
     assert!(
-        check_errors(&sh, "$f | wc -l").is_empty(),
+        check_errors(&sh, "f | wc -l").is_empty(),
         "expected a clean byte→byte pipeline across runs, got: {:?}",
-        check_errors(&sh, "$f | wc -l")
+        check_errors(&sh, "f | wc -l")
             .iter()
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()

@@ -149,7 +149,7 @@ struct AnchorProcess {
 #[cfg(unix)]
 impl AnchorProcess {
     fn spawn(shell: &Shell) -> Settled<Self> {
-        let (parent, child_end) = super::protocol::create_value_pair()?;
+        let (parent, child_end) = super::protocol::anchor_pair()?;
         let mut cmd = super::helper::self_reexec(super::helper::ANCHOR_FLAG).map_err(pipe_error)?;
         cmd.stdin(crate::process::StdioSpec::null());
         cmd.stdout(crate::process::StdioSpec::null());

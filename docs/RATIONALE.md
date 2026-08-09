@@ -144,19 +144,23 @@ directory, environment, interpretations, and authority of its caller.
 The braces show where a context begins; dynamic reach ensures that a callee
 cannot escape it merely because it was defined outside.
 
-## Pipelines follow their edges
+## The pipe is the operating system's
 
-**A pipe is dataflow, and the type of its connecting edge chooses the execution
-model.** No keyword and no runtime guess selects between the two cases.
+**A pipe carries bytes, because that is what the boundary it names carries.**
+The surface keeps exactly the composition its model can state, and nothing
+more.
 
-- A *value pipeline* is data-last composition. When every stage and edge is on
-  the value channel, `x | f` reduces to `f !{x}` and runs sequentially in the
-  parent evaluator. No process or OS pipe exists.
-- A *byte pipeline* is a process pipeline. If a stage is external or an edge
-  carries bytes, every stage runs in a subprocess, the stages share one process
-  group, and the parent shell remains outside that group.
+- Every interior edge is bytes: the producer's payload and the consumer's
+  input are both `Bytes`. A pipeline is therefore always a process pipeline —
+  every stage runs in a subprocess, the stages share one process group, and
+  the parent shell remains outside that group.
+- Values are combined by application and `let`, the ordinary composition of
+  the calculus. There is no second, value-shaped pipe to learn, and no rule
+  the model would have to invent to describe one.
+- Only the *final* stage may return a value, which is the pipeline's own
+  result rather than an edge. A decoder is therefore a legal tail.
 
-The parent must remain outside a byte pipeline's process group so it can hand
+The parent must remain outside a pipeline's process group so it can hand
 the terminal to the group and later reclaim it. A shell cannot both manage a
 foreground group and be one of its members.
 

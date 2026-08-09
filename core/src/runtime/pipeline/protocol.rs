@@ -24,12 +24,12 @@ use common::PendingFrame;
 pub(super) use common::{FrameReader, HelperProtocol, pipe_error};
 
 #[cfg(unix)]
-pub(super) use unix::{Channel as ValueChannel, pair as create_value_pair, pass};
+pub(super) use unix::{pair as anchor_pair, pass};
 // Only `pass` goes unused on Windows: its one caller outside this module is
 // the anchor process in `group.rs`, which is Unix-only.
 #[cfg(windows)]
 #[allow(unused_imports)]
-pub(super) use windows::{Channel as ValueChannel, pair as create_value_pair, pass};
+pub(super) use windows::pass;
 
 use crate::child_eval::ChildEvalRequest;
 

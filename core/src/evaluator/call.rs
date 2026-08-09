@@ -1,5 +1,6 @@
 //! Application dispatch: `App` is CBPV application, `Exec` an external
-//! command. Pipelines reuse both, passing the `x` of `x | f` as `upstream`.
+//! command. Pipelines use the same dispatch, with byte transport handled by
+//! the runtime pipeline.
 
 use crate::ir::{Args, Comp, CompKind, RedirectV, ScopeOp, ValListElem};
 use crate::types::{Error, Mooring, Raw, Shell, Tail, TailCall, Value};
@@ -11,19 +12,17 @@ use super::{apply, redirect};
 use crate::runtime::command::EvalRedirectV;
 use crate::runtime::command_call;
 
-/// Dispatches `App`, `Exec`, and redirect-scoped calls, appending `upstream`
-/// to the arguments; anything else falls through to [`eval_comp`].
+/// Dispatches `App`, `Exec`, and redirect-scoped calls; anything else falls
+/// through to [`eval_comp`].
 pub(crate) fn invoke(
     comp: &Arc<Comp>,
-    upstream: Option<Value>,
     tail: Tail,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
     match &comp.item {
         CompKind::Exec(e) => {
-            let (mut arg_vals, redir_eval) = eval_call_parts(&e.args, &e.redirects, shell)?;
-            arg_vals.extend(upstream);
+            let (arg_vals, redir_eval) = eval_call_parts(&e.args, &e.redirects, shell)?;
             command_call::run_call(&e.head, &arg_vals, &redir_eval, comp.span, mooring, shell)
         }
 
@@ -34,8 +33,7 @@ pub(crate) fn invoke(
         } => {
             // Evaluated, not tail-called: the application consumes their values.
             let head_val = eval_comp(head, mooring, shell, Tail::No)?;
-            let mut arg_vals = eval_call_args(app_args, shell)?;
-            arg_vals.extend(upstream);
+            let arg_vals = eval_call_args(app_args, shell)?;
             // `f ...$xs` with an empty `$xs` leaves nothing to apply.
             if arg_vals.is_empty() {
                 Ok(head_val)
@@ -48,19 +46,11 @@ pub(crate) fn invoke(
             // Forwarding `tail` is safe: the frame absorbs the tail call
             // inside itself, so the callee still sees the redirected fds.
             redirect::within_redirect_frame(redirects, mooring, shell, |shell| {
-                invoke(body, upstream, tail, mooring, shell)
+                invoke(body, tail, mooring, shell)
             })
         }
 
-        _ => {
-            let result = eval_comp(comp, mooring, shell, Tail::No)?;
-            match upstream {
-                None => Ok(result),
-                // For a bare-value stage (`x | f`, `f` a plain reference) this
-                // application is the stage's own tail call, hence `eval_app`.
-                Some(v) => eval_app(result, vec![v], tail, mooring, shell),
-            }
-        }
+        _ => eval_comp(comp, mooring, shell, Tail::No),
     }
 }
 

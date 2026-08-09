@@ -27,39 +27,6 @@ impl TerminalPlan {
     }
 }
 
-// ── PipelineKind ────────────────────────────────────────────────────────
-
-/// `PureValue` — no byte edge anywhere, so the pipeline reduces to a data-last
-/// fold in the parent evaluator (`x | f = f !{x}`) and enters no job control.
-/// `ProcessStaged` — at least one byte edge, so every stage becomes a child in
-/// one process group, either a direct external or a ral helper.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum PipelineKind {
-    PureValue,
-    ProcessStaged,
-}
-
-impl PipelineKind {
-    /// A stage disqualifies the fold if bytes touch it anywhere: on its
-    /// upstream, on its payload — which is what its edge carries — or as
-    /// chatter, since chatter needs a stage's own ambient conduit to escape
-    /// through and the in-parent fold has none of its own.  Keeping chatter in
-    /// the test is also what stops `… | {|x| echo note; $x}` flipping from a
-    /// helper to the parent, a `cd`-visibility change no repeal should make.
-    fn from_specs(specs: &[StageSpec]) -> Self {
-        let pure_value = specs.iter().all(|spec| {
-            spec.comp_type.input != crate::mode::PipeMode::Bytes
-                && spec.comp_type.output != crate::mode::PipeMode::Bytes
-                && spec.comp_type.result != crate::mode::PipeMode::Bytes
-        });
-        if pure_value {
-            Self::PureValue
-        } else {
-            Self::ProcessStaged
-        }
-    }
-}
-
 /// Identity and pre-evaluated argv for a directly spawned external stage.  Args
 /// stay `Value`s so launch-time `command::vet` applies the same shape rejection
 /// single-command exec does.
@@ -135,51 +102,26 @@ fn eval_external_stage(
     Ok(ExternalStage { id, args })
 }
 
-/// A value edge on either side of stage `i` of `n`: only an evaluating helper,
-/// which reads the value channel before invoking, can run such a stage.
-fn carries_value_edge(i: usize, n: usize, comp_type: crate::mode::PipeSpec) -> bool {
-    super::route::value_edge_in(i, comp_type) || super::route::value_edge_out(i, n, comp_type)
-}
-
-/// Whether a pure external stage can be spawned with no helper — every
+/// Whether an external stage can be spawned with no helper — every
 /// condition a resolve-time fact:
 ///
 /// - the pipeline does not own the controlling terminal (a foreground
 ///   pipeline parks its stages on stop, which only the helper handles);
-/// - the stage carries no value edge;
 /// - the stage has no redirects (the direct path wires only byte ends);
 /// - no `!{…}` audit is capturing bytes (that needs the helper's accounting).
-fn direct_spawnable(
-    i: usize,
-    n: usize,
-    stage: &Comp,
-    comp_type: crate::mode::PipeSpec,
-    terminal: TerminalPlan,
-    shell: &Shell,
-) -> bool {
+fn direct_spawnable(stage: &Comp, terminal: TerminalPlan, shell: &Shell) -> bool {
     let redirects_empty = matches!(&stage.item, CompKind::Exec(e) if e.redirects.is_empty());
-    !terminal.owns_tty()
-        && redirects_empty
-        && !carries_value_edge(i, n, comp_type)
-        && !shell.local.audit.captures_bytes()
+    !terminal.owns_tty() && redirects_empty && !shell.local.audit.captures_bytes()
 }
 
-/// Freeze one stage's launch decision.  A value-edge bundled stage fails
-/// `direct_spawnable` and so runs in a helper: data-last application
-/// (`x | f = f !{x}`) is evaluator work, and command dispatch inside that
-/// child still resolves the bundled image, so bundled-first holds.
-fn resolve_launch(
-    i: usize,
-    n: usize,
-    stage: &Comp,
-    comp_type: crate::mode::PipeSpec,
-    terminal: TerminalPlan,
-    shell: &mut Shell,
-) -> Settled<StageLaunch> {
+/// Freeze one stage's launch decision.  A bundled tool still becomes an
+/// external stage, while redirects, foreground ownership, and byte-capturing
+/// audits keep the evaluator in a helper.
+fn resolve_launch(stage: &Comp, terminal: TerminalPlan, shell: &mut Shell) -> Settled<StageLaunch> {
     Ok(match classify_stage(stage, shell) {
         StageKind::Ral => StageLaunch::HelperEval,
         StageKind::External(id) => {
-            if direct_spawnable(i, n, stage, comp_type, terminal, shell) {
+            if direct_spawnable(stage, terminal, shell) {
                 StageLaunch::Direct(eval_external_stage(id, stage, shell)?)
             } else {
                 StageLaunch::HelperEval
@@ -189,14 +131,12 @@ fn resolve_launch(
 }
 
 fn analyze_stage(
-    i: usize,
-    n: usize,
     stage: &Comp,
     comp_type: crate::mode::PipeSpec,
     terminal: TerminalPlan,
     shell: &mut Shell,
 ) -> Settled<StageSpec> {
-    let launch = resolve_launch(i, n, stage, comp_type, terminal, shell)?;
+    let launch = resolve_launch(stage, terminal, shell)?;
     Ok(StageSpec {
         comp_type,
         launch,
@@ -206,7 +146,6 @@ fn analyze_stage(
 
 /// Frozen output of resolve, threaded through launch and collect.
 pub(super) struct PipelinePlan {
-    pub(super) kind: PipelineKind,
     pub(super) specs: Vec<StageSpec>,
     pub(super) terminal: TerminalPlan,
     /// Which conduit the pipeline's own payload rides, read off the last
@@ -259,12 +198,10 @@ fn specs_from_wires(
         );
     }
 
-    let n = stages.len();
     stages
         .iter()
         .zip(wires)
-        .enumerate()
-        .map(|(i, (stage, wire))| analyze_stage(i, n, stage, wire.spec(), terminal, shell))
+        .map(|(stage, wire)| analyze_stage(stage, wire.spec(), terminal, shell))
         .collect()
 }
 
@@ -287,10 +224,7 @@ pub(super) fn resolve_pipeline(
     // than fabricate a `Mode::None` fallback that lies about an empty pipeline.
     let last = specs.last().expect("pipeline has at least one stage");
     let last_result = last.comp_type.result;
-    let kind = PipelineKind::from_specs(&specs);
-
     Ok(PipelinePlan {
-        kind,
         specs,
         terminal,
         last_result,

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1e9fea4
-generated_at_date: 2026-08-06
+generated_at_commit: 40e6d77
+generated_at_date: 2026-08-09
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs, core/src/mode.rs]
 ---
 
@@ -23,12 +23,13 @@ Entry points (`typecheck.rs`):
   ([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]],
   [[map/core/ir|ir]]). A `Pipeline` also carries `stage_types`, one resolved
   value type per stage, parallel to its stages and wires. `infer_pipeline`
-  records each stage's return value alongside its spec in
+  records each stage's return type alongside its spec in
   `InferCtx::stage_types`, keyed by stage address; `annotate` resolves each
   entry against the final unifier and writes the `Vec<Ty>` onto the node —
-  the data that flows between stages, kept for the structural REPL's typed
-  spine. This step retains what the pipeline check already computes; it
-  adds no inference. The evaluator never reads `stage_types`, so an
+  typing metadata for the structural REPL, not a value transport channel.
+  Every interior payload is checked as bytes; only the final stage's result
+  returns through the pipeline boundary. This step retains what the pipeline
+  check already computes; it adds no inference. The evaluator never reads `stage_types`, so an
   un-annotated stage keeps the elaborator's `Unit` placeholder without harm.
   The seed for a check is one `SessionSchemes { bindings, aliases,
   builtins }`
@@ -107,9 +108,10 @@ evaluator's mode wires
 The pipeline-mode lattice — `PipeMode` / `ModeVar` / `PipeSpec` and the
 constructors `none`/`decode`, plus the ground `ByteMode` / `Wire`
 the annotation pass grounds into — lives in `core/src/mode.rs`. The equality rule
-(a value edge cannot meet a byte edge, `docs/SPEC.md` §4.2.1, §20.4) is one plain
-method, `Unifier::unify_mode` (`core/src/typecheck/unify.rs`), reached through
-the single variable store the single engine keeps
+(`Unifier::unify_mode`, `core/src/typecheck/unify.rs`) remains one plain method:
+pipeline inference applies it to the producer's `result` and consumer's
+`input` after requiring both ends to be `Bytes` (`docs/SPEC.md` §4.2.1, §20.4).
+The single variable store the single engine keeps
 ([[decisions/260601_modes-equality-constrained-shared|modes-equality-constrained-shared]]).
 
 A builtin's boundary modes are the modal projection of its declared signature,
@@ -125,26 +127,16 @@ The byte-output mode of the streaming reducers `map-lines`/`filter-lines`/`each-
 (prelude wrappers over `fold-lines`) follows from the body: `fold-lines` is
 mode-polymorphic in its callback's output, and a `Seq`'s byte-output is a join over
 its statements (`infer.rs::lift_channels`) — bytes if *any* statement emits bytes.
-A value edge is unconditionally data-last application — `x | f = f !{x}` — with
-no structural recognition of streams ([[decisions/260609_pure-pipe-equation|pure-pipe-equation]]):
-`consumes_value_arg` is the discriminator. When it holds, the value producer
-feeds a value-arg function consumer and `infer.rs::apply_piped_value` flows the
-produced value into the function's first parameter (one thunk deref via
-`deref_forced_producer`, mirroring the single runtime force). When it does not,
-the stage is a plain channel consumer and the modes unify directly, so a
-`∅`-into-`Bytes` adjacency is rejected as the §4.2.1 mismatch it is.
-`consumes_value_arg` resolves the stage's `spec.input` first: a stage whose
-input is ground `PipeMode::Bytes` is a channel consumer regardless of how
-polymorphic its return value is, so a `∅`-output producer feeding a byte decoder
-(`from-json : ⟨Bytes, ∅, ∅⟩ A`) is a static T0012. The `from-*` decoders are
-arity-0 for the same reason — their bytes come from the channel, never from an
-argument — so `from-json $x` is the static `DecoderTakesNoArgument` (T0054),
-whose hint names the encoder-pipe remedy ([[design/codecs|codecs]]). A Step-shaped piped value (a
-variant carrying `` `more `` / `` `done ``) is ordinary recursive data the
-consumer receives whole; on a clash, `apply_piped_value`'s hint points at the
-explicit `stream-each` / `stream-map` / `stream-to-list` eliminators —
-diagnostic-only, never shaping the types
-([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
+`infer_pipeline` has one edge rule: for every interior edge, it unifies the
+producer's payload/result with `Bytes` and the consumer's input with `Bytes`.
+An attempted value payload receives a diagnostic that teaches ordinary
+application or an encoder; it is never sent through an evaluator fold. The
+`from-*` decoders are arity-0 because their bytes come from the channel, never
+from an argument — so `from-json $x` is the static `DecoderTakesNoArgument`
+(T0054), whose hint names the encoder remedy ([[design/codecs|codecs]]).
+Decoders are legal final stages: `cat data.json | from-json` returns the
+decoded value. A decoder followed by another pipeline stage is rejected; bind
+the tail and apply the next function to its result.
 
 The `if`/`case` branch-mode *alternation* — `InferCtx::alt_modes`
 (`mode_solver.rs`), reached through `merge_branches` — widens a
@@ -163,9 +155,9 @@ arms reads as byte-output
 
 `mode_solver.rs` owns `InferCtx::mode_constraints` (`env.rs:155`) and is the
 **only** logic in the checker that computes a join by casing on a mode's
-groundness; the reads that remain outside — `infer_pipeline`'s byte-tail
-verdict, `Bind`'s result pin, `consumes_value_arg`, `lift_channels`'
-tail-shape verdict — are shape decisions against settled state, not joins
+groundness; the reads that remain outside — `infer_pipeline`'s byte-edge and
+final-result rules, `Bind`'s result pin, and `lift_channels`' tail-shape verdict
+— are shape decisions against settled state, not joins
 ([[decisions/260807_modes-solved-by-deferred-joins|modes-solved-by-deferred-joins]]).
 Every join site — a `Seq`'s channel over its statements, a scope's channel
 over its arms, the arm-result conduit an `if`/`?`/`case`/`try` agrees on —
@@ -221,22 +213,20 @@ conduit carries a computation's payload: `Bytes` for the byte channel,
 `None` for the return value. `result` rides the same unification,
 generalisation, and display code as `input` and `output`.
 
-Two well-formedness conditions guard every `Return` type the checker
-builds. WF-1 states `result ⊑ output`: a byte payload needs a byte channel.
-WF-2 states that `result = Bytes` implies a `Unit` return type: a byte
-payload leaves no separate value. Both live in the solver
+One well-formedness condition guards every `Return` type the checker
+builds. WF-2 states that `result = Bytes` implies a `Unit` return type: a byte
+payload leaves no separate value. `output` is independent chatter, so it does
+not constrain `result`. WF-2 lives in the solver
 (`mode_solver.rs`'s `conclude_arm_results`), asserted and enforced per arm
 at the moment an `ArmResults` lands on the byte side, rather than
 debug-asserted at each constructing site
 ([[decisions/260807_modes-solved-by-deferred-joins|modes-solved-by-deferred-joins]]).
-`infer_pipeline` (`infer.rs:1076`) keeps its own two assertions
-(`infer.rs:1170`, `infer.rs:1175`): it decides a byte tail by reading
-settled modes, not by joining. `ret_bytes` and `builtin_sig_result`
+`infer_pipeline` (`infer.rs:1076`) reads the settled modes at each interior
+edge and leaves the final stage's result mode free. `ret_bytes` and `builtin_sig_result`
 (`builtins.rs:336`, `builtins.rs:1187`) keep theirs too — they check
 hand-written signature tables at construction, and have nothing to do with
-joins. `external_exec_comp_ty` (`infer.rs:769`) satisfies WF-1 by
-inspection: an external command's `output` and `result` are both the
-literal `Bytes`. `lift_channels` (`infer.rs:864`) holds the sequence's
+joins. `external_exec_comp_ty` (`infer.rs:769`) supplies a byte result for an
+external command. `lift_channels` (`infer.rs:864`) holds the sequence's
 shape verdict — a `Fun` tail keeps its shape, a `Return` tail joins its
 ends with the statements', and a still-unknown tail is forced into stage
 shape only when a statement's end has settled `Bytes` — a read of settled
@@ -280,10 +270,9 @@ collapsed — at the drain that owns its variables, so an arm that grounds
 and never revisited. `merge_branches` (`infer.rs:311`) first forces a still-
 bare-variable arm — a recursive call — to `Return` shape when any arm already
 is, so it joins instead of strict-unifying. `infer_pipeline` (`infer.rs:1076`)
-grounds a byte-tailed final stage's own `result` onto the whole pipeline
-(`infer.rs:1162`): with no downstream consumer, such a pipeline returns
-`Unit` and its `result` is `Bytes`, so a bound pipeline value captures the
-last stage's bytes.
+reads the final stage's own `result` as the pipeline result: a byte result gives
+`Unit` and is captured at a value boundary, while a decoder tail keeps its
+returned value for the helper's final report.
 
 `CompKind::Capture(body)` types through `Inferencer::infer_comp`
 (`infer.rs:1675`): its own `result` and `output` ground `None`, its `input`

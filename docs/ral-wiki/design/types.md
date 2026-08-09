@@ -21,22 +21,23 @@ type `A` under the spec. The spec is `PipeSpec` in `core/src/mode.rs`:
 
 - `i` is the input mode: `Bytes` when the computation reads the byte channel, `∅` when it does not;
 - `o` is the output mode: `Bytes` when the computation writes the byte channel, `∅` when it does not;
-- `r` is the result mode: the conduit that carries the computation's result.
+- `r` is the result mode: the conduit that carries the computation's payload.
 
 Each mode is `∅`, `Bytes`, or a mode variable. The three modes share one
 unification, generalisation, and display machinery. Adjacent
-[[design/pipelines|pipeline]] stages connect only when the left output mode
-equals the right input mode. A parameterised block has the type `{A → B}`.
+[[design/pipelines|pipeline]] stages connect through the producer's `result`
+and the consumer's `input`; every interior connection is `Bytes` on both sides.
+The final stage keeps its own result mode, so a pipeline may return a value at
+its boundary. A parameterised block has the type `{A → B}`.
 
 **The result mode locates the payload.** `result = Bytes` means: the
-computation's result is the bytes that it writes. `result = ∅` means: the
-computation's result is its return value. Two well-formedness conditions
-constrain the spec:
+computation's payload is its byte channel. `result = ∅` means: the payload is
+its return value. `output` is independent chatter, so it does not constrain
+`result`; the one remaining well-formedness condition is:
 
-- **WF-1** — `result ⊑ output`;
 - **WF-2** — `result = Bytes` implies that the return type is `Unit`.
 
-Both conditions are the mode solver's to keep
+WF-2 is the mode solver's to keep
 (`core/src/typecheck/mode_solver.rs`), checked per arm wherever a join lands on
 the byte side. WF-2 is enforced there rather than merely asserted: the byte
 side ties every arm's value to `Unit`, arms whose conduit was still open
@@ -75,8 +76,8 @@ A slot variable is quantified like every other mode variable, for example
 a slot variable.
 
 **One subsumption rule has one instance.** The type `⟨i, o, ∅⟩ Unit` is also
-the type `⟨i, o, Bytes⟩ Unit` when `o ⊒ Bytes`. The rule applies at the top of
-a computation type only:
+the type `⟨i, o, Bytes⟩ Unit`. The rule applies at the top of a computation
+type only:
 
 - it does not descend through `Thunk`, `Fun`, or rows;
 - it is not a unification rule — `unify_mode` demands equality on ground modes.
@@ -122,7 +123,9 @@ rule (`core/src/evaluator/capture.rs`):
 - strip the trailing newline;
 - decode the bytes as strict UTF-8 — `| from-bytes` keeps bytes that are not valid UTF-8.
 
-`capture M` is close to the pipe `M | from-string`, which a user can write.
+`capture M` is close to the legal decoder tail `M | from-string`, which a user
+can write. A decoder may end a byte pipeline; a value produced by that decoder
+is then composed by application or bind, not by another pipeline edge.
 
 **The calculus is a graded call-by-push-value.** The spec is the grading; `F`
 remains a functor from value types to computation types, and the adjunction

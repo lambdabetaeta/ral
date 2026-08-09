@@ -70,9 +70,9 @@ pub(crate) fn eval_comp(
 
         CompKind::Capture(body) => eval_capture(body, mooring, shell),
 
-        // `invoke` is the call evaluator pipelines use; a pipeline stage
-        // enters it with the upstream value, a bare call with none.
-        CompKind::App { .. } | CompKind::Exec(_) => call::invoke(comp, None, tail, mooring, shell),
+        // `invoke` is the ordinary call evaluator, for pipeline stages and
+        // bare calls alike.
+        CompKind::App { .. } | CompKind::Exec(_) => call::invoke(comp, tail, mooring, shell),
 
         CompKind::Pipeline { stages, wires, .. } => {
             eval_pipeline(stages, wires, tail, mooring, shell)
@@ -92,7 +92,7 @@ pub(crate) fn eval_comp(
             // `invoke` runs the body inside the fd frame and absorbs its
             // tail call there: a tail callee that escaped would land after
             // restoration, writing to the parent instead of the target.
-            ScopeOp::Redirect { .. } => call::invoke(comp, None, tail, mooring, shell),
+            ScopeOp::Redirect { .. } => call::invoke(comp, tail, mooring, shell),
             // These brackets apply their body thunk through the trampoline,
             // which absorbs the body's tail call inside the frame, so they
             // have no tail position to grant.
@@ -296,9 +296,9 @@ fn eval_bind(
 }
 
 /// A single-stage pipeline is just its inner computation, and inherits the
-/// pipeline's tail position; otherwise [`pipeline::run_pipeline`] grants
-/// that position to the final stage alone, since every earlier stage's
-/// value has to cross an edge into the next.
+/// pipeline's tail position.  A multi-stage pipeline grants that position to
+/// no one: every stage runs in a child, and a tail call cannot cross the
+/// process boundary.
 fn eval_pipeline(
     stages: &[Arc<Comp>],
     wires: &[Wire],
@@ -309,7 +309,7 @@ fn eval_pipeline(
     if stages.len() == 1 {
         return eval_comp(&stages[0], mooring, shell, tail);
     }
-    pipeline::run_pipeline(stages, wires, tail, mooring, shell)
+    pipeline::run_pipeline(stages, wires, mooring, shell)
 }
 
 /// `a ? b ? c` — the first arm to succeed wins, else the last error (`Unit`

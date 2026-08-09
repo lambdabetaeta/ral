@@ -153,12 +153,11 @@ fn stream_map_doubles_each_element() {
 // ─── Stream pipeline integration (Stream.3/4) ──────────────────────────────────
 
 #[test]
-fn stream_value_piped_into_stream_each_runs_per_element() {
-    // A finite Step value piped into `stream-each f` iterates
-    // element-by-element: `$s | stream-each f` is `stream-each f $s`.
+fn stream_value_passed_to_stream_each_runs_per_element() {
+    // Stream elimination is ordinary application, not a value-pipeline edge.
     let out = common::run(
         "step_pipe_finite",
-        "let s = !{stream-cons 1 { !{stream-cons 2 { !{stream-cons 3 { !{stream-nil} } } } } }}\nreturn $s | stream-each { |x| echo \"got $x\" }\n",
+        "let s = !{stream-cons 1 { !{stream-cons 2 { !{stream-cons 3 { !{stream-nil} } } } } }}\nstream-each { |x| echo \"got $x\" } $s\n",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert_eq!(out.stdout.trim(), "got 1\ngot 2\ngot 3");
@@ -171,7 +170,7 @@ fn stream_each_terminates_on_infinite_producer_with_take() {
     // take cut.
     let out = common::run(
         "step_pipe_lazy",
-        "let nats = { |n| stream-cons $n { !{nats $[$n + 1]} } }\n!{stream-take 5 !{nats 0}} | stream-each { |x| echo $x }\n",
+        "let nats = { |n| stream-cons $n { !{nats $[$n + 1]} } }\nstream-each { |x| echo $x } !{stream-take 5 !{nats 0}}\n",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert_eq!(out.stdout.trim(), "0\n1\n2\n3\n4");
@@ -204,37 +203,52 @@ fn stream_each_on_empty_stream_runs_body_zero_times() {
     // element.
     let out = common::run(
         "step_pipe_empty",
-        "return !{stream-nil} | stream-each { |_x| echo should-not-print }\necho after\n",
+        "stream-each { |_x| echo should-not-print } !{stream-nil}\necho after\n",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert_eq!(out.stdout.trim(), "after");
 }
 
 #[test]
-fn variant_is_passed_through_unchanged() {
-    // Every value edge is data-last application: `x | f` is `f !{x}`,
-    // whatever the value's shape.  The consumer receives the variant whole.
+fn variant_value_pipeline_is_rejected() {
+    // A variant is a value and cannot cross a byte-pipeline edge.
     let out = common::run("non_step_variant", "return `ok 5 | { |v| echo $v }\n");
-    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    assert_eq!(out.stdout.trim(), "`ok 5");
+    assert_ne!(out.status, 0, "expected a compile error");
+    assert!(
+        out.stdout.is_empty(),
+        "rejected pipeline wrote stdout: {}",
+        out.stdout
+    );
+    assert!(
+        out.stderr.contains("this stage produces a value"),
+        "stderr: {}",
+        out.stderr
+    );
 }
 
 #[test]
-fn done_labelled_variant_is_ordinary_data() {
-    // A payload-carrying `` `done 5 `` is no different: the consumer runs
-    // once and receives it whole.
+fn done_labelled_variant_pipeline_is_rejected() {
     let out = common::run("done_payload_variant", "return `done 5 | { |v| echo $v }\n");
-    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    assert_eq!(out.stdout.trim(), "`done 5");
+    assert_ne!(out.status, 0, "expected a compile error");
+    assert!(
+        out.stdout.is_empty(),
+        "rejected pipeline wrote stdout: {}",
+        out.stdout
+    );
+    assert!(
+        out.stderr.contains("this stage produces a value"),
+        "stderr: {}",
+        out.stderr
+    );
 }
 
 #[test]
 fn from_lines_stream_consumed_by_stream_each() {
-    // Canonical Step pipeline form: from-lines produces a Step stream and
-    // the explicit eliminator runs its body once per line.
+    // `from-lines` is a decoder tail; consume its returned stream with an
+    // ordinary application.
     let out = common::run(
         "from_lines_inline_consumer",
-        "echo \"a\nb\nc\" | from-lines | stream-each { |line| echo \"L: $line\" }\n",
+        "let lines = !{echo \"a\nb\nc\" | from-lines}\nstream-each { |line| echo \"L: $line\" } $lines\n",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert_eq!(out.stdout.trim(), "L: a\nL: b\nL: c");

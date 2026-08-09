@@ -8,7 +8,7 @@
 let [repo] = $ARGS
 
 let names = within [dir: $repo] {
-    git log --format=%an | from-lines | stream-to-list
+    stream-to-list !{git log --format=%an | from-lines}
 }
 
 let counts = group-by $id $names

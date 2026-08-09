@@ -6,13 +6,12 @@
 //!   * external-only byte pipeline,
 //!   * external → ral helper byte pipeline,
 //!   * ral helper → external byte pipeline,
-//!   * ral helper → ral helper value edge,
+//!   * rejection of an implicit value edge,
 //!   * final value returned from a helper,
 //!   * `2>&1` inside a pipeline stage,
 //!   * stage redirect inside a pipeline (`cmd > file`),
 //!   * missing-command diagnostic surfaces the user's command name,
-//!   * upstream helper failure surfaces the structured "value edge
-//!     closed" diagnostic at the consumer,
+//!   * a value-producing helper is rejected before any consumer runs,
 //!   * a leader exiting before later stages does not reap the pipeline
 //!     prematurely (whole-job completion),
 //!
@@ -105,13 +104,10 @@ fn helper_to_external_pipeline_runs() {
     assert!(out.stdout.contains('c'), "stdout={}", out.stdout);
 }
 
-/// ral helper → ral helper via a value edge.  The producer returns a
-/// list, the consumer takes it as data-last input.  The pipeline
-/// allocates an inter-stage value channel (anonymous pipe pair on
-/// Windows) and passes the producer the writer end, the consumer the
-/// reader end.
+/// A value-producing helper cannot feed another stage as an implicit
+/// argument.  The checker rejects the program before either helper runs.
 #[test]
-fn helper_to_helper_value_edge() {
+fn helper_to_helper_value_edge_is_rejected() {
     let out = run(
         "win_pipeline_value_edge",
         r"
@@ -119,8 +115,17 @@ fn helper_to_helper_value_edge() {
         echo $res
         ",
     );
-    assert_eq!(out.status, 0, "stderr={}", out.stderr);
-    assert!(out.stdout.trim().ends_with('3'), "stdout={}", out.stdout);
+    assert_ne!(out.status, 0, "expected a compile error");
+    assert!(
+        out.stdout.is_empty(),
+        "rejected pipeline wrote stdout={}",
+        out.stdout
+    );
+    assert!(
+        out.stderr.contains("this stage produces a value"),
+        "stderr={}",
+        out.stderr
+    );
 }
 
 /// `2>&1` inside a pipeline stage.  The stage's stderr must be
@@ -184,12 +189,10 @@ fn missing_command_in_pipeline_reports_user_command() {
     );
 }
 
-/// Upstream helper failure on a value edge.  The producer raises
-/// before returning a value; the consumer must surface "pipeline
-/// value edge closed before a value was sent" rather than running
-/// with phantom-None upstream.
+/// A failing value-producing helper is rejected as a value pipeline before
+/// its failure or the consumer's side effect can occur.
 #[test]
-fn upstream_helper_failure_reaches_consumer() {
+fn upstream_value_helper_is_rejected_before_consumer() {
     let out = run(
         "win_pipe_upstream_fail",
         r#"
@@ -197,9 +200,14 @@ fn upstream_helper_failure_reaches_consumer() {
         "#,
     );
     assert_ne!(out.status, 0);
+    assert!(
+        out.stdout.is_empty(),
+        "rejected pipeline wrote stdout={}",
+        out.stdout
+    );
     let stderr = out.stderr.to_lowercase();
     assert!(
-        stderr.contains("boom") || stderr.contains("value edge"),
+        stderr.contains("this stage produces a value"),
         "stderr={}",
         out.stderr
     );
@@ -212,10 +220,17 @@ fn upstream_helper_failure_reaches_consumer() {
 /// leader's premature exit.
 #[test]
 fn whole_job_completion_required() {
+    // The tail echoes what it *read*, so the assertion still witnesses the
+    // leader's bytes arriving rather than a literal the tail could print on
+    // its own.
     let out = run(
         "win_pipe_whole_job",
         r#"
-        cmd /c "echo done" | from-string | { |s| echo $s }
+        let relay = {
+            let s = !{from-line}
+            echo $s
+        }
+        cmd /c "echo done" | !$relay
         "#,
     );
     assert_eq!(out.status, 0, "stderr={}", out.stderr);

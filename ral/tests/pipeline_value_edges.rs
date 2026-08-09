@@ -1,7 +1,6 @@
 #![allow(clippy::disallowed_methods)]
-//! Integration tests for pipeline *value* semantics: capture rules,
-//! data-last application across stage shapes, and value-edge error
-//! reporting.
+//! Integration tests for byte-pipeline boundaries: capture rules, decoder
+//! tails, and the compile-time rejection of implicit value edges.
 //!
 //! Split out of `pipeline.rs`, which stays `#![cfg(unix)]` because most of
 //! it drives real external processes (`/bin/sh`, absolute-path coreutils,
@@ -56,7 +55,7 @@ fn to_bytes_roundtrips_through_from_bytes() {
     // decodes them back to Value::Bytes.
     // Verify the roundtrip via length and string decoding (pure ASCII input).
     let o = run_pipe(
-        "let bs = !{return [65, 66, 67] | to-bytes | from-bytes}\necho !{length $bs}\nlet txt = !{to-bytes $bs | from-string}\necho $txt",
+        "let bs = !{to-bytes [65, 66, 67] | from-bytes}\necho !{length $bs}\nlet txt = !{to-bytes $bs | from-string}\necho $txt",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     let lines: Vec<&str> = o.stdout.lines().collect();
@@ -65,7 +64,7 @@ fn to_bytes_roundtrips_through_from_bytes() {
 
 #[test]
 fn to_bytes_rejects_out_of_range_values() {
-    let o = run_pipe("return [256] | to-bytes");
+    let o = run_pipe("!{to-bytes [256]}");
     assert_ne!(o.status, 0);
     assert!(
         o.stderr.contains("to-bytes: byte at index 0 out of range"),
@@ -76,10 +75,13 @@ fn to_bytes_rejects_out_of_range_values() {
 
 #[test]
 fn to_bytes_rejects_non_int_values() {
-    let o = run_pipe("return ['x'] | to-bytes");
+    // The list element type is checked before the codec runs, so this is a
+    // static failure rather than the builtin's runtime index diagnostic.
+    let o = run_pipe("!{to-bytes ['x']}");
     assert_ne!(o.status, 0);
     assert!(
-        o.stderr.contains("to-bytes: expected Int at index 0"),
+        o.stderr
+            .contains("couldn't match type String with type Integer"),
         "stderr: {}",
         o.stderr
     );
@@ -136,177 +138,138 @@ echo $lines[1]
     assert_eq!(out, vec!["2", "a", "b"]);
 }
 
-// ── Pure-value pipelines: data-last application across all stage shapes ────
+// ── Value-looking pipelines are compile errors ───────────────────────────
 //
-// These exercise the post-redesign rule: the upstream value is the
-// data-last argument of the next stage's call, regardless of whether the
-// stage is `Exec`, `App`, a bare-block, or `Force(Variable)`.  Pure-value
-// pipelines short-circuit to a sequential fold; no threading is involved.
+// A pipeline has one transport: Bytes.  Ordinary application remains the
+// spelling for combining values (`f x` or `!{f x}`), while encoders make a
+// value an explicit byte producer.
 
 #[test]
-fn block_as_stage_binds_upstream_to_param() {
-    // The original bug: `5 | { |x| echo $x }` returned the thunk instead
-    // of echoing 5.  After the redesign the block's |x| binds to the
-    // upstream value and the body runs.
+fn value_producer_into_block_is_rejected_before_side_effect() {
     let o = run_pipe("5 | { |x| echo $x }");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "5");
-}
-
-#[test]
-fn block_as_stage_returns_value_via_let() {
-    let o = run_pipe("let res = 5 | { |x| return $x }\necho $res");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "5");
-}
-
-#[test]
-fn pure_value_pipeline_chains_compose_data_last() {
-    // [1,2,3] | map { |x| x*2 } | map { |y| y+1 } → [3,5,7]
-    let o = run_pipe(
-        r"let res = [1, 2, 3] | map { |x| return $[$x * 2] } | map { |y| return $[$y + 1] }
-echo !{length $res} $res[0] $res[1] $res[2]",
-    );
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "3 3 5 7");
-}
-
-#[test]
-fn pure_value_pipeline_matches_explicit_data_last_call() {
-    let o = run_pipe(
-        r"let lhs = [1, 2, 3] | fold { |acc x| return $[$acc + $x] } 0
-let rhs = !{fold { |acc x| return $[$acc + $x] } 0 [1, 2, 3]}
-echo $lhs
-echo $rhs",
-    );
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "6\n6");
-}
-
-#[test]
-fn force_variable_as_stage_applies_to_upstream() {
-    // `5 | $f` where f is a unary block: f gets applied to 5.
-    let o = run_pipe("let f = { |x| return $[$x + 10] }\nlet res = 5 | $f\necho $res");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "15");
-}
-
-#[test]
-fn force_variable_stage_keeps_upstream_data_last_after_explicit_args() {
-    let o = run_pipe(
-        "let f = { |prefix x| return \"$prefix:$x\" }\n\
-         let lhs = 5 | $f 'n'\n\
-         let rhs = !{$f 'n' 5}\n\
-         echo $lhs\n\
-         echo $rhs",
-    );
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "n:5\nn:5");
-}
-
-#[test]
-fn pipe_into_non_function_value_errors() {
-    // `5 | 6` — there's no function on the right; the trampoline says so.
-    let o = run_pipe("5 | 6");
-    assert_ne!(o.status, 0, "expected failure, got: {}", o.stdout);
+    assert_ne!(o.status, 0, "expected a compile error");
     assert!(
-        o.stderr.contains("is not a function"),
-        "stderr: {}",
+        o.stdout.is_empty(),
+        "rejected pipeline wrote stdout: {}",
+        o.stdout
+    );
+    assert!(
+        o.stderr.contains("this stage produces a value"),
+        "missing producer teaching diagnostic: {}",
         o.stderr
     );
 }
 
-// ── Consumed stages with byte output: value edge in, byte channel out ──────
-
+/// The zero-arity block used to run its body eagerly and only then fail on
+/// the excess argument, so `hi` reached stdout before the error.  The byte
+/// rule moves that to compile time, and the side-effect assertion inverts.
 #[test]
-fn consumed_stage_with_byte_output_feeds_external_consumer() {
-    // `{ |xs| echo $xs }` takes its upstream on the value edge (input ∅)
-    // but its application body emits bytes, which `wc -l` reads.  Pins
-    // the consumed-stage wire: input ∅, output Bytes — one echoed list
-    // line reaches wc.
-    let o = run_pipe("return [1, 2] | { |xs| echo $xs } | wc -l");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "1");
+fn value_producer_into_zero_arity_block_is_rejected_before_its_side_effect() {
+    let o = run_pipe("5 | { echo hi }");
+    assert_ne!(o.status, 0, "expected a compile error");
+    assert!(
+        !o.stdout.contains("hi"),
+        "the rejected block's body must never run: {}",
+        o.stdout
+    );
+    assert!(
+        o.stderr.contains("this stage produces a value"),
+        "missing producer teaching diagnostic: {}",
+        o.stderr
+    );
 }
 
 #[test]
-fn value_producer_block_is_forced_across_helper_value_edge() {
-    // Process-staged because the last stage's body emits bytes: the
-    // bare-block producer runs in a helper, and its block result is
-    // forced once before crossing the value edge, so the middle stage
-    // receives 5 rather than an unforced thunk.
-    let o = run_pipe("{ return 5 } | { |v| return $[$v + 1] } | { |n| echo $n }");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "6");
+fn value_producer_into_value_stage_is_rejected_before_application() {
+    let o = run_pipe("5 | 6");
+    assert_ne!(o.status, 0, "expected a compile error");
+    assert!(
+        o.stdout.is_empty(),
+        "rejected pipeline wrote stdout: {}",
+        o.stdout
+    );
+    assert!(
+        o.stderr.contains("this stage produces a value"),
+        "missing producer teaching diagnostic: {}",
+        o.stderr
+    );
 }
 
 #[test]
-fn value_producer_lambda_returning_block_is_forced_across_helper_value_edge() {
-    // The middle stage is a lambda whose body returns a block, so the
-    // edge value after data-last application (`{ |x| { return 9 } } !{1}`)
-    // is itself a block needing one force.  Pins that `force_pipe_value`
-    // forces the post-application block once — not the lambda, which the
-    // checker's `deref_forced_producer` passes through unforced — so the
-    // consumer receives 9 rather than an unforced thunk.
-    let o = run_pipe("return 1 | { |x| { return 9 } } | { |n| echo $n }");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "9");
+fn interior_value_payload_is_rejected_and_explicit_encoder_is_legal() {
+    let rejected = run_pipe("return [1, 2] | { |xs| echo $xs } | wc -l");
+    assert_ne!(
+        rejected.status, 0,
+        "expected an interior value-payload error"
+    );
+    assert!(
+        rejected.stdout.is_empty(),
+        "rejected pipeline wrote stdout: {}",
+        rejected.stdout
+    );
+    assert!(
+        rejected.stderr.contains("this stage produces a value"),
+        "missing producer teaching diagnostic: {}",
+        rejected.stderr
+    );
+
+    let encoded = run_pipe("to-json [1, 2] | wc -l");
+    assert_eq!(
+        encoded.status, 0,
+        "explicit encoder pipeline failed: {}",
+        encoded.stderr
+    );
 }
 
 #[test]
-fn float_crosses_a_process_staged_value_edge_bit_exactly() {
-    // A Float produced upstream must survive the value wire unchanged.
-    // Non-finite floats are refused at construction, so the wire only ever
-    // carries finite values; a full-mantissa one pins that the trailing
-    // byte-emitting stage — which makes the pipeline `ProcessStaged`, so
-    // the Float is reified into a `SerialValue::Float` and JSON-framed
-    // between helpers — reproduces it digit for digit.
-    let o = run_pipe("{ return $[0.1 + 0.2] } | { |x| return $x } | { |y| echo $y }");
+fn decoder_tail_returns_its_value_after_a_byte_pipeline() {
+    let o = run_pipe("let s = !{echo abc | from-string}\necho !{length $s}");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "4");
+}
+
+#[test]
+fn float_value_crosses_the_final_report_boundary_bit_exactly() {
+    let o = run_pipe("let value = !{printf '0.30000000000000004' | from-json}\necho $value");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "0.30000000000000004");
 }
 
+/// A captured native crosses the Report boundary by *name* and re-links
+/// against the receiving process's own manifest.  The tail runs in a helper,
+/// so applying `$f` in the parent proves the re-linked value is the genuine
+/// native rather than a decoded husk.
 #[test]
-fn captured_native_crosses_a_process_staged_value_edge_and_relinks() {
-    // The byte-emitting last stage forces the pipeline process-staged, so
-    // `$round` crosses a real process boundary by name and re-links against
-    // the receiving process's own manifest; the middle stage applies it
-    // fully, proving the re-linked value is the genuine native.
-    let o = run_pipe("{ return $round } | { |f| return !{$f 1.567 2} } | { |n| echo $n }");
+fn captured_native_crosses_the_final_report_boundary_and_relinks() {
+    let o = run_pipe(
+        "let hand = { from-line; return $round }\n\
+         let f = !{printf hi | !$hand}\n\
+         echo !{$f 1.567 2}",
+    );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "1.57");
 }
 
+/// A value a helper cannot serialize fails at the Report boundary with the
+/// process-boundary diagnostic, not a silent `None`.  `spawn`'s `Handle` is
+/// the non-transferable case.
 #[test]
-fn value_edge_into_external_applies_data_last_on_every_dispatch_path() {
-    // A value edge into an external head is data-last application —
-    // `x | cmd = cmd !{x}` — so the upstream value becomes the
-    // command's final argument.  The stage therefore routes through
-    // the helper (a direct spawn cannot wait for the value), and the
-    // result is the same whether or not the pipeline is interactive:
-    // `true | cat` runs `cat true`, which fails on the missing file.
-    let o = run_pipe("true | cat");
-    assert_ne!(o.status, 0, "stdout: {}", o.stdout);
+fn non_transferable_value_fails_at_the_final_report_boundary() {
+    let o = run_pipe(
+        "let hold = { from-line; let h = !{spawn { return 1 }}; return $h }\n\
+         let r = !{printf hi | !$hold}\n\
+         echo got",
+    );
+    assert_ne!(o.status, 0, "expected a boundary failure: {}", o.stdout);
     assert!(
-        o.stderr.contains("No such file") || o.stderr.contains("cat"),
-        "expected cat's missing-file failure, got: {}",
+        o.stderr.contains("cannot cross the process boundary"),
+        "expected the boundary diagnostic; stderr: {}",
         o.stderr
     );
-}
-
-#[test]
-fn pipe_into_zero_arity_block_runs_then_errors_on_excess_arg() {
-    // `5 | { echo hi }` — the block has no params; echo runs (eager)
-    // and then the trampoline errors with "too many arguments" because
-    // the block's Unit result can't accept the upstream 5.
-    let o = run_pipe("5 | { echo hi }");
-    assert_ne!(o.status, 0);
-    // The side effect happened before the error.
-    assert!(o.stdout.contains("hi"), "stdout: {}", o.stdout);
     assert!(
-        o.stderr.contains("too many arguments") || o.stderr.contains("is not a function"),
-        "stderr: {}",
-        o.stderr
+        !o.stdout.contains("got"),
+        "the script must not continue past the failed report: {}",
+        o.stdout
     );
 }
 
@@ -397,68 +360,33 @@ fn try_handler_final_stdout_can_be_recovery_value() {
     assert_eq!(o.stdout.trim(), "x=caught", "full stdout: {:?}", o.stdout);
 }
 
-// ── Value-edge structured errors ────────────────────────────────────────────
+// ── Pipeline failure reporting ──────────────────────────────────────────────
 
 #[test]
-fn required_value_edge_eof_is_structured_error() {
-    // Producer fails before yielding a value; the consumer's
-    // value-in fd closes empty.  Pre-Fix-3 the helper treated this
-    // as "no upstream value" and ran the consumer with `None`.  Now
-    // it's a structured pipeline protocol error or — depending on
-    // which side of the race wins — the producer's own error.  Either
-    // way the script must fail loudly rather than silently running
-    // the consumer with a phantom upstream.
-    let script = r#"
-let res = { fail [status: 1, message: "producer failed"] } | { |x| return $[$x + 1] }
-echo $res
-"#;
-    let o = run_with_timeout("ral_pipeline_value", &[], script, Duration::from_secs(5))
-        .expect("required-value-edge test hung");
-    assert_ne!(o.status, 0, "expected failure: {}", o.stdout);
-    let combined = format!("{} {}", o.stderr, o.stdout);
+fn failing_decoder_tail_surfaces_its_own_diagnostic() {
+    let o = run_pipe("echo not-json | from-json");
+    assert_ne!(o.status, 0, "expected decoder failure: {}", o.stdout);
     assert!(
-        combined.contains("producer failed") || combined.contains("value edge"),
-        "expected producer error or value-edge diagnostic; stderr: {}",
+        o.stderr.contains("from-json:"),
+        "expected the decoder's own message; stderr: {}",
         o.stderr
     );
 }
 
+/// A producer that fails before writing anything is an ordinary pipeline
+/// failure: its message wins, and the tail contributes no value.
 #[test]
-fn value_edge_send_failure_is_structured() {
-    // A producer that tries to send a non-transferable value (a
-    // `Handle`) across an inter-stage value edge must surface the
-    // boundary diagnostic from `pack_stage_value`, not the generic
-    // "value edge closed" EOF that the consumer would otherwise
-    // emit.  Pre-fix the producer logged the failure and continued
-    // sending its (success) report; the consumer then ran without a
-    // value or saw a confusing downstream-only error.
-    //
-    // The shape forces process-staged execution by including a byte
-    // stage (`printf hi | from-string`); the next ral helper builds
-    // a `Handle` and returns it, exercising the producer→consumer
-    // value edge.
-    let script = r"
-let res = !{
-  printf hi
-  | from-string
-  | { |_s| let h = !{spawn { return 1 }}; return $h }
-  | { |_x| echo got }
-}
-echo done
-";
-    let o = run_with_timeout("ral_pipeline_value", &[], script, Duration::from_secs(5))
-        .expect("value-edge send-failure test hung");
-    assert_ne!(o.status, 0, "expected failure: {}", o.stdout);
-    let combined = format!("{} {}", o.stderr, o.stdout);
-    assert!(
-        combined.contains("cannot cross the process boundary"),
-        "expected boundary diagnostic; stderr: {}",
-        o.stderr
+fn producer_failure_before_any_bytes_wins_over_the_tail() {
+    let o = run_pipe(
+        "let boom = { fail [status: 3, message: 'producer failed'] }\n\
+         let r = !{!$boom | from-json}\n\
+         echo $r",
     );
+    assert_ne!(o.status, 0, "expected failure: {}", o.stdout);
     assert!(
-        !o.stdout.contains("got"),
-        "downstream consumer body must not have run; stdout: {}",
-        o.stdout
+        o.stderr.contains("producer failed"),
+        "expected the producer's error; stderr: {}",
+        o.stderr
     );
 }
 
@@ -571,15 +499,22 @@ fn outer_stdin_redirect_feeds_external_pipeline_first_stage() {
 }
 
 #[test]
-fn outer_stdin_redirect_feeds_ral_builtin_pipeline_first_stage() {
-    // SPEC: same rule for ral helper stage producers.
-    // `fold-lines` reads bytes off stdin, counts lines, pipes the
-    // value to the next ral stage which echoes it.
+fn outer_stdin_redirect_feeds_ral_helper_pipeline_first_stage() {
+    // SPEC: same rule for ral helper stage producers.  The forced block is
+    // the *first* stage: it reads the redirected stdin, materialises the
+    // lines, and emits the count as bytes for the external consumer.
     let lines = ["one", "two", "three", "four"];
     let path = write_tmp_lines("ral_pipe_stdin_ral", &lines);
     let path_str = path.display().to_string();
     let script = format!(
-        "let f = {{\n    fold-lines {{ |acc _| return $[$acc + 1] }} 0 | {{ |n| echo $n }}\n}}\nf < '{path_str}'\n"
+        "let f = {{\n\
+         \x20   let count = {{\n\
+         \x20       let rows = !{{stream-to-list !{{from-lines}}}}\n\
+         \x20       echo !{{length $rows}}\n\
+         \x20   }}\n\
+         \x20   !$count | cat\n\
+         }}\n\
+         f < '{path_str}'\n"
     );
     let o = run_with_timeout("ral_pipeline_value", &[], &script, Duration::from_secs(5))
         .expect("outer stdin redirect to ral pipeline first stage hung");

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1e9fea4
-generated_at_date: 2026-08-06
+generated_at_commit: 40e6d77
+generated_at_date: 2026-08-09
 covers_paths: [core/src/ir.rs]
 ---
 
@@ -28,9 +28,11 @@ slots are not optional: "the checker has not run yet" is not a representable sta
 
 - `CompKind::Pipeline` is a struct variant `{ stages, wires: Vec<Wire>, stage_types: Vec<Ty> }`
   — one `Wire` and one `Ty` per stage, both parallel to `stages`. `wires` carries the
-  ground byte channel; `stage_types` carries the inferred *value* type that flows out of
-  each stage. The elaborator fills `wires` with `Wire::EMPTY` and `stage_types` with `Unit`
-  placeholders that the annotation pass overwrites wherever inference visited
+  ground input/output/result modes; every interior result/input pair is the byte
+  channel, while the final result may be a value. `stage_types` carries typing
+  metadata for each stage, not a transport channel. The elaborator fills `wires`
+  with `Wire::EMPTY` and `stage_types` with `Unit` placeholders that the annotation
+  pass overwrites wherever inference visited
   ([[map/core/typecheck|typecheck]]).
 - `CompKind::Capture(Arc<Comp>)` (`ir.rs:463`) is the checker's one payload
   coercion: run the body, capture its bytes, decode them as a `String`
@@ -38,7 +40,7 @@ slots are not optional: "the checker has not run yet" is not a representable sta
   `annotate` pass inserts it as demand propagation. `referenced_names`'s walk
   descends into it at `ir.rs:253`.
 
-A `Wire { input, output }` and `ByteMode { Bytes, Empty }` live in
+A `Wire { input, output, result }` and `ByteMode { Bytes, Empty }` live in
 `core/src/mode.rs`: the two-valued image of a `PipeSpec` with the `PipeMode::Var`
 arm removed. The placeholder `Wire::EMPTY` is the same `Var → Empty` default the
 annotator writes for an unconstrained wire, so a hypothetical un-annotated path

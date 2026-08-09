@@ -1,7 +1,7 @@
 //! Union-find unifier over four variable kinds: type, computation type, mode, row.
 //!
 //! Record↔Map is the one coercion the language keeps; pipeline modes get none,
-//! so a value edge cannot silently meet a byte edge.
+//! so `∅` and `Bytes` never unify.
 //!
 //! Value and computation types are both *equi-recursive* — a slot may be bound
 //! to a structure containing its own variable — so neither needs an occurs
@@ -986,10 +986,9 @@ impl Unifier {
     }
 
     /// Unify two pipeline modes by *equality*: two variables unite, a variable
-    /// and a ground mode bind, two ground modes must agree.  Stages connect
-    /// only when the left's output mode equals the right's input mode, so
-    /// `None` and `Bytes` never unify — a value edge cannot silently meet a
-    /// byte edge.
+    /// and a ground mode bind, two ground modes must agree.  Pipeline edges
+    /// choose their own channel ends — interior payloads and consumer inputs
+    /// are pinned to `Bytes` — so `None` and `Bytes` never unify silently.
     ///
     /// # Errors
     /// [`crate::mode::ModeMismatch`] for distinct ground modes, which each

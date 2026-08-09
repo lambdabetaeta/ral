@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 1e9fea4
-verified_at_date: 2026-08-06
+verified_at_commit: 40e6d77
+verified_at_date: 2026-08-09
 anchors: [Inferencer, Unifier, Pairs, unify_row, unify_mode, generalize, instantiate, annotate, SessionSchemes, PipeMode, PipeSpec, extract_return, InferCtx, join_modes, alt_modes, join_arm_results, solve_at_boundary, solve_and_finalize, ModeConstraint]
 ---
 
@@ -37,9 +37,12 @@ signatures enter through per-builtin rules carried with the body
 - *Modes* unify too, *by equality* (`unify_mode`): the `∅` / `Bytes` / `μ`
   modes (`PipeMode`) of a spec `⟨i, o, r⟩` are first-class unification variables,
   and all three ride the same rule, but a ground `∅` and a ground `Bytes` do not
-  unify — a value edge cannot meet a byte edge. The lattice (`PipeMode`, `PipeSpec`) lives in `core/src/mode.rs` and
-  the equality rule is `Unifier::unify_mode` — a plain method now that the static
-  checker is the sole mode engine
+  unify. A pipeline interior edge is admitted only when its producer payload and
+  consumer input both settle to `Bytes`; a returned value is composed by
+  application or bind, not by a second pipe mode. The lattice (`PipeMode`,
+  `PipeSpec`) lives in `core/src/mode.rs` and the equality rule is
+  `Unifier::unify_mode` — a plain method now that the static checker is the sole
+  mode engine
   ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]) — so a
   pipeline edge mismatch is a live `ModeMismatch` (T0012) at type-check time rather
   than a silent coercion ([[design/pipelines|pipelines]];
@@ -60,18 +63,18 @@ source-tree node grounds its own result mode:
 
 A payload decision taken against an unresolved result mode pins it to `None`.
 
-**Two well-formedness conditions hold wherever a rule builds a `Return` type.**
+**One well-formedness condition holds wherever a rule builds a `Return` type.**
 
-- WF-1: `result ⊑ output`. A payload on the byte channel needs a byte channel.
 - WF-2: `result = Bytes` implies a `Unit` return type. A computation never
-  carries both a value payload and a byte payload.
+  carries both a value payload and a byte payload. `output` is independent
+  chatter, not a bound on the payload conduit.
 
 `Unifier::unify_mode` treats a ground result mode by the same equality rule as
 a ground input or output mode. Two different ground results never unify. One
 subsumption rule relates them instead, as a judgment and not as a unification
 step. A computation of type `⟨i, o, None⟩ Unit` also has type
-`⟨i, o, Bytes⟩ Unit` when `o` permits bytes. The rule fires only at the top of
-a `Return` type. It needs no variance clause through `Thunk`, `Fun`, or a row.
+`⟨i, o, Bytes⟩ Unit`. The rule fires only at the top of a `Return` type. It
+needs no variance clause through `Thunk`, `Fun`, or a row.
 
 **A declared signature slot is still the only place a result-mode variable is
 quantified.** Two kinds of slot carry one:
@@ -141,8 +144,8 @@ the only module permitted to case on a mode's groundness. Equality stays
 
 A byte-payload arm alongside a ground `None` arm at a non-`Unit` type is a
 type error. The two arms disagree about which conduit carries the payload.
-The fix is an explicit pipe, for example `echo hi | from-string`, and not an
-inserted coercion.
+The fix is an explicit decoder tail, for example `echo hi | from-string`, and
+not an inserted coercion.
 
 **Conclude, store, solve-what-you-own.** Each call above applies whatever
 conclusion is already determined and defers the rest as a stored

@@ -56,7 +56,7 @@ Blocks support recursive definitions.
 
 ## Pipelines
 
-`ral` has two kinds of pipes: some carry bytes from one command to the next (UNIX-style); others pipe values, satisfying the equation `x | f = f !{x}`.
+`ral` has one pipe, and it carries bytes from one command to the next (UNIX-style). Every interior edge is bytes on both sides; only the *last* stage may return a value. Values are combined by ordinary application (`f $x`) and `let`, never by `|`: `[1,2] | length` is a type error, `length [1,2]` is the spelling.
 
 Codecs bridge the world of bytes to the world of values: `from-line` takes `Bytes` to a `String` with no trailing `\n`, and `from-string` with it; `from-lines` gives a lazy stream of `String`; `from-json` turns JSON into a `ral` value. Decode where the bytes flow, and capture only after decoding:
 
@@ -67,7 +67,7 @@ There are also corresponding `to-line`, `to-string`, `to-lines`, `to-json` that 
 
 Decoders read from the byte channel.  To decode bytes in a definition, use `bytes-to-string $r[stdout]`.
 
-`from-lines` yields a lazy stream, which no function iterates implicitly (`x | f` is always `f !{x}`). Either eliminate it explicitly — `git log | from-lines | stream-each { |l| … }`, or `stream-to-list`/`stream-map`/`stream-fold` — or skip streams: `lines` splits a String into a materialised list, and `from-lines-list PATH` reads a file as a materialised list of lines:
+`from-lines` yields a lazy stream, which no function iterates implicitly. A decoder ends its pipeline, so bind the stream and eliminate it explicitly — `stream-each { |l| … } !{git log | from-lines}`, or `stream-to-list`/`stream-map`/`stream-fold` — or skip streams: `lines` splits a String into a materialised list, and `from-lines-list PATH` reads a file as a materialised list of lines:
 
     let commits = lines !{git log --oneline -5 | from-string}
     let src     = from-lines-list #'src/main.rs'#

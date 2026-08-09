@@ -7,7 +7,7 @@
 let [repo, base] = $ARGS
 
 let files = within [dir: $repo] {
-    git diff --name-only "$base...HEAD" | from-lines | stream-to-list
+    stream-to-list !{git diff --name-only "$base...HEAD" | from-lines}
 }
 
 for $files { |f| echo $f }

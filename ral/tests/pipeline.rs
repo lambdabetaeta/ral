@@ -9,9 +9,8 @@
 //
 // Unix-only: these tests rely on Unix commands (/bin/echo, grep, cat, yes,
 // head, wc) and Unix process-group / signal semantics.  The portable
-// subset — pure-value pipelines, capture semantics, stdin-consuming
-// builtins — was extracted to pipeline_value_edges.rs, which runs on
-// every platform.
+// subset — capture semantics and stdin-consuming builtins — was extracted to
+// pipeline_value_edges.rs, which runs on every platform.
 #![cfg(unix)]
 
 mod common;
@@ -439,9 +438,9 @@ echo done
 
 #[test]
 fn mixed_pipeline_range_to_wc() {
-    // range 1 21 produces [1..20] — 20 elements.  to-lines encodes the
-    // list as newline-separated bytes; grep -c counts non-empty lines.
-    let o = run("range 1 21 | to-lines | grep -c .");
+    // range 1 21 produces [1..20].  Apply the encoder explicitly, then let
+    // grep count the newline-separated bytes.
+    let o = run("to-lines !{range 1 21} | grep -c .");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     let count: u32 = o.stdout.trim().parse().expect("grep -c output");
     assert_eq!(count, 20);
@@ -845,10 +844,10 @@ fn grant_pipeline_abort_after_missing_later_stage_does_not_hang() {
     }
     for n in [5, 50_000] {
         let script = format!(
-            "grant [net: false, fs: [read: ['cwd:', '/tmp', 'tempdir:'], write: ['cwd:', '/tmp', 'tempdir:']]] {{ range 0 {n} | limit 80 }}"
+            "grant [net: false, fs: [read: ['cwd:', '/tmp', 'tempdir:'], write: ['cwd:', '/tmp', 'tempdir:']]] {{ to-lines !{{range 0 {n}}} | limit 80 }}"
         );
         let o = run_with_timeout(&[], &script, Duration::from_secs(5))
-            .expect("sandboxed value-to-missing-external pipeline hung");
+            .expect("sandboxed byte-to-missing-external pipeline hung");
         assert_eq!(o.status, 127, "stdout: {}\nstderr: {}", o.stdout, o.stderr);
         assert!(
             o.stderr.contains("limit: command not found"),
@@ -1397,7 +1396,8 @@ fn ral_helper_emits_large_audit_payload_without_deadlock() {
     // socket buffer) while the parent blocked waiting on the helper
     // — a circular wait this test would catch as a 15-second hang.
     let script = r#"
-let s = !{ /bin/echo "" | from-string | { |x| /bin/sh -c 'head -c 200000 /dev/zero >&2'; return $x } }
+let noisy = { from-line; /bin/sh -c 'head -c 200000 /dev/zero >&2' }
+let s = !{ /bin/echo "" | !$noisy }
 echo done
 "#;
     let o = run_with_timeout(&["--audit"], script, Duration::from_secs(15))

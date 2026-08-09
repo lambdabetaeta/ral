@@ -436,19 +436,23 @@ let from-lines-list = { |p|
 }
 
 # JSON Lines — one JSON value per line, over the serde-backed `from-json`
-# / `to-json` codecs.  `from-jsonl` keeps `from-lines` at the head of its
-# body pipeline so the block advertises the `Bytes` input channel, and so
-# composes both as `from-jsonl < $p` and `… | from-jsonl`.  Each line is
-# routed back onto the channel with `to-string` before `from-json` reads
-# it, since decoders are 0-arity.  `to-json` emits compact (single-line)
-# JSON, so one record per line falls out for free.  The result is a Stream
-# value shaped for `stream-*` consumption; only the decode step is lazy
-# (`stream-map` decodes a line only when demanded) — the underlying
-# `from-lines` read is not, so `from-jsonl` gives no bounded-memory
-# guarantee over an unbounded or very large source.
+# / `to-json` codecs.  `from-jsonl` binds the eagerly-read `from-lines`
+# result before applying `stream-map`, so the byte-producing decoder stays
+# at the head of the block and the value-producing stream transformation is
+# an ordinary application.  Each line is routed back onto the channel with
+# `to-string` before `from-json` reads it, since decoders are 0-arity.
+# `to-json` emits compact (single-line) JSON, so one record per line falls
+# out for free.  The result is a Stream value shaped for `stream-*`
+# consumption; only the decode step is lazy (`stream-map` decodes a line
+# only when demanded) — the underlying `from-lines` read is not, so
+# `from-jsonl` gives no bounded-memory guarantee over an unbounded or very
+# large source.
 ## Decode JSON Lines from stdin into a Stream of values, decoded lazily
 ## but read from an eagerly-materialised `from-lines` source.
-let from-jsonl = { from-lines | stream-map { |line| to-string $line | from-json } }
+let from-jsonl = {
+    let lines = !{from-lines}
+    stream-map { |line| to-string $line | from-json } $lines
+}
 ## Encode a list of values as JSON Lines, one compact record per line.
 let to-jsonl = { |items| each { |x| to-json $x; echo "" } $items }
 

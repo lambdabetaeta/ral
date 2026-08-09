@@ -1,19 +1,15 @@
 //! Child side of ral's hidden multicall flags, entered before the CLI.
 //!
 //! `--ral-pipeline-stage-helper` rebuilds a shell from the
-//! [`ChildEvalRequest`] the parent writes into the job channel, optionally
-//! reads one upstream value, runs the stage, and writes one response frame
-//! back — the final value rides inside it.  `--ral-pipeline-anchor` holds
-//! the pipeline pgid open so a fast-exiting first stage cannot strand its
-//! successors.  `--ral-bundled-tool` exchanges no frame at all: the
-//! inherited env, cwd, stdio, process group and sandbox are the whole
-//! execution context.
+//! [`ChildEvalRequest`] the parent writes into the job channel, runs the
+//! stage, and writes one response frame back — the final value rides inside
+//! it.  `--ral-pipeline-anchor` holds the pipeline pgid open so a
+//! fast-exiting first stage cannot strand its successors.
+//! `--ral-bundled-tool` exchanges no frame at all: the inherited env, cwd,
+//! stdio, process group and sandbox are the whole execution context.
 
-use crate::child_eval::{ChildEvalRequest, break_response, run_child_eval, transfer_error};
-use crate::serial::{InternCtx, ScopeTable, SerialValue};
+use crate::child_eval::{ChildEvalRequest, run_child_eval};
 use crate::subprocess_codec::{read_frame, write_frame};
-use crate::types::{Break, Error, Settled, Value};
-use serde::{Deserialize, Serialize};
 
 pub(crate) const HELPER_FLAG: &str = "--ral-pipeline-stage-helper";
 
@@ -24,41 +20,16 @@ pub(crate) const JOB_FD_ENV: &str = "RAL_PIPELINE_STAGE_JOB_FD";
 #[cfg(unix)]
 pub(crate) const REPORT_FD_ENV: &str = "RAL_PIPELINE_STAGE_REPORT_FD";
 #[cfg(unix)]
-pub(crate) const VALUE_IN_FD_ENV: &str = "RAL_PIPELINE_STAGE_VALUE_IN_FD";
-#[cfg(unix)]
-pub(crate) const VALUE_OUT_FD_ENV: &str = "RAL_PIPELINE_STAGE_VALUE_OUT_FD";
-#[cfg(unix)]
 pub(crate) const ANCHOR_FD_ENV: &str = "RAL_PIPELINE_ANCHOR_FD";
 
 #[cfg(windows)]
 pub(crate) const JOB_HANDLE_ENV: &str = "RAL_PIPELINE_STAGE_JOB_HANDLE";
 #[cfg(windows)]
 pub(crate) const REPORT_HANDLE_ENV: &str = "RAL_PIPELINE_STAGE_REPORT_HANDLE";
-#[cfg(windows)]
-pub(crate) const VALUE_IN_HANDLE_ENV: &str = "RAL_PIPELINE_STAGE_VALUE_IN_HANDLE";
-#[cfg(windows)]
-pub(crate) const VALUE_OUT_HANDLE_ENV: &str = "RAL_PIPELINE_STAGE_VALUE_OUT_HANDLE";
 
 pub(crate) const ANCHOR_FLAG: &str = "--ral-pipeline-anchor";
 
 pub(crate) const BUNDLED_TOOL_FLAG: &str = "--ral-bundled-tool";
-
-/// One typed value crossing a process-staged pipeline boundary, held serial
-/// until `child_eval` has a child shell to decode against.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct StageValue {
-    pub(crate) scope_table: ScopeTable,
-    pub(crate) value: SerialValue,
-}
-
-pub(crate) fn pack_stage_value(value: &Value) -> Result<StageValue, Error> {
-    let mut ctx = InternCtx::new();
-    let value = SerialValue::from_runtime(value, &mut ctx).map_err(|e| transfer_error(&e))?;
-    Ok(StageValue {
-        scope_table: ctx.finish().map_err(|e| transfer_error(&e))?,
-        value,
-    })
-}
 
 /// `label` lands in `"{name} is not {label}"`, so it carries its own
 /// article: `"an fd"`.
@@ -71,22 +42,7 @@ fn read_env_required<T>(
     parse(&s).ok_or_else(|| format!("{name} is not {label}"))
 }
 
-/// As `read_env_required`, but an unset var is `Ok(None)` rather than an error.
-fn read_env_optional<T>(
-    name: &str,
-    label: &str,
-    parse: impl FnOnce(&str) -> Option<T>,
-) -> Result<Option<T>, String> {
-    match std::env::var(name) {
-        Ok(s) => parse(&s)
-            .map(Some)
-            .ok_or_else(|| format!("{name} is not {label}")),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(_) => Err(format!("{name} is not valid unicode")),
-    }
-}
-
-/// All that separates the two backends: the descriptor type and five
+/// All that separates the two backends: the descriptor type and four
 /// primitives, so `serve_from_env` performs one dance on both.
 trait HelperTransport {
     /// An fd on Unix, a Win32 `HANDLE` on Windows.
@@ -94,11 +50,8 @@ trait HelperTransport {
 
     const JOB: &'static str;
     const REPORT: &'static str;
-    const VALUE_IN: &'static str;
-    const VALUE_OUT: &'static str;
 
     fn read(name: &str) -> Result<Self::Desc, String>;
-    fn read_optional(name: &str) -> Result<Option<Self::Desc>, String>;
     /// Stop the inherited descriptor leaking on into the stage's own
     /// children (set `FD_CLOEXEC` / clear `HANDLE_FLAG_INHERIT`).
     fn secure(desc: Self::Desc) -> Result<(), String>;
@@ -116,50 +69,9 @@ fn serve_from_env<P: HelperTransport>() -> u8 {
         let mut job_reader = P::reader(job);
         let mut report_writer = P::writer(report);
 
-        let value_in = P::read_optional(P::VALUE_IN).map_err(report_helper_env_err)?;
-        let value_out = P::read_optional(P::VALUE_OUT).map_err(report_helper_env_err)?;
-        for d in value_in.into_iter().chain(value_out) {
-            P::secure(d).map_err(report_helper_setup_err)?;
-        }
-
-        Ok(serve_stage_core(
-            &mut *job_reader,
-            &mut *report_writer,
-            value_in.map(P::reader),
-            value_out.map(P::writer),
-        ))
+        Ok(serve_stage_core(&mut *job_reader, &mut *report_writer))
     })();
     outcome.unwrap_or(1)
-}
-
-/// EOF is an error, not an empty read: the parent wires a value-in channel
-/// only when a value is coming, so a closed pipe means the producer died
-/// before reaching its consumer.
-fn read_required_stage_value<R: std::io::BufRead>(reader: &mut R) -> Settled<StageValue> {
-    let frame = read_frame::<_, StageValue>(reader).map_err(|e| {
-        Break::Error(Error::new(
-            format!("pipeline value edge: failed to decode upstream value: {e}"),
-            1,
-        ))
-    })?;
-    frame.ok_or_else(|| {
-        Break::Error(
-            Error::new("pipeline value edge closed before a value was sent", 1)
-                .with_hint("did the previous stage fail before returning a value?"),
-        )
-    })
-}
-
-/// A value that cannot be serialized — an open handle, say — fails here
-/// rather than at the peer.
-fn write_stage_value<W: std::io::Write>(writer: &mut W, value: &Value) -> Result<(), Error> {
-    let packed = pack_stage_value(value)?;
-    write_frame(writer, &packed).map_err(|e| {
-        Error::new(
-            format!("pipeline value edge: failed to send output value: {e}"),
-            1,
-        )
-    })
 }
 
 /// One job frame in, one report frame out; the transport has already turned
@@ -167,8 +79,6 @@ fn write_stage_value<W: std::io::Write>(writer: &mut W, value: &Value) -> Result
 fn serve_stage_core<R: std::io::BufRead + ?Sized, W: std::io::Write + ?Sized>(
     job_reader: &mut R,
     report_writer: &mut W,
-    value_in: Option<Box<dyn std::io::BufRead>>,
-    value_out: Option<Box<dyn std::io::Write>>,
 ) -> u8 {
     let request: ChildEvalRequest = match read_frame(job_reader) {
         Ok(Some(request)) => request,
@@ -182,40 +92,7 @@ fn serve_stage_core<R: std::io::BufRead + ?Sized, W: std::io::Write + ?Sized>(
         }
     };
 
-    // A value-out channel means a value consumer downstream, so the output
-    // is forced once (`x | f = f !{x}`).  Read before the match below moves it.
-    let force_output = value_out.is_some();
-
-    let upstream = match value_in {
-        Some(mut reader) => match read_required_stage_value(&mut reader) {
-            Ok(value) => Some(value),
-            Err(signal) => {
-                let report = break_response(signal);
-                if let Err(err) = write_frame(report_writer, &report) {
-                    crate::diagnostic::cmd_error(
-                        "ral",
-                        &format!("pipeline helper: failed to write stage report: {err}"),
-                    );
-                    return 1;
-                }
-                return 0;
-            }
-        },
-        None => None,
-    };
-    let (report, output_value) = run_child_eval(request, upstream, force_output);
-
-    let report = match (value_out, output_value.as_ref()) {
-        (Some(mut writer), Some(value)) => match write_stage_value(&mut writer, value) {
-            Ok(()) => report,
-            Err(err) => {
-                let mut overwritten = break_response(Break::Error(err));
-                overwritten.audit_observations = report.audit_observations;
-                overwritten
-            }
-        },
-        _ => report,
-    };
+    let report = run_child_eval(request);
 
     if let Err(err) = write_frame(report_writer, &report) {
         crate::diagnostic::cmd_error(
@@ -258,15 +135,9 @@ impl HelperTransport for UnixTransport {
 
     const JOB: &'static str = JOB_FD_ENV;
     const REPORT: &'static str = REPORT_FD_ENV;
-    const VALUE_IN: &'static str = VALUE_IN_FD_ENV;
-    const VALUE_OUT: &'static str = VALUE_OUT_FD_ENV;
 
     fn read(name: &str) -> Result<i32, String> {
         read_env_fd(name)
-    }
-
-    fn read_optional(name: &str) -> Result<Option<i32>, String> {
-        read_env_optional(name, "an fd", |s| s.parse::<i32>().ok())
     }
 
     fn secure(fd: i32) -> Result<(), String> {
@@ -339,17 +210,9 @@ impl HelperTransport for WindowsTransport {
 
     const JOB: &'static str = JOB_HANDLE_ENV;
     const REPORT: &'static str = REPORT_HANDLE_ENV;
-    const VALUE_IN: &'static str = VALUE_IN_HANDLE_ENV;
-    const VALUE_OUT: &'static str = VALUE_OUT_HANDLE_ENV;
 
     fn read(name: &str) -> Result<Self::Desc, String> {
         read_env_required(name, "a handle", |s| {
-            s.parse::<usize>().ok().map(|v| v as Self::Desc)
-        })
-    }
-
-    fn read_optional(name: &str) -> Result<Option<Self::Desc>, String> {
-        read_env_optional(name, "a handle", |s| {
             s.parse::<usize>().ok().map(|v| v as Self::Desc)
         })
     }

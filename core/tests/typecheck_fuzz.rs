@@ -175,7 +175,7 @@ fn scenarios() -> Vec<Scenario> {
             "return [1, [a: 1], hello, true, [b: 2], unit, [1, 2]]",
             "wide-mismatch",
         ),
-        // ─── Pipeline shape: stream piped whole into element consumer ────
+        // ─── Pipeline shape: value payload cannot cross a byte edge ─────
         s(
             "let s = !{stream-cons 1 { !{stream-nil} }}\n$s | { |e| return $[$e + 1] }",
             "stream-piped-whole-into-element-consumer",

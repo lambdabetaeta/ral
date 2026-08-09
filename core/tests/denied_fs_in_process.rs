@@ -16,7 +16,7 @@
 //!     read set;
 //!   * the **stdin (`<`)** and **stderr (`2>`)** redirect opens (the
 //!     `>` stdout case is already `grant_fs_write_denies_external_redirect`);
-//!   * the **pipeline helper transport** — a ral closure stage runs in a
+//!   * the **pipeline helper transport** — a ral pipeline stage runs in a
 //!     re-exec'd helper carrying the same grant stack, so its in-process
 //!     redirect open hits `check_fs_op` exactly as in the parent.
 //!
@@ -332,17 +332,17 @@ fn grant_fs_read_allows_stdin_redirect_inside_set() {
 
 // ── 4. Pipeline helper transport ─────────────────────────────────────────
 //
-// A byte-pipeline stage that is ral code (`{ |s| … }`) runs in a re-exec'd
-// helper subprocess that carries the parent's grant stack on its `WireMobile`
+// A byte-pipeline stage that is ral code runs in a re-exec'd helper
+// subprocess that carries the parent's grant stack on its `WireMobile`
 // snapshot (`Capabilities` serialise the grants across the helper protocol).
 // A RAL-owned fs effect inside that stage — here a redirect, the only
 // in-process write edge — is therefore checked by the helper's own
 // `check_fs_op` exactly as in the parent.  This proves the helper is *not* a
-// third, unchecked filesystem path.  The stage takes a value edge
-// (`from-string` decodes the seed bytes to a String the closure binds as
-// `s`); the redirect inside the closure is the in-process write under test.
+// third, unchecked filesystem path.  The stage reads the seed bytes with
+// `from-line`; the redirect inside its byte-reading body is the in-process
+// write under test.
 
-/// A helper-staged closure that redirects into a path outside the write set
+/// A helper-staged stage that redirects into a path outside the write set
 /// is denied at `check_fs_op` inside the helper.  The seed bytes reach the
 /// stage (so the helper genuinely ran), but the denied redirect target is
 /// never created.
@@ -353,7 +353,10 @@ fn grant_fs_write_denies_helper_stage_redirect() {
     std::fs::create_dir_all(&allowed).unwrap();
     let denied = dir.join("leak.txt");
     let script = format!(
-        "grant [fs: [write: ['{}']]] {{ echo seed | from-string | {{ |s| /bin/echo $s > '{}' }} }}",
+        "grant [fs: [write: ['{}']]] {{\n\
+         let sink = {{ from-line; /bin/echo seed > '{}' }}\n\
+         echo seed | !$sink\n\
+         }}",
         allowed.display(),
         denied.display()
     );
@@ -365,9 +368,8 @@ fn grant_fs_write_denies_helper_stage_redirect() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Positive control for the helper transport: the same closure stage
-/// redirecting into a path *inside* the write set succeeds and the file
-/// lands.  This proves the helper enforces the granted region (carries the
+/// Positive control for the helper transport: the same stage redirecting
+/// into a path *inside* the write set succeeds and the file lands.  This proves the helper enforces the granted region (carries the
 /// stack correctly) rather than failing on every redirect.
 ///
 /// Unix-only: unlike its denial twin above (whose redirect is refused before
@@ -380,7 +382,10 @@ fn grant_fs_write_allows_helper_stage_redirect_inside_set() {
     let dir = scratch("helperok");
     let target = dir.join("kept.txt");
     let script = format!(
-        "grant [fs: [write: ['{}']]] {{ echo seed | from-string | {{ |s| /bin/echo $s > '{}' }} }}",
+        "grant [fs: [write: ['{}']]] {{\n\
+         let sink = {{ from-line; /bin/echo seed > '{}' }}\n\
+         echo seed | !$sink\n\
+         }}",
         dir.display(),
         target.display()
     );

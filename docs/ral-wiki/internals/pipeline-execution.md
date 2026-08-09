@@ -1,133 +1,97 @@
 ---
-verified_at_commit: 1e9fea4
-verified_at_date: 2026-08-06
-anchors: [run_pipeline, resolve_pipeline, StageLaunch, value_edge_in, force_pipe_value, run_child_eval, PipelineGroup, Launch, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, park_on_stop, PipeSpec, Capture, infer_pipeline]
+verified_at_commit: 40e6d77
+verified_at_date: 2026-08-09
+anchors: [run_pipeline, resolve_pipeline, StageLaunch, open_stage_routes, FinalValue::Report, run_child_eval, PipelineGroup, Launch, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, park_on_stop, PipeSpec, Capture, infer_pipeline]
 ---
 
-# Pipeline execution: value folds, process groups, and the resolve-time launch
+# Pipeline execution: byte edges, process groups, and helper final values
 
-[[design/pipelines|The design]] says a pipeline runs as a value fold or a
-byte-process pipeline, chosen by the connecting edge's type. *Every value edge
-is the one β-rule `x | f = f !{x}`, realised once*; every byte edge is a
-subprocess in one group; and which of those a stage takes is frozen at resolve
-time, from facts the checker already settled. `eval_pipeline` (`evaluator/comp.rs`)
-reduces a single-stage pipeline to its inner computation and hands the rest to
+[[design/pipelines|The design]] makes `|` a byte conduit. Every interior edge
+connects a producer payload to a consumer input as `Bytes`; only the final
+stage's result may be a value. `eval_pipeline` (`evaluator/comp.rs`) reduces a
+single-stage form to its inner computation and hands a multi-stage form to
 `runtime::pipeline::run_pipeline`, whose three phases — resolve, launch,
-collect — are the spine below.
+collect — are the spine below. Ordinary application and bind compose values in
+the evaluator and do not enter this pipeline runtime.
 
 **Resolve freezes a `StageLaunch` per stage from resolve-time facts.**
-`resolve_pipeline` (`pipeline/resolve.rs`) reads each stage's input and output
-modes off the ground `Vec<Wire>` the checker wrote onto the `Pipeline` node
-([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]) — never
-re-inferring it — and, from the unified modes, the redirects, the terminal plan,
-and whether a `!{…}` audit is capturing bytes, commits one decision per stage:
+`resolve_pipeline` (`pipeline/resolve.rs`) reads the ground `Vec<Wire>` that
+the checker wrote onto the `Pipeline` node, including each stage's input,
+chatter, and result modes. It does not re-infer them. Redirects, the terminal
+plan, and whether a `!{…}` audit captures bytes then determine one launch
+decision per stage:
 
-- `Direct` — an external command spawned with no stage helper. A bundled tool's
-  byte stage takes this arm too: its direct child is the `ral --ral-bundled-tool
-  <tool>` placement chosen by the command image
-  ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]]);
+- `Direct` — an external command or bundled tool launched directly;
 - `HelperEval` — the stage's ral computation evaluated in a helper.
 
-Launch reads this decision; it does not re-derive it. A whole pipeline whose every
-edge is on the value channel resolves to `PipelineKind::PureValue`; anything
-touching bytes is `ProcessStaged`.
+Launch consumes these decisions; it does not re-derive a value-transport mode.
+There is no in-process pipeline fold and no typed value channel between stages.
 
-**A byte-wired final stage carries the pipeline's own payload on the wire.**
-The pipeline's last stage may go unconsumed as a value, with its own output
-mode grounding `Bytes`. The checker then types the whole pipeline as
-`⟨input, output, Bytes⟩ Unit` (`infer_pipeline`, `core/src/typecheck/infer.rs`).
-By WF-2, that type carries no value component. The last stage's own return
-value — for example the record `audit` builds — is therefore not the
-pipeline's payload. `PipelineCollector::finish` (`pipeline/collect.rs`)
-returns `Value::Unit` for a byte-tailed pipeline, matching the checker's
-verdict rather than discarding a value the type still claimed.
+**Every interior route is an operating-system byte pipe.**
+`open_stage_routes` allocates the route endpoints before launch. For each
+adjacent pair it connects the producer's `result = Bytes` to the consumer's
+`input = Bytes`; a stage's independent `output` remains ambient chatter. The
+last stage's result is left free, so a decoder may be the tail and return a
+value. A non-final value result is a type error, not a request to serialize or
+force a value on the next edge
+([[decisions/260809_byte-only-pipelines|byte-only-pipelines]]).
 
-At a bind, the boundary reads a value demand against a `result` of `Bytes`
-and inserts `Capture` ([[internals/compilation-ladder|compilation-ladder]]).
-`let v = echo a | audit { /bin/cat }` binds the text `/bin/cat` wrote, not
-the `audit` record. `pipeline_value_edges.rs` (`ral/tests/`) pins this case.
-`force_pipe_value` is untouched by this typing. It forces exactly one value
-crossing a value edge, and a byte-tailed pipeline has none.
-
-**The value-edge judgment has one definition.** Whether stage *i* carries a value
-on its input or output edge is `value_edge_in` / `value_edge_out`
-(`pipeline/route.rs`): a value edge exists between *i* and its neighbour exactly
-when both have that neighbour and the connecting mode is non-`Bytes`. Every other
-site — the edge allocator that realises an edge as a byte pipe or a
-serialised-value channel, the launch classifier, the helper's force decision —
-asks those two predicates rather than re-testing the modes
-([[decisions/260610_value-edge-locality|value-edge-locality]]).
-
-**Every value edge realises `x | f = f !{x}` through one force.**
-`force_pipe_value` (`pipeline.rs`, the module's own file) is the sole
-value-level `!{x}`: a
-producer's value crossing a value edge is forced exactly once — a suspended block
-runs and yields its body's value; every other value (a concrete value, or a
-lambda whose force is the identity) passes through. The same function is called
-
-- in the parent fold (`run_value_fold`, for a `PureValue` pipeline — a sequential
-  `f !{x}` over `call::invoke`, no process, no pipe, outside job control), and
-- in the re-exec'd helper for a `ProcessStaged` value edge, via
-  `run_child_eval(request, upstream, force_output)` — `force_output` derived at
-  the helper's serve site from the stage's *own* value-out channel (a stage
-  holding a value-out edge feeds a value consumer and forces; a final or
-  byte-mode stage holds none and leaves the value as-is).
-
-So the single thunk-deref the checker models at a value edge has exactly one
-runtime mirror, parent-side and child-side ([[decisions/260609_pure-pipe-equation|pure-pipe-equation]];
-[[decisions/260610_child-eval-unification|child-eval-unification]]).
+**The final value report remains helper-staged for now.**
+When the final result is a value, `FinalValue::Report` selects the helper's
+value report. The parent sends one `ChildEvalRequest` with the stage body and
+`WireMobile` snapshot; the helper evaluates it and returns the value in one
+`ChildEvalResponse`, alongside status and observations. The parent does not
+run a special in-process tail yet. Moving that tail into the parent is a
+separate future decision ([[internals/compilation-ladder|compilation-ladder]]).
 
 **A helper serves one `ChildEvalRequest` / `ChildEvalResponse` frame pair.**
-A `HelperEval` stage runs through the shared `run_child_eval` runner
-(`core/src/child_eval.rs`): the parent packs the stage body plus a `WireMobile`
+A `HelperEval` stage uses the shared `run_child_eval` runner
+(`core/src/child_eval.rs`). The parent packs the stage body plus a `WireMobile`
 snapshot into one request frame and gates the helper on it; the helper
-reconstructs a child shell (`Shell::child_of` over the captured closure env),
-optionally reads one upstream value, applies the body `call::invoke` data-last,
-forces per `force_output`, and ships one response frame carrying the final value,
-status, and the flat list of observations it collected. This `run_child_eval` runner is the one re-exec'd-child
-eval protocol; the grant body no longer re-execs through it — a `grant` evaluates
-locally and confines each external child per-command instead
+reconstructs a child shell (`Shell::child_of` over the captured closure
+environment), evaluates the stage, and ships one response frame carrying the
+final value, status, and flat observations. It has no upstream typed-value
+input: an interior producer reaches it only through its byte route. The grant
+body evaluates locally and confines each external child per-command instead
 ([[internals/capability-enforcement|capability enforcement]];
 [[decisions/260617_sandbox-external-children|sandbox-external-children]]). A
 byte-only bundled stage takes the `Direct` arm as a `ral --ral-bundled-tool`
 child, so it never reaches this runner.
 
 **Byte pipelines run as one process group; the pgid anchor exists only for two
-or more stages.** As soon as an edge touches bytes, every stage — including
-ral-implemented ones — executes in a subprocess sharing one pgid the parent ral
+or more stages.** Every multi-stage pipeline — including one whose stages are
+ral-implemented — executes in a subprocess sharing one pgid the parent ral
 process is *not* a member of. `PipelineGroup` (`pipeline/group.rs`) owns that pgid
 through a stable *anchor* process, but `prepare` spawns the anchor only for `n ≥ 2`
 stages: a single-stage pipeline has no later `setpgid` join to protect, so its one
 child establishes the group as leader on `spawn`
-([[decisions/260610_value-edge-locality|value-edge-locality]]). The SIGINT-forwarding relay is
+([[decisions/260809_byte-only-pipelines|byte-only-pipelines]]). The SIGINT-forwarding relay is
 claimed on the first `spawn` — *after* `spawn_with_pgid` plus `setpgid` in
 `pre_exec` has put a real child in the group — so a signal is never forwarded to a
 child-less pgid; the module doc of `group.rs` states this SIGINT/relay invariant in
 full. Between `prepare` and the first `spawn`, a racing SIGINT only bumps the
 handler's counter, which the launch loop's per-stage `signal::check` reads to abort.
 
-**A helper-evaluated stage can itself launch a pipeline, so `HelperProtocol::wire`
-clears absent value-channel env vars.** Bundled-tool dispatch goes through
-`run_pipeline` (a single anchorless stage whose wire grounds to `∅ → bytes`), so a `HelperEval`
-child may spawn its own nested helper. An absent value-channel fd left merely unset
-would ride the inherited environment into that nested helper, which would then parse
-a fd number already closed in its address space; `wire` (`pipeline/protocol/common.rs`)
-`env_remove`s the unused channel vars to break that inheritance.
+**A helper-evaluated stage can itself launch a pipeline.** Bundled-tool dispatch
+goes through `run_pipeline`, so a `HelperEval` child may spawn its own nested
+helper. Nested stages still receive only the byte routes and the helper control
+frames relevant to their own launch; no interior typed-value descriptor is an
+inheritance mechanism.
 
 **Out-of-process ral stages are subshells.** A helper stage's `cd`, env, or module
-changes do not flow back — only the pipe contents and the final value cross the
-boundary (`wants_mobile` is `false` for a stage; only the last value-typed stage
-sets `wants_value`), which is what keeps job control coherent
+changes do not flow back — only the byte pipe contents, final result, and
+observations cross the boundary. The final value report is enabled only for the
+last stage, which keeps job control coherent
 ([[design/pipelines|isolation]]).
 
 **Windows has no foreground handoff, and its pipeline spawn boundary is
 creation-time.** There is no `tcsetpgrp` to race; the terminal plan never selects
-`ForegroundExternalGroup`. The helper protocol still runs (gate / report / value
-edges) over anonymous OS pipe pairs (`pipeline/protocol/{unix,windows}.rs`), but
+`ForegroundExternalGroup`. The helper protocol still runs over anonymous OS
+pipe pairs for gate and final-report frames (`pipeline/protocol/{unix,windows}.rs`), but
 the parent side now writes numeric handle values into the helper environment and
 admits the raw handles to `process::Launch`. The Windows launch backend lowers
 that value through raw `CreateProcessW` with `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
-under a process-wide launch mutex, so report/value/gate handles cross only to the
+under a process-wide launch mutex, so report/gate handles cross only to the
 child named by that launch. Pipeline Job Object membership is likewise a launch
 fact: the group is prepared before spawn, the child is created suspended,
 assigned to the known job, then resumed; registration records a child already in
@@ -175,8 +139,8 @@ terminal plan and the guard ask the same authority
 `Escape::Stopped` rides out to the REPL, which records a `Stopped` job;
 [[map/repl/jobs|`JobTable`]] keys it by pgid. `try` and `audit` deliberately let
 `Escape::Stopped` propagate unclassified — a parked job is not a recoverable
-error — and pure-value pipelines never reach this flow, having no kernel stage to
-suspend.
+error — ordinary application and bind never reach this flow, having no kernel
+stage to suspend.
 
 Resuming is where ordering becomes load-bearing. `wait_foreground`
 (`ral/src/jobs.rs`) acquires a `ForegroundGuard` *first* — `tcsetpgrp(-pgid)`

@@ -1,13 +1,13 @@
 //! The pipeline-mode lattice: the ends of a stage's computation type
-//! `F[I,O,R] A` — `None` for a value edge, `Bytes` for a raw byte channel,
-//! `Var` for a variable inference resolves.
+//! `F[I,O,R] A` — `None` for no channel at all, `Bytes` for a raw byte
+//! channel, `Var` for a variable inference resolves.
 //!
-//! Connecting two stages demands *equality* of the producer's result mode and
-//! the consumer's input, so no value silently crosses a byte edge; that rule
-//! lives on the checker's `Unifier::unify_mode`, whose annotation pass grounds
-//! every stage into the [`Wire`] the evaluator reads off the IR.  A stage's
-//! `output` takes no part in that: chatter escapes the pipeline rather than
-//! riding its wire.
+//! An interior pipeline edge pins the producer's result mode and the
+//! consumer's input to `Bytes`, so no value crosses one; that rule lives in
+//! the checker's `infer_pipeline`, whose annotation pass grounds every stage
+//! into the [`Wire`] the evaluator reads off the IR.  A stage's `output`
+//! takes no part in it: chatter escapes the pipeline rather than riding its
+//! wire.
 //!
 //! These types ride inside a [`crate::typecheck::Scheme`] into the
 //! postcard-baked prelude, which carries no schema of its own; the serde
@@ -27,11 +27,12 @@ pub enum PipeMode {
     Var(ModeVar),
 }
 
-/// A command's computation type: `F[input, output, result]`.  `output` and
-/// `result` are the two byte conduits out and name different streams —
-/// `output` is chatter, the bytes that *escape* to whoever is watching;
-/// `result` is the payload, which belongs to whoever consumes the
-/// computation.  Neither bounds the other.
+/// A command's computation type: `F[input, output, result]`.
+///
+/// `output` and `result` are the two byte conduits out, and they name
+/// different streams — `output` is chatter, the bytes that *escape* to
+/// whoever is watching; `result` is the payload, which belongs to whoever
+/// consumes the computation.  Neither bounds the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PipeSpec {
     pub input: PipeMode,
@@ -66,7 +67,7 @@ impl PipeSpec {
 }
 
 /// A ground I/O mode: [`PipeMode`] with the `Var` arm removed, `Empty`
-/// standing for the `∅` value edge.
+/// standing for `∅`, the absent channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ByteMode {
     Bytes,

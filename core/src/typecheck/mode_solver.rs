@@ -13,9 +13,9 @@
 //! everything.
 //!
 //! Every join-shaped case on a mode's groundness lives here. The reads that
-//! remain outside — `infer_pipeline`'s byte-tail verdict, `Bind`'s result
-//! pin, `consumes_value_arg`, `lift_channels`' tail-shape verdict — inspect
-//! settled state to apply their own rules; none of them computes a join.
+//! remain outside — `Bind`'s result pin and `lift_channels`' tail-shape
+//! verdict — inspect settled state to apply their own rules; none of them
+//! computes a join.
 
 use super::env::{InferCtx, TyEnv};
 use super::error::Reason;

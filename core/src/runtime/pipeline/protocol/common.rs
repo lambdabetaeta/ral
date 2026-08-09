@@ -96,62 +96,35 @@ impl<T: serde::Serialize + Send + 'static> PendingFrame<T> {
     }
 }
 
-/// Parent-side ends of a helper stage's four channels — job gate in, report
-/// out, optional value edges — held together because one backend table,
-/// `platform::ENV`, names all four for the helper to find them by.
+/// Parent-side ends of a helper stage's two channels — job gate in and report
+/// out — held together because one backend table, `platform::ENV`, names both
+/// for the helper to find them by.
 pub(crate) struct HelperProtocol {
     job_gate: FrameGate<ChildEvalRequest>,
     child_report_writer: Option<platform::Channel>,
     report_reader: FrameReader<ChildEvalResponse>,
-    incoming_value: Option<platform::Channel>,
-    outgoing_value: Option<platform::Channel>,
 }
 
 impl HelperProtocol {
-    /// Re-exec ral behind `HELPER_FLAG` and wire the four channels onto it.
-    pub(crate) fn build_command(
-        incoming_value: Option<platform::Channel>,
-        outgoing_value: Option<platform::Channel>,
-    ) -> Result<(crate::process::Launch, Self), Break> {
+    /// Re-exec ral behind `HELPER_FLAG` and wire the job/report channels onto
+    /// it.
+    pub(crate) fn build_command() -> Result<(crate::process::Launch, Self), Break> {
         let mut cmd = self_reexec(HELPER_FLAG).map_err(pipe_error)?;
-        let proto = Self::wire(&mut cmd, incoming_value, outgoing_value)?;
+        let proto = Self::wire(&mut cmd)?;
         Ok((cmd, proto))
     }
 
-    fn wire(
-        cmd: &mut crate::process::Launch,
-        incoming_value: Option<platform::Channel>,
-        outgoing_value: Option<platform::Channel>,
-    ) -> Settled<Self> {
+    fn wire(cmd: &mut crate::process::Launch) -> Settled<Self> {
         let env = platform::ENV;
         let job_gate = FrameGate::<ChildEvalRequest>::wire(cmd, env.job)?;
         let (report_reader_ch, report_writer) = platform::pair()?;
         platform::pass(cmd, env.report, &report_writer)?;
         let report_reader = FrameReader::spawn(report_reader_ch, "pipeline report reader panicked");
 
-        // Clear an absent value channel rather than leave it unset: a stage
-        // the helper evaluates can run a pipeline of its own, and this
-        // helper's vars would otherwise ride the inherited environment into
-        // the nested helper, naming a descriptor closed in that process.
-        match incoming_value.as_ref() {
-            Some(input) => platform::pass(cmd, env.value_in, input)?,
-            None => {
-                cmd.env_remove(env.value_in);
-            }
-        }
-        match outgoing_value.as_ref() {
-            Some(output) => platform::pass(cmd, env.value_out, output)?,
-            None => {
-                cmd.env_remove(env.value_out);
-            }
-        }
-
         Ok(Self {
             job_gate,
             child_report_writer: Some(report_writer),
             report_reader,
-            incoming_value,
-            outgoing_value,
         })
     }
 
@@ -166,21 +139,15 @@ impl HelperProtocol {
             job_gate,
             mut child_report_writer,
             report_reader,
-            incoming_value,
-            outgoing_value,
         } = self;
         drop(child_report_writer.take());
-        drop(incoming_value);
-        drop(outgoing_value);
         (report_reader, job_gate.settle(job))
     }
 }
 
-/// The env vars a backend uses to name its four channels to the helper, which
+/// The env vars a backend uses to name its two channels to the helper, which
 /// parses them back into descriptors in `helper::serve_from_env`.
 pub(crate) struct EnvNames {
     pub(crate) job: &'static str,
     pub(crate) report: &'static str,
-    pub(crate) value_in: &'static str,
-    pub(crate) value_out: &'static str,
 }

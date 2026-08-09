@@ -391,17 +391,16 @@ fn guard_body_bytes_output_dominates_pure_cleanup() {
 }
 
 #[test]
-fn guard_cleanup_bytes_output_dominates_pure_body() {
-    // The cleanup's value is dropped, so its bytes have no consumer and
-    // escape as the guard's chatter.  The guard's own payload stays the
-    // body's — a value here — so this is chatter, not a byte edge.
-    assert_eq!(
-        first_stage_wire("guard { return unit } { echo hi } | cat"),
-        Wire {
-            input: ByteMode::Empty,
-            output: ByteMode::Bytes,
-            result: ByteMode::Empty
-        }
+fn guard_cleanup_bytes_do_not_make_a_value_payload_a_wire() {
+    // Cleanup chatter escapes to the ambient stream, but it is not the
+    // guard's payload.  The body's value therefore cannot cross an interior
+    // byte edge merely because cleanup writes bytes.
+    let errs = raw_errors("guard { return unit } { echo hi } | cat");
+    assert!(
+        errs.iter().any(|e| e
+            .hint()
+            .is_some_and(|h| h.contains("this stage produces a value"))),
+        "expected a producer-side byte-pipeline hint, got: {errs:?}"
     );
 }
 
@@ -538,18 +537,28 @@ fn pipeline_bytes_to_bytes_ok() {
 }
 
 #[test]
-fn pipeline_value_pass_through() {
-    // A pure stage feeds its return value as implicit arg to next stage.
-    ok("return hello | echo");
+fn pipeline_value_pass_through_is_rejected() {
+    // `|` is a byte conduit, not implicit data-last application.
+    let errs = raw_errors("return hello | echo");
+    assert!(
+        errs.iter().any(|e| matches!(
+            e.kind,
+            ral_core::typecheck::TypeErrorKind::ModeMismatch { .. }
+        )),
+        "expected a producer mode mismatch, got: {errs:?}"
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.hint().is_some_and(|h| h.contains("bind it"))),
+        "expected a teaching hint for the value producer, got: {errs:?}"
+    );
 }
 
 #[test]
 fn pipeline_byte_into_value_stage_is_mode_mismatch() {
-    // A byte-output stage feeding a value-input consumer is an adjacency
-    // mismatch caught at type-check time (SPEC §20.4).  This exercises the
-    // equality-strict `unify_mode`: the `ModeMismatch` arm (T0012) is live,
-    // not dead code coerced away.  `echo` is byte-output; `length` reads a
-    // value, not bytes.
+    // A byte producer feeding a value-input consumer is a consumer-side
+    // mismatch caught at type-check time.  `length` is a value application,
+    // not a byte reader.
     let errs = raw_errors("echo foo | length");
     assert!(
         errs.iter().any(|e| matches!(
@@ -561,12 +570,18 @@ fn pipeline_byte_into_value_stage_is_mode_mismatch() {
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
     );
+    assert!(
+        errs.iter().any(|e| e
+            .hint()
+            .is_some_and(|h| h.contains("does not read the byte channel"))),
+        "expected a consumer-side teaching hint, got: {errs:?}"
+    );
 }
 
 #[test]
 fn pipeline_var_tail_stays_shape_forcing_not_pinned() {
-    // Pins: a `Var`-typed pipeline tail mints a fresh `result` instead of
-    // pinning `∅`, so a forced parameter that writes bytes still typechecks.
+    // A forced variable can still become a byte-reading stage at the edge;
+    // the edge pins its input rather than classifying it as an application.
     ok("let ff = { |k| echo a | !$k }; ff { /bin/cat }");
 }
 
@@ -578,6 +593,23 @@ fn pipeline_var_tail_stays_shape_forcing_not_pinned() {
 #[test]
 fn block_stage_reading_bytes_before_its_last_statement_is_byte_input() {
     ok("echo foo | within [env: [X: 'y']] { from-lines; return unit }");
+}
+
+/// A ral block reaches stage position by being forced there — `!$reader`
+/// names a computation, so its channel-reading tail is the stage's input.  A
+/// bare block *literal* stays a value at that position and never advertises a
+/// byte input, which is why decoder tails written in ral must be named and
+/// forced (`decisions/260809_byte-only-pipelines`).
+#[test]
+fn a_forced_block_reads_bytes_where_a_block_literal_does_not() {
+    ok("let reader = { from-line }\ncat input.txt | !$reader");
+    let errs = raw_errors("cat input.txt | { from-line }");
+    assert!(
+        errs.iter().any(|e| e
+            .hint()
+            .is_some_and(|h| h.contains("does not read the byte channel"))),
+        "a block literal in stage position is a value, not a byte reader: {errs:?}"
+    );
 }
 
 /// A `let` captures its RHS's *output* into the bound value, but its demand on
@@ -601,6 +633,12 @@ fn block_stage_of_pure_statements_stays_value_input() {
         errs.iter()
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
+    );
+    assert!(
+        errs.iter().any(|e| e
+            .hint()
+            .is_some_and(|h| h.contains("does not read the byte channel"))),
+        "expected a consumer-side teaching hint, got: {errs:?}"
     );
 }
 
@@ -865,26 +903,29 @@ fn recursive_sibling_arm_outputs_stay_independent_under_the_join() {
 }
 
 #[test]
-fn step_labelled_variant_pipes_as_plain_value() {
-    // `x | f` is `f !{x}` at every value edge: a `more-labelled variant
-    // is ordinary data, whatever its payload's shape, and the consumer
-    // receives it whole.
-    ok("return `more [head: 1, tail: { return `ok 2 }] | { |v| echo $v }");
+fn value_payload_cannot_cross_into_a_block_stage() {
+    let errs = raw_errors("return `more [head: 1, tail: { return `ok 2 }] | { |v| echo $v }");
+    assert!(
+        errs.iter().any(|e| e
+            .hint()
+            .is_some_and(|h| h.contains("this stage produces a value"))),
+        "expected a producer-side teaching hint, got: {errs:?}"
+    );
 }
 
 #[test]
 fn stream_piped_whole_into_element_consumer_is_static_error() {
-    // The consumer receives the Step variant itself, not its elements;
-    // a parameter constrained to Int clashes with the stream type, and
-    // the hint points at the explicit eliminators.
+    // A stream is still a value.  It must be passed to an explicit stream
+    // eliminator rather than sent through a pipeline edge.
     let errs = raw_errors(
         "let s = !{stream-cons 1 { !{stream-nil} }}\n\
          $s | { |e| return $[$e + 1] } | { |y| return $[$y * 10] }",
     );
     assert!(
-        errs.iter()
-            .any(|e| e.hint().is_some_and(|h| h.contains("lazy Step stream"))),
-        "expected a stream-eliminator hint, got: {errs:?}"
+        errs.iter().any(|e| e
+            .hint()
+            .is_some_and(|h| h.contains("this stage produces a value"))),
+        "expected a byte-pipeline hint, got: {errs:?}"
     );
 }
 
@@ -1386,17 +1427,6 @@ fn all_pipeline_wires(comp: &Comp) -> Vec<(usize, Vec<Wire>)> {
     out
 }
 
-/// The ground wire of `src`'s first stage — the checker's whole verdict on
-/// one computation's three channel ends, chatter and payload apart.  `| cat`
-/// is the neutral consumer that makes a bare form into a stage: an external's
-/// input is an open mode, so it accepts either conduit without pinning it.
-fn first_stage_wire(src: &str) -> Wire {
-    let comp = annotated(src);
-    let pipelines = all_pipeline_wires(&comp);
-    assert_eq!(pipelines.len(), 1, "expected exactly one pipeline in {src:?}");
-    pipelines[0].1[0]
-}
-
 /// Every `Pipeline` node's `stage_types` slot, reachable anywhere.
 fn all_pipeline_stage_types(comp: &Comp) -> Vec<(usize, Vec<Ty>)> {
     let mut out = Vec::new();
@@ -1544,51 +1574,38 @@ fn if_value_branches_join_to_value_output() {
 }
 
 #[test]
-fn if_arm_writing_bytes_before_its_return_joins_to_byte_output() {
-    // The `then` arm's chatter is `Bytes` from `echo hi`, even though its
-    // final statement is a pure `return` — the node's output spec must still
-    // see it.  Its *payload* is the `Int` either arm returns, and that is the
-    // conduit a downstream stage would read, so the two must not be confused:
-    // `| from-string` here is now the adjacency error it always was.
-    assert_eq!(
-        first_stage_wire("if true { echo hi; return 1 } else { return 2 } | cat"),
-        Wire {
-            input: ByteMode::Empty,
-            output: ByteMode::Bytes,
-            result: ByteMode::Empty
-        }
-    );
-    has_error(
-        "if true { echo hi; return 1 } else { return 2 } | from-string",
-        "pipeline channels don't agree",
+fn if_arm_chatter_does_not_make_a_value_payload_a_wire() {
+    // Chatter from one arm is not the payload returned by the conditional.
+    let errs = raw_errors("if true { echo hi; return 1 } else { return 2 } | cat");
+    assert!(
+        errs.iter().any(|e| e
+            .hint()
+            .is_some_and(|h| h.contains("this stage produces a value"))),
+        "expected a producer-side teaching hint, got: {errs:?}"
     );
 }
 
 #[test]
-fn if_arm_echo_alongside_pure_return_arm_joins_to_byte_output() {
-    assert_eq!(
-        first_stage_wire("if true { echo a; return 1 } else { echo b; return 2 } | cat"),
-        Wire {
-            input: ByteMode::Empty,
-            output: ByteMode::Bytes,
-            result: ByteMode::Empty
-        }
+fn if_arm_echo_alongside_pure_return_arm_is_not_a_byte_payload() {
+    let errs = raw_errors("if true { echo a; return 1 } else { echo b; return 2 } | cat");
+    assert!(
+        errs.iter().any(|e| e
+            .hint()
+            .is_some_and(|h| h.contains("this stage produces a value"))),
+        "expected a producer-side teaching hint, got: {errs:?}"
     );
 }
 
 #[test]
-fn bind_rhs_writing_bytes_before_a_value_result_joins_to_byte_output() {
-    // Running `M to x. N` runs `M`, so `M`'s own chatter is the binder's too.
-    // Here `M`'s payload rides the value conduit (`return 5`), so no
-    // `Capture` swallows its `echo` — those bytes escape, and the binder's
-    // output spec must say so while its payload stays a value.
-    assert_eq!(
-        first_stage_wire("!{ let x = !{ echo hi; return 5 }; return unit } | cat"),
-        Wire {
-            input: ByteMode::Empty,
-            output: ByteMode::Bytes,
-            result: ByteMode::Empty
-        }
+fn bind_rhs_chatter_does_not_make_a_value_payload_a_wire() {
+    // A bind may observe bytes produced by its RHS, but those bytes do not
+    // turn the RHS's returned value into a pipeline payload.
+    let errs = raw_errors("!{ let x = !{ echo hi; return 5 }; return unit } | cat");
+    assert!(
+        errs.iter().any(|e| e
+            .hint()
+            .is_some_and(|h| h.contains("this stage produces a value"))),
+        "expected a producer-side teaching hint, got: {errs:?}"
     );
 }
 

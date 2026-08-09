@@ -5,7 +5,7 @@
 # input order and hands equal counts to locale collation.  Here the tally
 # is a map keyed by the line, and ties break by codepoint in every locale.
 
-let counts = group-by $id !{from-lines | stream-to-list}
+let counts = group-by $id !{stream-to-list !{from-lines}}
 let tally = map { |l| return [line: $l, n: !{length $counts[$l]}] } !{keys $counts}
 
 for !{reverse !{sort-list-by { |r| return $r[n] } $tally}} { |r|

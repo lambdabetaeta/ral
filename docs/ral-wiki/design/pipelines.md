@@ -1,57 +1,65 @@
-# Pipelines: byte processes and value folds
+# Pipelines: bytes between stages, values at boundaries
 
-**`|` is dataflow.** The pipe threads each stage's output into the next stage.
-The type of the connecting edge decides the runtime behaviour: the byte modes
-of [[design/types|computation types]] select one of two execution models. The
-result mode of the final stage decides where the pipeline's own result is:
+**`|` is a byte conduit.** A pipeline connects the payload of one stage to the
+input of the next, and every interior connection is `Bytes` on both sides. The
+last stage may return an ordinary ral value; that value is the pipeline's final
+result, not another interior edge.
 
-- a final stage on the value edge gives the pipeline a value payload;
-- a byte-wired final stage puts the pipeline's result on the wire, so the
-  pipeline's type is `⟨…, Bytes, Bytes⟩ Unit` and, by WF-2, the pipeline has
-  no value component.
+- A stage's `result` is its payload. For every non-final stage it is `Bytes`.
+- A following stage consumes that payload through `input = Bytes`.
+- A stage's `output` is visible chatter. It is not the payload carried to the
+  next stage.
+- The final stage's result mode is free: `Bytes` gives the byte result, while
+  `∅` gives the returned value.
 
-At a bind, the boundary inserts the [[design/types|capture]] coercion, so the
-binding receives the decoded text.
+Value composition is ordinary call-by-push-value composition. Use application
+to pass a value to a function and `let`/`to` to bind a computation's result;
+there is no pipeline-style combinator for values. A decoder can therefore end
+a pipeline — `cat data.json | from-json` — while a value produced by that
+decoder is composed by binding or application:
+
+```ral
+let document = cat data.json | from-json
+length $document
+```
+
+**Every multi-stage pipeline is process-staged.** The checker establishes the
+byte edges before evaluation, and the runtime launches the stages as one
+process group:
+
+- every stage, including ral-written stages, executes in a helper or external
+  child;
+- operating-system pipes carry every interior payload;
+- the parent ral process is not a member of the stage group;
+- the final value, when the last stage returns one, comes home in the
+  `ChildEvalResponse` selected by `FinalValue::Report`.
+
+The final-value report is deliberately helper-staged for now. Moving a
+value-returning tail into the parent would change job control, failure
+precedence, audit ordering, cancellation, input restoration, and capability
+enforcement; it is a separate decision.
+
+Out-of-process stages are subshells with respect to mutation: a helper stage's
+`cd`, environment, alias, or module changes do not flow back to the parent.
+Only pipe contents, the final result, and recorded observations cross the
+boundary. This keeps terminal ownership coherent: a shell computation inside
+its own foreground process group cannot both own the terminal and remain the
+parent's session.
 
 Failure is a separate axis. A pipeline propagates a stage's failure, but the
-pipe never *reacts* to it: recovering from failure is `?`'s and `try`'s job, and
-branching is on `Bool`, never on command success ([[design/failure|failure]]).
-
-**Value pipelines are folds.** When every stage operates on the value channel,
-`x | f` is typed data-last composition — it reduces to `f !{x}` and is evaluated
-sequentially in the parent. No process is spawned, no pipe exists, no process
-group is formed. `range 1 21 | filter $even | sum` is three function calls
-threaded by the value channel.
-
-**Byte pipelines are processes.** As soon as one edge touches bytes — an
-external command, or any byte-output stage — the whole pipeline runs as a
-Unix-style process pipeline:
-
-- every stage, *including* ral-implemented ones, executes in a subprocess;
-- all subprocesses share one process group;
-- the parent ral process is not a member of that group.
-
-This is what lets a terminal-touching pipeline behave exactly as a shell's does,
-regardless of whether a stage is `/bin/cat`, a handler, or a ral block.
-
-Out-of-process stages are therefore subshells with respect to mutation: a
-helper stage's `cd`, env, alias, or module changes do not flow back to the
-parent — only the pipe contents and the final value cross the boundary. This
-matches every traditional shell and is what keeps job control coherent: a shell
-process inside its own foreground pipeline cannot consistently both own the
-terminal and not own it. It is the same isolation a spawned block enjoys
-([[design/cbpv|immutable bindings]]).
+pipe never reacts to it: recovering from failure is `?`'s and `try`'s job, and
+branching is on `Bool`, never on command success
+([[design/failure|failure]]).
 
 The terminal-handoff and process-containment machinery is transport detail, not
-semantics. Unix uses process groups, a foreground guard, and helper job-frame
-gates where a tty handoff must settle before user code runs; Windows has no
-`tcsetpgrp` analogue, so it uses Job Objects after spawn and still needs a custom
-creation-time launch path to close its handle-inheritance and early-fork windows.
-The moving parts live in the [[map/core/runtime|runtime]]'s `pipeline/` and
-[[map/core/io-process|process]] maps.
+surface semantics. Unix uses process groups, a foreground guard, and helper
+job-frame gates where a tty handoff must settle before user code runs; Windows
+uses Job Objects and a creation-time launch path to close its handle-inheritance
+window. The moving parts live in the [[map/core/runtime|runtime]]'s `pipeline/`
+and [[map/core/io-process|process]] maps.
 
 See also [[design/types|types]], [[design/cbpv|cbpv]],
-[[design/scoping|scoping]].
+[[design/codecs|codecs]], [[design/scoping|scoping]].
 
 **Realised in** [[internals/pipeline-execution|pipeline-execution]].
 

@@ -14,7 +14,8 @@ mod common;
 use ral_core::transport::{Program, Run};
 use ral_core::types::{Capabilities, Escape, Mooring, Settled, Shell};
 use ral_core::{
-    Break, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value, builtins,
+    Break, HostSurface, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin,
+    SessionSchemes, Value, builtins, elaborator::elaborate, syntax::parser::parse, typecheck,
 };
 
 // ── Harness (same shape as `top_level_vs_block.rs`) ─────────────────────
@@ -55,6 +56,24 @@ fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
         RunReport::Ran { ending, .. } => ending.into_result(),
         RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }
+}
+
+/// Check a source string without opening the runtime door.  Static failures
+/// are reported as `RunReport::Static` by the shell, so a checker regression
+/// must be asserted before trying to evaluate this intentionally ill-typed
+/// pipeline.
+fn statically_rejected(source: &str) -> bool {
+    let ast = parse(source).unwrap_or_else(|e| panic!("parse error in {source:?}: {e:?}"));
+    let comp = elaborate(&ast, std::collections::HashSet::default(), "")
+        .unwrap_or_else(|e| panic!("elaborate error in {source:?}: {e:?}"));
+    typecheck(
+        &comp,
+        SessionSchemes::from_schemes(
+            common::prelude_schemes(),
+            HostSurface::default().builtin_table(),
+        ),
+    )
+    .is_err()
 }
 
 // ── (1) `try` must not swallow `exit` ────────────────────────────────────
@@ -244,19 +263,16 @@ fn audit_recording_survives_consecutive_audit_blocks() {
 //
 // Before A1, tail-ness was an ambient bit on `shell.mobile.control`
 // (`in_tail_position`) that every eliminator had to remember to clear.
-// Two eliminators forgot: a non-final value-pipeline stage and a
-// non-final fallback-chain arm both ran under the caller's tail flag, so
-// a tail call inside one escaped as `Control::Tail` and abandoned the
-// rest of the pipeline / chain (finding E1). After A1, `Tail` is a
+// One eliminator forgot: a non-final fallback-chain arm ran under the
+// caller's tail flag, so a tail call inside it escaped as `Control::Tail`
+// and abandoned the rest of the chain (finding E1). After A1, `Tail` is a
 // parameter of `eval_comp`, granted only to the final sub-computation;
 // a non-final stage / arm receives `Tail::No` by construction, so its
 // tail call stays a catchable application.
 //
-// The pure-pipe equation (decisions/260609) says `x | f = f !{x}`
-// unconditionally at every value edge, so an in-function pipeline must
-// equal the same pipeline at top level. The two tests below pin both:
-// the value reaching the consumer (site 1) and the fallback running
-// (site 2). The third test is the regression guard for the *other*
+// Value application is written explicitly, so a value-looking pipeline is a
+// checker error. The first test pins that rejection; the second still pins
+// the fallback running (site 2). The third test is the regression guard for the *other*
 // direction — a wrong grant that broke tail recursion — by recursing
 // 100 000 deep through every tail-bearing eliminator without tripping
 // the recursion cap or overflowing the host stack.
@@ -270,26 +286,13 @@ fn int_result(shell: &mut Shell, source: &str) -> i64 {
     }
 }
 
-/// E1 site 1 — a value pipeline inside a function must equal the same
-/// pipeline at top level.  Pre-fix, the non-final stage's tail call
-/// escaped and discarded the downstream stage, so `f $y | f` inside a
-/// function yielded `2` (one increment) where `f 1 | f` at top level
-/// (non-tail) yielded `3` (two increments).  The pure-pipe equation
-/// demands they agree.
+/// E1 site 1 — a value-looking pipeline is rejected before any stage can
+/// emit or tail-call.  The former pure-pipe fold (`f 1 | f`) no longer exists.
 #[test]
-fn pipeline_non_final_stage_is_not_tail_emitting() {
-    let mut shell = fresh_shell();
-    let _ = top_level(&mut shell, "let f = { |x| $[$x + 1] }");
-    let top = int_result(&mut shell, "f 1 | f");
-    let in_fn = int_result(&mut shell, "let gg = { |y| f $y | f }\n!{gg 1}");
-    assert_eq!(top, 3, "top-level `f 1 | f` must apply f twice");
-    assert_eq!(
-        in_fn, top,
-        "the in-function pipeline `f $y | f` must equal the top-level \
-         `f 1 | f` (the pure-pipe equation `x | f = f !{{x}}` holds at \
-         every value edge).  Pre-A1 the non-final stage emitted \
-         `Control::Tail`, discarding the final stage: in-fn = {in_fn}, \
-         top-level = {top}."
+fn value_pipeline_is_rejected_before_tail_emission() {
+    assert!(
+        statically_rejected("let f = { |x| $[$x + 1] }\nf 1 | f"),
+        "a value-looking pipeline must be rejected before evaluation"
     );
 }
 
@@ -328,10 +331,9 @@ fn chain_non_final_arm_failure_is_catchable() {
 
 /// The other direction — a wrong tail grant either reintroduces E1 (over-
 /// grant) or breaks tail recursion (under-grant).  This recurses deep
-/// through *every* tail-bearing eliminator: the bare lambda body, the
-/// selected `if` branch, the final chain arm, the final pipeline stage
-/// (as a bare consumer of the upstream), the `case` selected arm, and a
-/// bind continuation.  Each must trampoline in O(1) host frames; a
+/// through *every* remaining tail-bearing eliminator: the bare lambda body,
+/// the selected `if` branch, the final chain arm, the `case` selected arm, and
+/// a bind continuation.  Each must trampoline in O(1) host frames; a
 /// missing grant would overflow the host stack (or trip the default
 /// 1024-deep recursion cap) instead of returning the base case.
 ///
@@ -370,26 +372,14 @@ fn deep_tail_recursion_trampolines_through_every_eliminator() {
         "final-chain-arm tail recursion"
     );
 
-    // (c) recursion through the FINAL pipeline stage as a bare consumer
-    //     of the upstream value (`$[n-1] | loop`).
-    let mut shell = fresh_shell();
-    let piped = format!(
-        "let loop = {{ |n| if $[$n <= 0] {{ return $n }} else {{ $[$n - 1] | loop }} }}\n!{{loop {deep}}}"
-    );
-    assert_eq!(
-        int_result(&mut shell, &piped),
-        0,
-        "final-pipeline-stage tail recursion"
-    );
-
-    // (d) recursion through the selected `case` arm.
+    // (c) recursion through the selected `case` arm.
     let mut shell = fresh_shell();
     let cased = format!(
         "let loop = {{ |n| if $[$n <= 0] {{ return 0 }} else {{ case `go $[$n - 1] [`go: {{ |m| loop $m }}] }} }}\n!{{loop {deep}}}"
     );
     assert_eq!(int_result(&mut shell, &cased), 0, "case-arm tail recursion");
 
-    // (e) recursion through a bind continuation (`let m = …; loop $m`).
+    // (d) recursion through a bind continuation (`let m = …; loop $m`).
     let mut shell = fresh_shell();
     let bound = format!(
         "let loop = {{ |n| if $[$n <= 0] {{ return $n }} else {{ let m = $[$n - 1]\nloop $m }} }}\n!{{loop {deep}}}"

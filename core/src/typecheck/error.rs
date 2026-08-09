@@ -44,13 +44,11 @@ pub enum Reason {
     BuiltinTypedArg,
     /// A raising form's argument against the error-record shape it demands.
     ErrorRecordArg,
-    /// A stage's produced value against the next stage's parameter; the flag
-    /// marks a lazy Step stream, which must be consumed explicitly.
-    PipedValue {
-        step_stream: bool,
-    },
-    /// The byte-channel modes of two adjacent stages, at the edge between them.
-    PipelineEdge,
+    /// An interior pipeline producer tried to place a value on the byte
+    /// conduit.
+    PipelineProducer,
+    /// An interior pipeline consumer does not read the byte conduit.
+    PipelineConsumer,
     /// A pipeline's chatter join over every stage's escaping output.
     PipelineChatter,
     /// An unresolved computation forced to `Return` shape to read its value and modes.

@@ -100,21 +100,10 @@ fn literal_string_in_assignment() {
 }
 
 #[test]
-fn quoted_literal_pipeline_stage_is_not_executed_as_command() {
-    // `'abc'` is a value-producing stage (`∅` output), not a command: it
-    // feeds the next stage as a value.  The external consumer `blah` has
-    // an open input the value edge pins to `∅`, so the pipeline is well
-    // typed — it fails only because `blah` is not a command on PATH, never
-    // because `'abc'` was run as one.
-    let err = match eval("'abc' | blah") {
-        Err(Break::Error(err)) => err,
-        other => panic!("should fail because blah is unknown: {other:?}"),
-    };
-    assert!(
-        err.message.contains("blah") && err.message.contains("not found"),
-        "unexpected error: {}",
-        err.message
-    );
+fn quoted_literal_pipeline_stage_is_rejected_before_command_lookup() {
+    // A literal cannot become an implicit argument to the next stage.  The
+    // checker rejects the value payload before it attempts to resolve `blah`.
+    must_fail("'abc' | blah");
 }
 
 // ── Arithmetic type preservation ─────────────────────────────────────────
@@ -725,7 +714,10 @@ fn grant_exec_thunk_form_errors_with_clear_message() {
 fn within_handler_applies_inside_pipeline() {
     assert_eq!(
         must_succeed(
-            "within [handlers: [cat: { |args| echo mocked }]] { let n = !{cat /nonexistent | from-string | length}; return $n }"
+            "within [handlers: [cat: { |args| echo mocked }]] { \
+             let text = !{cat /nonexistent | from-string}\n\
+             let n = !{length $text}\n\
+             return $n }"
         ),
         Value::Int(7)
     );
@@ -2697,22 +2689,17 @@ fn audit_direct_external_pipeline_stage_appears_in_tree() {
 // resolve to bundled tools spawned as direct `--ral-bundled-tool`
 // children.
 
-/// The pure-pipe equation `x | f = f !{x}` holds across a *process
-/// boundary*.  `echo abc | from-string | length` is process-staged: the
-/// `from-string` value crosses a value edge into the `length` helper
-/// stage, where it is forced once.  `"abc\n"` has four characters, so a
-/// correct single force yields 4 — a missing or double force would not.
-/// (`scope_escapes.rs::pipeline_non_final_stage_is_not_tail_emitting` pins
-/// the same equation for the *in-process* `PureValue` fold; this is its
-/// cross-process counterpart.)
+/// A decoder may be the final stage of a process pipeline and return its
+/// value through the report frame.  The value can then be used by ordinary
+/// application in the parent; no implicit value edge is involved.
 #[cfg(unix)]
 #[test]
-fn helper_stage_forces_value_edge_across_process_boundary() {
+fn decoder_tail_returns_value_across_process_boundary() {
     assert_eq!(
-        must_succeed("!{echo abc | from-string | length}"),
+        must_succeed("let text = !{echo abc | from-string}\n!{length $text}"),
         Value::Int(4),
-        "the value edge into a helper-eval stage must force exactly once \
-         (`x | f = f !{{x}}`): `echo abc` yields `\"abc\\n\"` (4 chars)"
+        "the decoder tail returns `\"abc\\n\"` (4 chars) through the \
+         final report path"
     );
 }
 
@@ -2726,7 +2713,8 @@ fn helper_stage_cd_does_not_flow_back_to_parent() {
     assert_eq!(
         must_succeed(
             "let before = !{pwd}\n\
-             !{echo x | from-string | { |_| cd /tmp; return unit }}\n\
+             let wander = { from-line; cd /tmp; return unit }\n\
+             !{echo x | !$wander}\n\
              let after = !{pwd}\n\
              return !{equal $before $after}"
         ),
@@ -2752,7 +2740,10 @@ fn helper_stage_audit_observations_merge_into_parent_tree() {
             collect_cmds(&child, out);
         }
     }
-    let tree = must_succeed("audit { echo seed | from-string | { |s| /bin/echo $s } }");
+    let tree = must_succeed(
+        "let relay = { from-line; /bin/echo helper }\n\
+         audit { echo seed | !$relay }",
+    );
     let mut cmds = Vec::new();
     collect_cmds(&tree, &mut cmds);
     assert!(

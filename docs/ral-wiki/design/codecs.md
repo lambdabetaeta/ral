@@ -1,9 +1,9 @@
 # Codecs: the typed crossing between bytes and values
 
-**The `from-X` / `to-X` builtins move a [[design/pipelines|pipeline]] edge
-between the byte channel and structured values, and the move is a typing
-fact.** A decoder reads the byte channel and returns a value. An encoder takes
-one value, writes the encoded bytes, and those bytes are its result:
+**The `from-X` / `to-X` builtins name the typed crossing between a byte
+pipeline and structured values.** A decoder reads the byte channel and returns
+a value. An encoder takes one value, writes the encoded bytes, and those bytes
+are its result:
 
 - every decoder has the computation type `from-X : ⟨Bytes, ∅, ∅⟩ A`;
 - every encoder has the type `to-X : A → ⟨∅, Bytes, Bytes⟩ Unit`.
@@ -26,13 +26,14 @@ builtins:
 `PipeSpec::none` and `PipeSpec::decode` in `core/src/mode.rs` build the two
 value-payload shapes; `ret_bytes` in `core/src/typecheck/builtins.rs` builds
 the two byte-payload shapes for builtins, and `external_exec_comp_ty` in
-`core/src/typecheck/infer.rs` builds the external-command shape. The [[design/pipelines|pipe]] connects two
-stages only when the left output mode equals the right input mode. The modes
-therefore admit `cmd | from-json` and `to-json $x | cmd` (`Bytes` meets
-`Bytes`), and they reject a value where bytes are due. A program crosses the
-boundary only when it names a codec. The decode is typed at the crossing:
-`from-json` yields a fresh value type, and the inferencer threads that type
-onward. A misspelled codec fails at command lookup
+`core/src/typecheck/infer.rs` builds the external-command shape. The
+[[design/pipelines|pipe]] connects a producer's `result` to the next stage's
+`input`, and every interior connection is `Bytes`/`Bytes`. The modes therefore
+admit `cmd | from-json` and `to-json $x | cmd` (`Bytes` meets `Bytes`), and they
+reject a value where bytes are due. A program crosses the boundary only when it
+names a codec. The decode is typed at the final stage:
+`from-json` yields a fresh value type for the pipeline's result. A misspelled
+codec fails at command lookup
 ([[design/builtins|why each codec is its own builtin]]).
 
 ## The two directions
@@ -41,8 +42,8 @@ A decoder takes no value argument. It reads the byte channel, whether that
 channel is a `< file` redirect or the left stage of a pipeline. Each decoder
 is declared with arity 0, so a passed value is a type error, raised before the
 call runs (`` `from-json` takes no argument — it reads the byte channel ``).
-The error's hint names the fix: pipe the value through the matching encoder,
-so the bytes enter the channel that a decoder reads —
+The error's hint names the fix: apply the matching encoder, then send its bytes
+through the pipeline so the decoder has a channel to read —
 `to-string $s | from-json` for JSON in a `String`, `to-bytes $b | from-string`
 for a `Bytes` value (for example `$r[stdout]` from `await`). The decoders:
 
@@ -54,6 +55,11 @@ for a `Bytes` value (for example `$r[stdout]` from `await`). The decoders:
   `String`, because CSV is untyped — coerce with `int` / `float`; the reader
   handles quoted fields, embedded commas, and embedded newlines;
 - `from-lines` → a line stream (below).
+
+**A decoder is a legal pipeline tail.** `cat data.json | from-json` returns a
+decoded value. A later stage cannot consume that value through `|`; bind it and
+use ordinary application instead, for example
+`let document = cat data.json | from-json` followed by `length $document`.
 
 An encoder takes one value and writes its encoded form to the byte channel.
 `to-bytes`, `to-string`, `to-lines` (which joins a list with newlines),

@@ -1,8 +1,8 @@
 # Test: pipes, redirects, fd numbers, command substitution
 
-# Basic pipe
-echo 'hello world' | from-string | upper
-# Expected: HELLO WORLD (if upper works as a command)
+# Basic pipe, ended by a decoder; the decoded String is an ordinary argument
+echo !{upper !{echo 'hello world' | from-string}}
+# Expected: HELLO WORLD
 
 # Multi-stage pipe: external | external
 printf "cherry\napple\nbanana\n" | grep "apple"
@@ -10,7 +10,11 @@ printf "cherry\napple\nbanana\n" | grep "apple"
 
 # Multi-stage pipe: internal | internal over explicit byte boundary
 let fruits = ["cherry", "apple", "banana"]
-sort-list $fruits | map { |x| echo $x }
+let show = {
+    let ls = !{from-lines}
+    stream-each { |l| echo $l } $ls
+}
+to-lines !{sort-list $fruits} | !$show
 # Expected: apple banana cherry (sorted)
 
 # Redirect stdout

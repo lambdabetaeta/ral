@@ -452,20 +452,20 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
             }
             .to_string(),
         ),
-        Reason::PipedValue { step_stream } => {
-            let mut hint = String::from(
-                "this stage produces a value that is piped into the next \
-                 stage's function — the value's type and the function's \
-                 parameter type must agree",
-            );
-            if *step_stream {
-                hint.push_str(
-                    "; this stage receives a lazy Step stream — consume it \
-                     explicitly with stream-each / stream-map / stream-to-list",
-                );
-            }
-            Some(hint)
-        }
+        Reason::PipelineProducer => Some(
+            "`|` connects byte streams, but this stage produces a value — \
+             bind it (`let x = ...`) and pass it on by ordinary application \
+             (`f $x`), or encode it (`to-json`, `to-lines`, `echo`) to put \
+             bytes on the channel; a decoder ends a pipeline, it cannot sit \
+             in the middle of one"
+                .to_string(),
+        ),
+        Reason::PipelineConsumer => Some(
+            "`|` connects byte streams, but this stage does not read the byte \
+             channel — apply it to its argument (`f $x`) rather than piping \
+             into it, or read the channel with a decoder such as `from-line`"
+                .to_string(),
+        ),
         Reason::OptionField { form, key } => Some(format!("{form} {key}: wrong value type")),
         Reason::ErrorRecordArg => Some(
             "a failure is raised with an error record: at least `[status: Int]` with a \
@@ -480,7 +480,6 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         ),
         Reason::AliasParam
         | Reason::BuiltinTypedArg
-        | Reason::PipelineEdge
         | Reason::ReturnShape
         | Reason::TryHandler
         | Reason::ScopeBody

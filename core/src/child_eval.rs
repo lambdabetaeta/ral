@@ -10,7 +10,6 @@ use crate::evaluator::absorb_tail;
 use crate::evaluator::call;
 use crate::io::TerminalState;
 use crate::ir::Comp;
-use crate::runtime::pipeline::helper::StageValue;
 use crate::serial::{
     InternCtx, ScopeTable, SerialEnvSnapshot, SerialValue, WireDecoder, is_handle, scrub,
 };
@@ -56,7 +55,7 @@ pub(crate) struct ChildEvalRequest {
     pub body: Arc<Comp>,
     pub mobile: WireMobile,
     /// Stage closure env: the child pushes a child scope and applies `body`
-    /// via [`call::invoke`] with the upstream value data-last.
+    /// via [`call::invoke`].
     pub captured: Option<SerialEnvSnapshot>,
     /// An instruction to the child rather than snapshot state, hence its own
     /// field — see [`Audit::active_policy`](crate::types::Audit::active_policy).
@@ -201,7 +200,7 @@ pub(crate) struct DecodedResponse {
 
 /// Re-phrase a value-serialization failure as a process-boundary error,
 /// keeping the value's own hint when it has one (a `Handle`'s already points
-/// at `await`).  Shared with the pipeline value edge in
+/// at `await`).  Shared with the stage report boundary in
 /// `runtime/pipeline/helper`.
 pub(crate) fn transfer_error(err: &Error) -> Error {
     let hint = err.hint.clone().unwrap_or_else(|| {
@@ -250,15 +249,13 @@ struct EvalOutcome {
     last_status: i32,
 }
 
-/// Evaluate one stage in a freshly hydrated child shell.  `force_output`
-/// applies the value edge's `!{x}` before the value ships.  An outer `Err`
-/// is a *pre-eval* fault — arc rebuild or mobile hydration, the body never
-/// ran — which [`run_child_eval`] folds into a [`break_response`].
-fn eval_request(
-    request: ChildEvalRequest,
-    upstream: Option<StageValue>,
-    force_output: bool,
-) -> Settled<EvalOutcome> {
+/// Evaluate one stage in a freshly hydrated child shell.  The stage's value
+/// ships as evaluated: it is the pipeline's own result, so forcing it here
+/// would run a suspension the program never forced and contradict the type
+/// the checker read off the final stage.  An outer `Err` is a *pre-eval*
+/// fault — arc rebuild or mobile hydration, the body never ran — which
+/// [`run_child_eval`] folds into a [`break_response`].
+fn eval_request(request: ChildEvalRequest) -> Settled<EvalOutcome> {
     let ChildEvalRequest {
         scope_table,
         body,
@@ -296,26 +293,13 @@ fn eval_request(
         })?
         .into_runtime(&dec)?;
     let mut child = Shell::child_of(&captured, &mut shell);
-    let upstream = upstream
-        .map(|sv| {
-            let upstream_dec = WireDecoder::for_shell(&child, &sv.scope_table)?;
-            sv.value.into_runtime(&upstream_dec)
-        })
-        .transpose()?;
     // A tail call cannot cross the boundary — the parent's callee and args
     // are meaningless in this address space — so settle it here.
     let result = absorb_tail(
-        call::invoke(&body, upstream, Tail::No, &mooring, &mut child),
+        call::invoke(&body, Tail::No, &mooring, &mut child),
         &mooring,
         &mut child,
     );
-    let result = if force_output {
-        result.and_then(|value| {
-            crate::runtime::pipeline::force_pipe_value(value, &mooring, &mut child)
-        })
-    } else {
-        result
-    };
     // Before `return_to`, which would merge the fragment into the outer shell.
     let audit_observations = child.local.audit.take_fragment().into_observations();
     child.return_to(&mut shell);
@@ -373,21 +357,14 @@ fn break_to_outcome(b: Break) -> WireOutcome {
     }
 }
 
-/// The one child runner.  The returned [`Value`] is the in-process value for
-/// the pipeline's value-out edge — independent of `wants_value`, which gates
-/// only the value serialized into the response.  A value that `wants_value`
-/// asked for but cannot be serialized becomes a [`WireOutcome::Error`], not a
-/// transport fault.
-pub(crate) fn run_child_eval(
-    request: ChildEvalRequest,
-    upstream: Option<StageValue>,
-    force_output: bool,
-) -> (ChildEvalResponse, Option<Value>) {
+/// The one child runner.  A value that `wants_value` asked for but cannot be
+/// serialized becomes a [`WireOutcome::Error`], not a transport fault.
+pub(crate) fn run_child_eval(request: ChildEvalRequest) -> ChildEvalResponse {
     let wants_value = request.wants_value;
-    let outcome = match eval_request(request, upstream, force_output) {
+    let outcome = match eval_request(request) {
         Ok(outcome) => outcome,
         // The body never ran: no audit, no output value.
-        Err(b) => return (break_response(b), None),
+        Err(b) => return break_response(b),
     };
     let EvalOutcome {
         result,
@@ -397,30 +374,30 @@ pub(crate) fn run_child_eval(
 
     let audit_observations = match pack_audit_observations(audit_observations) {
         Ok(observations) => observations,
-        Err(b) => return (break_response(b), None),
+        Err(b) => return break_response(b),
     };
 
     let mut ctx = InternCtx::new();
 
-    let (outcome, output_value) = match result {
+    let outcome = match result {
         Ok(value) => {
             let packed = if wants_value {
                 match SerialValue::from_runtime(&value, &mut ctx) {
                     Ok(serial) => Some(serial),
                     Err(e) => {
                         let outcome = break_to_outcome(Break::Error(transfer_error(&e)));
-                        return finish(ctx, outcome, last_status, audit_observations, None);
+                        return finish(ctx, outcome, last_status, audit_observations);
                     }
                 }
             } else {
                 None
             };
-            (WireOutcome::Ok(packed), Some(value))
+            WireOutcome::Ok(packed)
         }
-        Err(b) => (break_to_outcome(b), None),
+        Err(b) => break_to_outcome(b),
     };
 
-    finish(ctx, outcome, last_status, audit_observations, output_value)
+    finish(ctx, outcome, last_status, audit_observations)
 }
 
 /// Assemble the response from its fully-packed parts.  A scope table that
@@ -431,25 +408,20 @@ fn finish(
     outcome: WireOutcome,
     last_status: i32,
     audit_observations: Vec<WireAuditObservation>,
-    output_value: Option<Value>,
-) -> (ChildEvalResponse, Option<Value>) {
-    let (scope_table, outcome, output_value) = match ctx.finish() {
-        Ok(table) => (table, outcome, output_value),
+) -> ChildEvalResponse {
+    let (scope_table, outcome) = match ctx.finish() {
+        Ok(table) => (table, outcome),
         Err(e) => (
             ScopeTable::default(),
             break_to_outcome(Break::Error(transfer_error(&e))),
-            None,
         ),
     };
-    (
-        ChildEvalResponse {
-            scope_table,
-            outcome,
-            last_status,
-            audit_observations,
-        },
-        output_value,
-    )
+    ChildEvalResponse {
+        scope_table,
+        outcome,
+        last_status,
+        audit_observations,
+    }
 }
 
 /// A response for a failure that fires before, or instead of, a real eval:
@@ -551,22 +523,6 @@ mod tests {
             &shell.session.sources,
         )
         .expect("pack")
-    }
-
-    #[test]
-    fn stage_job_round_trip_applies_upstream_data_last() {
-        let shell = Shell::default();
-        let stage = compile_one("{ |x| return $[$x + 1] }");
-        let request = pack_stage(stage, &shell, true);
-        let upstream = crate::runtime::pipeline::helper::pack_stage_value(&Value::Int(41))
-            .expect("pack upstream");
-        let (response, value) = run_child_eval(request, Some(upstream), false);
-        let decoded = decode_response(response, &shell).expect("decode");
-        assert_eq!(value, Some(Value::Int(42)));
-        assert_eq!(decoded.value, Some(Value::Int(42)));
-        assert_eq!(decoded.last_status, 0);
-        assert!(decoded.audit_observations.is_empty());
-        assert!(decoded.signal.is_none());
     }
 
     #[test]
@@ -798,13 +754,11 @@ mod tests {
         let shell = Shell::default();
         let stage = compile_one("return 7");
         let request = pack_stage(stage, &shell, false);
-        let (response, value) = run_child_eval(request, None, false);
+        let response = run_child_eval(request);
         assert!(
             matches!(response.outcome, WireOutcome::Ok(None)),
             "response value should be skipped"
         );
-        // The value-out edge stays usable regardless.
-        assert_eq!(value, Some(Value::Int(7)));
     }
 
     #[test]
@@ -815,9 +769,8 @@ mod tests {
 
         let stage = compile_one("twice 21");
         let request = pack_stage(stage, &shell, true);
-        let (response, value) = run_child_eval(request, None, false);
+        let response = run_child_eval(request);
         let _ = decode_response(response, &shell).expect("decode");
-        assert_eq!(value, Some(Value::Int(42)));
     }
 
     #[test]

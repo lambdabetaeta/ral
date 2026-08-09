@@ -704,8 +704,8 @@ impl Elaborator {
 
     /// Isolates hoists like [`Self::elab_guarded`], but reads a surface `{ … }`
     /// as the thunk value it denotes: a pipeline stage is data the pipeline
-    /// drives — a producer is forced, a consumer has the upstream value applied
-    /// — whereas reading it inline would splice upstream onto its last command.
+    /// drives, with every interior handoff carried as bytes. Reading it inline
+    /// would splice the stage's statements into the surrounding computation.
     fn elab_isolated(&mut self, ast: &Ast) -> Comp {
         let mut stage_binds = Vec::new();
         let body = self.elab_expr(ast, &mut stage_binds);

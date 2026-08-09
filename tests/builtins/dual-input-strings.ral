@@ -44,8 +44,8 @@ let parsed = !{to-string '{"k": 7}' | from-json}
 assert_eq 'parse-json wrapper explicit' 7 $parsed[k]
 let rl = lines "u\nv"
 assert_eq 'read-lines wrapper explicit' 2 !{length $rl}
-# to-X encoders write to the byte channel: value piped to from-X roundtrip
-let round2 = [x: 1] | to-json | from-json
+# to-X encoders write to the byte channel; the from-X decoder ends the pipe
+let round2 = to-json [x: 1] | from-json
 assert_eq 'to-json piped roundtrip' 1 $round2[x]
 
 # bytes codec roundtrip — to-bytes piped to from-bytes gives Value::Bytes

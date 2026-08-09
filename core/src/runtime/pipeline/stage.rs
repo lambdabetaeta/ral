@@ -109,14 +109,8 @@ pub(super) fn launch_helper_stage(
     group: &mut PipelineGroup,
     park_on_stop: bool,
 ) -> Settled<(HelperStageHandle, DeferredFrame)> {
-    let StageRoute {
-        stdin,
-        stdout,
-        value_in,
-        value_out,
-        ..
-    } = route;
-    let (mut cmd, proto) = HelperProtocol::build_command(value_in, value_out)?;
+    let StageRoute { stdin, stdout, .. } = route;
+    let (mut cmd, proto) = HelperProtocol::build_command()?;
     let plumbing = wire_stage_stdio(&mut cmd, stdin, stdout, group, shell)?;
     let running = spawn_into_group(
         group,

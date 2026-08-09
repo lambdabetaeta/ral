@@ -7,7 +7,7 @@
 let [repo] = $ARGS
 
 let merged = within [dir: $repo] {
-    git branch --merged main '--format=%(refname:short)' | from-lines | stream-to-list
+    stream-to-list !{git branch --merged main '--format=%(refname:short)' | from-lines}
 }
 
 for !{filter { |b| return $[not !{equal $b 'main'}] } $merged} { |b| echo $b }

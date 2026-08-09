@@ -10,9 +10,7 @@
 use os_pipe::{PipeReader, PipeWriter};
 use std::io::{Read, Write};
 
-use super::super::helper::{
-    JOB_HANDLE_ENV, REPORT_HANDLE_ENV, VALUE_IN_HANDLE_ENV, VALUE_OUT_HANDLE_ENV,
-};
+use super::super::helper::{JOB_HANDLE_ENV, REPORT_HANDLE_ENV};
 use super::common::{EnvNames, pipe_error};
 use crate::types::{Break, Settled};
 
@@ -85,6 +83,4 @@ pub(crate) fn pass(cmd: &mut crate::process::Launch, env: &str, ch: &Channel) ->
 pub(crate) const ENV: EnvNames = EnvNames {
     job: JOB_HANDLE_ENV,
     report: REPORT_HANDLE_ENV,
-    value_in: VALUE_IN_HANDLE_ENV,
-    value_out: VALUE_OUT_HANDLE_ENV,
 };
