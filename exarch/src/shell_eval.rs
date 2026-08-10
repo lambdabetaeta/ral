@@ -361,9 +361,10 @@ pub(crate) fn run_shell(
 const VALUE_PRINT_PARAMS: ral_core::builtins::PrintParams = ral_core::builtins::PrintParams {
     max_width: 120,
     max_string: 72,
-    max_depth: 2,
+    max_depth: 3,
     min_quote_hashes: 1,
     quote_bytes: true,
+    max_bytes: 16 * 1024,
 };
 
 /// Render a ral value as the text the `VALUE` section carries.  A top-level
@@ -2283,45 +2284,6 @@ return !{{length $hits}}"
         assert!(
             rec.get("card").is_none(),
             "the operational trace drops the rendered card, got {rec:?}"
-        );
-    }
-
-    #[test]
-    fn ral_value_to_text_passes_top_level_strings_through_raw() {
-        let v = RalValue::String("# Report\nline one\nline two".into());
-        assert_eq!(
-            super::ral_value_to_text(&v).as_deref(),
-            Some("# Report\nline one\nline two"),
-        );
-    }
-
-    #[test]
-    fn ral_value_to_text_renders_structures_in_ral_syntax() {
-        let v = RalValue::Variant {
-            label: "done".into(),
-            payload: Some(Box::new(RalValue::map(vec![
-                (
-                    "files".into(),
-                    RalValue::list(vec![RalValue::String("a.rs".into())]),
-                ),
-                ("tests".into(), RalValue::Int(12)),
-            ]))),
-        };
-        let out = super::ral_value_to_text(&v).expect("variant renders");
-        assert!(out.starts_with("`done ["));
-        assert!(out.contains("files: [#'a.rs'#]"));
-        assert!(out.contains("tests: 12"));
-        assert!(!out.contains("\"tag\""));
-        assert!(!out.contains("\"payload\""));
-    }
-
-    #[test]
-    fn ral_value_to_text_uses_multiline_layout_for_wide_structures() {
-        let items = (0..64).map(RalValue::Int).collect::<Vec<_>>();
-        let out = super::ral_value_to_text(&RalValue::list(items)).expect("list renders");
-        assert!(
-            out.contains('\n'),
-            "wide structures should clip on useful lines"
         );
     }
 

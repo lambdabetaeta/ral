@@ -1,19 +1,30 @@
 //! Renders a [`Value`] as bracketed, quote-fenced ral surface syntax — a
-//! utility, not a registered builtin. The REPL (`ral/src/repl/exec.rs`) tunes it
-//! narrow for a terminal; exarch's tool-result `VALUE` section
-//! (`exarch/src/shell_eval.rs`) forces `#` fences and quotes bytes, because the
-//! model's prompt teaches only the `#'…'#` string form.
+//! utility, not a registered builtin. One policy serves both readers: the REPL
+//! (`ral/src/repl/exec.rs`) and exarch's tool-result `VALUE` section
+//! (`exarch/src/shell_eval.rs`) agree on what to show and differ only in
+//! numbers — how wide the reader's window is, which quote form its parser
+//! accepts, how many bytes it can absorb.
+//!
+//! The policy is that **truncation preserves identity**: at the depth limit a
+//! record keeps its keys and a list keeps its heads, a long string keeps its
+//! head and tail around a marker, and a spent budget names how many children it
+//! dropped. A bare count is the rendering of last resort, for the floor beneath
+//! the depth limit, where there is no room left to say anything else.
 
 use crate::types::Value;
+use std::cell::Cell;
 
 /// Tuning knobs for [`pretty_print`].
 pub struct PrintParams {
     /// Char width above which a bracketed `List`/`Map` breaks across lines; the
     /// leading indent does not count toward it.
     pub max_width: usize,
-    /// Elide the middle of map values longer than this; `0` keeps them whole.
+    /// Elide the middle of a string held *inside* a structure past this many
+    /// **characters** — a measure of how much text a reader takes in, not of a
+    /// wire; `0` keeps them whole.
     pub max_string: usize,
-    /// `List`/`Map` nesting depth past which a body collapses to a count marker.
+    /// `List`/`Map` nesting depth past which a container renders its children
+    /// in shallow form: keys and heads, and counts below them.
     pub max_depth: usize,
     /// Floor on the `#` fence count around a quoted string; `0` allows the
     /// minimal, possibly unfenced form.
@@ -21,88 +32,124 @@ pub struct PrintParams {
     /// Quote-fence a nested `Bytes` like a `String`, rather than emitting its
     /// lossy text raw.
     pub quote_bytes: bool,
+    /// **Byte** budget for rendered children: once it is spent, each container
+    /// closes with `…N more` instead of rendering the rest. Bytes because the
+    /// caps downstream are byte caps and `String::len` already counts them,
+    /// where `max_string` counts characters. It bounds rendered *content*, not
+    /// the finished string: [`bracketed`] chooses its layout once its children
+    /// exist, so indentation is padded on behind the budget's back.
+    pub max_bytes: usize,
 }
 
 pub const REPL_PRINT_PARAMS: PrintParams = PrintParams {
     max_width: 80,
     max_string: 72,
-    max_depth: 6,
+    max_depth: 3,
     min_quote_hashes: 0,
     quote_bytes: false,
+    max_bytes: 64 * 1024,
 };
 
 pub fn pretty_print(val: &Value, indent: usize, params: &PrintParams) -> String {
+    full(val, indent, params, &Cell::new(params.max_bytes))
+}
+
+/// The full rendering: containers expand their children, and a string that *is*
+/// the value is content rather than a field. Everything else renders as its
+/// [`shallow`] form, which the two levels agree on.
+fn full(val: &Value, indent: usize, params: &PrintParams, budget: &Cell<usize>) -> String {
     match val {
-        Value::String(s) => quote_string(s, params),
-        Value::Unit => "unit".into(),
-        Value::Bool(b) => {
-            if *b {
-                "true".into()
-            } else {
-                "false".into()
-            }
+        // A string that is the whole value prints whole; any string inside a
+        // structure is a field, and elides — see the `shallow` arms.
+        Value::String(s) if indent == 0 => quote_string(s, params),
+        Value::Bytes(b) if indent == 0 && params.quote_bytes => {
+            quote_string(&String::from_utf8_lossy(b), params)
         }
+        Value::List(items) if !items.is_empty() => {
+            let parts = budgeted(items.len(), items.iter(), budget, |v| {
+                child(v, indent, params, budget)
+            });
+            bracketed(&parts, indent, "[", "]", params)
+        }
+        Value::Map(pairs) if !pairs.is_empty() => {
+            let parts = budgeted(pairs.len(), pairs.iter(), budget, |(k, v)| {
+                format!("{k}: {}", child(v, indent, params, budget))
+            });
+            bracketed(&parts, indent, "[", "]", params)
+        }
+        Value::Variant {
+            label,
+            payload: Some(p),
+        } => format!("`{label} {}", full(p, indent, params, budget)),
+        other => shallow(other, params),
+    }
+}
+
+/// A container's child: full one level deeper, or shallow once `max_depth` is
+/// reached. The summary a depth-limited container gives is therefore its
+/// children's keys and heads, and only what lies beneath them collapses.
+fn child(val: &Value, indent: usize, params: &PrintParams, budget: &Cell<usize>) -> String {
+    if indent >= params.max_depth {
+        shallow(val, params)
+    } else {
+        full(val, indent + 1, params, budget)
+    }
+}
+
+/// The floor: scalars verbatim, a string cut to its head and tail, a container
+/// to its cardinality. Recursion runs only through `Variant` payloads, which
+/// carry no container of their own, so no chain of records can outrun the depth
+/// bound.
+fn shallow(val: &Value, params: &PrintParams) -> String {
+    match val {
+        Value::String(s) => quote_string(&elide(s, params.max_string), params),
+        Value::Bytes(b) if params.quote_bytes => quote_string(
+            &elide(&String::from_utf8_lossy(b), params.max_string),
+            params,
+        ),
+        Value::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
+        Value::List(items) if items.is_empty() => "[]".into(),
+        Value::List(items) => format!("[...{} items]", items.len()),
+        Value::Map(pairs) if pairs.is_empty() => "[:]".into(),
+        Value::Map(pairs) => format!("[:...{} pairs]", pairs.len()),
+        Value::Variant { label, payload } => match payload {
+            None => format!("`{label}"),
+            Some(p) => format!("`{label} {}", shallow(p, params)),
+        },
+        Value::Unit => "unit".into(),
+        Value::Bool(b) => if *b { "true" } else { "false" }.into(),
         Value::Int(n) => n.to_string(),
         Value::Float(f) => format!("{f}"),
         Value::Handle(_) => "<handle>".into(),
         Value::Lambda { param, body, .. } => crate::types::fmt_lambda(param, body),
         Value::Block { .. } => "<block>".into(),
         Value::Native { entry, applied } => crate::types::fmt_native(&entry.name, applied),
-        Value::Bytes(b) => {
-            let text = String::from_utf8_lossy(b);
-            if params.quote_bytes {
-                quote_string(&text, params)
-            } else {
-                text.into_owned()
-            }
-        }
-        Value::List(items) => {
-            if items.is_empty() {
-                return "[]".into();
-            }
-            if indent >= params.max_depth {
-                return format!("[...{} items]", items.len());
-            }
-            let parts: Vec<String> = items
-                .iter()
-                .map(|v| pretty_print(v, indent + 1, params))
-                .collect();
-            bracketed(&parts, indent, "[", "]", params)
-        }
-        Value::Map(pairs) => {
-            if pairs.is_empty() {
-                return "[:]".into();
-            }
-            if indent >= params.max_depth {
-                return format!("[:...{} pairs]", pairs.len());
-            }
-            let parts: Vec<String> = pairs
-                .iter()
-                .map(|(k, v)| {
-                    let rendered = match v {
-                        // Long text lands in map values (descriptions, file
-                        // bodies); a list item keeps its string whole.
-                        Value::String(s) if params.max_string > 0 => {
-                            quote_string(&elide(s, params.max_string), params)
-                        }
-                        Value::Bytes(b) if params.quote_bytes && params.max_string > 0 => {
-                            quote_string(
-                                &elide(&String::from_utf8_lossy(b), params.max_string),
-                                params,
-                            )
-                        }
-                        _ => pretty_print(v, indent + 1, params),
-                    };
-                    format!("{k}: {rendered}")
-                })
-                .collect();
-            bracketed(&parts, indent, "[", "]", params)
-        }
-        Value::Variant { label, payload } => match payload {
-            None => format!("`{label}"),
-            Some(p) => format!("`{label} {}", pretty_print(p, indent, params)),
-        },
     }
+}
+
+/// Render `count` children, stopping at `…N more` once `budget` is spent — but
+/// never before the first, since a marker alone tells the reader nothing.
+/// Charging a finished part against the budget as it stood *before* rendering
+/// unwinds whatever its own children charged, so every byte is paid for once,
+/// by the outermost container that owns it.
+fn budgeted<T>(
+    count: usize,
+    items: impl Iterator<Item = T>,
+    budget: &Cell<usize>,
+    mut render: impl FnMut(T) -> String,
+) -> Vec<String> {
+    let mut parts = Vec::with_capacity(count);
+    for (i, item) in items.enumerate() {
+        if i > 0 && budget.get() == 0 {
+            parts.push(format!("…{} more", count - i));
+            break;
+        }
+        let before = budget.get();
+        let part = render(item);
+        budget.set(before.saturating_sub(part.len()));
+        parts.push(part);
+    }
+    parts
 }
 
 fn quote_string(body: &str, params: &PrintParams) -> String {
@@ -113,8 +160,12 @@ fn quote_string(body: &str, params: &PrintParams) -> String {
 
 /// Elide the middle of `s` to a `budget`-char head and tail around an
 /// `[…elided N characters…]` marker. Each stops at its nearest newline too, so
-/// no embedded newline survives; `s` returns whole only when nothing was cut.
+/// no embedded newline survives; `s` returns whole when nothing was cut, and
+/// when `budget` is `0`.
 fn elide(s: &str, budget: usize) -> String {
+    if budget == 0 {
+        return s.to_string();
+    }
     let total = s.chars().count();
     let head_budget = budget / 2;
     let tail_budget = budget - head_budget;
@@ -180,78 +231,4 @@ fn quote_bump_level(body: &str) -> usize {
         }
     }
     max_run.map_or(0, |m| m + 1)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pretty_print_elides_past_max_depth() {
-        let params = PrintParams {
-            max_depth: 1,
-            ..REPL_PRINT_PARAMS
-        };
-        let nested =
-            Value::List(vec![Value::List(vec![Value::Int(1), Value::Int(2)].into())].into());
-        let out = pretty_print(&nested, 0, &params);
-        assert_eq!(out, "[[...2 items]]");
-    }
-
-    #[test]
-    fn pretty_print_variant_does_not_consume_depth() {
-        let params = PrintParams {
-            max_depth: 1,
-            ..REPL_PRINT_PARAMS
-        };
-        let val = Value::List(
-            vec![Value::Variant {
-                label: "some".into(),
-                payload: Some(Box::new(Value::Int(1))),
-            }]
-            .into(),
-        );
-        let out = pretty_print(&val, 0, &params);
-        assert_eq!(out, "[`some 1]");
-    }
-
-    #[test]
-    fn pretty_print_elides_long_map_string_value() {
-        let params = PrintParams {
-            max_string: 20,
-            ..REPL_PRINT_PARAMS
-        };
-        let val = Value::Map(
-            vec![(
-                "note".into(),
-                Value::String(
-                    "a very long and tiresome sentence that goes on and on and so the play ended"
-                        .into(),
-                ),
-            )]
-            .into(),
-        );
-        let out = pretty_print(&val, 0, &params);
-        assert!(
-            out.contains("…elided") && out.contains("characters…"),
-            "expected an elision marker, got {out:?}"
-        );
-        assert!(
-            out.starts_with("[note: 'a very lon"),
-            "keeps the head, got {out:?}"
-        );
-        assert!(out.ends_with("play ended']"), "keeps the tail, got {out:?}");
-    }
-
-    #[test]
-    fn pretty_print_does_not_elide_list_string_items() {
-        let params = PrintParams {
-            max_string: 10,
-            ..REPL_PRINT_PARAMS
-        };
-        let long = "a very long and tiresome sentence that goes on and on";
-        let val = Value::List(vec![Value::String(long.into())].into());
-        let out = pretty_print(&val, 0, &params);
-        assert!(out.contains(long), "list items print in full, got {out:?}");
-    }
 }

@@ -169,7 +169,11 @@ Bodies are grouped by concern, one submodule each:
 - `help.rs` — `help` (arity-0 command index) and `explain <name>` lookup;
 - `print.rs` — the value pretty-printer shared by the REPL and exarch's
   tool-result rendering (`PrintParams`; a rendering utility, not a registered
-  builtin);
+  builtin). One printer, one policy, per-reader numbers: truncation preserves
+  identity — the depth limit summarises (keys and heads) and only the floor
+  beneath it counts, a string elides unless it *is* the whole value, and a byte
+  budget is spent inside each container, which closes with `…N more`. The two
+  readers differ only in window, quote fence, and absorbable bytes;
 - `util.rs` — shared helpers, JSON coercion.
 
 The capability `Value`-map decoder is *not* a builtin: it lives beside the

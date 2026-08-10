@@ -516,8 +516,11 @@ for opaque error blobs (`OPAQUE_CAP`), agent replies (`AGENT_REPLY_CAP`), and
 the history-compaction threshold. An oversize section keeps a head+tail digest
 and elides the middle, with a banner nudging the model to scope the query at
 its source and re-read in slices — the same rendering the transcript records,
-so the user never sees more of a result than the model does. `run_shell` here
-threads to [[map/exarch/shell-eval|shell-eval]].
+so the user never sees more of a result than the model does. A structured
+`VALUE` now arrives pre-budgeted — the printer spends its own byte budget inside
+the value, cutting where a container can still name what it dropped — so `clip`
+is a backstop there, while stdout, stderr, and raw payload strings still meet it
+head-on. `run_shell` here threads to [[map/exarch/shell-eval|shell-eval]].
 
 ## See also
 
