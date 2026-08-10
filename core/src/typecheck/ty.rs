@@ -3,10 +3,10 @@
 //!
 //! The discipline is call-by-push-value — `Ty` classifies data at rest, `CompTy`
 //! effectful processes, and the two meet at `Thunk` (CBPV's `U`) and `Return`
-//! (`F`).  The pipeline-mode lattice is [`crate::mode`]'s, re-exported here so
-//! that `typecheck`'s surface carries it.
+//! (`F`).  The payload route is [`crate::route`]'s, re-exported here so that
+//! `typecheck`'s surface carries it.
 
-pub use crate::mode::{ByteMode, ModeVar, PipeMode, PipeSpec};
+pub use crate::route::{GroundRoute, PayloadRoute, PayloadVar};
 
 /// Unification variable for value types.
 #[derive(
@@ -65,8 +65,9 @@ pub enum Row {
 /// Computation types (`B` in CBPV).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CompTy {
-    /// `F[I,O] A` — an effectful command with pipeline modes, returning `A`.
-    Return(PipeSpec, Box<Ty>),
+    /// `F[ρ] A` — an effectful command returning `A`, whose payload a value
+    /// boundary reads by the route `ρ`.
+    Return(PayloadRoute, Box<Ty>),
     /// `A -> B`.
     Fun(Box<Ty>, Box<Self>),
     /// Unification variable.
@@ -74,8 +75,16 @@ pub enum CompTy {
 }
 
 impl CompTy {
-    /// Pure computation: no pipeline I/O.
+    /// A computation whose payload is its returned value.
     pub fn pure(ty: Ty) -> Self {
-        Self::Return(PipeSpec::none(), Box::new(ty))
+        Self::Return(PayloadRoute::Value, Box::new(ty))
+    }
+
+    /// The one byte-routed computation WF-2 admits: captured from stdout,
+    /// returning `Unit`.  Landing on the byte side of any decision means
+    /// unifying with this whole, so the `Bytes`/`Unit` pairing travels
+    /// structurally and no grounding site carries half of it from memory.
+    pub fn bytes() -> Self {
+        Self::Return(PayloadRoute::Bytes, Box::new(Ty::Unit))
     }
 }

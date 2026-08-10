@@ -6,7 +6,7 @@
 
 use super::env::TyEnv;
 use super::scheme::Scheme;
-use super::ty::{CompTy, CompTyVar, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar};
+use super::ty::{CompTy, CompTyVar, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
 use super::unify::{Unifier, Visited};
 use std::collections::{HashMap, HashSet};
 
@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 pub struct FreeVars {
     pub tys: HashSet<TyVar>,
     pub comps: HashSet<CompTyVar>,
-    pub modes: HashSet<ModeVar>,
+    pub routes: HashSet<PayloadVar>,
     pub rows: HashSet<RowVar>,
 }
 
@@ -23,7 +23,7 @@ impl FreeVars {
         Self {
             tys: HashSet::new(),
             comps: HashSet::new(),
-            modes: HashSet::new(),
+            routes: HashSet::new(),
             rows: HashSet::new(),
         }
     }
@@ -31,14 +31,14 @@ impl FreeVars {
     pub fn merge_cached(&mut self, cached: &super::scheme::CachedFreeVars) {
         self.tys.extend(&cached.ty_fv);
         self.comps.extend(&cached.comp_fv);
-        self.modes.extend(&cached.mode_fv);
+        self.routes.extend(&cached.route_fv);
         self.rows.extend(&cached.row_fv);
     }
 
     pub fn merge_into(self, target: &mut Self) {
         target.tys.extend(self.tys);
         target.comps.extend(self.comps);
-        target.modes.extend(self.modes);
+        target.routes.extend(self.routes);
         target.rows.extend(self.rows);
     }
 
@@ -50,8 +50,8 @@ impl FreeVars {
         for v in &s.comp_ty_vars {
             self.comps.remove(v);
         }
-        for v in &s.mode_vars {
-            self.modes.remove(v);
+        for v in &s.route_vars {
+            self.routes.remove(v);
         }
         for v in &s.row_vars {
             self.rows.remove(v);
@@ -63,7 +63,7 @@ impl FreeVars {
         super::scheme::CachedFreeVars {
             ty_fv: self.tys.intersection(&env.tys).copied().collect(),
             comp_fv: self.comps.intersection(&env.comps).copied().collect(),
-            mode_fv: self.modes.intersection(&env.modes).copied().collect(),
+            route_fv: self.routes.intersection(&env.routes).copied().collect(),
             row_fv: self.rows.intersection(&env.rows).copied().collect(),
         }
     }
@@ -127,10 +127,8 @@ fn free_comp_inner(u: &mut Unifier, cty: &CompTy, out: &mut FreeVars, visited: &
         CompTy::Var(v) => {
             out.comps.insert(v);
         }
-        CompTy::Return(spec, a) => {
-            free_mode_inner(u, spec.input, out);
-            free_mode_inner(u, spec.output, out);
-            free_mode_inner(u, spec.result, out);
+        CompTy::Return(route, a) => {
+            free_route_inner(u, route, out);
             free_ty_inner(u, &a, out, visited);
         }
         CompTy::Fun(a, b) => {
@@ -140,9 +138,9 @@ fn free_comp_inner(u: &mut Unifier, cty: &CompTy, out: &mut FreeVars, visited: &
     }
 }
 
-fn free_mode_inner(u: &mut Unifier, mode: PipeMode, out: &mut FreeVars) {
-    if let PipeMode::Var(v) = u.resolve_mode(&mode) {
-        out.modes.insert(v);
+fn free_route_inner(u: &mut Unifier, route: PayloadRoute, out: &mut FreeVars) {
+    if let PayloadRoute::Var(v) = u.resolve_route(&route) {
+        out.routes.insert(v);
     }
 }
 
@@ -170,7 +168,7 @@ pub fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
 
     let ty_vars = fvs.tys.difference(&env_fvs.tys).copied();
     let comp_ty_vars = fvs.comps.difference(&env_fvs.comps).copied();
-    let mode_vars: Vec<ModeVar> = fvs.modes.difference(&env_fvs.modes).copied().collect();
+    let route_vars: Vec<PayloadVar> = fvs.routes.difference(&env_fvs.routes).copied().collect();
     let row_vars: Vec<RowVar> = fvs.rows.difference(&env_fvs.rows).copied().collect();
 
     // Cached so later `env_free_vars` calls read the sets instead of re-walking
@@ -223,7 +221,7 @@ pub fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
     Scheme {
         ty_vars,
         comp_ty_vars,
-        mode_vars,
+        route_vars,
         row_vars,
         ty: applied,
         comp_ty_bindings,
@@ -241,9 +239,9 @@ fn residuals_are_live_roots(u: &mut Unifier, residuals: &super::scheme::CachedFr
             u.comp_root(v.0) == v.0 && matches!(u.resolve_comp_ty(&CompTy::Var(*v)), CompTy::Var(_))
         })
         && residuals
-            .mode_fv
+            .route_fv
             .iter()
-            .all(|v| matches!(u.resolve_mode(&PipeMode::Var(*v)), PipeMode::Var(rv) if rv == *v))
+            .all(|v| matches!(u.resolve_route(&PayloadRoute::Var(*v)), PayloadRoute::Var(rv) if rv == *v))
         && residuals
             .row_fv
             .iter()
@@ -268,7 +266,7 @@ pub fn scheme_is_closed(u: &mut Unifier, scheme: &Scheme) -> bool {
             .comps
             .iter()
             .all(|v| scheme.comp_ty_vars.contains(v) || comp_roots.contains(&v.0))
-        && fvs.modes.iter().all(|v| scheme.mode_vars.contains(v))
+        && fvs.routes.iter().all(|v| scheme.route_vars.contains(v))
         && fvs.rows.iter().all(|v| scheme.row_vars.contains(v))
 }
 
@@ -305,10 +303,10 @@ pub fn instantiate(u: &mut Unifier, scheme: &Scheme) -> Ty {
             .iter()
             .map(|&v| (v, u.fresh_tyvar()))
             .collect(),
-        mm: scheme
-            .mode_vars
+        rtm: scheme
+            .route_vars
             .iter()
-            .map(|&v| (v, u.fresh_modevar()))
+            .map(|&v| (v, u.fresh_routevar()))
             .collect(),
         rm: scheme
             .row_vars
@@ -364,7 +362,7 @@ fn snapshot_cyclic_ty_bindings(u: &mut Unifier, applied: &Ty) -> Vec<(u32, Ty)> 
 /// carry the cyclic back-edge roots — empty for non-recursive schemes.
 struct SubstMap {
     tm: HashMap<TyVar, TyVar>,
-    mm: HashMap<ModeVar, ModeVar>,
+    rtm: HashMap<PayloadVar, PayloadVar>,
     rm: HashMap<RowVar, RowVar>,
     cm: HashMap<u32, u32>,
     tcm: HashMap<u32, u32>,
@@ -409,22 +407,15 @@ impl SubstMap {
                 let id = *self.cm.get(i).unwrap_or(i);
                 CompTy::Var(CompTyVar(id))
             }
-            CompTy::Return(spec, a) => CompTy::Return(
-                PipeSpec {
-                    input: self.mode(spec.input),
-                    output: self.mode(spec.output),
-                    result: self.mode(spec.result),
-                },
-                Box::new(self.ty(a)),
-            ),
+            CompTy::Return(route, a) => CompTy::Return(self.route(*route), Box::new(self.ty(a))),
             CompTy::Fun(a, b) => CompTy::Fun(Box::new(self.ty(a)), Box::new(self.comp(b))),
         }
     }
 
-    fn mode(&self, mode: PipeMode) -> PipeMode {
-        match mode {
-            PipeMode::None | PipeMode::Bytes => mode,
-            PipeMode::Var(v) => self.mm.get(&v).map_or(mode, |&f| PipeMode::Var(f)),
+    fn route(&self, route: PayloadRoute) -> PayloadRoute {
+        match route {
+            PayloadRoute::Value | PayloadRoute::Bytes => route,
+            PayloadRoute::Var(v) => self.rtm.get(&v).map_or(route, |&f| PayloadRoute::Var(f)),
         }
     }
 }

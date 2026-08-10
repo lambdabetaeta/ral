@@ -1,5 +1,5 @@
 //! Write-back pass: rebuild a checked comp with the inferencer's verdicts —
-//! generalised schemes, ground byte modes, pipeline wires, `Capture` nodes —
+//! generalised schemes, a pipeline's ground final route, `Capture` nodes —
 //! over the tree that was inferred, using [`InferCtx`]'s node-address-keyed
 //! side maps.
 //!
@@ -15,7 +15,7 @@ use crate::ir::{
     Comp, CompKind, Exec, IrPattern, RedirectV, ScopeOp, Val, ValListElem, ValMapEntry,
     ValRedirectTarget,
 };
-use crate::mode::{ByteMode, Wire};
+use crate::route::GroundRoute;
 use crate::source::Spanned;
 use crate::syntax::ast::MapPatternEntry;
 use crate::syntax::tag::is_tag_label;
@@ -57,19 +57,22 @@ fn val_key(val: &Val) -> usize {
 }
 
 /// Does `key`'s recorded result ground `Bytes`? Absent or still-unresolved
-/// both read `Empty`, via [`InferCtx::ground`].
+/// both read `Value`, via [`InferCtx::ground`].
 fn bytes_result(ctx: &mut InferCtx, key: usize) -> bool {
     matches!(
-        ctx.results.get(&key).copied().map(|m| ctx.ground(m)),
-        Some(ByteMode::Bytes)
+        ctx.results.get(&key).copied().map(|route| ctx.ground(route)),
+        Some(GroundRoute::Bytes)
     )
 }
 
 /// The `Val`-keyed analogue of [`bytes_result`], for scope arms.
 fn bytes_val_result(ctx: &mut InferCtx, key: usize) -> bool {
     matches!(
-        ctx.val_results.get(&key).copied().map(|m| ctx.ground(m)),
-        Some(ByteMode::Bytes)
+        ctx.val_results
+            .get(&key)
+            .copied()
+            .map(|route| ctx.ground(route)),
+        Some(GroundRoute::Bytes)
     )
 }
 
@@ -187,23 +190,14 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
     match &comp.item {
         CompKind::Pipeline {
             stages,
-            wires,
             stage_types,
+            final_route: _,
         } => {
-            let wires = stages
-                .iter()
-                .zip(wires)
-                .map(|(stage, placeholder)| {
-                    ctx.stage_specs
-                        .get(&comp_key(stage))
-                        .copied()
-                        .map_or(*placeholder, |spec| Wire {
-                            input: ctx.ground(spec.input),
-                            output: ctx.ground(spec.output),
-                            result: ctx.ground(spec.result),
-                        })
-                })
-                .collect();
+            let final_route = ctx
+                .pipeline_routes
+                .get(&comp_key(comp))
+                .copied()
+                .map_or(GroundRoute::Value, |route| ctx.ground(route));
             let stage_types = stages
                 .iter()
                 .zip(stage_types)
@@ -219,8 +213,8 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
                     .iter()
                     .map(|stage| Arc::new(annotate(stage, ctx, false)))
                     .collect(),
-                wires,
                 stage_types,
+                final_route,
             }
         }
         CompKind::Lam { param, body } => CompKind::Lam {

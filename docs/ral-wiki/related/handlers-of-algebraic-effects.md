@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 19d53bb
-verified_at_date: 2026-07-28
+verified_at_commit: 95449d4
+verified_at_date: 2026-08-10
 against: [design/effects-handlers, design/syscalls-are-effects, design/pipelines]
 ---
 
@@ -69,10 +69,10 @@ primary.
 - **The pipe is not a handler — and could not be.** They cannot express
   `t₁ | t₂` ("the difficulty is very much like that with the CCS parallel
   combinator") and leave it as the paper's principal open question. ral agrees
-  by architecture: the pipe is a primitive computation combinator over the byte
-  channel — a process group or a fold, selected by the edge type
-  ([[design/pipelines|pipelines]]) — orthogonal to the handler stack, not a
-  deconstruction of one computation.
+  by architecture: the pipe is a primitive computation combinator whose whole
+  content is operational — connect stdout to stdin, run both in one process
+  group ([[design/pipelines|pipelines]]) — orthogonal to the handler stack, not
+  a deconstruction of one computation.
 
 ## What ral could borrow
 

@@ -25,8 +25,8 @@ irreducibility:
 - **It is a base computation** — an operation the prelude has no smaller pieces to
   build from: a regex engine, the string transforms, structural comparison
   dispatched on the runtime value, scalar coercion.
-- **Its type cannot be given to an ordinary binding** — the codec specs
-  `⟨Bytes, ∅, ∅⟩` / `⟨∅, Bytes, Bytes⟩` ([[design/codecs|codecs]]) and `fail`'s
+- **Its type cannot be given to an ordinary binding** — the codec routes
+  `F[Value] A` / `A → F[Bytes] Unit` ([[design/codecs|codecs]]) and `fail`'s
   divergent, open-row result.
 
 Filesystem *effects* are deliberately none of these: there is no `copy-file` or
@@ -39,10 +39,9 @@ spelling would be a second thing to keep capability-checked
 The core entries group by what they compute:
 
 - **List & higher-order** — `each` `map` `filter` `fold` `sort-list` `sort-list-by`
-  `range`. Each takes a thunk, and the callback's pipeline modes are *universally
-  quantified*: `map { echo $x }` typechecks because the callback may itself write
-  bytes while the list operation still returns a value
-  ([[decisions/260601_modes-equality-constrained-shared|equality-constrained modes]]).
+  `range`. Each takes a thunk, and the callback's [[design/types|payload route]]
+  is *universally quantified*: `map { echo $x }` typechecks because the callback
+  may itself be byte-routed while the list operation still returns a value.
 - **String & regex** — `upper` `lower` `dedent` `slice` `intercalate`
   `re-match` `re-split` `re-find-match` `re-find-matches` `re-replace`
   `re-replace-all` `string-replace` `shell-quote` `shell-split`.
@@ -60,12 +59,12 @@ The core entries group by what they compute:
   or failure as one settle variant rather than blocking or re-raising
   ([[decisions/260615_poll-total-failed-arm|the settle decision]]).
 - **Byte writes** — `echo`: per-argument `str`, single-space intercalation, a
-  trailing newline, typed with `to-line`'s modes so pipelines treat it as the
-  byte write it is. Mixed argument types coexist because each is rendered
+  trailing newline, typed with `to-line`'s route so a value boundary reads the
+  bytes it wrote. Mixed argument types coexist because each is rendered
   before any list is formed.
 - **Session & terminal** — `cd` `cwd` `alias` / `unalias` `source` / `use`
   `exit` / `quit` `ask` `clear` `reset` `surface` `help` / `explain`, with the
-  underscore probes `_type` / `_ansi-ok`.
+  underscore probe `_ansi-ok`.
 
 `fail` sits outside these: it diverges rather than computing, and its role in
 fallback chains is [[design/failure|failure]].
@@ -78,25 +77,24 @@ rule whose shape follows from how command-like the builtin is:
 - **`Scheme`** — an ordinary first-class polytype, allocated fresh per call. The
   default: a curried function usable in command position *and* reifiable as a
   value (`$map`). A builtin is a `Scheme` whenever its surface is an ordinary
-  curried function. `fold-lines` is a `Scheme` like any other; its
-  byte-boundary modes — bytes in, output following the callback — are invisible
-  to a structural projection of the type, so its scheme constructor writes them
-  in via `reducer_spec` ([[design/codecs|codecs]]).
+  curried function. `fold-lines` is a `Scheme` like any other; the route it
+  forwards from its callback is invisible to a structural projection of a
+  command signature, so its scheme constructor writes it in directly
+  ([[design/codecs|codecs]]).
 - **`Sig`** — a *command signature*: argv shape and result computation read
   directly, without falling through to command-name classification. This is for
   builtins whose surface is not a curried function — *nullary* (`clear`, `reset`,
-  `help`, and the `from-X` codecs, which read the ambient channel),
-  *optional-argument* (`cd`), *open-argv* (`echo`, `detach`), *divergent*
+  `help`, and the `from-X` codecs, which read stdin),
+  *optional-argument* (`cd`), *open-argv* (`echo`, `detach`), or *divergent*
   (`fail`, result `Never`, carrying the nonzero-status diagnostic —
-  [[design/failure|failure]]), or carrying a compile-time *probe* (`_type`).
+  [[design/failure|failure]]).
 
 A `Sig`'s first-class form is *derived* from it — the `Exact` / `DataLast`
 argument templates become the curry spine and the result template the
-computation — so a value scheme is written by hand only where it states
-something the templates cannot: `_type`, whose scheme correlates argument and
-result (`α → α`). The deriver is undefined exactly on the open and optional argv
+computation. The deriver is undefined exactly on the open and optional argv
 shapes, which is the [[invariants/fixed-arity|arity partition]] holding by
-construction.
+construction. The registry keeps a hand-written override slot for a value scheme
+the templates cannot state; no entry uses it.
 
 Each codec being its own `Sig` rather than one polymorphic `decode` / `encode` is
 what lets `from-json < file` dispatch straight through the command arm with the

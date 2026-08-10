@@ -7,7 +7,7 @@
 //! onto, so a span rides with the value rather than the parent; `None`
 //! means the node is synthetic — a builtin, the prelude, generated code.
 
-use crate::mode::Wire;
+use crate::route::GroundRoute;
 use crate::path::tilde::TildePath;
 use crate::source::Spanned;
 use crate::syntax::ast::{BinaryOp, Pattern, RedirectMode};
@@ -205,7 +205,7 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
         }
         CompKind::Pipeline {
             stages,
-            wires: _,
+            final_route: _,
             stage_types: _,
         } => {
             for stage in stages {
@@ -399,14 +399,15 @@ pub enum CompKind {
     /// stdin of stage N+1.
     Pipeline {
         stages: Vec<Arc<Comp>>,
-        /// One ground [`Wire`] per stage, exactly `stages.len()` of them.
-        /// The elaborator emits an all-[`Wire::EMPTY`] placeholder; the
-        /// annotation pass writes the byte channels the evaluator wires from.
-        wires: Vec<Wire>,
         /// The inferred value type out of each stage, parallel to `stages`.
         /// Only the structural REPL's typed spine reads it, so an
         /// un-annotated pipeline keeps the `Unit` placeholder harmlessly.
         stage_types: Vec<crate::typecheck::Ty>,
+        /// The final stage's ground route: the pipeline reports its helper's
+        /// returned value to the parent only when this is `Value`.  Every
+        /// interior edge is an operating-system byte pipe allocated from stage
+        /// position alone, so no other stage's route is wired anywhere.
+        final_route: GroundRoute,
     },
     /// Binary primitive on already-evaluated values (`$[a + b]`, `$[a == b]`).
     Binary(BinaryOp, Val, Val),
@@ -524,7 +525,6 @@ pub enum ScopeOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mode::Wire;
     use crate::path::tilde::TildePath;
     use crate::syntax::ast::{BinaryOp, RedirectMode};
     use crate::typecheck::Ty;
@@ -622,8 +622,8 @@ mod tests {
                     "r_pipeline_stage2",
                 )))),
             ],
-            wires: vec![Wire::EMPTY, Wire::EMPTY],
             stage_types: vec![Ty::Unit, Ty::Unit],
+            final_route: GroundRoute::Value,
         });
 
         let binary = Spanned::synthetic(CompKind::Binary(

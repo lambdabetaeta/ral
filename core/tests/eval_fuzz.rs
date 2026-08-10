@@ -1127,29 +1127,29 @@ fn alias_inside_within_shadows_within_per_name() {
     );
 }
 
-// ── handler / alias mode preservation at install ─────────────────────────────
+// ── handler / alias route preservation at install ────────────────────────────
 //
 // A computed `within [handlers: $h]` opts map and a runtime-installed alias
-// are invisible to the static check, so their arms' `PipeSpec`s are pinned to
-// the head's spec at install instead.  An unknown head's spec is fully fresh,
-// so the arm defines its modes and a value-output arm installs and runs; a
-// known head with incompatible modes is the clash rejected there.
+// are invisible to the static check, so their arms' payload routes are pinned
+// to the head's at install instead.  An unknown head's route is fresh, so the
+// arm defines it and a value-returning arm installs and runs; a known head
+// whose route disagrees is the clash rejected there.
 
-/// A computed (non-literal) `within` opts map carrying a value-output arm
-/// defines the unknown head's modes, so it installs and runs, yielding the
+/// A computed (non-literal) `within` opts map carrying a value-returning arm
+/// defines the unknown head's route, so it installs and runs, yielding the
 /// arm's value.
 #[test]
-fn computed_within_value_output_arm_runs() {
+fn computed_within_value_arm_runs() {
     assert_eq!(
         must_succeed("let h = [foo: { |args| return 3 }]; within [handlers: $h] { foo }"),
         Value::Int(3)
     );
 }
 
-/// A computed `within` opts map carrying a byte-output arm defines the unknown
-/// head as byte-output and runs.
+/// A computed `within` opts map carrying a byte-routed arm defines the unknown
+/// head as byte-routed and runs.
 #[test]
-fn computed_within_byte_output_arm_runs() {
+fn computed_within_byte_arm_runs() {
     // `foo` emits bytes; the block captures nothing and yields unit.
     assert_eq!(
         must_succeed("let h = [foo: { |args| echo hi }]; within [handlers: $h] { foo }"),
@@ -1157,11 +1157,48 @@ fn computed_within_byte_output_arm_runs() {
     );
 }
 
-/// A runtime-installed value-output alias defines the unknown head's modes, so
-/// the install guard in `Shell::install_alias` accepts it.
+/// A runtime-installed value-returning alias defines the unknown head's route,
+/// so the install guard in `Shell::install_alias` accepts it.
 #[test]
-fn value_output_alias_installs() {
+fn value_alias_installs() {
     assert_eq!(must_succeed("alias foo { |args| return 3 }"), Value::Unit);
+}
+
+/// `vet` is the install path, and a computed handler map is the only way to
+/// reach it — a literal one is checked statically first.  Its two failures say
+/// different things, and both are only reachable here.
+///
+/// The route clash: `echo`'s payload is its stdout, and this arm returns a
+/// value instead.
+#[test]
+fn a_value_arm_under_a_byte_head_is_refused_at_install() {
+    let err = eval(r#"let h = [echo: { |args| return "not bytes" }]; within [handlers: $h] { echo hi }"#)
+        .expect_err("a value-returning arm cannot be installed under `echo`");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("where their payload lives"),
+        "expected the route-clash wording from `vet`, got: {msg}"
+    );
+}
+
+/// The WF-2 failure, and the more interesting one: this arm's route is *open*,
+/// not `Value`.  The callback never returns, so its route stays a free
+/// variable that `fold-lines` forwards; the pin grounds it to `Bytes` beside
+/// an `Int`.  Unrepaired, that was silent type confusion — a release build
+/// exited 0 printing `""` where the checker said `Int` — because the only
+/// tripwire was a `debug_assert!` inside `Capture`.
+#[test]
+fn an_open_route_arm_under_a_byte_head_is_refused_at_install() {
+    let err = eval(
+        "let h = [echo: { |args| fold-lines { |a l| fail [status: 5] } 0 }]; \
+         within [handlers: $h] { echo hi }",
+    )
+    .expect_err("a byte-routed pin leaves no room for an Int return");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("no separate value to return"),
+        "expected `vet`'s WF-2 wording, got: {msg}"
+    );
 }
 
 /// The arm `install_alias` vets is a live value, so its body is annotated IR —

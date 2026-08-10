@@ -27,7 +27,7 @@ reserved to most peripheral:
   ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
   [[invariants/fixed-arity|fixed-arity]]). What makes a capability one of these,
   and the shape of the set, is [[design/builtins|builtins]].
-- **Underscore primitives** — `_type`, `_ansi-ok`, and the host `_ed-*` / `_plugin`:
+- **Underscore primitives** — `_ansi-ok` and the host `_ed-*` / `_plugin`:
   internals the prelude wraps, never called directly by user scripts.
 - **Prelude functions** — ordinary ral bindings in scope before user code,
   wrapping the layers below for convenience (`for` calls `each`, `lines` splits on

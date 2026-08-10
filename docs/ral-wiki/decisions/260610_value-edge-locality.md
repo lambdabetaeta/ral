@@ -1,6 +1,6 @@
 ---
 status: superseded
-superseded_by: decisions/260809_byte-only-pipelines
+superseded_by: decisions/260809_pipes-are-positional-byte-wires
 ---
 
 # Value-edge judgments live where their facts live

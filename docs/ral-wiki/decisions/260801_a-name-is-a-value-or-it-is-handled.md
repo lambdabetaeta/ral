@@ -121,8 +121,21 @@ value schemes, which now derive from the signature through the projections that
 already existed (`derive_sig_scheme`, `core/src/typecheck/builtins.rs:1058`).
 The deriver is total on `Exact`/`DataLast` and undefined on `Optional`/`Any`, so
 "fixed arity ⇒ a value scheme, variadic ⇒ none" holds by construction. One
-override survives, `_type`, whose scheme correlates argument and result
-(`α → α`) — a fact the template vocabulary cannot state.
+override survived at the time of this decision: `_type`, whose scheme
+correlated an argument and a result (`α → F α`) — a fact the template
+vocabulary could not state, since it names an occurrence's *instantiated*
+type where every other signature is closed before generalisation.
+
+`_type` is since deleted
+([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]);
+`explain <name>` answers the name-level question `_type` used to answer at an
+occurrence, at the cost of generality — a name's declared scheme, not the
+type an argument happened to instantiate it to during inference. With `_type`
+gone, the override this section describes — `Sig::value: Option<fn(&mut
+Unifier) -> Scheme>` — has no entry left that sets it to `Some`. Whether the
+override mechanism itself should now come out, or stays as the honest escape
+hatch for the next signature the template vocabulary can't state, is a
+separate question this page does not answer.
 
 ## Consequences
 

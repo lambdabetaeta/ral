@@ -52,15 +52,15 @@ fn value_type_error_blocks() {
     );
 }
 
-/// A `∅`-into-`Bytes` pipeline adjacency (`echo foo | length`) is the mode
-/// fragment: it is fatal, since the evaluator has no runnable wires for it.
+/// A stage still waiting for an argument (`length` is `String -> …`) is not a
+/// computation that can run, so the pipeline is fatal at check time.
 #[test]
-fn mode_error_blocks() {
+fn stage_shape_error_blocks() {
     let r = run_c("echo foo | length");
-    assert_ne!(r.status, 0, "a mode error must block");
+    assert_ne!(r.status, 0, "a stage-shape error must block");
     assert!(
-        r.stderr.contains("T0012") && r.stderr.contains("Error"),
-        "a mode error must render as an Error (T0012); stderr was:\n{}",
+        r.stderr.contains("T0011") && r.stderr.contains("apply it to its argument"),
+        "the stage-shape error must render with its teaching hint; stderr was:\n{}",
         r.stderr
     );
 }
@@ -221,15 +221,14 @@ fn rc_value_type_error_skips_file_but_boots() {
     );
 }
 
-/// An rc file with a *mode* error is skipped (it has no runnable wires) but
-/// the shell boots.
+/// An rc file whose pipeline cannot run is skipped, but the shell boots.
 #[test]
-fn rc_mode_error_skips_file_but_boots() {
+fn rc_stage_shape_error_skips_file_but_boots() {
     let rc = "let marker = 'applied'\necho foo | length\n";
     let r = boot_with_rc(rc, "return booted\n");
     assert!(
-        r.stderr.contains("T0012") && r.stderr.contains("skipped due to type errors"),
-        "an rc mode error must skip the file; stderr was:\n{}",
+        r.stderr.contains("T0011") && r.stderr.contains("skipped due to type errors"),
+        "an rc stage-shape error must skip the file; stderr was:\n{}",
         r.stderr
     );
     assert!(

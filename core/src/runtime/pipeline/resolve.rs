@@ -1,7 +1,7 @@
-//! Pipeline resolve: validate channel adjacency, freeze each stage's launch
-//! decision, and classify the pipeline.  Modes come from the checker's ground
-//! wires, never re-inferred; no process is created and no pipe opened.  Launch
-//! reads everything this phase produces.
+//! Pipeline resolve: freeze each stage's launch decision and the pipeline's
+//! final route.  The route comes from the checker's ground annotation, never
+//! re-inferred; no process is created and no pipe opened.  Launch reads
+//! everything this phase produces.
 
 use super::super::command::CommandIdentity;
 use super::super::command_call;
@@ -57,11 +57,10 @@ pub(super) enum StageLaunch {
 }
 
 /// Per-stage analysis.  Edge transport is deliberately absent: the allocator
-/// `route::open_stage_routes` derives each edge from the stage's position and
-/// `comp_type.result`, which the checker already unified across the edge.
+/// `route::open_stage_routes` derives each edge from the stage's position
+/// alone.
 #[derive(Clone, Debug)]
 pub(super) struct StageSpec {
-    pub(super) comp_type: crate::mode::PipeSpec,
     pub(super) launch: StageLaunch,
     /// So a parent-side error points at this stage, not the whole pipeline.
     pub(super) span: Option<Span>,
@@ -130,15 +129,9 @@ fn resolve_launch(stage: &Comp, terminal: TerminalPlan, shell: &mut Shell) -> Se
     })
 }
 
-fn analyze_stage(
-    stage: &Comp,
-    comp_type: crate::mode::PipeSpec,
-    terminal: TerminalPlan,
-    shell: &mut Shell,
-) -> Settled<StageSpec> {
+fn analyze_stage(stage: &Comp, terminal: TerminalPlan, shell: &mut Shell) -> Settled<StageSpec> {
     let launch = resolve_launch(stage, terminal, shell)?;
     Ok(StageSpec {
-        comp_type,
         launch,
         span: stage.span,
     })
@@ -148,9 +141,9 @@ fn analyze_stage(
 pub(super) struct PipelinePlan {
     pub(super) specs: Vec<StageSpec>,
     pub(super) terminal: TerminalPlan,
-    /// Which conduit the pipeline's own payload rides, read off the last
+    /// The pipeline's own ground route, the checker's verdict on its final
     /// stage: `Bytes` and there is no value to hand back.
-    pub(super) last_result: crate::mode::PipeMode,
+    pub(super) final_route: crate::route::GroundRoute,
 }
 
 fn resolve_terminal_plan(mooring: &Mooring, shell: &Shell) -> TerminalPlan {
@@ -180,54 +173,26 @@ fn resolve_terminal_plan(mooring: &Mooring, shell: &Shell) -> TerminalPlan {
     }
 }
 
-/// Adjacency holds by construction — the checker unified each producer's
-/// payload against its consumer's input — so a debug build only asserts it.
-/// A stage's `output` is not part of it: chatter escapes the pipeline.
-fn specs_from_wires(
-    stages: &[Arc<Comp>],
-    wires: &[crate::mode::Wire],
-    terminal: TerminalPlan,
-    shell: &mut Shell,
-) -> Settled<Vec<StageSpec>> {
-    debug_assert_eq!(wires.len(), stages.len());
-    for i in 1..wires.len() {
-        debug_assert_eq!(
-            wires[i - 1].result,
-            wires[i].input,
-            "adjacent pipeline wires disagree at stage {i}"
-        );
-    }
-
-    stages
-        .iter()
-        .zip(wires)
-        .map(|(stage, wire)| analyze_stage(stage, wire.spec(), terminal, shell))
-        .collect()
-}
-
-/// Resolve phase: validate adjacency, freeze every stage's launch path, and
-/// classify the pipeline.  The byte-capturing audit decision is consulted live
-/// during classification, not stored on the plan.
+/// Resolve phase: freeze every stage's launch path and record the
+/// pipeline's ground final route.  The byte-capturing audit decision is
+/// consulted live during classification, not stored on the plan.
 pub(super) fn resolve_pipeline(
     stages: &[Arc<Comp>],
-    wires: &[crate::mode::Wire],
+    final_route: crate::route::GroundRoute,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<PipelinePlan> {
     // Every stage's launch decision depends on it, so the terminal plan is frozen
     // first; it reads only boot/capture state, which argv evaluation cannot touch.
     let terminal = resolve_terminal_plan(mooring, shell);
-    let specs = specs_from_wires(stages, wires, terminal, shell)?;
-
-    // `eval_pipeline` in `core/src/evaluator/comp.rs` sends a lone stage straight
-    // to `eval_comp`, so this is reached only with ≥2.  Pin the invariant rather
-    // than fabricate a `Mode::None` fallback that lies about an empty pipeline.
-    let last = specs.last().expect("pipeline has at least one stage");
-    let last_result = last.comp_type.result;
+    let specs = stages
+        .iter()
+        .map(|stage| analyze_stage(stage, terminal, shell))
+        .collect::<Settled<Vec<_>>>()?;
     Ok(PipelinePlan {
         specs,
         terminal,
-        last_result,
+        final_route,
     })
 }
 

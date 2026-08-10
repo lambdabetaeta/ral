@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 1e9fea4
-verified_at_date: 2026-08-06
-anchors: [compile, compile_and_typecheck, CompileOutcome, SessionSchemes, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, Wire, stage_types, Capture, ArmWalk, eta_expand_captured]
+verified_at_commit: 95449d4
+verified_at_date: 2026-08-10
+anchors: [compile, compile_and_typecheck, CompileOutcome, SessionSchemes, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, final_route, stage_types, Capture, ArmWalk, eta_expand_captured]
 ---
 
 # The compilation ladder: source to typed IR
@@ -35,15 +35,16 @@ artifact. `core/src/lib.rs` exposes the whole descent as two functions: `compile
     closed against the empty environment so the scheme outlives the per-run
     unifier
     ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
-  - Each `Pipeline` stage carries its *ground mode wire*: the checker's
-    resolved input and output modes, with every unification variable defaulted
-    away. The evaluator reads this wire instead of re-inferring it
-    ([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]).
-  - Each `Pipeline` carries `stage_types`, one resolved value type per stage,
-    parallel to its wires. Only the structural REPL's typed spine reads a
-    stage type.
+  - Each `Pipeline` carries one *ground* `final_route`: the checker's verdict on
+    the last stage, with every unification variable defaulted away. It is the
+    only thing that decides whether the pipeline reports its helper's returned
+    value; every interior edge is a byte pipe allocated from position, so there
+    is nothing per-stage to write
+    ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
+  - Each `Pipeline` also carries `stage_types`, one resolved value type per
+    stage. Only the structural REPL's typed spine reads a stage type.
   - The rebuild wraps a node in a `Capture` node wherever a value demand meets
-    a result mode that grounds `Bytes`
+    a payload route that grounds `Bytes`
     ([[internals/output-capture-and-detachment|output-capture-and-detachment]]).
 
   Generalisation happens at each `Bind`, along the SCC structure the

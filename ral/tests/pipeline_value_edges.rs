@@ -138,79 +138,64 @@ echo $lines[1]
     assert_eq!(out, vec!["2", "a", "b"]);
 }
 
-// ── Value-looking pipelines are compile errors ───────────────────────────
+// ── A stage's returned value simply goes nowhere ─────────────────────────
 //
-// A pipeline has one transport: Bytes.  Ordinary application remains the
-// spelling for combining values (`f x` or `!{f x}`), while encoders make a
-// value an explicit byte producer.
+// A pipeline has one transport: bytes on an operating-system wire, chosen by
+// position.  A non-final stage's returned value is discarded — not
+// serialised, not an error.  Ordinary application (`f $x`) remains the
+// spelling for combining values, and encoders make a value explicit bytes.
 
 #[test]
-fn value_producer_into_block_is_rejected_before_side_effect() {
+fn a_value_producer_into_a_block_writes_nothing_and_is_accepted() {
     let o = run_pipe("5 | { |x| echo $x }");
-    assert_ne!(o.status, 0, "expected a compile error");
+    assert_eq!(o.status, 0, "expected acceptance: {}", o.stderr);
+    // The block literal is a value: it is returned, never applied, so the
+    // `echo` inside it never runs.
     assert!(
         o.stdout.is_empty(),
-        "rejected pipeline wrote stdout: {}",
+        "a returned thunk must not run: {}",
         o.stdout
-    );
-    assert!(
-        o.stderr.contains("this stage produces a value"),
-        "missing producer teaching diagnostic: {}",
-        o.stderr
     );
 }
 
-/// The zero-arity block used to run its body eagerly and only then fail on
-/// the excess argument, so `hi` reached stdout before the error.  The byte
-/// rule moves that to compile time, and the side-effect assertion inverts.
+/// The program is accepted, and `hi` still never prints.  That side-effect
+/// assertion is the interesting half: a thunk in stage position is returned,
+/// and a returned thunk is never forced.  Acceptance changed; this did not.
 #[test]
-fn value_producer_into_zero_arity_block_is_rejected_before_its_side_effect() {
+fn a_thunk_stage_is_accepted_and_never_forced() {
     let o = run_pipe("5 | { echo hi }");
-    assert_ne!(o.status, 0, "expected a compile error");
+    assert_eq!(o.status, 0, "expected acceptance: {}", o.stderr);
     assert!(
         !o.stdout.contains("hi"),
-        "the rejected block's body must never run: {}",
+        "a returned thunk must never run: {}",
         o.stdout
-    );
-    assert!(
-        o.stderr.contains("this stage produces a value"),
-        "missing producer teaching diagnostic: {}",
-        o.stderr
     );
 }
 
+/// `|` is not application.  Both stages run, `5`'s value is discarded because
+/// its stage is non-final, and the pipeline's value is its last stage's.
 #[test]
-fn value_producer_into_value_stage_is_rejected_before_application() {
+fn a_pipeline_takes_its_value_from_its_last_stage() {
     let o = run_pipe("5 | 6");
-    assert_ne!(o.status, 0, "expected a compile error");
-    assert!(
-        o.stdout.is_empty(),
-        "rejected pipeline wrote stdout: {}",
-        o.stdout
-    );
-    assert!(
-        o.stderr.contains("this stage produces a value"),
-        "missing producer teaching diagnostic: {}",
-        o.stderr
-    );
+    assert_eq!(o.status, 0, "expected acceptance: {}", o.stderr);
 }
 
 #[test]
-fn interior_value_payload_is_rejected_and_explicit_encoder_is_legal() {
-    let rejected = run_pipe("return [1, 2] | { |xs| echo $xs } | wc -l");
-    assert_ne!(
-        rejected.status, 0,
-        "expected an interior value-payload error"
+fn an_interior_value_goes_nowhere_and_an_encoder_still_works() {
+    // No value is serialised onto an edge, so `wc -l` reads EOF and counts
+    // nothing.  This is the whole difference between a byte wire and the
+    // value pipe ral deliberately does not have.
+    let discarded = run_pipe("return [1, 2] | { |xs| echo $xs } | wc -l");
+    assert_eq!(
+        discarded.status, 0,
+        "expected acceptance: {}",
+        discarded.stderr
     );
-    assert!(
-        rejected.stdout.is_empty(),
-        "rejected pipeline wrote stdout: {}",
-        rejected.stdout
-    );
-    assert!(
-        rejected.stderr.contains("this stage produces a value"),
-        "missing producer teaching diagnostic: {}",
-        rejected.stderr
+    assert_eq!(
+        discarded.stdout.trim(),
+        "0",
+        "an interior value must not reach the wire: {}",
+        discarded.stdout
     );
 
     let encoded = run_pipe("to-json [1, 2] | wc -l");
@@ -218,6 +203,213 @@ fn interior_value_payload_is_rejected_and_explicit_encoder_is_legal() {
         encoded.status, 0,
         "explicit encoder pipeline failed: {}",
         encoded.stderr
+    );
+}
+
+/// An interior decoder returns its bytes as a *value*, so the following
+/// stage receives EOF.  The consumer is `wc -l` rather than the `grep x` the
+/// design writes: `grep` on an empty stream exits 1, and that status would
+/// confound "nothing arrived" with "nothing matched".
+#[test]
+fn an_interior_decoders_returned_bytes_never_reach_the_next_stage() {
+    let path = write_tmp_lines("ral_decoder_interior", &["x marks it", "and again x"]);
+    let path_str = path.display().to_string();
+    let o = run_pipe(&format!("cat '{path_str}' | from-bytes | wc -l"));
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(o.status, 0, "expected acceptance: {}", o.stderr);
+    assert_eq!(
+        o.stdout.trim(),
+        "0",
+        "from-bytes' returned Bytes must not be serialised onto the wire: {}",
+        o.stdout
+    );
+}
+
+/// A producer need not write; an empty stream is still a byte stream.
+#[test]
+fn a_silent_producer_gives_its_consumer_eof() {
+    let o = run_pipe("!{ return unit } | cat");
+    assert_eq!(o.status, 0, "expected acceptance: {}", o.stderr);
+    assert!(
+        o.stdout.is_empty(),
+        "a value-returning producer must write nothing: {:?}",
+        o.stdout
+    );
+}
+
+/// The bytes of a discarded statement are still bytes, and inside a non-final
+/// stage the visible stream *is* the wire — so `x` reaches `cat` even though
+/// the stage's own value is `unit`.
+#[test]
+fn a_discarded_statements_bytes_reach_the_pipe() {
+    let o = run_pipe("!{ echo x; return unit } | cat");
+    assert_eq!(o.status, 0, "expected acceptance: {}", o.stderr);
+    assert_eq!(
+        o.stdout, "x\n",
+        "the discarded statement's bytes must reach the consumer: {:?}",
+        o.stdout
+    );
+}
+
+/// A consumer need not read, and the pipeline's value is its final stage's.
+#[test]
+fn a_consumer_that_ignores_its_stdin_still_returns_its_value() {
+    let o = run_pipe("let r = echo x | !{ return 5 }\necho $r");
+    assert_eq!(o.status, 0, "expected acceptance: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "5", "full stdout: {:?}", o.stdout);
+}
+
+/// `from-bytes` returns the byte-exact `Bytes` `[65]` and `cat` still sees
+/// EOF rather than `A`.  There is no implicit value pipe.
+#[test]
+fn a_returned_bytes_value_is_not_written_to_the_next_stage() {
+    let o = run_pipe("to-bytes [65] | from-bytes | cat");
+    assert_eq!(o.status, 0, "expected acceptance: {}", o.stderr);
+    assert!(
+        o.stdout.is_empty(),
+        "a returned Bytes must not be serialised onto the wire: {:?}",
+        o.stdout
+    );
+}
+
+/// The stdin wiring belongs to the pipeline, not to a thunk that escapes it.
+/// `echo hi`'s bytes go into an edge nobody reads, and forcing `reader`
+/// afterwards runs `from-line` against the script's own stdin.
+#[test]
+fn a_thunk_that_escapes_a_pipeline_reads_ambient_stdin() {
+    let o = run_pipe_stdin(
+        "let reader = echo hi | { from-line }\n\
+         let s = !$reader\n\
+         echo \"[$s]\"",
+        b"ambient\n",
+    );
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(
+        o.stdout.trim(),
+        "[ambient]",
+        "the forced thunk must read the script's stdin, not the dead edge: {:?}",
+        o.stdout
+    );
+    assert!(
+        !o.stdout.contains("hi"),
+        "the unread edge must swallow the producer's bytes: {:?}",
+        o.stdout
+    );
+}
+
+// ── A stage must be ready to run ─────────────────────────────────────────
+//
+// One static rule about stages survives: a stage's type is `F[ρ] A`, so a
+// stage still waiting for an argument is rejected — in either position, and
+// on its own rather than against its neighbour.
+
+#[test]
+fn a_final_stage_waiting_for_an_argument_is_rejected() {
+    let o = run_pipe("echo hi | !{ |x| echo $x }");
+    assert_ne!(o.status, 0, "expected a stage-shape error: {}", o.stdout);
+    assert!(
+        o.stderr.contains("T0011"),
+        "expected the shape error code; stderr: {}",
+        o.stderr
+    );
+    assert!(
+        o.stderr.contains("apply it to its argument"),
+        "the hint must name application as the fix; stderr: {}",
+        o.stderr
+    );
+}
+
+#[test]
+fn an_interior_stage_waiting_for_an_argument_is_rejected() {
+    // `fold-lines $step` is one argument short of a computation.
+    let o = run_pipe(
+        "let step = { |acc _| return $acc }\n\
+         echo hi | fold-lines $step | cat",
+    );
+    assert_ne!(o.status, 0, "expected a stage-shape error: {}", o.stdout);
+    assert!(
+        o.stderr.contains("T0011"),
+        "expected the shape error code; stderr: {}",
+        o.stderr
+    );
+    assert!(
+        o.stderr.contains("apply it to its argument"),
+        "the hint must reach stderr in interior position too; stderr: {}",
+        o.stderr
+    );
+}
+
+// ── Streaming line combinators ───────────────────────────────────────────
+
+/// Every line is offered to the predicate on its own, the kept lines are
+/// written in order, and the decoder at the tail returns them as text.
+#[test]
+fn filter_lines_streams_its_input_through_the_predicate() {
+    let o = run_pipe(
+        "let s = !{printf 'aa\\nbb\\ncc\\ndd\\n' | filter-lines { |l| contains ['bb', 'dd'] $l } | from-string}\n\
+         echo \"[$s]\"",
+    );
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout, "[bb\ndd\n]\n", "full stdout: {:?}", o.stdout);
+}
+
+/// A non-final reducer's accumulator is discarded; what its callback writes
+/// is what the next stage reads.
+#[test]
+fn an_interior_folds_accumulator_is_discarded_and_its_callbacks_bytes_are_piped() {
+    let o = run_pipe(
+        "printf 'a\\nb\\n' | fold-lines { |acc line| echo $line; return $[$acc + 1] } 0 | cat",
+    );
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(
+        o.stdout, "a\nb\n",
+        "the callback's bytes, not the accumulator, cross the edge: {:?}",
+        o.stdout
+    );
+}
+
+/// The dual: in final position the same reducer's accumulator is the
+/// pipeline's value.
+#[test]
+fn a_final_folds_accumulator_is_the_pipelines_value() {
+    let o = run_pipe(
+        "let n = printf 'a\\nb\\n' | fold-lines { |acc _| return $[$acc + 1] } 0\necho $n",
+    );
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "2", "full stdout: {:?}", o.stdout);
+}
+
+// ── Route forwarding through `spawn` ─────────────────────────────────────
+//
+// `spawn` forwards its body's payload route, so `await` observes the same
+// kind of result the body would have produced in place.  `watch` and
+// `service` forward by the same one-variable mechanism, but both are
+// long-running forms this file has no scaffolding to start and stop.
+
+#[test]
+fn spawn_forwards_its_bodys_route_to_the_awaited_result() {
+    let byte_routed = run_pipe(
+        "let h = spawn { echo hi }\n\
+         let r = await $h\n\
+         echo \"[!{bytes-to-string $r[stdout]}]\"",
+    );
+    assert_eq!(byte_routed.status, 0, "stderr: {}", byte_routed.stderr);
+    assert_eq!(
+        byte_routed.stdout, "[hi\n]\n",
+        "a byte-routed body's payload is its stdout: {:?}",
+        byte_routed.stdout
+    );
+
+    let value_routed = run_pipe(
+        "let h = spawn { return 5 }\n\
+         let r = await $h\n\
+         echo \"$r[value] [!{bytes-to-string $r[stdout]}]\"",
+    );
+    assert_eq!(value_routed.status, 0, "stderr: {}", value_routed.stderr);
+    assert_eq!(
+        value_routed.stdout, "5 []\n",
+        "a value-routed body's payload is its return, and it wrote nothing: {:?}",
+        value_routed.stdout
     );
 }
 

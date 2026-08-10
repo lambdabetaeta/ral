@@ -90,8 +90,8 @@ rather than evaluating it directly**
 `Shell::run` entry every host shares, handed a `Program::Source` run
 ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]).
 
-- **The check.** The inference pass is not optional — it writes the mode wires
-  the evaluator reads
+- **The check.** The inference pass is not optional — it writes the ground
+  annotations the evaluator reads
   ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]) — so a
   batch run always typechecks, taking `typecheck`'s
   `Result<Comp, Vec<TypeError>>`. A script has no prior session, so the check

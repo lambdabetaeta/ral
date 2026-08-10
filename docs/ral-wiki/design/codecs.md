@@ -1,45 +1,44 @@
 # Codecs: the typed crossing between bytes and values
 
-**The `from-X` / `to-X` builtins name the typed crossing between a byte
-pipeline and structured values.** A decoder reads the byte channel and returns
-a value. An encoder takes one value, writes the encoded bytes, and those bytes
-are its result:
+**The `from-X` / `to-X` builtins name the typed crossing between stdin bytes
+and structured values.** A decoder reads stdin and returns a value. An encoder
+takes one value and writes the encoded bytes, and those bytes are what a value
+boundary sees:
 
-- every decoder has the computation type `from-X : ⟨Bytes, ∅, ∅⟩ A`;
-- every encoder has the type `to-X : A → ⟨∅, Bytes, Bytes⟩ Unit`.
+- every decoder has the computation type `from-X : F[Value] A`;
+- every encoder has the type `to-X : A → F[Bytes] Unit`.
 
-The encoder's result mode is `Bytes`, so by WF-2 its return type is `Unit`
-([[design/types|types]]). The two types are inverse: an encoder puts on the
-channel what the matching decoder reads from it.
+The encoder's [[design/types|payload route]] is `Bytes`, so by WF-2 its return
+type is `Unit`. The two types are inverse: an encoder writes what the matching
+decoder reads.
 
-## Byte modes make the crossing checkable
+## The route makes the crossing legible
 
-A computation has the type `⟨i, o, r⟩ A` over an input mode, an output mode,
-and a result mode ([[design/types|types]]). Four spec shapes classify the
+A codec's declaration says which of its two products a value boundary should
+observe, and nothing more ([[design/types|types]]). Three shapes classify the
 builtins:
 
-- `⟨∅, ∅, ∅⟩` — a pure value builtin; it touches no byte channel.
-- `⟨Bytes, Bytes, Bytes⟩` — an external command or a byte filter.
-- `⟨Bytes, ∅, ∅⟩` — a decoder: it consumes the byte channel and returns a value.
-- `⟨∅, Bytes, Bytes⟩` — an encoder: it consumes a value argument and writes the byte channel.
+- `F[Value] A` — a pure value builtin, and also a decoder: its answer is its
+  returned value.
+- `F[Bytes] Unit` — an external command, a byte filter, or an encoder: its
+  answer is what it wrote.
+- `F[ρ] A` with `ρ` forwarded from a supplied thunk — the streaming reducer.
 
-`PipeSpec::none` and `PipeSpec::decode` in `core/src/mode.rs` build the two
-value-payload shapes; `ret_bytes` in `core/src/typecheck/builtins.rs` builds
-the two byte-payload shapes for builtins, and `external_exec_comp_ty` in
-`core/src/typecheck/infer.rs` builds the external-command shape. The
-[[design/pipelines|pipe]] connects a producer's `result` to the next stage's
-`input`, and every interior connection is `Bytes`/`Bytes`. The modes therefore
-admit `cmd | from-json` and `to-json $x | cmd` (`Bytes` meets `Bytes`), and they
-reject a value where bytes are due. A program crosses the boundary only when it
-names a codec. The decode is typed at the final stage:
-`from-json` yields a fresh value type for the pipeline's result. A misspelled
-codec fails at command lookup
+`ret` and `ret_bytes` in `core/src/typecheck/builtins.rs` build the two ground
+shapes, and `external_exec_comp_ty` in `core/src/typecheck/infer.rs` gives every
+external command the second. Nothing about the [[design/pipelines|pipe]] reads
+these: a `|` is a positional byte wire, and asks of a stage only that it be a
+computation ready to run, never what its route is. What the
+route buys is the *boundary*: `let x = cat f` binds captured text, while
+`let x = cat f | from-bytes` binds the bytes exactly, and the ordinary return
+type alone cannot tell those apart. A program crosses between bytes and values
+only when it names a codec. A misspelled codec fails at command lookup
 ([[design/builtins|why each codec is its own builtin]]).
 
 ## The two directions
 
-A decoder takes no value argument. It reads the byte channel, whether that
-channel is a `< file` redirect or the left stage of a pipeline. Each decoder
+A decoder takes no value argument. It reads stdin, whether that comes from a
+`< file` redirect, the left stage of a pipeline, or the terminal. Each decoder
 is declared with arity 0, so a passed value is a type error, raised before the
 call runs (`` `from-json` takes no argument — it reads the byte channel ``).
 The error's hint names the fix: apply the matching encoder, then send its bytes
@@ -56,15 +55,16 @@ for a `Bytes` value (for example `$r[stdout]` from `await`). The decoders:
   handles quoted fields, embedded commas, and embedded newlines;
 - `from-lines` → a line stream (below).
 
-**A decoder is a legal pipeline tail.** `cat data.json | from-json` returns a
-decoded value. A later stage cannot consume that value through `|`; bind it and
-use ordinary application instead, for example
+**A decoder is the natural pipeline tail.** `cat data.json | from-json` returns
+a decoded value. Putting a stage *after* a decoder is legal and useless: the
+decoded value goes nowhere, and the next stage reads the EOF the decoder left
+behind. Bind the decoder's result and apply the next function to it instead —
 `let document = cat data.json | from-json` followed by `length $document`.
 
-An encoder takes one value and writes its encoded form to the byte channel.
+An encoder takes one value and writes its encoded form to stdout.
 `to-bytes`, `to-string`, `to-lines` (which joins a list with newlines),
 `to-json`, `to-csv`, and `to-line` (the line writer that `echo` uses) all
-return `Unit`; the written bytes are the result (`write_encoded` in
+return `Unit`; the written bytes are the payload (`write_encoded` in
 `core/src/builtins/codecs.rs`). In a pipeline, the write feeds the wire:
 `to-json $x | cmd` gives `cmd` the encoded bytes. At a bind, the
 [[design/types|capture]] coercion applies: `let e = to-json $x` binds the
@@ -93,15 +93,16 @@ whole chain eagerly, from the stdin read to EOF. The interface is incremental;
 the memory profile matches the other decoders. One codec streams, and it is
 the way to process unbounded input without holding it:
 
-- `fold-lines <fn> <init>` folds over stdin line by line. Its output mode is
-  parametric:
-  `fold-lines : ∀ α μ ρ. U (α → String → ⟨∅, μ, ρ⟩ α) → α → ⟨Bytes, μ, ∅⟩ α`.
-  A pure fold keeps `μ = ∅` and has the decoder shape. A callback that writes
-  bytes per line lifts the stage to `⟨Bytes, Bytes, ∅⟩ α`, and the fold's
-  result stays the reduced value. The inferencer takes `μ` from the callback;
-  no declaration is needed. The callback slot carries the quantified
-  result-mode variable `ρ`, as [[design/types|types]] describes for signature
-  slots (`reducer_spec` in `core/src/typecheck/builtins.rs`).
+- `fold-lines <fn> <init>` folds over stdin line by line, forwarding its
+  callback's boundary behaviour:
+  `fold-lines : ∀ α ρ. U (α → String → F[ρ] α) → α → F[ρ] α`.
+  A value-returning fold returns its accumulator. A callback that emits per
+  line makes the fold byte-routed, so a value boundary captures the emitted
+  lines instead — which is what `map-lines` is. `each-line` deliberately
+  returns `Unit`, leaving its callback's writes visible. The one route variable
+  is the caller's, read off the supplied thunk and handed back paired with the
+  value type it came with; the inferencer needs no declaration
+  (`scheme::fold_lines` in `core/src/typecheck/builtins.rs`).
 
 ## Strict values, lossy lines
 

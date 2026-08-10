@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 40e6d77
-generated_at_date: 2026-08-09
+generated_at_commit: 95449d4
+generated_at_date: 2026-08-10
 covers_paths: [core/src/runtime.rs, core/src/runtime/, core/src/child_eval.rs]
 ---
 
@@ -91,22 +91,26 @@ guards
     ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
 - `pipeline/` — pipeline planning and execution
   (`pipeline.rs`'s `run_pipeline` is the few-line orchestrator: resolve →
-  launch → collect). `resolve.rs` reads each stage's input, chatter, and result
-  signature off the checker's ground `Wire` and freezes the launch decision once
-  as `StageLaunch` (`Direct` | `HelperEval`), so launch reads a decision rather
-  than re-deriving a dispatch gate. Every interior route is an operating-system
-  byte pipe: a producer's `result = Bytes` connects to the next stage's
-  `input = Bytes`; the independent `output` remains ambient chatter. The final
-  stage's result is free to be a value ([[decisions/260809_byte-only-pipelines|byte-only-pipelines]]).
-  A multi-stage pipeline always launches its stages as subprocesses in one
+  launch → collect). `resolve.rs` freezes each stage's launch decision once as
+  `StageLaunch` (`Direct` | `HelperEval`) from the head's resolution, redirects,
+  terminal ownership, and audit state, so launch reads a decision rather than
+  re-deriving a dispatch gate. **No route enters that classification**: a
+  stage's dispatch may not depend on where its payload lives, or the choice
+  would stop being observationally transparent. The single type-level fact
+  resolve carries is `PipelinePlan::final_route`, the checker's `GroundRoute`
+  for the last stage. `route.rs`'s `open_stage_routes` then allocates every
+  interior edge as an operating-system byte pipe from **stage position alone**
+  (`i + 1 < n`), and derives `FinalValue::Report` from `i + 1 == n` together
+  with that one `final_route` — the pipeline's only value-transport question
+  ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
+  A non-final stage's returned value is discarded, never serialised onto an
+  edge. A multi-stage pipeline always launches its stages as subprocesses in one
   process group; ordinary application and bind do not enter this runtime.
-  - A bundled (uutils) head routes `Direct` when it is a byte stage, where its
-    `ral --ral-bundled-tool` child is the image chosen by `command::build_command`
+  - A bundled (uutils) head routes `Direct` like any external, its
+    `ral --ral-bundled-tool` child the image chosen by `command::build_command`
     — nothing in the pipeline distinguishes a bundled head from a host binary,
-    so both classify as `External` carrying the resolved `CommandIdentity`. A
-    bundled head whose result is not `Bytes` in an interior position is rejected
-    by type checking;
-    value-style composition is evaluator application, not a helper route. The
+    so both classify as `External` carrying the resolved `CommandIdentity`.
+    Value-style composition is evaluator application, not a helper route. The
     terminal-ownership decision (`resolve_terminal_plan`) likewise gates on a
     reachable terminal lease and a terminal-bound final sink, not on a
     `startup_foreground` predicate.
@@ -126,8 +130,7 @@ guards
     ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).
 - **A `grant` is a dynamic effect scope, not a process boundary, so the grant
   body always evaluates locally** — the boundary verbs (`eval_top_level` /
-  `eval_block`) run their body in process, with no router in between
-  ([[decisions/260610_value-edge-locality|value-edge-locality]]):
+  `eval_block`) run their body in process, with no router in between:
   nested grants compose by intersection over authority, an algebra of the
   evaluator's dynamic context. Confinement happens elsewhere — the
   RAL-owned effects are decided in process by `capability::check_*`
@@ -157,10 +160,11 @@ guards
   One request frame in, one response frame out: the child packs the body plus a
   `WireMobile` snapshot, rebuilds its shell with `subprocess::reexec_child_shell`,
   evaluates the stage against its byte input, drains its audit fragment, and
-  ships a single `ChildEvalResponse`. For a final value result,
-  `FinalValue::Report` asks this helper response to carry the value; the final
-  report remains helper-staged until a separate in-parent-tail decision. There
-  is no upstream typed-value response edge.
+  ships a single `ChildEvalResponse`. When the pipeline's `final_route` is
+  `Value`, `FinalValue::Report` asks this helper response to carry the value;
+  the final report remains helper-staged until a separate in-parent-tail
+  decision. The response frame travels its own socketpair, never aliased with an
+  interior pipe, so there is no upstream typed-value edge.
 
 The `Shell` state these thread is [[map/core/shell-state|shell-state]]; the serde
 mirror and wire envelope they ride is [[map/core/transport|transport]].

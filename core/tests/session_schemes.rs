@@ -14,8 +14,7 @@ use ral_core::transport::{Program, Run};
 use ral_core::types::{Capabilities, Settled};
 use ral_core::{
     CompileOutcome, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Shell,
-    TypeError, Value, builtins, compile_and_typecheck,
-    typecheck::{TypeErrorKind, fmt_scheme},
+    TypeError, Value, builtins, compile_and_typecheck, typecheck::fmt_scheme,
 };
 
 fn shell() -> Shell {
@@ -72,49 +71,36 @@ fn check_errors(shell: &Shell, src: &str) -> Vec<TypeError> {
     }
 }
 
-fn is_mode_mismatch(errs: &[TypeError]) -> bool {
-    errs.iter()
-        .any(|e| matches!(e.kind, TypeErrorKind::ModeMismatch { .. }))
-}
+// ─── (1) value producer into byte decoder is an ordinary byte pipe ──────────
 
-// ─── (1) value producer into byte decoder is a static mode mismatch ──────────
-
-/// `let f = { return 3 }` then `$f | from-json`: the value producer's
-/// `∅` output feeding `from-json`'s ground `Bytes` input is the
-/// `∅`-into-`Bytes` edge.  The next run's check reports it (T0012)
-/// before evaluation, with the binding's session scheme as the seed.
+/// `let f = { return 3 }` then `$f | from-json`: `|` is a positional byte
+/// wire that asks nothing about a stage's return value, so `f`'s
+/// returned `3` is discarded and `from-json` reads EOF. The next run's
+/// check accepts it, with the binding's session scheme as the seed.
 #[test]
-fn value_producer_into_decoder_is_static_mode_mismatch_cross_run() {
+fn value_producer_into_decoder_is_accepted_cross_run() {
     let mut sh = shell();
     run(&mut sh, "let f = { return 3 }").unwrap();
     let errs = check_errors(&sh, "$f | from-json");
     assert!(
-        is_mode_mismatch(&errs),
-        "expected a cross-run ModeMismatch (T0012), got: {:?}",
-        errs.iter()
-            .map(|e| e.kind.render_message())
-            .collect::<Vec<_>>()
-    );
-    assert!(
-        errs.iter()
-            .any(|e| e.kind.render_message().contains("pipeline channels")),
-        "expected the mode-mismatch message to mention pipeline channels, got: {:?}",
+        errs.is_empty(),
+        "expected a value producer piped into a decoder to typecheck across runs, got: {:?}",
         errs.iter()
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
     );
 }
 
-/// The same edge in a single program now reports statically too — the
-/// Part-1 rule: a stage whose input resolves to ground `Bytes` takes the
-/// channel edge regardless of how polymorphic its return value is.
+/// The same edge in a single program typechecks too: the pipe's rule is
+/// about a stage's shape (`F[ρ] A`), never about whether its neighbour
+/// reads or writes.
 #[test]
-fn value_producer_into_decoder_is_static_mode_mismatch_in_run() {
+fn value_producer_into_decoder_is_accepted_in_run() {
     let sh = shell();
     let errs = check_errors(&sh, "let f = { return 3 }\n$f | from-json");
     assert!(
-        is_mode_mismatch(&errs),
-        "expected an in-run ModeMismatch (T0012), got: {:?}",
+        errs.is_empty(),
+        "expected a value producer piped into a decoder to typecheck in one run, got: {:?}",
         errs.iter()
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
@@ -288,24 +274,24 @@ fn alias_visible_to_next_run() {
 }
 
 /// A value-output alias body defines the unknown head's modes, so the
-/// definition draws no mismatch at the next run's check; the `∅` output is
-/// rejected only where it feeds a byte consumer (`docs/SPEC.md` §4.2.1), as
-/// `three | from-json` shows.
+/// definition draws no error at the next run's check; piping the alias into
+/// a decoder is an ordinary byte wire too — `three` writes nothing,
+/// so `from-json` reads EOF.
 #[test]
-fn value_output_alias_is_use_site_mode_mismatch() {
+fn value_output_alias_piped_into_decoder_is_accepted() {
     let sh = shell();
     let errs = check_errors(&sh, "alias three { |args| return 3 }\nreturn unit");
     assert!(
-        !is_mode_mismatch(&errs),
-        "expected no ModeMismatch defining a value-output alias, got: {:?}",
+        errs.is_empty(),
+        "expected no error defining a value-output alias, got: {:?}",
         errs.iter()
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
     );
     let errs = check_errors(&sh, "alias three { |args| return 3 }\nthree | from-json");
     assert!(
-        is_mode_mismatch(&errs),
-        "expected a ModeMismatch (T0012) where the value-output alias feeds from-json, got: {:?}",
+        errs.is_empty(),
+        "expected the value-output alias piped into from-json to typecheck, got: {:?}",
         errs.iter()
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()

@@ -8,7 +8,7 @@
 
 use crate::io::strip_trailing_newline;
 use crate::ir::{Comp, CompKind, IrPattern, ScopeOp, Val};
-use crate::mode::Wire;
+use crate::route::GroundRoute;
 use crate::source::Spanned;
 use crate::typecheck::Scheme;
 use crate::types::{Binding, Break, Control, Error, Mooring, Raw, Shell, Tail, Value};
@@ -74,9 +74,11 @@ pub(crate) fn eval_comp(
         // bare calls alike.
         CompKind::App { .. } | CompKind::Exec(_) => call::invoke(comp, tail, mooring, shell),
 
-        CompKind::Pipeline { stages, wires, .. } => {
-            eval_pipeline(stages, wires, tail, mooring, shell)
-        }
+        CompKind::Pipeline {
+            stages,
+            final_route,
+            ..
+        } => eval_pipeline(stages, *final_route, tail, mooring, shell),
 
         CompKind::Chain(parts) => eval_chain(parts, tail, mooring, shell),
 
@@ -259,7 +261,12 @@ fn eval_capture(body: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Raw<V
             .and_then(std::convert::identity)
             .map_err(|e| shell.err(format!("capture flush: {e}"), 1))?;
     }
-    debug_assert!(
+    // Type-ensured, not merely expected: every operation that grounds a route
+    // to `Bytes` unifies the paired type with `Unit` (WF-2).  A firing assert
+    // means that story has a hole — silent in release, it once meant a
+    // captured string standing in for a typed value — so it aborts in every
+    // profile, not just debug.
+    assert!(
         matches!(&result, Err(_) | Ok(Value::Unit)),
         "capture's operand is result: Bytes, so WF-2 makes its value Unit"
     );
@@ -301,7 +308,7 @@ fn eval_bind(
 /// process boundary.
 fn eval_pipeline(
     stages: &[Arc<Comp>],
-    wires: &[Wire],
+    final_route: GroundRoute,
     tail: Tail,
     mooring: &Mooring,
     shell: &mut Shell,
@@ -309,7 +316,7 @@ fn eval_pipeline(
     if stages.len() == 1 {
         return eval_comp(&stages[0], mooring, shell, tail);
     }
-    pipeline::run_pipeline(stages, wires, mooring, shell)
+    pipeline::run_pipeline(stages, final_route, mooring, shell)
 }
 
 /// `a ? b ? c` — the first arm to succeed wins, else the last error (`Unit`

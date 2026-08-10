@@ -11,7 +11,7 @@ mod explain;
 mod fmt;
 mod generalize;
 pub(crate) mod infer;
-mod mode_solver;
+mod route_solver;
 mod scheme;
 mod scope;
 mod ty;
@@ -19,13 +19,13 @@ mod unify;
 
 pub use self::builtins::builtin_type_hint;
 pub use self::env::{InferCtx, TyEnv};
-pub use self::error::{CompDiff, Reason, TypeError, TypeErrorKind};
+pub use self::error::{CompDiff, PinFailure, Reason, TypeError, TypeErrorKind};
 pub use self::fmt::{
-    FmtCtx, fmt_comp_ty_ctx, fmt_mode, fmt_mode_ctx, fmt_scheme, fmt_ty, fmt_ty_ctx,
+    FmtCtx, fmt_comp_ty_ctx, fmt_route, fmt_route_ctx, fmt_scheme, fmt_ty, fmt_ty_ctx,
 };
 pub use self::scheme::{CachedFreeVars, Scheme};
 pub use self::ty::{
-    ByteMode, CompTy, CompTyVar, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar,
+    CompTy, CompTyVar, GroundRoute, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar,
 };
 pub use self::unify::Unifier;
 
@@ -170,20 +170,19 @@ pub fn bake_prelude(comp: &Comp) -> (Comp, Vec<(String, Scheme)>) {
 ///
 /// The arm is inferred under the runtime handler calling convention — a
 /// lambda arm receives the argv list — and closed against its own unifier
-/// so a later run's check can be seeded with it.  Pinning constrains only
-/// the arm's `PipeSpec`, leaving its value type free: to the head's handler
-/// scheme when one is in scope, otherwise to a fresh `F[μ, ν]` the arm
-/// itself pins down.
+/// so a later run's check can be seeded with it.  Pinning constrains the
+/// arm's payload route against the head's, and — where that pin grounds
+/// `Bytes` — the arm's value against `Unit` (WF-2).
 ///
 /// # Errors
-/// The lone rejection: a ground mode clash, a value-output body under a
-/// byte-output head.
+/// The arm's route disagrees with the head's, or a byte-routed pin leaves
+/// the arm still returning a value.
 pub fn alias_arm_scheme(
     head: &str,
     param: &crate::ir::IrPattern,
     body: &Comp,
     schemes: SessionSchemes,
-) -> Result<Scheme, crate::mode::ModeMismatch> {
+) -> Result<Scheme, PinFailure> {
     let mut ctx = InferCtx::new();
     let mut env = TyEnv::new();
     seed_env(&mut env, schemes);

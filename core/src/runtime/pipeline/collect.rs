@@ -252,7 +252,7 @@ impl PipelineCollector {
     pub(super) fn finish(
         self,
         shell: &mut Shell,
-        last_result: crate::mode::PipeMode,
+        final_route: crate::route::GroundRoute,
     ) -> Settled<Value> {
         if let Some(br) = self.break_ {
             return Err(match br {
@@ -263,9 +263,9 @@ impl PipelineCollector {
                 }
             });
         }
-        match last_result {
-            crate::mode::PipeMode::Bytes => Ok(Value::Unit),
-            _ => Ok(self.final_value.unwrap_or(Value::Unit)),
+        match final_route {
+            crate::route::GroundRoute::Bytes => Ok(Value::Unit),
+            crate::route::GroundRoute::Value => Ok(self.final_value.unwrap_or(Value::Unit)),
         }
     }
 }

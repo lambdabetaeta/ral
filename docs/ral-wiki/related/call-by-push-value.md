@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 19d53bb
-verified_at_date: 2026-07-28
+verified_at_commit: 95449d4
+verified_at_date: 2026-08-10
 against: [design/cbpv, design/types, design/pipelines, internals/evaluator-machine]
 ---
 
@@ -40,18 +40,26 @@ touches the world ([[design/cbpv|cbpv]],
 
 ## Divergences (extensions, mostly)
 
-- **`F` is graded.** ral's computation type is `F[I,O] A`: Levy's `F A`
-  indexed by two byte-channel modes (`∅` / `Bytes` / `μ`). The grading is what
-  makes a pipeline edge a typing fact — adjacent stages connect only when the
-  modes agree ([[design/types|types]],
-  [[decisions/260601_modes-equality-constrained-shared|modes-equality-constrained-shared]]).
-- **The pipe is a new computation combinator.** CBPV composes computations by
-  sequencing and application only. ral adds `|` — binary composition along the
-  byte channel, run as a process group or a fold by edge type
-  ([[design/pipelines|pipelines]]). It is not a CBPV connective; it is exactly
-  where ral is a shell rather than a λ-calculus.
-- **No computation products.** ral's computation types are `F[I,O] A` and
-  `A → B`, full stop; Levy's `Πᵢ Bᵢ` is absent. Where it would be used, a
+- **`F` carries one annotation, and it is not a grade.** ral's returner is
+  `F[ρ] A`, where `ρ ∈ {Value, Bytes}` says which of a computation's two
+  products a *value boundary* observes — the returned `A`, or the stdout it
+  wrote ([[design/types|types]]). It bounds no effect, licenses nothing, and
+  does not multiply along a bind: `M to x. N` simply takes `N`'s route. The
+  formation rule `ρ = Bytes ⇒ A = Unit` is the whole of its theory. Strip the
+  annotation and what is left is Levy's calculus unchanged
+  ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
+- **The pipe is a new computation combinator, and it is not a typing fact.**
+  CBPV composes computations by sequencing and application only. ral adds `|`,
+  whose static rule says just that both sides are computations — `Γ ⊢ M : F[ρ] A`
+  and `Γ ⊢ N : F[σ] B` give `Γ ⊢ M | N : F[σ] B`. What the combinator *does* is
+  operational: it connects `M`'s stdout to `N`'s stdin with an
+  operating-system pipe, discards `M`'s returned value, and runs both in one
+  process group ([[design/pipelines|pipelines]]). It is not a CBPV connective;
+  it is exactly where ral is a shell rather than a λ-calculus, and the honest
+  reading is that the shell's one composition operator lives outside the
+  calculus rather than being encoded into it.
+- **No computation products.** ral's computation types are `F[ρ] A` and
+  `A → C`, full stop; Levy's `Πᵢ Bᵢ` is absent. Where it would be used, a
   record of thunks — a value product of `U`s — serves.
 - **The effect interface is fixed.** Levy's calculus is effect-agnostic; ral
   pins the operation signature at the external-command boundary

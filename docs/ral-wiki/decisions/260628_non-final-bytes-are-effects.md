@@ -1,5 +1,6 @@
 ---
-status: implemented (2026-06-28)
+status: superseded
+superseded_by: decisions/260809_pipes-are-positional-byte-wires
 ---
 
 # A value boundary binds the final value; non-final bytes are effects

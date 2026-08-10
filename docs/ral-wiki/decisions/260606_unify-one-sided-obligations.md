@@ -48,8 +48,28 @@ they denote one and the same equi-recursive type.
   which the old `apply_ty` comment wrongly called unreachable. It is reachable;
   the unifier now handles it co-inductively rather than the program being
   ill-formed.
-- **`PipeMode` gains `Hash`** so a resolved channel mode can sit inside a
-  structural key.
+- **`PayloadRoute` gains `Hash`** so a resolved route can sit inside a
+  structural key. `CompTyKey::Return` carries exactly the one field that
+  matters to the fingerprint: `Return(PayloadRoute, Box<TyKey>)`. It once
+  carried the pair `Return(PipeMode, PipeMode, Box<TyKey>)` — an `input` and
+  an `output`, both since deleted
+  ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
+  **This was the single most dangerous line in the whole payload-route
+  change.** The two deleted fields were exactly what the key fingerprinted;
+  the route was not in the key at all under the old shape (it lived as one of
+  the two `PipeMode`s being deleted, not as a separate slot to preserve). A
+  naive deletion — drop the two fields being removed, leave the rest of the
+  variant alone — would have produced `Return(Box<TyKey>)`: a key that
+  forgets payload route entirely. Two comp types differing only in route
+  would then fingerprint identically, so the co-inductive guard this page
+  exists to make complete would instead treat re-entry on a route-changing
+  cycle as the same obligation already in progress and let it through. The
+  compiler would not catch this: every type still checks, every existing test
+  still passes, because no test was written to distinguish a route-preserving
+  cycle from a route-erasing one — the corner this key exists to guard is
+  exactly the corner nothing else exercises. The fix is not a deletion but a
+  rewrite: the route must be *added back* as the key's one payload field, not
+  merely left over from the pair being removed.
 
 This is what lets the prelude `stream-*` family present `Stream`-value
 signatures — `case $s` directly, recursing through the forced tail `!$p[tail]`,

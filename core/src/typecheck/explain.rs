@@ -3,7 +3,7 @@
 //! written here and nowhere else.
 
 use super::error::{CompDiff, Reason, TypeErrorKind};
-use super::fmt::{FmtCtx, fmt_mode_ctx, fmt_ty_ctx};
+use super::fmt::{FmtCtx, fmt_route_ctx, fmt_ty_ctx};
 use super::ty::Ty;
 use crate::syntax::ast::BinaryOpKind;
 
@@ -27,12 +27,13 @@ impl TypeErrorKind {
                 )
             }
             Self::CompTyMismatch { diffs, .. } => fmt_comp_mismatch(diffs),
-            Self::ModeMismatch { expected, actual } => {
+            Self::RouteMismatch { expected, actual } => {
                 let ctx = FmtCtx::default();
                 format!(
-                    "pipeline channels don't agree: one side is {}, the other is {}",
-                    fmt_mode_ctx(expected, &ctx),
-                    fmt_mode_ctx(actual, &ctx)
+                    "these two computations disagree about where their payload lives: \
+                     one is {}, the other is {}",
+                    fmt_route_ctx(expected, &ctx),
+                    fmt_route_ctx(actual, &ctx)
                 )
             }
             Self::RowExtraField { label } => {
@@ -142,7 +143,7 @@ impl TypeErrorKind {
                 let ctx = FmtCtx::for_value_types(&[ty]);
                 format!("{} cannot be invoked as a command", fmt_ty_ctx(ty, &ctx))
             }
-            Self::ModeMismatch { .. } => "pipeline channels disagree here".into(),
+            Self::RouteMismatch { .. } => "these disagree about where their payload lives".into(),
             Self::RowExtraField { label } => format!("no field '{label}' in this record"),
             Self::RowMissingField { label } => format!("this record needs field '{label}'"),
             Self::CaseNotExhaustive { missing, extra } => {
@@ -181,7 +182,7 @@ impl TypeErrorKind {
 /// the two heads differ in shape — `Return` against `Fun` — blaming no
 /// component.
 fn fmt_comp_mismatch(diffs: &[CompDiff]) -> String {
-    use CompDiff::{Result, ReturnType, Stdin, Stdout};
+    use CompDiff::{ReturnType, Route};
     if diffs.is_empty() {
         return "two computations have incompatible shapes — one is a function, the other is not"
             .into();
@@ -191,14 +192,14 @@ fn fmt_comp_mismatch(diffs: &[CompDiff]) -> String {
         .iter()
         .flat_map(|d| match d {
             ReturnType { expected, actual } => vec![expected, actual],
-            _ => Vec::new(),
+            Route { .. } => Vec::new(),
         })
         .collect();
     let mut ctx = FmtCtx::for_value_types(&ty_refs);
     for d in diffs {
-        if let Stdin { expected, actual } | Stdout { expected, actual } = d {
-            ctx.absorb_mode(*expected);
-            ctx.absorb_mode(*actual);
+        if let Route { expected, actual } = d {
+            ctx.absorb_route(*expected);
+            ctx.absorb_route(*actual);
         }
     }
 
@@ -212,7 +213,7 @@ fn fmt_comp_mismatch(diffs: &[CompDiff]) -> String {
                     fmt_ty_ctx(expected, &ctx),
                     fmt_ty_ctx(actual, &ctx)
                 )),
-                _ => None,
+                Route { .. } => None,
             })
             .collect();
         return parts.join("; ");
@@ -221,20 +222,10 @@ fn fmt_comp_mismatch(diffs: &[CompDiff]) -> String {
     lines.push("these two computations don't line up:".into());
     for d in diffs {
         let line = match d {
-            Stdin { expected, actual } => format!(
-                "  stdin channel: one expects {}, the other {}",
-                fmt_mode_ctx(expected, &ctx),
-                fmt_mode_ctx(actual, &ctx)
-            ),
-            Stdout { expected, actual } => format!(
-                "  stdout channel: one expects {}, the other {}",
-                fmt_mode_ctx(expected, &ctx),
-                fmt_mode_ctx(actual, &ctx)
-            ),
-            Result { expected, actual } => format!(
-                "  result conduit: one expects {}, the other {}",
-                fmt_mode_ctx(expected, &ctx),
-                fmt_mode_ctx(actual, &ctx)
+            Route { expected, actual } => format!(
+                "  payload route: one is {}, the other is {}",
+                fmt_route_ctx(expected, &ctx),
+                fmt_route_ctx(actual, &ctx)
             ),
             ReturnType { expected, actual } => format!(
                 "  return type: couldn't match {} with {}",
@@ -392,9 +383,9 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         ),
         Reason::CaseArms => Some(
             "every arm of a `case` must agree on where its payload lives: \
-             either every arm produces a value of the same type, or every arm \
-             writes to the byte channel — a mix of the two cannot join, so \
-             pipe the byte-payload arm through a decoder (`| from-string`) to \
+             either every arm returns a value of the same type, or every arm \
+             is captured from stdout — a mix of the two cannot join, so pipe \
+             the stdout-routed arm through a decoder (`| from-string`) to \
              bring it onto the value side"
                 .to_string(),
         ),
@@ -410,32 +401,32 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         ),
         Reason::IfBranches => Some(
             "both branches of an `if` must agree on where their payload lives: \
-             either both produce a value of the same type, or both write to \
-             the byte channel — a mix of the two cannot join, so pipe the \
-             byte-payload arm through a decoder (`| from-string`) to bring \
-             it onto the value side"
+             either both return a value of the same type, or both are \
+             captured from stdout — a mix of the two cannot join, so pipe \
+             the stdout-routed branch through a decoder (`| from-string`) to \
+             bring it onto the value side"
                 .to_string(),
         ),
         Reason::ChainBranches => Some(
             "every arm of a `?` chain must agree on where their payload lives: \
-             either every arm produces a value of the same type, or every arm \
-             writes to the byte channel — a mix of the two cannot join, so \
-             pipe the byte-payload arm through a decoder (`| from-string`) to \
+             either every arm returns a value of the same type, or every arm \
+             is captured from stdout — a mix of the two cannot join, so pipe \
+             the stdout-routed arm through a decoder (`| from-string`) to \
              bring it onto the value side"
                 .to_string(),
         ),
         Reason::TryArms => Some(
             "both outcomes of a `try` must agree on where their payload lives: \
-             either both produce a value of the same type, or both write to \
-             the byte channel — a mix of the two cannot join, so pipe the \
-             byte-payload arm through a decoder (`| from-string`) to bring \
-             it onto the value side"
+             either both return a value of the same type, or both are \
+             captured from stdout — a mix of the two cannot join, so pipe \
+             the stdout-routed outcome through a decoder (`| from-string`) to \
+             bring it onto the value side"
                 .to_string(),
         ),
-        Reason::ResultPin => Some(
-            "this computation's result was still undecided where a payload \
-             decision was made, so it was pinned to the return value — a \
-             later use that puts it on the byte channel disagrees with that"
+        Reason::RoutePin => Some(
+            "this computation's payload route was still undecided, so an \
+             earlier use pinned it to where its payload turned out to live — \
+             a later use expecting the other route disagrees with that pin"
                 .to_string(),
         ),
         Reason::BinaryOperands(op) => Some(
@@ -452,18 +443,11 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
             }
             .to_string(),
         ),
-        Reason::PipelineProducer => Some(
-            "`|` connects byte streams, but this stage produces a value — \
-             bind it (`let x = ...`) and pass it on by ordinary application \
-             (`f $x`), or encode it (`to-json`, `to-lines`, `echo`) to put \
-             bytes on the channel; a decoder ends a pipeline, it cannot sit \
-             in the middle of one"
-                .to_string(),
-        ),
-        Reason::PipelineConsumer => Some(
-            "`|` connects byte streams, but this stage does not read the byte \
-             channel — apply it to its argument (`f $x`) rather than piping \
-             into it, or read the channel with a decoder such as `from-line`"
+        Reason::PipelineStageShape => Some(
+            "a pipeline stage must be ready to run, not still waiting for an \
+             argument — apply it to its argument (`f $x`) rather than piping \
+             into it, or read the incoming bytes with a decoder such as \
+             `from-line` if it should consume the stream instead"
                 .to_string(),
         ),
         Reason::OptionField { form, key } => Some(format!("{form} {key}: wrong value type")),
@@ -473,11 +457,26 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
              fields you care to carry — `fail $e` re-raises a caught error as it stands"
                 .to_string(),
         ),
-        Reason::HandlerModePin => Some(
-            "a handler or alias reinterprets a head — it preserves the head's \
-             pipeline modes; match the existing head's modes or add a codec"
+        // The same pin fails two different ways.  A route clash is about
+        // *where* the payload lives; a WF-2 failure is about the arm having a
+        // returned value at all, and telling that author to "add a codec"
+        // would send them after the wrong thing.
+        Reason::HandlerRoutePin => Some(match kind {
+            TypeErrorKind::CompTyMismatch { diffs, .. }
+                if diffs
+                    .iter()
+                    .any(|d| matches!(d, CompDiff::ReturnType { .. })) =>
+            {
+                "this head's payload is its stdout, so an arm installed under it has \
+                 no separate value to return — its return type must be Unit. Write the \
+                 arm to emit its result rather than return it, or install it under a \
+                 head whose payload is a returned value"
+                    .to_string()
+            }
+            _ => "a handler or alias reinterprets a head — it preserves the head's \
+                  payload route; match the existing head's route or add a codec"
                 .to_string(),
-        ),
+        }),
         Reason::AliasParam
         | Reason::BuiltinTypedArg
         | Reason::ReturnShape
@@ -491,11 +490,7 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         | Reason::RecordFieldRead
         | Reason::DynamicIndexTarget
         | Reason::AutoderefHead
-        | Reason::TypeProbe
         | Reason::LetRecSelf
-        | Reason::LinesStepSelf
-        | Reason::SeqChannels
-        | Reason::PipelineChatter
-        | Reason::ScopeArms => None,
+        | Reason::LinesStepSelf => None,
     }
 }

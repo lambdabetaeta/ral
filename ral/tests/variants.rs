@@ -210,35 +210,29 @@ fn stream_each_on_empty_stream_runs_body_zero_times() {
 }
 
 #[test]
-fn variant_value_pipeline_is_rejected() {
-    // A variant is a value and cannot cross a byte-pipeline edge.
+fn a_variant_piped_into_a_block_goes_nowhere() {
+    // A variant is a value, and no value crosses an edge: the producer's
+    // `ok 5` is discarded, the block literal is returned rather than
+    // applied, and so `$v` never prints.
     let out = common::run("non_step_variant", "return `ok 5 | { |v| echo $v }\n");
-    assert_ne!(out.status, 0, "expected a compile error");
+    assert_eq!(out.status, 0, "expected acceptance: {}", out.stderr);
     assert!(
         out.stdout.is_empty(),
-        "rejected pipeline wrote stdout: {}",
+        "a returned thunk must never run: {}",
         out.stdout
-    );
-    assert!(
-        out.stderr.contains("this stage produces a value"),
-        "stderr: {}",
-        out.stderr
     );
 }
 
+/// The same, for a `done`-labelled variant: the stream vocabulary earns no
+/// special treatment at an edge, because no value reaches one.
 #[test]
-fn done_labelled_variant_pipeline_is_rejected() {
+fn a_done_labelled_variant_piped_into_a_block_goes_nowhere() {
     let out = common::run("done_payload_variant", "return `done 5 | { |v| echo $v }\n");
-    assert_ne!(out.status, 0, "expected a compile error");
+    assert_eq!(out.status, 0, "expected acceptance: {}", out.stderr);
     assert!(
         out.stdout.is_empty(),
-        "rejected pipeline wrote stdout: {}",
+        "a returned thunk must never run: {}",
         out.stdout
-    );
-    assert!(
-        out.stderr.contains("this stage produces a value"),
-        "stderr: {}",
-        out.stderr
     );
 }
 

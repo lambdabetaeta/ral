@@ -111,31 +111,28 @@ fn baked_prelude_carries_interior_captures() {
     );
 }
 
-/// The other interior annotation: a `Pipeline`'s `Bytes` wires.  The core
+/// The other interior annotation: a `Pipeline`'s final route.  The core
 /// prelude has no `|` pipeline of its own (the hashed `view` lives in
 /// exarch's `agent.ral`), so a focused fixture stands in — the bake path is
 /// identical, and the probe no longer hinges on incidental prelude content.
 #[test]
-fn bake_annotates_interior_pipeline_wires() {
-    use ral_core::mode::ByteMode;
+fn bake_annotates_a_pipelines_final_route() {
+    use ral_core::route::GroundRoute;
     let ast =
         ral_core::syntax::parser::parse("let tag = { cat -n | head -n 1 }").expect("fixture parse");
     let comp = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
         .expect("elaborate");
     let (annotated, _) = ral_core::bake_prelude(&comp);
-    let mut wires = false;
+    let mut routes = Vec::new();
     common::walk_comp(&annotated, &mut |c| {
-        if let CompKind::Pipeline { wires: ws, .. } = &c.item
-            && ws
-                .iter()
-                .any(|w| w.output == ByteMode::Bytes || w.input == ByteMode::Bytes)
-        {
-            wires = true;
+        if let CompKind::Pipeline { final_route, .. } = &c.item {
+            routes.push(*final_route);
         }
     });
-    assert!(
-        wires,
-        "a byte pipeline must carry a Bytes wire — the bake's checked pass annotates it"
+    assert_eq!(
+        routes,
+        vec![GroundRoute::Bytes],
+        "an external tail is captured from stdout — the bake's checked pass annotates that route"
     );
 }
 

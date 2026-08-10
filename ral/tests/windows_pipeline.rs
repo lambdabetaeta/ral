@@ -6,12 +6,14 @@
 //!   * external-only byte pipeline,
 //!   * external → ral helper byte pipeline,
 //!   * ral helper → external byte pipeline,
-//!   * rejection of an implicit value edge,
+//!   * a block literal in stage position runs nothing,
 //!   * final value returned from a helper,
 //!   * `2>&1` inside a pipeline stage,
 //!   * stage redirect inside a pipeline (`cmd > file`),
 //!   * missing-command diagnostic surfaces the user's command name,
-//!   * a value-producing helper is rejected before any consumer runs,
+//!   * an unforced block cannot fail, because it never runs,
+//!   * a consumer that never reads closes its read end, so an unbounded
+//!     producer dies of a broken pipe instead of filling one forever,
 //!   * a leader exiting before later stages does not reap the pipeline
 //!     prematurely (whole-job completion),
 //!
@@ -23,7 +25,8 @@
 
 mod common;
 
-use common::{run, run_with_env};
+use common::{run, run_with_env, run_with_timeout};
+use std::time::Duration;
 
 /// A file in the directory the user just `cd`'d into is not on `PATH`, and a
 /// `PATH` ending in `;` — the ubiquitous Windows spelling — does not put it
@@ -104,27 +107,25 @@ fn helper_to_external_pipeline_runs() {
     assert!(out.stdout.contains('c'), "stdout={}", out.stdout);
 }
 
-/// A value-producing helper cannot feed another stage as an implicit
-/// argument.  The checker rejects the program before either helper runs.
+/// A block literal in stage position is an ordinary value: the stage
+/// returns a thunk and runs nothing.  The upstream list is never
+/// serialised onto the wire either — a returned value in non-final
+/// position is simply discarded — so the bound result is the thunk, not
+/// the `3` the block would have computed had anything forced it.
 #[test]
-fn helper_to_helper_value_edge_is_rejected() {
+fn block_literal_stage_returns_a_thunk_and_runs_nothing() {
     let out = run(
-        "win_pipeline_value_edge",
+        "win_pipeline_thunk_stage",
         r"
         let res = !{ [1, 2, 3] | { |xs| return !{length $xs} } }
         echo $res
         ",
     );
-    assert_ne!(out.status, 0, "expected a compile error");
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
     assert!(
-        out.stdout.is_empty(),
-        "rejected pipeline wrote stdout={}",
+        !out.stdout.contains('3'),
+        "the block was forced; stdout={}",
         out.stdout
-    );
-    assert!(
-        out.stderr.contains("this stage produces a value"),
-        "stderr={}",
-        out.stderr
     );
 }
 
@@ -147,9 +148,8 @@ fn pipeline_stage_2to1_routes_into_pipe() {
 }
 
 /// Stage-level `>file` redirect inside a pipeline.  The redirect
-/// overrides the pipeline's downstream pipe for that stage, so the
-/// next stage sees an empty pipe (pipeline byte channel falls through
-/// to parent stdin) and the file holds the producer's output.
+/// overrides the pipeline's downstream pipe for that stage, so the next
+/// stage reads EOF and the file holds the producer's output.
 #[test]
 fn pipeline_stage_redirect_to_file() {
     let tmp = common::fresh_tmp_path("win_pipe_stage_redir", "txt");
@@ -189,28 +189,52 @@ fn missing_command_in_pipeline_reports_user_command() {
     );
 }
 
-/// A failing value-producing helper is rejected as a value pipeline before
-/// its failure or the consumer's side effect can occur.
+/// The other half of the same rule, read off the status rather than the
+/// value: an unforced block never runs, so the `fail` inside it never
+/// fires.  Both stages are thunks nobody forces, and the pipeline — whose
+/// own value is discarded at statement position — succeeds having done
+/// nothing at all.
 #[test]
-fn upstream_value_helper_is_rejected_before_consumer() {
+fn a_failing_block_in_stage_position_never_fires() {
     let out = run(
-        "win_pipe_upstream_fail",
+        "win_pipe_unforced_fail",
         r#"
         { fail [status: 1, message: "boom"] } | { |x| echo $x }
         "#,
     );
-    assert_ne!(out.status, 0);
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
     assert!(
         out.stdout.is_empty(),
-        "rejected pipeline wrote stdout={}",
+        "an unforced block wrote stdout={}",
         out.stdout
     );
-    let stderr = out.stderr.to_lowercase();
     assert!(
-        stderr.contains("this stage produces a value"),
-        "stderr={}",
+        !out.stderr.contains("boom"),
+        "the unforced block's failure fired; stderr={}",
         out.stderr
     );
+}
+
+/// Neither side of a `|` promises traffic, and the producer's side of that
+/// symmetry is the one with teeth: `for /L %i in (1,0,2)` steps by zero and
+/// so never stops writing, while the consumer returns without touching
+/// stdin.  Finishing must close the consumer's read end promptly, or the
+/// producer blocks on a full pipe nobody will ever drain.  The pipeline's
+/// value is the consumer's own `5`; not one byte of the firehose is in it.
+#[test]
+fn a_firehose_into_a_non_reading_consumer_terminates() {
+    let out = run_with_timeout(
+        "win_pipe_firehose",
+        &[],
+        r#"
+        let n = !{ cmd /c "for /L %i in (1,0,2) do @echo DATA" | !{ return 5 } }
+        echo $n
+        "#,
+        Duration::from_secs(20),
+    )
+    .expect("firehose hung — the consumer's read end outlived the consumer");
+    assert_eq!(out.status, 0, "stderr={}", out.stderr);
+    assert_eq!(out.stdout.trim(), "5", "stdout={}", out.stdout);
 }
 
 /// Whole-job completion: the leader (first stage) exits early because

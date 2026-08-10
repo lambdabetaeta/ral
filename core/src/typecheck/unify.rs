@@ -1,7 +1,7 @@
-//! Union-find unifier over four variable kinds: type, computation type, mode, row.
+//! Union-find unifier over four variable kinds: type, computation type, route, row.
 //!
-//! Record↔Map is the one coercion the language keeps; pipeline modes get none,
-//! so `∅` and `Bytes` never unify.
+//! Record↔Map is the one coercion the language keeps; payload routes get
+//! none, so `Value` and `Bytes` never unify.
 //!
 //! Value and computation types are both *equi-recursive* — a slot may be bound
 //! to a structure containing its own variable — so neither needs an occurs
@@ -10,7 +10,8 @@
 //! co-inductive [`Pairs`], so two cyclic types reach a fixed point.
 
 use super::error::{CompDiff, TypeErrorKind};
-use super::ty::{CompTy, CompTyVar, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar};
+use super::ty::{CompTy, CompTyVar, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
+use crate::route::RouteMismatch;
 use crate::syntax::tag::is_tag_label;
 use std::collections::HashSet;
 
@@ -84,7 +85,7 @@ enum TyKey {
 /// Fingerprint of a computation type.  See [`TyKey`].
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum CompTyKey {
-    Return(PipeMode, PipeMode, Box<TyKey>),
+    Return(PayloadRoute, Box<TyKey>),
     Fun(Box<TyKey>, Box<Self>),
     Var(u32),
 }
@@ -139,15 +140,15 @@ impl Unifiable for CompTy {
     }
 }
 
-impl Unifiable for PipeMode {
+impl Unifiable for PayloadRoute {
     fn as_var(&self) -> Option<u32> {
         match self {
-            Self::Var(ModeVar(i)) => Some(*i),
+            Self::Var(PayloadVar(i)) => Some(*i),
             _ => None,
         }
     }
     fn from_root(root: u32) -> Self {
-        Self::Var(ModeVar(root))
+        Self::Var(PayloadVar(root))
     }
 }
 
@@ -260,7 +261,7 @@ impl<T: Unifiable> Store<T> {
 pub struct Unifier {
     tys: Store<Ty>,
     ctys: Store<CompTy>,
-    modes: Store<PipeMode>,
+    routes: Store<PayloadRoute>,
     rows: Store<Row>,
 }
 
@@ -269,7 +270,7 @@ impl Unifier {
         Self {
             tys: Store::new(),
             ctys: Store::new(),
-            modes: Store::new(),
+            routes: Store::new(),
             rows: Store::new(),
         }
     }
@@ -281,22 +282,13 @@ impl Unifier {
         Ty::Var(self.fresh_tyvar())
     }
 
-    pub fn fresh_modevar(&mut self) -> ModeVar {
-        ModeVar(self.modes.fresh())
+    pub fn fresh_routevar(&mut self) -> PayloadVar {
+        PayloadVar(self.routes.fresh())
     }
-    pub fn fresh_mode(&mut self) -> PipeMode {
-        PipeMode::Var(self.fresh_modevar())
-    }
-    /// The unconstrained `F[μ, ν, ρ]`, for a head whose modes are not yet
-    /// known.  `result` is open like the rest: this stands for a signature
-    /// nobody declared, so it must constrain nothing — an alias over an
-    /// unknown head is free to put its payload on either conduit.
-    pub fn fresh_spec(&mut self) -> PipeSpec {
-        PipeSpec {
-            input: self.fresh_mode(),
-            output: self.fresh_mode(),
-            result: self.fresh_mode(),
-        }
+    /// The unconstrained `F[μ] _`, for a head whose route is not yet known —
+    /// a signature nobody declared, so it must constrain nothing.
+    pub fn fresh_route(&mut self) -> PayloadRoute {
+        PayloadRoute::Var(self.fresh_routevar())
     }
 
     pub fn fresh_comp_ty(&mut self) -> CompTy {
@@ -389,8 +381,8 @@ impl Unifier {
         self.ctys.resolve(cty)
     }
 
-    pub fn resolve_mode(&mut self, mode: &PipeMode) -> PipeMode {
-        self.modes.resolve(mode)
+    pub fn resolve_route(&mut self, route: &PayloadRoute) -> PayloadRoute {
+        self.routes.resolve(route)
     }
 
     /// Canonicalize the head; variables nested in the result stay unresolved.
@@ -516,8 +508,8 @@ impl Unifier {
             visited.comps.insert(r);
         }
         let out = match resolved {
-            CompTy::Return(spec, a) => CompTy::Return(
-                self.resolve_spec(&spec),
+            CompTy::Return(route, a) => CompTy::Return(
+                self.resolve_route(&route),
                 Box::new(self.apply_ty_inner(&a, visited)),
             ),
             CompTy::Fun(a, b) => CompTy::Fun(
@@ -653,9 +645,8 @@ impl Unifier {
 
     fn comp_key(&mut self, cty: &CompTy, depth: u32) -> Result<CompTyKey, TypeErrorKind> {
         Ok(match cty {
-            CompTy::Return(spec, t) => CompTyKey::Return(
-                self.resolve_mode(&spec.input),
-                self.resolve_mode(&spec.output),
+            CompTy::Return(route, t) => CompTyKey::Return(
+                self.resolve_route(route),
                 Box::new(self.ty_key(t, deeper(depth)?)?),
             ),
             CompTy::Fun(a, b) => CompTyKey::Fun(
@@ -919,24 +910,12 @@ impl Unifier {
         }
         let depth = deeper(depth)?;
         match (a, b) {
-            (CompTy::Return(sa, ta), CompTy::Return(sb, tb)) => {
+            (CompTy::Return(ra, ta), CompTy::Return(rb, tb)) => {
                 let mut diffs: Vec<CompDiff> = Vec::new();
-                if self.unify_mode(&sa.input, &sb.input).is_err() {
-                    diffs.push(CompDiff::Stdin {
-                        expected: self.resolve_mode(&sa.input),
-                        actual: self.resolve_mode(&sb.input),
-                    });
-                }
-                if self.unify_mode(&sa.output, &sb.output).is_err() {
-                    diffs.push(CompDiff::Stdout {
-                        expected: self.resolve_mode(&sa.output),
-                        actual: self.resolve_mode(&sb.output),
-                    });
-                }
-                if self.unify_mode(&sa.result, &sb.result).is_err() {
-                    diffs.push(CompDiff::Result {
-                        expected: self.resolve_mode(&sa.result),
-                        actual: self.resolve_mode(&sb.result),
+                if self.unify_route(&ra, &rb).is_err() {
+                    diffs.push(CompDiff::Route {
+                        expected: self.resolve_route(&ra),
+                        actual: self.resolve_route(&rb),
                     });
                 }
                 // A return-type disagreement folds into the rich `Return` diff,
@@ -954,8 +933,8 @@ impl Unifier {
                     Ok(())
                 } else {
                     Err(TypeErrorKind::CompTyMismatch {
-                        expected: self.apply_return(&sa, &ta),
-                        actual: self.apply_return(&sb, &tb),
+                        expected: self.apply_return(ra, &ta),
+                        actual: self.apply_return(rb, &tb),
                         diffs,
                     })
                 }
@@ -972,46 +951,42 @@ impl Unifier {
         }
     }
 
-    fn resolve_spec(&mut self, spec: &PipeSpec) -> PipeSpec {
-        PipeSpec {
-            input: self.resolve_mode(&spec.input),
-            output: self.resolve_mode(&spec.output),
-            result: self.resolve_mode(&spec.result),
-        }
-    }
-
     /// Rebuild a `CompTy::Return` post-substitution, for mismatch diagnostics.
-    fn apply_return(&mut self, spec: &PipeSpec, ty: &Ty) -> CompTy {
-        CompTy::Return(self.resolve_spec(spec), Box::new(self.apply_ty(ty)))
+    fn apply_return(&mut self, route: PayloadRoute, ty: &Ty) -> CompTy {
+        CompTy::Return(self.resolve_route(&route), Box::new(self.apply_ty(ty)))
     }
 
-    /// Unify two pipeline modes by *equality*: two variables unite, a variable
-    /// and a ground mode bind, two ground modes must agree.  Pipeline edges
-    /// choose their own channel ends — interior payloads and consumer inputs
-    /// are pinned to `Bytes` — so `None` and `Bytes` never unify silently.
+    /// Unify two payload routes by *equality*: two variables unite, a
+    /// variable and a ground route bind, two ground routes must agree.  A
+    /// route names where a value boundary reads a computation's payload,
+    /// never what it writes, so `Value` and `Bytes` never unify silently.
+    ///
+    /// No caller passes a bare `Bytes` in here: WF-2 admits exactly one
+    /// byte-routed computation, so a decision that lands on the byte side
+    /// unifies with [`CompTy::bytes`] whole, and the `Unit` pairing travels
+    /// with the route instead of resting on the caller's memory.  Ground
+    /// `Bytes` reaches this function only riding a type (`unify_comp_ty`)
+    /// or already resolved on both sides.
     ///
     /// # Errors
-    /// [`crate::mode::ModeMismatch`] for distinct ground modes, which each
-    /// caller maps onto its own diagnostic.
-    pub fn unify_mode(
-        &mut self,
-        a: &PipeMode,
-        b: &PipeMode,
-    ) -> Result<(), crate::mode::ModeMismatch> {
-        let a = self.resolve_mode(a);
-        let b = self.resolve_mode(b);
+    /// [`RouteMismatch`] for distinct ground routes, which each caller maps
+    /// onto its own diagnostic.
+    pub fn unify_route(&mut self, a: &PayloadRoute, b: &PayloadRoute) -> Result<(), RouteMismatch> {
+        let a = self.resolve_route(a);
+        let b = self.resolve_route(b);
         match (a, b) {
-            (PipeMode::Var(ModeVar(va)), PipeMode::Var(ModeVar(vb))) => {
-                self.modes.unite(va, vb);
+            (PayloadRoute::Var(PayloadVar(va)), PayloadRoute::Var(PayloadVar(vb))) => {
+                self.routes.unite(va, vb);
                 Ok(())
             }
-            (PipeMode::Var(ModeVar(v)), g) | (g, PipeMode::Var(ModeVar(v))) => {
-                let r = self.modes.find(v);
-                self.modes.bind(r, g);
+            (PayloadRoute::Var(PayloadVar(v)), g) | (g, PayloadRoute::Var(PayloadVar(v))) => {
+                let r = self.routes.find(v);
+                self.routes.bind(r, g);
                 Ok(())
             }
-            (PipeMode::None, PipeMode::None) | (PipeMode::Bytes, PipeMode::Bytes) => Ok(()),
-            (left, right) => Err(crate::mode::ModeMismatch { left, right }),
+            (PayloadRoute::Value, PayloadRoute::Value)
+            | (PayloadRoute::Bytes, PayloadRoute::Bytes) => Ok(()),
+            (left, right) => Err(RouteMismatch { left, right }),
         }
     }
 
@@ -1112,6 +1087,41 @@ mod tests {
 
         u.unify_ty(&Ty::Var(t), &step_c)
             .expect("equi-recursive stream types unify regardless of anchor");
+    }
+
+    /// The one-sided obligation guard keys a variable root against a
+    /// *fingerprint* of the other side, so two obligations that differ only in
+    /// payload route must land on two different keys.  Before this change the
+    /// fingerprint carried `input` and `output` and not the route; deleting
+    /// those two without installing the route in their place compiles
+    /// perfectly and silently coarsens what a `CompTy::Var` obligation can
+    /// tell apart, which is why this is a test and not a reading.
+    #[test]
+    fn a_one_sided_obligation_distinguishes_the_payload_route() {
+        let mut u = Unifier::new();
+        let CompTy::Var(CompTyVar(root)) = u.fresh_comp_ty() else {
+            unreachable!("fresh_comp_ty yields a Var")
+        };
+        let captured = u
+            .comp_key(&CompTy::Return(PayloadRoute::Bytes, Box::new(Ty::Unit)), 0)
+            .expect("a ground key");
+        let returned = u
+            .comp_key(&CompTy::Return(PayloadRoute::Value, Box::new(Ty::Unit)), 0)
+            .expect("a ground key");
+        assert!(
+            captured != returned,
+            "a captured-from-stdout command and a Unit-returning one are not the same obligation"
+        );
+
+        let mut seen = HashSet::new();
+        assert!(
+            !guard_expansion(&mut seen, root, captured),
+            "the first obligation is new"
+        );
+        assert!(
+            !guard_expansion(&mut seen, root, returned),
+            "an obligation differing only in route must not be discharged as one already in progress"
+        );
     }
 
     /// A `List(List(… Int …))` spine: no variable, so nothing to memoize.

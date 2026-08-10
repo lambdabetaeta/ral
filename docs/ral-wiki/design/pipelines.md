@@ -1,37 +1,65 @@
-# Pipelines: bytes between stages, values at boundaries
+# Pipelines: positional byte wires, values at boundaries
 
-**`|` is a byte conduit.** A pipeline connects the payload of one stage to the
-input of the next, and every interior connection is `Bytes` on both sides. The
-last stage may return an ordinary ral value; that value is the pipeline's final
-result, not another interior edge.
+**`|` connects the left stage's stdout to the right stage's stdin, and neither
+endpoint must prove that it writes or reads.** Every interior edge is an
+operating-system byte pipe, allocated from stage position alone. A non-final
+stage's returned value is discarded; the final stage's
+[[design/types|payload route]] decides what the pipeline as a whole reports.
 
-- A stage's `result` is its payload. For every non-final stage it is `Bytes`.
-- A following stage consumes that payload through `input = Bytes`.
-- A stage's `output` is visible chatter. It is not the payload carried to the
-  next stage.
-- The final stage's result mode is free: `Bytes` gives the byte result, while
-  `∅` gives the returned value.
+```text
+Γ ⊢ M : F[ρ] A       Γ ⊢ N : F[σ] B
+────────────────────────────────────
+          Γ ⊢ M | N : F[σ] B
+```
 
-Value composition is ordinary call-by-push-value composition. Use application
-to pass a value to a function and `let`/`to` to bind a computation's result;
-there is no pipeline-style combinator for values. A decoder can therefore end
-a pipeline — `cat data.json | from-json` — while a value produced by that
-decoder is composed by binding or application:
+Operationally: connect `stdout(M)` to `stdin(N)`, run the stages under the
+process-group discipline below, discard `M`'s returned value, and take the
+pipeline's route and value type from `N`.
+
+**This is not a value pipe.** No returned `Bytes`, `String`, record, or other
+value is ever serialised onto an interior edge. A returned value in non-final
+position is simply unused, exactly as bytes written to an unread pipe are simply
+unread. The symmetry is deliberate — a consumer need not read, a producer need
+not write, and an empty stream is still a byte stream:
+
+```ral
+!{ return unit } | cat            # cat reads EOF
+!{ echo hi; return unit } | cat   # cat reads "hi"; the Unit goes nowhere
+cat f | from-bytes | grep x       # the returned Bytes is discarded; grep reads EOF
+echo hi | !{ return 5 }           # the consumer ignores stdin; the pipeline returns 5
+yes | !{ return 5 }               # terminates: the non-reader closes, the firehose gets EPIPE
+```
+
+**The one static rule about a stage constrains that stage alone.** A stage must
+have shape `F[ρ] A` — a computation ready to run, not a function still waiting
+for an argument. `echo hi | !{ |x| echo $x }` is a type error whose help says to
+apply it rather than pipe into it. Nothing constrains a stage relative to its
+neighbours.
+
+That rule reads type formers, not spellings, so a stage that *returns* a thunk
+is accepted: `cat f | { from-line }` typechecks, runs nothing, leaves `f`
+unread, and discards the thunk. This footgun is admitted deliberately — a
+syntax-directed rejection is not stable under naming the subterm, and rejecting
+on the type needs a negative premise no sound decidable rule can state
+([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
+
+Value composition is ordinary call-by-push-value composition: application passes
+a value to a function, `let` / `to` binds a computation's result. A decoder
+therefore ends a pipeline, and what it decodes is composed by binding:
 
 ```ral
 let document = cat data.json | from-json
 length $document
 ```
 
-**Every multi-stage pipeline is process-staged.** The checker establishes the
-byte edges before evaluation, and the runtime launches the stages as one
-process group:
+**Every multi-stage pipeline is process-staged.** The runtime launches the
+stages as one process group:
 
 - every stage, including ral-written stages, executes in a helper or external
   child;
-- operating-system pipes carry every interior payload;
+- operating-system pipes carry every interior edge, all of them alike;
 - the parent ral process is not a member of the stage group;
-- the final value, when the last stage returns one, comes home in the
+- the final value, when the final route is `Value`, comes home in the
   `ChildEvalResponse` selected by `FinalValue::Report`.
 
 The final-value report is deliberately helper-staged for now. Moving a

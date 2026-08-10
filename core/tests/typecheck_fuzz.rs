@@ -175,10 +175,10 @@ fn scenarios() -> Vec<Scenario> {
             "return [1, [a: 1], hello, true, [b: 2], unit, [1, 2]]",
             "wide-mismatch",
         ),
-        // ─── Pipeline shape: value payload cannot cross a byte edge ─────
+        // ─── Pipeline shape: a stage must be ready to run ────────────────
         s(
-            "let s = !{stream-cons 1 { !{stream-nil} }}\n$s | { |e| return $[$e + 1] }",
-            "stream-piped-whole-into-element-consumer",
+            "let s = !{stream-cons 1 { !{stream-nil} }}\n$s | !{ |e| return $[$e + 1] }",
+            "stage-still-waiting-for-its-argument",
         ),
         // ─── Nested error in nested function body ────────────────────────
         s(
@@ -206,7 +206,9 @@ const JARGON_FRAGMENTS: &[&str] = &[
     "CompTy",
     "TyVar",
     "RowVar",
-    "ModeVar",
+    "PayloadVar",
+    "PayloadRoute",
+    "GroundRoute",
     "CompTyVar",
     "Box<",
     "unifier",

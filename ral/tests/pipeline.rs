@@ -129,7 +129,8 @@ fn audit_cli_captures_command_stdout() {
 #[test]
 fn redirect_stderr_to_stdout_flows_through_pipeline() {
     // Inner block captures stdout (with 2>&1 merging stderr in) as a String
-    // via the byte-mode bind capture; from-string is then identity on String.
+    // via the capture a byte-routed bind inserts; from-string is then
+    // identity on String.
     let o =
         run("let s = !{!{/bin/sh -c 'printf out; printf err >&2' 2>&1} | from-string}\necho $s");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
@@ -393,6 +394,25 @@ fn broken_pipe_very_large_count() {
     assert_eq!(o.stdout.trim(), "10000");
 }
 
+#[test]
+fn a_firehose_into_a_non_reading_consumer_terminates() {
+    // Neither side of a `|` promises traffic, and the producer's side of
+    // that symmetry is the one with teeth: `yes` never stops writing, and
+    // `!{ return 5 }` returns without ever touching stdin.  The consumer
+    // finishing must close its read end promptly, so the producer takes
+    // EPIPE rather than blocking forever on a pipe nobody will drain.
+    // The pipeline's value is the consumer's own `5`; not one byte of the
+    // firehose is in it.
+    let o = run_with_timeout(
+        &[],
+        "let n = !{ /usr/bin/yes | !{ return 5 } }\necho $n\n",
+        Duration::from_secs(10),
+    )
+    .expect("firehose hung — the consumer's read end outlived the consumer");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "5", "stdout: {}", o.stdout);
+}
+
 // ── Concurrent spawned pipelines ─────────────────────────────────────────────
 
 #[test]
@@ -453,8 +473,8 @@ fn many_sequential_pipelines_no_leak() {
     // Run 50 external pipelines in sequence.  If file descriptors or process
     // groups leak, this will exhaust them and start failing.
     //
-    // This pipeline takes the direct-external path: no value edge, no
-    // redirects on the stages, no byte audit capture, and no foreground
+    // This pipeline takes the direct-external path: no ral helper stage,
+    // no redirects on the stages, no byte audit capture, and no foreground
     // terminal handoff.  It still allocates byte pipes and process-group
     // state each iteration, so the test catches fd/pgid leaks without
     // exercising helper-evaluated stages.
@@ -1029,10 +1049,10 @@ fn parse_tagged_pgid(stderr: &str, tag: &str) -> Option<i32> {
 
 #[test]
 fn race_true_producer_does_not_strand_consumer() {
-    // `/usr/bin/true` (the external, byte-typed) exits immediately with no
-    // bytes.  Distinct from ral's value-typed `true` builtin, which would
-    // be a value-to-byte mismatch — this test deliberately exercises the
-    // byte-pipeline path.
+    // `/usr/bin/true` exits immediately with no bytes.  The external, not
+    // ral's `true` builtin: the builtin would make stage 1 a ral helper and
+    // move the test off the direct-external launch path it is here to
+    // exercise.  Both spellings typecheck — a stage promises no traffic.
     let ral = ral_bin();
     let script = format!(
         "/usr/bin/true | {} --ral-test-pgid-check post",
@@ -1455,13 +1475,13 @@ fn pipeline_permission_denied_path_reports_126() {
     );
 }
 
-// The non-transferable retained-value invariant — that a byte-mode
+// The non-transferable retained-value invariant — that a byte-routed
 // helper does not pay for serialising its (unused) return value — is
-// covered by `runtime::pipeline::helper::tests::stage_job_skips_report_value_when_parent_does_not_need_it`
+// covered by `child_eval::tests::stage_job_skips_report_value_when_parent_does_not_need_it`
 // at the protocol layer.  Constructing an end-to-end script that
-// exercises it is awkward because byte-mode helper bodies naturally
-// return Unit; the unit test names the contract more clearly than any
-// indirect integration shape.
+// exercises it is awkward because a byte route pairs with `Unit`, so such
+// a helper's body returns nothing worth transferring; the unit test names
+// the contract more clearly than any indirect integration shape.
 
 // ── Audit + redirect: no panic ───────────────────────────────────────────────
 //

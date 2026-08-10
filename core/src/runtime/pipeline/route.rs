@@ -40,13 +40,13 @@ pub(super) struct StageRoute {
     pub(super) final_value: FinalValue,
 }
 
-/// Allocate every interior edge as a byte pipe.  The checker unified adjacent
-/// wires, so the consumer agrees with the producer's byte payload.
+/// Allocate every interior edge as a byte pipe, purely from stage position —
+/// every edge is the same kind of pipe regardless of what either side routes.
 pub(super) fn open_stage_routes(plan: &PipelinePlan) -> Settled<Vec<StageRoute>> {
     let n = plan.specs.len();
     let mut routes = Vec::with_capacity(n);
     let mut inbound = None;
-    for (i, spec) in plan.specs.iter().enumerate() {
+    for i in 0..n {
         let stdin = match inbound.take() {
             Some(reader) => ByteIn::Upstream(reader),
             None => ByteIn::Parent,
@@ -58,7 +58,7 @@ pub(super) fn open_stage_routes(plan: &PipelinePlan) -> Settled<Vec<StageRoute>>
         } else {
             ByteOut::Parent
         };
-        let final_value = if i + 1 == n && spec.comp_type.result != crate::mode::PipeMode::Bytes {
+        let final_value = if i + 1 == n && plan.final_route == crate::route::GroundRoute::Value {
             FinalValue::Report
         } else {
             FinalValue::Ignore

@@ -265,7 +265,7 @@ fn fmt_scheme_shows_quantified_comp_vars() {
     let scheme = Scheme {
         ty_vars: vec![],
         comp_ty_vars: vec![beta],
-        mode_vars: vec![],
+        route_vars: vec![],
         row_vars: vec![],
         ty: Ty::Thunk(Box::new(CompTy::Var(beta))),
         comp_ty_bindings: vec![],
@@ -282,7 +282,7 @@ fn fmt_scheme_quantifies_cyclic_comp_roots() {
     let scheme = Scheme {
         ty_vars: vec![],
         comp_ty_vars: vec![],
-        mode_vars: vec![],
+        route_vars: vec![],
         row_vars: vec![],
         ty: Ty::Thunk(Box::new(CompTy::Var(root))),
         comp_ty_bindings: vec![(root.0, CompTy::pure(Ty::Unit))],
@@ -378,30 +378,24 @@ fn builtin_try_err_field_types() {
     ok("let r = try { return 1 } { |e| return $e[status] }; return $r");
 }
 
-// ─── guard / audit scope byte I/O (`Inferencer::seal`) ───────────────────────
+// ─── guard / audit scopes ─────────────────────────────────────────────────────
 //
-// `guard` and `audit` no longer report `CompTy::pure`: their `ScopeSig` arms
-// fold into a real `PipeSpec` via `seal`, output bytes-dominant over every
-// arm and input by byte-join since every `guard`/`audit` arm is `Always`
-// (only `try`'s handler is `OnFailure`, exercised separately below).
+// `guard` passes its body's payload route and value through — cleanup runs
+// for its effects alone, its writes escaping like any discarded statement's —
+// while `audit` is fixed `Value`, returning its record whatever the body did.
 
 #[test]
-fn guard_body_bytes_output_dominates_pure_cleanup() {
+fn guard_passes_its_bodys_byte_route_through() {
     ok("guard { echo hi } { return unit } | from-string");
 }
 
 #[test]
-fn guard_cleanup_bytes_do_not_make_a_value_payload_a_wire() {
-    // Cleanup chatter escapes to the ambient stream, but it is not the
-    // guard's payload.  The body's value therefore cannot cross an interior
-    // byte edge merely because cleanup writes bytes.
-    let errs = raw_errors("guard { return unit } { echo hi } | cat");
-    assert!(
-        errs.iter().any(|e| e
-            .hint()
-            .is_some_and(|h| h.contains("this stage produces a value"))),
-        "expected a producer-side byte-pipeline hint, got: {errs:?}"
-    );
+fn guard_cleanup_bytes_are_ambient_not_a_payload() {
+    // Cleanup chatter escapes to the ambient stream — inside a stage, that
+    // stream is the pipe.  Neither the guard's payload route nor its
+    // cleanup's decides whether the edge to `cat` is allowed: it is
+    // positional, and no route takes part in it.
+    ok("guard { return unit } { echo hi } | cat");
 }
 
 #[test]
@@ -537,44 +531,23 @@ fn pipeline_bytes_to_bytes_ok() {
 }
 
 #[test]
-fn pipeline_value_pass_through_is_rejected() {
-    // `|` is a byte conduit, not implicit data-last application.
-    let errs = raw_errors("return hello | echo");
-    assert!(
-        errs.iter().any(|e| matches!(
-            e.kind,
-            ral_core::typecheck::TypeErrorKind::ModeMismatch { .. }
-        )),
-        "expected a producer mode mismatch, got: {errs:?}"
-    );
-    assert!(
-        errs.iter()
-            .any(|e| e.hint().is_some_and(|h| h.contains("bind it"))),
-        "expected a teaching hint for the value producer, got: {errs:?}"
-    );
+fn a_value_returning_producer_is_an_ordinary_stage() {
+    // A producer need not write.  `return hello`'s value is discarded
+    // because the stage is non-final, and `echo` reads EOF.
+    ok("return hello | echo");
 }
 
 #[test]
-fn pipeline_byte_into_value_stage_is_mode_mismatch() {
-    // A byte producer feeding a value-input consumer is a consumer-side
-    // mismatch caught at type-check time.  `length` is a value application,
-    // not a byte reader.
+fn a_stage_still_wanting_an_argument_is_rejected() {
+    // `length` is `String -> …`, a function, not a computation that can run.
+    // The rejection is on its *shape*, so the useful thing to say is to apply
+    // it — the one static rule about a stage that survives.
     let errs = raw_errors("echo foo | length");
-    assert!(
-        errs.iter().any(|e| matches!(
-            e.kind,
-            ral_core::typecheck::TypeErrorKind::ModeMismatch { .. }
-        )),
-        "expected a ModeMismatch (T0012) for a byte→value adjacency, got: {:?}",
-        errs.iter()
-            .map(|e| e.kind.render_message())
-            .collect::<Vec<_>>()
-    );
     assert!(
         errs.iter().any(|e| e
             .hint()
-            .is_some_and(|h| h.contains("does not read the byte channel"))),
-        "expected a consumer-side teaching hint, got: {errs:?}"
+            .is_some_and(|h| h.contains("apply it to its argument"))),
+        "expected the stage-shape hint, got: {errs:?}"
     );
 }
 
@@ -595,21 +568,16 @@ fn block_stage_reading_bytes_before_its_last_statement_is_byte_input() {
     ok("echo foo | within [env: [X: 'y']] { from-lines; return unit }");
 }
 
-/// A ral block reaches stage position by being forced there — `!$reader`
-/// names a computation, so its channel-reading tail is the stage's input.  A
-/// bare block *literal* stays a value at that position and never advertises a
-/// byte input, which is why decoder tails written in ral must be named and
-/// forced (`decisions/260809_byte-only-pipelines`).
+/// A block *literal* in stage position is an ordinary value: the stage
+/// returns the thunk and runs nothing.  Forcing it (`!$reader`) is what makes
+/// it a computation that runs as the stage and reads the pipe.
 #[test]
-fn a_forced_block_reads_bytes_where_a_block_literal_does_not() {
+fn a_block_literal_stage_returns_a_thunk_and_a_forced_one_runs() {
+    // Both typecheck.  They differ in what they *do*: the forced block runs
+    // as a stage and decodes the bytes; the literal is an ordinary value, so
+    // nothing runs and `input.txt` goes unread.
     ok("let reader = { from-line }\ncat input.txt | !$reader");
-    let errs = raw_errors("cat input.txt | { from-line }");
-    assert!(
-        errs.iter().any(|e| e
-            .hint()
-            .is_some_and(|h| h.contains("does not read the byte channel"))),
-        "a block literal in stage position is a value, not a byte reader: {errs:?}"
-    );
+    ok("cat input.txt | { from-line }");
 }
 
 /// A `let` captures its RHS's *output* into the bound value, but its demand on
@@ -619,27 +587,11 @@ fn bound_reader_before_the_last_statement_is_byte_input() {
     ok("echo foo | within [env: [X: 'y']] { let s = !{from-lines}; stream-to-list $s }");
 }
 
-/// The join is one-sided: a block of pure statements stays a value stage, so a
-/// byte upstream is still the adjacency error it was.
+/// A stage that ignores stdin is not thereby an error: the bytes are unread,
+/// which is an ordinary thing for a byte stream to be.
 #[test]
-fn block_stage_of_pure_statements_stays_value_input() {
-    let errs = raw_errors("echo foo | within [env: [X: 'y']] { let n = 1; length $n }");
-    assert!(
-        errs.iter().any(|e| matches!(
-            e.kind,
-            ral_core::typecheck::TypeErrorKind::ModeMismatch { .. }
-        )),
-        "expected a ModeMismatch (T0012) feeding bytes to a pure block, got: {:?}",
-        errs.iter()
-            .map(|e| e.kind.render_message())
-            .collect::<Vec<_>>()
-    );
-    assert!(
-        errs.iter().any(|e| e
-            .hint()
-            .is_some_and(|h| h.contains("does not read the byte channel"))),
-        "expected a consumer-side teaching hint, got: {errs:?}"
-    );
+fn a_stage_that_never_reads_its_bytes_is_still_a_stage() {
+    ok("echo foo | within [env: [X: 'y']] { let n = 1; length $n }");
 }
 
 // ─── String interpolation ─────────────────────────────────────────────────────
@@ -903,29 +855,20 @@ fn recursive_sibling_arm_outputs_stay_independent_under_the_join() {
 }
 
 #[test]
-fn value_payload_cannot_cross_into_a_block_stage() {
-    let errs = raw_errors("return `more [head: 1, tail: { return `ok 2 }] | { |v| echo $v }");
-    assert!(
-        errs.iter().any(|e| e
-            .hint()
-            .is_some_and(|h| h.contains("this stage produces a value"))),
-        "expected a producer-side teaching hint, got: {errs:?}"
-    );
+fn a_stage_may_return_a_thunk() {
+    // `Return(V) | Return(Thunk)`: nothing makes a thunk a worse thing to
+    // discard than an Int, and the lambda is never applied.
+    ok("return `more [head: 1, tail: { return `ok 2 }] | { |v| echo $v }");
 }
 
 #[test]
-fn stream_piped_whole_into_element_consumer_is_static_error() {
-    // A stream is still a value.  It must be passed to an explicit stream
-    // eliminator rather than sent through a pipeline edge.
-    let errs = raw_errors(
+fn a_stream_piped_whole_is_accepted_and_simply_discarded() {
+    // A stream is a value, and a non-final stage's value goes nowhere.  The
+    // program is silent rather than wrong — the footgun admitted in
+    // exchange for a stage rule that reads types, not spellings.
+    ok(
         "let s = !{stream-cons 1 { !{stream-nil} }}\n\
          $s | { |e| return $[$e + 1] } | { |y| return $[$y * 10] }",
-    );
-    assert!(
-        errs.iter().any(|e| e
-            .hint()
-            .is_some_and(|h| h.contains("this stage produces a value"))),
-        "expected a byte-pipeline hint, got: {errs:?}"
     );
 }
 
@@ -1037,16 +980,15 @@ fn caret_reaches_a_handler_stacked_on_a_native_name() {
 //
 // A handler arm (or alias body) for an unknown head `h` defines `h`'s modes:
 // its spec is fully fresh, so the arm pins it, while its value type stays free.
-// Reinterpreting a known head pins the arm to that head's spec, and a clash
-// there is a `ModeMismatch`.  The byte-channel discipline is enforced where
-// pipeline channels connect, so a value-output head feeding a byte consumer is
-// a `ModeMismatch` at the connection (`docs/SPEC.md` §4.2.1).
+// Reinterpreting a known head pins the arm's payload route to that head's, and
+// a clash there is a `RouteMismatch`.  Pinning is an install-time property of
+// the arm and the head alone; no pipeline takes part in it.
 
-fn is_mode_mismatch(src: &str) -> bool {
+fn is_route_mismatch(src: &str) -> bool {
     raw_errors(src).iter().any(|e| {
         matches!(
             e.kind,
-            ral_core::typecheck::TypeErrorKind::ModeMismatch { .. }
+            ral_core::typecheck::TypeErrorKind::RouteMismatch { .. }
         )
     })
 }
@@ -1055,11 +997,10 @@ fn is_mode_mismatch(src: &str) -> bool {
 /// standalone use typechecks; the mismatch is a connection-point property,
 /// surfacing only when the head's `∅` output feeds a byte consumer.
 #[test]
-fn within_handler_value_output_pipes_byte_consumer_is_mismatch() {
-    assert!(
-        is_mode_mismatch(r"within [handlers: [foo: { |args| return 3 }]] { foo | from-json }"),
-        "expected a ModeMismatch where the value-output handler arm feeds the from-json decoder"
-    );
+fn within_handler_value_arm_pipes_into_a_decoder_freely() {
+    // The arm defines the unknown head's route, and feeding a decoder says
+    // nothing about it: `from-json` reads the byte channel, which is empty.
+    ok(r"within [handlers: [foo: { |args| return 3 }]] { foo | from-json }");
     ok(r"within [handlers: [foo: { |args| return 3 }]] { foo }");
 }
 
@@ -1073,10 +1014,10 @@ fn within_handler_byte_output_arm_ok() {
 /// A stacked `echo` arm pins to the base frame's `None → Bytes` modes; a
 /// value-output body is refused at install.
 #[test]
-fn within_handler_for_echo_breaking_its_byte_mode_is_rejected() {
+fn within_handler_for_echo_breaking_its_route_is_rejected() {
     assert!(
-        is_mode_mismatch(r#"within [handlers: [echo: { |args| return "not bytes" }]] { echo hi }"#),
-        "expected a ModeMismatch pinning the echo arm to None -> Bytes"
+        is_route_mismatch(r#"within [handlers: [echo: { |args| return "not bytes" }]] { echo hi }"#),
+        "expected a RouteMismatch pinning the echo arm to its head's byte route"
     );
 }
 
@@ -1086,6 +1027,34 @@ fn within_handler_for_echo_preserving_its_byte_mode_ok() {
     ok(r"within [handlers: [echo: { |args| echo mocked }]] { echo hi }");
 }
 
+/// WF-2 — a byte route pairs with a `Unit` value — is not carried by the type,
+/// so it is an obligation on every operation that *grounds* a route to
+/// `Bytes`.  The pin is one such grounder, and this arm is the shape that
+/// catches it: `fail` never returns, so the callback's route is fresh;
+/// `fold-lines` forwards it; the arm is `F[ρ] Int` with `ρ` still open when
+/// the pin grounds it beside the head's `Bytes`.
+///
+/// Unrepaired this was silent: a release build exited 0 printing `""` where
+/// the checker said `Int`, because the only tripwire was a `debug_assert!`
+/// inside `Capture`.
+#[test]
+fn an_open_route_pinned_to_a_byte_head_must_return_unit() {
+    has_error(
+        "alias echo { |args| fold-lines { |a l| fail [status: 5] } 0 }\nreturn unit",
+        "couldn't match",
+    );
+    // The diagnostic must name what the author did, not merely the clash.
+    let errs =
+        raw_errors("alias echo { |args| fold-lines { |a l| fail [status: 5] } 0 }\nreturn unit");
+    assert!(
+        errs.iter()
+            .any(|e| e.hint().is_some_and(|h| h.contains("no separate value to return"))),
+        "expected the WF-2 hint naming both sides, got: {errs:?}"
+    );
+    // The same arm returning `Unit` is consistent, and stays accepted.
+    ok("alias echo { |args| fold-lines { |a l| fail [status: 5] } unit }\nreturn unit");
+}
+
 /// A byte-output forwarding alias defines the unknown head as byte-output and
 /// typechecks.
 #[test]
@@ -1093,37 +1062,32 @@ fn alias_byte_output_forwarder_typechecks() {
     ok(r"alias myecho { |a| /bin/echo ...$a }; myecho hi");
 }
 
-/// A value-output alias body defines the unknown head's modes, so the
+/// A value-returning alias body defines the unknown head's route, so the
 /// definition typechecks on its own.
 #[test]
 fn alias_value_output_body_typechecks() {
     ok("alias foo { |args| return 3 }\nreturn unit");
 }
 
-/// The value-output head's `∅` output is rejected where it feeds a byte
-/// consumer: the alias binds for subsequent statements in the `Seq`, so
-/// `foo | from-json` is a connection-point `ModeMismatch`.
 #[test]
-fn alias_value_output_piped_into_byte_consumer_is_mismatch() {
-    assert!(
-        is_mode_mismatch("alias foo { |args| return 3 }\nfoo | from-json"),
-        "expected a ModeMismatch where the value-output alias feeds the from-json decoder"
-    );
+fn alias_value_arm_piped_into_a_decoder_is_accepted() {
+    // The alias binds for the following statements, and piping it into a
+    // decoder is an ordinary byte edge: `from-json` reads EOF.
+    ok("alias foo { |args| return 3 }\nfoo | from-json");
 }
 
-/// An alias over an existing mode-preserving alias resolves the head's spec
-/// from the prior alias's handler scheme and typechecks: byte output pins to
-/// byte output.
+/// An alias over an existing alias resolves the head's route from the prior
+/// alias's handler scheme and typechecks: a byte route pins to a byte route.
 #[test]
-fn alias_over_mode_preserving_alias_typechecks() {
+fn alias_over_route_preserving_alias_typechecks() {
     ok(r"alias one { |args| echo one }; alias two { |args| one }; two");
 }
 
 /// The catch-all `handler: { comp }` names no specific head, so the
-/// mode-preservation rule does not constrain it — a value-output catch-all
-/// arm is not rejected.
+/// route-preservation rule does not constrain it — a value-returning
+/// catch-all arm is not rejected.
 #[test]
-fn catch_all_handler_arm_is_not_mode_pinned() {
+fn catch_all_handler_arm_is_not_route_pinned() {
     ok(r"within [handler: { |n a| return 'x' }] { return unit }");
 }
 
@@ -1343,7 +1307,6 @@ fn builtin_command_signatures_are_explicit() {
     ok("range 1 3");
     has_error(r#"range "a" 3"#, "couldn't match");
     ok("from-lines");
-    ok("_type 42");
     has_error("fail [status: 0]", "fail requires a nonzero status");
 }
 
@@ -1379,27 +1342,15 @@ fn fail_message_must_be_text() {
     );
 }
 
-#[test]
-fn type_probe_threads_argument_type() {
-    // `_type` is `α → F α`: the argument's type flows through to the
-    // result, so a String probed by `_type` is still rejected in
-    // arithmetic. A fresh, decoupled result type would mask this.
-    ok(r"let x = !{_type 41}; return $[$x + 1]");
-    has_error(
-        r"let x = !{_type hello}; return $[$x + 1]",
-        "couldn't match",
-    );
-}
-
-// ─── IR mode annotation ───────────────────────────────────────────────────────
+// ─── IR route annotation ──────────────────────────────────────────────────────
 //
-// The annotation pass writes the checker's ground mode verdicts into a
-// rebuilt IR: a `Wire` per pipeline stage, and the RHS output `ByteMode`
-// on every `Bind`.  Schemes stay on the top-level spine only; wires and
-// RHS modes go everywhere, at any depth.
+// The annotation pass writes the checker's ground verdicts into a rebuilt IR:
+// one `final_route` per pipeline, and a `Capture` node wherever a value
+// boundary meets a byte route.  Schemes stay on the top-level spine only; the
+// route and the captures go everywhere, at any depth.
 
 use ral_core::ir::{Comp, CompKind, IrPattern};
-use ral_core::mode::{ByteMode, Wire};
+use ral_core::route::GroundRoute;
 
 /// Compile `src` to an annotated comp, asserting it type-checks.
 fn annotated(src: &str) -> Comp {
@@ -1416,12 +1367,17 @@ fn annotated(src: &str) -> Comp {
     .unwrap_or_else(|errs| panic!("expected no errors in {src:?}, got: {errs:?}"))
 }
 
-/// Every `Pipeline` node's `wires` slot, reachable anywhere in the tree.
-fn all_pipeline_wires(comp: &Comp) -> Vec<(usize, Vec<Wire>)> {
+/// Every `Pipeline` node's stage count and `final_route`, anywhere in the tree.
+fn all_pipeline_routes(comp: &Comp) -> Vec<(usize, GroundRoute)> {
     let mut out = Vec::new();
     common::walk_comp(comp, &mut |c| {
-        if let CompKind::Pipeline { stages, wires, .. } = &c.item {
-            out.push((stages.len(), wires.clone()));
+        if let CompKind::Pipeline {
+            stages,
+            final_route,
+            ..
+        } = &c.item
+        {
+            out.push((stages.len(), *final_route));
         }
     });
     out
@@ -1457,54 +1413,37 @@ fn top_level_pipeline_retains_per_stage_value_types() {
 }
 
 #[test]
-fn top_level_pipeline_carries_ground_wires() {
-    let comp = annotated(r"/bin/echo hi | /bin/cat");
-    let pipelines = all_pipeline_wires(&comp);
-    assert_eq!(pipelines.len(), 1, "expected exactly one pipeline node");
-    let (stage_count, wires) = &pipelines[0];
-    assert_eq!(*stage_count, 2, "two-stage pipeline");
-    assert_eq!(wires.len(), *stage_count, "one wire per stage");
-    // `/bin/echo`'s bytes are its *payload* with an open input (defaulted to
-    // `Empty`); the adjacency unifies `/bin/cat`'s input to `Bytes`.  Neither
-    // stage chatters, so both `output`s are `Empty`.
+fn a_pipeline_carries_one_ground_final_route() {
+    // One annotation for the whole pipeline, not one per stage: only the
+    // final stage's route is ever read, and every interior edge is allocated
+    // from position.  An external tail is captured from stdout.
     assert_eq!(
-        wires[0],
-        Wire {
-            input: ByteMode::Empty,
-            output: ByteMode::Empty,
-            result: ByteMode::Bytes
-        }
+        all_pipeline_routes(&annotated(r"/bin/echo hi | /bin/cat")),
+        vec![(2, GroundRoute::Bytes)]
     );
+    // A decoder tail returns its value instead, so the same shape of
+    // pipeline is annotated `Value`.
     assert_eq!(
-        wires[1],
-        Wire {
-            input: ByteMode::Bytes,
-            output: ByteMode::Empty,
-            result: ByteMode::Bytes
-        }
+        all_pipeline_routes(&annotated(r"/bin/echo hi | from-string")),
+        vec![(2, GroundRoute::Value)]
     );
 }
 
 #[test]
-fn pipeline_inside_thunk_body_carries_wires() {
+fn pipeline_inside_thunk_body_is_annotated() {
     // The pipeline lives in a lambda body under a `let`; the pass must
     // descend past the spine to reach it.
-    let comp = annotated(r"let f = { |x| /bin/echo $x | /bin/cat }");
-    let pipelines = all_pipeline_wires(&comp);
     assert_eq!(
-        pipelines.len(),
-        1,
-        "expected one pipeline nested in the lambda body"
+        all_pipeline_routes(&annotated(r"let f = { |x| /bin/echo $x | /bin/cat }")),
+        vec![(2, GroundRoute::Bytes)]
     );
-    let (stage_count, wires) = &pipelines[0];
-    assert_eq!(*stage_count, 2);
-    assert_eq!(wires.len(), 2);
 }
 
 #[test]
-fn bind_rhs_output_mode_is_ground() {
-    // A byte-producing RHS (`echo`, `F[μ, Bytes]`) is wrapped in `Capture`;
-    // a pure value RHS (`return 42`, `F[∅, ∅]`) is left alone.
+fn a_byte_routed_bind_rhs_is_wrapped_in_capture() {
+    // A byte-routed RHS (`echo`) is wrapped in `Capture`; a value-routed one
+    // (`return 42`) is left alone.  This is the whole observable content of
+    // the route at a value boundary.
     let comp = annotated(r"let x = echo hi; let y = return 42; return unit");
     let mut binds = Vec::new();
     common::walk_comp(&comp, &mut |c| {
@@ -1524,8 +1463,9 @@ fn bind_rhs_output_mode_is_ground() {
     );
 }
 
-/// The single ground output mode written onto the `x` bind of `src`.
-fn bind_x_output(src: &str) -> ByteMode {
+/// Whether the `x` bind of `src` had its RHS captured — the whole observable
+/// content of a `Bytes` route at a value boundary.
+fn bind_x_is_captured(src: &str) -> bool {
     let comp = annotated(src);
     let mut found = None;
     common::walk_comp(&comp, &mut |c| {
@@ -1545,11 +1485,7 @@ fn bind_x_output(src: &str) -> ByteMode {
                     has_capture = true;
                 }
             });
-            found = Some(if has_capture {
-                ByteMode::Bytes
-            } else {
-                ByteMode::Empty
-            });
+            found = Some(has_capture);
         }
     });
     found.expect("a bind named `x`")
@@ -1558,123 +1494,52 @@ fn bind_x_output(src: &str) -> ByteMode {
 #[test]
 fn if_byte_branches_join_to_byte_output() {
     // Both arms emit bytes, so the conditional's output channel is `Bytes`.
-    assert_eq!(
-        bind_x_output("let x = if true { echo a } else { echo b }; return unit"),
-        ByteMode::Bytes
-    );
+    assert!(bind_x_is_captured(
+        "let x = if true { echo a } else { echo b }; return unit"
+    ));
 }
 
 #[test]
 fn if_value_branches_join_to_value_output() {
     // Both arms are pure values, so the conditional carries no byte output.
-    assert_eq!(
-        bind_x_output("let x = if true { return 1 } else { return 2 }; return unit"),
-        ByteMode::Empty
-    );
+    assert!(!bind_x_is_captured(
+        "let x = if true { return 1 } else { return 2 }; return unit"
+    ));
 }
 
 #[test]
-fn if_arm_chatter_does_not_make_a_value_payload_a_wire() {
-    // Chatter from one arm is not the payload returned by the conditional.
-    let errs = raw_errors("if true { echo hi; return 1 } else { return 2 } | cat");
-    assert!(
-        errs.iter().any(|e| e
-            .hint()
-            .is_some_and(|h| h.contains("this stage produces a value"))),
-        "expected a producer-side teaching hint, got: {errs:?}"
-    );
+fn an_arms_writes_are_not_the_conditionals_payload() {
+    // One arm writes and both return: the join's route stays `Value`, the
+    // bytes go to the stage's sink, and the edge to `cat` asks nothing.
+    ok("if true { echo hi; return 1 } else { return 2 } | cat");
 }
 
 #[test]
-fn if_arm_echo_alongside_pure_return_arm_is_not_a_byte_payload() {
-    let errs = raw_errors("if true { echo a; return 1 } else { echo b; return 2 } | cat");
-    assert!(
-        errs.iter().any(|e| e
-            .hint()
-            .is_some_and(|h| h.contains("this stage produces a value"))),
-        "expected a producer-side teaching hint, got: {errs:?}"
-    );
+fn an_arms_writes_do_not_make_its_returned_value_a_payload() {
+    // Both arms write and both return; the join's route is `Value` either
+    // way, and the bytes go to the stage's stdout sink — here, the pipe.
+    ok("if true { echo a; return 1 } else { echo b; return 2 } | cat");
 }
 
 #[test]
-fn bind_rhs_chatter_does_not_make_a_value_payload_a_wire() {
-    // A bind may observe bytes produced by its RHS, but those bytes do not
-    // turn the RHS's returned value into a pipeline payload.
-    let errs = raw_errors("!{ let x = !{ echo hi; return 5 }; return unit } | cat");
-    assert!(
-        errs.iter().any(|e| e
-            .hint()
-            .is_some_and(|h| h.contains("this stage produces a value"))),
-        "expected a producer-side teaching hint, got: {errs:?}"
-    );
+fn a_bind_rhs_writes_reach_the_stages_sink() {
+    // The RHS's bytes escape the bind and reach the stage's visible stream,
+    // which inside a pipeline is the pipe.  The returned value is discarded.
+    ok("!{ let x = !{ echo hi; return 5 }; return unit } | cat");
 }
 
 #[test]
-fn captured_bind_rhs_keeps_its_bytes_off_the_channel() {
-    // The other side of the same join: a byte-*result* RHS is wrapped in
-    // `Capture`, which swallows its bytes into `x`, so the binder writes
-    // nothing and feeding a byte consumer stays the adjacency error it was.
-    let errs = raw_errors("!{ let x = echo hi; length $x } | from-string");
-    assert!(
-        errs.iter().any(|e| matches!(
-            e.kind,
-            ral_core::typecheck::TypeErrorKind::ModeMismatch { .. }
-        )),
-        "expected a ModeMismatch feeding bytes to a captured-bind block, got: {:?}",
-        errs.iter()
-            .map(|e| e.kind.render_message())
-            .collect::<Vec<_>>()
-    );
+fn a_captured_bind_rhs_keeps_its_bytes_out_of_the_pipe() {
+    // `Capture` swallows the RHS's bytes into `x`, so this stage writes
+    // nothing.  It typechecks, and `from-string` decodes EOF at runtime —
+    // the stage's silence is a fact about the run, not about the types.
+    ok("!{ let x = echo hi; length $x } | from-string");
 }
 
 #[test]
 fn chain_byte_arms_join_to_byte_output() {
     // Both arms emit bytes, so the chain's output channel is `Bytes`.
-    assert_eq!(
-        bind_x_output("let x = echo a ? echo b; return unit"),
-        ByteMode::Bytes
-    );
-}
-
-#[test]
-fn seq_forcing_a_thunk_generalises_with_its_output_mode_quantified() {
-    // `∅ ⊔ μ = μ`: the sequence's output stays an open, quantified mode
-    // variable, not `∅` stamped for good because nothing was ground `Bytes`
-    // at visit time.  The variable is the sequence's own — an opaque
-    // statement contributes no attachment to `t`'s channels, since tying
-    // them down would force `t` into stage shape and reject a lambda
-    // argument.
-    use ral_core::typecheck::PipeMode;
-    let comp = annotated("let k = { |t| !$t; return unit }; return unit");
-    let mut scheme = None;
-    common::walk_comp(&comp, &mut |c| {
-        if let CompKind::Bind {
-            pattern: IrPattern::Name(name),
-            scheme: Some(s),
-            ..
-        } = &c.item
-            && name == "k"
-        {
-            scheme = Some(s.clone());
-        }
-    });
-    let scheme = scheme.expect("a scheme on the spine bind of `k`");
-    let Ty::Thunk(body) = &scheme.ty else {
-        panic!("k is a thunk, got {:?}", scheme.ty);
-    };
-    let CompTy::Fun(_, seq) = body.as_ref() else {
-        panic!("k's body takes a parameter, got {body:?}");
-    };
-    let CompTy::Return(spec, _) = seq.as_ref() else {
-        panic!("k's sequence is a Return, got {seq:?}");
-    };
-    let PipeMode::Var(output) = spec.output else {
-        panic!("the sequence's output must stay a mode variable, got {spec:?}");
-    };
-    assert!(
-        scheme.mode_vars.contains(&output),
-        "the output mode must be quantified, scheme: {scheme:?}"
-    );
+    assert!(bind_x_is_captured("let x = echo a ? echo b; return unit"));
 }
 
 #[test]
@@ -1686,14 +1551,11 @@ fn seq_tail_still_unknown_may_become_a_function() {
 }
 
 #[test]
-fn seq_tail_carries_a_settled_byte_demand() {
-    // A statement's settled byte demand needs a stage spec to live on, so
-    // the same tail is forced to `Return` shape and a function argument is
-    // rejected.
-    has_error(
-        "let apply = { |f| let x = from-string; !$f }; apply { |x| return $x }",
-        "one is a function",
-    );
+fn a_preceding_statements_bytes_do_not_constrain_the_tail() {
+    // The dual: a statement that reads bytes is still just a discarded
+    // statement.  It leaves nothing behind for the tail to carry, so the
+    // tail stays free to resolve `Fun` at the call site.
+    ok("let apply = { |f| let x = from-string; !$f }; apply { |x| return $x }");
 }
 
 // ─── Observed-value arm join (if / `?` / try) ─────────────────────────────────
@@ -1732,12 +1594,12 @@ fn chain_return_int_then_echo_is_observed_mismatch() {
 #[test]
 fn if_byte_arm_alongside_value_arm_is_rejected() {
     // Pins: a mixed byte/value join is rejected outright, not reconciled.
-    has_error("if true { echo hi } else { return 's' }", "result conduit");
+    has_error("if true { echo hi } else { return 's' }", "payload route");
 }
 
 #[test]
 fn try_byte_body_alongside_value_handler_is_rejected() {
-    has_error("try { echo hi } { |_| return 's' }", "result conduit");
+    has_error("try { echo hi } { |_| return 's' }", "payload route");
 }
 
 #[test]
@@ -1756,7 +1618,7 @@ fn sibling_arms_grounding_apart_report_under_the_joins_own_reason() {
     assert!(
         errs.iter().any(|e| {
             matches!(e.reason, Some(ral_core::typecheck::Reason::CaseArms))
-                && e.kind.render_message().contains("result conduit")
+                && e.kind.render_message().contains("payload route")
         }),
         "expected the join's own conduit mismatch under CaseArms, got: {errs:?}"
     );
@@ -1778,7 +1640,7 @@ fn inner_bind_does_not_collapse_the_enclosing_groups_join() {
     assert!(
         errs.iter().any(|e| {
             matches!(e.reason, Some(ral_core::typecheck::Reason::CaseArms))
-                && e.kind.render_message().contains("result conduit")
+                && e.kind.render_message().contains("payload route")
         }),
         "expected the join's own conduit mismatch under CaseArms, got: {errs:?}"
     );
@@ -1813,7 +1675,7 @@ fn late_byte_arm_beside_value_payload_arm_is_a_conduit_mismatch_under_try_arms()
     assert!(
         errs.iter().any(|e| {
             matches!(e.reason, Some(ral_core::typecheck::Reason::TryArms))
-                && e.kind.render_message().contains("result conduit")
+                && e.kind.render_message().contains("payload route")
         }),
         "expected the join's own conduit mismatch under TryArms, got: {errs:?}"
     );
@@ -1825,7 +1687,7 @@ fn traced_mixed_join_under_opaque_force_is_now_rejected() {
     // opaque force is now a static error, not a silent runtime mismatch.
     has_error(
         "let v = !{ echo pre; if true { echo hi } else { return 'other' } }",
-        "result conduit",
+        "payload route",
     );
 }
 
@@ -1892,21 +1754,13 @@ fn decoder_with_an_argument_is_a_type_error() {
     }
 }
 
-/// As a pipeline's last stage a decoder reads `Bytes`, chatters nothing, and
-/// carries its payload as a value.
+/// A decoder tail carries its payload as a returned value, so the pipeline
+/// it ends is annotated `Value` and reports that value to the parent.
 #[test]
-fn nullary_decoder_keeps_its_byte_modes() {
-    let comp = annotated("echo hi | from-json");
-    let pipelines = all_pipeline_wires(&comp);
-    let (stage_count, wires) = &pipelines[0];
-    assert_eq!(*stage_count, 2, "two-stage pipeline");
+fn a_decoder_tail_routes_the_pipeline_to_its_value() {
     assert_eq!(
-        wires[1],
-        Wire {
-            input: ByteMode::Bytes,
-            output: ByteMode::Empty,
-            result: ByteMode::Empty
-        }
+        all_pipeline_routes(&annotated("echo hi | from-json")),
+        vec![(2, GroundRoute::Value)]
     );
 }
 

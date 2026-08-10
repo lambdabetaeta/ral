@@ -1,43 +1,57 @@
 ---
-verified_at_commit: 40e6d77
-verified_at_date: 2026-08-09
-anchors: [run_pipeline, resolve_pipeline, StageLaunch, open_stage_routes, FinalValue::Report, run_child_eval, PipelineGroup, Launch, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, park_on_stop, PipeSpec, Capture, infer_pipeline]
+verified_at_commit: 95449d4
+verified_at_date: 2026-08-10
+anchors: [run_pipeline, resolve_pipeline, StageLaunch, open_stage_routes, FinalValue::Report, run_child_eval, PipelineGroup, Launch, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, park_on_stop, GroundRoute, Capture, infer_pipeline]
 ---
 
 # Pipeline execution: byte edges, process groups, and helper final values
 
-[[design/pipelines|The design]] makes `|` a byte conduit. Every interior edge
-connects a producer payload to a consumer input as `Bytes`; only the final
-stage's result may be a value. `eval_pipeline` (`evaluator/comp.rs`) reduces a
-single-stage form to its inner computation and hands a multi-stage form to
+[[design/pipelines|The design]] makes `|` a positional byte wire. Every interior
+edge is an operating-system pipe from the left stage's stdout to the right
+stage's stdin, alike for every pair; only the final stage may report a value.
+`eval_pipeline` (`evaluator/comp.rs`) reduces a single-stage form to its inner
+computation and hands a multi-stage form to
 `runtime::pipeline::run_pipeline`, whose three phases — resolve, launch,
 collect — are the spine below. Ordinary application and bind compose values in
 the evaluator and do not enter this pipeline runtime.
 
 **Resolve freezes a `StageLaunch` per stage from resolve-time facts.**
-`resolve_pipeline` (`pipeline/resolve.rs`) reads the ground `Vec<Wire>` that
-the checker wrote onto the `Pipeline` node, including each stage's input,
-chatter, and result modes. It does not re-infer them. Redirects, the terminal
-plan, and whether a `!{…}` audit captures bytes then determine one launch
-decision per stage:
+`resolve_pipeline` (`pipeline/resolve.rs`) reads redirects, the terminal plan,
+and whether a `!{…}` audit captures bytes, and turns each stage's head
+resolution into one launch decision:
 
 - `Direct` — an external command or bundled tool launched directly;
 - `HelperEval` — the stage's ral computation evaluated in a helper.
 
-Launch consumes these decisions; it does not re-derive a value-transport mode.
-There is no in-process pipeline fold and no typed value channel between stages.
+No route is consulted: a stage's classification cannot depend on where its
+payload lives, because the choice must be observationally transparent. The one
+type-level fact resolve carries through is the pipeline's own `final_route`,
+the checker's `GroundRoute` verdict on the last stage, frozen onto the
+`PipelinePlan`. Launch consumes these decisions; it does not re-derive a
+transport mode. There is no in-process pipeline fold and no typed value channel
+between stages.
 
-**Every interior route is an operating-system byte pipe.**
-`open_stage_routes` allocates the route endpoints before launch. For each
-adjacent pair it connects the producer's `result = Bytes` to the consumer's
-`input = Bytes`; a stage's independent `output` remains ambient chatter. The
-last stage's result is left free, so a decoder may be the tail and return a
-value. A non-final value result is a type error, not a request to serialize or
-force a value on the next edge
-([[decisions/260809_byte-only-pipelines|byte-only-pipelines]]).
+**Every interior route is an operating-system byte pipe, allocated from stage
+position alone.** `open_stage_routes` walks the stages once: stage `i` takes its
+stdin from the previous edge when there is one and from the parent otherwise,
+and writes to a fresh `os_pipe` when `i + 1 < n` and to the parent otherwise.
+Nothing in that loop reads a type. A non-final stage's returned value is simply
+discarded (`wants_value = false`), and no returned value is ever serialised onto
+an edge — the value report travels the separate socketpair, never aliased with
+the interior pipes
+([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
+
+The final-value bit is derived **once**, from two facts in one place:
+`FinalValue::Report` iff `i + 1 == n` and `plan.final_route` is `Value`.
+Everything else is `FinalValue::Ignore`.
+
+**A consumer that stops reading must close promptly.** `yes | !{ return 5 }`
+terminates because the non-reader's read end closes and the firehose takes
+EPIPE, on Unix and on the Windows-supported paths alike. Neither endpoint of a
+pipe promises traffic, so this is the ordinary case, not an error path.
 
 **The final value report remains helper-staged for now.**
-When the final result is a value, `FinalValue::Report` selects the helper's
+When `final_route` is `Value`, `FinalValue::Report` selects the helper's
 value report. The parent sends one `ChildEvalRequest` with the stage body and
 `WireMobile` snapshot; the helper evaluates it and returns the value in one
 `ChildEvalResponse`, alongside status and observations. The parent does not
@@ -51,21 +65,20 @@ snapshot into one request frame and gates the helper on it; the helper
 reconstructs a child shell (`Shell::child_of` over the captured closure
 environment), evaluates the stage, and ships one response frame carrying the
 final value, status, and flat observations. It has no upstream typed-value
-input: an interior producer reaches it only through its byte route. The grant
+input: an interior producer reaches it only through its byte pipe. The grant
 body evaluates locally and confines each external child per-command instead
 ([[internals/capability-enforcement|capability enforcement]];
 [[decisions/260617_sandbox-external-children|sandbox-external-children]]). A
-byte-only bundled stage takes the `Direct` arm as a `ral --ral-bundled-tool`
+bundled stage takes the `Direct` arm as a `ral --ral-bundled-tool`
 child, so it never reaches this runner.
 
-**Byte pipelines run as one process group; the pgid anchor exists only for two
+**Pipelines run as one process group; the pgid anchor exists only for two
 or more stages.** Every multi-stage pipeline — including one whose stages are
 ral-implemented — executes in a subprocess sharing one pgid the parent ral
 process is *not* a member of. `PipelineGroup` (`pipeline/group.rs`) owns that pgid
 through a stable *anchor* process, but `prepare` spawns the anchor only for `n ≥ 2`
 stages: a single-stage pipeline has no later `setpgid` join to protect, so its one
-child establishes the group as leader on `spawn`
-([[decisions/260809_byte-only-pipelines|byte-only-pipelines]]). The SIGINT-forwarding relay is
+child establishes the group as leader on `spawn`. The SIGINT-forwarding relay is
 claimed on the first `spawn` — *after* `spawn_with_pgid` plus `setpgid` in
 `pre_exec` has put a real child in the group — so a signal is never forwarded to a
 child-less pgid; the module doc of `group.rs` states this SIGINT/relay invariant in

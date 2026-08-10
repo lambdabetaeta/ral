@@ -60,8 +60,9 @@ impl HandlerEntry {
     /// order alone is what decides that.
     ///
     /// # Errors
-    /// `thunk` not a unary lambda, or its body changing the head's pipeline
-    /// mode.
+    /// `thunk` not a unary lambda, its body disagreeing with the head about
+    /// where their payload lives, or — under a byte-routed head — still
+    /// returning a value instead of `Unit`.
     pub fn vet(
         name: String,
         thunk: Value,
@@ -74,15 +75,25 @@ impl HandlerEntry {
             unreachable!("validate_handler_arity guarantees a unary lambda");
         };
         let scheme = crate::typecheck::alias_arm_scheme(&name, param, body, session_schemes)
-            .map_err(|m| {
-                use crate::typecheck::fmt_mode;
-                super::coerce::sig(format!(
-                    "{label}: `{name}`'s body changes the head's pipeline mode ({} vs {}); \
-                     a handler reinterprets a head and must preserve its modes — match the \
-                     existing head's modes or add a codec",
-                    fmt_mode(&m.left),
-                    fmt_mode(&m.right),
-                ))
+            .map_err(|failure| {
+                use crate::typecheck::{PinFailure, fmt_route, fmt_ty};
+                let msg = match failure {
+                    PinFailure::Route(m) => format!(
+                        "{label}: `{name}`'s body and the head it reinterprets disagree \
+                         about where their payload lives — the arm's is {}, the head's is \
+                         {}; a handler must agree with the head it reinterprets, so match \
+                         its route or add a codec",
+                        fmt_route(&m.left),
+                        fmt_route(&m.right),
+                    ),
+                    PinFailure::ByteHeadReturnsValue(ty) => format!(
+                        "{label}: `{name}`'s payload is its stdout, so an arm installed \
+                         under it has no separate value to return; its return type must be \
+                         Unit, and `{name}`'s body returns {}",
+                        fmt_ty(&ty),
+                    ),
+                };
+                super::coerce::sig(msg)
             })?;
         let mut entry = Self::ral_per_name(name, thunk);
         if role.persists_scheme() {

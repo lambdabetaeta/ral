@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1e9fea4
-generated_at_date: 2026-08-06
+generated_at_commit: 95449d4
+generated_at_date: 2026-08-10
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -23,10 +23,13 @@ with state to carry — so the run's mooring arrives beside the shell
 enquires, or starts a nested run parented under the run that called it. The
 type-rule facet is a `BuiltinTypeRule` of two arms: `Sig` (a command signature)
 or `Scheme` (a first-class polytype). The streaming reducer `fold-lines`
-registers as an ordinary `Scheme` whose factory bakes the reducer boundary
-directly ([[map/core/typecheck|reducer_spec]]); there is no separate reducer
-arm. A `Sig`-ruled entry's first-class form is derived from the signature, with
-`_type` the sole hand-written override ([[invariants/fixed-arity|fixed-arity]]).
+registers as an ordinary `Scheme` whose factory writes its forwarded
+[[design/types|payload route]] directly ([[map/core/typecheck|typecheck]]);
+there is no separate reducer arm. A `Sig`-ruled entry's first-class form is
+derived from the signature by `derive_sig_scheme`
+([[invariants/fixed-arity|fixed-arity]]); `BuiltinSig::value` remains as the
+hand-written override for a scheme the templates cannot state, and no entry sets
+it.
 Builtins are *shell-scoped*: each shell's session carries a `BuiltinTable`
 ([[map/core/shell-state|shell-state]]) seeded from `CORE_BUILTINS`
 (`core_builtin_table`), and a host's extra sets ride a `HostSurface` into
@@ -60,9 +63,9 @@ Bodies are grouped by concern, one submodule each:
 - `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs` — the last is also
   home to `builtin_echo`, `to-line`'s neighbour by nature: per-argument
   `str`, single-space intercalation, a newline to the byte channel.
-  `write_encoded` (`codecs.rs:216`) writes its bytes to stdout and returns
+  `write_encoded` (`codecs.rs`) writes its bytes to stdout and returns
   `Value::Unit`, so `to-csv`, `to-bytes`, `to-string`, `to-lines`, and
-  `to-json` are writers: each types `A → ⟨∅, Bytes, Bytes⟩ Unit`, and its
+  `to-json` are writers: each types `A → F[Bytes] Unit`, and its
   encoded bytes are its sole payload;
 - `shell.rs` — `cd`, `alias` / `unalias`;
 - `concurrency.rs` — `spawn` / `watch` / `service` / `detach` and the handle

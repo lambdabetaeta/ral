@@ -343,11 +343,6 @@ builtin_registry! {
     // `ral --ral-bundled-tool <tool>` child, so they cross the same wait / signal /
     // exit-code boundary as a system binary.  See `crate::uutils::is_uutils_tool`.
 
-    // `_type` types as an ordinary `α → F α`; the printing is a side effect of its
-    // `BuiltinDiagnostic::TypeProbe`, and the runtime body is the identity.
-    TypeOf { names: ["_type"], ty: Sig(sig::TYPE_PROBE),
-        doc: "_type <val>  — print inferred type at compile time; passthrough at runtime.",
-        call: |args, _mooring, _shell| Ok(args.first().cloned().unwrap_or(Value::Unit)), },
     Help { names: ["help"], ty: Sig(sig::HELP),
         doc: "help  — print an overview of builtins, prelude, and library; see also `explain`.",
         call: |args, _mooring, shell| Ok(help::builtin_help(args, shell)), },

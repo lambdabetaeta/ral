@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: 95449d4
+generated_at_date: 2026-08-10
 covers_paths: [core/src/lib.rs]
 ---
 
@@ -69,8 +69,8 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
 - [[map/core/ir|ir]] — the `Val` / `Comp` intermediate representation
   (`core/src/ir.rs`).
 - [[map/core/typecheck|typecheck]] — Hindley–Milner inference with row types
-  (`core/src/typecheck/`), the sole mode-inference engine; the mode lattice in
-  `mode.rs` is covered by the same page.
+  (`core/src/typecheck/`), the sole inference engine; the payload-route types in
+  `route.rs` are covered by the same page.
 - [[map/core/evaluator|evaluator]] — the CBPV machine: trampoline, scope frames,
   matching, audit (`core/src/evaluator/`).
 - [[map/core/runtime|runtime]] — the command/pipeline/transport machinery the

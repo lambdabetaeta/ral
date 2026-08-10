@@ -694,10 +694,11 @@ mod tests {
     use super::*;
     use crate::ir::{CompKind, IrPattern};
 
-    /// The child reads modes off the node rather than re-inferring, so a
-    /// lambda body must carry its interior verdicts across the wire — a wire
-    /// per pipeline stage, a `Capture` node on a byte-payload `Bind` RHS.
-    /// There is no thunk-root wire, so those interior slots are the whole of it.
+    /// The child reads routes off the node rather than re-inferring, so a
+    /// lambda body must carry its interior verdicts across the wire — a
+    /// pipeline's ground final route, a `Capture` node on a byte-payload
+    /// `Bind` RHS. There is no thunk-root route, so those interior slots are
+    /// the whole of it.
     fn annotated_lambda_body() -> Arc<Comp> {
         let src = r"let f = { |x| let y = /bin/echo $x; /bin/cat | /bin/cat }";
         let ast = crate::parse(src).expect("parse");
@@ -740,30 +741,29 @@ mod tests {
         }
     }
 
-    /// `(byte pipeline wire, a `Capture` node)`. The elaborator never emits
+    /// `(byte final route, a `Capture` node)`. The elaborator never emits
     /// either, so finding one is proof the checker wrote it.
     fn interior_annotations(body: &Comp) -> (bool, bool) {
-        use crate::mode::ByteMode;
-        let (mut wires, mut capture) = (false, false);
+        use crate::route::GroundRoute;
+        let (mut byte_route, mut capture) = (false, false);
         walk_comp(body, &mut |c| match &c.item {
-            CompKind::Pipeline { wires: ws, .. }
-                if ws
-                    .iter()
-                    .any(|w| w.output == ByteMode::Bytes || w.input == ByteMode::Bytes) =>
-            {
-                wires = true;
+            CompKind::Pipeline {
+                final_route: GroundRoute::Bytes,
+                ..
+            } => {
+                byte_route = true;
             }
             CompKind::Capture(_) => capture = true,
             _ => {}
         });
-        (wires, capture)
+        (byte_route, capture)
     }
 
     #[test]
     fn lambda_body_round_trips_with_interior_annotations() {
         let body = annotated_lambda_body();
-        let (wires, capture) = interior_annotations(&body);
-        assert!(wires, "body's pipeline carries a Bytes wire annotation");
+        let (byte_route, capture) = interior_annotations(&body);
+        assert!(byte_route, "body's pipeline carries a Bytes final route");
         assert!(
             capture,
             "body's byte-payload bind RHS carries a Capture node"
@@ -786,8 +786,8 @@ mod tests {
             *back.body, *body,
             "the deserialised body must equal the original, annotations and all"
         );
-        let (wires, capture) = interior_annotations(&back.body);
-        assert!(wires, "pipeline wires survive the round-trip");
+        let (byte_route, capture) = interior_annotations(&back.body);
+        assert!(byte_route, "pipeline's final route survives the round-trip");
         assert!(capture, "the Capture node survives the round-trip");
     }
 

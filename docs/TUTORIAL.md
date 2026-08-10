@@ -329,16 +329,24 @@ The type checker verifies the arms. A tag without a payload passes `unit`;
 
 ## 6  Pipelines, codecs, and files
 
-ral has two kinds of pipelines. External commands move bytes:
+ral has one pipeline. `|` is an operating-system byte pipe: the stage on its
+left writes its standard output into the standard input of the stage on its
+right. Position is the whole of the wiring:
 
     cat data.txt | sort | uniq
 
-Internal functions move values:
+Neither side has to use the wire. A stage may write nothing, and a stage may
+never read. What `|` never carries is a value: a non-final stage's return value
+is simply discarded, and the pipeline's value is the final stage's.
 
-    range 1 10 | filter { |n| return $[$n % 2 == 0] } | sum
+Each stage must be a command ready to run. A function still waiting for an
+argument is a type error, because there is nothing there to start:
 
-On a value pipeline, `x | f` means `f !{x}`: the pipeline supplies the final
-argument.
+    cat notes.txt | fold-lines { |n line| return $[$n + 1] }     # error
+    cat notes.txt | fold-lines { |n line| return $[$n + 1] } 0   # runs
+
+Apply such a stage to its argument rather than piping into it. The second line
+runs and returns the number of lines.
 
 Codecs cross between bytes and values:
 
@@ -354,26 +362,32 @@ Codecs cross between bytes and values:
 The encoders are `to-line`, `to-string`, `to-lines`, `to-json`, `to-csv`, and
 `to-bytes`.
 
-Decode while bytes are flowing, then capture the value:
+Decode while bytes are flowing, and let the decoder be the last stage. Its
+returned value is the pipeline's, and `let` binds it:
 
     let branch = git branch --show-current | from-line
     let config = curl -fsS $url | from-json
     let rows   = curl -fsS $csv-url | from-csv
 
-Do not capture structured bytes as text and later send the value into a byte
-decoder:
+A value already in hand is not on any pipe. Encode it into one first, or read
+the file directly:
 
-    let config = curl -fsS $url | from-json   # right
+    let config = to-string $text | from-json   # right
+    let config = from-json < $path             # right
 
-    let text   = curl -fsS $url
-    let config = $text | from-json            # type error
+    let config = $text | from-json             # decodes an empty pipe
 
-If the string is already in hand, encode it first:
+The last line is a legal program that does the wrong thing. `$text` is a
+perfectly good first stage, but it writes no bytes, so `from-json` reads end of
+input and fails when the program runs. The string never reached it.
 
-    let config = to-string $text | from-json
+`|` moves bytes; `let` binds the final stage's payload. The type checker checks
+every stage before a process starts.
 
-`|` moves a stage's output; `let` binds the final return value. The type checker
-follows every edge before a process starts.
+Values compose by application, not by `|`:
+
+    let evens   = filter { |n| return $[$n % 2 == 0] } !{range 1 10}
+    let doubled = map { |n| return $[$n * 2] } $evens
 
 File I/O is a redirect plus a codec:
 
@@ -395,13 +409,19 @@ return values:
     exists $path
     is-file $path
 
-`from-lines` is lazy and must be eliminated explicitly:
+`map-lines`, `filter-lines`, `each-line`, and `fold-lines` read the byte pipe a
+line at a time, in bounded memory, so they belong in a pipeline:
 
-    git log --oneline | from-lines | stream-each { |line| echo $line }
+    cat access.log | filter-lines { |line| re-match ' 500 ' $line } | wc -l
 
-Use `stream-map`, `stream-fold`, and `stream-to-list` for lazy work;
-`from-lines-list $path` for a materialised list; and `map-lines`,
-`filter-lines`, or `fold-lines` for streaming text filters.
+`from-lines` decodes the pipe into a lazy stream instead, and a stream must be
+eliminated explicitly:
+
+    let commits = git log --oneline | from-lines
+    stream-each { |line| echo $line } $commits
+
+Use `stream-map`, `stream-fold`, and `stream-to-list` for the rest of the lazy
+work, and `from-lines-list $path` for a materialised list.
 
 ## 7  Scripts, scope, and modules
 
@@ -612,9 +632,10 @@ handles. Check a script without performing any command:
 
     ral --check script.ral
 
-The checker catches bytes/value pipeline mismatches, non-scalar interpolation,
-wrong function arguments, incompatible `if` branches, missing `case` arms, and
-impossible record fields. You rarely write a type annotation.
+The checker catches a pipeline stage that is still waiting for an argument,
+non-scalar interpolation, wrong function arguments, incompatible `if` branches,
+missing `case` arms, and impossible record fields. Every type is inferred: the
+language has no syntax for writing one.
 
 The deeper model is now small:
 

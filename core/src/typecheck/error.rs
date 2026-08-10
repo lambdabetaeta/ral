@@ -1,29 +1,37 @@
 //! The type errors the checker raises: a structural cause, the provenance of
 //! the failed constraint, and a span.  Their user-facing prose is in `explain.rs`.
 
-use super::ty::{CompTy, PipeMode, Ty};
+use super::ty::{CompTy, PayloadRoute, Ty};
+use crate::route::RouteMismatch;
 use crate::source::Span;
 use crate::syntax::ast::BinaryOpKind;
 
 /// Which component of a computation type disagreed, within a `CompTyMismatch`.
 #[derive(Debug, Clone)]
 pub enum CompDiff {
-    Stdin {
-        expected: PipeMode,
-        actual: PipeMode,
-    },
-    Stdout {
-        expected: PipeMode,
-        actual: PipeMode,
-    },
-    Result {
-        expected: PipeMode,
-        actual: PipeMode,
+    Route {
+        expected: PayloadRoute,
+        actual: PayloadRoute,
     },
     ReturnType {
         expected: Ty,
         actual: Ty,
     },
+}
+
+/// Why an arm cannot be installed under `head`.
+///
+/// The two failures are genuinely different questions — one is about where a
+/// payload lives, the other about what WF-2 then forces the returned value to
+/// be — and the alias install, the handler `vet`, and the checker each render
+/// them in their own words.
+#[derive(Debug, Clone)]
+pub enum PinFailure {
+    /// The arm and the head disagree about where their payload lives.
+    Route(RouteMismatch),
+    /// The head is captured from stdout, so WF-2 makes the arm's value
+    /// `Unit` — and this arm returns something else.
+    ByteHeadReturnsValue(Ty),
 }
 
 /// Why the inferencer demanded that two types agree.
@@ -44,17 +52,13 @@ pub enum Reason {
     BuiltinTypedArg,
     /// A raising form's argument against the error-record shape it demands.
     ErrorRecordArg,
-    /// An interior pipeline producer tried to place a value on the byte
-    /// conduit.
-    PipelineProducer,
-    /// An interior pipeline consumer does not read the byte conduit.
-    PipelineConsumer,
-    /// A pipeline's chatter join over every stage's escaping output.
-    PipelineChatter,
-    /// An unresolved computation forced to `Return` shape to read its value and modes.
+    /// A pipeline stage forced to `Return` shape: a stage still waiting for an
+    /// argument is not a computation that can run.
+    PipelineStageShape,
+    /// An unresolved computation forced to `Return` shape to read its value and route.
     ReturnShape,
-    /// An arm's pipeline modes against those of the head it reinterprets.
-    HandlerModePin,
+    /// An arm's payload route against that of the head it reinterprets.
+    HandlerRoutePin,
     IfCond,
     IfBranches,
     ChainBranches,
@@ -91,19 +95,13 @@ pub enum Reason {
     DynamicIndexTarget,
     /// A head still a bare variable, pinned to `Thunk` so application can unfold it.
     AutoderefHead,
-    /// `_type`'s result threaded back to its argument, keeping the probe transparent.
-    TypeProbe,
     LetRecSelf,
     /// `from-lines`' recursive Step tail against the stream it closes into.
     LinesStepSelf,
-    /// An undecided `result` mode pinned at a payload-conduit decision (a
-    /// `Bind` RHS, a join's non-byte or byte side) so a later grounding
-    /// becomes an honest mismatch rather than silent divergence.
-    ResultPin,
-    /// A `Seq`'s channel join over its statements' ends.
-    SeqChannels,
-    /// A scope's channel join/alt over its arms' ends.
-    ScopeArms,
+    /// An undecided payload route pinned at a value boundary (a `Bind` RHS, a
+    /// join's byte or value side) so a later grounding becomes an honest
+    /// mismatch rather than silent divergence.
+    RoutePin,
 }
 
 /// The structural cause of a type error, raised by the unifier or inferencer.
@@ -122,9 +120,9 @@ pub enum TypeErrorKind {
         actual: CompTy,
         diffs: Vec<CompDiff>,
     },
-    ModeMismatch {
-        expected: PipeMode,
-        actual: PipeMode,
+    RouteMismatch {
+        expected: PayloadRoute,
+        actual: PayloadRoute,
     },
     RowExtraField {
         label: String,
@@ -209,7 +207,7 @@ impl TypeErrorKind {
             Self::TypeTooDeep => "T0003",
             Self::TyMismatch { .. } => "T0010",
             Self::CompTyMismatch { .. } | Self::CommandNotFunction { .. } => "T0011",
-            Self::ModeMismatch { .. } => "T0012",
+            Self::RouteMismatch { .. } => "T0012",
             Self::RowExtraField { .. } => "T0020",
             Self::RowMissingField { .. } => "T0021",
             Self::CaseNotExhaustive { .. } => "T0030",

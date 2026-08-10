@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 40e6d77
-verified_at_date: 2026-08-09
-anchors: [Inferencer, Unifier, Pairs, unify_row, unify_mode, generalize, instantiate, annotate, SessionSchemes, PipeMode, PipeSpec, extract_return, InferCtx, join_modes, alt_modes, join_arm_results, solve_at_boundary, solve_and_finalize, ModeConstraint]
+verified_at_commit: 95449d4
+verified_at_date: 2026-08-10
+anchors: [Inferencer, Unifier, Pairs, unify_row, unify_route, generalize, instantiate, annotate, SessionSchemes, PayloadRoute, extract_return, force_return_shape, pin_arm_to_head, InferCtx, join_arm_results, solve_at_boundary, solve_and_finalize, ArmResults]
 ---
 
 # Type inference: the algorithm
@@ -11,11 +11,11 @@ anchors: [Inferencer, Unifier, Pairs, unify_row, unify_mode, generalize, instant
 [[map/core/ir|IR]] after [[internals/compilation-ladder|elaboration]].
 
 **The Inferencer walks the typed IR.** `infer.rs` traverses `Val` / `Comp`,
-allocating fresh type, row, and mode variables and emitting unification
+allocating fresh type, row, and route variables and emitting unification
 constraints as it goes; `infer_case` is kept whole at ~100 lines by decision
 ([[decisions/260530_infer-case-stays-whole|infer-case-stays-whole]]). Builtin
 signatures enter through per-builtin rules carried with the body
-([[internals/builtins-registry|builtins registry]]: `builtin_arity`,
+([[internals/builtins-registry|builtins registry]]: `fixed_arity`,
 `builtin_type_hint`), the one source of arity
 ([[invariants/fixed-arity|fixed-arity]]).
 
@@ -30,160 +30,123 @@ signatures enter through per-builtin rules carried with the body
   anchored at a ty-var on one side and a comp-var on the other still converges
   rather than overflowing the stack
   ([[decisions/260606_unify-one-sided-obligations|unify-one-sided-obligations]]).
+  `CompTyKey::Return` fingerprints the payload route beside the return type, so
+  two obligations differing only in route are never conflated.
 - *Rows* unify by the Rémy rewrite (`unify_row`): a row-spine occurs check guards
   the tail variable, then mismatched labels are permuted past one another into a
   shared fresh tail — which is what makes scoped-label shadowing coherent without
   a restriction operator ([[design/row-types|row-types]]).
-- *Modes* unify too, *by equality* (`unify_mode`): the `∅` / `Bytes` / `μ`
-  modes (`PipeMode`) of a spec `⟨i, o, r⟩` are first-class unification variables,
-  and all three ride the same rule, but a ground `∅` and a ground `Bytes` do not
-  unify. A pipeline interior edge is admitted only when its producer payload and
-  consumer input both settle to `Bytes`; a returned value is composed by
-  application or bind, not by a second pipe mode. The lattice (`PipeMode`,
-  `PipeSpec`) lives in `core/src/mode.rs` and the equality rule is
-  `Unifier::unify_mode` — a plain method now that the static checker is the sole
-  mode engine
-  ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]) — so a
-  pipeline edge mismatch is a live `ModeMismatch` (T0012) at type-check time rather
-  than a silent coercion ([[design/pipelines|pipelines]];
-  [[decisions/260601_modes-equality-constrained-shared|modes-equality-constrained-shared]]).
+- *Payload routes* unify **by equality** (`unify_route`): `Value`, `Bytes`, and
+  route variables are first-class unification variables under one rule, and a
+  ground `Value` does not unify with a ground `Bytes`. A clash is a live
+  `RouteMismatch` (T0012), raised where two computations must genuinely be the
+  same — a handler or alias arm against its head — and nowhere else. There is no
+  adjacency premise: a `|` constrains no route at all
+  ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
 
-**The result mode names the payload's conduit** (`PipeSpec.result`,
-`core/src/mode.rs`). Its value is `None` or `Bytes`, with no third case. Every
-source-tree node grounds its own result mode:
+**One shape rule, `force_return_shape`, does the work an adjacency rule used to.**
+`extract_return` (`infer.rs`) resolves a `CompTy` to `Return(route, value)`,
+unifying against a freshly minted `Return` when it is still a variable. It is
+how every value boundary reads a computation's two facts at once, and
+`infer_pipeline` forces **every** stage through it under
+`Reason::PipelineStageShape`: a stage typed `Fun` is a function still waiting
+for an argument, and the diagnostic says to apply it rather than pipe into it.
+The pipeline then takes its route and value type from one projection of the
+final stage — never from peering past an arrow — and records the stage types for
+the structural REPL along the way.
 
-- An introduction rule sets a ground result mode where it builds a node's type.
-- Propagation copies a result mode from a sub-term.
-- A join over branches computes a result mode from its arms
-  (`join_arm_results`), deferred as a stored constraint the moment the arms
-  can't yet decide it; `InferCtx::solve_at_boundary` revisits it at the
-  scheme boundary that owns its variables.
-- `extract_return`'s shape-forcing expectation grounds an otherwise-unresolved
-  result mode.
+**WF-2 is structural: the byte side is one computation.** `ρ = Bytes` implies
+a `Unit` return type, and the checker cannot assume it: `PayloadRoute` and the
+value type are independent fields, so the pairing must be established at the
+moment a `Var` route becomes ground. WF-2's own consequence carries it — there
+is exactly one byte-routed computation type, `CompTy::bytes()` =
+`F[Bytes] Unit` — so landing on the byte side means unifying with that
+computation whole, and no live code unifies a route against a detached
+`Bytes`. Two operations land there:
 
-A payload decision taken against an unresolved result mode pins it to `None`.
+- `conclude_byte_side` (`route_solver.rs`), when an arm join lands on the byte
+  side — each non-subsumed arm unifies with `CompTy::bytes()`, open arms
+  included;
+- `pin_arm_to_head` (`infer.rs`), when a handler or alias arm is installed under
+  a byte-routed head: the arm's value unifies with `Unit` in the same breath as
+  the pin. A byte pin against a non-`Unit` arm is
+  `PinFailure::ByteHeadReturnsValue`, reported by `handler_comp_scheme` under
+  `Reason::HandlerRoutePin` and rendered by `HandlerEntry::vet` at the runtime
+  install door.
 
-**One well-formedness condition holds wherever a rule builds a `Return` type.**
+**One join survives, and it is deferred.** `join_arm_results`
+(`core/src/typecheck/route_solver.rs`) is the payload merge every arm form
+funnels through — `merge_branches` for `if`, a `?` fallback chain, and `case`,
+and `infer_try` for `try` — under the one subsumption instance
+`Value Unit ⊑ Bytes`:
 
-- WF-2: `result = Bytes` implies a `Unit` return type. A computation never
-  carries both a value payload and a byte payload. `output` is independent
-  chatter, not a bound on the payload conduit.
+- an arm whose computation type is still a bare variable (a call to a function
+  under inference, as in a recursive branch) is first forced to `Return` shape,
+  so it joins rather than strict-unifies;
+- a join with any byte-routed arm lands wholly on the byte side and ties every
+  arm's value to `Unit`;
+- with no byte-routed arm, a `Value`-at-`Unit` arm is the identity: still-open
+  arms unify with one another and stay open, pinned to `Value` only by an arm
+  carrying a genuine value payload;
+- an arm still open when the join is raised defers, even beside a ground
+  `Value`-at-non-`Unit` arm — that arm may yet ground `Bytes`, and the resulting
+  mismatch must be the join's own verdict rather than foreclosed by pinning
+  early.
 
-`Unifier::unify_mode` treats a ground result mode by the same equality rule as
-a ground input or output mode. Two different ground results never unify. One
-subsumption rule relates them instead, as a judgment and not as a unification
-step. A computation of type `⟨i, o, None⟩ Unit` also has type
-`⟨i, o, Bytes⟩ Unit`. The rule fires only at the top of a `Return` type. It
-needs no variance clause through `Thunk`, `Fun`, or a row.
+A byte-routed arm alongside a `Value` arm at a non-`Unit` type is a type error:
+the two disagree about where their payload lives. The fix is an explicit decoder
+tail, `echo hi | from-string`, not an inserted coercion.
 
-**A declared signature slot is still the only place a result-mode variable is
-quantified.** Two kinds of slot carry one:
-
-- a builtin's computation-typed argument, for example the callback passed to
-  `spawn`, `each`, `map`, or `fold`;
-- a scope's expected arm shape.
-
-Each such variable is quantified in its `Scheme` beside the other mode
-variables; `instantiate` refreshes it at each use like any other variable, a
-call site's actual argument grounds it, and otherwise it stays quantified
-inside an arrow that nothing consults.
-
-A deferred `join_arm_results` does mint a result-mode variable of its own —
-the target it hands back while the arms are undecided — so the restriction is
-stated over lifetime rather than origin: **no result-mode variable outlives
-its owning drain except as an alias of a declared slot variable or of a
-ground mode.** The target is either concluded to a ground mode or collapsed
-onto the arms' own variables; nothing downstream sees an unattached one.
-
-**Principality holds for mode constraints, with its limits stated.** Typing
-verdicts do not depend on the order the solver emits, retries, or collapses
-constraints: every join — `join_modes` and `alt_modes` included — is a
-constraint stored and re-examined at the scheme boundary that owns its
-variables rather than a decision read off a partially-solved store;
-conclusions are monotone on a height-1 lattice, ground-directed collapses are
-serialised through the worklist, and the all-open residue equates by pure
-union-find merges. Two limits are part of the claim: still-open ends joined
-under one binding equate at the boundary that owns them (the completeness
-frontier priced below), and two still-open `join_arm_results` sharing value
-*type* variables at one boundary could in principle observe each other's
-value unifications in collapse order — a corner no source program has been
-made to reach. Shape verdicts — `consumes_value_arg`, the sequence tail —
-sit outside the claim; they are introduction-rule choices, not joins.
-
-**Three named join operations live in `core/src/typecheck/mode_solver.rs`,**
-the only module permitted to case on a mode's groundness. Equality stays
-`Unifier::unify_mode`, above; beside it stand:
-
-- `join_modes` (`⊔`, bytes-dominant) — a form's channel end is the least
-  upper bound of its parts': a `Seq`'s channel over its statements, a
-  scope's over its arms. `∅` is the identity and `Bytes` is absorbing, and
-  the join constrains the *target* only — it never writes back into an end,
-  so a statement's still-open mode is never pinned by the sequence around
-  it. Which ends a `Seq` even contributes is `lift_channels`' shape verdict,
-  not a join: a `Fun` tail keeps the sequence a function, a `Return` tail
-  joins its ends with the statements', and a still-unknown tail is forced
-  into stage shape only when some statement's end has settled `Bytes` —
-  otherwise the sequence is exactly its tail, free to become a function at
-  its call site. An opaque statement (`force $t`) contributes fresh
-  unattached ends, not `t`'s own: attaching them would force `t` into stage
-  shape and reject a lambda argument.
-- `alt_modes` — arms of which only one runs, so a clash is an unknown for a
-  downstream stage to pin rather than a contradiction: ground and equal ends
-  agree, ground and disagreeing ends leave the target free.
-- `join_arm_results` — the result-mode join at the heart of every arm merge
-  (reached from `merge_branches` for `if`, a `?` fallback chain, and `case`,
-  and from `infer_try`), under the one subsumption instance
-  `∅@Unit ⊑ Bytes@Unit`. An arm whose computation type is still a bare
-  variable — a call to a function under inference, as in a recursive branch
-  — is first forced to `Return` shape by `extract_return`, so it joins with
-  the other arms instead of strict-unifying against them. A join with any
-  byte-payload arm lands wholly on the byte side and ties every arm's value
-  to `Unit`; with no byte-payload arm, a ground `None` arm at `Unit` is the
-  identity, still-open arms unify with one another and stay open, and only
-  an arm with a value payload (`None` at non-`Unit`) pins them to `None`.
-
-A byte-payload arm alongside a ground `None` arm at a non-`Unit` type is a
-type error. The two arms disagree about which conduit carries the payload.
-The fix is an explicit decoder tail, for example `echo hi | from-string`, and
-not an inserted coercion.
-
-**Conclude, store, solve-what-you-own.** Each call above applies whatever
-conclusion is already determined and defers the rest as a stored
-`ModeConstraint` — applying early is sound because a mode only ever moves
-`Var → ground`, never back, so an early conclusion can't be invalidated
-later. `InferCtx::solve_at_boundary(env)` runs at every in-inference point
-that produces a scheme — the `Bind` let-generalisation, `infer_letrec`'s
-group fixpoint, `handler_comp_scheme` — and solves exactly the constraints
-touching a mode variable not free in `env`: the variables about to be
-quantified, which a constraint must not outlive. A constraint whose every
-writable variable is still free in the environment belongs to an enclosing
-binding and is left entirely untouched — not retried either, since a
-conclusion's side effects pin arms still under inference elsewhere, so
-running it at a boundary a syntactic accident placed (any inner `let`, the
-elaborator's hoisted binds included) would foreclose a sibling's `∅@Unit`
-subsumption or move the join's error onto the group unification.
-`InferCtx::solve_and_finalize` is the terminal drain — end of check before
-`annotate`, plus the empty-environment `alias_arm_scheme` and
+**Conclude, store, solve-what-you-own.** `join_arm_results` applies whatever
+conclusion is already determined and defers the rest as a stored `ArmResults` —
+applying early is sound because a route only ever moves `Var → ground`, never
+back, so an early conclusion cannot be invalidated later.
+`InferCtx::solve_at_boundary(env)` runs at every in-inference point that
+produces a scheme — the `Bind` let-generalisation, `infer_letrec`'s group
+fixpoint, `handler_comp_scheme` — and solves exactly the constraints touching a
+route variable not free in `env`: the variables about to be quantified, which a
+constraint must not outlive. A constraint whose every variable is still free in
+the environment belongs to an enclosing binding and is left *entirely*
+untouched — not retried either, since a conclusion's side effects discipline
+arms still under inference elsewhere, so running it at a boundary a syntactic
+accident placed (any inner `let`, the elaborator's hoisted binds included) would
+foreclose a sibling's `Value Unit` subsumption or move the join's error onto the
+group unification. `InferCtx::solve_and_finalize` is the terminal drain — end of
+check before `annotate`, plus the empty-environment `alias_arm_scheme` and
 `binding_value_scheme` — where everything collapses. Each drain propagates to
-quiescence, since one conclusion can determine a sibling, then collapses what
-it owns. **Collapse is directed by the target, then equates; it never
-defaults**: a `join_modes`/`alt_modes` residue whose target grounded `Bytes`
-from outside is satisfied and drops without touching its ends, a `∅` target
-pins the open ends `∅`, and a `join_arm_results` whose result grounded lands
-on that side with the side's full protocol. These ground-writing collapses
-run one at a time with the worklist re-run between; only the all-open residue
-then equates — open ends with each other and with the target — and a
-collapsed variable can still ground `Bytes` afterwards, with the target
-riding along. Defaulting stays exactly where it always lived, in
-`InferCtx::ground`, at annotation time.
+quiescence, since one conclusion can determine a sibling, then collapses what it
+owns: a constraint whose result grounded lands on that side with the side's full
+protocol, one at a time with the worklist re-run between; only an all-open
+residue equates, and a collapsed variable can still ground `Bytes` afterwards.
+Defaulting stays exactly where it always lived, in `InferCtx::ground`, at
+annotation time.
 
-**The price of deferral:** two open ends joined under one binding equate at
-the collapse of the boundary that owns them, so mode polymorphism holds *up
-to joined ends sharing a variable* —
-`{|t,u| if $c { force $t } else { force $u }}` comes out with one shared `μ`
-rather than two independent ones. See
+**Principality holds, with its limits stated.** Typing verdicts do not depend on
+the order the solver emits, retries, or collapses constraints: the join is a
+stored constraint re-examined at the boundary that owns its variables rather
+than a decision read off a partially-solved store; conclusions are monotone on a
+height-1 lattice, ground-directed collapses are serialised through the worklist,
+and the all-open residue equates by pure union-find merges. Two limits are part
+of the claim: still-open arms joined under one binding equate at the boundary
+that owns them, so route polymorphism holds *up to joined arms sharing a
+variable*; and two still-open joins sharing value *type* variables at one
+boundary could in principle observe each other's value unifications in collapse
+order — a corner no source program has been made to reach. Shape verdicts — the
+pipeline stage forcing, the sequence tail — sit outside the claim; they are
+introduction-rule choices, not joins. See
 [[decisions/260807_modes-solved-by-deferred-joins|modes-solved-by-deferred-joins]]
-for the full account of what the solver replaced and why.
+for the architecture, narrowed to this one constraint.
+
+**A route variable is quantified only in a declared slot or a forwarded pair.**
+A builtin's computation-typed argument (`spawn`, `watch`, `service`, and the
+`map`/`filter`/`each`/`fold` callback family), a scope's expected arm shape, and
+`fold-lines`, which reads a route off its callback and hands it back beside the
+value type it was paired with. `instantiate` refreshes each at every use; a call
+site's actual argument grounds it, and otherwise it stays quantified inside an
+arrow nothing consults. A deferred join mints a target route of its own, so the
+restriction is stated over lifetime rather than origin: **no route variable
+outlives its owning drain except as an alias of a declared slot variable or of a
+ground route.**
 
 **Generalisation is at the binding boundary** (`generalize.rs`). At each `Bind`
 the inferencer takes the type's free variables minus those still free in the
@@ -192,11 +155,12 @@ refreshes a scheme's bound variables at each use. The order follows the SCC
 structure the elaborator found — a non-recursive group generalises at its binding
 point, a mutually recursive group stays monomorphic until its fixed point — which
 is what keeps generalisation sound. A type error aborts with a positioned
-expected-vs-inferred message (`fmt.rs`).
+expected-vs-inferred message (`fmt.rs`), where a byte-routed computation reads
+`Command captured from stdout` and every other reads `Command A`.
 
 **The quantifier is the prefix, not a binder.** A `Scheme` is the body's
 ordinary `Ty` under a ∀-prefix of four `Vec`s of variable ids — value
-(`ty_vars`), computation (`comp_ty_vars`), mode (`mode_vars`), row (`row_vars`)
+(`ty_vars`), computation (`comp_ty_vars`), route (`route_vars`), row (`row_vars`)
 sorts, each a `u32`-tagged unifier root (`scheme.rs`). There is no binder node
 and no de Bruijn index: a variable is **bound iff it is listed**.
 
@@ -213,11 +177,10 @@ and no de Bruijn index: a variable is **bound iff it is listed**.
 
 **The verdict survives into the next run.** The checker is a transformation:
 on success `annotate` writes each top-level name-bind's generalised `Scheme` onto
-its `Bind` node — and the ground mode `Wire` onto every `Pipeline` stage
-([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]) — the
-scheme closed against the empty environment so it carries no residual variable that
-could alias the next run's fresh ids. The next run's
-check is seeded from the live session — one `SessionSchemes` (the scope's
+its `Bind` node — and each `Pipeline`'s ground `final_route` and per-stage value
+types onto the node — the scheme closed against the empty environment so it
+carries no residual variable that could alias the next run's fresh ids. The next
+run's check is seeded from the live session — one `SessionSchemes` (the scope's
 name→scheme map plus the alias arms' schemes) — so a name bound in run *N* is
 checked at its inferred scheme in run *N+1*; a name from an unchecked path (a
 `source`d file, a plugin) is `None` and infers afresh

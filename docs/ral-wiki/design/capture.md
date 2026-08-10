@@ -1,12 +1,12 @@
 # Capture: a command's value is its stdout
 
-**One rule, in three clauses.** A command's value *is* its byte output: an
-external call is typed `⟨i, Bytes, Bytes⟩ Unit`, its payload riding the byte
-channel rather than a return value — one payload, never both
-([[design/types|WF-2]]). A block's value is its *last* statement's value; every
-earlier statement stands in **statement position**, where a value is discarded.
-And discarding bytes means letting them go where a command's bytes go by
-default: out.
+**One rule, in three clauses.** A command's value *is* its stdout: an external
+call is typed `F[Bytes] Unit`, its [[design/types|payload route]] sending a
+value boundary to the byte stream rather than to the returned value — one
+payload, never both ([[design/types|WF-2]]). A block's value is its *last*
+statement's value; every earlier statement stands in **statement position**,
+where a value is discarded. And discarding bytes means letting them go where a
+command's bytes go by default: out.
 
 ```ral
 let answer = !{ echo visible ; echo captured }
@@ -15,10 +15,10 @@ let answer = !{ echo visible ; echo captured }
 
 Nothing here is special-cased for bytes. A discarded `$[1 + 1]` in statement
 position is discarded too. The only difference is what discarding *means* for a
-conduit rather than for a value, and for stdout it means the terminal.
+byte stream rather than for a value, and for stdout it means the terminal.
 
 **Why not slurp the whole block.** `$(setup; work)` in a POSIX shell glues
-setup's chatter onto the result, which is why shell scripts are littered with
+setup's noise onto the result, which is why shell scripts are littered with
 `2>/dev/null` and why reading a chatty tool is a research project. Ral needs no
 annotation for it: diagnostics reach the terminal, the payload reaches the
 binding, and the statement boundary does the work a redirect would otherwise do
@@ -28,10 +28,12 @@ retains the *tail*, not the transcript.
 **Discarded bytes leave the whole capture chain.** Not one level of it. The
 destination is the nearest enclosing **visible** stream, and a capture buffer is
 not visible: a discarded statement's bytes pass every enclosing capture and
-reach the terminal. Inside a [[design/pipelines|byte pipeline]] "visible" is
-stage-relative — a stage's own stdout is the wire, and a stage runs in a fresh
-child shell with no enclosing capture at all, so a flush there bottoms out at
-the wire rather than escaping the pipeline.
+reach the terminal. Inside a [[design/pipelines|pipeline]] "visible" is
+stage-relative — a non-final stage's own stdout *is* the wire, and a stage runs
+in a fresh child shell with no enclosing capture at all, so a flush there
+bottoms out at the wire rather than escaping the pipeline. `!{ echo a; return
+unit } | cat` therefore writes `a` into `cat` by exactly this clause, with no
+pipeline rule involved.
 
 This is the load-bearing clause, and the one an implementation can get subtly
 wrong: routing a discarded write to the *immediately* enclosing sink agrees with
@@ -57,11 +59,11 @@ path is the one that must name the *visible* sink rather than the enclosing one.
 **Why `;` is not a bind.** A bind at a byte payload installs the buffer — that
 is what having a bound variable to decode into means — so `M to (ignore x. N)`
 *destroys* `M`'s bytes. A statement boundary installs no buffer and lets them
-out. The two have the same type: a mode is a bound on channel traffic, not an
-obligation to use it, so `⟨∅, Bytes, ∅⟩ Unit` is honest about a computation that
-writes and about one that could but doesn't. Only the evaluator distinguishes
-them, which is why the boundary has to be its own former rather than sugar for a
-bind on a dropped variable.
+out. The two have the same type: a payload route says where a value boundary
+looks, never whether anything was written, so `F[Value] Unit` is honest about a
+computation that writes and about one that could but doesn't. Only the
+evaluator distinguishes them, which is why the boundary has to be its own former
+rather than sugar for a bind on a dropped variable.
 
 **Failure flushes.** If a captured computation fails, bytes it produced before
 failing are flushed visibly rather than lost — a partial write from

@@ -1,7 +1,7 @@
-//! Pipeline execution engine.  `resolve` freezes the whole plan — modes,
-//! last-result, and each stage's launch decision; `launch` walks the stages
-//! once, placing every one in a single process group; `collect` waits in
-//! launch order, surfaces the first error, and recovers the final value.
+//! Pipeline execution engine.  `resolve` freezes the whole plan — the final
+//! route and each stage's launch decision; `launch` walks the stages once,
+//! placing every one in a single process group; `collect` waits in launch
+//! order, surfaces the first error, and recovers the final value.
 //! `run_pipeline` is the orchestrator; nothing more.
 
 mod collect;
@@ -27,7 +27,7 @@ use resolve::resolve_pipeline;
 /// runs in the parent, so none can be granted tail position.
 pub(crate) fn run_pipeline(
     stages: &[Arc<Comp>],
-    wires: &[crate::mode::Wire],
+    final_route: crate::route::GroundRoute,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
@@ -36,7 +36,7 @@ pub(crate) fn run_pipeline(
     // but claimed no relay pgid, so without this the pipeline would launch
     // anyway and collect would block on a child that never saw the signal.
     crate::process::check(mooring)?;
-    let plan = resolve_pipeline(stages, wires, mooring, shell)?;
+    let plan = resolve_pipeline(stages, final_route, mooring, shell)?;
 
     // Window start for the sandbox-denial reader, anchored before any stage
     // spawns so a kernel deny logged by a stage falls inside it.
@@ -51,7 +51,7 @@ pub(crate) fn run_pipeline(
     // helper, since one blocked on a stopped upstream would deadlock us.
     running
         .collect(mooring, shell, started)
-        .finish(shell, plan.last_result)
+        .finish(shell, plan.final_route)
         .map_err(Into::into)
 }
 

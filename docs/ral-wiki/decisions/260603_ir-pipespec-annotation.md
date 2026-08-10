@@ -1,5 +1,6 @@
 ---
-status: active
+status: superseded
+superseded_by: decisions/260809_pipes-are-positional-byte-wires
 landed: [d4aa75be, e3c23b4b, edf47cd9]
 ---
 

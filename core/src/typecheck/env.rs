@@ -1,11 +1,10 @@
 //! Typing environment and inference context.
 
 use super::error::{Reason, TypeError, TypeErrorKind};
-use super::mode_solver::ModeConstraint;
+use super::route_solver::ArmResults;
 use super::scheme::Scheme;
-use super::ty::{CompTy, PipeMode, PipeSpec, Ty};
+use super::ty::{CompTy, GroundRoute, PayloadRoute, Ty};
 use super::unify::Unifier;
-use crate::mode::ByteMode;
 use crate::source::Span;
 use std::collections::HashMap;
 
@@ -137,22 +136,21 @@ pub struct InferCtx {
     pub pos: Option<Span>,
     /// Pre-generalisation type bound by each `Name`-pattern `Bind`.
     pub bind_tys: HashMap<usize, Ty>,
-    /// Each stage's `F[I,O]`, settled only once `infer_pipeline` has unified every
-    /// adjacency; its modes may still be variables until grounded to a
-    /// [`crate::mode::Wire`].
-    pub stage_specs: HashMap<usize, PipeSpec>,
+    /// Each pipeline's final stage's payload route, keyed by the *pipeline*
+    /// node's address; still a variable until `annotate` grounds it.
+    pub pipeline_routes: HashMap<usize, PayloadRoute>,
     /// The value flowing out of each pipeline stage.  Feeds the structural REPL's
     /// typed spine; the evaluator never reads it.
     pub stage_types: HashMap<usize, Ty>,
-    /// A `Comp` node's own top-level `result`, recorded for `annotate`'s
-    /// demand walk; absent = no `Return` shape at record time = `∅`.
-    pub results: HashMap<usize, PipeMode>,
-    /// A scope arm's (`Val`-keyed) own `result`, the `Val`-level analogue of
+    /// A `Comp` node's own payload route, recorded for `annotate`'s demand
+    /// walk; absent = no `Return` shape at record time.
+    pub results: HashMap<usize, PayloadRoute>,
+    /// A scope arm's (`Val`-keyed) own route, the `Val`-level analogue of
     /// [`Self::results`] — scope arms have no `Comp` node of their own.
-    pub val_results: HashMap<usize, PipeMode>,
-    /// Joins and arm-result merges not yet determined, awaiting
-    /// [`Self::solve_and_finalize`](super::mode_solver); see `mode_solver`.
-    pub(super) mode_constraints: Vec<ModeConstraint>,
+    pub val_results: HashMap<usize, PayloadRoute>,
+    /// Arm-result merges not yet determined, awaiting
+    /// [`Self::solve_and_finalize`](super::route_solver).
+    pub(super) route_constraints: Vec<ArmResults>,
 }
 
 impl Default for InferCtx {
@@ -168,19 +166,19 @@ impl InferCtx {
             errors: Vec::new(),
             pos: None,
             bind_tys: HashMap::new(),
-            stage_specs: HashMap::new(),
+            pipeline_routes: HashMap::new(),
             stage_types: HashMap::new(),
             results: HashMap::new(),
             val_results: HashMap::new(),
-            mode_constraints: Vec::new(),
+            route_constraints: Vec::new(),
         }
     }
 
-    /// Ground a mode into a [`ByteMode`]; a still-unresolved variable defaults empty.
-    pub fn ground(&mut self, mode: PipeMode) -> ByteMode {
-        match self.unifier.resolve_mode(&mode) {
-            PipeMode::Bytes => ByteMode::Bytes,
-            PipeMode::None | PipeMode::Var(_) => ByteMode::Empty,
+    /// Ground a route; a still-unresolved variable defaults to `Value`.
+    pub fn ground(&mut self, route: PayloadRoute) -> GroundRoute {
+        match self.unifier.resolve_route(&route) {
+            PayloadRoute::Bytes => GroundRoute::Bytes,
+            PayloadRoute::Value | PayloadRoute::Var(_) => GroundRoute::Value,
         }
     }
 
@@ -216,11 +214,11 @@ impl InferCtx {
         }
     }
 
-    /// Unify two pipeline modes, reporting a `ModeMismatch` under `why`.
-    pub fn unify_mode(&mut self, a: &PipeMode, b: &PipeMode, why: Reason) {
-        if let Err(m) = self.unifier.unify_mode(a, b) {
+    /// Unify two payload routes, reporting a `RouteMismatch` under `why`.
+    pub fn unify_route(&mut self, a: &PayloadRoute, b: &PayloadRoute, why: Reason) {
+        if let Err(m) = self.unifier.unify_route(a, b) {
             self.report(
-                TypeErrorKind::ModeMismatch {
+                TypeErrorKind::RouteMismatch {
                     expected: m.left,
                     actual: m.right,
                 },

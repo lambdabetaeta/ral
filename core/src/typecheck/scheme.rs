@@ -3,7 +3,7 @@
 //! `generalize.rs` builds these at `let` bindings and instantiates them with
 //! fresh unification variables at each use site, giving let-polymorphism.
 
-use super::ty::{CompTy, CompTyVar, ModeVar, RowVar, Ty, TyVar};
+use super::ty::{CompTy, CompTyVar, PayloadVar, RowVar, Ty, TyVar};
 use std::collections::BTreeSet;
 
 /// The free variables a scheme did *not* quantify, being already free in the
@@ -14,13 +14,13 @@ pub struct CachedFreeVars {
     pub ty_fv: BTreeSet<TyVar>,
     #[serde(default)]
     pub comp_fv: BTreeSet<CompTyVar>,
-    pub mode_fv: BTreeSet<ModeVar>,
+    pub route_fv: BTreeSet<PayloadVar>,
     pub row_fv: BTreeSet<RowVar>,
 }
 
 /// A polymorphic type scheme: `forall alpha_1 ... alpha_n, gamma_1 ... gamma_l, rho_1 ... rho_k, mu_1 ... mu_m. A`.
 ///
-/// Quantifies value types, computation types, rows, and pipeline modes at
+/// Quantifies value types, computation types, rows, and payload routes at
 /// once.  A variable caught in a cycle cannot be a plain quantifier, so
 /// `comp_ty_bindings` and `ty_bindings` snapshot it as `(original root id,
 /// applied binding)`; instantiation mints a fresh id per entry and re-binds
@@ -30,7 +30,7 @@ pub struct Scheme {
     pub ty_vars: Vec<TyVar>,
     #[serde(default)]
     pub comp_ty_vars: Vec<CompTyVar>,
-    pub mode_vars: Vec<ModeVar>,
+    pub route_vars: Vec<PayloadVar>,
     pub row_vars: Vec<RowVar>,
     pub ty: Ty,
     #[serde(default)]
@@ -49,7 +49,7 @@ impl Scheme {
         Self {
             ty_vars: vec![],
             comp_ty_vars: vec![],
-            mode_vars: vec![],
+            route_vars: vec![],
             row_vars: vec![],
             ty,
             comp_ty_bindings: vec![],
@@ -62,7 +62,7 @@ impl Scheme {
     pub fn is_poly(&self) -> bool {
         !self.ty_vars.is_empty()
             || !self.comp_ty_vars.is_empty()
-            || !self.mode_vars.is_empty()
+            || !self.route_vars.is_empty()
             || !self.row_vars.is_empty()
             || !self.comp_ty_bindings.is_empty()
             || !self.ty_bindings.is_empty()

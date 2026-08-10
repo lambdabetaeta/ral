@@ -63,6 +63,30 @@ adjacency is genuine unification, ground `∅` never meets ground `Bytes`
   `∅@Unit ⊑ Bytes@Unit`. Unlike the channel join, this one *does* discipline
   the arms: it pins open results and ties byte-side values to `Unit`.
 
+**Narrowed by the payload-route change: `Join` and `Alt` are gone; only
+`ArmResults` remains.**
+[[decisions/260809_pipes-are-positional-byte-wires|Pipes are positional byte
+wires]] deletes `input`/`output` outright, leaving one payload route per
+computation type. `Join` and `Alt` existed to merge *channel ends* — the
+`input`/`output` a `Seq`'s statements, a scope's arms, or a branch's arms
+carried independently of their value — and that is exactly the notion the
+route collapse removes: stdout is no longer typed per node at all, so there
+are no channel ends left for a form's parts to join. `route_solver.rs`
+(renamed from `mode_solver.rs`) carries no `Join` or `Alt` today; the
+constraint store is `route_constraints: Vec<ArmResults>` — a plain struct, not
+an enum of three — and `ArmResults` is unchanged in kind: it is exactly this
+page's payload-boundary join, over the one thing still worth deferring, which
+side of the route an `if`/`case`/`try`'s arms collapse to. So the verdict is
+**narrowed, not reversed**: the architecture this page decided — emit an
+already-determined conclusion immediately, defer the rest as a constraint,
+drain only what a boundary is about to quantify at `solve_at_boundary`,
+collapse everything at `solve_and_finalize`, ground-directed collapse before
+equation, principality up to variables shared across one binding — is exactly
+what `join_arm_results` still does, unchanged in shape, for the one join that
+survived. Two of the three constraint *kinds* this page named are gone
+because their subject matter is gone, not because the solver built for them
+was wrong.
+
 **Conclude, store, solve-what-you-own.** Emission applies whatever conclusion
 is already determined and stores the rest. Applying early is sound because a
 mode only ever moves `Var → ground`, never back, so an early conclusion cannot

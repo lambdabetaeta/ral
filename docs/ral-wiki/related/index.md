@@ -26,5 +26,5 @@ revisit.
   the effect typing ral declined — the same row machinery, extended to every
   arrow; nearly ral's runtime, the inverse of ral's wild/handleable split.
 - [[related/call-by-push-value|call-by-push-value]] — Levy 1999/2003: the
-  substrate taken as surface design; ral grades `F` with byte modes, adds the
-  pipe as a combinator, and drops computation products.
+  substrate taken as surface design; ral tags `F` with a payload route, adds the
+  pipe as a combinator outside the calculus, and drops computation products.

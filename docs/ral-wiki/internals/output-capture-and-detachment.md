@@ -19,10 +19,10 @@ only for neglect — or never, if born a `service`.
 **This section names a different mechanism from the drain-to-EOF story
 below, though both swap in a `Sink::Buffer`.** The evaluator's `Capture` node
 is inserted by [[internals/compilation-ladder|annotate]] wherever a value
-demand meets a byte-payload result mode. A command substitution is the
-canonical example: `let v = echo hi`. It does not inspect the operand's
-produced value. The operand's type already says `result = Bytes`, so there
-is nothing left to discriminate.
+demand meets a byte [[design/types|payload route]]. A command substitution is
+the canonical example: `let v = echo hi`. It does not inspect the operand's
+produced value. The operand's type already routes its payload to stdout, so
+there is nothing left to discriminate.
 
 - `eval_capture` (`core/src/evaluator/comp.rs`) installs the buffer through
   `with_capture` (`core/src/evaluator/capture.rs`). It swaps `shell.io.stdout`

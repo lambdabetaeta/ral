@@ -26,6 +26,28 @@ algebraic-effects literature must match its operation's signature. **A handler
 output]` is pinned by unification against `h`'s known spec, while the arm's
 *value* type stays whatever scheme inference yields.**
 
+**Narrowed by the payload-route change: exactly one thing is preserved, and the
+pin now carries an obligation.**
+[[decisions/260809_pipes-are-positional-byte-wires|Pipes are positional byte
+wires]] deletes `input` and `output`, so the mode pair this page pins has no
+members left. What survives is the reason the pin existed at all: a handler
+reinterprets an operation without retyping it, so an arm installed under `h`
+must agree with `h` about **where its payload lives** — the returned value, or
+stdout. `pin_arm_to_head` unifies the arm's `PayloadRoute` against the head's,
+and the two failure modes are `PinFailure::Route` and
+`PinFailure::ByteHeadReturnsValue`.
+
+The second is new, and it is the correction of a live defect this page's
+implementation carried. Pinning the *bare* route while discarding the arm's
+value type let an arm with an open route be grounded `Bytes` under a byte-routed
+head while keeping a concrete non-`Unit` value the checker never re-examined —
+silent type confusion, a release build printing `""` where the recorded type
+said `Int`. WF-2 (`Bytes` implies the value is `Unit`) leaves exactly one
+byte-routed computation, and this pin is one of the two operations that land
+on it. So the verdict is **narrowed, not reversed**: one route preserved
+instead of a mode pair, and the pin discharges the `Unit` pairing in the same
+breath as the grounding.
+
 This is the second of four decisions whose end state is a single mode-inference
 engine. The arc: session-scheme-continuity
 ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]) →

@@ -443,12 +443,13 @@ fn run_startup(path: &str, block: Value, shell: &mut Shell) -> Result<(), String
 fn evaluate_startup_file(path: &str, shell: &mut Shell) -> Result<Option<Value>, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let src = ral_core::source::normalize_source_text(src);
-    // The check always runs (it writes the evaluator's mode wires) and is
-    // seeded from the live shell, so an earlier startup file's bindings are
-    // visible to a later file's check.  A type error of any kind leaves the
-    // file with no runnable annotation: it is reported and skipped while the
-    // boot survives — a broken startup file must not strand the user at no
-    // shell, the parse-error precedent above.
+    // The check always runs (it writes the annotations the evaluator reads —
+    // capture points and each pipeline's final route) and is seeded from the
+    // live shell, so an earlier startup file's bindings are visible to a
+    // later file's check.  A type error of any kind leaves the file with no
+    // runnable annotation: it is reported and skipped while the boot
+    // survives — a broken startup file must not strand the user at no shell,
+    // the parse-error precedent above.
     //
     // Compiled against the `FileId` `evaluate_checked` registers the text
     // under a moment later, exactly as a module load is: an alias or function

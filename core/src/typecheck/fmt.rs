@@ -6,14 +6,14 @@
 //! are about to render: it mints Greek letters in first-appearance order.
 
 use super::scheme::Scheme;
-use super::ty::{CompTy, CompTyVar, ModeVar, PipeMode, Row, RowVar, Ty, TyVar};
+use super::ty::{CompTy, CompTyVar, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
 use std::collections::HashMap;
 
 // One alphabet per kind of unification variable, kept disjoint so a letter
 // alone tells the reader which kind it names.
 const TY_LETTERS: &[&str] = &["α", "β", "γ", "δ", "ε", "ζ", "η", "θ", "ι", "κ"];
 const COMP_LETTERS: &[&str] = &["ϕ", "χ", "ψ", "ω"];
-const MODE_LETTERS: &[&str] = &["μ", "ν", "ξ", "π"];
+const ROUTE_LETTERS: &[&str] = &["μ", "ν", "ξ", "π"];
 const ROW_LETTERS: &[&str] = &["ρ", "σ", "τ", "υ"];
 
 fn pick(letters: &[&str], idx: usize) -> String {
@@ -33,7 +33,7 @@ fn pick(letters: &[&str], idx: usize) -> String {
 pub struct FmtCtx {
     pub ty_names: HashMap<TyVar, String>,
     pub comp_names: HashMap<CompTyVar, String>,
-    pub mode_names: HashMap<ModeVar, String>,
+    pub route_names: HashMap<PayloadVar, String>,
     pub row_names: HashMap<RowVar, String>,
 }
 
@@ -50,8 +50,8 @@ impl FmtCtx {
             .cloned()
             .unwrap_or_else(|| "_".into())
     }
-    fn mode_name(&self, v: ModeVar) -> Option<String> {
-        self.mode_names.get(&v).cloned()
+    fn route_name(&self, v: PayloadVar) -> Option<String> {
+        self.route_names.get(&v).cloned()
     }
 
     /// Name every unification variable in `types`, in first-appearance order.
@@ -88,9 +88,8 @@ impl FmtCtx {
                     self.comp_names.insert(*v, pick(COMP_LETTERS, idx));
                 }
             }
-            CompTy::Return(spec, a) => {
-                self.absorb_mode(spec.input);
-                self.absorb_mode(spec.output);
+            CompTy::Return(route, a) => {
+                self.absorb_route(*route);
                 self.absorb_ty(a);
             }
             CompTy::Fun(a, b) => {
@@ -116,12 +115,12 @@ impl FmtCtx {
         }
     }
 
-    pub(super) fn absorb_mode(&mut self, mode: PipeMode) {
-        if let PipeMode::Var(v) = mode
-            && !self.mode_names.contains_key(&v)
+    pub(super) fn absorb_route(&mut self, route: PayloadRoute) {
+        if let PayloadRoute::Var(v) = route
+            && !self.route_names.contains_key(&v)
         {
-            let idx = self.mode_names.len();
-            self.mode_names.insert(v, pick(MODE_LETTERS, idx));
+            let idx = self.route_names.len();
+            self.route_names.insert(v, pick(ROUTE_LETTERS, idx));
         }
     }
 }
@@ -197,45 +196,25 @@ pub fn fmt_comp_ty_ctx(cty: &CompTy, ctx: &FmtCtx) -> String {
     match cty {
         CompTy::Var(v) => ctx.comp_name(*v),
         CompTy::Fun(a, b) => format!("{} → {}", fmt_ty_ctx(a, ctx), fmt_comp_ty_ctx(b, ctx)),
-        CompTy::Return(spec, a) => {
-            let mut fields: Vec<String> = Vec::new();
-            if let Some(s) = fmt_mode_field_ctx(spec.input) {
-                fields.push(format!("stdin: {s}"));
-            }
-            if let Some(s) = fmt_mode_field_ctx(spec.output) {
-                fields.push(format!("stdout: {s}"));
-            }
-            if let Some(s) = fmt_mode_field_ctx(spec.result) {
-                fields.push(format!("result: {s}"));
-            }
-            if fields.is_empty() {
-                format!("Command {}", fmt_ty_ctx(a, ctx))
-            } else {
-                format!("Command[{}] {}", fields.join(", "), fmt_ty_ctx(a, ctx))
-            }
-        }
+        CompTy::Return(PayloadRoute::Bytes, _) => "Command captured from stdout".into(),
+        CompTy::Return(_, a) => format!("Command {}", fmt_ty_ctx(a, ctx)),
     }
 }
 
-fn fmt_mode_field_ctx(mode: PipeMode) -> Option<String> {
-    match mode {
-        PipeMode::None | PipeMode::Var(_) => None,
-        PipeMode::Bytes => Some("Bytes".into()),
-    }
+/// Format a payload route on its own, outside any type — the mismatch
+/// renderer's one use, since a route otherwise prints as nothing inside a
+/// `Command` type (see [`fmt_comp_ty_ctx`]).
+pub fn fmt_route(route: &PayloadRoute) -> String {
+    fmt_route_ctx(route, &FmtCtx::default())
 }
 
-/// Format a pipeline mode on its own, outside any type.
-pub fn fmt_mode(mode: &PipeMode) -> String {
-    fmt_mode_ctx(mode, &FmtCtx::default())
-}
-
-/// Like [`fmt_mode`], but a mode variable takes its name from `ctx` when it
+/// Like [`fmt_route`], but a route variable takes its name from `ctx` when it
 /// has one there.
-pub fn fmt_mode_ctx(mode: &PipeMode, ctx: &FmtCtx) -> String {
-    match mode {
-        PipeMode::None => "(no channel)".into(),
-        PipeMode::Bytes => "Bytes".into(),
-        PipeMode::Var(v) => ctx.mode_name(*v).unwrap_or_else(|| "_".into()),
+pub fn fmt_route_ctx(route: &PayloadRoute, ctx: &FmtCtx) -> String {
+    match route {
+        PayloadRoute::Value => "a returned value".into(),
+        PayloadRoute::Bytes => "captured from stdout".into(),
+        PayloadRoute::Var(v) => ctx.route_name(*v).unwrap_or_else(|| "_".into()),
     }
 }
 
@@ -253,7 +232,7 @@ fn names_in_order<V: Copy + Eq + std::hash::Hash>(
 /// Format a scheme with its ∀ prefix, naming variables by their position in
 /// the scheme's quantifier lists.
 ///
-/// Mode variables are named but never quantified: a mode variable prints as
+/// Route variables are named but never quantified: an open route prints as
 /// nothing inside a `Command` type, so its binder would dangle.  The outer
 /// `Thunk` is stripped, so a command reads `Command …`, not `{Command …}`.
 pub fn fmt_scheme(scheme: &Scheme) -> String {
@@ -276,7 +255,7 @@ pub fn fmt_scheme(scheme: &Scheme) -> String {
     let ctx = FmtCtx {
         ty_names: names_in_order(&ty_order, TY_LETTERS),
         comp_names: names_in_order(&comp_order, COMP_LETTERS),
-        mode_names: names_in_order(&scheme.mode_vars, MODE_LETTERS),
+        route_names: names_in_order(&scheme.route_vars, ROUTE_LETTERS),
         row_names: names_in_order(&scheme.row_vars, ROW_LETTERS),
     };
 
@@ -311,7 +290,7 @@ mod tests {
         let scheme = Scheme {
             ty_vars: vec![],
             comp_ty_vars: vec![],
-            mode_vars: vec![],
+            route_vars: vec![],
             row_vars: vec![],
             ty: Ty::List(Box::new(Ty::Var(root))),
             comp_ty_bindings: vec![],

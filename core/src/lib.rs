@@ -19,7 +19,6 @@ pub mod exit_hints;
 pub mod host;
 pub mod io;
 pub mod ir;
-pub mod mode;
 pub mod path;
 /// Names exported by `prelude.ral`, harvested from its top-level `let`
 /// bindings by `build.rs`.
@@ -31,6 +30,7 @@ pub mod engine;
 #[cfg(unix)]
 pub mod hatch;
 pub mod process;
+pub mod route;
 pub mod run;
 pub(crate) mod runtime;
 pub mod sandbox;

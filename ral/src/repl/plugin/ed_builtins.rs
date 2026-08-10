@@ -19,7 +19,7 @@ use ral_core::syntax::lexer::{Token, lex};
 use ral_core::typecheck::builtins::{
     BuiltinTypeRule, closed_record, fun, mk_scheme as scheme, pure, thunk,
 };
-use ral_core::typecheck::{CompTy, PipeMode, PipeSpec, Row, Scheme, Ty, Unifier};
+use ral_core::typecheck::{CompTy, PayloadRoute, Row, Scheme, Ty, Unifier};
 use ral_core::types::as_list;
 use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Mooring, Settled, as_map, sig};
 use ral_core::{Shell, Value};
@@ -672,22 +672,13 @@ fn scheme_parse(_u: &mut Unifier) -> Scheme {
 
 fn scheme_tui(u: &mut Unifier) -> Scheme {
     let av = u.fresh_tyvar();
-    let i = u.fresh_modevar();
-    let o = u.fresh_modevar();
-    let r = u.fresh_modevar();
+    let rv = u.fresh_routevar();
     scheme(
         &[av],
-        &[i, o, r],
+        &[rv],
         &[],
         thunk(fun(
-            thunk(CompTy::Return(
-                PipeSpec {
-                    input: PipeMode::Var(i),
-                    output: PipeMode::Var(o),
-                    result: PipeMode::Var(r),
-                },
-                Box::new(Ty::Var(av)),
-            )),
+            thunk(CompTy::Return(PayloadRoute::Var(rv), Box::new(Ty::Var(av)))),
             pure(closed_record(&[
                 ("output", Ty::String),
                 ("status", Ty::Int),

@@ -479,18 +479,17 @@ impl Elaborator {
                         self.with_span(stage.span, |this| this.elab_isolated(&stage.item));
                     comps.push(Arc::new(stage_comp));
                 }
-                // One placeholder per stage, overwritten by the annotation pass
-                // with the stage's ground wire and value type.  The checker
-                // runs before every evaluation, so an un-annotated pipeline
-                // never reaches the evaluator.
-                let wires = vec![crate::mode::Wire::EMPTY; comps.len()];
+                // Placeholders, overwritten by the annotation pass with the
+                // stages' value types and the pipeline's ground final route.
+                // The checker runs before every evaluation, so an
+                // un-annotated pipeline never reaches the evaluator.
                 let stage_types = vec![crate::typecheck::Ty::Unit; comps.len()];
                 comp!(
                     self,
                     CompKind::Pipeline {
                         stages: comps,
-                        wires,
-                        stage_types
+                        stage_types,
+                        final_route: crate::route::GroundRoute::Value,
                     }
                 )
             }

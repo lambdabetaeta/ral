@@ -150,10 +150,12 @@ cannot escape it merely because it was defined outside.
 The surface keeps exactly the composition its model can state, and nothing
 more.
 
-- Every interior edge is bytes: the producer's payload and the consumer's
-  input are both `Bytes`. A pipeline is therefore always a process pipeline —
-  every stage runs in a subprocess, the stages share one process group, and
-  the parent shell remains outside that group.
+- Every interior edge is a positional operating-system byte pipe, wired from
+  the left stage's stdout to the right stage's stdin — a fact about stage
+  position, not a promise that either side writes or reads. A pipeline is
+  therefore always a process pipeline — every stage runs in a subprocess, the
+  stages share one process group, and the parent shell remains outside that
+  group.
 - Values are combined by application and `let`, the ordinary composition of
   the calculus. There is no second, value-shaped pipe to learn, and no rule
   the model would have to invent to describe one.

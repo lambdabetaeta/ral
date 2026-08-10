@@ -125,15 +125,14 @@ fn span_cases() -> Vec<SpanCase> {
         // caret narrows from the whole `return …` statement to just
         // the value expression — `[1, hello]`, here.
         c("return [1, hello]", "[1, hello]", "return-value-narrowing"),
-        // A mode mismatch on an *early* edge of a 3-stage pipeline must
-        // underline whichever end of that edge is the actual violator, not
-        // the last stage.  `'abc'` is a value producer where the edge to
-        // `from-json` needs Bytes, so the caret lands on `'abc'`, not
-        // `from-json` or `upper`.
+        // A bad stage *early* in a 3-stage pipeline must underline that
+        // stage, not the last one.  The lambda still wants an argument, so
+        // it is not a computation that can run; the caret lands on it rather
+        // than on `upper`.
         c(
-            "'abc' | from-json | upper",
-            "'abc'",
-            "pipeline-mode-mismatch-early-edge",
+            "echo hi | !{ |x| echo $x } | upper",
+            "!{ |x| echo $x }",
+            "pipeline-stage-shape-early-stage",
         ),
     ]
 }

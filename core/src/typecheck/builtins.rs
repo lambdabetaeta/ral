@@ -11,11 +11,11 @@
 
 use super::env::TyEnv;
 use super::error::{Reason, TypeErrorKind};
-use super::fmt::{fmt_scheme, fmt_ty};
+use super::fmt::fmt_scheme;
 use super::generalize::generalize;
 use super::infer::Inferencer;
 use super::scheme::{CachedFreeVars, Scheme};
-use super::ty::{ByteMode, CompTy, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar};
+use super::ty::{CompTy, GroundRoute, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
 use super::unify::Unifier;
 use crate::types::BuiltinTable;
 
@@ -123,21 +123,11 @@ pub enum TyTemplate {
 pub enum CompTemplate {
     Pure(TyTemplate),
     Return {
-        input: ModeTemplate,
-        output: ModeTemplate,
         value: TyTemplate,
-        result: ByteMode,
+        route: GroundRoute,
     },
     Never,
     LinesStep,
-}
-
-/// Pipe-mode template used by [`CompTemplate`].
-#[derive(Clone, Copy)]
-pub enum ModeTemplate {
-    None,
-    Bytes,
-    Fresh,
 }
 
 /// Extra non-typing behaviour attached to a builtin signature.
@@ -145,65 +135,36 @@ pub enum ModeTemplate {
 pub enum BuiltinDiagnostic {
     None,
     FailStatusNonzero,
-    TypeProbe,
     /// A `from-*` decoder: an argument is not an arity slip but a misreading
     /// of where the bytes come from.
     Decoder,
 }
 
-/// Project a [`ModeTemplate`] onto a [`PipeMode`], minting `Fresh` from `u`.
-pub fn mode_of_template(template: ModeTemplate, u: &mut Unifier) -> PipeMode {
-    match template {
-        ModeTemplate::None => PipeMode::None,
-        ModeTemplate::Bytes => PipeMode::Bytes,
-        ModeTemplate::Fresh => u.fresh_mode(),
-    }
-}
-
-/// The boundary [`PipeSpec`] of a command signature — the sole source of a
-/// `Sig` builtin's modes.
-pub fn sig_pipe_spec(result: &CompTemplate, u: &mut Unifier) -> PipeSpec {
+/// The [`PayloadRoute`] of a command signature — the sole source of a `Sig`
+/// builtin's route.
+pub fn sig_route(result: &CompTemplate, u: &mut Unifier) -> PayloadRoute {
     match result {
-        CompTemplate::Pure(_) => PipeSpec::none(),
-        CompTemplate::Return {
-            input,
-            output,
-            result,
-            ..
-        } => PipeSpec {
-            input: mode_of_template(*input, u),
-            output: mode_of_template(*output, u),
-            result: (*result).into(),
-        },
-        // A divergent computation (`fail`, `exit`) joins either side of a
-        // byte/value split, so its result is a fresh mode var like its
-        // input/output, not a ground `∅` — see `join_arm_results`.
-        CompTemplate::Never => PipeSpec {
-            input: u.fresh_mode(),
-            output: u.fresh_mode(),
-            result: u.fresh_mode(),
-        },
-        CompTemplate::LinesStep => PipeSpec::decode(),
-    }
-}
-
-/// The boundary [`PipeSpec`] of a streaming reducer (`fold-lines`): bytes in,
-/// and both conduits out inherited from the callback, each as itself.
-pub fn reducer_spec(callback_output: PipeMode, callback_result: PipeMode) -> PipeSpec {
-    PipeSpec {
-        input: PipeMode::Bytes,
-        output: callback_output,
-        result: callback_result,
+        CompTemplate::Pure(_) | CompTemplate::LinesStep => PayloadRoute::Value,
+        CompTemplate::Return { route, .. } => (*route).into(),
+        // A divergent computation (`fail`) joins either side of a byte/value
+        // split, so its route is a fresh variable, not a ground `Value` —
+        // see `join_arm_results`.
+        CompTemplate::Never => u.fresh_route(),
     }
 }
 
 /// Build a [`Scheme`] from its quantified vars and body.  Public so host crates
 /// can write their own scheme arms without touching `Scheme`'s internals.
-pub fn mk_scheme(ty_vars: &[TyVar], mode_vars: &[ModeVar], row_vars: &[RowVar], ty: Ty) -> Scheme {
+pub fn mk_scheme(
+    ty_vars: &[TyVar],
+    route_vars: &[PayloadVar],
+    row_vars: &[RowVar],
+    ty: Ty,
+) -> Scheme {
     Scheme {
         ty_vars: ty_vars.to_vec(),
         comp_ty_vars: vec![],
-        mode_vars: mode_vars.to_vec(),
+        route_vars: route_vars.to_vec(),
         row_vars: row_vars.to_vec(),
         ty,
         comp_ty_bindings: vec![],
@@ -226,11 +187,10 @@ pub fn pure(ty: Ty) -> CompTy {
 //
 // `scheme!` writes a builtin's polytype declaratively: `<tv>` declares fresh
 // type vars, `[...]` params curry left-to-right, `pure` means a thunked
-// constant, `pipe` means fresh pipe-mode vars.  Each arm is labelled with the
-// spelling it accepts.
+// constant.  Each arm is labelled with the spelling it accepts.
 //
-// It expands only inside `mod scheme` below, whose imports — and `fm`, which
-// `pipe` calls — are what the expansion resolves against.
+// It expands only inside `mod scheme` below, whose imports are what the
+// expansion resolves against.
 
 macro_rules! scheme {
     // scheme!(temp_path: pure Ty::String);
@@ -259,21 +219,6 @@ macro_rules! scheme {
             mk_scheme(&[$a,$b], &[], &[], thunk(curry!($($p),* => $ret)))
         }
     };
-    // scheme!(ask: pipe [Ty::String] -> Ty::String);
-    ($name:ident: pipe [$($p:expr),*] -> $ret:expr) => {
-        pub fn $name(u: &mut Unifier) -> Scheme {
-            let (m0,m1,m2,ct) = fm(u, $ret);
-            mk_scheme(&[], &[m0,m1,m2], &[], thunk(curry_pipe!($($p),* => ct)))
-        }
-    };
-    // scheme!(source_op<av>: pipe [Ty::String] -> Ty::Var(av));
-    ($name:ident<$tv:ident>: pipe [$($p:expr),*] -> $ret:expr) => {
-        pub fn $name(u: &mut Unifier) -> Scheme {
-            let $tv = u.fresh_tyvar();
-            let (m0,m1,m2,ct) = fm(u, $ret);
-            mk_scheme(&[$tv], &[m0,m1,m2], &[], thunk(curry_pipe!($($p),* => ct)))
-        }
-    };
 }
 
 /// Right-fold parameters into `fun(p₁, fun(p₂, …, pure(ret)))`.
@@ -282,19 +227,10 @@ macro_rules! curry {
     ($p:expr, $($rest:expr),+ => $ret:expr) => { fun($p, curry!($($rest),+ => $ret)) };
 }
 
-/// Like `curry!`, but the result already carries a `CompTy`, so no `pure`
-/// wrapper.  One parameter only: a piped builtin takes exactly one.
-macro_rules! curry_pipe {
-    ($p:expr => $ret:expr) => {
-        fun($p, $ret)
-    };
-}
-
 /// Command signatures for builtins whose surface is not a curried value.
 pub mod sig {
     use super::{
-        ArgSig, ArgTemplate, BuiltinDiagnostic, BuiltinSig, ByteMode, CompTemplate, ModeTemplate,
-        TyTemplate, scheme,
+        ArgSig, ArgTemplate, BuiltinDiagnostic, BuiltinSig, CompTemplate, GroundRoute, TyTemplate,
     };
 
     const ANY: ArgTemplate = ArgTemplate::Any;
@@ -322,25 +258,20 @@ pub mod sig {
         CompTemplate::Pure(value)
     }
 
-    const fn ret(input: ModeTemplate, output: ModeTemplate, value: TyTemplate) -> CompTemplate {
+    const fn ret(value: TyTemplate) -> CompTemplate {
         CompTemplate::Return {
-            input,
-            output,
             value,
-            result: ByteMode::Empty,
+            route: GroundRoute::Value,
         }
     }
 
-    /// Like [`ret`], but the byte channel *is* the result: `result: Bytes`,
-    /// so `value` must be `Unit` (WF-2).  Those bytes are the builtin's
-    /// payload and belong to whoever consumes it, so nothing escapes:
-    /// `output` is `∅` until a statement boundary turns the payload loose.
-    const fn ret_bytes(input: ModeTemplate) -> CompTemplate {
+    /// Like [`ret`], but the byte channel *is* the payload: `route: Bytes`,
+    /// so `value` must be `Unit` (WF-2) — those bytes belong to whoever
+    /// consumes this command as a value.
+    const fn ret_bytes() -> CompTemplate {
         CompTemplate::Return {
-            input,
-            output: ModeTemplate::None,
             value: TyTemplate::Unit,
-            result: ByteMode::Bytes,
+            route: GroundRoute::Bytes,
         }
     }
 
@@ -368,54 +299,22 @@ pub mod sig {
         }
     }
 
-    pub const TERMINAL_CONTROL: BuiltinSig = command(
-        ArgSig::Exact(NO_ARGS),
-        ret_bytes(ModeTemplate::Fresh),
-        None,
-    );
+    pub const TERMINAL_CONTROL: BuiltinSig = command(ArgSig::Exact(NO_ARGS), ret_bytes(), None);
 
     pub const RANGE: BuiltinSig = command(ArgSig::Exact(TWO_INTS), pure(TyTemplate::ListInt), None);
 
-    pub const FROM_BYTES: BuiltinSig = decoder(ret(
-        ModeTemplate::Bytes,
-        ModeTemplate::None,
-        TyTemplate::Bytes,
-    ));
-    pub const FROM_STRING: BuiltinSig = decoder(ret(
-        ModeTemplate::Bytes,
-        ModeTemplate::None,
-        TyTemplate::String,
-    ));
-    pub const FROM_JSON: BuiltinSig = decoder(ret(
-        ModeTemplate::Bytes,
-        ModeTemplate::None,
-        TyTemplate::Any,
-    ));
+    pub const FROM_BYTES: BuiltinSig = decoder(ret(TyTemplate::Bytes));
+    pub const FROM_STRING: BuiltinSig = decoder(ret(TyTemplate::String));
+    pub const FROM_JSON: BuiltinSig = decoder(ret(TyTemplate::Any));
     pub const FROM_LINES: BuiltinSig = decoder(CompTemplate::LinesStep);
 
-    pub const TO_BYTES: BuiltinSig = command(
-        ArgSig::DataLast(TO_BYTES_ARGS),
-        ret_bytes(ModeTemplate::None),
-        None,
-    );
+    pub const TO_BYTES: BuiltinSig = command(ArgSig::DataLast(TO_BYTES_ARGS), ret_bytes(), None);
 
-    pub const TO_ANY_BYTES: BuiltinSig = command(
-        ArgSig::DataLast(ONE_ANY),
-        ret_bytes(ModeTemplate::None),
-        None,
-    );
+    pub const TO_ANY_BYTES: BuiltinSig = command(ArgSig::DataLast(ONE_ANY), ret_bytes(), None);
 
-    pub const TO_LINE: BuiltinSig = command(
-        ArgSig::DataLast(ONE_ANY),
-        ret_bytes(ModeTemplate::None),
-        None,
-    );
+    pub const TO_LINE: BuiltinSig = command(ArgSig::DataLast(ONE_ANY), ret_bytes(), None);
 
-    pub const TO_LINES: BuiltinSig = command(
-        ArgSig::DataLast(TO_LINES_ARGS),
-        ret_bytes(ModeTemplate::None),
-        None,
-    );
+    pub const TO_LINES: BuiltinSig = command(ArgSig::DataLast(TO_LINES_ARGS), ret_bytes(), None);
 
     pub const CHDIR: BuiltinSig = command(ArgSig::Optional(STR), pure(TyTemplate::Unit), None);
     pub const PATH_BOOL: BuiltinSig = command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Bool), None);
@@ -433,17 +332,9 @@ pub mod sig {
     pub const ALIAS: BuiltinSig = command(ArgSig::Exact(ALIAS_ARGS), pure(TyTemplate::Unit), None);
     pub const UNALIAS: BuiltinSig = command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Unit), None);
 
-    pub const HELP: BuiltinSig = command(
-        ArgSig::Exact(NO_ARGS),
-        ret_bytes(ModeTemplate::Fresh),
-        None,
-    );
+    pub const HELP: BuiltinSig = command(ArgSig::Exact(NO_ARGS), ret_bytes(), None);
 
-    pub const EXPLAIN: BuiltinSig = command(
-        ArgSig::Exact(ONE_STR),
-        ret_bytes(ModeTemplate::Fresh),
-        None,
-    );
+    pub const EXPLAIN: BuiltinSig = command(ArgSig::Exact(ONE_STR), ret_bytes(), None);
 
     /// `detach`: any argv, and a `{pid, desc}` receipt the checker leaves as a
     /// fresh variable — a result template names a [`TyTemplate`], which has no
@@ -454,13 +345,9 @@ pub mod sig {
     pub const DETACH: BuiltinSig = command(ArgSig::Any, pure(TyTemplate::Any), None);
 
     /// `echo`: any argv — mixed types coexist through per-argument `str`
-    /// rather than a shared element type — with `to-line`'s modes, so
+    /// rather than a shared element type — with `to-line`'s route, so
     /// pipeline typing treats it as the byte write it is.
-    pub const ECHO: BuiltinSig = command(
-        ArgSig::Any,
-        ret_bytes(ModeTemplate::None),
-        None,
-    );
+    pub const ECHO: BuiltinSig = command(ArgSig::Any, ret_bytes(), None);
 
     /// `fg`/`bg`/`disown`, registered by the REPL host in
     /// `ral/src/repl/host_handlers.rs`: zero or one Int, a bare call meaning
@@ -482,13 +369,6 @@ pub mod sig {
         result: CompTemplate::Never,
         value: None,
         diagnostic: BuiltinDiagnostic::FailStatusNonzero,
-    };
-
-    pub const TYPE_PROBE: BuiltinSig = BuiltinSig {
-        args: ArgSig::Exact(ONE_ANY),
-        result: ret(ModeTemplate::Fresh, ModeTemplate::Fresh, TyTemplate::Any),
-        value: Some(scheme::type_probe),
-        diagnostic: BuiltinDiagnostic::TypeProbe,
     };
 }
 
@@ -631,25 +511,9 @@ pub fn fs_file_info_ty() -> Ty {
 /// function here rather than duplicating the body.
 pub mod scheme {
     use super::{
-        CompTy, PipeMode, PipeSpec, Row, Scheme, Ty, Unifier, await_record, fs_file_info_ty,
-        fs_list_entry_ty, fun, mk_scheme, poll_variant, pure, reducer_spec, thunk,
+        CompTy, PayloadRoute, PayloadVar, Row, Scheme, Ty, Unifier, await_record, fs_file_info_ty,
+        fs_list_entry_ty, fun, mk_scheme, poll_variant, pure, thunk,
     };
-
-    /// `F[μ₀,μ₁,μ₂] τ` with fresh per-call mode vars (`μ₂` is `result`), so a
-    /// first-class builtin like `$ask` or `$source` takes its pipeline modes
-    /// from each use site.
-    fn fm(u: &mut Unifier, ty: Ty) -> (super::ModeVar, super::ModeVar, super::ModeVar, CompTy) {
-        let (m0, m1, m2) = (u.fresh_modevar(), u.fresh_modevar(), u.fresh_modevar());
-        let cty = CompTy::Return(
-            PipeSpec {
-                input: PipeMode::Var(m0),
-                output: PipeMode::Var(m1),
-                result: PipeMode::Var(m2),
-            },
-            Box::new(ty),
-        );
-        (m0, m1, m2, cty)
-    }
 
     // ── List operations ──────────────────────────────────────────────────
 
@@ -697,22 +561,22 @@ pub mod scheme {
 
     scheme!(compare<av,bv>: [Ty::Var(av), Ty::Var(bv)] -> Ty::Bool);
 
-    /// Result type of a higher-order callback: `F[μ₀,μ₁,μ₂] τ`, all three
-    /// modes scheme-quantified — `map { echo $x }` needs `result` free to
-    /// instantiate `Bytes`.
-    fn callback_result(u: &mut Unifier, ty: Ty) -> ([super::ModeVar; 3], CompTy) {
-        let (m0, m1, m2, cty) = fm(u, ty);
-        ([m0, m1, m2], cty)
+    /// Result type of a higher-order callback: `F[ρ] τ`, its route
+    /// scheme-quantified — `map { echo $x }` needs it free to instantiate
+    /// `Bytes`.
+    fn callback_result(u: &mut Unifier, ty: Ty) -> (PayloadVar, CompTy) {
+        let rv = u.fresh_routevar();
+        (rv, CompTy::Return(PayloadRoute::Var(rv), Box::new(ty)))
     }
 
-    /// `map :: ∀α β μ₀ μ₁. U(α → F[μ₀,μ₁] β) → [α] → F [β]`
+    /// `map :: ∀α β ρ. U(α → F[ρ] β) → [α] → F [β]`
     pub fn map_op(u: &mut Unifier) -> Scheme {
         let (av, bv) = (u.fresh_tyvar(), u.fresh_tyvar());
         let (a, b) = (Ty::Var(av), Ty::Var(bv));
-        let (cb_modes, cb_result) = callback_result(u, b.clone());
+        let (rv, cb_result) = callback_result(u, b.clone());
         mk_scheme(
             &[av, bv],
-            &cb_modes,
+            &[rv],
             &[],
             thunk(fun(
                 thunk(fun(a.clone(), cb_result)),
@@ -721,14 +585,14 @@ pub mod scheme {
         )
     }
 
-    /// `filter :: ∀α μ₀ μ₁. U(α → F[μ₀,μ₁] Bool) → [α] → F [α]`
+    /// `filter :: ∀α ρ. U(α → F[ρ] Bool) → [α] → F [α]`
     pub fn filter_op(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
-        let (cb_modes, cb_result) = callback_result(u, Ty::Bool);
+        let (rv, cb_result) = callback_result(u, Ty::Bool);
         mk_scheme(
             &[av],
-            &cb_modes,
+            &[rv],
             &[],
             thunk(fun(
                 thunk(fun(a.clone(), cb_result)),
@@ -737,14 +601,14 @@ pub mod scheme {
         )
     }
 
-    /// `each :: ∀α β μ₀ μ₁. U(α → F[μ₀,μ₁] β) → [α] → F Unit`
+    /// `each :: ∀α β ρ. U(α → F[ρ] β) → [α] → F Unit`
     pub fn each_op(u: &mut Unifier) -> Scheme {
         let (av, bv) = (u.fresh_tyvar(), u.fresh_tyvar());
         let (a, b) = (Ty::Var(av), Ty::Var(bv));
-        let (cb_modes, cb_result) = callback_result(u, b);
+        let (rv, cb_result) = callback_result(u, b);
         mk_scheme(
             &[av, bv],
-            &cb_modes,
+            &[rv],
             &[],
             thunk(fun(
                 thunk(fun(a.clone(), cb_result)),
@@ -753,14 +617,14 @@ pub mod scheme {
         )
     }
 
-    /// `fold :: ∀α β μ₀ μ₁. U(β → α → F[μ₀,μ₁] β) → β → [α] → F β`
+    /// `fold :: ∀α β ρ. U(β → α → F[ρ] β) → β → [α] → F β`
     pub fn fold_op(u: &mut Unifier) -> Scheme {
         let (av, bv) = (u.fresh_tyvar(), u.fresh_tyvar());
         let (a, b) = (Ty::Var(av), Ty::Var(bv));
-        let (cb_modes, cb_result) = callback_result(u, b.clone());
+        let (rv, cb_result) = callback_result(u, b.clone());
         mk_scheme(
             &[av, bv],
-            &cb_modes,
+            &[rv],
             &[],
             thunk(fun(
                 thunk(fun(b.clone(), fun(a.clone(), cb_result))),
@@ -784,14 +648,14 @@ pub mod scheme {
         )
     }
 
-    /// `sort-list-by :: ∀α β μ₀ μ₁. U(α → F[μ₀,μ₁] β) → [α] → F [α]`
+    /// `sort-list-by :: ∀α β ρ. U(α → F[ρ] β) → [α] → F [α]`
     pub fn sort_list_by(u: &mut Unifier) -> Scheme {
         let (av, bv) = (u.fresh_tyvar(), u.fresh_tyvar());
         let (a, b) = (Ty::Var(av), Ty::Var(bv));
-        let (cb_modes, cb_result) = callback_result(u, b);
+        let (rv, cb_result) = callback_result(u, b);
         mk_scheme(
             &[av, bv],
-            &cb_modes,
+            &[rv],
             &[],
             thunk(fun(
                 thunk(fun(a.clone(), cb_result)),
@@ -863,70 +727,59 @@ pub mod scheme {
 
     // ── Streaming reducers ───────────────────────────────────────────────
 
-    /// `fold-lines :: ∀α μ ρ. U(α → Str → F[∅,μ,ρ] α) → α → F[Bytes,μ,ρ] α`
+    /// `fold-lines :: ∀α ρ. U(α → Str → F[ρ] α) → α → F[ρ] α`
     ///
-    /// Both of the callback's conduits out are the reducer's, each staying the
-    /// conduit it was.  Its chatter `μ` is the reducer's chatter: a callback
-    /// that logs per line logs from inside the fold, and those bytes escape.
-    /// Its payload `ρ` is the reducer's payload, so a callback whose *tail* is
-    /// a byte write — `map-lines` and `filter-lines` in `prelude.ral` — makes
-    /// the whole stage a byte producer feeding downstream, while `return $acc`
-    /// keeps `ρ = ∅` and the accumulator comes home as a value.  WF-2 survives
-    /// the forwarding: at `ρ = Bytes` the callback's own value is `Unit`, and
-    /// `α` is what the reducer returns.
+    /// The callback's route and the reducer's own route are one variable: a
+    /// callback whose *tail* is a byte write — `map-lines` and `filter-lines`
+    /// in `prelude.ral` — makes the whole stage a byte producer feeding
+    /// downstream, while `return $acc` keeps the route `Value` and the
+    /// accumulator comes home as a value.  WF-2 survives the forwarding: at
+    /// `ρ = Bytes` the callback's own value is `Unit`, and `α` is what the
+    /// reducer returns.
     pub fn fold_lines(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
-        let mu = u.fresh_modevar();
-        let mr = u.fresh_modevar();
-        let callback_result = CompTy::Return(
-            PipeSpec {
-                input: PipeMode::None,
-                output: PipeMode::Var(mu),
-                result: PipeMode::Var(mr),
-            },
-            Box::new(a.clone()),
-        );
+        let rv = u.fresh_routevar();
+        let route = PayloadRoute::Var(rv);
         mk_scheme(
             &[av],
-            &[mu, mr],
+            &[rv],
             &[],
             thunk(fun(
-                thunk(fun(a.clone(), fun(Ty::String, callback_result))),
-                fun(
+                thunk(fun(
                     a.clone(),
-                    CompTy::Return(
-                        reducer_spec(PipeMode::Var(mu), PipeMode::Var(mr)),
-                        Box::new(a),
-                    ),
-                ),
+                    fun(Ty::String, CompTy::Return(route, Box::new(a.clone()))),
+                )),
+                fun(a.clone(), CompTy::Return(route, Box::new(a))),
             )),
         )
     }
 
     // ── Concurrency ──────────────────────────────────────────────────────
 
-    /// `spawn :: ∀α μ₀ μ₁. U(F[μ₀,μ₁] α) → F (Handle α)`
+    /// `spawn :: ∀α ρ. U(F[ρ] α) → F (Handle α)`
     pub fn spawn(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
-        let (m0, m1, m2, body) = fm(u, a.clone());
+        let rv = u.fresh_routevar();
+        let body = CompTy::Return(PayloadRoute::Var(rv), Box::new(a.clone()));
         mk_scheme(
             &[av],
-            &[m0, m1, m2],
+            &[rv],
             &[],
             thunk(fun(thunk(body), pure(Ty::Handle(Box::new(a))))),
         )
     }
 
-    /// `watch :: ∀α μ₀ μ₁. String → U(F[μ₀,μ₁] α) → F (Handle α)`
+    /// `watch :: ∀α ρ. String → U(F[ρ] α) → F (Handle α)`
     pub fn watch(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
-        let (m0, m1, m2, body) = fm(u, a.clone());
+        let rv = u.fresh_routevar();
+        let body = CompTy::Return(PayloadRoute::Var(rv), Box::new(a.clone()));
         mk_scheme(
             &[av],
-            &[m0, m1, m2],
+            &[rv],
             &[],
             thunk(fun(
                 Ty::String,
@@ -935,17 +788,18 @@ pub mod scheme {
         )
     }
 
-    /// `service :: ∀α μ₀ μ₁. String → U(F[μ₀,μ₁] α) → F (Handle α)` — `watch`'s
+    /// `service :: ∀α ρ. String → U(F[ρ] α) → F (Handle α)` — `watch`'s
     /// scheme, the leading `String` being the mandatory birth description.
     ///
     /// The durable lease class is a runtime fact, invisible to the types.
     pub fn service(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
-        let (m0, m1, m2, body) = fm(u, a.clone());
+        let rv = u.fresh_routevar();
+        let body = CompTy::Return(PayloadRoute::Var(rv), Box::new(a.clone()));
         mk_scheme(
             &[av],
-            &[m0, m1, m2],
+            &[rv],
             &[],
             thunk(fun(
                 Ty::String,
@@ -1014,15 +868,13 @@ pub mod scheme {
 
     scheme!(pure_bool: pure Ty::Bool);
 
-    // ── First-class functions with pipeline modes ───────────────────────
+    // ── Host-backed queries ───────────────────────────────────────────────
 
-    scheme!(ask: pipe [Ty::String] -> Ty::String);
+    scheme!(ask: [Ty::String] -> Ty::String);
 
-    scheme!(type_probe<av>: pipe [Ty::Var(av)] -> Ty::Var(av));
+    scheme!(source_op<av>: [Ty::String] -> Ty::Var(av));
 
-    scheme!(source_op<av>: pipe [Ty::String] -> Ty::Var(av));
-
-    scheme!(use_op<av>: pipe [Ty::String] -> Ty::Map(Box::new(Ty::Var(av))));
+    scheme!(use_op<av>: [Ty::String] -> Ty::Map(Box::new(Ty::Var(av))));
 }
 
 /// A builtin's first-class polytype, or `None` when `table` does not know the
@@ -1030,9 +882,8 @@ pub mod scheme {
 ///
 /// Resolution runs against `table`, the checked session's own surface, so a
 /// name means what that session evaluates.  A `Sig` rule's own `value` is an
-/// override for the one case the template vocabulary cannot state
-/// ([`sig::TYPE_PROBE`]); every other `Sig` gets its scheme by
-/// [`derive_sig_scheme`].
+/// override for a signature the template vocabulary cannot state; every
+/// other `Sig` gets its scheme by [`derive_sig_scheme`].
 pub fn builtin_scheme(table: &BuiltinTable, name: &str, u: &mut Unifier) -> Option<Scheme> {
     match table.get(name)?.type_rule {
         BuiltinTypeRule::Scheme(factory) => Some(factory(u)),
@@ -1067,7 +918,7 @@ fn derive_sig_scheme(sig: &BuiltinSig, u: &mut Unifier) -> Option<Scheme> {
         ArgSig::Optional(_) | ArgSig::Any => return None,
     };
     let params: Vec<Ty> = args.iter().map(|t| arg_template_ty(*t, u)).collect();
-    let pipe = sig_pipe_spec(&sig.result, u);
+    let route = sig_route(&sig.result, u);
     let value = match sig.result {
         CompTemplate::Pure(t) | CompTemplate::Return { value: t, .. } => ty_of_template(t, u),
         CompTemplate::Never => u.fresh_ty(),
@@ -1076,7 +927,7 @@ fn derive_sig_scheme(sig: &BuiltinSig, u: &mut Unifier) -> Option<Scheme> {
     let body = params
         .into_iter()
         .rev()
-        .fold(CompTy::Return(pipe, Box::new(value)), |acc, p| fun(p, acc));
+        .fold(CompTy::Return(route, Box::new(value)), |acc, p| fun(p, acc));
     Some(generalize(u, &TyEnv::new(), &thunk(body)))
 }
 
@@ -1093,10 +944,9 @@ fn arg_template_ty(template: ArgTemplate, u: &mut Unifier) -> Ty {
 
 /// A [`TyTemplate`]'s type, standalone from an [`Inferencer`] context.
 ///
-/// [`Inferencer::ty_from_template`] delegates here. Public alongside
-/// [`mode_of_template`], its mode-side twin, so a caller outside the checker
-/// (`help`/`explain`'s fallback) can lower a signature's result to a `Ty`
-/// too.
+/// [`Inferencer::ty_from_template`] delegates here.  Public so a caller
+/// outside the checker (`help`/`explain`'s fallback) can lower a signature's
+/// result to a `Ty` too.
 pub fn ty_of_template(template: TyTemplate, u: &mut Unifier) -> Ty {
     match template {
         TyTemplate::String => Ty::String,
@@ -1191,7 +1041,7 @@ impl Inferencer<'_> {
     }
 
     fn builtin_sig_result(&mut self, sig: BuiltinSig) -> CompTy {
-        let pipe = sig_pipe_spec(&sig.result, &mut self.ctx.unifier);
+        let route = sig_route(&sig.result, &mut self.ctx.unifier);
         let value = match sig.result {
             CompTemplate::Pure(ty) | CompTemplate::Return { value: ty, .. } => {
                 self.ty_from_template(ty)
@@ -1200,10 +1050,10 @@ impl Inferencer<'_> {
             CompTemplate::LinesStep => self.lines_step_ty(),
         };
         debug_assert!(
-            pipe.result != PipeMode::Bytes || matches!(value, Ty::Unit),
-            "WF-2: a Bytes-result sig's value template must be Unit"
+            route != PayloadRoute::Bytes || matches!(value, Ty::Unit),
+            "WF-2: a Bytes-route sig's value template must be Unit"
         );
-        CompTy::Return(pipe, Box::new(value))
+        CompTy::Return(route, Box::new(value))
     }
 
     fn unify_arg_template(&mut self, actual: &Ty, template: ArgTemplate) {
@@ -1302,7 +1152,6 @@ impl Inferencer<'_> {
             self.ctx.diagnose(TypeErrorKind::FailStatusZero);
         }
 
-        let mut type_probe_arg = None;
         match crate::ir::args::positional(args) {
             Some(positional) => match sig.args {
                 ArgSig::Exact(expected) | ArgSig::DataLast(expected) => {
@@ -1324,9 +1173,6 @@ impl Inferencer<'_> {
                     }
                     for (arg, template) in positional.iter().zip(expected.iter()) {
                         let actual = self.infer_val(arg);
-                        if sig.diagnostic == BuiltinDiagnostic::TypeProbe {
-                            type_probe_arg = Some(actual.clone());
-                        }
                         self.unify_arg_template(&actual, *template);
                     }
                     for arg in positional.iter().skip(expected.len()) {
@@ -1351,24 +1197,7 @@ impl Inferencer<'_> {
             None => self.infer_args(args),
         }
 
-        let result = self.builtin_sig_result(sig);
-        if sig.diagnostic == BuiltinDiagnostic::TypeProbe
-            && let Some(arg_ty) = type_probe_arg
-        {
-            // `_type` is `α → F α`: threading the argument's type through to
-            // the result keeps the probe transparent to downstream inference.
-            if let CompTy::Return(_, value_ty) = &result {
-                self.ctx.unify_ty(value_ty, &arg_ty, Reason::TypeProbe);
-            }
-            let resolved = self.ctx.unifier.apply_ty(&arg_ty);
-            let pos = self
-                .ctx
-                .pos
-                .map(|sp| format!("@{}..{}: ", sp.start, sp.end))
-                .unwrap_or_default();
-            eprintln!("_type: {}{}", pos, fmt_ty(&resolved));
-        }
-        result
+        self.builtin_sig_result(sig)
     }
 }
 

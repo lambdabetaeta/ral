@@ -3,10 +3,10 @@
 
 use super::builtins::{FieldSchema, plugin_entry_field_ty};
 use super::env::{InferCtx, TyEnv};
-use super::error::{Reason, TypeErrorKind};
+use super::error::{CompDiff, PinFailure, Reason, TypeErrorKind};
 use super::generalize::{generalize, instantiate};
 use super::scheme::Scheme;
-use super::ty::{ByteMode, CompTy, PipeMode, PipeSpec, Row, Ty};
+use super::ty::{CompTy, GroundRoute, PayloadRoute, Row, Ty};
 use crate::ir::{
     CommandName, CommandWord, Comp, CompKind, IrPattern, ScopeOp, Val, ValListElem, ValMapEntry,
 };
@@ -227,66 +227,45 @@ impl Inferencer<'_> {
         }
     }
 
-    pub(super) fn extract_return(&mut self, cty: &CompTy) -> (Ty, PipeMode, PipeMode, PipeMode) {
-        if let CompTy::Return(spec, ty) = self.ctx.unifier.resolve_comp_ty(cty) {
-            (*ty, spec.input, spec.output, spec.result)
+    /// Force `cty` to `Return` shape and read off its payload type and route.
+    /// A still-open comp var is unified into that shape rather than rejected
+    /// — it may be a free var at an ungeneralized definition site — while a
+    /// `Fun` fails under [`Reason::ReturnShape`].
+    pub(super) fn extract_return(&mut self, cty: &CompTy) -> (Ty, PayloadRoute) {
+        self.force_return_shape(cty, Reason::ReturnShape)
+    }
+
+    /// [`Self::extract_return`], reported under a caller-chosen [`Reason`] —
+    /// the pipeline stage forcer wants its own hint, not the generic one.
+    fn force_return_shape(&mut self, cty: &CompTy, why: Reason) -> (Ty, PayloadRoute) {
+        if let CompTy::Return(route, ty) = self.ctx.unifier.resolve_comp_ty(cty) {
+            (*ty, route)
         } else {
             let ty = self.ctx.unifier.fresh_ty();
-            let input = self.ctx.unifier.fresh_mode();
-            let output = self.ctx.unifier.fresh_mode();
-            // `cty` may still be a free comp var at an ungeneralized
-            // definition site, so `result` mints fresh rather than pinning.
-            let result = self.ctx.unifier.fresh_mode();
-            let expected = CompTy::Return(
-                PipeSpec {
-                    input,
-                    output,
-                    result,
-                },
-                Box::new(ty.clone()),
-            );
-            self.ctx.unify_comp_ty(cty, &expected, Reason::ReturnShape);
-            (ty, input, output, result)
+            let route = self.ctx.unifier.fresh_route();
+            let expected = CompTy::Return(route, Box::new(ty.clone()));
+            self.ctx.unify_comp_ty(cty, &expected, why);
+            (ty, route)
         }
     }
 
-    /// One end of a computation's channel spec, peering past `Fun` arrows; an
-    /// unresolved comp var yields a fresh mode.
-    fn comp_end_mode(&mut self, cty: &CompTy, pick: fn(PipeSpec) -> PipeMode) -> PipeMode {
+    /// A computation's own payload route, peering past `Fun` arrows; an
+    /// unresolved comp var yields a fresh route.  Unlike [`Self::extract_return`],
+    /// this never forces or reports — it reads whatever shape is already
+    /// there, which is the right thing only where the shape was vetted
+    /// elsewhere (a looked-up head's own scheme, already installed).
+    fn comp_route(&mut self, cty: &CompTy) -> PayloadRoute {
         match self.ctx.unifier.resolve_comp_ty(cty) {
-            CompTy::Return(spec, _) => pick(spec),
-            CompTy::Fun(_, body) => self.comp_end_mode(&body, pick),
-            CompTy::Var(_) => self.ctx.unifier.fresh_mode(),
+            CompTy::Return(route, _) => route,
+            CompTy::Fun(_, body) => self.comp_route(&body),
+            CompTy::Var(_) => self.ctx.unifier.fresh_route(),
         }
     }
 
-    /// A stage's own channel signature, for the annotation pass.  The three
-    /// ends are facts about the stage itself: `result` is its payload conduit,
-    /// while `output` escapes to the ambient stream.
-    fn stage_own_spec(&mut self, cty: &CompTy) -> PipeSpec {
-        PipeSpec {
-            input: self.comp_input_mode(cty),
-            output: self.comp_output_mode(cty),
-            result: self.comp_result_mode(cty),
-        }
-    }
-
-    fn comp_input_mode(&mut self, cty: &CompTy) -> PipeMode {
-        self.comp_end_mode(cty, |s| s.input)
-    }
-
-    fn comp_output_mode(&mut self, cty: &CompTy) -> PipeMode {
-        self.comp_end_mode(cty, |s| s.output)
-    }
-
-    fn comp_result_mode(&mut self, cty: &CompTy) -> PipeMode {
-        self.comp_end_mode(cty, |s| s.result)
-    }
-
-    /// Merge a conditional's or chain's arms over their result modes: input
-    /// alternates over the arms — only one runs — and output joins bytes-
-    /// dominant. All-or-nothing: if any arm isn't `Return`, every arm instead
-    /// unifies strictly via `unify_comp_ty`.
+    /// Merge a conditional's or chain's arms over their payload routes:
+    /// exactly one runs, so the arms join rather than unify.  All-or-nothing:
+    /// if any arm isn't `Return`, every arm instead unifies strictly via
+    /// `unify_comp_ty`.
     fn merge_branches(&mut self, arms: Vec<CompTy>, why: &Reason) -> CompTy {
         if arms.is_empty() {
             return CompTy::pure(self.ctx.unifier.fresh_ty());
@@ -321,41 +300,16 @@ impl Inferencer<'_> {
             return acc;
         }
 
-        let mut inputs = Vec::with_capacity(arms.len());
-        let mut outputs = Vec::with_capacity(arms.len());
         let mut per_arm = Vec::with_capacity(arms.len());
         for cty in &arms {
-            let CompTy::Return(spec, ty) = self.ctx.unifier.resolve_comp_ty(cty) else {
+            let CompTy::Return(route, ty) = self.ctx.unifier.resolve_comp_ty(cty) else {
                 unreachable!("checked all_return above")
             };
-            inputs.push(spec.input);
-            outputs.push(spec.output);
-            per_arm.push((spec, *ty));
+            per_arm.push((route, *ty));
         }
-        let input = self.ctx.alt_modes(inputs, why.clone());
-        let output = self.ctx.join_modes(outputs, why.clone());
-        let (result, observed_acc) = self.ctx.join_arm_results(per_arm, why.clone());
+        let (route, observed_acc) = self.ctx.join_arm_results(per_arm, why.clone());
 
-        CompTy::Return(
-            PipeSpec {
-                input,
-                output,
-                result,
-            },
-            Box::new(observed_acc),
-        )
-    }
-
-    /// Eventual return type, peering past `Fun` arrows as
-    /// [`Self::comp_end_mode`] does for modes.  An unresolved `Var` yields a
-    /// fresh type, so a caller needing the constraint propagated must unify it
-    /// back itself.
-    fn comp_return_ty(&mut self, cty: &CompTy) -> Ty {
-        match self.ctx.unifier.resolve_comp_ty(cty) {
-            CompTy::Return(_, ty) => *ty,
-            CompTy::Fun(_, body) => self.comp_return_ty(&body),
-            CompTy::Var(_) => self.ctx.unifier.fresh_ty(),
-        }
+        CompTy::Return(route, Box::new(observed_acc))
     }
 
     fn autoderef_thunk_return(&mut self, mut cty: CompTy) -> CompTy {
@@ -492,50 +446,56 @@ impl Inferencer<'_> {
         self.apply_args(head_cty, args)
     }
 
-    /// Infer the arm for head `name`, pin its `PipeSpec` to the head's, and
-    /// generalise.  Reinterpreting a known head preserves that head's modes and
-    /// a clash becomes a positioned [`TypeErrorKind::ModeMismatch`]; an unknown
-    /// head takes whatever modes the arm defines.  The arm's value type stays
-    /// free.
+    /// Infer the arm for head `name`, pin its payload route to the head's,
+    /// and generalise.  Reinterpreting a known head preserves that head's
+    /// route and a clash becomes a positioned diagnostic under
+    /// [`Reason::HandlerRoutePin`]; an unknown head takes whatever route the
+    /// arm defines.
     pub(super) fn handler_comp_scheme(&mut self, name: &str, comp: &Comp) -> Scheme {
         let cty = self.infer_handler_comp(comp);
-        if let Err(mismatch) = self.pin_arm_to_head(name, &cty) {
-            self.ctx.report(
-                TypeErrorKind::ModeMismatch {
-                    expected: mismatch.left,
-                    actual: mismatch.right,
+        if let Err(failure) = self.pin_arm_to_head(name, &cty) {
+            let kind = match failure {
+                PinFailure::Route(m) => TypeErrorKind::RouteMismatch {
+                    expected: m.left,
+                    actual: m.right,
                 },
-                Reason::HandlerModePin,
-            );
+                PinFailure::ByteHeadReturnsValue(actual) => TypeErrorKind::CompTyMismatch {
+                    expected: CompTy::bytes(),
+                    actual: CompTy::Return(PayloadRoute::Bytes, Box::new(actual.clone())),
+                    diffs: vec![CompDiff::ReturnType {
+                        expected: Ty::Unit,
+                        actual,
+                    }],
+                },
+            };
+            self.ctx.report(kind, Reason::HandlerRoutePin);
         }
         let thunk_ty = Ty::Thunk(Box::new(cty));
         self.ctx.solve_at_boundary(self.env);
         super::generalize::generalize(&mut self.ctx.unifier, self.env, &thunk_ty)
     }
 
-    /// Head `name`'s known `PipeSpec`: from its handler scheme when one is
+    /// Head `name`'s known payload route: from its handler scheme when one is
     /// in scope, else from a base frame's `Sig`.  A plain native pins to
     /// nothing — only `^name` reaches an arm under it — and an unknown head
-    /// or non-`Return` scheme gets a fresh `F[μ, ν]`, leaving the
-    /// byte-channel discipline to the pipeline edges.
-    fn head_pipe_spec(&mut self, name: &str) -> PipeSpec {
+    /// or non-`Return` scheme gets a fresh route, leaving the grounding
+    /// obligation to whoever settles it.
+    fn head_pipe_route(&mut self, name: &str) -> PayloadRoute {
         if let Some(handler) = self.env.lookup_handler(name).cloned() {
             let cty = self.instantiate_comp(&handler.scheme);
-            if let CompTy::Return(spec, _) = self.alias_arm_body(&cty) {
-                return spec;
-            }
+            return self.comp_route(&cty);
         }
         if let Some(entry) = self.env.builtins.get(name)
             && entry.fixed_arity().is_none()
             && let super::builtins::BuiltinTypeRule::Sig(sig) = entry.type_rule
         {
-            return super::builtins::sig_pipe_spec(&sig.result, &mut self.ctx.unifier);
+            return super::builtins::sig_route(&sig.result, &mut self.ctx.unifier);
         }
-        self.ctx.unifier.fresh_spec()
+        self.ctx.unifier.fresh_route()
     }
 
     /// Peel an alias arm's leading `Fun` arrows: the calling convention forces
-    /// the arm on the argv list, so the head's pipeline modes live on the
+    /// the arm on the argv list, so the head's payload route lives on the
     /// body's `Return`, past the parameter arrow.
     fn alias_arm_body(&mut self, cty: &CompTy) -> CompTy {
         match self.ctx.unifier.resolve_comp_ty(cty) {
@@ -544,27 +504,31 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Unify the arm's *connectable* ends against head `name`'s, leaving its
-    /// value type free.  Those are `input` and `result`: what a pipeline joins
-    /// to a neighbour is the head's upstream and its payload conduit, and an
-    /// arm that moved either would not be reinterpreting the same head.
-    /// `output` is deliberately not pinned — chatter is nobody's contract, so
-    /// an arm may log where its head does not (`echo: { |args| echo
-    /// intercepted; echo ...$args }`) without changing what it is.
+    /// Unify the arm's payload route against head `name`'s.  A pin that
+    /// lands on the byte side lands on [`CompTy::bytes`] — WF-2 admits no
+    /// other byte-routed computation — so the arm's value unifies with
+    /// `Unit` in the same breath, never left to a sibling grounding.
     ///
-    /// The only failure is a ground mode clash, returned rather than reported
-    /// so `alias_arm_scheme` in `typecheck.rs` can refuse the install while
+    /// The only failures are a route clash and a byte-routed arm that still
+    /// returns something, both returned rather than reported so
+    /// `alias_arm_scheme` in `typecheck.rs` can refuse the install while
     /// `handler_comp_scheme` merely positions it.
-    pub(super) fn pin_arm_to_head(
-        &mut self,
-        name: &str,
-        arm: &CompTy,
-    ) -> Result<(), crate::mode::ModeMismatch> {
+    pub(super) fn pin_arm_to_head(&mut self, name: &str, arm: &CompTy) -> Result<(), PinFailure> {
         let body = self.alias_arm_body(arm);
-        let (_, arm_input, _, arm_result) = self.extract_return(&body);
-        let head = self.head_pipe_spec(name);
-        self.ctx.unifier.unify_mode(&arm_input, &head.input)?;
-        self.ctx.unifier.unify_mode(&arm_result, &head.result)
+        let (value, route) = self.extract_return(&body);
+        let head = self.head_pipe_route(name);
+        self.ctx
+            .unifier
+            .unify_route(&route, &head)
+            .map_err(PinFailure::Route)?;
+        if matches!(self.ctx.unifier.resolve_route(&route), PayloadRoute::Bytes)
+            && self.ctx.unifier.unify_ty(&value, &Ty::Unit).is_err()
+        {
+            return Err(PinFailure::ByteHeadReturnsValue(
+                self.ctx.unifier.apply_ty(&value),
+            ));
+        }
+        Ok(())
     }
 
     /// Instantiate `scheme` and strip the outer `Thunk` schemes carry; a
@@ -704,21 +668,11 @@ impl Inferencer<'_> {
         self.external_exec_comp_ty(args)
     }
 
-    /// An external's bytes are its payload, not chatter: they belong to
-    /// whoever consumes the command, and nothing escapes past them.  Only a
-    /// statement boundary turns a payload loose (see
-    /// [`Self::infer_seq_with_alias_bindings`]).
+    /// An external's payload is always captured from its stdout: the one
+    /// byte-routed computation, WF-2 by construction.
     fn external_exec_comp_ty(&mut self, args: &crate::ir::Args) -> CompTy {
         self.infer_args(args);
-        let input = self.ctx.unifier.fresh_mode();
-        CompTy::Return(
-            PipeSpec {
-                input,
-                output: PipeMode::None,
-                result: PipeMode::Bytes,
-            },
-            Box::new(Ty::Unit),
-        )
+        CompTy::bytes()
     }
 
     pub(super) fn infer_args(&mut self, args: &crate::ir::Args) {
@@ -741,9 +695,7 @@ impl Inferencer<'_> {
         empty: Ty,
     ) -> CompTy {
         let mut last = CompTy::pure(empty);
-        let mut inputs = Vec::with_capacity(parts.len());
-        let mut outputs = Vec::with_capacity(parts.len());
-        for (i, part) in parts.iter().enumerate() {
+        for part in parts {
             let mut alias_already_typed = false;
             match alias_statement_shape(part) {
                 Ok(Some((name, thunk))) => {
@@ -777,75 +729,18 @@ impl Inferencer<'_> {
             } else {
                 self.infer_comp(part)
             };
-            // The tail's ends are `lift_channels`' to weigh — a statement
-            // runs for its effect, the tail gives the sequence its shape.
-            //
-            // Discarding a computation is what turns a payload loose: nobody
-            // is left to consume it, so a statement's `result` escapes
-            // alongside its `output`.  This is the sole producer of chatter,
-            // and the statement boundary is where the rule belongs — the same
-            // fact `eval_seq` acts on, in the same place, for the same reason.
-            if i + 1 < parts.len() {
-                inputs.push(self.comp_input_mode(&last));
-                outputs.push(self.comp_output_mode(&last));
-                outputs.push(self.comp_result_mode(&last));
-            }
         }
-        self.lift_channels(last, inputs, outputs)
-    }
-
-    /// A sequence's two channels are everything its statements read and
-    /// write, so each end joins over the whole run, not just the last
-    /// statement — a body that `echo`es per line is byte-output, and one
-    /// that reads stdin before its final statement is byte-input.  A
-    /// `Fun`-tailed sequence yields a function, not a stage, and keeps its
-    /// shape untouched; a `Return` tail joins its own ends with the
-    /// statements' into the rebuilt `Return`.
-    ///
-    /// A tail whose shape is still unknown may yet become either, so it is
-    /// forced into stage shape only when some statement's end has settled
-    /// `Bytes` — that demand needs a spec to live on — and is otherwise left
-    /// exactly as it is, silent statements dropping out.  This is a shape
-    /// verdict read off settled modes, not a join: a statement whose demand grounds only
-    /// later keeps the tail's freedom, the price of not foreclosing a
-    /// function tail.
-    fn lift_channels(
-        &mut self,
-        last: CompTy,
-        mut inputs: Vec<PipeMode>,
-        mut outputs: Vec<PipeMode>,
-    ) -> CompTy {
-        match self.ctx.unifier.resolve_comp_ty(&last) {
-            CompTy::Fun(..) => return last,
-            CompTy::Var(_) => {
-                let settled_bytes = inputs
-                    .iter()
-                    .chain(outputs.iter())
-                    .any(|end| matches!(self.ctx.unifier.resolve_mode(end), PipeMode::Bytes));
-                if !settled_bytes {
-                    return last;
-                }
-            }
-            CompTy::Return(..) => {}
-        }
-        let (ret, input, output, result) = self.extract_return(&last);
-        inputs.push(input);
-        outputs.push(output);
-        CompTy::Return(
-            PipeSpec {
-                input: self.ctx.join_modes(inputs, Reason::SeqChannels),
-                output: self.ctx.join_modes(outputs, Reason::SeqChannels),
-                result,
-            },
-            Box::new(ret),
-        )
+        // A sequence *is* its tail: a discarded statement ran for its effect
+        // and left nothing behind for a later boundary to observe.  Forcing
+        // the tail to `Return` here would pin a still-unknown tail out of
+        // ever becoming a function.
+        last
     }
 
     /// `a ? b ? c` yields whichever arm succeeds, so every arm must agree on
-    /// one result type — exactly the discipline [`Self::merge_branches`]
-    /// already applies to `if`'s two arms, here folded over the whole chain.
-    /// The output mode is a bytes-dominant join — `tmux a ? tmux b` emits
-    /// bytes either way.
+    /// one payload route and value — exactly the discipline
+    /// [`Self::merge_branches`] already applies to `if`'s two arms, here
+    /// folded over the whole chain.
     fn infer_chain(&mut self, parts: &[Arc<Comp>]) -> CompTy {
         let arms: Vec<CompTy> = parts.iter().map(|part| self.infer_comp(part)).collect();
         self.merge_branches(arms, &Reason::ChainBranches)
@@ -1021,109 +916,36 @@ impl Inferencer<'_> {
         }
     }
 
-    fn infer_pipeline(&mut self, stages: &[Arc<Comp>]) -> CompTy {
+    /// A `|` is a positional operating-system byte wire: the runtime
+    /// connects stdout to stdin and discards every non-final return, so no
+    /// adjacency obligation links a stage to its neighbour.  The one static
+    /// premise a stage still carries is its own: it must be a
+    /// computation ready to run, not a `Fun` still waiting for its argument,
+    /// forced under its own [`Reason::PipelineStageShape`] rather than
+    /// [`Self::extract_return`]'s generic one, to earn the shape's own hint
+    /// text.  The pipeline's own route and value type are then one
+    /// projection of the *final* stage's forced shape — never `comp_route`
+    /// peering past an arrow into a lambda body.
+    fn infer_pipeline(&mut self, comp: &Comp, stages: &[Arc<Comp>]) -> CompTy {
         // The parser unwraps a single-stage pipeline to the bare stage and the
         // elaborator preserves that shape, so a `Pipeline` node always has two.
         debug_assert!(stages.len() >= 2, "Pipeline carries ≥2 stages");
 
-        let stage_tys: Vec<CompTy> = stages.iter().map(|stage| self.infer_comp(stage)).collect();
-        for i in 0..stage_tys.len() - 1 {
-            // A pipeline edge is a byte conduit, never an implicit
-            // application.  Pin both ends independently: the producer's
-            // payload and the consumer's input are facts about different
-            // channels, even when the surrounding stages chatter bytes too.
-            //
-            // Each end is therefore underlined where it stands — the caret
-            // names the stage whose channel is wrong, not the edge as a
-            // whole.  Falling back to the other stage's span keeps it off
-            // whatever `ctx.pos` the last-inferred stage left behind.
-            let producer_span = stages[i].span.or(stages[i + 1].span);
-            let consumer_span = stages[i + 1].span.or(stages[i].span);
-            let producer_result = self.comp_result_mode(&stage_tys[i]);
-            let consumer_input = self.comp_input_mode(&stage_tys[i + 1]);
-            let producer_ok = self.with_span(producer_span, |this| {
-                this.pin_pipeline_mode(producer_result, Reason::PipelineProducer, true)
+        let mut final_shape = None;
+        for stage in stages {
+            let cty = self.infer_comp(stage);
+            let (value, route) = self.with_span(stage.span, |this| {
+                this.force_return_shape(&cty, Reason::PipelineStageShape)
             });
-            // Constrain the consumer either way, but when both ends are
-            // values the producer's diagnostic is the useful one: one edge
-            // should not print two equally opaque mode clashes.
-            self.with_span(consumer_span, |this| {
-                this.pin_pipeline_mode(consumer_input, Reason::PipelineConsumer, producer_ok);
-            });
-        }
-
-        // Input from the first stage, payload and return type from the last.
-        // A `Var` tail is unified back against the synthesized `Return`, or the
-        // pipeline's own consumers would see an unrelated fresh variable.
-        let input = self.comp_input_mode(&stage_tys[0]);
-        let last = stage_tys
-            .last()
-            .expect("≥2 stages by invariant above")
-            .clone();
-        let last_output = self.comp_output_mode(&last);
-        let last_result = self.comp_result_mode(&last);
-        let ret_ty = self.comp_return_ty(&last);
-        if matches!(self.ctx.unifier.resolve_comp_ty(&last), CompTy::Var(_)) {
-            let bound = CompTy::Return(
-                PipeSpec {
-                    input: self.comp_input_mode(&last),
-                    output: last_output,
-                    result: last_result,
-                },
-                Box::new(ret_ty.clone()),
-            );
-            self.ctx.unify_comp_ty(&last, &bound, Reason::ReturnShape);
-        }
-
-        // For the annotation pass, keyed by node address; still-unresolved
-        // modes and vars settle once the whole walk's constraints are in.
-        let mut chatter = Vec::with_capacity(stages.len());
-        for (stage, ty) in stages.iter().zip(&stage_tys) {
-            let spec = self.stage_own_spec(ty);
-            let value_ty = self.comp_return_ty(ty);
             let key = std::ptr::from_ref::<Comp>(stage.as_ref()) as usize;
-            self.ctx.stage_specs.insert(key, spec);
-            self.ctx.stage_types.insert(key, value_ty);
-            chatter.push(spec.output);
+            self.ctx.stage_types.insert(key, value.clone());
+            final_shape = Some((value, route));
         }
-
-        // No stage's chatter rides the wire — every stage writes it to the
-        // pipeline's own ambient stream — so the pipeline escapes what all of
-        // its stages escape, not just the last one's.
-        let output = self.ctx.join_modes(chatter, Reason::PipelineChatter);
-
-        // The final stage is the pipeline's final computation.  Its payload
-        // conduit and returned value stay paired; only interior edges are
-        // forced to Bytes.
-        CompTy::Return(
-            PipeSpec {
-                input,
-                output,
-                result: last_result,
-            },
-            Box::new(ret_ty),
-        )
-    }
-
-    /// Pin one end of an interior pipeline edge to the byte conduit.  The
-    /// result is whether the unification succeeded; callers use it to prefer
-    /// one teaching diagnostic when both sides of an edge are value-shaped.
-    fn pin_pipeline_mode(&mut self, mode: PipeMode, reason: Reason, report: bool) -> bool {
-        match self.ctx.unifier.unify_mode(&mode, &PipeMode::Bytes) {
-            Ok(()) => true,
-            Err(mismatch) => {
-                if report {
-                    self.ctx.report(
-                        TypeErrorKind::ModeMismatch {
-                            expected: mismatch.left,
-                            actual: mismatch.right,
-                        },
-                        reason,
-                    );
-                }
-                false
-            }
-        }
+        let (value, route) = final_shape.expect("≥2 stages by invariant above");
+        self.ctx
+            .pipeline_routes
+            .insert(std::ptr::from_ref::<Comp>(comp) as usize, route);
+        CompTy::Return(route, Box::new(value))
     }
 
     fn infer_index(&mut self, target: &Val, keys: &[crate::source::Spanned<Val>]) -> CompTy {
@@ -1322,8 +1144,8 @@ impl Inferencer<'_> {
 
         // Each handler at `l` is a thunk of `payload_l → arm_l`, every arm
         // with its own computation type: exactly one arm runs, so the arms
-        // join like `if`'s branches rather than unifying.  Each arm's result
-        // mode is recorded for `annotate` — a var now, ground once the join
+        // join like `if`'s branches rather than unifying.  Each arm's route
+        // is recorded for `annotate` — a var now, ground once the join
         // settles it.  The closed scrutinee row is built from the payloads as
         // we go.
         let mut closed_scrut = Row::Empty;
@@ -1335,10 +1157,10 @@ impl Inferencer<'_> {
                 this.check_case_arm(label, handler_ty, &arm_cty, &scrut_payloads)
             });
             if let Some(arm) = arm {
-                let (_, _, _, result) = self.extract_return(&arm_cty);
+                let (_, route) = self.extract_return(&arm_cty);
                 self.ctx
                     .val_results
-                    .insert(std::ptr::from_ref::<Val>(arm.val) as usize, result);
+                    .insert(std::ptr::from_ref::<Val>(arm.val) as usize, route);
             }
             arms.push(arm_cty);
             closed_scrut = Row::Extend(
@@ -1471,32 +1293,27 @@ impl Inferencer<'_> {
                 ..
             } => {
                 let inner_ty = self.infer_comp(inner);
-                // A `Fun` RHS is a lambda: evaluating it builds a closure and
-                // emits nothing, so its output is `∅`.
-                // Otherwise the binder consumes the RHS's *payload* — a
-                // byte payload through the `Capture` coercion, as the bound
-                // `String`; a value payload directly — and consumes only
-                // that.  The RHS's chatter is nobody's payload by definition,
-                // so it escapes past the binder and is the binder's output as
-                // much as `rest`'s.  Its bytes *in* are a demand on the one
-                // stdin the binder shares with `rest`, so they lift out too.
-                let (bound_ty, rhs_input, rhs_output) =
-                    if let CompTy::Fun(..) = self.ctx.unifier.resolve_comp_ty(&inner_ty) {
-                        (
-                            Ty::Thunk(Box::new(inner_ty)),
-                            PipeMode::None,
-                            PipeMode::None,
-                        )
+                // A `Fun` RHS is a lambda: evaluating it builds a closure,
+                // nothing to capture.  Otherwise the binder consumes the
+                // RHS's *payload* — a byte payload through the `Capture`
+                // coercion, as the bound `String`; a value payload directly.
+                // An open route defaults to `Value`: nothing pinned it to
+                // `Bytes`, so there is nothing here to capture.
+                let bound_ty = if let CompTy::Fun(..) = self.ctx.unifier.resolve_comp_ty(&inner_ty)
+                {
+                    Ty::Thunk(Box::new(inner_ty))
+                } else {
+                    let (ty, route) = self.extract_return(&inner_ty);
+                    if matches!(route, PayloadRoute::Var(_)) {
+                        self.ctx
+                            .unify_route(&route, &PayloadRoute::Value, Reason::RoutePin);
+                    }
+                    if self.ctx.ground(route) == GroundRoute::Bytes {
+                        Ty::String
                     } else {
-                        let (ty, input, output, result) = self.extract_return(&inner_ty);
-                        if matches!(result, PipeMode::Var(_)) {
-                            self.ctx
-                                .unify_mode(&result, &PipeMode::None, Reason::ResultPin);
-                        }
-                        let captured = self.ctx.ground(result) == ByteMode::Bytes;
-                        let observed = if captured { Ty::String } else { ty };
-                        (observed, input, output)
-                    };
+                        ty
+                    }
+                };
 
                 if let IrPattern::Name(_) = pattern {
                     self.ctx
@@ -1506,8 +1323,7 @@ impl Inferencer<'_> {
                 self.ctx.solve_at_boundary(self.env);
                 let concrete = self.ctx.unifier.apply_ty(&bound_ty);
                 self.bind_pattern(pattern, &concrete, BindMode::Let);
-                let rest_ty = self.infer_comp(rest);
-                self.lift_channels(rest_ty, vec![rhs_input], vec![rhs_output])
+                self.infer_comp(rest)
             }
             CompKind::App { head, args } => {
                 let head_ty = self.infer_comp(head);
@@ -1544,7 +1360,7 @@ impl Inferencer<'_> {
                     self.external_exec_comp_ty(&e.args)
                 }
             },
-            CompKind::Pipeline { stages, .. } => self.infer_pipeline(stages),
+            CompKind::Pipeline { stages, .. } => self.infer_pipeline(comp, stages),
             CompKind::Chain(parts) => self.infer_chain(parts),
             CompKind::Binary(op, lhs, rhs) => CompTy::pure(self.infer_binary(*op, lhs, rhs)),
             // The operand's own type, unconstrained — `Arith` below leaves
@@ -1585,23 +1401,23 @@ impl Inferencer<'_> {
             CompKind::Scope(op) => match op {
                 ScopeOp::Within { opts, body } => {
                     let sig = self.infer_within(opts, body);
-                    self.seal(sig)
+                    CompTy::Return(sig.route, Box::new(sig.value))
                 }
                 ScopeOp::Grant { caps, body } => {
                     let sig = self.infer_grant(caps, body);
-                    self.seal(sig)
+                    CompTy::Return(sig.route, Box::new(sig.value))
                 }
                 ScopeOp::Try { body, handler } => {
                     let sig = self.infer_try(body, handler);
-                    self.seal(sig)
+                    CompTy::Return(sig.route, Box::new(sig.value))
                 }
                 ScopeOp::Guard { body, cleanup } => {
                     let sig = self.infer_guard(body, cleanup);
-                    self.seal(sig)
+                    CompTy::Return(sig.route, Box::new(sig.value))
                 }
                 ScopeOp::Audit { body } => {
                     let sig = self.infer_audit(body);
-                    self.seal(sig)
+                    CompTy::Return(sig.route, Box::new(sig.value))
                 }
                 // A redirect installs fds for the body's duration without
                 // touching its type.  Its body is an `Arc<Comp>`, not a
@@ -1612,28 +1428,20 @@ impl Inferencer<'_> {
             // Inserted by `annotate`'s write-back pass, so it is absent from a
             // freshly elaborated tree but present in every tree re-inferred
             // from a live value — a handler arm vetted at install, a bound
-            // lambda's body.  It is a coercion on one conduit, not a bracket
-            // over a subterm: the body's *payload* becomes this node's
-            // `String`, while its chatter passes straight through, as does its
-            // stdin demand.  So a capture over an opaque force says what it
-            // has always done — `!{ !$fa }` lets `fa`'s statements be seen.
+            // lambda's body.  Its own route is fixed `Value`: whatever the
+            // body's route is, `Capture` is what turns it into a plain
+            // returned `String`, so a capture over an opaque force says what
+            // it has always done — `!{ !$fa }` lets `fa`'s statements be seen.
             CompKind::Capture(body) => {
                 let body_ty = self.infer_comp(body);
-                let (_, input, output, _) = self.extract_return(&body_ty);
-                CompTy::Return(
-                    PipeSpec {
-                        input,
-                        output,
-                        result: PipeMode::None,
-                    },
-                    Box::new(Ty::String),
-                )
+                let _ = self.extract_return(&body_ty);
+                CompTy::pure(Ty::String)
             }
         };
-        if let CompTy::Return(spec, _) = self.ctx.unifier.resolve_comp_ty(&cty) {
+        if let CompTy::Return(route, _) = self.ctx.unifier.resolve_comp_ty(&cty) {
             self.ctx
                 .results
-                .insert(std::ptr::from_ref::<Comp>(comp) as usize, spec.result);
+                .insert(std::ptr::from_ref::<Comp>(comp) as usize, route);
         }
         cty
     }

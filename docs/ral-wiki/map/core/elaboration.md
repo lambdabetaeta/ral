@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: 95449d4
+generated_at_date: 2026-08-10
 covers_paths: [core/src/elaborator.rs, core/src/syntax/group.rs]
 ---
 
@@ -62,11 +62,11 @@ whose typing collapses to the external case (`exec_comp_ty` →
 `external_exec_comp_ty`), since a prelude function reaches the checker as a
 bound `App` head, never a bare `Exec`.
 
-A pipeline elaborates to a [[map/core/ir|`Pipeline`]] node whose stage-parallel
-arrays the elaborator can only fill with placeholders: a `Wire::EMPTY` per stage
-for the byte channel, and a `Ty::Unit` per stage for the value type. Both are
-overwritten by the [[map/core/typecheck|annotation pass]], which writes each
-stage's resolved mode-wire and value type onto the node's `wires` and
-`stage_types` fields once it has typed the pipeline. The evaluator never reads
-either array on an un-annotated comp, so the placeholders are harmless; the
-retained per-stage value types feed the structural REPL's typed spine.
+A pipeline elaborates to a [[map/core/ir|`Pipeline`]] node carrying two
+annotations the elaborator can only fill with placeholders: a `Ty::Unit` per
+stage for the value type, and a `GroundRoute::Value` for the node's
+`final_route`. Both are overwritten by the [[map/core/typecheck|annotation
+pass]] once it has typed the pipeline. The evaluator never reads `stage_types`,
+which feeds the structural REPL's typed spine; it reads `final_route` only to
+decide whether the last stage's helper reports a value, and the checker runs
+before every evaluation, so the placeholder is never observed.

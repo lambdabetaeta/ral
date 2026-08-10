@@ -1,5 +1,6 @@
 ---
-status: active
+status: superseded
+superseded_by: decisions/260809_pipes-are-positional-byte-wires
 supersedes: decisions/260609_pure-pipe-equation, decisions/260610_value-edge-locality
 ---
 

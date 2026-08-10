@@ -1,4 +1,4 @@
-# The type system: Hindley–Milner with byte modes and rows
+# The type system: Hindley–Milner with payload routes and rows
 
 ral is typed by Hindley–Milner inference with let-polymorphism, run over the
 call-by-push-value [[map/core/ir|IR]] after [[map/core/elaboration|elaboration]].
@@ -15,123 +15,165 @@ open-row-polymorphic; that fragment is its own page,
 [[design/row-types|row-types]]. Records and maps share one runtime carrier but
 answer different static questions — [[design/records-and-maps|records-and-maps]].
 
-**Computation types carry a three-mode spec.** A computation has the type
-`⟨i, o, r⟩ A`, where `A` is a value type: the computation returns a value of
-type `A` under the spec. The spec is `PipeSpec` in `core/src/mode.rs`:
+The computation types are three:
 
-- `i` is the input mode: `Bytes` when the computation reads the byte channel, `∅` when it does not;
-- `o` is the output mode: `Bytes` when the computation writes the byte channel, `∅` when it does not;
-- `r` is the result mode: the conduit that carries the computation's payload.
+```text
+C ::= F[ρ] A  |  A → C  |  γ
+```
 
-Each mode is `∅`, `Bytes`, or a mode variable. The three modes share one
-unification, generalisation, and display machinery. Adjacent
-[[design/pipelines|pipeline]] stages connect through the producer's `result`
-and the consumer's `input`; every interior connection is `Bytes` on both sides.
-The final stage keeps its own result mode, so a pipeline may return a value at
-its boundary. A parameterised block has the type `{A → B}`.
+A parameterised block has the value type `{A → C}`.
 
-**The result mode locates the payload.** `result = Bytes` means: the
-computation's payload is its byte channel. `result = ∅` means: the payload is
-its return value. `output` is independent chatter, so it does not constrain
-`result`; the one remaining well-formedness condition is:
+## The payload route
 
-- **WF-2** — `result = Bytes` implies that the return type is `Unit`.
+**A computation does two independent things: it writes bytes to stdout, and it
+returns a value.** Neither needs the type system. Stdout is an operating-system
+stream whose sink is chosen by position — a redirect, a capture bracket, a
+[[design/pipelines|pipeline]] stage's place in the line. The returned value is
+simply the evaluator's result. What does need saying is which of the two a
+*value boundary* observes when it demands the computation as a value. That is
+the **payload route** `ρ`, and it is the whole of what a computation type
+annotates:
 
-WF-2 is the mode solver's to keep
-(`core/src/typecheck/mode_solver.rs`), checked per arm wherever a join lands on
-the byte side. WF-2 is enforced there rather than merely asserted: the byte
-side ties every arm's value to `Unit`, arms whose conduit was still open
-included. `core/src/typecheck/builtins.rs` keeps its own assertions, which
-guard hand-written signature tables at construction rather than any join. A
-computation therefore has one payload: its return value or its byte channel,
-never both. For example:
+```text
+ρ ::= Value | Bytes | ρ-variable
+```
 
-- `echo hi : ⟨∅, Bytes, Bytes⟩ Unit` — the bytes are the payload;
-- `return 5 : ⟨∅, ∅, ∅⟩ Int` — the return value is the payload;
-- `audit { echo hi } : ⟨Bytes, Bytes, ∅⟩ Record` — the computation writes bytes, and the record is the payload;
-- `from-json : ⟨Bytes, ∅, ∅⟩ A` — a decoder reads bytes and returns a value.
+- `Value` — the boundary takes the evaluator's return.
+- `Bytes` — the boundary captures the computation's stdout, decodes it as
+  strict UTF-8, and strips one trailing line terminator.
 
-The third example shows that a computation can write bytes and keep a value
-payload. `audit` needs no special case in the checker or in the evaluator. An
-external command has the type `⟨i, Bytes, Bytes⟩ Unit` with a fresh input mode
-`i` (`external_exec_comp_ty` in `core/src/typecheck/infer.rs`), so `echo` and
+**The route is not an output predicate.** A `Value`-routed computation may write
+any number of bytes; a `Bytes`-routed one may write none. It therefore cannot be
+read as a promise about traffic, and nothing in the language asks it to be:
+adjacency in a pipeline does not consult it, and neither does any runtime wiring
+decision.
+
+Five places read a route: a value boundary (`let`, `to`, a captured argument),
+the join over a branch's arms, the final report of a process-staged pipeline, a
+higher-order signature forwarding a thunk's route back out, and the pin that
+installs a handler or alias arm under a head. A pipeline edge is not among
+them.
+
+| program | type |
+|---|---|
+| `hostname` | `F[Bytes] Unit` |
+| `echo hi` | `F[Bytes] Unit` |
+| `return 5` | `F[Value] Int` |
+| `from-bytes` | `F[Value] Bytes` |
+| `from-json` | `F[Value] A` |
+| `to-json $x` | `F[Bytes] Unit` |
+| `audit { echo hi }` | `F[Value] Record` |
+
+`audit` writes bytes and keeps a value payload; it needs no special case in the
+checker or the evaluator. Every external command is `F[Bytes] Unit`
+(`external_exec_comp_ty` in `core/src/typecheck/infer.rs`), so `echo` and
 `^echo` show the checker one shape.
 
-**The result mode is decided at every source-tree node.** An introduction
-rule sets it; propagation copies it; a join computes it; a shape-forcing
-expectation grounds it. A payload decision against an unresolved result mode
-pins the mode to `∅`. One decision is a deferral: a join computes its mode
-from the arms that carry information, and a `∅`-at-`Unit` arm carries none —
-it is the join's identity, compatible with either side by the subsumption
-instance below. A join whose only informative arms are still open — say a
-recursive call, whose mode is its own function's — therefore stays open, and
-grounds at the binding group's fixed point or at the first payload decision.
-Result-mode variables otherwise appear only in declared signature slots:
+**Display names the exceptional boundary behaviour in words.** A byte-routed
+computation prints as `Command captured from stdout`; every other prints as
+`Command A`. A stdout-captured command and a command returning a first-class
+`Bytes` must not differ only by punctuation.
 
-- the computation-typed argument of a builtin, for example `spawn`, `each`, `map`, and `fold`;
-- the expected arm shape of a scope.
+## WF-2 is carried by the one byte computation
 
-A slot variable is quantified like every other mode variable, for example
-`spawn : ∀ i o r β. U (⟨i, o, r⟩ β) → Handle β`. No elaboration decision reads
-a slot variable.
+The formation rule is one line:
 
-**One subsumption rule has one instance.** The type `⟨i, o, ∅⟩ Unit` is also
-the type `⟨i, o, Bytes⟩ Unit`. The rule applies at the top of a computation
-type only:
+- **WF-2** — `ρ = Bytes` implies the return type is `Unit`.
 
-- it does not descend through `Thunk`, `Fun`, or rows;
-- it is not a unification rule — `unify_mode` demands equality on ground modes.
+A byte-routed computation's returned value is discarded at capture, so a
+non-`Unit` value under a byte route is a value the checker promised and the
+runtime will never produce. The rule cannot be asserted once at the type's
+definition: `PayloadRoute` and the value type are independent fields, and a
+route is often a variable that some later operation *grounds*. What makes the
+rule hold everywhere is its consequence: WF-2 leaves **exactly one**
+byte-routed computation type, `F[Bytes] Unit`, named `CompTy::bytes()` (the
+dual of `CompTy::pure`). Landing on the byte side of any decision therefore
+means unifying with that computation *whole* — route and value in one
+structural step — never writing a bare route:
 
-The join over the arms of `if`, `?`, `case`, and `try` applies the instance:
+- the byte side of an arm join (`conclude_byte_side`) unifies each
+  non-subsumed arm with `CompTy::bytes()`;
+- the alias/handler arm pin (`pin_arm_to_head`) demands the arm's value be
+  `Unit` in the same breath as the pin that lands on bytes.
 
-- a join with a byte-payload arm lands wholly on the byte side;
-- a `∅`-at-`Unit` arm subsumes into the byte side;
-- a byte-payload arm beside a `∅`-non-`Unit` arm is a type error, and the explicit spelling is `echo hi | from-string`.
+No live code unifies a route against a detached `Bytes`, so a new decision
+site cannot forget the pairing — it has no way to spell half of it
+([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
 
-`guard`, `within`, and `grant` pass their body's type through and need no arm
-rule.
+## Where a route variable may live
 
-**Three relations, not one.** Equality is only one of them, and the other two
-are solved rather than folded
+A route variable is quantified in a `Scheme` like any other variable, and
+`instantiate` refreshes it at each use. Two shapes are legitimate:
+
+- **A declared slot** — the computation-typed argument of a builtin, and a
+  scope's expected arm shape. Nothing consults it until a call site supplies a
+  thunk.
+- **A forwarded route** — a combinator that hands a supplied thunk's boundary
+  behaviour back out, carrying the `(route, value)` pair together:
+  `fold-lines :: ∀α ρ. U(α → String → F[ρ] α) → α → F[ρ] α`.
+
+A builtin may **not** mint a route for its own result — one appearing nowhere
+else in its signature. Nothing could ever ground it except an alias pin, and
+forwarding half of a `(route, value)` pair is exactly the shape WF-2 cannot
+police. `fail` is the one free route that is safe by construction: it never
+returns, so no boundary observes it.
+
+## One subsumption instance, at arm joins only
+
+`F[Value] Unit` is also `F[Bytes] Unit`. The instance fires at the top of a
+computation type only — it does not descend through `Thunk`, `Fun`, or rows —
+and it is a judgment, not a unification step: `unify_route` demands equality on
+ground routes. The join over the arms of `if`, `?`, `case`, and `try` applies
+it:
+
+- `Value A` beside `Value B` unifies `A` and `B`;
+- `Bytes` beside `Bytes` stays `Bytes`;
+- `Value Unit` beside `Bytes` coerces to the byte side, and the byte side ties
+  every arm's value to `Unit`;
+- `Value A` for non-`Unit` `A` beside `Bytes` is a type error, and the explicit
+  spelling is `echo hi | from-string`;
+- a wholly open join defers to the generalisation boundary that owns its
+  variables, so an arm holding a recursive call is not forced to answer before
+  it has one;
+- divergence is neutral until another arm determines the route.
+
+The join is decided by the arms' *types*, never by how an arm was written, so an
+arm extracted into a `let` and forced back joins identically. `guard`, `within`,
+and `grant` pass their body's route and value type through and need no arm rule.
+
+A join whose informative arms are all still open is stored rather than decided
+on the spot, and re-examined at the boundary that owns its variables — an inner
+binding leaves an enclosing group's joins alone
 ([[decisions/260807_modes-solved-by-deferred-joins|modes-solved-by-deferred-joins]]).
-Pipeline adjacency is equality: ground `∅` never meets ground `Bytes`. A
-compound form's channel end is the *join* `⊔` of its parts' ends — `∅` the
-identity, `Bytes` absorbing — constraining the compound's end alone and never
-writing back into a part's. A branch's or scope's input end *alternates*
-instead, because only one arm runs, so arms that disagree on stdin leave the
-input unknown for a downstream stage to pin rather than clashing. The arm
-result is the third: which conduit carries the payload, decided under the one
-subsumption instance above.
+There a residue equates rather than defaults, so route polymorphism survives.
 
-A join whose informative arms are all still open is not decided on the spot;
-it is stored and re-examined at the generalisation boundary that owns its
-variables — an inner binding leaves an enclosing group's joins alone — and
-there a residue equates rather than defaults. So an arm holding a recursive
-call — whose mode is its own function's, still under inference — no longer
-forces an answer before it has one, and mode polymorphism survives
-(`∅ ⊔ μ = μ`).
+## One coercion, `capture`, moves a byte payload to a value
 
-**One coercion, `capture`, moves a byte payload to a value.** The checker
-inserts `capture M : ⟨i, ∅, ∅⟩ String` where `M : ⟨i, o, Bytes⟩ Unit`, for
-example at the right-hand side of a `let`: the capture swallows `M`'s byte
-output into the result, so only the stdin demand rides through. The precondition is
-`result = Bytes`, which is a type, so no runtime value test remains. `capture`
-is an IR node (`CompKind::Capture` in `core/src/ir.rs`) with one evaluation
-rule (`core/src/evaluator/capture.rs`):
+The checker inserts `capture M : F[Value] String` where `M : F[Bytes] Unit`, for
+example at the right-hand side of a `let`. The precondition is a type, so no
+runtime value test remains. `capture` is an IR node (`CompKind::Capture` in
+`core/src/ir.rs`) with one evaluation rule
+(`core/src/evaluator/capture.rs`):
 
-- run `M` with the output captured;
-- strip the trailing newline;
-- decode the bytes as strict UTF-8 — `| from-bytes` keeps bytes that are not valid UTF-8.
+- run `M` with its stdout captured;
+- strip one trailing newline;
+- decode strictly as UTF-8 — `| from-bytes` keeps bytes that are not valid UTF-8.
 
-`capture M` is close to the legal decoder tail `M | from-string`, which a user
-can write. A decoder may end a byte pipeline; a value produced by that decoder
-is then composed by application or bind, not by another pipeline edge.
+`capture M` is close to the decoder tail `M | from-string`, which a user can
+write. A value produced by a decoder is composed by application or bind, never
+by another pipeline edge — a `|` carries bytes and nothing else.
 
-**The calculus is a graded call-by-push-value.** The spec is the grading; `F`
-remains a functor from value types to computation types, and the adjunction
-with `U` is unchanged. Three properties hold:
+## The calculus is ordinary CBPV plus one boundary annotation
 
-- the result mode of a computation is stable under substitution and under abstraction;
+`F` remains a functor from value types to computation types and the adjunction
+with `U` is unchanged. The route is not a grade: it bounds no effect, licenses
+nothing, and does not multiply along a bind — a sequence simply takes its tail's
+route and value type. It is a tag on the returner naming which of two products a
+value boundary reads ([[related/cbpve|cbpve]]).
+
+Three properties hold:
+
+- a computation's route is stable under substitution and under abstraction;
 - elaboration is total and type-preserving;
 - coherence follows from one subsumption instance and one coercion.
 
