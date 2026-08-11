@@ -90,4 +90,4 @@ Cite: Plotkin & Pretnar, *Handlers of Algebraic Effects*, ESOP 2009,
 [doi:10.1007/978-3-642-00590-9_7](https://doi.org/10.1007/978-3-642-00590-9_7).
 Zotero `QIBEF77V`. ral side:
 [[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]];
-`docs/SPEC.md` §3.2.
+`docs/SPEC.md` §9.6.

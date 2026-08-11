@@ -50,5 +50,5 @@ layer and everything else is a library binding. `group.rs` is a pre-pass
 marking mutually recursive binding groups for the elaborator.
 
 See also [[internals/compilation-ladder|compilation-ladder]]; map
-[[map/core/syntax|syntax]]. Grammar: `docs/SPEC.md` §1–§4; RATIONALE
+[[map/core/syntax|syntax]]. Grammar: `docs/SPEC.md` §3, §17.1; RATIONALE
 §"One form, one meaning".

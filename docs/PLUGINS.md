@@ -1,6 +1,6 @@
 # ral plugins
 
-A plugin is a ral module (SPEC §8) whose return value is either a
+A plugin is a ral module (SPEC §15.5) whose return value is either a
 manifest map, or a block that takes an options map and returns a
 manifest map. `load-plugin` (§4) reads the manifest and registers the
 plugin's hooks, keybindings, and aliases. There is no plugin DSL and
@@ -48,13 +48,13 @@ Plugins extract fields by name (`get $options key <default>` or
 
 Plugins run with host authority. A hook, keybinding handler, or
 plugin-registered alias executes under whatever capabilities the
-caller's grant stack (SPEC §11) already holds — the manifest has no
+caller's grant stack (SPEC §12) already holds — the manifest has no
 field for declaring or narrowing that. A `capabilities:` key in a
 manifest is a load-time error, so a plugin cannot mistake a listed
 capability set for enforcement. Confinement is `grant`, applied at
 the call site, not a manifest declaration.
 
-`grant`'s `editor` field gates the `_ed-*` builtins (SPEC §11.6):
+`grant`'s `editor` field gates the `_ed-*` builtins (SPEC §12.8):
 
 | Field | Enables |
 |---|---|
@@ -63,7 +63,7 @@ the call site, not a manifest declaration.
 | `tui`   | `_ed-tui` |
 
 `grant`'s `shell` field gates shell builtins that modify persistent
-process state (SPEC §11.7):
+process state (SPEC §12.8):
 
 | Field | Enables |
 |---|---|
@@ -80,7 +80,7 @@ keybinding handler documents that the enclosing session needs
 
 Interactive only. Outside an interactive session every builtin raises
 `<name>: not available outside interactive mode`. The full reference
-is SPEC §18.1; the summary below is oriented around what plugin code
+is SPEC §15.5; the summary below is oriented around what plugin code
 needs to know.
 
 | Builtin | Shape | Purpose |
@@ -345,7 +345,7 @@ elem   x items   -- membership test
 
 ## 10 `~/.ralrc`
 
-The config map (SPEC §9) accepts an optional `plugins` list.  Each
+The config map (SPEC §15.3) accepts an optional `plugins` list.  Each
 entry is a map `[plugin: Str, options?: Map]`:
 
 ```

@@ -90,4 +90,4 @@ See also [[internals/capability-enforcement|capability-enforcement]],
 [[decisions/260602_exec-authority-partitioned|exec-authority-partitioned]],
 [[design/capability-carriers|capability-carriers]],
 [[design/two-enforcers|two-enforcers]]; map [[map/core/capabilities|capabilities]].
-`docs/SPEC.md` §11.
+`docs/SPEC.md` §12.

@@ -92,4 +92,4 @@ See also [[design/types|types]], [[design/cbpv|cbpv]],
 **Realised in** [[internals/pipeline-execution|pipeline-execution]].
 
 Cite: RATIONALE §"Pipelines follow their edges", §"Failure is not truth",
-§"Lexical data, dynamic authority"; `docs/SPEC.md` §4, §13, §20.4.
+§"Lexical data, dynamic authority"; `docs/SPEC.md` §7, §11, §17.4.

@@ -17,7 +17,7 @@ rejected with a clear error.**
 
 A per-name handler is invoked with the command's argument list; a catch-all is
 invoked with the name *and* the argument list. Currying ([[design/cbpv|cbpv]],
-`docs/SPEC.md` §4.5) makes the two indistinguishable by shape after the fact: a
+`docs/SPEC.md` §6.5) makes the two indistinguishable by shape after the fact: a
 binary lambda applied to a single argument does not error — it returns the inner
 unary closure. So a binary lambda installed where a unary handler is expected
 would not fault; it would hand the body a **partial-application closure** as the
@@ -35,7 +35,7 @@ state unconstructable rather than a runtime surprise.
   error. The only valid handler/alias values are unary and binary lambdas.
 - **The convention is positional.** The per-name slot demands unary; the
   catch-all slot demands binary; the `alias NAME { |args| … }` builtin and the
-  rc/plugin `aliases:` maps (`docs/SPEC.md` §9) demand unary. Dispatch
+  rc/plugin `aliases:` maps (`docs/SPEC.md` §15.3) demand unary. Dispatch
   ([[internals/handler-dispatch|handler-dispatch]]) invokes the matched entry
   under the convention its install site fixed, never by inspecting the stored
   value.
@@ -55,4 +55,4 @@ See also [[design/effects-handlers|effects-handlers]],
 [[internals/handler-dispatch|handler-dispatch]],
 [[decisions/260614_structural-bug-prevention|structural-bug-prevention]],
 [[decisions/260606_alias-head-defines-its-modes|alias-head-defines-its-modes]];
-the surface forms are `docs/SPEC.md` §3.2 (handlers) and §9 (aliases).
+the surface forms are `docs/SPEC.md` §9.4 (handlers) and §15.3 (aliases).

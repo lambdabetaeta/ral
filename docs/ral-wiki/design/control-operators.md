@@ -35,4 +35,4 @@ lexical ownership lives in [[design/audit|audit]].
 
 See also [[design/failure|failure]], [[design/scoping|scoping]], [[design/effects-handlers|effects-handlers]], [[design/grant|grant]].
 Cite: RATIONALE §"The grammar is the residue", §"Failure is not truth";
-`docs/SPEC.md` §1, §10.
+`docs/SPEC.md` §3.6, §8.

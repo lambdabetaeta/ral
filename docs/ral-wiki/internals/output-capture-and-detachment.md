@@ -253,4 +253,4 @@ leases-and-budgets retired: not
 split and the reaper), [[map/exarch/shell-eval|shell-eval]] (the frame that arms the
 wall and captures the bytes), [[internals/binding-leases|binding-leases]] (the
 lease idiom applied to scratch names, the same page's sibling story),
-[[map/core/io-process|io-process]], and `docs/SPEC.md` §13.3, §13.7.
+[[map/core/io-process|io-process]], and `docs/SPEC.md` §11.2, §11.5.

@@ -28,5 +28,5 @@ convenience, lower it during elaboration into what the IR already has; the IR
 grows a constructor only when the convenience's meaning depends on runtime
 values.
 
-See also [[invariants/fixed-arity|fixed-arity]]. Cite: `docs/SPEC.md` §1 (grammar /
+See also [[invariants/fixed-arity|fixed-arity]]. Cite: `docs/SPEC.md` §3, §17.1 (grammar /
 scope-stage), §IR.

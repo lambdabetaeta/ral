@@ -80,4 +80,4 @@ test).
 
 See also [[design/types|types]], [[internals/type-inference|type-inference]],
 [[map/core/typecheck|typecheck]], [[design/cbpv|cbpv]]; judgments in
-`docs/SPEC.md` §20.
+`docs/SPEC.md` §17.

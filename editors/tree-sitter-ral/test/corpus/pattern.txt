@@ -1,0 +1,80 @@
+================================================================================
+a let binding may destructure a list pattern
+================================================================================
+
+let [a, b] = pair
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (let_stmt
+            (list_pattern
+              (identifier)
+              (identifier))
+            (chain
+              (pipeline
+                (cmd
+                  (application
+                    (identifier)))))))))))
+
+================================================================================
+a let binding may destructure a map pattern
+================================================================================
+
+let [host: h, port: p] = config
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (let_stmt
+            (map_pattern
+              (map_pattern_entry
+                key: (identifier)
+                pattern: (identifier))
+              (map_pattern_entry
+                key: (identifier)
+                pattern: (identifier)))
+            (chain
+              (pipeline
+                (cmd
+                  (application
+                    (identifier)))))))))))
+
+================================================================================
+a lambda parameter may destructure too
+================================================================================
+
+{ |[head: h, tail: t]| use $h }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (application
+            (block
+              (lambda_params
+                (map_pattern
+                  (map_pattern_entry
+                    key: (identifier)
+                    pattern: (identifier))
+                  (map_pattern_entry
+                    key: (identifier)
+                    pattern: (identifier))))
+              (statement
+                (chain
+                  (pipeline
+                    (cmd
+                      (application
+                        (identifier)
+                        (deref)))))))))))))

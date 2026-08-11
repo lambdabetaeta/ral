@@ -148,7 +148,7 @@ is already confined by the [[map/core/io-process|spawn jail]] (a fresh
 unprivileged uid and a per-exec cgroup), the daemon disables the
 unprivileged user namespaces bwrap needs, and the guest has no network
 device for `net` to govern; the in-process gates apply unchanged
-(`docs/SPEC.md` §11.9, §15.2).
+(`docs/SPEC.md` §12.11).
 
 - `early_init(argv)` — startup: consumes `--sandbox-projection`, pins
   `SANDBOX_SELF`, on Unix enters the OS sandbox for a per-command

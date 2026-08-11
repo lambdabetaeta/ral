@@ -144,4 +144,4 @@ host-affordance registration principle this reuses),
 [[decisions/260629_agent-binding-reaping|agent-binding-reaping]] (a born-durable
 handle must be pinned against the reaper),
 [[map/repl/jobs|repl/jobs]] (the REPL's POSIX job control this is distinct from),
-[[map/core/builtins|map: builtins]], and `docs/SPEC.md` §13.
+[[map/core/builtins|map: builtins]], and `docs/SPEC.md` §11.

@@ -273,4 +273,4 @@ deferred survivor warning), [[decisions/260629_agent-binding-reaping|agent-bindi
 (keep distinct things distinct by type — the capability argument),
 [[invariants/probe-convention|probe-convention]] (the probe facet as a
 checkable rule), [[map/repl/jobs|repl/jobs]], [[map/exarch/agent|agent]],
-[[map/core/builtins|map: builtins]], and `docs/SPEC.md` §13 and §18.
+[[map/core/builtins|map: builtins]], and `docs/SPEC.md` §11 and §11.6.

@@ -221,4 +221,4 @@ semantics ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec
 That dispatch — the `ExecImage::BundledTool` placement and the hidden
 entrypoint — is the [[map/core/runtime|runtime]]'s; this page owns only the
 registry of names, shims, and the in-binary `uutils_invoke` they converge on.
-`docs/SPEC.md` §21 covers the single-binary tool surface.
+`docs/SPEC.md` §14.7 covers the single-binary tool surface.

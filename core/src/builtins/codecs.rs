@@ -14,7 +14,7 @@ use crate::stream::{DONE_LABEL, HEAD_FIELD, MORE_LABEL, TAIL_FIELD};
 use crate::types::{Env, Settled, Shell, Value, as_list, as_map_ref, sig, sig_hint};
 use std::sync::Arc;
 
-use super::util::{as_byte_list, decode_utf8_strict};
+use super::util::{arg0_str, as_byte_list, decode_utf8_strict};
 
 fn read_stdin_bytes(name: &str, shell: &mut Shell) -> Settled<Vec<u8>> {
     use std::io::Read;
@@ -228,11 +228,11 @@ pub(super) fn builtin_to_bytes(args: &[Value], shell: &mut Shell) -> Settled<Val
 }
 
 pub(super) fn builtin_to_string(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    write_encoded("to-string", &args[0].to_string().into_bytes(), shell)
+    write_encoded("to-string", &arg0_str(args).into_bytes(), shell)
 }
 
 pub(super) fn builtin_to_line(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let mut s = args[0].to_string();
+    let mut s = arg0_str(args);
     s.push('\n');
     write_stdout_ok("to-line", s.as_bytes(), shell)?;
     Ok(Value::Unit)

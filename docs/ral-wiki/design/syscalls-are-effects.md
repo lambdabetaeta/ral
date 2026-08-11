@@ -114,4 +114,4 @@ See also [[design/cbpv|cbpv]], [[design/name-resolution|name-resolution]],
 operation/interpretation separation at its source).
 
 Cite: README §"System calls are algebraic effects"; RATIONALE §"System calls are
-algebraic effects"; `docs/SPEC.md` §0, §3, §3.2.
+algebraic effects"; `docs/SPEC.md` §2, §9.6.

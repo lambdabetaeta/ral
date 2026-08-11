@@ -332,4 +332,4 @@ detachment-holds-only-root/handle-resources invariant),
 [[map/exarch/shell-eval|shell-eval]] (the `AgentSink`/`value_to_card` seam the
 third arm joins), [[map/exarch/cards|cards]] (the render subsystem),
 [[map/core/builtins|map: builtins]] (`spawn` and the concurrency primitives), and
-`docs/SPEC.md` §13.3 (the handle settle/replay rule the waiter must not disturb).
+`docs/SPEC.md` §11.2 (the handle settle/replay rule the waiter must not disturb).

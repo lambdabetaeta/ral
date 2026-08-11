@@ -1,0 +1,155 @@
+================================================================================
+if/elsif/else stay one statement when everything is on one line
+================================================================================
+
+if $ready { deploy } elsif $backup { deploy-backup } else { explain-delay }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (if_stmt
+            cond: (deref)
+            then: (block
+              (statement
+                (chain
+                  (pipeline
+                    (cmd
+                      (application
+                        (identifier)))))))
+            (elsif_clause
+              cond: (deref)
+              then: (block
+                (statement
+                  (chain
+                    (pipeline
+                      (cmd
+                        (application
+                          (identifier))))))))
+            (else_clause
+              body: (block
+                (statement
+                  (chain
+                    (pipeline
+                      (cmd
+                        (application
+                          (identifier))))))))))))))
+
+================================================================================
+a newline may follow 'if', the condition, 'elsif', and the elsif condition
+================================================================================
+
+if
+  $ready
+  { deploy }
+elsif
+  $backup
+  { deploy-backup }
+else
+  { explain-delay }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (if_stmt
+            cond: (deref)
+            then: (block
+              (statement
+                (chain
+                  (pipeline
+                    (cmd
+                      (application
+                        (identifier)))))))
+            (elsif_clause
+              cond: (deref)
+              then: (block
+                (statement
+                  (chain
+                    (pipeline
+                      (cmd
+                        (application
+                          (identifier))))))))
+            (else_clause
+              body: (block
+                (statement
+                  (chain
+                    (pipeline
+                      (cmd
+                        (application
+                          (identifier))))))))))))))
+
+================================================================================
+'elsif' and 'else' may start on the line after the preceding branch's body
+================================================================================
+
+if $ready
+  { deploy }
+elsif $backup
+  { deploy-backup }
+else
+  { explain-delay }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (if_stmt
+            cond: (deref)
+            then: (block
+              (statement
+                (chain
+                  (pipeline
+                    (cmd
+                      (application
+                        (identifier)))))))
+            (elsif_clause
+              cond: (deref)
+              then: (block
+                (statement
+                  (chain
+                    (pipeline
+                      (cmd
+                        (application
+                          (identifier))))))))
+            (else_clause
+              body: (block
+                (statement
+                  (chain
+                    (pipeline
+                      (cmd
+                        (application
+                          (identifier))))))))))))))
+
+================================================================================
+a lone 'if' with no elsif/else still ends cleanly at the trailing newline
+================================================================================
+
+if $ready
+  { deploy }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (if_stmt
+            cond: (deref)
+            then: (block
+              (statement
+                (chain
+                  (pipeline
+                    (cmd
+                      (application
+                        (identifier)))))))))))))

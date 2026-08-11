@@ -40,7 +40,7 @@ domain is a run-time value. Neither contains the other.
 
 ## What can be a key
 
-A key is a `String` either way (`docs/SPEC.md` §6). The *form* you write it in
+A key is a `String` either way (`docs/SPEC.md` §4.5). The *form* you write it in
 decides which type the literal takes:
 
 - **Bare word** — `host: 5432` — a static label.
@@ -55,7 +55,7 @@ The first three are *labels*: known at elaboration, so they make a record. A
 record draws its labels from two alphabets — **bare** for ordinary records,
 **tag** (backtick) for tag-keyed records and [[invariants/optionality-via-variants|variants]].
 The two do not unify, and mixing them in one literal is a parse error
-(`docs/SPEC.md` §6).
+(`docs/SPEC.md` §4.5).
 
 ## Which one a literal becomes
 
@@ -143,9 +143,9 @@ data, not chosen for tidiness.
 
 A *set* is the degenerate homogeneous map `Map<Unit>` — keys present, values
 carrying no information — with `has` for membership and `union` / `intersection`
-/ `difference` in the prelude (`docs/SPEC.md` §6).
+/ `difference` in the prelude (`docs/SPEC.md` §4.5).
 
 **Realised in** [[internals/type-inference|type-inference]] (literal inference,
 the record/map projection split, the `unify_map_record` coercion).
 
-Cite: `docs/SPEC.md` §6; `core/src/typecheck/{ty,infer,unify,builtins}.rs`.
+Cite: `docs/SPEC.md` §4.5; `core/src/typecheck/{ty,infer,unify,builtins}.rs`.

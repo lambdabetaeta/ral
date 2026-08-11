@@ -66,4 +66,4 @@ commit — is where the outcome becomes data.
 
 See also [[design/builtins|builtins]], [[map/core/builtins|map: builtins]],
 [[invariants/optionality-via-variants|optionality-via-variants]],
-[[design/failure|failure]]; `docs/SPEC.md` §13.3.
+[[design/failure|failure]]; `docs/SPEC.md` §11.2.

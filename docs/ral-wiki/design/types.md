@@ -240,4 +240,4 @@ declined). The volatile code map is [[map/core/typecheck|typecheck]].
 **Realised in** [[internals/type-inference|type-inference]].
 
 Cite: RATIONALE §"Values and commands", §"Pipelines follow their edges",
-§"Structured values cross once"; `docs/SPEC.md` §20.
+§"Structured values cross once"; `docs/SPEC.md` §17.

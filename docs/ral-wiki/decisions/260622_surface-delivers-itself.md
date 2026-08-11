@@ -330,5 +330,5 @@ surfaced values are public `Value`s, not core's repr),
 [[map/exarch/cards|cards]] (the render subsystem),
 [[map/exarch/tools|tools]] (the inbox path the boundary sink reuses),
 [[map/core/builtins|map: builtins]] (`spawn` and the concurrency primitives), and
-`docs/SPEC.md` §13.3 (the handle settle/replay rule — `await` as pull-forward leaves
+`docs/SPEC.md` §11.2 (the handle settle/replay rule — `await` as pull-forward leaves
 it intact).

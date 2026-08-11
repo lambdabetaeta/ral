@@ -337,6 +337,35 @@ fn lines_keeps_interior_blank() {
     assert_eq!(string_list("return !{lines \"a\n\nb\"}"), ["a", "", "b"]);
 }
 
+// ── follow-up to the 260811 decode-captured panic ──────────────────────────
+//
+// The deleted `__decode-captured` builtin indexed `args[0]` and a spread call
+// reached it with an empty argv, panicking past a catchable error. Its
+// sibling encoders (`to-json`, `to-csv`, `to-bytes`, `to-string`, `to-line`,
+// `to-lines`) share that same `&args[0]` shape, but each is fixed-arity-1:
+// application collects arguments before it will call a Native's body at all,
+// so an under-supplied spread curries instead of dispatching — there is
+// nothing here for a spread to reach empty-handed. These tests pin that
+// survival against a regression in that gate.
+
+#[test]
+fn to_json_survives_an_empty_spread_argument() {
+    let mut shell = fresh_shell();
+    assert!(eval(&mut shell, "let nothing = []\nto-json ...$nothing\nreturn unit").is_ok());
+}
+
+#[test]
+fn to_csv_survives_an_empty_spread_argument() {
+    let mut shell = fresh_shell();
+    assert!(eval(&mut shell, "let nothing = []\nto-csv ...$nothing\nreturn unit").is_ok());
+}
+
+#[test]
+fn to_bytes_survives_an_empty_spread_argument() {
+    let mut shell = fresh_shell();
+    assert!(eval(&mut shell, "let nothing = []\nto-bytes ...$nothing\nreturn unit").is_ok());
+}
+
 // ── B14 — coverage for previously untested builtins ───────────────────────
 
 #[test]

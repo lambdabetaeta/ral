@@ -116,4 +116,4 @@ See also [[design/builtins|builtins]], [[design/pipelines|pipelines]],
 [[design/types|types]], [[design/cbpv|cbpv]]; [[map/core/builtins|map: builtins]],
 [[map/core/io-process|io-process]].
 Cite: RATIONALE §"Values and commands", §"Pipelines follow their edges";
-`docs/SPEC.md` §4.2, §16, §20.
+`docs/SPEC.md` §7, §14, §17.5.

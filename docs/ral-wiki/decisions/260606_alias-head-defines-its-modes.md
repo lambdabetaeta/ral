@@ -25,7 +25,7 @@ byte-channel discipline that does the real work moves to the connection point.**
   existing handler with a value output under a byte-output head is unchanged: still
   rejected, still at the definition.
 - **The byte-channel discipline is the real invariant, and it is enforced at the
-  connection.** `O_left = I_right` (`docs/SPEC.md` §4.2.1) holds where pipeline
+  connection.** `O_left = I_right` (`docs/SPEC.md` §7.1) holds where pipeline
   channels meet, not at the alias definition. A value-output head piped into a
   byte consumer is still a mismatch — now reported at the *use site* where the
   edges connect rather than eagerly at the head's definition. The rule moved from
@@ -55,4 +55,4 @@ See also
 [[decisions/260601_modes-equality-constrained-shared|modes-equality-constrained-shared]],
 [[map/core/typecheck|typecheck]],
 [[design/effects-handlers|effects-handlers]];
-the byte-edge judgment is `docs/SPEC.md` §4.2.1.
+the byte-edge judgment is `docs/SPEC.md` §17.4.

@@ -173,4 +173,4 @@ See also
 (the ADR this revises),
 [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] (the frame and
 the root/foreground split), [[map/core/builtins|map: builtins]],
-[[map/repl/loop|map: repl/loop]], and `docs/SPEC.md` §13.5.
+[[map/repl/loop|map: repl/loop]], and `docs/SPEC.md` §11.5.

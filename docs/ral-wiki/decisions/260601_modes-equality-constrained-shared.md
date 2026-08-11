@@ -7,7 +7,7 @@ superseded_by: decisions/260809_pipes-are-positional-byte-wires
 
 A pipeline stage has a computation type `F[I,O] A`; connecting two stages
 requires `O_left = I_right`, and a value cannot silently cross a byte edge
-(`docs/SPEC.md` §4.2.1, §20.4). Modes are therefore *equality*-constrained:
+(`docs/SPEC.md` §7.1, §17.4). Modes are therefore *equality*-constrained:
 `none` and `bytes` do not unify.
 
 ## What was wrong
@@ -18,7 +18,7 @@ this rule.
 - The static Hindley–Milner checker (`core/src/typecheck/`) unified modes in
   `unify.rs`, where `None ↔ Bytes` was made to *succeed* ("coercion preserved
   by design"). That made the `TypeErrorKind::ModeMismatch` arm dead code: the
-  static checker enforced *nothing* about modes, so SPEC §20.4's "mismatches
+  static checker enforced *nothing* about modes, so SPEC §17.4's "mismatches
   are caught at type-check time" was false.
 - The runtime engine (`core/src/ty.rs`), which runs per-bind at evaluation
   time with the live `Shell` and must keep working under `--no-typecheck`,

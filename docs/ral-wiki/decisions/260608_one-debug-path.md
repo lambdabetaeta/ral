@@ -15,7 +15,7 @@ compiled, never of the runtime environment.**
 - The same `debug_assertions` gate governs the `try`-caught-error echo
   ([[design/control-operators|control-operators]], `eval_try`): debug
   builds echo `ral: try caught error …` to stderr; release builds stay
-  silent (`docs/SPEC.md` §10.1).
+  silent (`docs/SPEC.md` §8.6).
 
 **Why one path.** A second, environment-gated channel earns nothing: a
 developer who wants traces builds in debug, and a release user wants

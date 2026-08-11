@@ -70,4 +70,4 @@ whose leases reap ordinary workers, simply lacks the verb it cannot honour
 Why these primitives exist and how the set is shaped is
 [[design/builtins|builtins]]; which layer any given capability lands in is
 [[design/name-resolution|name-resolution]]. See also map
-[[map/core/builtins|builtins]]. `docs/SPEC.md` §16, §21.
+[[map/core/builtins|builtins]]. `docs/SPEC.md` §14, §16.7.

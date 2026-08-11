@@ -472,4 +472,4 @@ above core; the `_ed-*` `Captured` precedent),
 [[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]]
 (the layering the seam must respect), [[map/exarch/agent|agent]] and
 [[design/agents|agents]] (`fork`, `assemble`, the tree, `policy::narrow`),
-and `docs/SPEC.md` §13, §16.
+and `docs/SPEC.md` §11, §14.

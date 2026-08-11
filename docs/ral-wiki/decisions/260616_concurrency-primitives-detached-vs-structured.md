@@ -335,4 +335,4 @@ premise: the root/foreground split), [[decisions/260615_poll-total-failed-arm|ha
 poll the scope), [[design/scoping|scoping]], [[map/core/builtins|map: builtins]],
 [[internals/output-capture-and-detachment|output-capture-and-detachment]] (how
 this plays out for a never-closing pipe — the long-running-server flow), and
-`docs/SPEC.md` §13.3.
+`docs/SPEC.md` §11.2.

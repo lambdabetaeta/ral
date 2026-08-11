@@ -164,7 +164,7 @@ distinct meaning and is removed:
   and elaborator nodes ([`core/src/syntax/`](../../../core/src/syntax/),
   [`core/src/elaborator.rs`](../../../core/src/elaborator.rs)); the `Alias` /
   `Unalias` registry entries → `Handle` / `Unhandle`.
-- **Docs.** `docs/SPEC.md` §9 and its §3.2 cross-references, `docs/PLUGINS.md`,
+- **Docs.** `docs/SPEC.md` §15.3 and its §9.1 cross-references, `docs/PLUGINS.md`,
   `docs/TUTORIAL.md`, `docs/RATIONALE.md`, `docs/rc.example`, and example scripts
   (`kit/tasks.ral`).
 
@@ -259,4 +259,4 @@ Cite: [[design/builtins|builtins]], [[design/name-resolution|name-resolution]],
 [[invariants/fixed-arity|fixed-arity]],
 [[internals/handler-dispatch|handler-dispatch]],
 [[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]];
-`docs/SPEC.md` §3.2, §9, §16, §17.
+`docs/SPEC.md` §9.1, §9.4, §14.

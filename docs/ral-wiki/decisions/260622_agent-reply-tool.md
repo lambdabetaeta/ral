@@ -199,4 +199,4 @@ oh-my-pi) without a prose fallback at all.
 delivery seam, and `AgentResult` this rides on),
 [[invariants/turn-ends-ready|turn-ends-ready]], [[map/exarch/agent|agent]],
 [[map/exarch/tools|tools]], [[map/exarch/shell-eval|shell-eval]] (the value→text
-render this reuses), and `docs/SPEC.md` §13.
+render this reuses), and `docs/SPEC.md` §11.

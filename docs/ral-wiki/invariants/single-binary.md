@@ -23,7 +23,7 @@ sibling helper crate or a second shipped executable, and do not introduce a
 runtime dependency on an external program for core behaviour.
 
 One deliberate piece stands *outside* the runtime: `ral-sh`, a thin POSIX-bridge
-login shell (`docs/SPEC.md` §21.1). It carries no `ral-core` dependency and
+login shell (`docs/SPEC.md` §16.7). It carries no `ral-core` dependency and
 forwards non-interactive invocations to `/bin/sh`; it exists so ral can be
 registered as a login shell, not to divide the runtime. It is a registration
 shim, not a functional split.

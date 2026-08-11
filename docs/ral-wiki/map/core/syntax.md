@@ -53,5 +53,5 @@ no shell-free fallback and no hand-maintained residue: the baked prelude's
 schemes carry the real inferred route for every prelude export.
 
 The five reserved [[design/control-operators|control operators]] are recognised
-at this layer; everything else is a library binding. See `docs/SPEC.md` §2–§4
-for the grammar.
+at this layer; everything else is a library binding. See `docs/SPEC.md` §3,
+§17.1 for the grammar.

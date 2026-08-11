@@ -102,4 +102,4 @@ model this lattice instantiates — composition over a Belnap bilattice).
 **Realised in** [[internals/capability-enforcement|capability-enforcement]].
 
 Cite: RATIONALE §"`grant` attenuates authority",
-§"Lexical data, dynamic authority"; `docs/SPEC.md` §11.
+§"Lexical data, dynamic authority"; `docs/SPEC.md` §12.

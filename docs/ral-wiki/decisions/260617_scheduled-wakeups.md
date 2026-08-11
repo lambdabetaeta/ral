@@ -306,4 +306,4 @@ missing-type discipline that keeps a cancellation unconstructable as a message),
 `ScheduleId`), [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]
 (the frame, the root/foreground cancel scopes the control plane rides, and the
 idle loop's home), [[design/exarch-architecture|exarch-architecture]], and
-`docs/SPEC.md` §13.
+`docs/SPEC.md` §11.

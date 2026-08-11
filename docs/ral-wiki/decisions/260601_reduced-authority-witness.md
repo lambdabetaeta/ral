@@ -85,7 +85,7 @@ restrict another (e.g. net). In particular `net` has no in-process gate — a
 net-deny is enforced *only* by the OS sandbox, which a net or fs restriction
 engages. This is by design, not a bug: preserving `None = top` keeps the lattice
 clean and the surface symmetric with the toml/inline projections of one
-`RawCapabilities`. Recorded in `docs/SPEC.md` §11 and [[design/grant|grant]] so
+`RawCapabilities`. Recorded in `docs/SPEC.md` §12 and [[design/grant|grant]] so
 the mental model is explicit; no enforcement behaviour changed.
 
 Superseded by [[decisions/260605_witness-collapse|witness-collapse]]: the B5

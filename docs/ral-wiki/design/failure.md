@@ -29,7 +29,7 @@ command encodes its result in its exit status rather than a value — an externa
 `try { grep -q p f; echo found } { |_| echo missing }`. There is no
 command-level `||`: it would force precedence against `?` and `|` for a case
 `try` already covers. The only `||` is the short-circuiting `Bool` connective
-inside `$[…]` expression blocks (`docs/SPEC.md` §2), which takes strict `Bool`
+inside `$[…]` expression blocks (`docs/SPEC.md` §17.1), which takes strict `Bool`
 operands and never inspects command success.
 
 The cleanup forms differ only in what they do with the original failure:
@@ -51,6 +51,6 @@ See also [[design/syscalls-are-effects|syscalls-are-effects]] (failure is an ope
 [[design/control-operators|control-operators]], [[design/types|types]],
 [[design/cbpv|cbpv]].
 Cite: RATIONALE §"Failure is not truth", §"Pipelines follow their edges";
-`docs/SPEC.md` §4.4, §10, §10.1–§10.2; `eval_chain` / `eval_return` in
+`docs/SPEC.md` §2.5, §8, §8.6–§8.7; `eval_chain` / `eval_return` in
 `core/src/evaluator/comp.rs`, `try` / `guard` typing in
 `core/src/typecheck/scope.rs`.

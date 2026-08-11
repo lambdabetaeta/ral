@@ -41,4 +41,4 @@ literature in [[related/rows-and-handlers|rows-and-handlers]].
 
 **Realised in** [[internals/type-inference|type-inference]] (row unification by the Rémy rewrite).
 
-Cite: RATIONALE §"Structured values cross once"; `docs/SPEC.md` §2, §6.
+Cite: RATIONALE §"Structured values cross once"; `docs/SPEC.md` §4, §4.5.

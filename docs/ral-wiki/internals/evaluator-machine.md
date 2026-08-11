@@ -128,4 +128,4 @@ so the mutual recursion is irreducible and the seam makes it visible
 
 See also [[design/cbpv|cbpv]], [[design/pipelines|pipelines]]; code maps
 [[map/core/evaluator|evaluator]], [[map/core/shell-state|shell-state]],
-[[map/core/runtime|runtime]]. The formal account is `docs/SPEC.md` §4.
+[[map/core/runtime|runtime]]. The formal account is `docs/SPEC.md` §17.8.

@@ -154,7 +154,7 @@ guards
   apply unchanged, and `child.rs` tracks the per-exec `JailCgroup`, so
   cancel and settle kill the whole tree through `cgroup.kill` (a
   `setsid`'d grandchild cannot leave its cgroup) while the grace phase
-  stays pgid-addressed (`docs/SPEC.md` §15.2).
+  stays pgid-addressed (`docs/SPEC.md` §12.11).
 - `core/src/child_eval.rs` (crate root, beside the wire layer it rides, *not*
   under `runtime/`) — the one re-exec'd-child eval runner the pipeline stage
   helper drives, `run_child_eval` ([[decisions/260610_child-eval-unification|child-eval-unification]]).

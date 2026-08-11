@@ -77,5 +77,5 @@ Recording lives in `core/src/evaluator/audit.rs` ([[map/core/evaluator|evaluator
 the dispatch delimiter is the run door's own scope, held at `Shell::enter` in
 `core/src/run.rs`, outside the `catch_unwind` a panicking run rolls back
 through — a panic still drains and closes the scope, but reports `Static`
-rather than carrying a trail; `docs/SPEC.md` §10.1 and §10.3 give the formal
+rather than carrying a trail; `docs/SPEC.md` §13.3 gives the formal
 account.

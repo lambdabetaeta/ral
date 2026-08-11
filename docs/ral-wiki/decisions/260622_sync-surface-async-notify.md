@@ -355,5 +355,5 @@ detachment-holds-only-root/handle/session-resources invariant),
 joins), [[map/exarch/cards|cards]] (the render subsystem),
 [[map/exarch/tools|tools]] (the async `agent`/inbox path the worker mirrors),
 [[map/core/builtins|map: builtins]] (`spawn` and the concurrency primitives), and
-`docs/SPEC.md` §13.3 (the handle settle/replay rule, here left undisturbed — the
+`docs/SPEC.md` §11.2 (the handle settle/replay rule, here left undisturbed — the
 notice carries a copy, not the cache).

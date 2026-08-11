@@ -5,6 +5,15 @@ supersedes: decisions/260601_modes-equality-constrained-shared, decisions/260603
 
 # Pipes are positional byte wires
 
+> Amended the next day by `f5720bee` ("The route is the checker's business,
+> and capture is the one coercion"): the bare `final_route: GroundRoute` this
+> page describes does not reach the runtime. A pipeline instead carries an
+> explicit `PipeYield` (`Last` or `Unit`), committed by the annotator so the
+> evaluator reads what to report without knowing what a route is. The
+> decision recorded here — one route per pipeline, no per-stage `Wire` — is
+> unaffected; only the shape of that one route's runtime carrier changed.
+> Read `final_route` below as `PipeYield`.
+
 ## Decision
 
 **The surface `|` connects the left stage's stdout to the right stage's stdin;

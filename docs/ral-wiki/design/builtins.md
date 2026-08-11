@@ -132,4 +132,4 @@ See also [[design/syscalls-are-effects|syscalls-are-effects]] (builtins are the 
 [[internals/builtins-registry|builtins-registry]], [[map/core/builtins|map: builtins]],
 [[map/core/typecheck|map: typecheck]].
 Cite: RATIONALE §"Structured values cross once",
-§"The grammar is the residue"; `docs/SPEC.md` §16, §17, §21.
+§"The grammar is the residue"; `docs/SPEC.md` §14, §16.7.

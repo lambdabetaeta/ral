@@ -172,4 +172,4 @@ scrape that lost reports. It made two choices this decision revisits:
 emit-seam recording principle the run usage meter mirrors for accounting),
 [[invariants/turn-ends-ready|turn-ends-ready]], [[map/exarch/agent|agent]],
 [[map/exarch/tools|tools]], [[map/exarch/shell-eval|shell-eval]] (the value→text
-render this reuses), and `docs/SPEC.md` §13.
+render this reuses), and `docs/SPEC.md` §11.

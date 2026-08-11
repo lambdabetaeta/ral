@@ -29,5 +29,5 @@ bindings — they are IR primitives (`CompKind::If` / `Case` / `Try`, see
 the five reserved [[design/control-operators|control operators]]. The prelude
 adds the iteration and collection vocabulary on top of that primitive core.
 
-`docs/SPEC.md` lists the prelude exports; a command name's head is classified once
+`docs/SPEC.md` §14 lists the prelude exports; a command name's head is classified once
 at the surface (`Head` in `core/src/syntax/ast.rs`, [[map/core/syntax|syntax]]).

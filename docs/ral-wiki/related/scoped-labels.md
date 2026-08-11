@@ -47,7 +47,7 @@ divergence below traces to that cut.
 
 - **No restriction operator.** Leijen's `r − l` removes the first occurrence,
   and update `{l := x | r}` and rename each derive from it in one line. ral cut
-  it (`docs/SPEC.md` §20.7: shadowing "without needing a restriction
+  it (`docs/SPEC.md` §4.5: shadowing "without needing a restriction
   operator"), so override is shadowing and a shadowed field is unreachable —
   there is no un-shadow. Leijen's own motivating idiom — override an
   environment's `color`, then restrict to re-expose the parent's — is therefore
@@ -59,7 +59,7 @@ divergence below traces to that cut.
   and the two never unify.
 - **Multi-spread is imprecise.** Leijen types iterated extension exactly; ral
   threads a *single* spread's field types precisely, while several spreads in
-  one literal yield an open but imprecise result (`docs/SPEC.md` §20.7).
+  one literal yield an open but imprecise result (`docs/SPEC.md` §4.5).
 
 ## What ral could borrow
 
@@ -81,4 +81,4 @@ the implementation menu stands as reference.
 
 Cite: Leijen, *Extensible records with scoped labels*, Trends in Functional
 Programming 2005. Zotero `AKRCBMLD`. ral side: RATIONALE §"Structured values
-cross once"; `docs/SPEC.md` §20.7.
+cross once"; `docs/SPEC.md` §4.5.

@@ -84,6 +84,6 @@ than decoding, so it is the node's clause, not the composed step's.
 See also [[design/types|types]], [[design/cbpv|cbpv]],
 [[design/pipelines|pipelines]], [[design/codecs|codecs]].
 
-Cite: `docs/SPEC.md` §20.4 ("Within a captured block, only the last command's
+Cite: `docs/SPEC.md` §7.2 ("Within a captured block, only the last command's
 byte output becomes the block value"; "Captures nest. Earlier output goes to the
 nearest enclosing visible stream").

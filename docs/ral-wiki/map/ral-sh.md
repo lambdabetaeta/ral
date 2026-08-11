@@ -8,7 +8,7 @@ covers_paths: [ral-sh/]
 
 `ral-sh/src/main.rs` is a thin POSIX-bridge login shell dispatcher — the one
 piece that stands *outside* the runtime ([[invariants/single-binary|single-binary]],
-`docs/SPEC.md` §21.1). It carries no `ral-core` dependency.
+`docs/SPEC.md` §16.7). It carries no `ral-core` dependency.
 
 It exists so `ral` can be registered as a login shell without breaking the
 POSIX-assuming tools (`scp`, `rsync`, git-over-ssh, ansible) that a login shell

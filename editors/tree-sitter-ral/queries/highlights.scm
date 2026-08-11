@@ -102,6 +102,13 @@
 
 (lambda_params (identifier) @variable.parameter)
 
+; Destructuring binders: names bound by a `[a, b]` / `[host: h]` pattern,
+; wherever that pattern occurs (`let`, a lambda parameter, or nested inside
+; another pattern) — unscoped like `rest_pattern` and `wildcard` above.
+(list_pattern (identifier) @variable.parameter)
+(map_pattern_entry
+  pattern: (identifier) @variable.parameter)
+
 (map_pattern_entry
   key: (identifier) @property)
 

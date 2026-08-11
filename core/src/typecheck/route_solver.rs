@@ -250,6 +250,12 @@ impl InferCtx {
 
     /// One quiescence pass over a single constraint: `Some` keeps it stored
     /// unchanged, `None` means it concluded and applied its side effects.
+    ///
+    /// The constraint's own `pos` is installed unconditionally, `None`
+    /// included. A deferred constraint's diagnostic belongs at the site that
+    /// deferred it, and the ambient position during a quiescence sweep is some
+    /// unrelated form's — so falling back to it, rather than to no position at
+    /// all, would point the error somewhere the reader never wrote.
     fn retry(&mut self, c: ArmResults) -> Option<ArmResults> {
         let saved = std::mem::replace(&mut self.pos, c.pos);
         let out = match self.conclude_arm_results(&c.arms, &c.why) {
@@ -296,6 +302,9 @@ impl InferCtx {
     /// tied to the join's own `value`, so the whole join stays one variable
     /// a later grounding can still move. Writes ground state; the caller
     /// re-runs the worklist after each.
+    ///
+    /// Installs `c.pos` unconditionally, as [`Self::retry`] does and for the
+    /// same reason.
     fn collapse_ground(&mut self, c: ArmResults) {
         let saved = std::mem::replace(&mut self.pos, c.pos);
         let ArmResults {

@@ -7,8 +7,9 @@
 //! needs — and nothing the user asked to stop; in that window a SIGINT
 //! instead cancels the run's foreground scope, which the launch loop's
 //! per-stage `process::check` observes before the next stage spawns.
-//! Off Unix and for single-stage pipelines `prepare` is a no-op, and the
-//! first `spawn` establishes the leader and claims the relay together.
+//! Off Unix `prepare` is a no-op, and the first `spawn` establishes the
+//! leader and claims the relay together. A single-stage pipeline never
+//! reaches either: `eval_pipeline` runs it inline, this module untouched.
 
 #[cfg(unix)]
 use super::protocol::pipe_error;
@@ -50,15 +51,12 @@ impl PipelineGroup {
         self.leader
     }
 
+    /// Spawn the anchor, whose only job is to keep the pgid's `setpgid`
+    /// join target alive until the last stage has joined — every caller
+    /// here has at least two stages to join.
     #[cfg(unix)]
-    pub(super) fn prepare(&mut self, shell: &Shell, stages: usize) -> Settled<()> {
+    pub(super) fn prepare(&mut self, shell: &Shell) -> Settled<()> {
         if self.leader.is_some() {
-            return Ok(());
-        }
-        // The anchor keeps a stage's `setpgid` join target alive until
-        // the last stage has joined.  One stage has no later join: its
-        // own child leads the group.
-        if stages < 2 {
             return Ok(());
         }
         let anchor = AnchorProcess::spawn(shell)?;
@@ -73,9 +71,9 @@ impl PipelineGroup {
         clippy::unused_self,
         clippy::needless_pass_by_ref_mut,
         clippy::unnecessary_wraps,
-        reason = "the signature is the Unix arm's, where the anchor records itself in `self`, needs the shell to spawn, counts the stages, and may fail; the one caller is cross-platform and writes `group.prepare(shell, stages)?`"
+        reason = "the signature is the Unix arm's, where the anchor records itself in `self`, needs the shell to spawn, and may fail; the one caller is cross-platform and writes `group.prepare(shell)?`"
     )]
-    pub(super) fn prepare(&mut self, _shell: &Shell, _stages: usize) -> Settled<()> {
+    pub(super) fn prepare(&mut self, _shell: &Shell) -> Settled<()> {
         Ok(())
     }
 

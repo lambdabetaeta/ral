@@ -119,4 +119,4 @@ denotes, not a confinement question, and it wants one run on Linux to settle.
 (the verb, and the open question this closes),
 [[design/grant|grant]] (the lattice this adds a dimension to),
 [[decisions/260617_watch-repl-builtin|watch-repl-builtin]] (absence versus
-veto, and why both survive here), and `docs/SPEC.md` §11.4, §13.6, §13.7.
+veto, and why both survive here), and `docs/SPEC.md` §12.6, §12.9, §11.5.

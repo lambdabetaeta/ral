@@ -85,12 +85,9 @@ module.exports = grammar({
   ],
 
   // GLR conflicts:
-  //  - $deref vs $deref_index: both start with '$' IDENT.
-  //  - list_pattern vs map_pattern: both start with '['.
   //  - _list_item vs _map_entry: a spread can begin either; the inside-`[…]`
   //    parser decides which by looking at the first non-spread shape.
   conflicts: $ => [
-    [$.deref, $.deref_index],
     [$._list_item, $._map_entry],
   ],
 
@@ -140,24 +137,37 @@ module.exports = grammar({
 
     // if cond then [elsif cond then]* [else atom]?
     // Both `then` and `else` branches are atoms — typically blocks or !{…}.
+    // Newlines may separate 'if'/'elsif' from their condition, and the
+    // condition from its body, mirroring Parser::parse_if_branch (SPEC §3.3).
     if_stmt: $ => prec.right(seq(
       'if',
+      optional(/\n+/),
       field('cond', $._value),
+      optional(/\n+/),
       field('then', $._value),
       repeat($.elsif_clause),
       optional($.else_clause),
     )),
 
+    // A newline before 'elsif'/'else' reads equally well as the separator
+    // ending the previous statement, and tree-sitter silently always chose
+    // that — so a clause starting on its own line parsed as a bare command
+    // named `elsif`. Bundling the newline run into the keyword's own token
+    // hands the choice to the lexer, which can look past the run and match
+    // only when the keyword is really there. The alias keeps the visible
+    // node type bare, so `"elsif" @keyword` still fires; its span reaches
+    // back over the swallowed whitespace, which has no glyph to mis-color.
     elsif_clause: $ => seq(
+      choice('elsif', alias(token(seq(/\n+/, /[ \t\r]*/, 'elsif')), 'elsif')),
       optional(/\n+/),
-      'elsif',
       field('cond', $._value),
+      optional(/\n+/),
       field('then', $._value),
     ),
 
     else_clause: $ => seq(
+      choice('else', alias(token(seq(/\n+/, /[ \t\r]*/, 'else')), 'else')),
       optional(/\n+/),
-      'else',
       field('body', $._value),
     ),
 
@@ -296,10 +306,13 @@ module.exports = grammar({
 
     // key: binding optional_default — e.g. [host: h, port: p = 5432].
     // Keys may be plain identifiers, single-quoted strings, or backtick tags.
+    // The binder is its own field (mirroring map_entry's 'value') so a
+    // highlight query can target it without also catching an identifier-
+    // shaped key.
     map_pattern_entry: $ => seq(
       field('key', choice($.identifier, $.string_single, $.tag)),
       ':',
-      optional($._pattern),
+      optional(field('pattern', $._pattern)),
       optional(seq('=', $._value_bracket)),
     ),
 
@@ -481,10 +494,12 @@ module.exports = grammar({
 
     // $name[k1][k2] — indexed dereference; at least one index.
     // Uses a compound `$IDENT` token so no space is permitted between sigil
-    // and name.
+    // and name, and `token.immediate` on '[' so none is permitted before an
+    // index either: `$x [0]` is a command argument followed by a list
+    // literal, not an index (Parser::next_token_is_adjacent).
     deref_index: $ => prec.left(seq(
       token(seq('$', IDENT)),
-      repeat1(seq('[', optional(/[^\]\n]*/), ']')),
+      repeat1(seq(token.immediate('['), optional(/[^\]\n]*/), ']')),
     )),
 
     // $name — plain dereference

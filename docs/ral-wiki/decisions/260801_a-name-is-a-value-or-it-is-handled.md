@@ -186,4 +186,4 @@ exhaustive),
 [[internals/builtins-registry|builtins-registry]],
 [[internals/handler-dispatch|handler-dispatch]],
 [[map/core/runtime|runtime]], [[map/core/builtins|builtins]];
-`docs/SPEC.md` §16, §17, §21, RATIONALE §"Values and commands".
+`docs/SPEC.md` §14, §16.7, RATIONALE §"Values and commands".

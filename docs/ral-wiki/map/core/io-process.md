@@ -179,7 +179,7 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   inherited exactly like the builtin table so workers, pipeline stages,
   and forks share one counter; only a guest engine (`RAL_GUEST`) installs
   it, and there it replaces the per-command OS projection
-  ([[map/core/runtime|runtime]], `docs/SPEC.md` §15.2).
+  ([[map/core/runtime|runtime]], `docs/SPEC.md` §12.11).
 
   **The recorded gap.** The jail is uid + cgroup + `NO_NEW_PRIVS` — there is
   no seccomp filter, and nothing stops a jailed process from calling
@@ -203,5 +203,5 @@ drives this plumbing in [[map/core/runtime|runtime]].
 Shared label vocabulary for the lazy Stream protocol: runtime variant labels
 `more` / `done` and the `head` / `tail` payload fields, with the type-row
 spellings (`` `more `` / `` `done ``) kept beside them so runtime and
-[[map/core/typecheck|typechecker]] recognition cannot drift. `docs/SPEC.md` §13
+[[map/core/typecheck|typechecker]] recognition cannot drift. `docs/SPEC.md` §14.5
 covers Stream semantics.

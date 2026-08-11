@@ -71,7 +71,27 @@ form,
 
 The kernel's term formers are now `_to_`, `_؛_`, `_∣_`, `exec`, `capture`,
 `decode`, `rec`. `decode : F[Value] Bytes → F[Value] String` is the one partial
-former, and it is where the Agda model should carry the failure clause.
+former, and it is where the Agda model carries the failure clause.
+
+The model carries it as of 2026-08-12. `dev/agda` gained a `String` base type
+with `str` as its introduction form, a `decode` former over a *computation* —
+the shape of `CompKind::Decode`, so the decomposition is a theorem rather than
+a convention — and a decoder `dec : 𝔹* → Maybe Str` as a parameter of the
+machine, not of the syntax: a typing rule cannot know whether a decode will
+succeed. Failure is **stuckness**, not a state: the kernel has no handlers, so
+there is nowhere to send a failure, and `decode-stuck` says the state has no
+successor under *any* label — which is what distinguishes it from an `exec`
+waiting on the world. `Obs` grew a second valueless leaf, `abort`, distinct
+from the truncation leaf `undef`, and `_≐_` grew the two fields that preserve
+it; `≉-abort-loop` proves a failing decode is not observationally a hang, which
+is what ral's behaviour demands and what makes the leaf more than decoration.
+
+One gap is owned rather than modelled: ral flushes a non-empty capture buffer
+to the nearest visible stream when the body of a capture fails, and the frozen
+machine reports none of it, so an aborting observation is faithful only up to
+that flush. No theorem depends on the difference — every conclusion about
+escaping bytes asks for a `Terminal` first — and modelling it needs a drain of
+the buffers above the failure at the instant it happens.
 
 ## The alternative that was refused
 

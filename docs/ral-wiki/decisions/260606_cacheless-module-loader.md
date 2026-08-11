@@ -61,4 +61,4 @@ cache child→parent — went with it.
 
 See also [[map/core/builtins|builtins]],
 [[map/core/capabilities|capabilities]],
-`docs/SPEC.md` §8 (Modules).
+`docs/SPEC.md` §10.3–§10.4 (Modules).

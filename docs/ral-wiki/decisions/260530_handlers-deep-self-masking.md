@@ -26,4 +26,4 @@ which handler is in scope at each point — rather than how a captured
 continuation is re-entered.
 
 See [[design/effects-handlers|effects-handlers]] for the underlying theory and `docs/SPEC.md`
-for the formal rules.
+§9.6 for the formal rules.

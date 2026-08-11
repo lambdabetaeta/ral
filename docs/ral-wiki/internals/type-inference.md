@@ -199,7 +199,13 @@ ground route.**
 **Generalisation is at the binding boundary** (`generalize.rs`). At each `Bind`
 the inferencer takes the type's free variables minus those still free in the
 environment and closes over the difference into a `Scheme`; `instantiate`
-refreshes a scheme's bound variables at each use. The order follows the SCC
+refreshes a scheme's bound variables at each use. Generalisation walks the
+type structurally and unbudgeted, where unification charges a depth ceiling:
+the walks are linear in a type the source built one constructor per statement,
+and only unification descends past what the parser saw
+([[decisions/260812_depth-is-guarded-where-it-multiplies|depth-is-guarded-where-it-multiplies]],
+which also records checking's superlinear cost in nesting depth). The order
+follows the SCC
 structure the elaborator found — a non-recursive group generalises at its binding
 point, a mutually recursive group stays monomorphic until its fixed point — which
 is what keeps generalisation sound. A type error aborts with a positioned
@@ -235,4 +241,4 @@ checked at its inferred scheme in run *N+1*; a name from an unchecked path (a
 ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
 
 See also [[design/types|types]]; map [[map/core/typecheck|typecheck]]. Judgments:
-`docs/SPEC.md` §20.
+`docs/SPEC.md` §17.3.

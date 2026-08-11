@@ -262,8 +262,8 @@ impl PipelineBuild {
     fn new(plan: &PipelinePlan, routes: VecDeque<StageRoute>, shell: &Shell) -> Settled<Self> {
         let mut group = PipelineGroup::new(plan.terminal);
         // The anchor holds the pgid open across the launch so a later stage's
-        // `setpgid` target cannot die first; no-op off Unix and for one stage.
-        group.prepare(shell, plan.specs.len())?;
+        // `setpgid` target cannot die first; no-op off Unix.
+        group.prepare(shell)?;
         let park_on_stop = plan.terminal.owns_tty();
         Ok(Self {
             resources: PipelineResources::new(group, routes),

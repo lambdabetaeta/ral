@@ -49,7 +49,7 @@ argument list; a catch-all is a binary lambda `{ |name args| … }`, applied to 
 name and the argument list. Dispatch invokes the matched entry under the
 convention its install site demands rather than inspecting the stored value; a
 bare block, a non-lambda, or a wrong-arity lambda is rejected at install time
-(`docs/SPEC.md` §3.2), so no malformed entry ever reaches lookup.
+(`docs/SPEC.md` §9.4), so no malformed entry ever reaches lookup.
 
 **Self-masking is a strip-and-restore of one frame.** For the dynamic extent of
 the matched handler's body, `strip_matched(depth)` lifts *only that frame* off the
@@ -73,4 +73,4 @@ See also [[design/effects-handlers|effects-handlers]],
 [[decisions/260530_handlers-deep-self-masking|handlers-deep-self-masking]],
 [[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]];
 map [[map/core/shell-state|shell-state]], [[map/core/runtime|runtime]].
-`docs/SPEC.md` §3.2.
+`docs/SPEC.md` §9.4, §9.6.

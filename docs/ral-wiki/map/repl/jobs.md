@@ -6,7 +6,7 @@ covers_paths: [ral/src/jobs.rs, ral/src/repl/host_handlers.rs]
 
 # Map: repl / jobs
 
-`ral/src/jobs.rs` is interactive job control (SPEC §18). `JobTable` tracks
+`ral/src/jobs.rs` is interactive job control (SPEC §11.6). `JobTable` tracks
 background and stopped *pipelines* keyed by process-group id. Every pipeline
 stage is placed in its own pgid — set in each stage's `pre_exec` on Unix, via
 `CREATE_NEW_PROCESS_GROUP` plus a Job Object on Windows — so signalling,
@@ -23,7 +23,7 @@ stopped, continued, exited, and signalled observations need no fallible enum dec
 four captured builtins ([[map/repl/plugins|host handlers]]) — `jobs`, `fg`, `bg`,
 `disown` — and is reaped each iteration and on exit by the [[map/repl/loop|session]].
 A bare `fg`/`bg`/`disown` defaults to `most_recent_id` (the highest, == newest,
-job id) per SPEC §18. `reap` requests continued as well as stopped statuses, so
+job id) per SPEC §11.6. `reap` requests continued as well as stopped statuses, so
 a group resumed out-of-band by an external `kill -CONT` flips back to running
 (`mark_running`) rather than reading `stopped` forever. On exit a job group is
 taken down in three steps:

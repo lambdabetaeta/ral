@@ -218,4 +218,4 @@ agent run is a host-pushed grant frame over this same stack.
 See also [[design/grant|grant]],
 [[design/capability-carriers|capability-carriers]] (why the rule, the live
 judgment, and the `SandboxProjection` are distinct, not one); map
-[[map/core/capabilities|capabilities]]. `docs/SPEC.md` §11.
+[[map/core/capabilities|capabilities]]. `docs/SPEC.md` §12.

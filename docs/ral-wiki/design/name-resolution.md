@@ -6,7 +6,7 @@ capability belongs to is a design decision — driven by whether it returns a
 mechanism is "the builtins"; this page answers *where* a capability lands and
 *why*, leaving *what a builtin is* to [[design/builtins|builtins]], the *how* of
 registration to [[internals/builtins-registry|builtins-registry]], and the
-formal catalog to `docs/SPEC.md` §16.
+formal catalog to `docs/SPEC.md` §14.
 
 ## The layers a head name can be
 
@@ -31,7 +31,7 @@ reserved to most peripheral:
   internals the prelude wraps, never called directly by user scripts.
 - **Prelude functions** — ordinary ral bindings in scope before user code,
   wrapping the layers below for convenience (`for` calls `each`, `lines` splits on
-  `\n`). They curry and shadow like any binding (`docs/SPEC.md` §17).
+  `\n`). They curry and shadow like any binding (`docs/SPEC.md` §14).
 - **Bundled coreutils** — `ls`, `cat`, `cp`, `mv`, `rm`, … : Rust, in-process, but
   *not* registry entries. The [[map/core/runtime|runtime command layer]]
   dispatches a bare invocation through `coreutils_invoke`, riding the same
@@ -81,4 +81,4 @@ See also [[design/syscalls-are-effects|syscalls-are-effects]] (the layering is t
 [[map/core/builtins|map: builtins]].
 Cite: RATIONALE §"Values and commands", §"Structured values cross once",
 §"The grammar is the residue";
-`docs/SPEC.md` §4.2, §16, §17, §21.
+`docs/SPEC.md` §6.8, §14, §16.7.

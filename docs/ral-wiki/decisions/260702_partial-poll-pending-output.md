@@ -79,4 +79,4 @@ accumulated output — the headless counterpart to `watch`. It turns the old
 See also [[decisions/260615_poll-total-failed-arm|the settle decision]],
 [[internals/output-capture-and-detachment|output capture and detachment]],
 [[decisions/260617_watch-repl-builtin|watch-repl-builtin]],
-[[map/core/builtins|map: builtins]]; `docs/SPEC.md` §13.3.
+[[map/core/builtins|map: builtins]]; `docs/SPEC.md` §11.2.

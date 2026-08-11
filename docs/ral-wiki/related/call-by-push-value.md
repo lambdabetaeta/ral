@@ -82,5 +82,5 @@ Cite: Levy, *Call-by-Push-Value: A Subsuming Paradigm* (TLCA 1999, Zotero
 `EBD23DBT`); *Call-by-Push-Value: A Functional/Imperative Synthesis* (2003,
 Zotero `GMGNPJTX`); *Jumping Semantics for Call-By-Push-Value* (Zotero
 `83ADMPBG`); *Adjunction Models for Call-By-Push-Value with Stacks* (Zotero
-`3JTC3NB8`). ral side: RATIONALE §"Values and commands"; `docs/SPEC.md` §0,
-§3, §4.
+`3JTC3NB8`). ral side: RATIONALE §"Values and commands"; `docs/SPEC.md` §2,
+§5.
