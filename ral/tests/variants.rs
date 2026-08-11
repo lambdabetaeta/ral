@@ -93,6 +93,60 @@ fn case_handles_nullary_tag() {
     assert_eq!(out.stdout.trim(), "absent");
 }
 
+/// An arm naming a handler binds the payload as surely as an inline one, and
+/// its bytes belong to the binding, not the terminal: the arm elaborates to
+/// that handler applied to the payload, so the coercion lands inside it.
+/// Without it the bytes would reach the terminal and the binding would be
+/// empty.
+#[test]
+fn case_arm_naming_a_handler_is_captured_like_an_inline_one() {
+    let named = common::run(
+        "case_named_arm",
+        "let h = { |p| echo b }\n\
+         let xv = case `some unit [`some: $h, `none: { |p| echo z }]\n\
+         echo \"got [$xv]\"\n",
+    );
+    assert_eq!(named.status, 0, "stderr: {}", named.stderr);
+    assert_eq!(named.stdout.trim(), "got [b]");
+
+    let inline = common::run(
+        "case_inline_arm",
+        "let h = { |p| echo b }\n\
+         let xv = case `some unit [`some: { |p| $h $p }, `none: { |p| echo z }]\n\
+         echo \"got [$xv]\"\n",
+    );
+    assert_eq!(inline.status, 0, "stderr: {}", inline.stderr);
+    assert_eq!(
+        inline.stdout, named.stdout,
+        "the two spellings of one arm must run alike"
+    );
+}
+
+/// An arm is a branch, not a function the runtime applies: it runs in the
+/// ambient control context rather than a frame of its own.  So `$STATUS` at
+/// arm entry is the one the preceding statement left — evaluating a variant
+/// scrutinee sets no status, where an `if` would first record its condition —
+/// and the status the arm leaves is the `case`'s own.
+#[test]
+fn case_arm_runs_in_the_ambient_status() {
+    let inherited = common::run(
+        "case_arm_inherits_status",
+        "false\n\
+         case `go unit [`go: { |_| echo \"in [$STATUS]\" }]\n",
+    );
+    assert_eq!(inherited.status, 0, "stderr: {}", inherited.stderr);
+    assert_eq!(inherited.stdout.trim(), "in [1]");
+
+    let left = common::run(
+        "case_arm_leaves_status",
+        "true\n\
+         case `go unit [`go: { |_| false }]\n\
+         echo \"out [$STATUS]\"\n",
+    );
+    assert_eq!(left.status, 0, "stderr: {}", left.stderr);
+    assert_eq!(left.stdout.trim(), "out [1]");
+}
+
 // ─── Stream (demand-driven streams, Stream) ────────────────────────────────────
 
 #[test]

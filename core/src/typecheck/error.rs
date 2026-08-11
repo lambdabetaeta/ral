@@ -67,13 +67,13 @@ pub enum Reason {
     TryHandler,
     /// A scope form's body against the thunk shape every control wrapper expects.
     ScopeBody,
-    /// An arm handler's payload against the scrutinee's payload at that tag.
+    /// An arm's bound payload against the scrutinee's payload at that tag.
     CaseArmPayload,
+    /// The handler an arm names, against the function of the payload it must be.
+    CaseArmHandler,
     /// The `case` arms against one another, where exactly one of them runs.
     CaseArms,
     CaseScrutinee,
-    /// A handler table against the record-of-thunks shape `case` requires.
-    CaseTable,
     ListElem,
     ListSpread,
     MapKey,
@@ -141,12 +141,6 @@ pub enum TypeErrorKind {
         missing: Vec<String>,
         extra: Vec<String>,
     },
-    /// A `case` handler at `label` is not a function, or its payload does not fit.
-    CaseLabelTypeMismatch {
-        label: String,
-        expected: Ty,
-        found: Ty,
-    },
     /// `case` scrutinee is concretely not a variant — no tag to dispatch on.
     CaseOnNonVariant {
         ty: Ty,
@@ -211,7 +205,6 @@ impl TypeErrorKind {
             Self::RowExtraField { .. } => "T0020",
             Self::RowMissingField { .. } => "T0021",
             Self::CaseNotExhaustive { .. } => "T0030",
-            Self::CaseLabelTypeMismatch { .. } => "T0031",
             Self::CaseOnNonVariant { .. } => "T0032",
             Self::ControlOperatorAsValue { .. } => "T0040",
             Self::HandlerNotFirstClass { .. } => "T0041",

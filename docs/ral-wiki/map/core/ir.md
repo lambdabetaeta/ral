@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 95449d4
-generated_at_date: 2026-08-10
+generated_at_commit: f5720be
+generated_at_date: 2026-08-11
 covers_paths: [core/src/ir.rs]
 ---
 
@@ -40,6 +40,15 @@ representable state.
   position and no rule relates one stage to its neighbour
   ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]],
   [[map/core/typecheck|typecheck]]).
+- `CompKind::Case { scrutinee, arms: Vec<CaseArm> }` is Levy's sum eliminator:
+  a `CaseArm` is a tag, the `IrPattern` its payload binds, and the computation
+  to run, so the alternatives are a list fixed at parse time and every arm body
+  is a node the checker can annotate — an `if` with as many branches as the
+  row has labels ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
+  An `ArmBody` is `Inline` or `Applied` — the branch the user wrote out, or the
+  handler they named applied to the payload. Both are the same branch and are
+  typed alike; the distinction exists so a handler that is not a function is
+  faulted as an *arm*.
 - `CompKind::Capture(Arc<Comp>)` is the kernel half of the checker's one
   payload coercion: run the body, capture its stdout, return those bytes
   exactly. No surface syntax produces it; [[map/core/typecheck|typecheck]]'s

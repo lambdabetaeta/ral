@@ -50,18 +50,6 @@ impl TypeErrorKind {
                 )
             }
             Self::CaseNotExhaustive { missing, extra } => fmt_case_exhaustiveness(missing, extra),
-            Self::CaseLabelTypeMismatch {
-                label,
-                expected,
-                found,
-            } => {
-                let ctx = FmtCtx::for_value_types(&[expected, found]);
-                format!(
-                    "the handler for {label} has the wrong shape — it should be a function taking {}, but it has type {}",
-                    fmt_ty_ctx(expected, &ctx),
-                    fmt_ty_ctx(found, &ctx)
-                )
-            }
             Self::CaseOnNonVariant { ty } => {
                 let ctx = FmtCtx::for_value_types(&[ty]);
                 format!(
@@ -148,18 +136,14 @@ impl TypeErrorKind {
             Self::RowMissingField { label } => format!("this record needs field '{label}'"),
             Self::CaseNotExhaustive { missing, extra } => {
                 match (missing.as_slice(), extra.as_slice()) {
-                    ([only], []) => format!("no handler for {only}"),
-                    (some, []) => format!("no handler for {}", some.join(", ")),
-                    ([], [only]) => format!("handler for {only} that the value never produces"),
-                    ([], some) => format!(
-                        "handlers for {} that the value never produces",
-                        some.join(", ")
-                    ),
+                    ([only], []) => format!("no arm for {only}"),
+                    (some, []) => format!("no arm for {}", some.join(", ")),
+                    ([], [only]) => format!("arm for {only} that the value never produces"),
+                    ([], some) => {
+                        format!("arms for {} that the value never produces", some.join(", "))
+                    }
                     _ => "case alternatives don't match the value".into(),
                 }
-            }
-            Self::CaseLabelTypeMismatch { label, .. } => {
-                format!("the handler at {label} is the wrong shape")
             }
             Self::ErrorRecordMessage { .. } => "this `message` is not text".into(),
             Self::CaseOnNonVariant { .. }
@@ -242,14 +226,14 @@ fn fmt_case_exhaustiveness(missing: &[String], extra: &[String]) -> String {
     let mut parts: Vec<String> = Vec::new();
     match missing {
         [] => {}
-        [one] => parts.push(format!("no handler for {one}")),
-        many => parts.push(format!("no handlers for {}", many.join(", "))),
+        [one] => parts.push(format!("no arm for {one}")),
+        many => parts.push(format!("no arms for {}", many.join(", "))),
     }
     match extra {
         [] => {}
-        [one] => parts.push(format!("handler for {one} but the value never produces it")),
+        [one] => parts.push(format!("arm for {one} but the value never produces it")),
         many => parts.push(format!(
-            "handlers for {} but the value never produces them",
+            "arms for {} but the value never produces them",
             many.join(", ")
         )),
     }
@@ -272,10 +256,12 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
              \\\" inside the string, or drop the inner quoting"
                 .to_string(),
         ),
+        // A `case` arm's head is the handler it named, and the `Reason` match
+        // below explains it as such.
         TypeErrorKind::CommandNotFunction {
             split_string_suspect: false,
             ..
-        } => Some(
+        } if !matches!(reason, Some(Reason::CaseArmHandler)) => Some(
             "a command head must be a function or a thunk; \
              a value here is data, not something you can invoke — pass it \
              as an argument, or wrap it in a function instead"
@@ -377,8 +363,15 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         }
         Reason::MapIndexKey => Some("indexing into a map takes a String (the key)".to_string()),
         Reason::CaseArmPayload => Some(
-            "the `case` arm's handler must accept the payload \
-             type the scrutinee constructs at that tag"
+            "the `case` arm binds the payload the scrutinee \
+             constructs at that tag, so the two must agree"
+                .to_string(),
+        ),
+        Reason::CaseArmHandler => Some(
+            "an arm that names its handler runs that handler on the payload, \
+             so the name must stand for a function of one argument — to hand \
+             a value back instead, write the arm out, as in \
+             `ok: { |_| return 5 }"
                 .to_string(),
         ),
         Reason::CaseArms => Some(
@@ -483,7 +476,6 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         | Reason::TryHandler
         | Reason::ScopeBody
         | Reason::CaseScrutinee
-        | Reason::CaseTable
         | Reason::ListElem
         | Reason::MapElem
         | Reason::MapSpread

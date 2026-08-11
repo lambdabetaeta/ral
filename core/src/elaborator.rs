@@ -15,15 +15,15 @@
 //! `./x`, `~/x`, `$f`, `{ … }`) declares which it is syntactically.
 
 use crate::ir::{
-    Args, CommandName, CommandWord, Comp, CompKind, Exec, IrPattern, PipeYield, RedirectV, ScopeOp,
-    Val, ValListElem, ValMapEntry, ValRedirectTarget,
+    Args, ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, IrPattern, PipeYield,
+    RedirectV, ScopeOp, Val, ValListElem, ValMapEntry, ValRedirectTarget,
 };
 use crate::prelude_manifest;
 use crate::source::Span;
 use crate::source::Spanned;
 use crate::source::WithSpan;
 use crate::syntax::ast::{
-    Ast, Expr, Head, IfBranch, ListElem, MapEntry, MapPatternEntry, Pattern, Redirect,
+    self, Ast, Expr, Head, IfBranch, ListElem, MapEntry, MapPatternEntry, Pattern, Redirect,
     RedirectTarget, ScopeAst, Stmt, Word,
 };
 use crate::syntax::group::{StmtGroup, group_stmts};
@@ -609,7 +609,10 @@ impl Elaborator {
 
             Ast::If { branches, else_ } => self.elab_if(branches, else_.as_ref(), binds),
 
-            Ast::Case { scrutinee, table } => comp!(
+            // The scrutinee always runs, so whatever it hoists joins the
+            // caller's binds; an arm may not run, and its body is a closed
+            // computation that hoists nothing outward.
+            Ast::Case { scrutinee, arms } => comp!(
                 self,
                 CompKind::Case {
                     scrutinee: Spanned::with_span(
@@ -618,10 +621,7 @@ impl Elaborator {
                             this.to_val(&scrutinee.item, binds)
                         }),
                     ),
-                    table: Spanned::with_span(
-                        table.span,
-                        self.with_span(table.span, |this| { this.to_val(&table.item, binds) }),
-                    ),
+                    arms: arms.iter().map(|arm| self.elab_case_arm(arm)).collect(),
                 }
             ),
 
@@ -684,6 +684,48 @@ impl Elaborator {
 
     fn elab_branch(&mut self, ast: &Ast) -> Arc<Comp> {
         Arc::new(self.elab_guarded(ast))
+    }
+
+    /// One `case` arm, in either spelling, as the same `pattern`-and-`body`
+    /// branch.
+    ///
+    /// An arm written `{ |p| … }` *is* that branch: the binder elaborates
+    /// before its names enter scope, as a lambda parameter does, and the body
+    /// runs inline, so tail position passes through and nothing it binds
+    /// escapes.  Any other atom is the function it names applied to the
+    /// payload — elaborated from the very call the user could have written, so
+    /// the two spellings agree on type, route, and coercion by construction.
+    fn elab_case_arm(&mut self, arm: &ast::CaseArm) -> CaseArm {
+        let tag = arm.tag.clone();
+        self.with_span(arm.body.span, |this| match arm.body.item.as_ref() {
+            Ast::Lambda { param, body } => {
+                let pattern = this.with_span(param.span, |t| t.elab_pattern(&param.item));
+                let mut names = HashSet::new();
+                param.item.collect_names(&mut names);
+                let body = this.with_bound_names(names, |t| t.stmts(body));
+                CaseArm {
+                    tag,
+                    pattern,
+                    body: ArmBody::Inline(Arc::new(body)),
+                }
+            }
+            handler => {
+                let payload = this.gensym();
+                let call = Ast::Call {
+                    head: Head::Value(Box::new(handler.clone())),
+                    args: vec![Spanned::with_span(
+                        arm.body.span,
+                        Ast::Variable(payload.clone()),
+                    )],
+                    redirects: Vec::new(),
+                };
+                CaseArm {
+                    tag,
+                    pattern: IrPattern::Name(payload),
+                    body: ArmBody::Applied(Arc::new(this.elab_guarded(&call))),
+                }
+            }
+        })
     }
 
     /// Elaborate `ast` in a context that may not run it.  The fresh binds

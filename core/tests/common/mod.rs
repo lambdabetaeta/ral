@@ -64,6 +64,7 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
             sub(then);
             sub(else_);
         }
+        CompKind::Case { arms, .. } => arms.iter().for_each(|arm| sub(arm.body.comp())),
         CompKind::Force(Val::Thunk(c)) | CompKind::Return(Val::Thunk(c)) | CompKind::Capture(c) => {
             walk_comp(c, visit);
         }

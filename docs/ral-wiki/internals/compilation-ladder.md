@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 95449d4
-verified_at_date: 2026-08-10
-anchors: [compile, compile_and_typecheck, CompileOutcome, SessionSchemes, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, PipeYield, stage_types, Capture, ArmWalk, eta_expand_captured]
+verified_at_commit: f5720be
+verified_at_date: 2026-08-11
+anchors: [compile, compile_and_typecheck, CompileOutcome, SessionSchemes, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, PipeYield, stage_types, Capture, CaseArm, ArmWalk, eta_expand_captured]
 ---
 
 # The compilation ladder: source to typed IR
@@ -57,7 +57,7 @@ artifact. `core/src/lib.rs` exposes the whole descent as two functions: `compile
 
   - a `Seq`'s tail;
   - a `Bind`'s RHS;
-  - each arm of an `If`, a fallback chain, or a `try`;
+  - each arm of an `If`, a `Case`, a fallback chain, or a `try`;
   - the body of a force of a syntactic thunk.
 
   Every other position is a discard. A discarded value never wraps in
@@ -77,8 +77,9 @@ artifact. `core/src/lib.rs` exposes the whole descent as two functions: `compile
   send the wrapper elsewhere.
 
   Demand propagation stops at a leaf, at an opaque force, and at an opaque
-  scope arm. `case` stays strict and uncoerced. Its arms are fields of a
-  record, with no fixed arity for a demand to walk.
+  scope arm. A `case` arm is never one of those stops: arms are syntax, so the
+  demand walks into every one of them
+  ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
 
   With the second mode-inference engine retired
   ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]), this

@@ -14,8 +14,9 @@
 
 use crate::source::{Span, Spanned};
 use crate::syntax::ast::{
-    Ast, BinaryOp, Expr, Head, IfBranch, ListElem, MapEntry, MapKey, MapPatternEntry, Pattern,
-    Redirect, RedirectMode, RedirectTarget, ScopeAst, ScopeKeyword, Stmt, Word, WordLiteral,
+    Ast, BinaryOp, CaseArm, Expr, Head, IfBranch, ListElem, MapEntry, MapKey, MapPatternEntry,
+    Pattern, Redirect, RedirectMode, RedirectTarget, ScopeAst, ScopeKeyword, Stmt, Word,
+    WordLiteral,
 };
 use crate::syntax::lexer::{self, LexError, LexErrorKind, StringPart, Token};
 use crate::types;
@@ -445,7 +446,7 @@ impl Parser {
     ///
     /// Every arm must leave the cursor at [`Self::at_cmd_end`] — checked once
     /// here rather than trusted of each arm, so a fixed-shape form that stops
-    /// short (like `case`'s scrutinee-then-table) can't hand its leftover
+    /// short (like `case`'s scrutinee-then-arms) can't hand its leftover
     /// tokens to `parse_program` as a silent, separator-less next statement.
     fn parse_stage(&mut self) -> Result<Ast, ParseError> {
         let head = self.peek().as_plain_word().map(str::to_owned);
@@ -521,19 +522,132 @@ impl Parser {
         Ok(redirects)
     }
 
-    /// case = 'case' atom atom  (scrutinee, then a tag-keyed table of thunks)
+    /// case = 'case' atom '[' arm (',' arm)* trailing-comma? ']'
     ///
-    /// Any atom is accepted for either: the typechecker enforces the shapes,
-    /// and its errors can name the resolved type where the parser could not.
+    /// The scrutinee is any atom; the arms are not an atom at all.  They look
+    /// like a tag-keyed record and are none: each is a literal label paired
+    /// with a body, so the set of alternatives is a fact the parser establishes
+    /// and nothing downstream can widen.  Everything that would hide that set —
+    /// a computed table in place of the list, a spread, a repeated tag — is
+    /// refused here, where no payload is yet in flight.
     fn parse_case(&mut self) -> Result<Ast, ParseError> {
         self.advance(); // consume `case`
         self.skip_newlines();
         let (scrut_span, scrutinee) = self.capture_span(Self::parse_atom)?;
         self.skip_newlines();
-        let (table_span, table) = self.capture_span(Self::parse_atom)?;
+        self.require_continuation("the `case` arms")?;
+        if self.peek() != &Token::LBracket {
+            let found = self.peek().clone();
+            return Err(self.error(format!(
+                "`case` wants its arms here, one per tag, written out — \
+                 case $x [`ok: {{ |v| … }}, `err: {{ |e| … }}] — but found {found}. \
+                 The arms are syntax, not a record: a table assembled elsewhere hides \
+                 alternatives `case` must see to prove it covers every tag."
+            )));
+        }
+        self.advance(); // consume `[`
+        if self.peek() == &Token::RBracket {
+            return Err(self.error(
+                "`case` needs at least one arm — what should it do with the value? \
+                 Write one arm per tag, as in case $x [`ok: { |v| … }].",
+            ));
+        }
+        let mut arms: Vec<CaseArm> = Vec::new();
+        self.parse_separated_until(&Token::RBracket, "`case` arms", |p| {
+            let arm = p.parse_case_arm()?;
+            if let Some(prev) = arms.iter().find(|a| a.tag.item == arm.tag.item) {
+                let label = &arm.tag.item;
+                let span = arm.tag.span.or(prev.tag.span).unwrap_or_else(|| p.span());
+                return Err(Self::error_at(
+                    span,
+                    format!(
+                        "this `case` already has a `{label} arm, and exactly one \
+                         computation may run per tag — merge the two bodies, or give \
+                         the second arm the tag you meant."
+                    ),
+                ));
+            }
+            arms.push(arm);
+            Ok(SepFlow::Cont)
+        })?;
         Ok(Ast::Case {
             scrutinee: Spanned::boxed(scrut_span, scrutinee),
-            table: Spanned::boxed(table_span, table),
+            arms,
+        })
+    }
+
+    /// arm = TAG ':' (lambda | atom)
+    ///
+    /// The tag is read straight off the token, never through `parse_atom`:
+    /// the tag grammar takes the next adjacent atom as a payload, and would
+    /// swallow the arm's binder as one.  The body is any atom — a function
+    /// named elsewhere is an arm like any other, since what must be syntax is
+    /// the *set* of alternatives, not how each one is spelled.  A brace form
+    /// is read here rather than by `parse_atom`, so an arm that forgot its
+    /// binder or took two is told so where it stands.
+    fn parse_case_arm(&mut self) -> Result<CaseArm, ParseError> {
+        if self.peek() == &Token::Spread {
+            return Err(self.error(
+                "a `case` lists its arms one by one, so a `...` spread has no meaning \
+                 here — an arm spliced in from elsewhere is an alternative `case` cannot \
+                 see, and so cannot prove it covers. Write it out as an arm of its own.",
+            ));
+        }
+        let tag_span = self.span();
+        let Token::Tag(label) = self.peek().clone() else {
+            let found = self.peek().clone();
+            return Err(self.error(format!(
+                "a `case` arm is labelled by a tag, as in \
+                 case $x [`some: {{ |p| … }}] — but found {found}."
+            )));
+        };
+        self.advance();
+        if self.peek() != &Token::Colon {
+            let found = self.peek().clone();
+            return Err(self.error(format!(
+                "expected `:` after the `{label} arm's tag, found {found}."
+            )));
+        }
+        self.advance(); // consume `:`
+        let (body_span, body) = if self.peek() == &Token::LBrace {
+            self.capture_span(|p| p.parse_case_arm_lambda(&label))?
+        } else {
+            self.capture_span(Self::parse_atom)?
+        };
+        Ok(CaseArm {
+            tag: Spanned::new(tag_span, label),
+            body: Spanned::boxed(body_span, body),
+        })
+    }
+
+    /// lambda = '{' '|' binder '|' program '}' — an arm's own body.
+    ///
+    /// `parse_block` would accept both shapes this rejects: a plain thunk,
+    /// which binds nothing, and a multi-parameter lambda, which it curries.
+    /// Neither is an arm, and each is worth its own sentence.
+    fn parse_case_arm_lambda(&mut self, label: &str) -> Result<Ast, ParseError> {
+        self.advance(); // consume `{`
+        if self.peek() != &Token::Pipe {
+            return Err(self.error(format!(
+                "the `{label} arm must bind its payload: write {{ |p| … }}, \
+                 or {{ |_| … }} where the tag carries nothing."
+            )));
+        }
+        self.advance(); // consume the opening `|`
+        let (param_span, param) = self.parse_binder()?;
+        if self.peek() != &Token::Pipe {
+            return Err(self.error(format!(
+                "a `case` arm binds exactly one payload, so the `{label} arm takes one \
+                 parameter — destructure it in place if it carries several fields, \
+                 as in {{ |[head: h, tail: t]| … }}."
+            )));
+        }
+        self.advance(); // consume the closing `|`
+        let body = self.parse_program()?;
+        self.expect(&Token::RBrace)?;
+        Ok(Ast::Lambda {
+            param: Spanned::new(param_span, param),
+            body,
         })
     }
 
@@ -1725,9 +1839,15 @@ mod tests {
                     .collect(),
                 else_: else_.map(|e| Spanned::synthetic_boxed(strip_one(*e.item))),
             },
-            Ast::Case { scrutinee, table } => Ast::Case {
+            Ast::Case { scrutinee, arms } => Ast::Case {
                 scrutinee: Spanned::synthetic_boxed(strip_one(*scrutinee.item)),
-                table: Spanned::synthetic_boxed(strip_one(*table.item)),
+                arms: arms
+                    .into_iter()
+                    .map(|arm| CaseArm {
+                        tag: Spanned::synthetic(arm.tag.item),
+                        body: Spanned::synthetic_boxed(strip_one(*arm.body.item)),
+                    })
+                    .collect(),
             },
             Ast::Tag { label, payload } => Ast::Tag {
                 label,
@@ -2511,9 +2631,156 @@ mod tests {
         assert_eq!(ast[1], app(bare_head("echo"), vec![plain("after")]));
     }
 
+    /// `` case $r [`ok: { |v| echo $v }] `` — the one-armed fixture the
+    /// statement-boundary tests below share.
+    const ONE_ARMED_CASE: &str = "case $r [`ok: { |v| echo $v }]";
+
+    fn one_armed_case() -> Ast {
+        Ast::Case {
+            scrutinee: Spanned::synthetic_boxed(Ast::Variable("r".into())),
+            arms: vec![CaseArm {
+                tag: Spanned::synthetic("ok".into()),
+                body: Spanned::synthetic_boxed(arm_lambda(
+                    Pattern::Name("v".into()),
+                    vec![app(bare_head("echo"), vec![Ast::Variable("v".into())])],
+                )),
+            }],
+        }
+    }
+
+    /// An arm's own `{ |p| … }` is an ordinary lambda in the tree.
+    fn arm_lambda(param: Pattern, stmts: Vec<Ast>) -> Ast {
+        Ast::Lambda {
+            param: Spanned::synthetic(param),
+            body: body(stmts),
+        }
+    }
+
+    #[test]
+    fn parse_case_reads_a_tag_and_a_binder_per_arm() {
+        let ast =
+            unwrap_stmts(parse("case $r [`ok: { |v| echo $v }, `err: { |_| echo no }]").unwrap());
+        assert_eq!(
+            ast,
+            vec![Ast::Case {
+                scrutinee: Spanned::synthetic_boxed(Ast::Variable("r".into())),
+                arms: vec![
+                    CaseArm {
+                        tag: Spanned::synthetic("ok".into()),
+                        body: Spanned::synthetic_boxed(arm_lambda(
+                            Pattern::Name("v".into()),
+                            vec![app(bare_head("echo"), vec![Ast::Variable("v".into())])],
+                        )),
+                    },
+                    CaseArm {
+                        tag: Spanned::synthetic("err".into()),
+                        body: Spanned::synthetic_boxed(arm_lambda(
+                            Pattern::Wildcard,
+                            vec![app(bare_head("echo"), vec![plain("no")])],
+                        )),
+                    },
+                ],
+            }]
+        );
+    }
+
+    /// A destructuring binder is a pattern like any other, so a payload
+    /// record can be taken apart in the arm that receives it.
+    #[test]
+    fn parse_case_arm_binder_may_destructure() {
+        let ast = unwrap_stmts(parse("case $s [`more: { |[head: h]| echo $h }]").unwrap());
+        let Ast::Case { arms, .. } = &ast[0] else {
+            panic!("expected a case");
+        };
+        let Ast::Lambda { param, .. } = arms[0].body.item.as_ref() else {
+            panic!("expected an inline arm");
+        };
+        assert_eq!(
+            param.item,
+            Pattern::Map(vec![MapPatternEntry {
+                key: MapKey::Bare("head".into()),
+                pattern: Pattern::Name("h".into()),
+                default: None,
+            }])
+        );
+    }
+
+    /// The set of alternatives is syntax; an arm's *body* is a computation
+    /// however it is spelled, so a function named elsewhere is an arm too.
+    #[test]
+    fn parse_case_arm_body_may_be_any_atom() {
+        let ast = unwrap_stmts(parse("case $r [`ok: $handler, `err: !{ recover }]").unwrap());
+        let Ast::Case { arms, .. } = &ast[0] else {
+            panic!("expected a case");
+        };
+        assert_eq!(arms[0].body.item.as_ref(), &Ast::Variable("handler".into()));
+        assert!(matches!(arms[1].body.item.as_ref(), Ast::Force(_)));
+    }
+
+    #[test]
+    fn parse_case_rejects_a_computed_table() {
+        let err = parse("case $r $handlers").unwrap_err();
+        assert!(
+            err.message
+                .contains("`case` wants its arms here, one per tag"),
+            "expected the arms-are-syntax error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_case_rejects_a_spread_arm() {
+        let err = parse("case $r [`ok: { |v| echo $v }, ...$rest]").unwrap_err();
+        assert!(
+            err.message.contains("`...` spread has no meaning here"),
+            "expected the spread-arm error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_case_rejects_a_repeated_tag() {
+        let err = parse("case $r [`ok: { |v| echo $v }, `ok: { |v| echo again }]").unwrap_err();
+        assert!(
+            err.message.contains("already has a `ok arm"),
+            "expected the duplicate-arm error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_case_rejects_an_unbound_arm_body() {
+        let err = parse("case $r [`ok: { echo hi }]").unwrap_err();
+        assert!(
+            err.message.contains("must bind its payload"),
+            "expected the missing-binder error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_case_rejects_a_two_parameter_arm() {
+        let err = parse("case $r [`ok: { |a b| echo hi }]").unwrap_err();
+        assert!(
+            err.message.contains("binds exactly one payload"),
+            "expected the arity error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_case_rejects_no_arms() {
+        let err = parse("case $r []").unwrap_err();
+        assert!(
+            err.message.contains("at least one arm"),
+            "expected the empty-case error, got: {}",
+            err.message
+        );
+    }
+
     #[test]
     fn parse_case_rejects_trailing_same_line_argument() {
-        let err = parse("case $r $handlers echo unexpected").unwrap_err();
+        let err = parse(&format!("{ONE_ARMED_CASE} echo unexpected")).unwrap_err();
         assert!(
             err.message.contains("unexpected") && err.message.contains("`case`"),
             "expected an unexpected-argument error naming `case`, got: {}",
@@ -2523,14 +2790,11 @@ mod tests {
 
     #[test]
     fn parse_case_still_allows_a_newline_separated_next_statement() {
-        let ast = unwrap_stmts(parse("case $r $handlers\necho after").unwrap());
+        let ast = unwrap_stmts(parse(&format!("{ONE_ARMED_CASE}\necho after")).unwrap());
         assert_eq!(
             ast,
             vec![
-                Ast::Case {
-                    scrutinee: Spanned::synthetic_boxed(Ast::Variable("r".into())),
-                    table: Spanned::synthetic_boxed(Ast::Variable("handlers".into())),
-                },
+                one_armed_case(),
                 app(bare_head("echo"), vec![plain("after")]),
             ]
         );
@@ -2538,14 +2802,11 @@ mod tests {
 
     #[test]
     fn parse_case_still_allows_a_semicolon_separated_next_statement() {
-        let ast = unwrap_stmts(parse("case $r $handlers; echo after").unwrap());
+        let ast = unwrap_stmts(parse(&format!("{ONE_ARMED_CASE}; echo after")).unwrap());
         assert_eq!(
             ast,
             vec![
-                Ast::Case {
-                    scrutinee: Spanned::synthetic_boxed(Ast::Variable("r".into())),
-                    table: Spanned::synthetic_boxed(Ast::Variable("handlers".into())),
-                },
+                one_armed_case(),
                 app(bare_head("echo"), vec![plain("after")]),
             ]
         );
@@ -2553,16 +2814,10 @@ mod tests {
 
     #[test]
     fn parse_case_still_allowed_as_a_pipeline_stage() {
-        let ast = unwrap_stmts(parse("case $r $handlers | cat").unwrap());
+        let ast = unwrap_stmts(parse(&format!("{ONE_ARMED_CASE} | cat")).unwrap());
         assert_eq!(
             ast,
-            vec![Ast::Pipeline(body(vec![
-                Ast::Case {
-                    scrutinee: Spanned::synthetic_boxed(Ast::Variable("r".into())),
-                    table: Spanned::synthetic_boxed(Ast::Variable("handlers".into())),
-                },
-                plain("cat"),
-            ]))]
+            vec![Ast::Pipeline(body(vec![one_armed_case(), plain("cat")]))]
         );
     }
 

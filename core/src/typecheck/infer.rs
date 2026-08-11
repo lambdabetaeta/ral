@@ -8,12 +8,13 @@ use super::generalize::{generalize, instantiate};
 use super::scheme::Scheme;
 use super::ty::{CompTy, GroundRoute, PayloadRoute, Row, Ty};
 use crate::ir::{
-    CommandName, CommandWord, Comp, CompKind, IrPattern, ScopeOp, Val, ValListElem, ValMapEntry,
+    ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, IrPattern, ScopeOp, Val,
+    ValListElem, ValMapEntry,
 };
 use crate::source::Span;
 use crate::source::WithSpan;
 use crate::syntax::ast::{BinaryOp, BinaryOpKind};
-use crate::syntax::tag::{is_tag_label, tag_row_label};
+use crate::syntax::tag::tag_row_label;
 use std::sync::Arc;
 
 /// Labels of a *resolved* row spine in first-appearance order, stopping at the
@@ -36,58 +37,6 @@ fn collect_extends(row: &Row) -> Vec<(String, Ty)> {
     }
 }
 
-/// One `case` arm as it was written: the handler value itself, whose address
-/// keys the result `annotate` reads back, and — for an arm written inline —
-/// its body's span, so an arm-local complaint underlines the arm and not the
-/// whole `case` form.
-struct ArmSyntax<'a> {
-    span: Option<crate::source::Span>,
-    val: &'a Val,
-}
-
-/// Each `case` arm's tag label paired with its [`ArmSyntax`].  An arm's
-/// spelling is not its identity: a named handler is as much an arm as an
-/// inline thunk, and its route is recorded just the same.  Only the span
-/// differs — a named arm has no body to underline, so the caller falls back
-/// to the `case` span.  An entry whose key is not a literal tag is no arm at
-/// all and is skipped.
-fn collect_handler_arms(table: &Val) -> std::collections::HashMap<String, ArmSyntax<'_>> {
-    fn handler_body_span(inner: &Comp) -> Option<crate::source::Span> {
-        match &inner.item {
-            // A `Lam`'s own span is the enclosing statement; the body's is the arm.
-            crate::ir::CompKind::Lam { body, .. } => body.span.or(inner.span),
-            _ => inner.span,
-        }
-    }
-    let mut out = std::collections::HashMap::new();
-    let Val::Map(entries) = table else {
-        return out;
-    };
-    for entry in entries {
-        let crate::ir::ValMapEntry::Entry(key, value) = entry else {
-            continue;
-        };
-        let raw_key = match key {
-            Val::String(s) => s.as_str(),
-            _ => continue,
-        };
-        if !is_tag_label(raw_key) {
-            continue;
-        }
-        out.insert(
-            raw_key.to_string(),
-            ArmSyntax {
-                span: match value {
-                    Val::Thunk(inner) => handler_body_span(inner),
-                    _ => None,
-                },
-                val: value,
-            },
-        );
-    }
-    out
-}
-
 /// Heuristic: did the lexer close a `"…"` on an unescaped inner quote?  The
 /// giveaway is a quoted head whose args mix a string chunk with a hoisted
 /// non-string fragment — the interpolation between the quotes, bound out into
@@ -101,6 +50,16 @@ fn looks_like_nested_quote_mistake(head: &Comp, args: &[&Val]) -> bool {
     let any_string_arg = args.iter().any(|a| matches!(a, Val::String(_)));
     let any_non_string_arg = args.iter().any(|a| !matches!(a, Val::String(_)));
     head_from_quoted && any_string_arg && any_non_string_arg
+}
+
+/// The application inside an [`ArmBody::Applied`] arm: the handler the arm
+/// named, applied to the payload.  Whatever that handler atom hoists is bound
+/// ahead of the call, so the dispatch is what those binds wrap.
+fn arm_dispatch(body: &Comp) -> &Comp {
+    match &body.item {
+        CompKind::Bind { rest, .. } => arm_dispatch(rest),
+        _ => body,
+    }
 }
 
 /// The elaborator's IR shape for `alias name { body }`.  `Ok(None)` means the
@@ -1042,66 +1001,60 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Check one `case` arm against its own `arm_cty` — the arms join, they do
-    /// not unify — and the scrutinee's resolved per-label payload row
-    /// `scrut_payloads`.
-    fn check_case_arm(
+    /// Infer one `case` arm: bind its pattern to a fresh payload type, infer
+    /// the body in that scope, then force the payload to agree with what the
+    /// scrutinee constructs at this label.  Returns the arm's computation
+    /// type and the payload type the closed scrutinee row carries at `label`.
+    ///
+    /// The agreement is forced here, while pos is still on the arm; the final
+    /// row-unify would report it with the caret on the whole `case` form.
+    fn infer_case_arm(
         &mut self,
+        arm: &CaseArm,
         label: &str,
-        handler_ty: &Ty,
-        arm_cty: &CompTy,
         scrut_payloads: &std::collections::HashMap<String, Ty>,
-    ) -> Ty {
+    ) -> (CompTy, Ty) {
         let payload_ty = self.ctx.unifier.fresh_ty();
-        let expected = Ty::Thunk(Box::new(CompTy::Fun(
-            Box::new(payload_ty.clone()),
-            Box::new(arm_cty.clone()),
-        )));
-        if self.ctx.unifier.unify_ty(handler_ty, &expected).is_err() {
-            let expected_resolved = self.ctx.unifier.apply_ty(&expected);
-            let found_resolved = self.ctx.unifier.apply_ty(handler_ty);
-            self.ctx.diagnose(TypeErrorKind::CaseLabelTypeMismatch {
-                label: label.to_string(),
-                expected: expected_resolved,
-                found: found_resolved,
-            });
-        }
-        // Force agreement while pos is still on the arm; the final row-unify
-        // would report it with the caret on the whole `case` form.
-        if let Some(scrut_payload) = scrut_payloads.get(label)
-            && self
+        let arm_cty = self.with_scope(|this| {
+            this.bind_pattern(&arm.pattern, &payload_ty, BindMode::Param);
+            if let ArmBody::Applied(body) = &arm.body {
+                let key = std::ptr::from_ref::<Comp>(arm_dispatch(body)) as usize;
+                this.ctx.arm_handler_apps.insert(key);
+            }
+            this.infer_comp(arm.body.comp())
+        });
+        // An arm always joins, so force `Return` shape now, before the join
+        // reads the arms: an arm still undecided — a call to a function under
+        // inference, as in a recursive branch — would otherwise make the whole
+        // join strict-unify, equating siblings that only ever needed to
+        // subsume.
+        let _ = self.extract_return(&arm_cty);
+        let closed_payload = self.with_span(arm.body.comp().span, |this| {
+            let Some(scrut_payload) = scrut_payloads.get(label) else {
+                return payload_ty.clone();
+            };
+            if this
                 .ctx
                 .unifier
                 .unify_ty(&payload_ty, scrut_payload)
-                .is_err()
-        {
-            let expected_resolved = self.ctx.unifier.apply_ty(scrut_payload);
-            let found_resolved = self.ctx.unifier.apply_ty(&payload_ty);
-            self.ctx.report(
-                TypeErrorKind::TyMismatch {
-                    expected: expected_resolved,
-                    actual: found_resolved,
-                },
+                .is_ok()
+            {
+                return payload_ty.clone();
+            }
+            let expected = this.ctx.unifier.apply_ty(scrut_payload);
+            let actual = this.ctx.unifier.apply_ty(&payload_ty);
+            this.ctx.report(
+                TypeErrorKind::TyMismatch { expected, actual },
                 Reason::CaseArmPayload,
             );
-            return self.ctx.unifier.fresh_ty();
-        }
-        payload_ty
+            this.ctx.unifier.fresh_ty()
+        });
+        (arm_cty, closed_payload)
     }
 
-    fn infer_case(
-        &mut self,
-        scrutinee: &crate::source::Spanned<Val>,
-        table: &crate::source::Spanned<Val>,
-    ) -> CompTy {
-        // CBPV: `case` eliminates a sum with a record of continuations, so both
-        // operands sit in value position.
+    fn infer_case(&mut self, scrutinee: &crate::source::Spanned<Val>, arms: &[CaseArm]) -> CompTy {
         let scrutinee_span = scrutinee.span;
-        let table_span = table.span;
         let scrut_ty = self.with_span(scrutinee_span, |this| this.infer_val(&scrutinee.item));
-        let table_ty = self.with_span(table_span, |this| this.infer_val(&table.item));
-
-        let arm_syntax = collect_handler_arms(&table.item);
 
         // A scrutinee that is concretely not a variant gets a sentence: the raw
         // row mismatch prints `[...ρ]`, which a beginner cannot read.
@@ -1120,66 +1073,44 @@ impl Inferencer<'_> {
                     .diagnose(TypeErrorKind::CaseOnNonVariant { ty: other });
             }
         });
-        let handler_row_var = self.ctx.unifier.fresh_row_var();
-        self.with_span(table_span, |this| {
-            this.ctx.unify_ty(
-                &table_ty,
-                &Ty::Record(Row::Var(handler_row_var)),
-                Reason::CaseTable,
-            );
-        });
-
-        // A record literal closes to `Empty`, so this is a clean label list
-        // under normal use.
-        let handler_resolved = self.ctx.unifier.apply_row(&Row::Var(handler_row_var));
-        let handler_labels = collect_extends(&handler_resolved);
 
         // Pre-resolved so each arm can unify its payload under its own pos; a
-        // residual `Var` here came from the handlers and waits for the final
-        // row-unify.
+        // residual `Var` here waits for the final row-unify.
         let scrut_resolved_row = self.ctx.unifier.apply_row(&Row::Var(scrut_row_var));
         let scrut_payloads: std::collections::HashMap<String, Ty> =
             collect_extends(&scrut_resolved_row).into_iter().collect();
 
-        // Each handler at `l` is a thunk of `payload_l → arm_l`, every arm
-        // with its own computation type: exactly one arm runs, so the arms
-        // join like `if`'s branches rather than unifying.  Each arm's route
-        // is recorded for `annotate` — a var now, ground once the join
-        // settles it.  The closed scrutinee row is built from the payloads as
-        // we go.
-        let mut closed_scrut = Row::Empty;
-        let mut arms = Vec::with_capacity(handler_labels.len());
-        for (label, handler_ty) in handler_labels.iter().rev() {
-            let arm = arm_syntax.get(label.as_str());
-            let arm_cty = self.ctx.unifier.fresh_comp_ty();
-            let closed_payload = self.with_span(arm.and_then(|a| a.span), |this| {
-                this.check_case_arm(label, handler_ty, &arm_cty, &scrut_payloads)
-            });
-            if let Some(arm) = arm {
-                let (_, route) = self.extract_return(&arm_cty);
-                self.ctx
-                    .val_results
-                    .insert(std::ptr::from_ref::<Val>(arm.val) as usize, route);
-            }
-            arms.push(arm_cty);
-            closed_scrut = Row::Extend(
-                label.clone(),
-                Box::new(closed_payload),
-                Box::new(closed_scrut),
-            );
+        // Every arm has its own computation type: exactly one runs, so the
+        // arms join like `if`'s branches rather than unifying, and each body's
+        // route is recorded for `annotate` by `infer_comp` like any other
+        // node's.  Source order throughout, so a program's complaints arrive
+        // in the order it was written.
+        let mut arm_ctys = Vec::with_capacity(arms.len());
+        let mut payloads = Vec::with_capacity(arms.len());
+        for arm in arms {
+            let label = tag_row_label(&arm.tag.item);
+            let (arm_cty, closed_payload) = self.infer_case_arm(arm, &label, &scrut_payloads);
+            arm_ctys.push(arm_cty);
+            payloads.push((label, closed_payload));
         }
+        let closed_scrut = payloads
+            .into_iter()
+            .rev()
+            .fold(Row::Empty, |rest, (l, ty)| {
+                Row::Extend(l, Box::new(ty), Box::new(rest))
+            });
 
-        // Force the scrutinee row to exactly the handler label set, restating a
-        // row mismatch as exhaustiveness.  A handler row still a bare variable
-        // — the table came from a parameter, not a literal — is *unknown*, not
-        // empty: closing it would call every scrutinee tag uncovered.
-        if !matches!(handler_resolved, Row::Var(_))
-            && let Err(kind) = self
-                .ctx
-                .unifier
-                .unify_row(&Row::Var(scrut_row_var), &closed_scrut)
+        // Force the scrutinee row to exactly the arms' label set, restating a
+        // row mismatch as exhaustiveness.  The arms are syntax, so this row is
+        // always closed and the judgment is always decided: there is no shape
+        // of `case` whose alternatives are unknown here.  An *open* scrutinee
+        // absorbs a label it has not been seen to construct — that is
+        // principal row inference, not a hole in the coverage proof.
+        if let Err(kind) = self
+            .ctx
+            .unifier
+            .unify_row(&Row::Var(scrut_row_var), &closed_scrut)
         {
-            use crate::typecheck::error::TypeErrorKind;
             let translated = match kind {
                 TypeErrorKind::RowExtraField { label } => TypeErrorKind::CaseNotExhaustive {
                     missing: vec![],
@@ -1194,12 +1125,7 @@ impl Inferencer<'_> {
             self.ctx.diagnose(translated);
         }
 
-        // No visible arms — the table came from a parameter — constrains
-        // nothing here; the case's type is the caller's to pin.
-        if arms.is_empty() {
-            return self.ctx.unifier.fresh_comp_ty();
-        }
-        self.merge_branches(arms, &Reason::CaseArms)
+        self.merge_branches(arm_ctys, &Reason::CaseArms)
     }
 
     /// Bind each name to a self-referential mono thunk, infer every RHS in that
@@ -1303,10 +1229,7 @@ impl Inferencer<'_> {
                     Ty::Thunk(Box::new(inner_ty))
                 } else {
                     let (ty, route) = self.extract_return(&inner_ty);
-                    if matches!(
-                        self.ctx.unifier.resolve_route(&route),
-                        PayloadRoute::Var(_)
-                    ) {
+                    if matches!(self.ctx.unifier.resolve_route(&route), PayloadRoute::Var(_)) {
                         self.ctx
                             .unify_route(&route, &PayloadRoute::Value, Reason::RoutePin);
                     }
@@ -1337,10 +1260,19 @@ impl Inferencer<'_> {
                     && let Some(ty) = self.command_non_function_ty(&head_ty)
                 {
                     let split_string_suspect = looks_like_nested_quote_mistake(head, &positional);
-                    self.ctx.diagnose(TypeErrorKind::CommandNotFunction {
+                    let kind = TypeErrorKind::CommandNotFunction {
                         ty,
                         split_string_suspect,
-                    });
+                    };
+                    if self
+                        .ctx
+                        .arm_handler_apps
+                        .contains(&(std::ptr::from_ref::<Comp>(comp) as usize))
+                    {
+                        self.ctx.report(kind, Reason::CaseArmHandler);
+                    } else {
+                        self.ctx.diagnose(kind);
+                    }
                     // Check the args anyway, then hand the enclosing pipeline
                     // or chain a coherent fresh result.
                     for sub in crate::ir::args::iter_subvals(args) {
@@ -1399,7 +1331,7 @@ impl Inferencer<'_> {
                 let else_cty = self.infer_comp(else_);
                 self.merge_branches(vec![then_cty, else_cty], &Reason::IfBranches)
             }
-            CompKind::Case { scrutinee, table } => self.infer_case(scrutinee, table),
+            CompKind::Case { scrutinee, arms } => self.infer_case(scrutinee, arms),
             CompKind::Scope(op) => match op {
                 ScopeOp::Within { opts, body } => {
                     let sig = self.infer_within(opts, body);

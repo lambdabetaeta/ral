@@ -324,8 +324,11 @@ A variant says that a value is one of several alternatives:
         `missing: { |_| echo "$path: not found" },
     ]
 
-The type checker verifies the arms. A tag without a payload passes `unit`;
-`_` ignores it.
+The arms are written out at the `case` itself, one per tag, which is what lets
+the type checker prove they cover every alternative the value can be. A tag
+without a payload binds `unit`; `_` ignores it. An arm may also name what to
+run — `` `missing: $explain `` runs `$explain` on the payload — but the list of
+arms is always there to read.
 
 ## 6  Pipelines, codecs, and files
 

@@ -6,7 +6,7 @@ use super::scheme::Scheme;
 use super::ty::{CompTy, GroundRoute, PayloadRoute, Ty};
 use super::unify::Unifier;
 use crate::source::{Span, WithSpan};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Typing environment
@@ -148,6 +148,10 @@ pub struct InferCtx {
     /// A scope arm's (`Val`-keyed) own route, the `Val`-level analogue of
     /// [`Self::results`] — scope arms have no `Comp` node of their own.
     pub val_results: HashMap<usize, PayloadRoute>,
+    /// The applications that are a `case` arm dispatching to the handler it
+    /// named.  A head that is not a function is then the arm's fault, and the
+    /// diagnostic says so in the vocabulary of arms.
+    pub(super) arm_handler_apps: HashSet<usize>,
     /// Arm-result merges not yet determined, awaiting
     /// [`Self::solve_and_finalize`](super::route_solver).
     pub(super) route_constraints: Vec<ArmResults>,
@@ -176,6 +180,7 @@ impl InferCtx {
             stage_types: HashMap::new(),
             results: HashMap::new(),
             val_results: HashMap::new(),
+            arm_handler_apps: HashSet::new(),
             route_constraints: Vec::new(),
         }
     }

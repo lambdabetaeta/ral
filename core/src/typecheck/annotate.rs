@@ -13,12 +13,11 @@ use super::env::{InferCtx, TyEnv};
 use super::generalize::generalize;
 use super::ty::GroundRoute;
 use crate::ir::{
-    CommandName, CommandWord, Comp, CompKind, Exec, IrPattern, PipeYield, RedirectV, ScopeOp, Val,
-    ValListElem, ValMapEntry, ValRedirectTarget,
+    CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, IrPattern, PipeYield, RedirectV,
+    ScopeOp, Val, ValListElem, ValMapEntry, ValRedirectTarget,
 };
 use crate::source::Spanned;
 use crate::syntax::ast::MapPatternEntry;
-use crate::syntax::tag::is_tag_label;
 use std::sync::Arc;
 
 /// What a demand-carrying position wants from the node it reaches.
@@ -60,7 +59,10 @@ fn val_key(val: &Val) -> usize {
 /// both read `Value`, via [`InferCtx::ground`].
 fn bytes_result(ctx: &mut InferCtx, key: usize) -> bool {
     matches!(
-        ctx.results.get(&key).copied().map(|route| ctx.ground(route)),
+        ctx.results
+            .get(&key)
+            .copied()
+            .map(|route| ctx.ground(route)),
         Some(GroundRoute::Bytes)
     )
 }
@@ -198,13 +200,22 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, spine: bool, demand: Demand)
             );
             return Spanned::with_span(comp.span, item);
         }
-        CompKind::Case { scrutinee, table } => {
+        CompKind::Case { scrutinee, arms } => {
             let item = CompKind::Case {
                 scrutinee: annotate_spanned_val(scrutinee, ctx),
-                table: Spanned::with_span(
-                    table.span,
-                    annotate_case_table(comp, &table.item, ctx, demand),
-                ),
+                arms: arms
+                    .iter()
+                    .map(|arm| CaseArm {
+                        tag: arm.tag.clone(),
+                        pattern: annotate_pattern(&arm.pattern, ctx),
+                        body: arm.body.with_comp(Arc::new(annotate_join_arm(
+                            comp,
+                            arm.body.comp(),
+                            ctx,
+                            demand,
+                        ))),
+                    })
+                    .collect(),
             };
             return Spanned::with_span(comp.span, item);
         }
@@ -313,9 +324,9 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
     }
 }
 
-/// One arm of an `If`/`Chain` join under `demand`: a byte-side join walks a
-/// byte-payload arm at `Value` and wraps a subsumed (`∅`-`Unit`) arm whole;
-/// otherwise `demand` simply inherits into the arm.
+/// One arm of an `If`/`Case`/`Chain` join under `demand`: a byte-side join
+/// walks a byte-payload arm at `Value` and wraps a subsumed (`∅`-`Unit`) arm
+/// whole; otherwise `demand` simply inherits into the arm.
 fn annotate_join_arm(join: &Comp, arm: &Comp, ctx: &mut InferCtx, demand: Demand) -> Comp {
     if byte_side_join(join, ctx, demand) {
         if bytes_result(ctx, comp_key(arm)) {
@@ -327,37 +338,6 @@ fn annotate_join_arm(join: &Comp, arm: &Comp, ctx: &mut InferCtx, demand: Demand
         );
     }
     annotate_demand(arm, ctx, false, demand)
-}
-
-/// A `case` handler table: every literal tag entry is a join arm, dispatched
-/// like a `try` handler — the `case` node's own result decides byte-side-or-
-/// not, each handler's decides descend-vs-wrap.  An arm's *spelling* never
-/// decides: a named handler is as much an arm as an inline thunk, and
-/// [`annotate_scope_val`] η-expands the one it cannot see into.
-///
-/// A table that is not a literal map (it came from a parameter) has no arms to
-/// reach here and rebuilds flat.
-fn annotate_case_table(join: &Comp, table: &Val, ctx: &mut InferCtx, demand: Demand) -> Val {
-    let Val::Map(entries) = table else {
-        return annotate_val(table, ctx);
-    };
-    Val::Map(
-        entries
-            .iter()
-            .map(|entry| match entry {
-                ValMapEntry::Entry(key @ Val::String(label), value) if is_tag_label(label) => {
-                    ValMapEntry::Entry(
-                        annotate_val(key, ctx),
-                        annotate_scope_val(join, value, ctx, true, demand),
-                    )
-                }
-                ValMapEntry::Entry(key, value) => {
-                    ValMapEntry::Entry(annotate_val(key, ctx), annotate_val(value, ctx))
-                }
-                ValMapEntry::Spread(val) => ValMapEntry::Spread(annotate_val(val, ctx)),
-            })
-            .collect(),
-    )
 }
 
 /// A scope arm/body `Val`, dispatched the way [`annotate_join_arm`]

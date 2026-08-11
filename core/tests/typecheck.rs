@@ -744,7 +744,7 @@ fn variant_payload_type_mismatch() {
 // ─── Case (sum eliminator, Phase B) ───────────────────────────────────────────
 
 #[test]
-fn case_open_scrutinee_absorbs_handler_labels() {
+fn case_open_scrutinee_absorbs_arm_labels() {
     // `` `ok 5 `` produces an open variant [`ok: Int | row].  A case with
     // `ok and `err arms forces the row to extend with `err, leaving the
     // scrutinee with both constructors after the case.
@@ -759,13 +759,13 @@ fn case_missing_arm_when_variant_has_more() {
     // `err.  A case that handles only `ok leaves `err unhandled.
     has_error(
         "let r = if true { return `ok 1 } else { return `err hello }\nlet x = case $r [`ok: { |i| return $i }]\nreturn $x",
-        "no handler for `err",
+        "no arm for `err",
     );
 }
 
 #[test]
-fn case_handler_payload_mismatch() {
-    // The `ok handler uses its payload as a String (via `upper`), but the
+fn case_arm_payload_mismatch() {
+    // The `ok arm uses its payload as a String (via `upper`), but the
     // scrutinee's `ok was constructed with an Int payload — per-label
     // unification surfaces a type mismatch.
     has_error(
@@ -775,8 +775,30 @@ fn case_handler_payload_mismatch() {
 }
 
 #[test]
+fn case_arm_naming_a_non_function_is_faulted_as_an_arm() {
+    // The arm runs what it names on the payload, so a value there is the
+    // same error as a value in head position — but the user wrote an arm,
+    // and the guidance has to be about arms.
+    let errs = raw_errors("case `a unit [`a: 7]");
+    assert!(
+        errs.iter()
+            .any(|e| e.hint().is_some_and(|h| h.contains("write the arm out"))),
+        "expected the arm-vocabulary hint, got: {errs:?}"
+    );
+    // A non-function head *inside* an arm the user wrote out is an ordinary
+    // command-head fault: the arm's body is where it belongs.
+    let errs = raw_errors("let n = 7\ncase `a unit [`a: { |_| $n x }]");
+    assert!(
+        errs.iter().any(|e| e
+            .hint()
+            .is_some_and(|h| h.contains("a command head must be"))),
+        "expected the command-head hint, got: {errs:?}"
+    );
+}
+
+#[test]
 fn case_arms_disagree_on_result() {
-    // The two handlers return values of different types — the shared
+    // The two arms return values of different types — the shared
     // result type cannot unify.
     has_error(
         "let r = `ok 5\nlet x = case $r [`ok: { |x| return $x }, `err: { |_| return hello }]\nreturn $x",
@@ -866,10 +888,8 @@ fn a_stream_piped_whole_is_accepted_and_simply_discarded() {
     // A stream is a value, and a non-final stage's value goes nowhere.  The
     // program is silent rather than wrong — the footgun admitted in
     // exchange for a stage rule that reads types, not spellings.
-    ok(
-        "let s = !{stream-cons 1 { !{stream-nil} }}\n\
-         $s | { |e| return $[$e + 1] } | { |y| return $[$y * 10] }",
-    );
+    ok("let s = !{stream-cons 1 { !{stream-nil} }}\n\
+         $s | { |e| return $[$e + 1] } | { |y| return $[$y * 10] }");
 }
 
 // ─── Control operators in value position ─────────────────────────────────────
@@ -1016,7 +1036,9 @@ fn within_handler_byte_output_arm_ok() {
 #[test]
 fn within_handler_for_echo_breaking_its_route_is_rejected() {
     assert!(
-        is_route_mismatch(r#"within [handlers: [echo: { |args| return "not bytes" }]] { echo hi }"#),
+        is_route_mismatch(
+            r#"within [handlers: [echo: { |args| return "not bytes" }]] { echo hi }"#
+        ),
         "expected a RouteMismatch pinning the echo arm to its head's byte route"
     );
 }
@@ -1047,8 +1069,9 @@ fn an_open_route_pinned_to_a_byte_head_must_return_unit() {
     let errs =
         raw_errors("alias echo { |args| fold-lines { |a l| fail [status: 5] } 0 }\nreturn unit");
     assert!(
-        errs.iter()
-            .any(|e| e.hint().is_some_and(|h| h.contains("no separate value to return"))),
+        errs.iter().any(|e| e
+            .hint()
+            .is_some_and(|h| h.contains("no separate value to return"))),
         "expected the WF-2 hint naming both sides, got: {errs:?}"
     );
     // The same arm returning `Unit` is consistent, and stays accepted.
@@ -1350,7 +1373,7 @@ fn fail_message_must_be_text() {
 // top-level spine only; the yields and the captures go everywhere, at any
 // depth.
 
-use ral_core::ir::{Comp, CompKind, IrPattern, PipeYield, Val, ValMapEntry};
+use ral_core::ir::{Comp, CompKind, IrPattern, PipeYield};
 
 /// Compile `src` to an annotated comp, asserting it type-checks.
 fn annotated(src: &str) -> Comp {
@@ -1561,29 +1584,19 @@ fn a_bind_reads_its_rhs_route_through_the_store() {
 
 /// Every tag arm of the program's `case`, in source order, with whether that
 /// arm carries a `Capture` — the byte-side coercion, which a join inserts per
-/// arm rather than at its own node.  `walk_comp` does not enter a handler
-/// table, so each arm is walked here; an arm still spelled as a bare name
-/// holds no computation, so it carries no coercion either.
+/// arm rather than at its own node.
 fn case_arms_captured(src: &str) -> Vec<(String, bool)> {
     let mut out = Vec::new();
     common::walk_comp(&annotated(src), &mut |c| {
-        let CompKind::Case { table, .. } = &c.item else {
+        let CompKind::Case { arms, .. } = &c.item else {
             return;
         };
-        let Val::Map(entries) = &table.item else {
-            return;
-        };
-        for entry in entries {
-            let ValMapEntry::Entry(Val::String(label), value) = entry else {
-                continue;
-            };
+        for arm in arms {
             let mut captured = false;
-            if let Val::Thunk(arm) = value {
-                common::walk_comp(arm, &mut |c| {
-                    captured |= matches!(c.item, CompKind::Capture(_));
-                });
-            }
-            out.push((label.clone(), captured));
+            common::walk_comp(arm.body.comp(), &mut |c| {
+                captured |= matches!(c.item, CompKind::Capture(_));
+            });
+            out.push((arm.tag.item.clone(), captured));
         }
     });
     out
@@ -1592,10 +1605,11 @@ fn case_arms_captured(src: &str) -> Vec<(String, bool)> {
 #[test]
 fn a_case_arm_is_coerced_by_its_route_not_its_spelling() {
     // Both arms write bytes and the `case` is bound, so both owe the
-    // byte-side coercion.  A named handler is as much an arm as an inline
-    // thunk: the annotator cannot see into it, so it η-expands it around a
-    // `Capture` instead of leaving it bare for its bytes to escape the
-    // binding — and the two spellings elaborate to the same route.
+    // byte-side coercion.  The set of alternatives is syntax, but an arm's
+    // body is a computation however it is spelled: an arm naming a handler
+    // elaborates to that handler applied to the payload, so the `Capture`
+    // lands inside it exactly as it lands inside an inline `echo`.  Were it
+    // left bare, its bytes would escape the binding.
     assert_eq!(
         case_arms_captured(
             "let h = { |p| echo b }\n\
@@ -1603,7 +1617,18 @@ fn a_case_arm_is_coerced_by_its_route_not_its_spelling() {
              let x = case $v [`some: $h, `none: { |p| echo z }]\n\
              return unit"
         ),
-        vec![("`some".to_string(), true), ("`none".to_string(), true)]
+        vec![("some".to_string(), true), ("none".to_string(), true)]
+    );
+    // And the two spellings of the same arm agree, which is the property the
+    // equivalence rests on — not merely that each is captured.
+    assert_eq!(
+        case_arms_captured(
+            "let h = { |p| echo b }\n\
+             let v = `some unit\n\
+             let x = case $v [`some: { |p| $h $p }, `none: { |p| echo z }]\n\
+             return unit"
+        ),
+        vec![("some".to_string(), true), ("none".to_string(), true)]
     );
 }
 
@@ -1618,7 +1643,7 @@ fn a_discarded_cases_arms_stay_uncaptured() {
              let v = `some unit\n\
              case $v [`some: $h, `none: { |p| echo z }]"
         ),
-        vec![("`some".to_string(), false), ("`none".to_string(), false)]
+        vec![("some".to_string(), false), ("none".to_string(), false)]
     );
 }
 
@@ -1808,11 +1833,13 @@ fn an_equation_added_elsewhere_does_not_make_a_program_typecheck() {
                        let z = 1\n\
                        if true { echo hi } else { !$t }\n\
                        return $x }");
-    ok("let f = { |t x| let u = if true { return $x } else { return unit }\n\
+    ok(
+        "let f = { |t x| let u = if true { return $x } else { return unit }\n\
                        if true { !$t } else { return $x }\n\
                        let z = 1\n\
                        if true { echo hi } else { !$t }\n\
-                       return $x }");
+                       return $x }",
+    );
 }
 
 #[test]
@@ -1963,15 +1990,23 @@ fn duplicate_key_last_wins_int_then_arith_ok() {
     ok("let m = [x: \"two\", x: 1]\nreturn $[$m[x] + 1]");
 }
 
-/// The same last-wins rule applies to `case` arms: a duplicated tag arm
-/// resolves to the last arm.  The first `` `ok `` arm would treat the payload
-/// as a String (via `upper`), but the last arm uses it as the Int the
-/// scrutinee carries; last-wins keeps the Int arm, so the program typechecks.
+/// A `case` arm is *not* a record entry, so the last-wins rule stops at the
+/// eliminator: exactly one computation may run per tag, and a repeated arm is
+/// refused outright rather than silently resolved to the later one.  The
+/// refusal is the parser's, since it needs no types to see it.
 #[test]
-fn duplicate_case_arm_last_wins() {
-    ok("let r = `ok 5\n\
+fn duplicate_case_arm_is_refused() {
+    let err = parse(
+        "let r = `ok 5\n\
          let x = case $r [`ok: { |s| !{upper $s} }, `ok: { |i| return $[$i + 1] }, `err: { |_| return 0 }]\n\
-         return $x");
+         return $x",
+    )
+    .expect_err("a repeated `case` arm must not parse");
+    assert!(
+        err.message.contains("already has a `ok arm"),
+        "expected the duplicate-arm refusal, got: {}",
+        err.message
+    );
 }
 
 // ─── LetRec slot inference (T7) ───────────────────────────────────────────────

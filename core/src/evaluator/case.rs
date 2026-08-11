@@ -1,28 +1,33 @@
 //! Runtime for the `case` sum eliminator.
 //!
-//! Exhaustiveness is checked only when the handler table is a record
-//! literal; an opaque table reaches the missing-handler branch here instead.
+//! Arms are syntax, so the alternatives are fixed before the program runs and
+//! the checker has already proved they cover the scrutinee's row: this rule
+//! selects a branch and runs it, exactly as `if` picks one of two.
 
-use super::apply;
+use super::comp::{eval_comp, with_scope};
+use super::pattern::assign_pattern;
 use super::val::eval_val;
-use crate::ir::Val;
-use crate::syntax::tag::{TAG_PREFIX, tag_row_label};
-use crate::types::{Mooring, Raw, Shell, Tail, TailCall, Value};
+use crate::ir::{CaseArm, Val};
+use crate::types::{Mooring, Raw, Shell, Tail, Value};
 
-/// Evaluate `case scrutinee table`: apply the matching handler to the
-/// variant's payload, or to `Unit` for a nullary tag — handlers are unary.
+/// Evaluate `case scrutinee [arms]`: bind the variant's payload — `Unit` for a
+/// nullary tag — to the matching arm's pattern in a fresh scope, and run that
+/// arm's body there.
 ///
-/// A granted [`Tail::Yes`] passes to the handler as a [`TailCall`], the same
-/// hand-off `eval_app` in `call.rs` makes for an application.
+/// The body is a branch, not a function the runtime applies: it inherits the
+/// `case`'s own tail position, so a tail call in an arm still escapes to the
+/// trampoline, and it inherits the ambient control state — `$STATUS` at arm
+/// entry is the one evaluating the scrutinee left, and every mutation the body
+/// makes outlives the `case`, as an `if` branch's does.  Only the lexical scope
+/// the pattern binds into is fresh.
 pub(crate) fn eval_case(
     scrutinee: &Val,
-    table: &Val,
+    arms: &[CaseArm],
     tail: Tail,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    let scrutinee_val = eval_val(scrutinee, shell)?;
-    let (label, payload) = match scrutinee_val {
+    let (label, payload) = match eval_val(scrutinee, shell)? {
         Value::Variant { label, payload } => (label, payload),
         other => {
             return Err(shell
@@ -38,53 +43,27 @@ pub(crate) fn eval_case(
         }
     };
 
-    let table_val = eval_val(table, shell)?;
-    let entries = match table_val {
-        Value::Map(entries) => entries,
-        other => {
-            return Err(shell
-                .err(
-                    format!(
-                        "case: handler table must be a tag-keyed record, got {}",
-                        other.type_name()
-                    ),
-                    1,
-                )
-                .into());
-        }
-    };
-
-    let key = tag_row_label(&label);
-    let handler = entries.get(&key).cloned().ok_or_else(|| {
-        let handled: Vec<&str> = entries
-            .keys()
-            .filter_map(|k| k.strip_prefix(TAG_PREFIX))
-            .collect();
-        shell.err(
-            if handled.is_empty() {
-                format!("case: handler table has no handler for variant `{label}`")
-            } else {
+    // Unreachable from source: the checker closes the scrutinee's row to the
+    // arms' label set. It remains for the variant that reaches here untyped —
+    // one decoded at a boundary, or an IR re-entered from a live value — for
+    // which silence would be the worse answer.
+    let arm = arms
+        .iter()
+        .find(|arm| arm.tag.item == label)
+        .ok_or_else(|| {
+            let handled: Vec<String> = arms.iter().map(|a| format!("`{}", a.tag.item)).collect();
+            shell.err(
                 format!(
-                    "case: handler table has no handler for variant `{label}`; table handles: {}",
+                    "case: no arm for variant `{label}`; this case matches: {}",
                     handled.join(", ")
-                )
-            },
-            1,
-        )
-    })?;
+                ),
+                1,
+            )
+        })?;
 
-    let payload_val = match payload {
-        Some(p) => *p,
-        None => Value::Unit,
-    };
-
-    if tail == Tail::Yes {
-        return Err(TailCall {
-            callee: handler,
-            args: vec![payload_val],
-        }
-        .into());
-    }
-
-    apply(handler, vec![payload_val], mooring, shell).map_err(Into::into)
+    let payload = payload.map_or(Value::Unit, |p| *p);
+    with_scope(shell, |shell| {
+        assign_pattern(&arm.pattern, &payload, None, mooring, shell)?;
+        eval_comp(arm.body.comp(), mooring, shell, tail)
+    })
 }

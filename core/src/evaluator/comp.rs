@@ -23,8 +23,8 @@ use crate::runtime::pipeline;
 ///
 /// An error unwinding through this node picks up `comp.span` unless it
 /// already carries one, so a runtime error names the innermost node it broke
-/// on. Of the eliminators, only application and `case` consume
-/// [`Tail::Yes`], emitting a `TailCall`.
+/// on. Of the eliminators, only application consumes [`Tail::Yes`], emitting
+/// a `TailCall`; `if` and `case` forward it into the branch they select.
 pub(crate) fn eval_comp(
     comp: &Arc<Comp>,
     mooring: &Mooring,
@@ -82,8 +82,8 @@ pub(crate) fn eval_comp(
             eval_if(&cond.item, then, else_, tail, mooring, shell)
         }
 
-        CompKind::Case { scrutinee, table } => {
-            case::eval_case(&scrutinee.item, &table.item, tail, mooring, shell)
+        CompKind::Case { scrutinee, arms } => {
+            case::eval_case(&scrutinee.item, arms, tail, mooring, shell)
         }
 
         CompKind::Scope(op) => match op {

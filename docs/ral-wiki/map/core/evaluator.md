@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1e9fea4
-generated_at_date: 2026-08-06
+generated_at_commit: f5720be
+generated_at_date: 2026-08-11
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
 
@@ -76,7 +76,16 @@ Internals:
   boundary by `validate_handler_arity`, never sniffed from the runtime value
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
   The handler-stack mechanics live in [[internals/handler-dispatch|handler-dispatch]].
-- `case.rs`, `pattern.rs` — matching: `assign_pattern` destructures a `Value`
+- `case.rs` — `eval_case` selects the arm carrying the scrutinee's tag, binds
+  the payload (`Unit` for a nullary tag) to that arm's pattern in a fresh scope,
+  and runs the arm's body there. The body is a branch, not a function applied
+  to the payload: it inherits the `case`'s tail position and the ambient
+  control state, so its effects on the shell outlive the `case` as an `if`
+  body's do
+  ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
+  The unmatched-tag error is unreachable from source — the checker has proved
+  coverage — and remains for a variant that arrives untyped.
+- `pattern.rs` — matching: `assign_pattern` destructures a `Value`
   against a compiled `IrPattern` (wildcard, name, list with optional `...rest`,
   map with pre-elaborated defaults), installing bindings into the current scope.
   Without a `...rest` tail a list pattern must cover the value exactly — a longer

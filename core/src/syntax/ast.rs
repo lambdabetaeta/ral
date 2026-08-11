@@ -91,13 +91,13 @@ pub enum Ast {
         label: String,
         payload: Option<Spanned<Box<Self>>>,
     },
-    /// The sum eliminator, matching the scrutinee's variant row against the
-    /// table's handler row label by label. Both operands parse as bare atoms;
-    /// only the typechecker insists on a variant and a tag-keyed record of
-    /// handler thunks, so its complaint can name the resolved types.
+    /// The sum eliminator: a scrutinee and one arm per tag of its variant row.
+    /// The arms are syntax, not a record the scrutinee is looked up in, so the
+    /// alternatives are a finite list the parser hands on whole — which is what
+    /// lets the checker prove the set exhaustive and reach inside each arm.
     Case {
         scrutinee: Spanned<Box<Self>>,
-        table: Spanned<Box<Self>>,
+        arms: Vec<CaseArm>,
     },
     /// `$[expr]`
     Expr(Box<Expr>),
@@ -119,6 +119,19 @@ pub enum Ast {
         branches: Vec<IfBranch>,
         else_: Option<Spanned<Box<Self>>>,
     },
+}
+
+/// One arm of an [`Ast::Case`]: a literal tag and the computation to run when
+/// the scrutinee carries it.
+///
+/// The *set* of alternatives is syntax; an alternative's body is a
+/// computation, however it is spelled. So `body` is the arm's own
+/// `{ |p| … }` — an [`Ast::Lambda`] — or any other atom, which elaboration
+/// applies to the payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaseArm {
+    pub tag: Spanned<String>,
+    pub body: Spanned<Box<Ast>>,
 }
 
 /// One branch of an [`Ast::If`]: a condition and the body to run when that

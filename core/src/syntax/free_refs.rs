@@ -118,9 +118,11 @@ impl Ast {
                     p.item.collect_free_refs(candidates, scopes, out);
                 }
             }
-            Self::Case { scrutinee, table } => {
+            Self::Case { scrutinee, arms } => {
                 scrutinee.item.collect_free_refs(candidates, scopes, out);
-                table.item.collect_free_refs(candidates, scopes, out);
+                for arm in arms {
+                    arm.body.item.collect_free_refs(candidates, scopes, out);
+                }
             }
             Self::Expr(expr) => {
                 expr.collect_free_refs(candidates, scopes, out);

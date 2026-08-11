@@ -1,4 +1,4 @@
-<!-- verified_at_commit: 95449d4 -->
+<!-- verified_at_commit: f5720bee -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -306,8 +306,8 @@ let report =
 ```
 
 The condition and body of `if` and `elsif` can start on later lines. `elsif`
-and `else` can also start on the line after the preceding branch. The two
-operands of `case` can be separated by newlines.
+and `else` can also start on the line after the preceding branch. A `case`'s
+scrutinee and its arm list can be separated by newlines, and so can its arms.
 
 ```ral
 if
@@ -602,8 +602,9 @@ A tag can also be a static record key:
 return [`development: 8080, `production: 443]
 ```
 
-One record literal cannot mix ordinary static keys and tag keys. This rule
-keeps ordinary records separate from the handler tables used with variants.
+One record literal cannot mix ordinary static keys and tag keys. Field names
+and tags are two distinct label alphabets that never unify, so a record is
+keyed by one or by the other.
 
 ### 4.6. Variants
 
@@ -617,7 +618,7 @@ let problem = `error [message: 'not found']
 
 The tag takes the next value atom as its payload. A statement boundary, comma,
 closing bracket, pipe, `?`, redirect, or `&` leaves it without a payload.
-Section 8 defines `case`, which selects a handler by tag.
+Section 8 defines `case`, which chooses one arm by tag.
 
 ### 4.7. Indexing
 
@@ -1479,7 +1480,8 @@ invoke a `try` handler.
 
 ### 8.3. Variant elimination with `case`
 
-`case` eliminates a variant using a tag-keyed record of handlers:
+`case` eliminates a variant. Its arms are syntax — one per tag, written out at
+the `case` itself:
 
 ```ral
 let result = case $reply [
@@ -1488,19 +1490,30 @@ let result = case $reply [
 ]
 ```
 
-The scrutinee must be a variant. `case` selects the handler whose record key
-matches the variant tag and calls it with the payload. A nullary variant passes
-`unit`. Handler result types must be compatible, exactly as for `if` branches
-and `?` alternatives: either every handler returns a value of one type, or
-every handler's payload is captured from standard output, with a handler that
-ends silently at `unit` admitted beside the byte-routed ones.
+The scrutinee must be a variant. `case` runs the arm whose tag matches it,
+binding the variant's payload to that arm's pattern; a nullary variant binds
+`unit`. The arm has a fresh lexical scope for that binding, but it is a branch
+and not a function applied to the payload: it runs in the surrounding shell
+context, so `$STATUS` enters the arm as evaluating the scrutinee left it, and
+the arm's own changes remain in place after the `case`, as an `if` body's do.
 
-When the handler table is a record literal, the typechecker verifies that it
-covers every tag known in the scrutinee's variant type and reports a missing
-handler before execution. A dynamically obtained handler table cannot always
-be proved exhaustive; encountering an unhandled tag then fails at runtime and
-names that tag. When the table contains other handlers, the diagnostic also
-lists the tags it does handle.
+An arm's body is an ordinary computation, and either spelling reaches it. A
+block with one binder writes the branch out. Any other atom names the
+computation to run, and the arm applies it to the payload, so `` `ok: $handle ``
+runs exactly what `` `ok: { |p| $handle $p } `` runs.
+
+Arm result types must be compatible, exactly as for `if` branches and `?`
+alternatives: either every arm returns a value of one type, or every arm's
+payload is captured from standard output, with an arm that ends silently at
+`unit` admitted beside the byte-routed ones.
+
+Because the alternatives are syntax, exhaustiveness is decided statically and
+always. The typechecker closes the scrutinee's variant row to exactly the arms'
+tags, and reports a tag with no arm before anything runs, listing the tags the
+`case` does match. What the grammar refuses is anything that hides the *set* of
+alternatives from that proof: a computed table in place of the arm list, a
+`...` spread arm, a repeated tag, and an empty arm list are all parse errors
+(§17.1).
 
 ### 8.4. Fallback chains
 
@@ -2783,12 +2796,10 @@ zero is rejected at runtime with a suggestion to use `return` for a clean
 result.
 
 Errors raised by the evaluator use the same path as explicit failures. For
-example, a `case` over a record literal is checked for exhaustiveness, but the
-handler table may instead be an opaque computed record. If that record lacks
-the scrutinee's tag at runtime, the miss is an ordinary runtime error naming
-the absent variant and the tags the table does handle. It is catchable by
-`try` and recordable by `audit`; it is not an implicit `Unit`, sentinel, or
-process crash.
+example, a map is indexed by a key computed at runtime, so a key the map does
+not carry can only be discovered there; the miss is an ordinary runtime error
+naming the absent key. It is catchable by `try` and recordable by `audit`; it
+is not an implicit `Unit`, sentinel, or process crash.
 
 ### 13.2. Human diagnostics
 
@@ -3908,7 +3919,9 @@ return        ::= "return" atom?
 conditional   ::= "if" atom atom
                   (NL* "elsif" atom atom)*
                   (NL* "else" atom)?
-case          ::= "case" atom atom
+case          ::= "case" atom "[" case-arm ("," case-arm)* ","? "]"
+case-arm      ::= tag-key ":" (arm-body | atom)
+arm-body      ::= "{" "|" pattern "|" program "}"
 
 scope-form    ::= "try" atom atom redirects
                 | "guard" atom atom redirects
@@ -3972,6 +3985,11 @@ A literal or pattern may use bare keys or tag keys, but may not mix the two
 static key alphabets. A map literal may additionally use a dynamic `$name`
 key; a pattern may not.
 
+A `case`'s arm list resembles a tag-keyed map literal but is a production of
+its own, and no expression may stand in its place: a spread among the arms and
+a repeated tag are both rejected, and the list may not be empty. This is what
+makes the set of alternatives a fact the parser establishes (§8.3).
+
 A plain identifier in head position enters ordinary name dispatch. A slash or
 tilde path is a direct path head. `^name` requests external-name lookup. Other
 atoms are value heads. With no arguments or redirects, a literal value head
@@ -4027,7 +4045,7 @@ M ::= return v
     | M1 | ... | Mn
     | M1 ? ... ? Mn
     | if v then M else N
-    | case v of table
+    | case v of {`l1 p1 . M1, ..., `ln pn . Mn}
     | M1 ; ... ; Mn
     | letrec {xi = vi}
     | scope op
@@ -4037,6 +4055,10 @@ Command calls elaborate either to `exec`, which enters command dispatch, or to
 application when the head resolves to a bound value. A trailing redirect on an
 application or scope form becomes a redirect scope; redirects on `exec` remain
 part of the atomic command launch.
+
+A `case` arm is a pattern and a computation, in the syntax of the term itself.
+An arm spelled as an atom elaborates to the application of that atom to the
+payload the arm binds, so both spellings reach the same arm computation.
 
 Blocks elaborate to thunks. A parameterized block elaborates to a thunk whose
 computation is a function. Adjacent recursive name bindings whose right-hand
@@ -4106,8 +4128,9 @@ K ⊢ C1 ~ C2                        unification
 A failed constraint records both the source span at which it was introduced
 and a provenance reason, such as argument application, pipeline stage shape,
 conditional branches, fallback branches, `try` arms, scope body, handler
-shape, or `case` payload. Diagnostics render the structural mismatch together
-with that provenance; provenance does not change the unification relation.
+shape, a `case` arm's payload, or the handler a `case` arm names. Diagnostics
+render the structural mismatch together with that provenance; provenance does
+not change the unification relation.
 
 Representative rules are:
 
@@ -4305,11 +4328,22 @@ Variant construction introduces an open row:
 Γ ⊢v `l v : Variant(`l : A, r)
 ```
 
-For `case v table`, the scrutinee must have `Variant ρ`. The table must be a
-record whose field at tag `l` has type `U (Al -> C)`, where `Al` is that tag's
-payload type; every handler shares `C`. A literal table is closed and must
-match the scrutinee's known tag set exactly. An opaque table remains open; a
-missing handler is then an ordinary runtime failure naming the tag.
+Variant elimination binds each payload and joins the arms:
+
+```text
+Γ ⊢v v : Variant(`l1 : A1, ..., `ln : An)
+Γ ⊢p pi : Ai ⇒ Γi        Γ, Γi ⊢c Mi : Ci        (1 ≤ i ≤ n)
+------------------------------------------------------------------ Case
+Γ ⊢c case v of {`l1 p1 . M1, ..., `ln pn . Mn} : join(C1, ..., Cn)
+```
+
+`join` is the arm join of §17.4, so an arm is coerced by its route and never by
+how it was written. The rule closes the scrutinee's row to exactly the arms'
+tags, which the syntax fixes: coverage is therefore decided wherever the rule
+fires, and both a tag the arms miss and an arm for a tag the scrutinee cannot
+carry are static errors. An *open* scrutinee row instead absorbs an arm label it
+has not been seen to construct — that is principal row inference (§17.3), not a
+gap in the coverage proof.
 
 ### 17.7. Scope signatures
 
@@ -4401,8 +4435,12 @@ The central rules are:
 Sequences evaluate left to right, stop on the first error or escape, and
 return the final value. `if` evaluates its Boolean condition and only the
 selected branch, in a fresh lexical scope. `case` evaluates the scrutinee,
-looks up its tag, and applies the handler to the payload or to `unit` for a
-nullary tag.
+selects the arm carrying its tag, binds the payload — `unit` for a nullary tag
+— to that arm's pattern in a fresh lexical scope, and runs that arm's body
+there. The body is a branch and not an applied function: it runs in the
+`case`'s own tail position and in the ambient shell context, so a tail call in
+an arm escapes as it would from an `if` body, `$STATUS` enters the arm as the
+scrutinee left it, and the arm's own effects on the shell outlive the `case`.
 
 For `M ? N`, a value from `M` wins; an ordinary error from `M` evaluates `N`;
 an escape from `M` propagates. A longer chain repeats this rule and reports the
@@ -4454,6 +4492,7 @@ every value boundary that demands a byte-routed computation is wrapped in a
 
 Evaluation begins only from this annotated IR. A route mismatch is therefore a
 static error, not a request for the runtime to guess a codec. Runtime checks
-remain for genuinely dynamic facts: missing record keys, bounds, opaque `case`
-tables, dynamic option maps, operating-system failures, cancellation, and
-external exit statuses.
+remain for genuinely dynamic facts: missing record keys, bounds, dynamic option
+maps, operating-system failures, cancellation, and external exit statuses. A
+`case` is not among them: its alternatives are syntax, so its coverage is
+settled here.

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 95449d4
-generated_at_date: 2026-08-10
+generated_at_commit: f5720be
+generated_at_date: 2026-08-11
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
 
@@ -96,8 +96,13 @@ Internals:
   whose arity rules enforce [[invariants/fixed-arity|fixed-arity]];
 - `scope.rs` — the five structural scope nodes.
 
-`infer.rs`'s `infer_case` is left as one ~100-line function by decision
-([[decisions/260530_infer-case-stays-whole|infer-case-stays-whole]]).
+`infer.rs`'s `infer_case` is left whole by decision
+([[decisions/260530_infer-case-stays-whole|infer-case-stays-whole]]). Its one
+companion, `infer_case_arm`, is a premise of the rule rather than a surface
+helper: an arm is syntax, so typing one — bind its pattern, infer its body,
+force its payload to agree with the scrutinee at that label — is a judgment
+that stands alone
+([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
 
 ## The payload route
 
@@ -238,13 +243,14 @@ expects is restored by the composed `__decode-captured` step.
 propagation, through the one constructor `captured_string`, which builds
 `capture body to b. __decode-captured b` with the captured node's span on both
 halves. A `Demand` is `Value` or `Discard`. It reaches a `Seq`'s tail,
-a `Bind`'s `rhs`, each arm of an `If`, `Chain`, `Try`, or `Case` handler
-table (`annotate_case_table`), and the body of a force of a syntactic thunk.
+a `Bind`'s `rhs`, each arm of an `If`, `Chain`, `Try`, or `Case`, and the body
+of a force of a syntactic thunk.
 Where a `Value` demand meets a node whose recorded route grounds `Bytes`,
 `annotate_demand` wraps it. `ArmWalk` (`Plain`, `Descend`, `Wrap`)
 decides how a join arm is rebuilt; `Wrap` is the subsumption instance, wrapping
 a whole `Value`-at-`Unit` arm so its capture contributes the empty string.
-`annotate_join_arm` dispatches a `Comp` arm this way. An opaque scope arm has no
-arm syntax to wrap, so `eta_expand_captured` η-expands it instead.
+`annotate_join_arm` dispatches a `Comp` arm this way, and every `Case` arm is
+one, since arms are syntax. An opaque scope arm has no arm syntax to wrap, so
+`eta_expand_captured` η-expands it instead.
 
 `docs/SPEC.md` has the typing judgments.

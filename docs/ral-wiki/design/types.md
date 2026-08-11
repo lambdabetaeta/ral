@@ -140,6 +140,10 @@ it:
 The join is decided by the arms' *types*, never by how an arm was written, so an
 arm extracted into a `let` and forced back joins identically. `guard`, `within`,
 and `grant` pass their body's route and value type through and need no arm rule.
+A `case` obeys this at its arm *bodies*, which is where it was ever exercised:
+its arms are a syntactic list, but an arm naming a handler is that handler
+applied to the payload, and so joins and coerces as the written-out branch does
+([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
 
 A join whose informative arms are all still open is stored rather than decided
 on the spot, and re-examined at the boundary that owns its variables — an inner

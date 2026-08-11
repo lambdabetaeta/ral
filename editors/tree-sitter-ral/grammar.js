@@ -161,11 +161,11 @@ module.exports = grammar({
       field('body', $._value),
     ),
 
-    // case scrutinee [`tag: handler, ...]
+    // case scrutinee [`tag: arm, ...]
     case_stmt: $ => seq(
       'case',
       field('scrutinee', $._value),
-      field('table', $._value),
+      field('arms', $._value),
     ),
 
     // Head and arguments are the same syntactic class, except that only the

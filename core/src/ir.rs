@@ -244,9 +244,12 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
             walk_comp(then, out);
             walk_comp(else_, out);
         }
-        CompKind::Case { scrutinee, table } => {
+        CompKind::Case { scrutinee, arms } => {
             walk_val(&scrutinee.item, out);
-            walk_val(&table.item, out);
+            for arm in arms {
+                walk_pattern_defaults(&arm.pattern, out);
+                walk_comp(arm.body.comp(), out);
+            }
         }
         CompKind::Scope(op) => walk_scope_op(op, out),
         CompKind::Capture(body) => walk_comp(body, out),
@@ -457,14 +460,14 @@ pub enum CompKind {
         then: Arc<Comp>,
         else_: Arc<Comp>,
     },
-    /// Sum eliminator: `table` is a tag-keyed record of thunks, the matching
-    /// one forced on the scrutinee's payload.  Literal handler tables are
-    /// checked for exhaustiveness; an opaque table may still miss at
-    /// runtime, which `evaluator::case` reports as an ordinary
-    /// missing-handler error.
+    /// Levy's sum eliminator: one arm per tag, each a computation in the
+    /// syntax.  The alternatives are a finite list fixed at parse time, so
+    /// exhaustiveness is always decided statically and every arm body is a
+    /// node the checker can annotate — an `if` with as many branches as the
+    /// scrutinee's row has labels.
     Case {
         scrutinee: Spanned<Val>,
-        table: Spanned<Val>,
+        arms: Vec<CaseArm>,
     },
     /// Effect-frame scope: install an effect for the duration of a body,
     /// then restore.
@@ -472,6 +475,51 @@ pub enum CompKind {
     /// Checker-inserted value boundary: run `body` with its byte channel
     /// captured, decode the bytes as its value. No surface syntax.
     Capture(Arc<Comp>),
+}
+
+/// One arm of a [`CompKind::Case`]: a tag, the pattern its payload binds,
+/// and the computation to run.
+///
+/// Arms are syntax, so every one is visible to the checker — which is what
+/// lets a `Capture` be placed inside each.  The label is stored bare, as
+/// [`Val::Variant`] stores it, so matching is a string comparison and not a
+/// row-label round trip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaseArm {
+    pub tag: Spanned<String>,
+    pub pattern: IrPattern,
+    pub body: ArmBody,
+}
+
+/// An arm's computation, and which way the surface reached it.
+///
+/// The two are the same branch and are typed by the same rules — the second
+/// is the application the user could have written by hand.  They are kept
+/// apart because a handler that turns out not to be a function is a fault of
+/// the *arm*, and only this distinction lets the diagnostic say so.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ArmBody {
+    /// The branch written at the arm: `` `tag: { |p| … } ``.
+    Inline(Arc<Comp>),
+    /// A handler named at the arm, applied to the payload the arm binds.
+    Applied(Arc<Comp>),
+}
+
+impl ArmBody {
+    pub fn comp(&self) -> &Arc<Comp> {
+        match self {
+            Self::Inline(body) | Self::Applied(body) => body,
+        }
+    }
+
+    /// The same spelling around a rebuilt computation — what the annotator
+    /// needs, since it reconstructs every node it walks.
+    pub fn with_comp(&self, comp: Arc<Comp>) -> Self {
+        match self {
+            Self::Inline(_) => Self::Inline(comp),
+            Self::Applied(_) => Self::Applied(comp),
+        }
+    }
 }
 
 /// Body of a [`CompKind::Exec`].
@@ -663,7 +711,17 @@ mod tests {
         });
         let case = Spanned::synthetic(CompKind::Case {
             scrutinee: Spanned::synthetic(var("r_case_scrutinee")),
-            table: Spanned::synthetic(var("r_case_table")),
+            arms: vec![CaseArm {
+                tag: Spanned::synthetic("some".into()),
+                pattern: IrPattern::Map(vec![crate::syntax::ast::MapPatternEntry {
+                    key: crate::syntax::ast::MapKey::Bare("k".into()),
+                    pattern: IrPattern::Name("case_arm_bound".into()),
+                    default: Some(Arc::new(Spanned::synthetic(CompKind::Return(var(
+                        "r_case_arm_default",
+                    ))))),
+                }]),
+                body: ArmBody::Inline(ret("r_case_arm_body")),
+            }],
         });
 
         let scope_try = Spanned::synthetic(CompKind::Scope(ScopeOp::Try {
@@ -790,7 +848,8 @@ mod tests {
             "r_if_then",
             "r_if_else",
             "r_case_scrutinee",
-            "r_case_table",
+            "r_case_arm_default",
+            "r_case_arm_body",
             "r_try_body",
             "r_try_handler",
             "r_guard_body",
@@ -820,7 +879,7 @@ mod tests {
             expected.len(),
             "unexpected extra name in {found:?}; every bound-not-referenced \
              name (lam_param_bound, bind_map_bound, bind_rest_bound, \
-             letrec_name_bound) must be absent"
+             letrec_name_bound, case_arm_bound) must be absent"
         );
 
         for bound in [
@@ -828,6 +887,7 @@ mod tests {
             "bind_map_bound",
             "bind_rest_bound",
             "letrec_name_bound",
+            "case_arm_bound",
         ] {
             assert!(
                 !found.contains(bound),

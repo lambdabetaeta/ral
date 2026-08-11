@@ -24,6 +24,15 @@ consequences follow:
 - **Structural equality of closed records is order-insensitive:**
   `[a: 1, b: 2] == [b: 2, a: 1]`.
 
+**A `case` closes a variant row, and the syntax is what lets it.** The arms are
+written out at the `case`, so the label set is known when the rule fires: the
+scrutinee's row unifies with exactly that set, and coverage is decided there,
+always ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
+An *open* scrutinee row absorbs an arm label it has not been seen to construct
+— `` let v = `ok 5 `` then a `case` with an `` `err `` arm typechecks — which is
+principal row inference and not a gap in the proof: the row records what the
+program has shown, and the `case` is one more such showing.
+
 Scoped labels and spread shadowing are how ral expresses optionality and
 defaults at the level of data rather than argument lists — see
 [[invariants/optionality-via-variants|optionality-via-variants]] and [[invariants/fixed-arity|fixed-arity]].

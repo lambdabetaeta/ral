@@ -127,7 +127,7 @@ A variant is a value tagged by a `` `tag ``, recording one of several outcomes a
       else                      { `file [bytes: !{file-info $p}[size]] }
     }
 
-`case` eliminates a variant; it accepts a table of blocks with tags as keys, and hands its record to the block:
+`case` eliminates a variant. Its arms are syntax: one arm per tag, written out in place — a table of handlers held in a variable, or spliced in with `...`, is a parse error, because `case` must see every arm to prove it covers every tag. Each arm binds the tag's payload:
 
     case !{probe $path} [
       `absent: { |_| "$path: not found" },
@@ -135,7 +135,7 @@ A variant is a value tagged by a `` `tag ``, recording one of several outcomes a
       `file:   { |f| "$path: file, $f[bytes] bytes" }
     ]
 
-A nullary tag still hands its block a value — ignore it with `_`. 
+A nullary tag still binds a value (`unit`) — ignore it with `_`. An arm's body may be any expression, not only `{ |p| … }`: naming a function (`` `dir: $describe ``) applies it to the payload, and types and behaves exactly as `` `dir: { |d| $describe $d } `` does. 
 
 `range 1 11` returns the list `[1, …, 10]` (`seq` is the external coreutil, and prints bytes).
 
