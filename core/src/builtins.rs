@@ -200,6 +200,12 @@ builtin_registry! {
     FoldLines { names: ["fold-lines"], ty: Scheme(scheme::fold_lines),
         doc: "fold-lines <fn> <init>  — fold over stdin lines.",
         call: |args, mooring, shell| collections::builtin_fold_lines(args, mooring, shell), },
+    // The second half of a checker-inserted `capture`, spelled as an ordinary
+    // command so the lossy step is visible IR.  The `_` prefix is what keeps
+    // it out of `help`, completion, and the audit trail.
+    DecodeCaptured { names: ["__decode-captured"], ty: Sig(sig::DECODE_CAPTURED),
+        doc: "__decode-captured <bytes>  — read captured bytes as text: one trailing newline dropped, then a strict UTF-8 decode.",
+        call: |args, _mooring, _shell| codecs::builtin_decode_captured(args), },
     FromBytes { names: ["from-bytes"], ty: Sig(sig::FROM_BYTES),
         doc: "from-bytes  — read raw bytes from the channel (stdin / `< file` / pipe) as Bytes.",
         call: |args, _mooring, shell| codecs::builtin_from_bytes(args, shell), },

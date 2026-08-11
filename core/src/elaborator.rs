@@ -15,8 +15,8 @@
 //! `./x`, `~/x`, `$f`, `{ … }`) declares which it is syntactically.
 
 use crate::ir::{
-    Args, CommandName, CommandWord, Comp, CompKind, Exec, IrPattern, RedirectV, ScopeOp, Val,
-    ValListElem, ValMapEntry, ValRedirectTarget,
+    Args, CommandName, CommandWord, Comp, CompKind, Exec, IrPattern, PipeYield, RedirectV, ScopeOp,
+    Val, ValListElem, ValMapEntry, ValRedirectTarget,
 };
 use crate::prelude_manifest;
 use crate::source::Span;
@@ -480,16 +480,16 @@ impl Elaborator {
                     comps.push(Arc::new(stage_comp));
                 }
                 // Placeholders, overwritten by the annotation pass with the
-                // stages' value types and the pipeline's ground final route.
-                // The checker runs before every evaluation, so an
-                // un-annotated pipeline never reaches the evaluator.
+                // stages' value types and the pipeline's yield.  The checker
+                // runs before every evaluation, so an un-annotated pipeline
+                // never reaches the evaluator.
                 let stage_types = vec![crate::typecheck::Ty::Unit; comps.len()];
                 comp!(
                     self,
                     CompKind::Pipeline {
                         stages: comps,
                         stage_types,
-                        final_route: crate::route::GroundRoute::Value,
+                        yields: PipeYield::Last,
                     }
                 )
             }

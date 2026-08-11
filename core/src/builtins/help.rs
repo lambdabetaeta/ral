@@ -257,27 +257,17 @@ fn name_matches(pattern: &str, name: &str) -> bool {
 }
 
 /// A command-only builtin has no first-class scheme for `builtin_type_hint`
-/// to format, so the fallback builds the `CompTy` its signature describes and
-/// renders it through [`fmt_comp_ty_ctx`], the same renderer a type error
-/// uses — one notation for both, payload route included.
+/// to format, so the fallback renders the `CompTy` its signature describes
+/// through [`fmt_comp_ty_ctx`], the same renderer a type error uses — one
+/// notation for both, payload route included.
 fn type_for(name: &str, table: &crate::types::BuiltinTable) -> String {
     builtin_type_hint(table, name).unwrap_or_else(|| {
-        use crate::typecheck::builtins::{
-            BuiltinTypeRule, CompTemplate, lines_step_ty, sig_route, ty_of_template,
-        };
-        use crate::typecheck::{CompTy, FmtCtx, Unifier, fmt_comp_ty_ctx};
+        use crate::typecheck::builtins::{BuiltinTypeRule, sig_comp_ty};
+        use crate::typecheck::{FmtCtx, Unifier, fmt_comp_ty_ctx};
         match table.get(name).map(|e| e.type_rule) {
             Some(BuiltinTypeRule::Sig(sig)) => {
                 let mut u = Unifier::new();
-                let route = sig_route(&sig.result, &mut u);
-                let value = match sig.result {
-                    CompTemplate::Pure(t) | CompTemplate::Return { value: t, .. } => {
-                        ty_of_template(t, &mut u)
-                    }
-                    CompTemplate::Never => u.fresh_ty(),
-                    CompTemplate::LinesStep => lines_step_ty(&mut u),
-                };
-                fmt_comp_ty_ctx(&CompTy::Return(route, Box::new(value)), &FmtCtx::default())
+                fmt_comp_ty_ctx(&sig_comp_ty(&sig, &mut u), &FmtCtx::default())
             }
             _ => "—".into(),
         }

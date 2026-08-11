@@ -65,9 +65,20 @@ computation that writes and about one that could but doesn't. Only the
 evaluator distinguishes them, which is why the boundary has to be its own former
 rather than sugar for a bind on a dropped variable.
 
+**The node returns bytes; the text is composed.** `capture M : F[Value] Bytes`
+is total and exact — precisely the bytes the handler collected, nothing
+stripped and nothing decoded. Reading them as the `String` a value boundary
+wants is a second, ordinary step the checker composes after it, `capture M to
+b. __decode-captured b`, and that step owns both things that can go wrong: one
+trailing newline is dropped, and output that is not valid UTF-8 fails there,
+naming `| from-bytes` as the way to keep it. The byte-channel handler is a
+primitive; reading its output as text is a library step; each is its own term
+in the IR ([[design/types|types]]).
+
 **Failure flushes.** If a captured computation fails, bytes it produced before
 failing are flushed visibly rather than lost — a partial write from
-`echo half; exit 3` stays on the terminal.
+`echo half; exit 3` stays on the terminal. That is handler semantics rather
+than decoding, so it is the node's clause, not the composed step's.
 
 See also [[design/types|types]], [[design/cbpv|cbpv]],
 [[design/pipelines|pipelines]], [[design/codecs|codecs]].

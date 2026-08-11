@@ -1344,13 +1344,13 @@ fn fail_message_must_be_text() {
 
 // ─── IR route annotation ──────────────────────────────────────────────────────
 //
-// The annotation pass writes the checker's ground verdicts into a rebuilt IR:
-// one `final_route` per pipeline, and a `Capture` node wherever a value
-// boundary meets a byte route.  Schemes stay on the top-level spine only; the
-// route and the captures go everywhere, at any depth.
+// The annotation pass writes the checker's ground verdicts into a rebuilt IR
+// as explicit syntax: one `PipeYield` per pipeline, and a `Capture` node
+// wherever a value boundary meets a byte route.  Schemes stay on the
+// top-level spine only; the yields and the captures go everywhere, at any
+// depth.
 
-use ral_core::ir::{Comp, CompKind, IrPattern};
-use ral_core::route::GroundRoute;
+use ral_core::ir::{Comp, CompKind, IrPattern, PipeYield, Val, ValMapEntry};
 
 /// Compile `src` to an annotated comp, asserting it type-checks.
 fn annotated(src: &str) -> Comp {
@@ -1367,17 +1367,12 @@ fn annotated(src: &str) -> Comp {
     .unwrap_or_else(|errs| panic!("expected no errors in {src:?}, got: {errs:?}"))
 }
 
-/// Every `Pipeline` node's stage count and `final_route`, anywhere in the tree.
-fn all_pipeline_routes(comp: &Comp) -> Vec<(usize, GroundRoute)> {
+/// Every `Pipeline` node's stage count and yield, anywhere in the tree.
+fn all_pipeline_yields(comp: &Comp) -> Vec<(usize, PipeYield)> {
     let mut out = Vec::new();
     common::walk_comp(comp, &mut |c| {
-        if let CompKind::Pipeline {
-            stages,
-            final_route,
-            ..
-        } = &c.item
-        {
-            out.push((stages.len(), *final_route));
+        if let CompKind::Pipeline { stages, yields, .. } = &c.item {
+            out.push((stages.len(), *yields));
         }
     });
     out
@@ -1413,19 +1408,20 @@ fn top_level_pipeline_retains_per_stage_value_types() {
 }
 
 #[test]
-fn a_pipeline_carries_one_ground_final_route() {
+fn a_pipeline_carries_one_yield() {
     // One annotation for the whole pipeline, not one per stage: only the
     // final stage's route is ever read, and every interior edge is allocated
-    // from position.  An external tail is captured from stdout.
+    // from position.  An external tail is captured from stdout, so the form
+    // has nothing to hand back.
     assert_eq!(
-        all_pipeline_routes(&annotated(r"/bin/echo hi | /bin/cat")),
-        vec![(2, GroundRoute::Bytes)]
+        all_pipeline_yields(&annotated(r"/bin/echo hi | /bin/cat")),
+        vec![(2, PipeYield::Unit)]
     );
     // A decoder tail returns its value instead, so the same shape of
-    // pipeline is annotated `Value`.
+    // pipeline yields that value.
     assert_eq!(
-        all_pipeline_routes(&annotated(r"/bin/echo hi | from-string")),
-        vec![(2, GroundRoute::Value)]
+        all_pipeline_yields(&annotated(r"/bin/echo hi | from-string")),
+        vec![(2, PipeYield::Last)]
     );
 }
 
@@ -1434,16 +1430,17 @@ fn pipeline_inside_thunk_body_is_annotated() {
     // The pipeline lives in a lambda body under a `let`; the pass must
     // descend past the spine to reach it.
     assert_eq!(
-        all_pipeline_routes(&annotated(r"let f = { |x| /bin/echo $x | /bin/cat }")),
-        vec![(2, GroundRoute::Bytes)]
+        all_pipeline_yields(&annotated(r"let f = { |x| /bin/echo $x | /bin/cat }")),
+        vec![(2, PipeYield::Unit)]
     );
 }
 
 #[test]
 fn a_byte_routed_bind_rhs_is_wrapped_in_capture() {
-    // A byte-routed RHS (`echo`) is wrapped in `Capture`; a value-routed one
-    // (`return 42`) is left alone.  This is the whole observable content of
-    // the route at a value boundary.
+    // A byte-routed RHS (`echo`) is wrapped in the capture coercion — the
+    // kernel node for the exact bytes, bound and handed to the decode step
+    // for the text; a value-routed one (`return 42`) is left alone.  This is
+    // the whole observable content of the route at a value boundary.
     let comp = annotated(r"let x = echo hi; let y = return 42; return unit");
     let mut binds = Vec::new();
     common::walk_comp(&comp, &mut |c| {
@@ -1452,9 +1449,13 @@ fn a_byte_routed_bind_rhs_is_wrapped_in_capture() {
             pattern: IrPattern::Name(name),
             ..
         } = &c.item
-            && !name.starts_with("_g")
+            && !name.starts_with('_')
         {
-            binds.push((name.clone(), matches!(rhs.item, CompKind::Capture(_))));
+            let coerced = matches!(&rhs.item, CompKind::Bind { comp, rest, .. }
+                if matches!(comp.item, CompKind::Capture(_))
+                    && matches!(&rest.item, CompKind::Exec(e)
+                        if e.head.name().bare() == Some("__decode-captured")));
+            binds.push((name.clone(), coerced));
         }
     });
     assert_eq!(
@@ -1540,6 +1541,85 @@ fn a_captured_bind_rhs_keeps_its_bytes_out_of_the_pipe() {
 fn chain_byte_arms_join_to_byte_output() {
     // Both arms emit bytes, so the chain's output channel is `Bytes`.
     assert!(bind_x_is_captured("let x = echo a ? echo b; return unit"));
+}
+
+#[test]
+fn a_bind_reads_its_rhs_route_through_the_store() {
+    // The join grounds `t`'s route to `Bytes` before the binder is reached,
+    // so `extract_return` hands the pin a route that is a `Var` in shape and
+    // `Bytes` in the store — it destructures a head-canonical `Return` and
+    // resolves no further.  Reading the shape unifies a settled `Bytes` with
+    // `Value`; reading the store captures, and `x` is the decoded `String`.
+    assert!(bind_x_is_captured(
+        "let f = { |t| if true { echo hi } else { !$t }; let x = !$t; return $x }"
+    ));
+    has_error(
+        "let f = { |t| if true { echo hi } else { !$t }; let x = !$t; return $[$x + 1] }",
+        "String",
+    );
+}
+
+/// Every tag arm of the program's `case`, in source order, with whether that
+/// arm carries a `Capture` — the byte-side coercion, which a join inserts per
+/// arm rather than at its own node.  `walk_comp` does not enter a handler
+/// table, so each arm is walked here; an arm still spelled as a bare name
+/// holds no computation, so it carries no coercion either.
+fn case_arms_captured(src: &str) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    common::walk_comp(&annotated(src), &mut |c| {
+        let CompKind::Case { table, .. } = &c.item else {
+            return;
+        };
+        let Val::Map(entries) = &table.item else {
+            return;
+        };
+        for entry in entries {
+            let ValMapEntry::Entry(Val::String(label), value) = entry else {
+                continue;
+            };
+            let mut captured = false;
+            if let Val::Thunk(arm) = value {
+                common::walk_comp(arm, &mut |c| {
+                    captured |= matches!(c.item, CompKind::Capture(_));
+                });
+            }
+            out.push((label.clone(), captured));
+        }
+    });
+    out
+}
+
+#[test]
+fn a_case_arm_is_coerced_by_its_route_not_its_spelling() {
+    // Both arms write bytes and the `case` is bound, so both owe the
+    // byte-side coercion.  A named handler is as much an arm as an inline
+    // thunk: the annotator cannot see into it, so it η-expands it around a
+    // `Capture` instead of leaving it bare for its bytes to escape the
+    // binding — and the two spellings elaborate to the same route.
+    assert_eq!(
+        case_arms_captured(
+            "let h = { |p| echo b }\n\
+             let v = `some unit\n\
+             let x = case $v [`some: $h, `none: { |p| echo z }]\n\
+             return unit"
+        ),
+        vec![("`some".to_string(), true), ("`none".to_string(), true)]
+    );
+}
+
+#[test]
+fn a_discarded_cases_arms_stay_uncaptured() {
+    // The dual, for both spellings again: in statement position nothing
+    // reads the payload, so no arm is coerced and each arm's bytes flush
+    // through to the stage's sink.
+    assert_eq!(
+        case_arms_captured(
+            "let h = { |p| echo b }\n\
+             let v = `some unit\n\
+             case $v [`some: $h, `none: { |p| echo z }]"
+        ),
+        vec![("`some".to_string(), false), ("`none".to_string(), false)]
+    );
 }
 
 #[test]
@@ -1708,6 +1788,59 @@ fn try_relaxation_echo_body_unit_handler_accepted() {
 }
 
 #[test]
+fn byte_side_subsumption_does_not_depend_on_statement_order() {
+    // `Value Unit ⊑ Bytes` demands that a subsumed arm's value be `Unit` —
+    // an equation the byte side imposes, not one it asks after.  `$x`'s type
+    // is still open when the byte join is reached in the first spelling and
+    // already `Unit` in the second, and the two must agree.
+    ok("let f = { |x| if true { return unit } else { return $x }\n\
+                     if true { echo hi } else { return $x } }");
+    ok("let f = { |x| if true { echo hi } else { return $x }\n\
+                     if true { return unit } else { return $x } }");
+}
+
+#[test]
+fn an_equation_added_elsewhere_does_not_make_a_program_typecheck() {
+    // The same monotonicity from the other side: prefixing a binding that
+    // only equates `$x`'s type with `Unit` adds no information the join did
+    // not already have, so it cannot turn a rejection into an acceptance.
+    ok("let f = { |t x| if true { !$t } else { return $x }\n\
+                       let z = 1\n\
+                       if true { echo hi } else { !$t }\n\
+                       return $x }");
+    ok("let f = { |t x| let u = if true { return $x } else { return unit }\n\
+                       if true { !$t } else { return $x }\n\
+                       let z = 1\n\
+                       if true { echo hi } else { !$t }\n\
+                       return $x }");
+}
+
+#[test]
+fn an_arms_unsolved_value_type_is_not_evidence_for_the_value_side() {
+    // At the boundary that owns it the join's own result is still open, and
+    // its one value-routed arm returns `$x` at a type nothing has solved.
+    // Absence of a solution is not a payload: pinning the open arm to the
+    // value side here would foreclose the byte side on no evidence.  `g`
+    // stays route-polymorphic instead, and both uses type.
+    ok("let g = { |t x| if true { !$t } else { return $x } }\n\
+        g { echo hi } unit\n\
+        g { return 3 } 4");
+}
+
+#[test]
+fn a_route_polymorphic_join_still_carries_wf2_to_its_byte_uses() {
+    // Route polymorphism does not loosen WF-2.  The join tied its arms'
+    // value types together, and `{ echo hi }` is `U(F[Bytes] Unit)` whole,
+    // so instantiating `g` at the byte side ties that shared type to `Unit`
+    // and an `Int` argument is rejected.
+    has_error(
+        "let g = { |t x| if true { !$t } else { return $x } }\n\
+         let y = g { echo hi } 3",
+        "couldn't match",
+    );
+}
+
+#[test]
 fn nested_binds_carry_no_scheme_while_spine_does() {
     // The spine `let g` carries a scheme; a `let inner` under the lambda
     // body evaluates in a block scope and never installs, so it stays
@@ -1755,12 +1888,12 @@ fn decoder_with_an_argument_is_a_type_error() {
 }
 
 /// A decoder tail carries its payload as a returned value, so the pipeline
-/// it ends is annotated `Value` and reports that value to the parent.
+/// it ends yields that value to the parent.
 #[test]
-fn a_decoder_tail_routes_the_pipeline_to_its_value() {
+fn a_decoder_tail_yields_the_pipelines_value() {
     assert_eq!(
-        all_pipeline_routes(&annotated("echo hi | from-json")),
-        vec![(2, GroundRoute::Value)]
+        all_pipeline_yields(&annotated("echo hi | from-json")),
+        vec![(2, PipeYield::Last)]
     );
 }
 

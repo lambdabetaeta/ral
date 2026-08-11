@@ -10,8 +10,8 @@
 //! co-inductive [`Pairs`], so two cyclic types reach a fixed point.
 
 use super::error::{CompDiff, TypeErrorKind};
+use super::route::RouteMismatch;
 use super::ty::{CompTy, CompTyVar, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
-use crate::route::RouteMismatch;
 use crate::syntax::tag::is_tag_label;
 use std::collections::HashSet;
 

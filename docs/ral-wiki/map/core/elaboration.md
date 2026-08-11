@@ -64,9 +64,9 @@ bound `App` head, never a bare `Exec`.
 
 A pipeline elaborates to a [[map/core/ir|`Pipeline`]] node carrying two
 annotations the elaborator can only fill with placeholders: a `Ty::Unit` per
-stage for the value type, and a `GroundRoute::Value` for the node's
-`final_route`. Both are overwritten by the [[map/core/typecheck|annotation
-pass]] once it has typed the pipeline. The evaluator never reads `stage_types`,
-which feeds the structural REPL's typed spine; it reads `final_route` only to
-decide whether the last stage's helper reports a value, and the checker runs
-before every evaluation, so the placeholder is never observed.
+stage for the value type, and a `PipeYield::Last` for the node's yield. Both are
+overwritten by the [[map/core/typecheck|annotation pass]] once it has typed the
+pipeline. The evaluator never reads `stage_types`, which feeds the structural
+REPL's typed spine; it reads the yield only to decide whether the last stage's
+helper reports a value, and the checker runs before every evaluation, so the
+placeholder is never observed.

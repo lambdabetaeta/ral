@@ -1,5 +1,5 @@
-//! Pipeline execution engine.  `resolve` freezes the whole plan — the final
-//! route and each stage's launch decision; `launch` walks the stages once,
+//! Pipeline execution engine.  `resolve` freezes the whole plan — the form's
+//! yield and each stage's launch decision; `launch` walks the stages once,
 //! placing every one in a single process group; `collect` waits in launch
 //! order, surfaces the first error, and recovers the final value.
 //! `run_pipeline` is the orchestrator; nothing more.
@@ -13,7 +13,7 @@ pub(crate) mod resolve;
 mod route;
 mod stage;
 
-use crate::ir::Comp;
+use crate::ir::{Comp, PipeYield};
 use crate::types::{Error, Mooring, Raw, Shell, Value};
 use std::sync::Arc;
 
@@ -22,12 +22,12 @@ use resolve::resolve_pipeline;
 
 /// Execute a multi-stage pipeline: resolve, launch, collect.
 ///
-/// Every multi-stage pipeline is process-staged.  The final helper, when its
-/// payload is a value, reports that value over the response frame.  No stage
-/// runs in the parent, so none can be granted tail position.
+/// Every multi-stage pipeline is process-staged.  The final helper reports
+/// its value over the response frame when the form yields it.  No stage runs
+/// in the parent, so none can be granted tail position.
 pub(crate) fn run_pipeline(
     stages: &[Arc<Comp>],
-    final_route: crate::route::GroundRoute,
+    yields: PipeYield,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
@@ -36,7 +36,7 @@ pub(crate) fn run_pipeline(
     // but claimed no relay pgid, so without this the pipeline would launch
     // anyway and collect would block on a child that never saw the signal.
     crate::process::check(mooring)?;
-    let plan = resolve_pipeline(stages, final_route, mooring, shell)?;
+    let plan = resolve_pipeline(stages, yields, mooring, shell)?;
 
     // Window start for the sandbox-denial reader, anchored before any stage
     // spawns so a kernel deny logged by a stage falls inside it.
@@ -46,12 +46,12 @@ pub(crate) fn run_pipeline(
     // end of scope, so they outlive `finish`.
     let (_group, running) = launch_pipeline(stages, &plan, mooring, shell)?;
 
-    // The last value-payloaded helper carries its value home in its
-    // `ChildEvalResponse` frame; collect reads it only after waiting on the
-    // helper, since one blocked on a stopped upstream would deadlock us.
+    // The last helper carries its value home in its `ChildEvalResponse`
+    // frame; collect reads it only after waiting on the helper, since one
+    // blocked on a stopped upstream would deadlock us.
     running
         .collect(mooring, shell, started)
-        .finish(shell, plan.final_route)
+        .finish(shell, plan.yields)
         .map_err(Into::into)
 }
 

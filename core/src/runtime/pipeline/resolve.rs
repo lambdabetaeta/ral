@@ -141,9 +141,8 @@ fn analyze_stage(stage: &Comp, terminal: TerminalPlan, shell: &mut Shell) -> Set
 pub(super) struct PipelinePlan {
     pub(super) specs: Vec<StageSpec>,
     pub(super) terminal: TerminalPlan,
-    /// The pipeline's own ground route, the checker's verdict on its final
-    /// stage: `Bytes` and there is no value to hand back.
-    pub(super) final_route: crate::route::GroundRoute,
+    /// What the pipeline form hands back, straight from the IR node.
+    pub(super) yields: crate::ir::PipeYield,
 }
 
 fn resolve_terminal_plan(mooring: &Mooring, shell: &Shell) -> TerminalPlan {
@@ -173,12 +172,12 @@ fn resolve_terminal_plan(mooring: &Mooring, shell: &Shell) -> TerminalPlan {
     }
 }
 
-/// Resolve phase: freeze every stage's launch path and record the
-/// pipeline's ground final route.  The byte-capturing audit decision is
-/// consulted live during classification, not stored on the plan.
+/// Resolve phase: freeze every stage's launch path and carry the form's
+/// yield through.  The byte-capturing audit decision is consulted live during
+/// classification, not stored on the plan.
 pub(super) fn resolve_pipeline(
     stages: &[Arc<Comp>],
-    final_route: crate::route::GroundRoute,
+    yields: crate::ir::PipeYield,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<PipelinePlan> {
@@ -192,7 +191,7 @@ pub(super) fn resolve_pipeline(
     Ok(PipelinePlan {
         specs,
         terminal,
-        final_route,
+        yields,
     })
 }
 

@@ -3,10 +3,11 @@
 //!
 //! The discipline is call-by-push-value — `Ty` classifies data at rest, `CompTy`
 //! effectful processes, and the two meet at `Thunk` (CBPV's `U`) and `Return`
-//! (`F`).  The payload route is [`crate::route`]'s, re-exported here so that
+//! (`F`).  The payload route is [`super::route`]'s, re-exported here so that
 //! `typecheck`'s surface carries it.
 
-pub use crate::route::{GroundRoute, PayloadRoute, PayloadVar};
+pub(in crate::typecheck) use super::route::GroundRoute;
+pub use super::route::{PayloadRoute, PayloadVar};
 
 /// Unification variable for value types.
 #[derive(

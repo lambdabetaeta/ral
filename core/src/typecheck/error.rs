@@ -1,8 +1,8 @@
 //! The type errors the checker raises: a structural cause, the provenance of
 //! the failed constraint, and a span.  Their user-facing prose is in `explain.rs`.
 
+use super::route::RouteMismatch;
 use super::ty::{CompTy, PayloadRoute, Ty};
-use crate::route::RouteMismatch;
 use crate::source::Span;
 use crate::syntax::ast::BinaryOpKind;
 

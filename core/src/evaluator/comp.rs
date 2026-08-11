@@ -6,9 +6,7 @@
 //! `TailCall` escapes through [`Raw`], and an absorption point above
 //! ([`super::absorb_tail`]) must land it before a settled caller sees it.
 
-use crate::io::strip_trailing_newline;
-use crate::ir::{Comp, CompKind, IrPattern, ScopeOp, Val};
-use crate::route::GroundRoute;
+use crate::ir::{Comp, CompKind, IrPattern, PipeYield, ScopeOp, Val};
 use crate::source::Spanned;
 use crate::typecheck::Scheme;
 use crate::types::{Binding, Break, Control, Error, Mooring, Raw, Shell, Tail, Value};
@@ -74,11 +72,9 @@ pub(crate) fn eval_comp(
         // bare calls alike.
         CompKind::App { .. } | CompKind::Exec(_) => call::invoke(comp, tail, mooring, shell),
 
-        CompKind::Pipeline {
-            stages,
-            final_route,
-            ..
-        } => eval_pipeline(stages, *final_route, tail, mooring, shell),
+        CompKind::Pipeline { stages, yields, .. } => {
+            eval_pipeline(stages, *yields, tail, mooring, shell)
+        }
 
         CompKind::Chain(parts) => eval_chain(parts, tail, mooring, shell),
 
@@ -247,14 +243,17 @@ fn eval_index(target: &Val, keys: &[Spanned<Val>], shell: &mut Shell) -> Raw<Val
     Ok(v)
 }
 
-/// `capture M` — run `M` with its byte channel captured, decode the bytes as
-/// its value; `M`'s value is `Unit` by typing (WF-2), so no inspection is
-/// needed. On failure the payload was never a value, so what `M` already wrote
-/// is seen exactly where a discarded statement's bytes are — the nearest
-/// visible stream, not the buffer one bracket out. A partial write
-/// (`echo half; exit 3`) stays visible however deep the brackets nest.
+/// `capture M` — run `M` with its byte channel captured; the bytes the
+/// handler collected *are* the value, exactly and entirely. `M`'s own value is
+/// `Unit` by typing (WF-2), so no inspection is needed. Reading those bytes as
+/// text is not this node's business: elaboration composes the decode after it.
+///
+/// On failure the payload was never a value, so what `M` already wrote is seen
+/// exactly where a discarded statement's bytes are — the nearest visible
+/// stream, not the buffer one bracket out. A partial write (`echo half; exit
+/// 3`) stays visible however deep the brackets nest.
 fn eval_capture(body: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
-    let (result, mut bytes) =
+    let (result, bytes) =
         super::capture::with_capture(shell, |shell| eval_comp(body, mooring, shell, Tail::No));
     if result.is_err() && !bytes.is_empty() {
         super::capture::with_ambient_stdout(shell, |shell| shell.write_stdout(&bytes))
@@ -271,13 +270,7 @@ fn eval_capture(body: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Raw<V
         "capture's operand is result: Bytes, so WF-2 makes its value Unit"
     );
     result?;
-    strip_trailing_newline(&mut bytes);
-    let s = crate::builtins::util::decode_utf8_strict(
-        bytes,
-        "captured output is not valid UTF-8",
-        "bind with `| from-bytes` to keep raw output",
-    )?;
-    Ok(Value::String(s))
+    Ok(Value::Bytes(bytes))
 }
 
 /// `M to x. N` — run `M`, destructure its result against `pattern`, then
@@ -308,7 +301,7 @@ fn eval_bind(
 /// process boundary.
 fn eval_pipeline(
     stages: &[Arc<Comp>],
-    final_route: GroundRoute,
+    yields: PipeYield,
     tail: Tail,
     mooring: &Mooring,
     shell: &mut Shell,
@@ -316,7 +309,7 @@ fn eval_pipeline(
     if stages.len() == 1 {
         return eval_comp(&stages[0], mooring, shell, tail);
     }
-    pipeline::run_pipeline(stages, final_route, mooring, shell)
+    pipeline::run_pipeline(stages, yields, mooring, shell)
 }
 
 /// `a ? b ? c` — the first arm to succeed wins, else the last error (`Unit`

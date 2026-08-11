@@ -183,6 +183,13 @@ impl InferCtx {
     /// grounding that reached an arm's route without touching its value
     /// still ties the value here — under the single subsumption
     /// `Value Unit ⊑ Bytes`, which admits the empty branch as it stands.
+    ///
+    /// The subsumed arm keeps its `Value` route, but every arm's value is
+    /// `Unit` here in *every* solution, so that is an equation to impose
+    /// rather than a question to ask: an arm whose value is still open is
+    /// not thereby a payload-carrying arm. What cannot meet the equation is
+    /// the conduit mismatch, and it reads truest as the whole computation
+    /// clashing with the byte-routed one — route diff and all.
     fn conclude_byte_side(
         &mut self,
         arms: &[(PayloadRoute, Ty)],
@@ -190,7 +197,7 @@ impl InferCtx {
     ) -> (PayloadRoute, Ty) {
         for (route, ty) in arms {
             if matches!(self.unifier.resolve_route(route), PayloadRoute::Value)
-                && matches!(self.unifier.resolve_ty(ty), Ty::Unit)
+                && self.unifier.unify_ty(ty, &Ty::Unit).is_ok()
             {
                 continue;
             }
@@ -278,10 +285,14 @@ impl InferCtx {
     /// Collapse a residual `ArmResults`, directed by where its own `result`
     /// route stands. Grounded from outside — a downstream consumer pinned
     /// the form's result — the arms land on that side with the full
-    /// protocol, not a bare equation. Still open: a ground `Value`-at-non-
-    /// `Unit` arm has, by now, spent every chance to subsume onto a byte
-    /// side, so it decides the value side and pins the arms still open;
-    /// otherwise every open route is folded into one class and every value
+    /// protocol, not a bare equation. Still open: a `Value`-routed arm at a
+    /// *solved* non-`Unit` type has, by now, spent every chance to subsume
+    /// onto a byte side, so it decides the value side and pins the arms
+    /// still open. An arm whose value type is merely not yet known is not
+    /// that evidence — reading absence as payload would make the verdict
+    /// turn on how much of the store a boundary happened to have solved,
+    /// so that an equation added elsewhere could make a program typecheck.
+    /// Otherwise every open route is folded into one class and every value
     /// tied to the join's own `value`, so the whole join stays one variable
     /// a later grounding can still move. Writes ground state; the caller
     /// re-runs the worklist after each.
@@ -300,7 +311,7 @@ impl InferCtx {
             PayloadRoute::Var(_)
                 if arms.iter().any(|(route, ty)| {
                     matches!(self.unifier.resolve_route(route), PayloadRoute::Value)
-                        && !matches!(self.unifier.resolve_ty(ty), Ty::Unit)
+                        && !matches!(self.unifier.resolve_ty(ty), Ty::Unit | Ty::Var(_))
                 }) =>
             {
                 Some(self.conclude_value_side(&arms, &why))

@@ -67,7 +67,7 @@ fn scheme_curry_depth(factory: fn(&mut Unifier) -> Scheme) -> usize {
 #[derive(Clone, Copy)]
 pub struct BuiltinSig {
     pub args: ArgSig,
-    pub result: CompTemplate,
+    pub(in crate::typecheck) result: CompTemplate,
     pub value: Option<fn(&mut Unifier) -> Scheme>,
     pub diagnostic: BuiltinDiagnostic,
 }
@@ -120,7 +120,7 @@ pub enum TyTemplate {
 
 /// Computation template returned by a command signature.
 #[derive(Clone, Copy)]
-pub enum CompTemplate {
+pub(in crate::typecheck) enum CompTemplate {
     Pure(TyTemplate),
     Return {
         value: TyTemplate,
@@ -142,7 +142,7 @@ pub enum BuiltinDiagnostic {
 
 /// The [`PayloadRoute`] of a command signature — the sole source of a `Sig`
 /// builtin's route.
-pub fn sig_route(result: &CompTemplate, u: &mut Unifier) -> PayloadRoute {
+pub(in crate::typecheck) fn sig_route(result: &CompTemplate, u: &mut Unifier) -> PayloadRoute {
     match result {
         CompTemplate::Pure(_) | CompTemplate::LinesStep => PayloadRoute::Value,
         CompTemplate::Return { route, .. } => (*route).into(),
@@ -244,6 +244,7 @@ pub mod sig {
     ];
 
     const TWO_INTS: &[ArgTemplate] = &[INT, INT];
+    const ONE_BYTES: &[ArgTemplate] = &[ArgTemplate::Ty(TyTemplate::Bytes)];
     const ONE_ANY: &[ArgTemplate] = &[ANY];
     const ONE_ERROR_RECORD: &[ArgTemplate] = &[ArgTemplate::ErrorRecord];
     const ONE_STR: &[ArgTemplate] = &[STR];
@@ -302,6 +303,11 @@ pub mod sig {
     pub const TERMINAL_CONTROL: BuiltinSig = command(ArgSig::Exact(NO_ARGS), ret_bytes(), None);
 
     pub const RANGE: BuiltinSig = command(ArgSig::Exact(TWO_INTS), pure(TyTemplate::ListInt), None);
+
+    /// `__decode-captured`: the step the checker composes after a `capture`,
+    /// carrying that node's bytes to the `String` a value position reads.
+    pub const DECODE_CAPTURED: BuiltinSig =
+        command(ArgSig::Exact(ONE_BYTES), ret(TyTemplate::String), None);
 
     pub const FROM_BYTES: BuiltinSig = decoder(ret(TyTemplate::Bytes));
     pub const FROM_STRING: BuiltinSig = decoder(ret(TyTemplate::String));
@@ -918,17 +924,29 @@ fn derive_sig_scheme(sig: &BuiltinSig, u: &mut Unifier) -> Option<Scheme> {
         ArgSig::Optional(_) | ArgSig::Any => return None,
     };
     let params: Vec<Ty> = args.iter().map(|t| arg_template_ty(*t, u)).collect();
+    let body = params
+        .into_iter()
+        .rev()
+        .fold(sig_comp_ty(sig, u), |acc, p| fun(p, acc));
+    Some(generalize(u, &TyEnv::new(), &thunk(body)))
+}
+
+/// The [`CompTy`] a command signature's result describes: the route it names
+/// over the value it returns.  Every reading of a [`BuiltinSig`] goes through
+/// here — inference, the derived value scheme, and `help`'s fallback for a
+/// builtin with no first-class scheme to print.
+pub fn sig_comp_ty(sig: &BuiltinSig, u: &mut Unifier) -> CompTy {
     let route = sig_route(&sig.result, u);
     let value = match sig.result {
         CompTemplate::Pure(t) | CompTemplate::Return { value: t, .. } => ty_of_template(t, u),
         CompTemplate::Never => u.fresh_ty(),
         CompTemplate::LinesStep => lines_step_ty(u),
     };
-    let body = params
-        .into_iter()
-        .rev()
-        .fold(CompTy::Return(route, Box::new(value)), |acc, p| fun(p, acc));
-    Some(generalize(u, &TyEnv::new(), &thunk(body)))
+    debug_assert!(
+        route != PayloadRoute::Bytes || matches!(value, Ty::Unit),
+        "WF-2: a Bytes-route sig's value template must be Unit"
+    );
+    CompTy::Return(route, Box::new(value))
 }
 
 /// An argument template's type in a derived value scheme; `OneOf` joins
@@ -944,10 +962,8 @@ fn arg_template_ty(template: ArgTemplate, u: &mut Unifier) -> Ty {
 
 /// A [`TyTemplate`]'s type, standalone from an [`Inferencer`] context.
 ///
-/// [`Inferencer::ty_from_template`] delegates here.  Public so a caller
-/// outside the checker (`help`/`explain`'s fallback) can lower a signature's
-/// result to a `Ty` too.
-pub fn ty_of_template(template: TyTemplate, u: &mut Unifier) -> Ty {
+/// [`Inferencer::ty_from_template`] delegates here.
+pub(in crate::typecheck) fn ty_of_template(template: TyTemplate, u: &mut Unifier) -> Ty {
     match template {
         TyTemplate::String => Ty::String,
         TyTemplate::Int => Ty::Int,
@@ -963,16 +979,13 @@ pub fn ty_of_template(template: TyTemplate, u: &mut Unifier) -> Ty {
 
 /// The value `from-lines` returns, standalone from an [`Inferencer`] context:
 /// a recursive Step stream of Strings, the recursion closing through a comp
-/// var.
-///
-/// [`Inferencer::lines_step_ty`] delegates here.  Public for the same reason
-/// as [`ty_of_template`]: `help`/`explain`'s fallback needs it too.
+/// var, not a `TyVar`.
 ///
 /// # Panics
 ///
 /// Never: the self-referential unification it performs is between a fresh
 /// comp var and the type built from it, which cannot fail.
-pub fn lines_step_ty(u: &mut Unifier) -> Ty {
+pub(in crate::typecheck) fn lines_step_ty(u: &mut Unifier) -> Ty {
     use crate::stream::{HEAD_FIELD, TAIL_FIELD, done_tag, more_tag};
     let tail_comp = u.fresh_comp_ty();
     let payload = Ty::Record(Row::Extend(
@@ -1038,22 +1051,6 @@ pub fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
 impl Inferencer<'_> {
     fn ty_from_template(&mut self, template: TyTemplate) -> Ty {
         ty_of_template(template, &mut self.ctx.unifier)
-    }
-
-    fn builtin_sig_result(&mut self, sig: BuiltinSig) -> CompTy {
-        let route = sig_route(&sig.result, &mut self.ctx.unifier);
-        let value = match sig.result {
-            CompTemplate::Pure(ty) | CompTemplate::Return { value: ty, .. } => {
-                self.ty_from_template(ty)
-            }
-            CompTemplate::Never => self.ctx.unifier.fresh_ty(),
-            CompTemplate::LinesStep => self.lines_step_ty(),
-        };
-        debug_assert!(
-            route != PayloadRoute::Bytes || matches!(value, Ty::Unit),
-            "WF-2: a Bytes-route sig's value template must be Unit"
-        );
-        CompTy::Return(route, Box::new(value))
     }
 
     fn unify_arg_template(&mut self, actual: &Ty, template: ArgTemplate) {
@@ -1197,7 +1194,7 @@ impl Inferencer<'_> {
             None => self.infer_args(args),
         }
 
-        self.builtin_sig_result(sig)
+        sig_comp_ty(&sig, &mut self.ctx.unifier)
     }
 }
 

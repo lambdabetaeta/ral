@@ -5,7 +5,7 @@ use super::route_solver::ArmResults;
 use super::scheme::Scheme;
 use super::ty::{CompTy, GroundRoute, PayloadRoute, Ty};
 use super::unify::Unifier;
-use crate::source::Span;
+use crate::source::{Span, WithSpan};
 use std::collections::HashMap;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -159,6 +159,12 @@ impl Default for InferCtx {
     }
 }
 
+impl WithSpan for InferCtx {
+    fn span_slot(&mut self) -> &mut Option<Span> {
+        &mut self.pos
+    }
+}
+
 impl InferCtx {
     pub fn new() -> Self {
         Self {
@@ -175,7 +181,7 @@ impl InferCtx {
     }
 
     /// Ground a route; a still-unresolved variable defaults to `Value`.
-    pub fn ground(&mut self, route: PayloadRoute) -> GroundRoute {
+    pub(in crate::typecheck) fn ground(&mut self, route: PayloadRoute) -> GroundRoute {
         match self.unifier.resolve_route(&route) {
             PayloadRoute::Bytes => GroundRoute::Bytes,
             PayloadRoute::Value | PayloadRoute::Var(_) => GroundRoute::Value,

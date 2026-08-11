@@ -24,9 +24,9 @@ pub(super) enum ByteOut {
     Downstream(os_pipe::PipeWriter),
 }
 
-/// Whether the stage's `ChildEvalResponse` carries the pipeline's final value.
-/// Only the last stage whose *payload* is a value reports one — a chatty
-/// decoder tail (`{ echo warn ; from-line }`) still has a value to report.
+/// Whether the stage's `ChildEvalResponse` carries the pipeline's final
+/// value.  Only the last stage of a value-yielding pipeline reports one — a
+/// chatty decoder tail (`{ echo warn ; from-line }`) still has one to report.
 pub(super) enum FinalValue {
     Report,
     Ignore,
@@ -58,7 +58,7 @@ pub(super) fn open_stage_routes(plan: &PipelinePlan) -> Settled<Vec<StageRoute>>
         } else {
             ByteOut::Parent
         };
-        let final_value = if i + 1 == n && plan.final_route == crate::route::GroundRoute::Value {
+        let final_value = if i + 1 == n && plan.yields == crate::ir::PipeYield::Last {
             FinalValue::Report
         } else {
             FinalValue::Ignore

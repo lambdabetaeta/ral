@@ -11,9 +11,14 @@
 //! The route is not an output predicate.  A `Value`-routed computation may
 //! write any number of bytes; a `Bytes`-routed one may write none.
 //!
-//! These types ride inside a [`crate::typecheck::Scheme`] into the
-//! postcard-baked prelude, which carries no schema of its own; the serde
-//! derives are load-bearing.
+//! These types ride inside a [`super::Scheme`] into the postcard-baked
+//! prelude, which carries no schema of its own; the serde derives are
+//! load-bearing.
+//!
+//! They live under `typecheck` and go no further: elaboration commits every
+//! route decision to explicit syntax — a [`crate::ir::PipeYield`], a
+//! [`crate::ir::CompKind::Capture`] — so no route reaches the evaluator, and
+//! the module boundary is what says so.
 
 /// Unification variable for payload routes.
 #[derive(
@@ -37,7 +42,7 @@ pub enum PayloadRoute {
 /// A resolved [`PayloadRoute`], so "annotations are ground" is a fact of the
 /// type rather than an invariant the reader must trust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum GroundRoute {
+pub(in crate::typecheck) enum GroundRoute {
     Value,
     Bytes,
 }
@@ -54,8 +59,8 @@ impl From<GroundRoute> for PayloadRoute {
 /// A `Value`/`Bytes` clash raised by `Unifier::unify_route`.
 ///
 /// Each caller maps it onto its own diagnostic: the checker's
-/// [`crate::typecheck::TypeErrorKind::RouteMismatch`], or a rejected handler
-/// arm in `typecheck::alias_arm_scheme`.
+/// [`super::TypeErrorKind::RouteMismatch`], or a rejected handler arm in
+/// `typecheck::alias_arm_scheme`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouteMismatch {
     pub left: PayloadRoute,

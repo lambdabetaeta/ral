@@ -1,21 +1,21 @@
 //! Write-back pass: rebuild a checked comp with the inferencer's verdicts —
-//! generalised schemes, a pipeline's ground final route, `Capture` nodes —
-//! over the tree that was inferred, using [`InferCtx`]'s node-address-keyed
-//! side maps.
+//! generalised schemes, a pipeline's yield marker, `capture` coercions — over
+//! the tree that was inferred, using [`InferCtx`]'s node-address-keyed side
+//! maps.
 //!
-//! `Capture` insertion is one recursive walk carrying a [`Demand`]: `Value`
+//! Coercion insertion is one recursive walk carrying a [`Demand`]: `Value`
 //! where a boundary reads a payload, `Discard` where one is dropped. `Value`
-//! reaching a node whose recorded `result` grounds `Bytes` wraps it in
-//! `Capture`; the demand follows the same path the payload rides at run
-//! time, so the wrap lands at the leaf that actually owns the bytes.
+//! reaching a node whose recorded `result` grounds `Bytes` wraps it with
+//! [`captured_string`]; the demand follows the same path the payload rides at
+//! run time, so the wrap lands at the leaf that actually owns the bytes.
 
 use super::env::{InferCtx, TyEnv};
 use super::generalize::generalize;
+use super::ty::GroundRoute;
 use crate::ir::{
-    Comp, CompKind, Exec, IrPattern, RedirectV, ScopeOp, Val, ValListElem, ValMapEntry,
-    ValRedirectTarget,
+    CommandName, CommandWord, Comp, CompKind, Exec, IrPattern, PipeYield, RedirectV, ScopeOp, Val,
+    ValListElem, ValMapEntry, ValRedirectTarget,
 };
-use crate::route::GroundRoute;
 use crate::source::Spanned;
 use crate::syntax::ast::MapPatternEntry;
 use crate::syntax::tag::is_tag_label;
@@ -74,6 +74,43 @@ fn bytes_val_result(ctx: &mut InferCtx, key: usize) -> bool {
             .map(|route| ctx.ground(route)),
         Some(GroundRoute::Bytes)
     )
+}
+
+/// Is `join`'s payload captured from stdout *and* read as a value here?  This
+/// is the one condition that puts a `Capture` inside an arm, so it is also the
+/// condition under which every arm must be visible.
+fn byte_side_join(join: &Comp, ctx: &mut InferCtx, demand: Demand) -> bool {
+    demand == Demand::Value && bytes_result(ctx, comp_key(join))
+}
+
+/// The whole of the byte-to-value coercion: `capture body to b.
+/// __decode-captured b`.  The kernel node yields the handler's bytes exactly;
+/// the one lossy, partial step that reads them as text is an ordinary command,
+/// visible in the IR like any other.  Both halves take `body`'s span, so a
+/// decode failure still names the expression the user wrote.
+///
+/// `__decode-captured` is the internal builtin registered in
+/// [`crate::builtins`]; its `_` prefix is what keeps this composition out of
+/// `help`, completion, and the audit trail.
+fn captured_string(body: Comp) -> CompKind {
+    let span = body.span;
+    let bytes = "__captured".to_string();
+    CompKind::Bind {
+        comp: Arc::new(Spanned::with_span(span, CompKind::Capture(Arc::new(body)))),
+        pattern: IrPattern::Name(bytes.clone()),
+        rest: Arc::new(Spanned::with_span(
+            span,
+            CompKind::Exec(Exec {
+                head: CommandWord::Name(CommandName::Bare("__decode-captured".into())),
+                args: vec![Spanned::with_span(
+                    span,
+                    ValListElem::Single(Val::Variable(bytes)),
+                )],
+                redirects: Vec::new(),
+            }),
+        )),
+        scheme: None,
+    }
 }
 
 /// A `Bind`'s scheme (spine only) and its RHS, always walked at `Value`
@@ -177,7 +214,7 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, spine: bool, demand: Demand)
 
     let item = annotate_plain(comp, ctx);
     let wrapped = if demand == Demand::Value && bytes_result(ctx, comp_key(comp)) {
-        CompKind::Capture(Arc::new(Spanned::with_span(comp.span, item)))
+        captured_string(Spanned::with_span(comp.span, item))
     } else {
         item
     };
@@ -191,13 +228,20 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
         CompKind::Pipeline {
             stages,
             stage_types,
-            final_route: _,
+            yields: _,
         } => {
-            let final_route = ctx
+            // The last place a route is read: a byte-routed pipeline's value
+            // is `Unit` by WF-2, so nothing is worth shipping home from the
+            // final stage's process.  Past here the IR is route-free.
+            let yields = match ctx
                 .pipeline_routes
                 .get(&comp_key(comp))
                 .copied()
-                .map_or(GroundRoute::Value, |route| ctx.ground(route));
+                .map(|route| ctx.ground(route))
+            {
+                Some(GroundRoute::Bytes) => PipeYield::Unit,
+                _ => PipeYield::Last,
+            };
             let stage_types = stages
                 .iter()
                 .zip(stage_types)
@@ -214,7 +258,7 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
                     .map(|stage| Arc::new(annotate(stage, ctx, false)))
                     .collect(),
                 stage_types,
-                final_route,
+                yields,
             }
         }
         CompKind::Lam { param, body } => CompKind::Lam {
@@ -273,13 +317,13 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
 /// byte-payload arm at `Value` and wraps a subsumed (`∅`-`Unit`) arm whole;
 /// otherwise `demand` simply inherits into the arm.
 fn annotate_join_arm(join: &Comp, arm: &Comp, ctx: &mut InferCtx, demand: Demand) -> Comp {
-    if demand == Demand::Value && bytes_result(ctx, comp_key(join)) {
+    if byte_side_join(join, ctx, demand) {
         if bytes_result(ctx, comp_key(arm)) {
             return annotate_demand(arm, ctx, false, Demand::Value);
         }
         return Spanned::with_span(
             arm.span,
-            CompKind::Capture(Arc::new(annotate_demand(arm, ctx, false, Demand::Discard))),
+            captured_string(annotate_demand(arm, ctx, false, Demand::Discard)),
         );
     }
     annotate_demand(arm, ctx, false, demand)
@@ -287,8 +331,12 @@ fn annotate_join_arm(join: &Comp, arm: &Comp, ctx: &mut InferCtx, demand: Demand
 
 /// A `case` handler table: every literal tag entry is a join arm, dispatched
 /// like a `try` handler — the `case` node's own result decides byte-side-or-
-/// not, each handler's decides descend-vs-wrap.  A table that is not a literal
-/// map (it came from a parameter) has no arms to reach here and rebuilds flat.
+/// not, each handler's decides descend-vs-wrap.  An arm's *spelling* never
+/// decides: a named handler is as much an arm as an inline thunk, and
+/// [`annotate_scope_val`] η-expands the one it cannot see into.
+///
+/// A table that is not a literal map (it came from a parameter) has no arms to
+/// reach here and rebuilds flat.
 fn annotate_case_table(join: &Comp, table: &Val, ctx: &mut InferCtx, demand: Demand) -> Val {
     let Val::Map(entries) = table else {
         return annotate_val(table, ctx);
@@ -297,9 +345,7 @@ fn annotate_case_table(join: &Comp, table: &Val, ctx: &mut InferCtx, demand: Dem
         entries
             .iter()
             .map(|entry| match entry {
-                ValMapEntry::Entry(key @ Val::String(label), value @ Val::Thunk(_))
-                    if is_tag_label(label) =>
-                {
+                ValMapEntry::Entry(key @ Val::String(label), value) if is_tag_label(label) => {
                     ValMapEntry::Entry(
                         annotate_val(key, ctx),
                         annotate_scope_val(join, value, ctx, true, demand),
@@ -324,7 +370,7 @@ fn annotate_scope_val(
     handler: bool,
     demand: Demand,
 ) -> Val {
-    let walk = if demand != Demand::Value || !bytes_result(ctx, comp_key(join)) {
+    let walk = if !byte_side_join(join, ctx, demand) {
         ArmWalk::Plain
     } else if bytes_val_result(ctx, val_key(val)) {
         ArmWalk::Descend
@@ -357,18 +403,19 @@ fn arm_body(body: &Arc<Comp>, ctx: &mut InferCtx, walk: ArmWalk) -> Arc<Comp> {
         ArmWalk::Descend => Arc::new(annotate_demand(body, ctx, false, Demand::Value)),
         ArmWalk::Wrap => Arc::new(Spanned::with_span(
             body.span,
-            CompKind::Capture(Arc::new(annotate_demand(body, ctx, false, Demand::Discard))),
+            captured_string(annotate_demand(body, ctx, false, Demand::Discard)),
         )),
         ArmWalk::Plain => unreachable!("arm_body is only called under Descend/Wrap"),
     }
 }
 
-/// `{ capture (force <val>) }`, or `{ |e| capture (force <val> e) }` for a
-/// handler. Safe: a scope forces its arm exactly once and never returns it.
+/// [`captured_string`] around `force <val>`, thunked — or around
+/// `force <val> e` under a fresh binder, for a handler. Safe: a scope forces
+/// its arm exactly once and never returns it.
 fn eta_expand_captured(val: &Val, ctx: &mut InferCtx, handler: bool) -> Val {
     let forced = Spanned::synthetic(CompKind::Force(annotate_val(val, ctx)));
     if !handler {
-        let captured = Spanned::synthetic(CompKind::Capture(Arc::new(forced)));
+        let captured = Spanned::synthetic(captured_string(forced));
         return Val::Thunk(Arc::new(captured));
     }
     let param = "__capture_e".to_string();
@@ -378,7 +425,7 @@ fn eta_expand_captured(val: &Val, ctx: &mut InferCtx, handler: bool) -> Val {
             param.clone(),
         )))],
     });
-    let captured = Spanned::synthetic(CompKind::Capture(Arc::new(app)));
+    let captured = Spanned::synthetic(captured_string(app));
     Val::Thunk(Arc::new(Spanned::synthetic(CompKind::Lam {
         param: IrPattern::Name(param),
         body: Arc::new(captured),

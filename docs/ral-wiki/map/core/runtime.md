@@ -96,12 +96,13 @@ guards
   terminal ownership, and audit state, so launch reads a decision rather than
   re-deriving a dispatch gate. **No route enters that classification**: a
   stage's dispatch may not depend on where its payload lives, or the choice
-  would stop being observationally transparent. The single type-level fact
-  resolve carries is `PipelinePlan::final_route`, the checker's `GroundRoute`
-  for the last stage. `route.rs`'s `open_stage_routes` then allocates every
-  interior edge as an operating-system byte pipe from **stage position alone**
-  (`i + 1 < n`), and derives `FinalValue::Report` from `i + 1 == n` together
-  with that one `final_route` — the pipeline's only value-transport question
+  would stop being observationally transparent. **No route enters anywhere
+  else, either**: the single fact resolve carries is `PipelinePlan::yields`,
+  the IR's own `PipeYield`, which the checker wrote and the runtime only reads.
+  `route.rs`'s `open_stage_routes` then allocates every interior edge as an
+  operating-system byte pipe from **stage position alone** (`i + 1 < n`), and
+  derives `FinalValue::Report` from `i + 1 == n` together with that one yield —
+  the pipeline's only value-transport question
   ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
   A non-final stage's returned value is discarded, never serialised onto an
   edge. A multi-stage pipeline always launches its stages as subprocesses in one
@@ -160,8 +161,8 @@ guards
   One request frame in, one response frame out: the child packs the body plus a
   `WireMobile` snapshot, rebuilds its shell with `subprocess::reexec_child_shell`,
   evaluates the stage against its byte input, drains its audit fragment, and
-  ships a single `ChildEvalResponse`. When the pipeline's `final_route` is
-  `Value`, `FinalValue::Report` asks this helper response to carry the value;
+  ships a single `ChildEvalResponse`. When the pipeline yields its last stage's
+  value, `FinalValue::Report` asks this helper response to carry it;
   the final report remains helper-staged until a separate in-parent-tail
   decision. The response frame travels its own socketpair, never aliased with an
   interior pipe, so there is no upstream typed-value edge.

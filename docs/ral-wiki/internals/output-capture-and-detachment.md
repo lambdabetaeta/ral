@@ -27,9 +27,11 @@ there is nothing left to discriminate.
 - `eval_capture` (`core/src/evaluator/comp.rs`) installs the buffer through
   `with_capture` (`core/src/evaluator/capture.rs`). It swaps `shell.io.stdout`
   to a fresh `Sink::Buffer` for the run of its operand.
-- On success, it strips one trailing newline and decodes the buffer strictly
-  with `decode_utf8_strict`. A decode failure names `| from-bytes` as the
-  route for output that is not valid UTF-8.
+- On success, it returns the buffer exactly, as `Value::Bytes`. The text a
+  value boundary reads comes from the `__decode-captured` step the checker
+  composes after the node (`core/src/builtins/codecs.rs`): one trailing
+  newline stripped, then `decode_utf8_strict`. A decode failure names
+  `| from-bytes` as the route for output that is not valid UTF-8.
 - On failure, it releases whatever bytes the operand already wrote to the
   outer stream, before the error propagates. A failed operand's partial
   output is therefore not silently lost.

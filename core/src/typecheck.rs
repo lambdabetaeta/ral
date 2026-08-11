@@ -11,6 +11,7 @@ mod explain;
 mod fmt;
 mod generalize;
 pub(crate) mod infer;
+mod route;
 mod route_solver;
 mod scheme;
 mod scope;
@@ -23,10 +24,9 @@ pub use self::error::{CompDiff, PinFailure, Reason, TypeError, TypeErrorKind};
 pub use self::fmt::{
     FmtCtx, fmt_comp_ty_ctx, fmt_route, fmt_route_ctx, fmt_scheme, fmt_ty, fmt_ty_ctx,
 };
+pub use self::route::{PayloadRoute, PayloadVar, RouteMismatch};
 pub use self::scheme::{CachedFreeVars, Scheme};
-pub use self::ty::{
-    CompTy, CompTyVar, GroundRoute, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar,
-};
+pub use self::ty::{CompTy, CompTyVar, Row, RowVar, Ty, TyVar};
 pub use self::unify::Unifier;
 
 use self::generalize::generalize;
@@ -98,7 +98,10 @@ fn seed_env(env: &mut TyEnv, schemes: SessionSchemes) {
 /// fresh variables.
 ///
 /// # Errors
-/// Every diagnostic the inference pass collected, whenever that list is non-empty.
+/// Every diagnostic the two passes collected, whenever that list is non-empty.
+/// Inference speaks first; the write-back pass, which alone knows where a
+/// payload is read and so where a coercion must land, may still refuse a
+/// program inference was content with.
 pub fn typecheck(comp: &Comp, schemes: SessionSchemes) -> Result<Comp, Vec<TypeError>> {
     let mut ctx = InferCtx::new();
     let mut env = TyEnv::new();
@@ -106,8 +109,13 @@ pub fn typecheck(comp: &Comp, schemes: SessionSchemes) -> Result<Comp, Vec<TypeE
 
     infer::infer_comp(&mut ctx, &mut env, comp);
     ctx.solve_and_finalize();
+    if !ctx.errors.is_empty() {
+        return Err(ctx.errors);
+    }
+
+    let annotated = annotate::annotate(comp, &mut ctx, true);
     if ctx.errors.is_empty() {
-        Ok(annotate::annotate(comp, &mut ctx, true))
+        Ok(annotated)
     } else {
         Err(ctx.errors)
     }

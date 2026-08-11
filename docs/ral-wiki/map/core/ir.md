@@ -27,29 +27,33 @@ annotated ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]])
 representable state.
 
 - `CompKind::Pipeline` is a struct variant
-  `{ stages, stage_types: Vec<Ty>, final_route: GroundRoute }`. `stage_types`
-  holds one value type per stage, parallel to `stages`, as typing metadata for
-  the structural REPL rather than a transport channel; the elaborator fills it
-  with `Unit` placeholders the annotation pass overwrites. `final_route` is one
-  route for the whole node — the checker's verdict on the last stage, and the
-  only thing that decides whether the pipeline reports its helper's returned
-  value. There is nothing per-stage to annotate, because every interior edge is
-  an operating-system byte pipe allocated from stage position and no rule
-  relates one stage to its neighbour
+  `{ stages, stage_types: Vec<Ty>, yields: PipeYield }`. `stage_types` holds one
+  value type per stage, parallel to `stages`, as typing metadata for the
+  structural REPL rather than a transport channel; the elaborator fills it with
+  `Unit` placeholders the annotation pass overwrites. `PipeYield { Last, Unit }`
+  says what the form hands back — the last stage's reported value, or unit
+  because that stage's payload stayed on the byte channel and so never crossed
+  the process boundary. It is a *choice of former*, not a route: the checker
+  reads the last stage's ground route once and writes the answer down, and no
+  route survives into the node. There is nothing per-stage to annotate, because
+  every interior edge is an operating-system byte pipe allocated from stage
+  position and no rule relates one stage to its neighbour
   ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]],
   [[map/core/typecheck|typecheck]]).
-- `CompKind::Capture(Arc<Comp>)` is the checker's one payload coercion: run the
-  body, capture its stdout, decode it as a `String` value. No surface syntax
-  produces it; [[map/core/typecheck|typecheck]]'s `annotate` pass inserts it as
-  demand propagation. `referenced_names`'s walk descends into it.
+- `CompKind::Capture(Arc<Comp>)` is the kernel half of the checker's one
+  payload coercion: run the body, capture its stdout, return those bytes
+  exactly. No surface syntax produces it; [[map/core/typecheck|typecheck]]'s
+  `annotate` pass inserts it as demand propagation, bound and handed to the
+  internal `__decode-captured` builtin for the `String` a value boundary reads
+  ([[design/types|types]]). `referenced_names`'s walk descends into it.
 
-`GroundRoute { Value, Bytes }` lives in `core/src/route.rs`, the resolved image
-of the checker's `PayloadRoute` with the `Var` arm removed — so "annotations are
-ground" is a fact of the type rather than an invariant the reader must trust.
-The elaborator's placeholder is `GroundRoute::Value`, which is what an
-unconstrained route defaults to anyway, and unreachable in practice since the
-checker runs before every evaluation. Route polymorphism lives only in schemes
-on the checker side, never on a node the evaluator reads.
+The route types live in `core/src/typecheck/route.rs`, a private module of the
+checker, and no name from them is reachable from `ir`, `evaluator`, or
+`runtime`: the module boundary is the proof that the checked IR is route-free.
+Every verdict the evaluator needs is explicit syntax — a `PipeYield`, a
+`Capture` node. The elaborator's placeholder yield is `PipeYield::Last`, which
+is what an unconstrained route defaults to anyway, and unreachable in practice
+since the checker runs before every evaluation.
 
 `CommandName` is the structured head for external dispatch (`Bare` / `Path` /
 `TildePath`). `IrPattern = Pattern<Arc<Comp>>` — the same `Pattern` shape as the

@@ -1,7 +1,7 @@
 ---
 generated_at_commit: 95449d4
 generated_at_date: 2026-08-10
-covers_paths: [core/src/typecheck/, core/src/typecheck.rs, core/src/route.rs]
+covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
 
 # Map: core / typecheck
@@ -17,13 +17,15 @@ Entry points (`typecheck.rs`):
   `annotate` rebuilds the IR after inference and writes three things onto
   it: a generalised `Scheme` on each top-level `Bind` node, resolved against
   the final unifier and closed by quantifying its residuals — that is,
-  generalised against the empty environment; a ground `final_route` and a
-  `Vec<Ty>` of per-stage value types on each `Pipeline`; and a `Capture` node
-  wherever a value demand meets a computation whose payload route grounds
-  `Bytes` ([[map/core/ir|ir]]). `infer_pipeline` records each stage's value
-  type in `InferCtx::stage_types`, keyed by stage address, and the *pipeline's*
-  own final route in `InferCtx::pipeline_routes`, keyed by the pipeline comp;
-  `annotate` resolves both against the final unifier. The stage types are
+  generalised against the empty environment; a `PipeYield` and a `Vec<Ty>` of
+  per-stage value types on each `Pipeline`; and a `Capture` node wherever a
+  value demand meets a computation whose payload route grounds `Bytes`
+  ([[map/core/ir|ir]]). `infer_pipeline` records each stage's value type in
+  `InferCtx::stage_types`, keyed by stage address, and the *pipeline's* own
+  final route in `InferCtx::pipeline_routes`, keyed by the pipeline comp;
+  `annotate` resolves both against the final unifier, and grounding that route
+  is the **last** place a route is read — a `Bytes` pipeline yields `Unit`, so
+  the checker's verdict leaves as syntax and no route reaches the evaluator. The stage types are
   typing metadata for the structural REPL, not a transport channel — the
   evaluator never reads them, so an un-annotated stage keeps the elaborator's
   `Unit` placeholder without harm. There is no per-stage annotation left,
@@ -75,8 +77,9 @@ Internals:
   `InferCtx::route_constraints`, the only logic in the checker that decides a
   join by casing on a route's groundness;
 - `unify.rs` — `Unifier`;
+- `route.rs` — the payload-route types, private to `typecheck`;
 - `ty.rs` — the data-only type definitions (`Ty`, `CompTy`, rows), re-exporting
-  the route types from `core/src/route.rs`;
+  the route types from `route.rs`;
 - `scheme.rs` — `Scheme`;
 - `error.rs` — the error taxonomy: `TypeError` / `TypeErrorKind`, with
   constraint provenance as data (`Reason`, `CompDiff`), plus `PinFailure`, the
@@ -85,7 +88,7 @@ Internals:
   (hints and `TypeErrorKind::render_label`), a pure function of the error data
   so each message is unit-testable;
 - `annotate.rs` — the write-back pass (`annotate`) that rebuilds the checked
-  IR with schemes, ground final routes, stage types, and `Capture` nodes;
+  IR with schemes, pipeline yields, stage types, and `Capture` nodes;
 - `generalize.rs`;
 - `env.rs` — `TyEnv`, `InferCtx`;
 - `fmt.rs` — type display;
@@ -98,10 +101,16 @@ Internals:
 
 ## The payload route
 
-`core/src/route.rs` is a leaf module knowing nothing of `Ty`. It holds four
+`typecheck/route.rs` is a leaf module knowing nothing of `Ty`. It holds four
 types: `PayloadVar`, `PayloadRoute { Value, Bytes, Var }`, its resolved
 counterpart `GroundRoute { Value, Bytes }`, and `RouteMismatch`. All carry serde
 derives, because they ride inside a `Scheme` into the postcard-baked prelude.
+
+The module is private to `typecheck`, and `GroundRoute` is `pub(in
+crate::typecheck)`: routes cannot flow past annotation, because past annotation
+their names do not exist. `PayloadRoute`, `PayloadVar`, and `RouteMismatch`
+stay public — they are in `CompTy`, in `Scheme`, and in `Unifier`'s result, all
+of which host crates write against.
 
 `CompTy::Return(PayloadRoute, Box<Ty>)` is the whole annotation. The route says
 which of a computation's two independent products a *value boundary* reads — the
@@ -220,18 +229,21 @@ the two computations disagree about where their payload lives.
 ## Capture insertion
 
 `CompKind::Capture(body)` types through `Inferencer::infer_comp`: its own route
-grounds `Value`, its value type is `String`. This rule fires only when
-re-inferring a tree that already carries `annotate`-inserted `Capture` nodes — a
-stored handler or thunk re-checked at a later install.
+grounds `Value`, its value type is `Bytes`. This rule fires only when
+re-inferring a tree that already carries `annotate`-inserted nodes — a stored
+handler or thunk re-checked at a later install; the `String` the bind rule then
+expects is restored by the composed `__decode-captured` step.
 
-`annotate.rs` inserts `Capture` during its write-back walk, as demand
-propagation. A `Demand` is `Value` or `Discard`. It reaches a `Seq`'s tail,
+`annotate.rs` inserts the coercion during its write-back walk, as demand
+propagation, through the one constructor `captured_string`, which builds
+`capture body to b. __decode-captured b` with the captured node's span on both
+halves. A `Demand` is `Value` or `Discard`. It reaches a `Seq`'s tail,
 a `Bind`'s `rhs`, each arm of an `If`, `Chain`, `Try`, or `Case` handler
 table (`annotate_case_table`), and the body of a force of a syntactic thunk.
 Where a `Value` demand meets a node whose recorded route grounds `Bytes`,
-`annotate_demand` wraps it in `Capture`. `ArmWalk` (`Plain`, `Descend`, `Wrap`)
+`annotate_demand` wraps it. `ArmWalk` (`Plain`, `Descend`, `Wrap`)
 decides how a join arm is rebuilt; `Wrap` is the subsumption instance, wrapping
-a whole `Value`-at-`Unit` arm so its `Capture` contributes the empty string.
+a whole `Value`-at-`Unit` arm so its capture contributes the empty string.
 `annotate_join_arm` dispatches a `Comp` arm this way. An opaque scope arm has no
 arm syntax to wrap, so `eta_expand_captured` η-expands it instead.
 

@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 95449d4
-verified_at_date: 2026-08-10
+verified_at_commit: a5ffb36
+verified_at_date: 2026-08-11
 anchors: [Inferencer, Unifier, Pairs, unify_row, unify_route, generalize, instantiate, annotate, SessionSchemes, PayloadRoute, extract_return, force_return_shape, pin_arm_to_head, InferCtx, join_arm_results, solve_at_boundary, solve_and_finalize, ArmResults]
 ---
 
@@ -118,22 +118,70 @@ quiescence, since one conclusion can determine a sibling, then collapses what it
 owns: a constraint whose result grounded lands on that side with the side's full
 protocol, one at a time with the worklist re-run between; only an all-open
 residue equates, and a collapsed variable can still ground `Bytes` afterwards.
-Defaulting stays exactly where it always lived, in `InferCtx::ground`, at
-annotation time.
+No drain defaults: `conclude_value_side` pins an open arm only once the join has
+already landed on the value side, and it lands there only on evidence some other
+arm supplied — an arm routed `Value` at a *solved* non-`Unit` type, which by then
+has spent every chance to subsume onto a byte side. An arm whose value type is
+merely not yet known to be `Unit` is **not** that evidence: reading absence of a
+solution as a payload would make the verdict turn on how much of the store a
+boundary happened to have solved, so that an equation added elsewhere — adding no
+information the join lacked — could turn a rejection into an acceptance.
 
-**Principality holds, with its limits stated.** Typing verdicts do not depend on
-the order the solver emits, retries, or collapses constraints: the join is a
-stored constraint re-examined at the boundary that owns its variables rather
-than a decision read off a partially-solved store; conclusions are monotone on a
-height-1 lattice, ground-directed collapses are serialised through the worklist,
-and the all-open residue equates by pure union-find merges. Two limits are part
-of the claim: still-open arms joined under one binding equate at the boundary
-that owns them, so route polymorphism holds *up to joined arms sharing a
-variable*; and two still-open joins sharing value *type* variables at one
-boundary could in principle observe each other's value unifications in collapse
-order — a corner no source program has been made to reach. Shape verdicts — the
-pipeline stage forcing, the sequence tail — sit outside the claim; they are
-introduction-rule choices, not joins. See
+**Defaulting is declared, and it happens at two sites.** Where the program
+supplies no evidence for a route, a stated rule picks `Value`. This is
+ambiguous-type defaulting in the sense of Haskell's `default` declarations — a
+rule of the language, applied at named positions, not an inference from anything
+the program said:
+
+- *The bind pin*, during inference (`infer.rs`, `Reason::RoutePin`). A binder
+  observes its RHS's payload, so it must know where that payload lives: a `Fun`
+  RHS is a lambda and is thunked unread, and otherwise `extract_return` yields
+  the route, a still-open one is unified with `Value`, and only then is the bound
+  type read (`String` on the byte side, the return type on the value side).
+  Nothing pinned the route to `Bytes`, so there is nothing here to capture. The
+  pin runs *before* the binder's own `solve_at_boundary`, so a deferred join
+  bound to a name is decided by it: the join's result grounds `Value`, and
+  `collapse_ground` takes it down the value side with that side's full protocol.
+  Every `Bind` in the IR fires the rule, the elaborator's hoisted ones included.
+- *The residue default*, at annotation (`InferCtx::ground`, `env.rs`). A route
+  variable still unresolved when the checked IR is written reads `Value`. This is
+  where the last open routes die: the per-node results driving `Capture`
+  insertion, the scope arms' results, and the pipeline route the annotator reads
+  to settle what a pipeline form yields (`annotate.rs`). `GroundRoute` has no
+  variable case, so no open route survives into the checked IR.
+
+Both rules are positional, not schematic: the pin fires on the route *instance*
+at one binder, so a scheme that quantified a route variable stays
+route-polymorphic and each use defaults on its own — `let x = !$spin 3` beside
+`!$spin 2 | wc -l` typechecks.
+
+**Principality holds up to those defaults, with its limits stated.** The claim
+is over programs whose boundaries supply route evidence; where a program supplies
+none, the two rules above decide, and the scheme is principal only relative to
+them. Within that scope, typing verdicts do not depend on the order the solver
+emits, retries, or collapses constraints: the join is a stored constraint
+re-examined at the boundary that owns its variables rather than a decision read
+off a partially-solved store; conclusions are monotone on a height-1 lattice,
+ground-directed collapses are serialised through the worklist, and the all-open
+residue equates by pure union-find merges. And no rule reads an arm's value type
+for its *unsolvedness*, the one way a `Ty::Var` could smuggle the store's progress
+into a verdict: the byte side imposes `Unit` on a subsumed arm rather than asking
+whether it is `Unit` yet, and the collapse counts only a *solved* non-`Unit` type
+as evidence of a payload.
+
+Two limits are part of the claim. First, still-open arms joined under one binding
+equate at the boundary that owns them, so route polymorphism holds *up to joined
+arms sharing a variable*. Second, and this is the substantive one: `Value Unit ⊑
+Bytes` is a subsumption, not an equation, so an arm still open when a join lands
+on the byte side has two solutions, and the solver takes whichever side the store
+already favours. `conclude_byte_side` pins such an arm to `Bytes`; the bind pin
+would have read `Value`. Whichever rule reaches the variable first wins, and the
+difference is visible in source — `{ |t| if true { echo hi } else { !$t }; let w =
+!$t }` gives `w : String`, and the same two statements exchanged give `w : Unit`.
+That is a genuinely unforced choice about which side a mixed join takes; it wants
+declaring as a rule of the language, beside the two defaults above, rather than
+proving away. Shape verdicts — the pipeline stage forcing, the sequence tail —
+sit outside the claim; they are introduction-rule choices, not joins. See
 [[decisions/260807_modes-solved-by-deferred-joins|modes-solved-by-deferred-joins]]
 for the architecture, narrowed to this one constraint.
 
@@ -177,7 +225,7 @@ and no de Bruijn index: a variable is **bound iff it is listed**.
 
 **The verdict survives into the next run.** The checker is a transformation:
 on success `annotate` writes each top-level name-bind's generalised `Scheme` onto
-its `Bind` node — and each `Pipeline`'s ground `final_route` and per-stage value
+its `Bind` node — and each `Pipeline`'s yield marker and per-stage value
 types onto the node — the scheme closed against the empty environment so it
 carries no residual variable that could alias the next run's fresh ids. The next
 run's check is seeded from the live session — one `SessionSchemes` (the scope's

@@ -58,9 +58,10 @@ Internals:
   `eval_block`; `apply_lambda_frame` runs a lambda body in place through
   `with_thunk_body`. `comp.rs` holds the `Comp` step functions, including
   `eval_capture` — the `Capture` node's evaluation rule. `eval_capture`
-  installs a buffer through `capture.rs`'s `with_capture`, strips one
-  trailing newline, and decodes the bytes strictly with
-  `builtins::util::decode_utf8_strict`. `comp.rs`'s `eval_seq` flushes each
+  installs a buffer through `capture.rs`'s `with_capture` and returns the
+  collected bytes exactly, as `Value::Bytes`; the checker composes the
+  `__decode-captured` step after it for the text a value boundary reads
+  ([[design/types|types]]). `comp.rs`'s `eval_seq` flushes each
   non-final part's bytes past the innermost capture buffer to the outer
   sink, so a `Capture` node drains only its tail's bytes. `val.rs` holds the
   side-effect-free `Val` layer (`eval_val`); `expr.rs` holds the primitive

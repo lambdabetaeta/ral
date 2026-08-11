@@ -37,16 +37,20 @@ fn collect_extends(row: &Row) -> Vec<(String, Ty)> {
 }
 
 /// One `case` arm as it was written: the handler value itself, whose address
-/// keys the result `annotate` reads back, and its body's span, so an arm-local
-/// complaint underlines the arm and not the whole `case` form.
+/// keys the result `annotate` reads back, and — for an arm written inline —
+/// its body's span, so an arm-local complaint underlines the arm and not the
+/// whole `case` form.
 struct ArmSyntax<'a> {
     span: Option<crate::source::Span>,
     val: &'a Val,
 }
 
-/// Each `case` arm's tag label paired with its [`ArmSyntax`].  Anything but a
-/// literal tag key over a `Val::Thunk` is skipped, and the caller falls back
-/// to the `case` span.
+/// Each `case` arm's tag label paired with its [`ArmSyntax`].  An arm's
+/// spelling is not its identity: a named handler is as much an arm as an
+/// inline thunk, and its route is recorded just the same.  Only the span
+/// differs — a named arm has no body to underline, so the caller falls back
+/// to the `case` span.  An entry whose key is not a literal tag is no arm at
+/// all and is skipped.
 fn collect_handler_arms(table: &Val) -> std::collections::HashMap<String, ArmSyntax<'_>> {
     fn handler_body_span(inner: &Comp) -> Option<crate::source::Span> {
         match &inner.item {
@@ -70,11 +74,13 @@ fn collect_handler_arms(table: &Val) -> std::collections::HashMap<String, ArmSyn
         if !is_tag_label(raw_key) {
             continue;
         }
-        let Val::Thunk(inner) = value else { continue };
         out.insert(
             raw_key.to_string(),
             ArmSyntax {
-                span: handler_body_span(inner),
+                span: match value {
+                    Val::Thunk(inner) => handler_body_span(inner),
+                    _ => None,
+                },
                 val: value,
             },
         );
@@ -372,13 +378,6 @@ impl Inferencer<'_> {
             },
             CompTy::Fun(_, _) | CompTy::Var(_) => None,
         }
-    }
-
-    /// The value `from-lines` returns: a recursive Step stream of Strings,
-    /// the recursion closing through a comp var, not a `TyVar`.  Shared with
-    /// `derive_sig_scheme`'s value form via [`super::builtins::lines_step_ty`].
-    pub(super) fn lines_step_ty(&mut self) -> Ty {
-        super::builtins::lines_step_ty(&mut self.ctx.unifier)
     }
 
     /// Check a map literal's entries against a per-key `schema`: every value is
@@ -1304,7 +1303,10 @@ impl Inferencer<'_> {
                     Ty::Thunk(Box::new(inner_ty))
                 } else {
                     let (ty, route) = self.extract_return(&inner_ty);
-                    if matches!(route, PayloadRoute::Var(_)) {
+                    if matches!(
+                        self.ctx.unifier.resolve_route(&route),
+                        PayloadRoute::Var(_)
+                    ) {
                         self.ctx
                             .unify_route(&route, &PayloadRoute::Value, Reason::RoutePin);
                     }
@@ -1429,13 +1431,15 @@ impl Inferencer<'_> {
             // freshly elaborated tree but present in every tree re-inferred
             // from a live value — a handler arm vetted at install, a bound
             // lambda's body.  Its own route is fixed `Value`: whatever the
-            // body's route is, `Capture` is what turns it into a plain
-            // returned `String`, so a capture over an opaque force says what
-            // it has always done — `!{ !$fa }` lets `fa`'s statements be seen.
+            // body's route is, `Capture` is what moves the payload off the
+            // byte channel, exactly, as `Bytes`.  Reading those bytes as text
+            // is the composed `__decode-captured` step's job, so a capture
+            // over an opaque force still says what it has always said —
+            // `!{ !$fa }` lets `fa`'s statements be seen.
             CompKind::Capture(body) => {
                 let body_ty = self.infer_comp(body);
                 let _ = self.extract_return(&body_ty);
-                CompTy::pure(Ty::String)
+                CompTy::pure(Ty::Bytes)
             }
         };
         if let CompTy::Return(route, _) = self.ctx.unifier.resolve_comp_ty(&cty) {

@@ -7,7 +7,6 @@
 //! onto, so a span rides with the value rather than the parent; `None`
 //! means the node is synthetic — a builtin, the prelude, generated code.
 
-use crate::route::GroundRoute;
 use crate::path::tilde::TildePath;
 use crate::source::Spanned;
 use crate::syntax::ast::{BinaryOp, Pattern, RedirectMode};
@@ -205,8 +204,8 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
         }
         CompKind::Pipeline {
             stages,
-            final_route: _,
             stage_types: _,
+            yields: _,
         } => {
             for stage in stages {
                 walk_comp(stage, out);
@@ -364,6 +363,18 @@ fn walk_scope_op<'a>(op: &'a ScopeOp, out: &mut Vec<&'a str>) {
     }
 }
 
+/// What a [`CompKind::Pipeline`] returns to whoever ran it: the last stage's
+/// reported value, or unit because that stage's payload stayed on the byte
+/// channel and so never crossed the process boundary.
+///
+/// Elaboration decides this and writes it down; nothing downstream re-derives
+/// it from a type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PipeYield {
+    Last,
+    Unit,
+}
+
 /// The CBPV computation category — the evaluator steps a program by
 /// matching on this.  Variant docs use Levy's CBPV notation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -403,11 +414,10 @@ pub enum CompKind {
         /// Only the structural REPL's typed spine reads it, so an
         /// un-annotated pipeline keeps the `Unit` placeholder harmlessly.
         stage_types: Vec<crate::typecheck::Ty>,
-        /// The final stage's ground route: the pipeline reports its helper's
-        /// returned value to the parent only when this is `Value`.  Every
-        /// interior edge is an operating-system byte pipe allocated from stage
-        /// position alone, so no other stage's route is wired anywhere.
-        final_route: GroundRoute,
+        /// What the pipeline hands back.  Every interior edge is an operating-
+        /// system byte pipe allocated from stage position alone, so this is
+        /// the whole of the form's value behaviour.
+        yields: PipeYield,
     },
     /// Binary primitive on already-evaluated values (`$[a + b]`, `$[a == b]`).
     Binary(BinaryOp, Val, Val),
@@ -623,7 +633,7 @@ mod tests {
                 )))),
             ],
             stage_types: vec![Ty::Unit, Ty::Unit],
-            final_route: GroundRoute::Value,
+            yields: PipeYield::Last,
         });
 
         let binary = Spanned::synthetic(CompKind::Binary(

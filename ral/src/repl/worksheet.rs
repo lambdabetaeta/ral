@@ -16,7 +16,7 @@
 //! analysis `syntax::group` (private to `ral_core`) uses to form `LetRec`
 //! groups.  The effect verdict reuses the checker's own IR: a binding whose
 //! RHS compiles to a [`CompKind::Exec`] or [`CompKind::Scope`], or whose RHS
-//! the checker wrapped in a [`CompKind::Capture`], is effectful — pure
+//! the checker wrapped in the `capture` coercion, is effectful — pure
 //! otherwise.  This is the mode-system verdict the typechecker already
 //! records, not a new heuristic.
 //!
@@ -140,8 +140,9 @@ fn top_level_let(ast: &Ast) -> Option<(&str, &Ast)> {
 /// Walk an annotated comp's top-level `Bind` nodes into `(name, effectful)`
 /// pairs, reading the checker's verdict off the IR.  A binding is effectful
 /// when its RHS compiles to a [`CompKind::Exec`] or [`CompKind::Scope`], or
-/// when its RHS is a [`CompKind::Capture`] — the annotation pass's own
-/// verdict that the RHS is a byte-payload computation.
+/// when the checker wrapped it in the `capture` coercion — a bind of a
+/// [`CompKind::Capture`] onto the decoding step, which is the annotation
+/// pass's own verdict that the RHS is a byte-payload computation.
 ///
 /// Walks `Seq` siblings and `Bind` `rest` chains, the two shapes a sequence
 /// of top-level lets elaborates to; it does not descend into nested
@@ -166,10 +167,11 @@ fn collect_bind_effects(comp: &Comp, out: &mut Vec<(String, bool)>) {
             ..
         } => {
             if let Pattern::Name(name) = pattern {
-                let effectful = matches!(
-                    rhs.item,
-                    CompKind::Exec(_) | CompKind::Scope(_) | CompKind::Capture(_)
-                );
+                let effectful = match &rhs.item {
+                    CompKind::Exec(_) | CompKind::Scope(_) => true,
+                    CompKind::Bind { comp, .. } => matches!(comp.item, CompKind::Capture(_)),
+                    _ => false,
+                };
                 out.push((name.clone(), effectful));
             }
             collect_bind_effects(rest, out);

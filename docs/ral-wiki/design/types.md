@@ -39,8 +39,8 @@ annotates:
 ```
 
 - `Value` — the boundary takes the evaluator's return.
-- `Bytes` — the boundary captures the computation's stdout, decodes it as
-  strict UTF-8, and strips one trailing line terminator.
+- `Bytes` — the boundary captures the computation's stdout, and reads those
+  bytes as text (§"One coercion").
 
 **The route is not an output predicate.** A `Value`-routed computation may write
 any number of bytes; a `Bytes`-routed one may write none. It therefore cannot be
@@ -147,19 +147,54 @@ binding leaves an enclosing group's joins alone
 ([[decisions/260807_modes-solved-by-deferred-joins|modes-solved-by-deferred-joins]]).
 There a residue equates rather than defaults, so route polymorphism survives.
 
+## The route is inference machinery; only syntax survives it
+
+Nothing downstream of the checker sees a route. Grounding one is the checker's
+last act, and it spends the verdict immediately on syntax: a `capture` node at
+a value boundary, and a `PipeYield` on a pipeline. The route types are private
+to `typecheck`, so this is enforced by the module system rather than promised
+by a convention ([[map/core/typecheck|typecheck]], [[map/core/ir|ir]]).
+
+Of the two, only `capture` is a coercion — syntax inserted around a term,
+changing its type. A pipeline's yield inserts nothing: it selects between two
+readings of one form, `Last` reporting the final stage's value and `Unit`
+reporting none. Elaboration makes that selection because the answer is
+derivable — a pipeline's payload is its last stage's payload, and WF-2 forces a
+byte-routed stage's value to be `Unit`, so a `Bytes` pipeline has nothing worth
+shipping home.
+
 ## One coercion, `capture`, moves a byte payload to a value
 
-The checker inserts `capture M : F[Value] String` where `M : F[Bytes] Unit`, for
-example at the right-hand side of a `let`. The precondition is a type, so no
-runtime value test remains. `capture` is an IR node (`CompKind::Capture` in
-`core/src/ir.rs`) with one evaluation rule
-(`core/src/evaluator/capture.rs`):
+The checker inserts a coercion where `M : F[Bytes] Unit` meets a value boundary
+— at the right-hand side of a `let`, say. The precondition is a type, so no
+runtime value test remains. What it inserts is a kernel node composed with a
+library step:
 
-- run `M` with its stdout captured;
-- strip one trailing newline;
-- decode strictly as UTF-8 — `| from-bytes` keeps bytes that are not valid UTF-8.
+```text
+capture M to b. __decode-captured b
+```
 
-`capture M` is close to the decoder tail `M | from-string`, which a user can
+**`capture` is total and exact.** `capture M : F[Value] Bytes` runs `M` with its
+stdout captured and returns precisely the bytes the handler collected — nothing
+stripped, nothing decoded, nothing that can fail which `M` would not
+(`CompKind::Capture` in `core/src/ir.rs`, evaluated by `eval_capture` in
+`core/src/evaluator/comp.rs`). Its one further clause is handler semantics
+rather than decoding, so it stays in the node: bytes `M` wrote before failing
+are flushed to the nearest visible stream rather than lost
+([[design/capture|capture]]).
+
+**`__decode-captured : Bytes → F[Value] String` owns everything lossy.** One
+trailing newline goes, and the rest must decode as strict UTF-8 or the step
+fails, naming `| from-bytes` as the way to keep output that is not text. It is
+an ordinary internal builtin beside the codecs
+(`core/src/builtins/codecs.rs`), hidden from `help` and completion by its `_`
+prefix, and it appears in the IR as an ordinary command — so every partial or
+lossy step on the way from bytes to `String` is syntax the operational
+semantics reads, not behaviour buried inside a node.
+
+That split is the kernel/surface line drawn through one coercion: the byte
+channel's handler is kernel, reading its output as text is surface. The
+composite is close to the decoder tail `M | from-string`, which a user can
 write. A value produced by a decoder is composed by application or bind, never
 by another pipeline edge — a `|` carries bytes and nothing else.
 
@@ -175,7 +210,8 @@ Three properties hold:
 
 - a computation's route is stable under substitution and under abstraction;
 - elaboration is total and type-preserving;
-- coherence follows from one subsumption instance and one coercion.
+- coherence follows from one subsumption instance and one coercion — the yield
+  a pipeline carries is a choice of former, not a second coercion to reconcile.
 
 Inference is annotation-free; generalisation happens at the `Bind` boundary. Its
 soundness rests on two independent legs:

@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 95449d4
 verified_at_date: 2026-08-10
-anchors: [run_pipeline, resolve_pipeline, StageLaunch, open_stage_routes, FinalValue::Report, run_child_eval, PipelineGroup, Launch, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, park_on_stop, GroundRoute, Capture, infer_pipeline]
+anchors: [run_pipeline, resolve_pipeline, StageLaunch, open_stage_routes, FinalValue::Report, run_child_eval, PipelineGroup, Launch, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, park_on_stop, PipeYield, Capture, infer_pipeline]
 ---
 
 # Pipeline execution: byte edges, process groups, and helper final values
@@ -23,12 +23,12 @@ resolution into one launch decision:
 - `Direct` — an external command or bundled tool launched directly;
 - `HelperEval` — the stage's ral computation evaluated in a helper.
 
-No route is consulted: a stage's classification cannot depend on where its
-payload lives, because the choice must be observationally transparent. The one
-type-level fact resolve carries through is the pipeline's own `final_route`,
-the checker's `GroundRoute` verdict on the last stage, frozen onto the
-`PipelinePlan`. Launch consumes these decisions; it does not re-derive a
-transport mode. There is no in-process pipeline fold and no typed value channel
+No route is consulted — nor could one be, since the checked IR carries none:
+a stage's classification cannot depend on where its payload lives, because the
+choice must be observationally transparent. The one fact resolve carries
+through is the pipeline node's own `PipeYield`, the syntax the checker wrote in
+place of the last stage's route, frozen onto the `PipelinePlan`. Launch
+consumes these decisions; it does not re-derive a transport mode. There is no in-process pipeline fold and no typed value channel
 between stages.
 
 **Every interior route is an operating-system byte pipe, allocated from stage
@@ -42,7 +42,7 @@ the interior pipes
 ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
 
 The final-value bit is derived **once**, from two facts in one place:
-`FinalValue::Report` iff `i + 1 == n` and `plan.final_route` is `Value`.
+`FinalValue::Report` iff `i + 1 == n` and `plan.yields` is `PipeYield::Last`.
 Everything else is `FinalValue::Ignore`.
 
 **A consumer that stops reading must close promptly.** `yes | !{ return 5 }`
@@ -51,8 +51,8 @@ EPIPE, on Unix and on the Windows-supported paths alike. Neither endpoint of a
 pipe promises traffic, so this is the ordinary case, not an error path.
 
 **The final value report remains helper-staged for now.**
-When `final_route` is `Value`, `FinalValue::Report` selects the helper's
-value report. The parent sends one `ChildEvalRequest` with the stage body and
+When the pipeline yields its last stage's value, `FinalValue::Report` selects
+the helper's value report. The parent sends one `ChildEvalRequest` with the stage body and
 `WireMobile` snapshot; the helper evaluates it and returns the value in one
 `ChildEvalResponse`, alongside status and observations. The parent does not
 run a special in-process tail yet. Moving that tail into the parent is a

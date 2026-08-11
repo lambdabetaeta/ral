@@ -30,7 +30,6 @@ pub mod engine;
 #[cfg(unix)]
 pub mod hatch;
 pub mod process;
-pub mod route;
 pub mod run;
 pub(crate) mod runtime;
 pub mod sandbox;

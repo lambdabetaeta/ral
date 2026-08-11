@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 95449d4
 verified_at_date: 2026-08-10
-anchors: [compile, compile_and_typecheck, CompileOutcome, SessionSchemes, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, final_route, stage_types, Capture, ArmWalk, eta_expand_captured]
+anchors: [compile, compile_and_typecheck, CompileOutcome, SessionSchemes, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, PipeYield, stage_types, Capture, ArmWalk, eta_expand_captured]
 ---
 
 # The compilation ladder: source to typed IR
@@ -35,11 +35,12 @@ artifact. `core/src/lib.rs` exposes the whole descent as two functions: `compile
     closed against the empty environment so the scheme outlives the per-run
     unifier
     ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
-  - Each `Pipeline` carries one *ground* `final_route`: the checker's verdict on
-    the last stage, with every unification variable defaulted away. It is the
-    only thing that decides whether the pipeline reports its helper's returned
-    value; every interior edge is a byte pipe allocated from position, so there
-    is nothing per-stage to write
+  - Each `Pipeline` carries one `PipeYield`: the checker grounds the last
+    stage's route, with every unification variable defaulted away, and writes
+    down the *answer* — `Last` to report the helper's returned value, `Unit`
+    because a byte payload never crosses the process boundary. The route itself
+    does not survive; every interior edge is a byte pipe allocated from
+    position, so there is nothing per-stage to write
     ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
   - Each `Pipeline` also carries `stage_types`, one resolved value type per
     stage. Only the structural REPL's typed spine reads a stage type.

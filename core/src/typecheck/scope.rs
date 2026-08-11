@@ -12,11 +12,11 @@
 use super::builtins::{FieldSchema, audit_record, try_error_record};
 use super::error::Reason;
 use super::infer::Inferencer;
+use super::route::PayloadRoute;
 use super::scheme::Scheme;
 use super::ty::{CompTy, Ty};
 use super::unify::Unifier;
 use crate::ir::{Val, ValMapEntry};
-use crate::route::PayloadRoute;
 
 /// What a scope rule knows before its computation type exists: the value the
 /// scope produces and the route that carries it.
