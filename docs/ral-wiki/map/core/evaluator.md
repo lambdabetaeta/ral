@@ -59,9 +59,11 @@ Internals:
   `with_thunk_body`. `comp.rs` holds the `Comp` step functions, including
   `eval_capture` — the `Capture` node's evaluation rule. `eval_capture`
   installs a buffer through `capture.rs`'s `with_capture` and returns the
-  collected bytes exactly, as `Value::Bytes`; the checker composes the
-  `__decode-captured` step after it for the text a value boundary reads
-  ([[design/types|types]]). `comp.rs`'s `eval_seq` flushes each
+  collected bytes exactly, as `Value::Bytes`; the checker composes a `Decode`
+  node over it, whose `eval_decode` moves those bytes out and reads them as the
+  text a value boundary wants — no name, no binder, nothing a session can
+  intercept ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
+  [[design/types|types]]). `comp.rs`'s `eval_seq` flushes each
   non-final part's bytes past the innermost capture buffer to the outer
   sink, so a `Capture` node drains only its tail's bytes. `val.rs` holds the
   side-effect-free `Val` layer (`eval_val`); `expr.rs` holds the primitive

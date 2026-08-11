@@ -25,6 +25,13 @@ fn raw_errors(src: &str) -> Vec<TypeError> {
     .unwrap_or_default()
 }
 
+/// Whether some error's guidance sentence contains `fragment` — the suite's way
+/// of asking which vocabulary a diagnosis was phrased in.
+fn has_hint(errs: &[TypeError], fragment: &str) -> bool {
+    errs.iter()
+        .any(|e| e.hint().is_some_and(|h| h.contains(fragment)))
+}
+
 fn errors(src: &str) -> Vec<String> {
     raw_errors(src)
         .into_iter()
@@ -781,18 +788,34 @@ fn case_arm_naming_a_non_function_is_faulted_as_an_arm() {
     // and the guidance has to be about arms.
     let errs = raw_errors("case `a unit [`a: 7]");
     assert!(
-        errs.iter()
-            .any(|e| e.hint().is_some_and(|h| h.contains("write the arm out"))),
+        has_hint(&errs, "write the arm out"),
         "expected the arm-vocabulary hint, got: {errs:?}"
     );
     // A non-function head *inside* an arm the user wrote out is an ordinary
     // command-head fault: the arm's body is where it belongs.
     let errs = raw_errors("let n = 7\ncase `a unit [`a: { |_| $n x }]");
     assert!(
-        errs.iter().any(|e| e
-            .hint()
-            .is_some_and(|h| h.contains("a command head must be"))),
+        has_hint(&errs, "a command head must be"),
         "expected the command-head hint, got: {errs:?}"
+    );
+}
+
+#[test]
+fn case_arm_hint_survives_a_handler_that_hoists() {
+    // A handler atom with an effect of its own is bound *ahead* of the
+    // dispatch, so the arm's application sits under a `Bind` chain rather than
+    // at the arm's root.  The arm still owns the head, and still says so.
+    let errs = raw_errors(r#"case `a unit [`a: "v$[1 + 1]"]"#);
+    assert!(
+        has_hint(&errs, "write the arm out"),
+        "expected the arm-vocabulary hint, got: {errs:?}"
+    );
+    // And the arm's voice stops at a value: the block interpolated into that
+    // handler is code of its own, so its bad head is diagnosed as any other.
+    let errs = raw_errors("let n = 7\ncase `a unit [`a: \"v!{$n x}\"]");
+    assert!(
+        has_hint(&errs, "a command head must be") && has_hint(&errs, "write the arm out"),
+        "expected both hints, each in its own voice, got: {errs:?}"
     );
 }
 
@@ -1461,9 +1484,9 @@ fn pipeline_inside_thunk_body_is_annotated() {
 #[test]
 fn a_byte_routed_bind_rhs_is_wrapped_in_capture() {
     // A byte-routed RHS (`echo`) is wrapped in the capture coercion — the
-    // kernel node for the exact bytes, bound and handed to the decode step
-    // for the text; a value-routed one (`return 42`) is left alone.  This is
-    // the whole observable content of the route at a value boundary.
+    // kernel node for the exact bytes, wrapped in a `Decode` node for the
+    // text; a value-routed one (`return 42`) is left alone.  This is the whole
+    // observable content of the route at a value boundary.
     let comp = annotated(r"let x = echo hi; let y = return 42; return unit");
     let mut binds = Vec::new();
     common::walk_comp(&comp, &mut |c| {
@@ -1472,12 +1495,9 @@ fn a_byte_routed_bind_rhs_is_wrapped_in_capture() {
             pattern: IrPattern::Name(name),
             ..
         } = &c.item
-            && !name.starts_with('_')
         {
-            let coerced = matches!(&rhs.item, CompKind::Bind { comp, rest, .. }
-                if matches!(comp.item, CompKind::Capture(_))
-                    && matches!(&rest.item, CompKind::Exec(e)
-                        if e.head.name().bare() == Some("__decode-captured")));
+            let coerced = matches!(&rhs.item, CompKind::Decode(inner)
+                if matches!(inner.item, CompKind::Capture(_)));
             binds.push((name.clone(), coerced));
         }
     });

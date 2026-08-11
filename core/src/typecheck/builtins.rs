@@ -244,7 +244,6 @@ pub mod sig {
     ];
 
     const TWO_INTS: &[ArgTemplate] = &[INT, INT];
-    const ONE_BYTES: &[ArgTemplate] = &[ArgTemplate::Ty(TyTemplate::Bytes)];
     const ONE_ANY: &[ArgTemplate] = &[ANY];
     const ONE_ERROR_RECORD: &[ArgTemplate] = &[ArgTemplate::ErrorRecord];
     const ONE_STR: &[ArgTemplate] = &[STR];
@@ -303,11 +302,6 @@ pub mod sig {
     pub const TERMINAL_CONTROL: BuiltinSig = command(ArgSig::Exact(NO_ARGS), ret_bytes(), None);
 
     pub const RANGE: BuiltinSig = command(ArgSig::Exact(TWO_INTS), pure(TyTemplate::ListInt), None);
-
-    /// `__decode-captured`: the step the checker composes after a `capture`,
-    /// carrying that node's bytes to the `String` a value position reads.
-    pub const DECODE_CAPTURED: BuiltinSig =
-        command(ArgSig::Exact(ONE_BYTES), ret(TyTemplate::String), None);
 
     pub const FROM_BYTES: BuiltinSig = decoder(ret(TyTemplate::Bytes));
     pub const FROM_STRING: BuiltinSig = decoder(ret(TyTemplate::String));

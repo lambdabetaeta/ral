@@ -4267,13 +4267,18 @@ its two products the binder receives:
 Γ ⊢c M to p . N : C
 ```
 
-`Bind-Bytes` is implemented by inserting the primitive `capture`, which is the
-one operation that turns a byte payload into a returned value:
+`Bind-Bytes` is implemented by inserting `decode (capture M)`, the composition
+of the two operations that turn a byte payload into a returned value. Both are
+syntax the checker writes, never a command a program can name:
 
 ```text
 Γ ⊢c M : F[bytes] Unit
 ------------------------------------ Capture
-Γ ⊢c capture M : F[value] String
+Γ ⊢c capture M : F[value] Bytes
+
+Γ ⊢c M : F[value] Bytes
+------------------------------------ Decode
+Γ ⊢c decode M : F[value] String
 ```
 
 A right-hand side whose route is still open at the binding is pinned `value`:
@@ -4281,11 +4286,11 @@ nothing has made it byte-routed, so there is nothing to capture. A right-hand
 side of type `A -> C` is a function — evaluating it builds a closure, and the
 binder receives `U (A -> C)` rather than a payload.
 
-At runtime, `capture` takes the bytes the computation wrote to standard
-output, decodes them as strict UTF-8, and removes one trailing line
-terminator. If the computation fails, bytes already written are flushed before
-the failure propagates. Invalid UTF-8 is an error; use `from-bytes` for
-binary.
+At runtime, `capture` takes the bytes the computation wrote to standard output
+and returns them exactly. If the computation fails, bytes already written are
+flushed before the failure propagates. `decode` then removes one trailing line
+terminator and decodes the rest as strict UTF-8. Invalid UTF-8 is an error; use
+`from-bytes` for binary.
 
 The route decides only this. It does not predict traffic: a `value`-routed
 computation may still write bytes, and those bytes go wherever the ambient
@@ -4488,7 +4493,7 @@ computation, and route substitutions are applied; quantified schemes are
 closed; an unconstrained route grounds to `value`; each pipeline node records
 its final stage's ground route together with the value type of each stage; and
 every value boundary that demands a byte-routed computation is wrapped in a
-`capture` node.
+`capture` node under a `decode` node.
 
 Evaluation begins only from this annotated IR. A route mismatch is therefore a
 static error, not a request for the runtime to guess a codec. Runtime checks

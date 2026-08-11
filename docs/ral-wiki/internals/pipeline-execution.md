@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 95449d4
-verified_at_date: 2026-08-10
+verified_at_commit: ff0a764
+verified_at_date: 2026-08-11
 anchors: [run_pipeline, resolve_pipeline, StageLaunch, open_stage_routes, FinalValue::Report, run_child_eval, PipelineGroup, Launch, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, park_on_stop, PipeYield, Capture, infer_pipeline]
 ---
 
@@ -28,8 +28,8 @@ a stage's classification cannot depend on where its payload lives, because the
 choice must be observationally transparent. The one fact resolve carries
 through is the pipeline node's own `PipeYield`, the syntax the checker wrote in
 place of the last stage's route, frozen onto the `PipelinePlan`. Launch
-consumes these decisions; it does not re-derive a transport mode. There is no in-process pipeline fold and no typed value channel
-between stages.
+consumes these decisions; it does not re-derive a transport mode. There is no
+in-process pipeline fold and no typed value channel between stages.
 
 **Every interior route is an operating-system byte pipe, allocated from stage
 position alone.** `open_stage_routes` walks the stages once: stage `i` takes its
@@ -37,8 +37,8 @@ stdin from the previous edge when there is one and from the parent otherwise,
 and writes to a fresh `os_pipe` when `i + 1 < n` and to the parent otherwise.
 Nothing in that loop reads a type. A non-final stage's returned value is simply
 discarded (`wants_value = false`), and no returned value is ever serialised onto
-an edge — the value report travels the separate socketpair, never aliased with
-the interior pipes
+an edge — the value report travels its own channel, a socketpair on Unix and an
+anonymous pipe pair on Windows, never aliased with the interior pipes
 ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
 
 The final-value bit is derived **once**, from two facts in one place:
@@ -69,27 +69,32 @@ input: an interior producer reaches it only through its byte pipe. The grant
 body evaluates locally and confines each external child per-command instead
 ([[internals/capability-enforcement|capability enforcement]];
 [[decisions/260617_sandbox-external-children|sandbox-external-children]]). A
-bundled stage takes the `Direct` arm as a `ral --ral-bundled-tool`
-child, so it never reaches this runner.
+bundled stage takes the `Direct` arm as a `ral --ral-bundled-tool` child, and
+then never reaches this runner; when a redirect, a byte-capturing audit, or a
+foreground handoff rules that arm out, it comes through the helper like any
+other stage and spawns that child from inside it.
 
-**Pipelines run as one process group; the pgid anchor exists only for two
-or more stages.** Every multi-stage pipeline — including one whose stages are
-ral-implemented — executes in a subprocess sharing one pgid the parent ral
-process is *not* a member of. `PipelineGroup` (`pipeline/group.rs`) owns that pgid
-through a stable *anchor* process, but `prepare` spawns the anchor only for `n ≥ 2`
-stages: a single-stage pipeline has no later `setpgid` join to protect, so its one
-child establishes the group as leader on `spawn`. The SIGINT-forwarding relay is
-claimed on the first `spawn` — *after* `spawn_with_pgid` plus `setpgid` in
-`pre_exec` has put a real child in the group — so a signal is never forwarded to a
-child-less pgid; the module doc of `group.rs` states this SIGINT/relay invariant in
-full. Between `prepare` and the first `spawn`, a racing SIGINT only bumps the
-handler's counter, which the launch loop's per-stage `signal::check` reads to abort.
+**Pipelines run as one process group, held open by an anchor.** Every
+multi-stage pipeline — including one whose stages are ral-implemented —
+executes in a subprocess sharing one pgid the parent ral process is *not* a
+member of. `PipelineGroup` (`pipeline/group.rs`) owns that pgid through a
+stable *anchor* process, spawned by `prepare` because a later stage's `setpgid`
+join needs a target that cannot die first. The `n ≥ 2` guard on that spawn is a
+formality: `eval_pipeline` reduces a single-stage form to its inner computation,
+so `run_pipeline` never sees one. The SIGINT-forwarding relay is claimed on the
+first `spawn` — *after* `spawn_with_pgid` plus `setpgid` in `pre_exec` has put a
+real child in the group — so a signal is never forwarded to a child-less pgid;
+the module doc of `group.rs` states this SIGINT/relay invariant in full. Between
+`prepare` and the first `spawn`, a racing SIGINT only cancels the run's
+foreground scope, which the launch loop's per-stage `process::check` turns into
+a prompt abort.
 
-**A helper-evaluated stage can itself launch a pipeline.** Bundled-tool dispatch
-goes through `run_pipeline`, so a `HelperEval` child may spawn its own nested
-helper. Nested stages still receive only the byte routes and the helper control
-frames relevant to their own launch; no interior typed-value descriptor is an
-inheritance mechanism.
+**A helper-evaluated stage can itself launch a pipeline.** `eval_pipeline` is
+`run_pipeline`'s only caller and runs in the helper exactly as in the parent, so
+a stage whose body is itself a pipeline spawns its own nested helpers. Nested
+stages still receive only the byte routes and the helper control frames relevant
+to their own launch; no interior typed-value descriptor is an inheritance
+mechanism.
 
 **Out-of-process ral stages are subshells.** A helper stage's `cd`, env, or module
 changes do not flow back — only the byte pipe contents, final result, and
@@ -112,24 +117,27 @@ the job. Collection therefore waits on the process tree ral actually launched,
 not on a post-spawn approximation
 ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).
 
-**Abort is gate-first.** A `PipelineBuild` accumulator owns every transient resource
-under one drop order: unreleased stage gates close first (a helper parked on its job
-read treats EOF as the parent's stand-down and exits), then the unconsumed
-`StageRoute`s (every unspawned stage's edge ends, allocated up front by
-`open_stage_routes`), then the running stage handles, then `PipelineGroup`. That
-order is the invariant — a helper holding an inherited copy of the anchor channel
-must be let go before the anchor is waited, or the wait deadlocks.
+**Abort is gate-first.** A mid-launch failure SIGTERMs the pgid so whoever honours
+it can leave before the drop order reaches SIGKILL, and a `PipelineBuild`
+accumulator then releases every transient resource in one order: unreleased
+stage gates close first (a helper parked on its job read treats EOF as the
+parent's stand-down and exits), then the unconsumed `StageRoute`s (every
+unspawned stage's edge ends, allocated up front by `open_stage_routes`), then
+the running stage handles, then `PipelineGroup`. That order is the invariant — a
+helper holding an inherited copy of the anchor channel must be let go before the
+anchor is waited, or the wait deadlocks.
 
 **Stop and resume park the whole group, and the foreground handoff orders
 before the wake.** A foreground command or pipeline that takes `SIGTSTP`
 becomes a parked job rather than dying. `wait_handling_stop`
 (`core/src/process/signal/unix.rs`) is entered with `park_on_stop` true only on
 the *interactive* foreground path — a standalone external sets it from
-`fg.park_on_stop()` (`want_fg && interactive`, `runtime/command.rs`), a pipeline
-stage from `plan.terminal.owns_tty()` (`pipeline/launch.rs`). A non-interactive
-script that foregrounds an interactive child still takes the terminal but has no
-job table to resume a parked job, so it kill-and-reaps on stop rather than
-parking ([[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]]).
+`fg.park_on_stop()` (`want_fg && interactive`, `runtime/command/foreground.rs`),
+a pipeline stage from `plan.terminal.owns_tty()` (`pipeline/launch.rs`). A
+non-interactive script that foregrounds an interactive child still takes the
+terminal but has no job table to resume a parked job, so it kill-and-reaps on
+stop rather than parking
+([[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]]).
 On `WIFSTOPPED` the parking path returns `WaitOutcome::Stopped`
 without killing or reaping (batch mode keeps `park_on_stop` false and runs the
 legacy kill-and-reap). `RunningChild::wait` (`runtime/command/child.rs`) turns
@@ -173,4 +181,4 @@ See also [[design/pipelines|pipelines]],
 [[internals/capability-enforcement|capability-enforcement]]; map
 [[map/core/runtime|runtime]], [[map/core/io-process|io-process]],
 [[map/repl/jobs|jobs]].
-`docs/SPEC.md` §4, §13, §18; RATIONALE §"Pipelines follow their edges".
+`docs/SPEC.md` §7, §11.6; RATIONALE §"The pipe is the operating system's".

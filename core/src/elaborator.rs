@@ -149,6 +149,24 @@ impl Elaborator {
         }
     }
 
+    /// A `{ |param| body }` binder together with the statements it scopes: the
+    /// param elaborates *before* its names enter scope, so its defaults resolve
+    /// outward, and the body is then elaborated inside the frame those names
+    /// open.  Both readings of that spelling — the lambda it denotes and the
+    /// `case` arm that is a branch rather than a function — get their scope from
+    /// here, so the ordering is stated once.
+    fn elab_binder_scope(
+        &mut self,
+        param: &Spanned<ast::Param>,
+        body: &[Stmt],
+    ) -> (IrPattern, Comp) {
+        let pattern = self.with_span(param.span, |this| this.elab_pattern(&param.item));
+        let mut names = HashSet::new();
+        param.item.collect_names(&mut names);
+        let body = self.with_bound_names(names, |this| this.stmts(body));
+        (pattern, body)
+    }
+
     fn with_bound_names<T>(
         &mut self,
         names: impl IntoIterator<Item = String>,
@@ -326,12 +344,7 @@ impl Elaborator {
             }
 
             Ast::Lambda { param, body } => {
-                // The param elaborates before its names enter scope, so its
-                // defaults resolve against the outer environment.
-                let param_ir = self.with_span(param.span, |this| this.elab_pattern(&param.item));
-                let mut names = HashSet::new();
-                param.item.collect_names(&mut names);
-                let body_comp = self.with_bound_names(names, |this| this.stmts(body));
+                let (param_ir, body_comp) = self.elab_binder_scope(param, body);
                 // A body that is itself a single lambda already carries its own
                 // thunk; reuse it rather than wrapping a thunk in a thunk.
                 let body_arc: Arc<Comp> = match &body_comp.item {
@@ -699,10 +712,7 @@ impl Elaborator {
         let tag = arm.tag.clone();
         self.with_span(arm.body.span, |this| match arm.body.item.as_ref() {
             Ast::Lambda { param, body } => {
-                let pattern = this.with_span(param.span, |t| t.elab_pattern(&param.item));
-                let mut names = HashSet::new();
-                param.item.collect_names(&mut names);
-                let body = this.with_bound_names(names, |t| t.stmts(body));
+                let (pattern, body) = this.elab_binder_scope(param, body);
                 CaseArm {
                     tag,
                     pattern,

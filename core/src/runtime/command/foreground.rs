@@ -4,7 +4,7 @@
 //! under and the post-spawn terminal handoff — so they are bundled in one
 //! witness and cannot drift apart.  Pipeline stages never come through here:
 //! they own their pgid via `PipelineGroup` in `core/src/runtime/pipeline/group.rs`
-//! and gate foreground on pure-vs-mixed mode instead.
+//! and gate foreground on the pipeline's frozen `TerminalPlan` instead.
 
 use crate::process::{ForegroundGuard, PgidPolicy};
 use crate::types::{Mooring, Shell};

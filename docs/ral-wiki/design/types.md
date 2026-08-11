@@ -171,11 +171,11 @@ shipping home.
 
 The checker inserts a coercion where `M : F[Bytes] Unit` meets a value boundary
 — at the right-hand side of a `let`, say. The precondition is a type, so no
-runtime value test remains. What it inserts is a kernel node composed with a
-library step:
+runtime value test remains. What it inserts is two nodes, the exact half and
+the lossy half:
 
 ```text
-capture M to b. __decode-captured b
+decode (capture M)
 ```
 
 **`capture` is total and exact.** `capture M : F[Value] Bytes` runs `M` with its
@@ -187,20 +187,20 @@ rather than decoding, so it stays in the node: bytes `M` wrote before failing
 are flushed to the nearest visible stream rather than lost
 ([[design/capture|capture]]).
 
-**`__decode-captured : Bytes → F[Value] String` owns everything lossy.** One
-trailing newline goes, and the rest must decode as strict UTF-8 or the step
+**`decode : F[Value] Bytes → F[Value] String` owns everything lossy.** One
+trailing terminator goes, and the rest must decode as strict UTF-8 or the step
 fails, naming `| from-bytes` as the way to keep output that is not text. It is
-an ordinary internal builtin beside the codecs
-(`core/src/builtins/codecs.rs`), hidden from `help` and completion by its `_`
-prefix, and it appears in the IR as an ordinary command — so every partial or
-lossy step on the way from bytes to `String` is syntax the operational
-semantics reads, not behaviour buried inside a node.
+its own node (`CompKind::Decode`, evaluated by `eval_decode`) rather than a step
+folded into `capture`, so every partial or lossy step on the way from bytes to
+`String` is syntax the operational semantics reads.
 
-That split is the kernel/surface line drawn through one coercion: the byte
-channel's handler is kernel, reading its output as text is surface. The
-composite is close to the decoder tail `M | from-string`, which a user can
-write. A value produced by a decoder is composed by application or bind, never
-by another pipeline edge — a `|` carries bytes and nothing else.
+It is *syntax and not a command*, which is the price of composing a coercion at
+all: a translation whose meaning a session could redefine is not a translation
+([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]]). The composite
+is close to the decoder tail `M | from-string`, which a user can write — and
+that spelling remains theirs to write, meaning whatever their session says
+`from-string` means. A value produced by a decoder is composed by application or
+bind, never by another pipeline edge — a `|` carries bytes and nothing else.
 
 ## The calculus is ordinary CBPV plus one boundary annotation
 

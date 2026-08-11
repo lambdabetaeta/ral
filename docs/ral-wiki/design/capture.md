@@ -68,12 +68,13 @@ rather than sugar for a bind on a dropped variable.
 **The node returns bytes; the text is composed.** `capture M : F[Value] Bytes`
 is total and exact — precisely the bytes the handler collected, nothing
 stripped and nothing decoded. Reading them as the `String` a value boundary
-wants is a second, ordinary step the checker composes after it, `capture M to
-b. __decode-captured b`, and that step owns both things that can go wrong: one
-trailing newline is dropped, and output that is not valid UTF-8 fails there,
-naming `| from-bytes` as the way to keep it. The byte-channel handler is a
-primitive; reading its output as text is a library step; each is its own term
-in the IR ([[design/types|types]]).
+wants is a second step the checker composes over it, `decode (capture M)`, and
+that step owns both things that can go wrong: one trailing terminator is
+dropped, and output that is not valid UTF-8 fails there, naming `| from-bytes`
+as the way to keep it. Each is its own term in the IR, and each is syntax: a
+step the checker writes into a program cannot be a name the program's session
+resolves ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
+[[design/types|types]]).
 
 **Failure flushes.** If a captured computation fails, bytes it produced before
 failing are flushed visibly rather than lost — a partial write from

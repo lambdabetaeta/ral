@@ -2,9 +2,11 @@
 //! name-dispatched `codec <name>`: the typechecker then sees each one's real
 //! return type, and a misspelling fails at command lookup.  Decoders are
 //! nullary; where their bytes come from is [`super::util::stdin_reader`]'s
-//! policy.  `__decode-captured` is the one exception, and lives here for the
-//! company: it takes its bytes as an argument, because the checker composes
-//! it directly onto a `capture` node rather than onto the channel.
+//! policy.
+//!
+//! The checker's own byte-to-text step is not here and is not a command: it is
+//! [`crate::ir::CompKind::Decode`], syntax whose meaning no session can
+//! redefine.
 
 use crate::ir::{CompKind, Val};
 use crate::source::Spanned;
@@ -39,21 +41,6 @@ fn input_bytes(args: &[Value], name: &str, shell: &mut Shell) -> Settled<Vec<u8>
 
 pub(super) fn builtin_from_bytes(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     Ok(Value::Bytes(input_bytes(args, "from-bytes", shell)?))
-}
-
-/// The surface half of the checker's `capture`: the kernel node hands over the
-/// captured bytes exactly, and this partial step reads them as text — one
-/// trailing newline dropped, because a command's line of output is its value
-/// and not its formatting, then a strict decode.  Only
-/// [`crate::typecheck`](crate::typecheck) emits the call.
-pub(super) fn builtin_decode_captured(args: &[Value]) -> Settled<Value> {
-    let mut bytes = as_byte_list(&args[0], "__decode-captured")?;
-    crate::io::strip_trailing_newline(&mut bytes);
-    Ok(Value::String(decode_utf8_strict(
-        bytes,
-        "captured output is not valid UTF-8",
-        "bind with `| from-bytes` to keep raw output",
-    )?))
 }
 
 pub(super) fn builtin_from_string(args: &[Value], shell: &mut Shell) -> Settled<Value> {

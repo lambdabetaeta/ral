@@ -1,0 +1,196 @@
+================================================================================
+case with one arm per tag
+================================================================================
+
+let result = case $reply [
+  `ok:  { |value| return $value },
+  `err: { |error| fail $error },
+]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (let_stmt
+            (identifier)
+            (chain
+              (pipeline
+                (cmd
+                  (case_stmt
+                    (deref)
+                    (case_arm
+                      (tag_label)
+                      (case_arm_lambda
+                        (lambda_params
+                          (identifier))
+                        (statement
+                          (chain
+                            (pipeline
+                              (cmd
+                                (return_stmt
+                                  (deref))))))))
+                    (case_arm
+                      (tag_label)
+                      (case_arm_lambda
+                        (lambda_params
+                          (identifier))
+                        (statement
+                          (chain
+                            (pipeline
+                              (cmd
+                                (application
+                                  (identifier)
+                                  (deref))))))))))))))))))
+
+================================================================================
+an arm body may be any atom
+================================================================================
+
+case $r [`ok: $handler, `err: !{ recover }]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (case_stmt
+            (deref)
+            (case_arm
+              (tag_label)
+              (deref))
+            (case_arm
+              (tag_label)
+              (force_brace
+                (statement
+                  (chain
+                    (pipeline
+                      (cmd
+                        (application
+                          (identifier))))))))))))))
+
+================================================================================
+an arm binder may destructure
+================================================================================
+
+case $s [`more: { |[head: h]| echo $h }]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (case_stmt
+            (deref)
+            (case_arm
+              (tag_label)
+              (case_arm_lambda
+                (lambda_params
+                  (map_pattern
+                    (map_pattern_entry
+                      (identifier)
+                      (identifier))))
+                (statement
+                  (chain
+                    (pipeline
+                      (cmd
+                        (application
+                          (identifier)
+                          (deref))))))))))))))
+
+================================================================================
+newlines separate the scrutinee from the arms, and the arms from each other
+================================================================================
+
+case
+  $result
+  [
+    `ok: { |value| use $value },
+    `err: { |error| fail $error }
+  ]
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (chain
+      (pipeline
+        (cmd
+          (case_stmt
+            (deref)
+            (case_arm
+              (tag_label)
+              (case_arm_lambda
+                (lambda_params
+                  (identifier))
+                (statement
+                  (chain
+                    (pipeline
+                      (cmd
+                        (application
+                          (identifier)
+                          (deref))))))))
+            (case_arm
+              (tag_label)
+              (case_arm_lambda
+                (lambda_params
+                  (identifier))
+                (statement
+                  (chain
+                    (pipeline
+                      (cmd
+                        (application
+                          (identifier)
+                          (deref))))))))))))))
+
+================================================================================
+a computed table is not an arm list
+:error
+================================================================================
+
+case $r $handlers
+
+--------------------------------------------------------------------------------
+
+================================================================================
+a spread is not an arm
+:error
+================================================================================
+
+case $r [`ok: { |v| echo $v }, ...$rest]
+
+--------------------------------------------------------------------------------
+
+================================================================================
+the arm list may not be empty
+:error
+================================================================================
+
+case $r []
+
+--------------------------------------------------------------------------------
+
+================================================================================
+an arm must bind its payload
+:error
+================================================================================
+
+case $r [`ok: { echo hi }]
+
+--------------------------------------------------------------------------------
+
+================================================================================
+an arm binds exactly one payload
+:error
+================================================================================
+
+case $r [`ok: { |a b| echo hi }]
+
+--------------------------------------------------------------------------------
+

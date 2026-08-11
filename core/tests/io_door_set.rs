@@ -249,7 +249,10 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     // The fallback key file, written only where this computer offers no
     // credential manager to keep the key in instead.
     ("exarch/src/provider/keychain.rs", "io-door:silent:key-read"),
-    ("exarch/src/provider/keychain.rs", "io-door:silent:key-write"),
+    (
+        "exarch/src/provider/keychain.rs",
+        "io-door:silent:key-write",
+    ),
     // Provider declarations written back to the app's own config directory by
     // synod's accounts screen; addresses and protocols, never keys.
     ("exarch/src/config.rs", "io-door:silent:config-write"),

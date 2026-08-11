@@ -13,8 +13,8 @@ use super::env::{InferCtx, TyEnv};
 use super::generalize::generalize;
 use super::ty::GroundRoute;
 use crate::ir::{
-    CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, IrPattern, PipeYield, RedirectV,
-    ScopeOp, Val, ValListElem, ValMapEntry, ValRedirectTarget,
+    CaseArm, Comp, CompKind, Exec, IrPattern, PipeYield, RedirectV, ScopeOp, Val, ValListElem,
+    ValMapEntry, ValRedirectTarget,
 };
 use crate::source::Spanned;
 use crate::syntax::ast::MapPatternEntry;
@@ -85,34 +85,21 @@ fn byte_side_join(join: &Comp, ctx: &mut InferCtx, demand: Demand) -> bool {
     demand == Demand::Value && bytes_result(ctx, comp_key(join))
 }
 
-/// The whole of the byte-to-value coercion: `capture body to b.
-/// __decode-captured b`.  The kernel node yields the handler's bytes exactly;
-/// the one lossy, partial step that reads them as text is an ordinary command,
-/// visible in the IR like any other.  Both halves take `body`'s span, so a
-/// decode failure still names the expression the user wrote.
+/// The whole of the byte-to-value coercion: `Decode(Capture(body))`.  The
+/// capture yields the handler's bytes exactly; the one lossy, partial step
+/// that reads them as text sits above it, visible in the IR as its own node.
+/// Both halves take `body`'s span, so a decode failure still names the
+/// expression the user wrote.
 ///
-/// `__decode-captured` is the internal builtin registered in
-/// [`crate::builtins`]; its `_` prefix is what keeps this composition out of
-/// `help`, completion, and the audit trail.
+/// Two nodes and no command: what the checker composes here means the same
+/// thing in every environment, because there is no name for user code to
+/// rebind and no binder for it to observe.
 fn captured_string(body: Comp) -> CompKind {
     let span = body.span;
-    let bytes = "__captured".to_string();
-    CompKind::Bind {
-        comp: Arc::new(Spanned::with_span(span, CompKind::Capture(Arc::new(body)))),
-        pattern: IrPattern::Name(bytes.clone()),
-        rest: Arc::new(Spanned::with_span(
-            span,
-            CompKind::Exec(Exec {
-                head: CommandWord::Name(CommandName::Bare("__decode-captured".into())),
-                args: vec![Spanned::with_span(
-                    span,
-                    ValListElem::Single(Val::Variable(bytes)),
-                )],
-                redirects: Vec::new(),
-            }),
-        )),
-        scheme: None,
-    }
+    CompKind::Decode(Arc::new(Spanned::with_span(
+        span,
+        CompKind::Capture(Arc::new(body)),
+    )))
 }
 
 /// A `Bind`'s scheme (spine only) and its RHS, always walked at `Value`
@@ -312,9 +299,11 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
                     .collect(),
             ),
         },
-        // `Capture` is checker-inserted only, by this very pass; the rest are
-        // walked directly by `annotate_demand` and never reach here.
+        // `Capture` and `Decode` are checker-inserted only, by this very pass;
+        // the rest are walked directly by `annotate_demand` and never reach
+        // here.
         CompKind::Capture(_)
+        | CompKind::Decode(_)
         | CompKind::Seq(_)
         | CompKind::Bind { .. }
         | CompKind::If { .. }

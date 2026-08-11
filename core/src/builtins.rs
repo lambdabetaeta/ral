@@ -200,12 +200,6 @@ builtin_registry! {
     FoldLines { names: ["fold-lines"], ty: Scheme(scheme::fold_lines),
         doc: "fold-lines <fn> <init>  — fold over stdin lines.",
         call: |args, mooring, shell| collections::builtin_fold_lines(args, mooring, shell), },
-    // The second half of a checker-inserted `capture`, spelled as an ordinary
-    // command so the lossy step is visible IR.  The `_` prefix is what keeps
-    // it out of `help`, completion, and the audit trail.
-    DecodeCaptured { names: ["__decode-captured"], ty: Sig(sig::DECODE_CAPTURED),
-        doc: "__decode-captured <bytes>  — read captured bytes as text: one trailing newline dropped, then a strict UTF-8 decode.",
-        call: |args, _mooring, _shell| codecs::builtin_decode_captured(args), },
     FromBytes { names: ["from-bytes"], ty: Sig(sig::FROM_BYTES),
         doc: "from-bytes  — read raw bytes from the channel (stdin / `< file` / pipe) as Bytes.",
         call: |args, _mooring, shell| codecs::builtin_from_bytes(args, shell), },
@@ -345,9 +339,9 @@ builtin_registry! {
         doc: "echo <args...>  — str each argument, join with a single space, write with a trailing newline. A base handler frame, not a value: stacking a handler on `echo` intercepts it, and `^echo` reaches this frame rather than a PATH binary.",
         call: |args, _mooring, shell| codecs::builtin_echo(args, shell), },
     // The bundled uutils tools (cat, yes, head, wc, …) are deliberately absent:
-    // `runtime::command` runs them either as an in-process `uumain` call or as a
-    // `ral --ral-bundled-tool <tool>` child, so they cross the same wait / signal /
-    // exit-code boundary as a system binary.  See `crate::uutils::is_uutils_tool`.
+    // `runtime::command` runs each as a `ral --ral-bundled-tool <tool>` child, so
+    // they cross the same wait / signal / exit-code boundary as a system binary.
+    // See `crate::uutils::is_uutils_tool`.
 
     Help { names: ["help"], ty: Sig(sig::HELP),
         doc: "help  — print an overview of builtins, prelude, and library; see also `explain`.",

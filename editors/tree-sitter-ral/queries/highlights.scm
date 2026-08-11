@@ -80,6 +80,9 @@
 
 (tag (tag_label) @constructor)
 
+; A `case` arm is labelled by a bare tag, not by a `tag` value.
+(case_arm tag: (tag_label) @constructor)
+
 ; ── Tilde ────────────────────────────────────────────────────────────────────
 
 (tilde) @constant.builtin
@@ -93,11 +96,11 @@
 (wildcard) @variable.builtin           ; _
 (rest_pattern "..." @operator (identifier) @variable.parameter)
 
-(let_stmt
-  (_pattern (identifier) @variable.declaration))
+; `_pattern` is hidden, so a plain-identifier binder is a direct child.
+; A `case` arm's binder is a `lambda_params` too, by alias.
+(let_stmt (identifier) @variable.declaration)
 
-(lambda_params
-  (_pattern (identifier) @variable.parameter))
+(lambda_params (identifier) @variable.parameter)
 
 (map_pattern_entry
   key: (identifier) @property)

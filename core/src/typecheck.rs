@@ -98,10 +98,9 @@ fn seed_env(env: &mut TyEnv, schemes: SessionSchemes) {
 /// fresh variables.
 ///
 /// # Errors
-/// Every diagnostic the two passes collected, whenever that list is non-empty.
-/// Inference speaks first; the write-back pass, which alone knows where a
-/// payload is read and so where a coercion must land, may still refuse a
-/// program inference was content with.
+/// Every diagnostic inference collected, whenever that list is non-empty.
+/// Inference alone judges; the write-back pass runs only on a program it
+/// accepted, and places the coercions that verdict implies.
 pub fn typecheck(comp: &Comp, schemes: SessionSchemes) -> Result<Comp, Vec<TypeError>> {
     let mut ctx = InferCtx::new();
     let mut env = TyEnv::new();
@@ -113,12 +112,7 @@ pub fn typecheck(comp: &Comp, schemes: SessionSchemes) -> Result<Comp, Vec<TypeE
         return Err(ctx.errors);
     }
 
-    let annotated = annotate::annotate(comp, &mut ctx, true);
-    if ctx.errors.is_empty() {
-        Ok(annotated)
-    } else {
-        Err(ctx.errors)
-    }
+    Ok(annotate::annotate(comp, &mut ctx, true))
 }
 
 /// The (name, scheme) pairs on an *annotated* comp's top-level `Bind` nodes.

@@ -252,7 +252,7 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
             }
         }
         CompKind::Scope(op) => walk_scope_op(op, out),
-        CompKind::Capture(body) => walk_comp(body, out),
+        CompKind::Capture(body) | CompKind::Decode(body) => walk_comp(body, out),
     }
 }
 
@@ -473,8 +473,19 @@ pub enum CompKind {
     /// then restore.
     Scope(ScopeOp),
     /// Checker-inserted value boundary: run `body` with its byte channel
-    /// captured, decode the bytes as its value. No surface syntax.
+    /// captured and hand those bytes over exactly, as `Bytes`. Total, and
+    /// lossless. No surface syntax.
     Capture(Arc<Comp>),
+    /// Checker-inserted coercion: read the `Bytes` `body` returns as text —
+    /// one trailing line terminator dropped, then a strict UTF-8 decode. The
+    /// partial, lossy half of the value boundary, kept its own node so that
+    /// [`CompKind::Capture`] stays exact.
+    ///
+    /// It is syntax and not a command because its meaning is fixed where the
+    /// checker writes it: no name is looked up, no binder is installed, and no
+    /// frame the user can install stands between the bytes and their reading.
+    /// No surface syntax.
+    Decode(Arc<Comp>),
 }
 
 /// One arm of a [`CompKind::Case`]: a tag, the pattern its payload binds,
@@ -781,6 +792,7 @@ mod tests {
             Spanned::synthetic(CompKind::Return(var("r_thunk_body"))),
         ))));
         let capture = Spanned::synthetic(CompKind::Capture(ret("r_capture_body")));
+        let decode = Spanned::synthetic(CompKind::Decode(ret("r_decode_body")));
 
         let whole = Spanned::synthetic(CompKind::Seq(vec![
             Arc::new(Spanned::synthetic(CompKind::Force(var("r_force")))),
@@ -812,6 +824,7 @@ mod tests {
             Arc::new(val_variant_empty),
             Arc::new(val_thunk),
             Arc::new(capture),
+            Arc::new(decode),
         ]));
 
         let found: std::collections::HashSet<&str> = referenced_names(&whole).into_iter().collect();
@@ -869,6 +882,7 @@ mod tests {
             "r_variant_payload",
             "r_thunk_body",
             "r_capture_body",
+            "r_decode_body",
         ];
 
         for name in expected {

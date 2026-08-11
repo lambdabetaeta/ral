@@ -68,6 +68,8 @@ pub(crate) fn eval_comp(
 
         CompKind::Capture(body) => eval_capture(body, mooring, shell),
 
+        CompKind::Decode(body) => eval_decode(body, mooring, shell),
+
         // `invoke` is the ordinary call evaluator, for pipeline stages and
         // bare calls alike.
         CompKind::App { .. } | CompKind::Exec(_) => call::invoke(comp, tail, mooring, shell),
@@ -246,7 +248,7 @@ fn eval_index(target: &Val, keys: &[Spanned<Val>], shell: &mut Shell) -> Raw<Val
 /// `capture M` — run `M` with its byte channel captured; the bytes the
 /// handler collected *are* the value, exactly and entirely. `M`'s own value is
 /// `Unit` by typing (WF-2), so no inspection is needed. Reading those bytes as
-/// text is not this node's business: elaboration composes the decode after it.
+/// text is not this node's business: the checker composes a `Decode` over it.
 ///
 /// On failure the payload was never a value, so what `M` already wrote is seen
 /// exactly where a discarded statement's bytes are — the nearest visible
@@ -271,6 +273,42 @@ fn eval_capture(body: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Raw<V
     );
     result?;
     Ok(Value::Bytes(bytes))
+}
+
+/// `Decode M` — read the bytes `M` returns as text: one trailing line
+/// terminator dropped, because a command's line of output is its value and not
+/// its formatting, then a strict UTF-8 decode. The lossy, partial half of the
+/// value boundary, which is why it is not folded back into `eval_capture`.
+///
+/// The checker writes this node over a `Capture` and nowhere else, so its
+/// meaning is settled before the program runs: there is no name to resolve and
+/// no scope to consult, and a session's aliases, bindings, and handler frames
+/// cannot come between captured bytes and the text a `let` binds.
+///
+/// The buffer is moved out of the operand's value and decoded in place, so the
+/// shell's hottest path — `let x = <command>` — copies no bytes here.
+fn eval_decode(body: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
+    let value = eval_comp(body, mooring, shell, Tail::No)?;
+    let Value::Bytes(mut bytes) = value else {
+        return Err(shell
+            .err_hint(
+                format!(
+                    "the value boundary was handed {} where a captured byte payload belongs",
+                    value.type_name()
+                ),
+                "only the type checker writes this step, so this is a fault in ral rather than in \
+                 your program — please report the source that produced it",
+                1,
+            )
+            .into());
+    };
+    crate::io::strip_trailing_newline(&mut bytes);
+    let text = crate::builtins::util::decode_utf8_strict(
+        bytes,
+        "captured output is not valid UTF-8",
+        "bind with `| from-bytes` to keep raw output",
+    )?;
+    Ok(Value::String(text))
 }
 
 /// `M to x. N` — run `M`, destructure its result against `pattern`, then

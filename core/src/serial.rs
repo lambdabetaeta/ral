@@ -736,7 +736,8 @@ mod tests {
             }
             CompKind::Force(crate::ir::Val::Thunk(c))
             | CompKind::Return(crate::ir::Val::Thunk(c))
-            | CompKind::Capture(c) => walk_comp(c, visit),
+            | CompKind::Capture(c)
+            | CompKind::Decode(c) => walk_comp(c, visit),
             _ => {}
         }
     }

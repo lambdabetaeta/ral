@@ -140,9 +140,9 @@ fn top_level_let(ast: &Ast) -> Option<(&str, &Ast)> {
 /// Walk an annotated comp's top-level `Bind` nodes into `(name, effectful)`
 /// pairs, reading the checker's verdict off the IR.  A binding is effectful
 /// when its RHS compiles to a [`CompKind::Exec`] or [`CompKind::Scope`], or
-/// when the checker wrapped it in the `capture` coercion — a bind of a
-/// [`CompKind::Capture`] onto the decoding step, which is the annotation
-/// pass's own verdict that the RHS is a byte-payload computation.
+/// when the checker wrapped it in the byte-to-value coercion — a
+/// [`CompKind::Decode`] over a capture, which is the annotation pass's own
+/// verdict that the RHS is a byte-payload computation.
 ///
 /// Walks `Seq` siblings and `Bind` `rest` chains, the two shapes a sequence
 /// of top-level lets elaborates to; it does not descend into nested
@@ -167,11 +167,10 @@ fn collect_bind_effects(comp: &Comp, out: &mut Vec<(String, bool)>) {
             ..
         } => {
             if let Pattern::Name(name) = pattern {
-                let effectful = match &rhs.item {
-                    CompKind::Exec(_) | CompKind::Scope(_) => true,
-                    CompKind::Bind { comp, .. } => matches!(comp.item, CompKind::Capture(_)),
-                    _ => false,
-                };
+                let effectful = matches!(
+                    rhs.item,
+                    CompKind::Exec(_) | CompKind::Scope(_) | CompKind::Decode(_)
+                );
                 out.push((name.clone(), effectful));
             }
             collect_bind_effects(rest, out);

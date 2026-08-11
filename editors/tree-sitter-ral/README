@@ -23,5 +23,10 @@ or, to produce only the parser sources without compiling:
     tree-sitter generate
 
 Run this after editing grammar.js to refresh src/parser.c and the
-accompanying JSON and headers. Test the grammar against the corpus
-with `tree-sitter test` (npm test).
+accompanying JSON and headers. Without node installed, evaluate
+grammar.js with the CLI's own JS engine instead:
+
+    tree-sitter generate --js-runtime native
+
+Test the grammar against the corpus in test/corpus with
+`tree-sitter test` (npm test).

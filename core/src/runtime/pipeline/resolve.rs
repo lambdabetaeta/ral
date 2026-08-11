@@ -1,5 +1,5 @@
 //! Pipeline resolve: freeze each stage's launch decision and the pipeline's
-//! final route.  The route comes from the checker's ground annotation, never
+//! yield.  The `PipeYield` comes committed in the checked IR, never
 //! re-inferred; no process is created and no pipe opened.  Launch reads
 //! everything this phase produces.
 

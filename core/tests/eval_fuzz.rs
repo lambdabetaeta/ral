@@ -1172,8 +1172,9 @@ fn value_alias_installs() {
 /// value instead.
 #[test]
 fn a_value_arm_under_a_byte_head_is_refused_at_install() {
-    let err = eval(r#"let h = [echo: { |args| return "not bytes" }]; within [handlers: $h] { echo hi }"#)
-        .expect_err("a value-returning arm cannot be installed under `echo`");
+    let err =
+        eval(r#"let h = [echo: { |args| return "not bytes" }]; within [handlers: $h] { echo hi }"#)
+            .expect_err("a value-returning arm cannot be installed under `echo`");
     let msg = format!("{err:?}");
     assert!(
         msg.contains("where their payload lives"),

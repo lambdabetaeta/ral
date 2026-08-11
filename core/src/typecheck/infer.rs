@@ -52,16 +52,6 @@ fn looks_like_nested_quote_mistake(head: &Comp, args: &[&Val]) -> bool {
     head_from_quoted && any_string_arg && any_non_string_arg
 }
 
-/// The application inside an [`ArmBody::Applied`] arm: the handler the arm
-/// named, applied to the payload.  Whatever that handler atom hoists is bound
-/// ahead of the call, so the dispatch is what those binds wrap.
-fn arm_dispatch(body: &Comp) -> &Comp {
-    match &body.item {
-        CompKind::Bind { rest, .. } => arm_dispatch(rest),
-        _ => body,
-    }
-}
-
 /// The elaborator's IR shape for `alias name { body }`.  `Ok(None)` means the
 /// head is not `alias` and the caller falls through to a normal exec; `Err`
 /// means it is `alias`, malformed.
@@ -140,6 +130,29 @@ impl Inferencer<'_> {
         let out = f(self);
         self.env.pop();
         self.ctx.pos = saved_pos;
+        out
+    }
+
+    /// Run `f` with a non-function command head blamed on `why` — the voice of
+    /// the form that put the head there — restoring the previous voice on the
+    /// way out, as [`WithSpan::with_span`] does for `pos`.  A form that owns
+    /// the head owns the whole computation it built around it, so the voice
+    /// carries down the spine without anyone having to say what that spine
+    /// looks like.
+    fn with_command_head_reason<T>(&mut self, why: Reason, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = self.ctx.command_head_reason.replace(why);
+        let out = f(self);
+        self.ctx.command_head_reason = saved;
+        out
+    }
+
+    /// Run `f` with no command-head voice: a thunk's body is code of its own,
+    /// and a bad head inside it is the author of that body's mistake, whatever
+    /// form the thunk happens to sit in.
+    fn without_command_head_reason<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = self.ctx.command_head_reason.take();
+        let out = f(self);
+        self.ctx.command_head_reason = saved;
         out
     }
 
@@ -834,7 +847,9 @@ impl Inferencer<'_> {
                     }
                 }
             }
-            Val::Thunk(comp) => Ty::Thunk(Box::new(self.with_scope(|this| this.infer_comp(comp)))),
+            Val::Thunk(comp) => Ty::Thunk(Box::new(self.without_command_head_reason(|this| {
+                this.with_scope(|this| this.infer_comp(comp))
+            }))),
             Val::List(elems) => {
                 let elem = self.ctx.unifier.fresh_ty();
                 for entry in elems {
@@ -1017,11 +1032,15 @@ impl Inferencer<'_> {
         let payload_ty = self.ctx.unifier.fresh_ty();
         let arm_cty = self.with_scope(|this| {
             this.bind_pattern(&arm.pattern, &payload_ty, BindMode::Param);
-            if let ArmBody::Applied(body) = &arm.body {
-                let key = std::ptr::from_ref::<Comp>(arm_dispatch(body)) as usize;
-                this.ctx.arm_handler_apps.insert(key);
+            match &arm.body {
+                // The arm the user wrote out is their own code, head and all.
+                ArmBody::Inline(body) => this.infer_comp(body),
+                // This dispatch is not: the elaborator built it from the atom
+                // the arm named, so a head here that is not a function is the
+                // arm's fault, wherever in the dispatch it turns up.
+                ArmBody::Applied(body) => this
+                    .with_command_head_reason(Reason::CaseArmHandler, |this| this.infer_comp(body)),
             }
-            this.infer_comp(arm.body.comp())
         });
         // An arm always joins, so force `Return` shape now, before the join
         // reads the arms: an arm still undecided — a call to a function under
@@ -1264,14 +1283,9 @@ impl Inferencer<'_> {
                         ty,
                         split_string_suspect,
                     };
-                    if self
-                        .ctx
-                        .arm_handler_apps
-                        .contains(&(std::ptr::from_ref::<Comp>(comp) as usize))
-                    {
-                        self.ctx.report(kind, Reason::CaseArmHandler);
-                    } else {
-                        self.ctx.diagnose(kind);
+                    match self.ctx.command_head_reason.clone() {
+                        Some(why) => self.ctx.report(kind, why),
+                        None => self.ctx.diagnose(kind),
                     }
                     // Check the args anyway, then hand the enclosing pipeline
                     // or chain a coherent fresh result.
@@ -1365,13 +1379,23 @@ impl Inferencer<'_> {
             // lambda's body.  Its own route is fixed `Value`: whatever the
             // body's route is, `Capture` is what moves the payload off the
             // byte channel, exactly, as `Bytes`.  Reading those bytes as text
-            // is the composed `__decode-captured` step's job, so a capture
-            // over an opaque force still says what it has always said —
-            // `!{ !$fa }` lets `fa`'s statements be seen.
+            // is the composed `Decode` node's job, so a capture over an opaque
+            // force still says what it has always said — `!{ !$fa }` lets
+            // `fa`'s statements be seen.
             CompKind::Capture(body) => {
                 let body_ty = self.infer_comp(body);
                 let _ = self.extract_return(&body_ty);
                 CompTy::pure(Ty::Bytes)
+            }
+            // The reading half of the same boundary, written by `annotate`
+            // directly over that `Capture`: bytes in, text out.  It is syntax
+            // rather than a command exactly so that this type is the whole
+            // story — nothing a session installs can make the value anything
+            // but a `String`.
+            CompKind::Decode(body) => {
+                let body_ty = self.infer_comp(body);
+                let _ = self.extract_return(&body_ty);
+                CompTy::pure(Ty::String)
             }
         };
         if let CompTy::Return(route, _) = self.ctx.unifier.resolve_comp_ty(&cty) {

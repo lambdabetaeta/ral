@@ -6,6 +6,7 @@ use super::env::Env;
 use super::handle::HandleInner;
 use super::list::List;
 use super::map::Map;
+use crate::syntax::tag::TAG_PREFIX;
 use std::fmt;
 use std::sync::Arc;
 
@@ -251,8 +252,8 @@ impl fmt::Display for Value {
                 write!(f, "]")
             }
             Self::Variant { label, payload } => match payload {
-                None => write!(f, "`{label}"),
-                Some(p) => write!(f, "`{label} {p}"),
+                None => write!(f, "{TAG_PREFIX}{label}"),
+                Some(p) => write!(f, "{TAG_PREFIX}{label} {p}"),
             },
             Self::Lambda { param, body, .. } => write!(f, "{}", fmt_lambda(param, body)),
             Self::Block { .. } => write!(f, "<block>"),

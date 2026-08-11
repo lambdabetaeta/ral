@@ -51,16 +51,21 @@ representable state.
   faulted as an *arm*.
 - `CompKind::Capture(Arc<Comp>)` is the kernel half of the checker's one
   payload coercion: run the body, capture its stdout, return those bytes
-  exactly. No surface syntax produces it; [[map/core/typecheck|typecheck]]'s
-  `annotate` pass inserts it as demand propagation, bound and handed to the
-  internal `__decode-captured` builtin for the `String` a value boundary reads
-  ([[design/types|types]]). `referenced_names`'s walk descends into it.
+  exactly — total and lossless. `CompKind::Decode(Arc<Comp>)` is the other
+  half: read those bytes as text, one trailing terminator dropped and a strict
+  UTF-8 decode, which is the partial, lossy step. Neither has surface syntax;
+  [[map/core/typecheck|typecheck]]'s `annotate` pass composes them as
+  `Decode(Capture(body))` by demand propagation, and `referenced_names`'s walk
+  descends into both. The reading is a node and not a command so that its
+  meaning is fixed where the checker writes it
+  ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
+  [[design/types|types]]).
 
 The route types live in `core/src/typecheck/route.rs`, a private module of the
 checker, and no name from them is reachable from `ir`, `evaluator`, or
 `runtime`: the module boundary is the proof that the checked IR is route-free.
 Every verdict the evaluator needs is explicit syntax — a `PipeYield`, a
-`Capture` node. The elaborator's placeholder yield is `PipeYield::Last`, which
+`Capture`/`Decode` pair. The elaborator's placeholder yield is `PipeYield::Last`, which
 is what an unconstrained route defaults to anyway, and unreachable in practice
 since the checker runs before every evaluation.
 

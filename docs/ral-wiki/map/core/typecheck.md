@@ -234,15 +234,18 @@ the two computations disagree about where their payload lives.
 ## Capture insertion
 
 `CompKind::Capture(body)` types through `Inferencer::infer_comp`: its own route
-grounds `Value`, its value type is `Bytes`. This rule fires only when
+grounds `Value`, its value type is `Bytes`. `CompKind::Decode(body)` is the
+reading step over it, and its value type is `String`. Both rules fire only when
 re-inferring a tree that already carries `annotate`-inserted nodes — a stored
-handler or thunk re-checked at a later install; the `String` the bind rule then
-expects is restored by the composed `__decode-captured` step.
+handler or thunk re-checked at a later install.
 
 `annotate.rs` inserts the coercion during its write-back walk, as demand
 propagation, through the one constructor `captured_string`, which builds
-`capture body to b. __decode-captured b` with the captured node's span on both
-halves. A `Demand` is `Value` or `Discard`. It reaches a `Seq`'s tail,
+`Decode(Capture(body))` with the captured node's span on both halves — two
+nodes of syntax, so no name is resolved and no binder installed where the
+checker composes them
+([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]]).
+A `Demand` is `Value` or `Discard`. It reaches a `Seq`'s tail,
 a `Bind`'s `rhs`, each arm of an `If`, `Chain`, `Try`, or `Case`, and the body
 of a force of a syntactic thunk.
 Where a `Value` demand meets a node whose recorded route grounds `Bytes`,

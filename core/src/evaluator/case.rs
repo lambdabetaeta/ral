@@ -8,6 +8,7 @@ use super::comp::{eval_comp, with_scope};
 use super::pattern::assign_pattern;
 use super::val::eval_val;
 use crate::ir::{CaseArm, Val};
+use crate::syntax::tag::tag_row_label;
 use crate::types::{Mooring, Raw, Shell, Tail, Value};
 
 /// Evaluate `case scrutinee [arms]`: bind the variant's payload — `Unit` for a
@@ -51,7 +52,7 @@ pub(crate) fn eval_case(
         .iter()
         .find(|arm| arm.tag.item == label)
         .ok_or_else(|| {
-            let handled: Vec<String> = arms.iter().map(|a| format!("`{}", a.tag.item)).collect();
+            let handled: Vec<String> = arms.iter().map(|a| tag_row_label(&a.tag.item)).collect();
             shell.err(
                 format!(
                     "case: no arm for variant `{label}`; this case matches: {}",

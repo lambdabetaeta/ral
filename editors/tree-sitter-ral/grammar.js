@@ -161,12 +161,52 @@ module.exports = grammar({
       field('body', $._value),
     ),
 
-    // case scrutinee [`tag: arm, ...]
+    // case scrutinee [`tag: body, ...]
+    //
+    // The arm list is a production of its own and no value stands in its
+    // place: a computed table (`case $x $handlers`), a `...` spread arm, and
+    // an empty list are all parse errors, because each hides the set of
+    // alternatives that makes exhaustiveness decidable (SPEC §8.3).  A
+    // repeated tag is refused by the real parser and not here — tree-sitter
+    // compares no two arms.
+    // Newlines may separate the scrutinee from the list, and the arms from
+    // each other (SPEC §3.3).
     case_stmt: $ => seq(
       'case',
+      optional(/\n+/),
       field('scrutinee', $._value),
-      field('arms', $._value),
+      optional(/\n+/),
+      '[',
+      optional(/\n+/),
+      field('arm', $.case_arm),
+      repeat(seq(',', optional(/\n+/), field('arm', $.case_arm))),
+      optional(','),
+      optional(/\n+/),
+      ']',
     ),
+
+    // `tag: { |payload| … } — or any other atom, which the arm applies to the
+    // payload.  The tag is a bare label rather than a `tag` value: a tag takes
+    // the next adjacent atom as its payload, and would swallow the arm's body.
+    case_arm: $ => seq(
+      field('tag', $.tag_label),
+      ':',
+      field('body', choice($.case_arm_lambda, $.word_bracket, $._value_nonblock)),
+    ),
+
+    // A brace body is the arm's own binder form, not a block: it binds exactly
+    // one payload, where a block binds any number or none.  Hence the arm's
+    // other spellings come from `_value_nonblock`, and the binder is written
+    // out here — aliased to `lambda_params` so one query highlights every
+    // parameter list.
+    case_arm_lambda: $ => seq(
+      '{',
+      field('binder', alias($._case_arm_binder, $.lambda_params)),
+      optional($._block_body),
+      '}',
+    ),
+
+    _case_arm_binder: $ => seq('|', $._pattern, '|'),
 
     // Head and arguments are the same syntactic class, except that only the
     // head may be a `^name` bypass (`head = '^' NAME | atom` — a bypass is
@@ -186,7 +226,11 @@ module.exports = grammar({
     _value: $ => choice($.word, $._value_common),
     _value_bracket: $ => choice($.word_bracket, $._value_common),
 
-    _value_common: $ => choice(
+    // Split around `block`, because a `case` arm's body is the one site where
+    // a brace opens the arm's binder rather than a block (`case_arm_lambda`).
+    _value_common: $ => choice($.block, $._value_nonblock),
+
+    _value_nonblock: $ => choice(
       $.identifier,
       $.integer,
       $.float,
@@ -195,7 +239,6 @@ module.exports = grammar({
       $.string_single,
       $.string_double,
       $.tag,
-      $.block,
       $.list_literal,
       $.map_literal,
       $.arith_expr,
