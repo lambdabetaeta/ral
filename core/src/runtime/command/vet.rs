@@ -9,7 +9,7 @@
 
 use crate::ir::CommandName;
 use crate::path::PathSearch;
-use crate::types::{Break, Error, Settled, Shell, Value};
+use crate::types::{Break, Error, RefusedArg, Settled, Shell, Value};
 
 use super::identity::CommandIdentity;
 
@@ -99,40 +99,27 @@ fn validate_argv(id: &CommandIdentity, args: &[Value], shell: &Shell) -> Settled
     Ok(args.iter().map(std::string::ToString::to_string).collect())
 }
 
-/// Per-argument shape gate: nothing here can reach `execve(2)`, so each
-/// refusal names the idiom that lowers it — `...$xs` for a list, `to-bytes`
-/// or a decode for bytes.
+/// Per-argument shape gate: nothing [`RefusedArg`] names can reach `execve(2)`,
+/// so each refusal carries the idiom that lowers it.
+///
+/// The refused set is shared with the checker, which raises the same refusal as
+/// a static error wherever an argument's type is concrete.  This is the backstop
+/// for what polymorphism hid from it — a `$x` whose shape only the run knows.
 fn reject_exec_arg(id: &CommandIdentity, arg: &Value, shell: &Shell) -> Option<Break> {
     let cmd = id.shown.as_str();
-    match arg {
-        Value::List(_)
-        | Value::Map(_)
-        | Value::Lambda { .. }
-        | Value::Block { .. }
-        | Value::Native { .. }
-        | Value::Handle(_) => Some(
-            shell
-                .err_hint(
-                    format!(
-                        "cannot pass {} to external command '{cmd}'",
-                        arg.type_name()
-                    ),
-                    format!("use '...' to spread a list into arguments: {cmd} ...$var"),
-                    1,
-                )
-                .into(),
-        ),
-        Value::Bytes(_) => Some(
-            shell
-                .err_hint(
-                    format!("cannot pass Bytes as argument to external command '{cmd}'"),
-                    "pipe binary data via stdin with to-bytes, or decode to string first",
-                    1,
-                )
-                .into(),
-        ),
-        _ => None,
-    }
+    let refusal = RefusedArg::of_value(arg)?;
+    Some(
+        shell
+            .err_hint(
+                format!(
+                    "cannot pass {} to external command '{cmd}'",
+                    arg.type_name()
+                ),
+                refusal.remedy(cmd),
+                1,
+            )
+            .into(),
+    )
 }
 
 #[cfg(test)]

@@ -392,12 +392,12 @@ fn chain_arms_agree_on_result() {
 
 #[test]
 fn builtin_map() {
-    ok("_map { |x| return $[$x + 1] } [1, 2, 3]");
+    ok("map { |x| return $[$x + 1] } [1, 2, 3]");
 }
 
 #[test]
 fn builtin_filter() {
-    ok("_filter { |x| return $[$x == 1] } [1, 2, 3]");
+    ok("filter { |x| return $[$x == 1] } [1, 2, 3]");
 }
 
 #[test]
@@ -511,8 +511,8 @@ fn builtin_len_on_list() {
 }
 
 #[test]
-fn builtin_fork() {
-    ok("let h = _fork { return 42 }; return $h");
+fn builtin_spawn() {
+    ok("let h = spawn { return 42 }; return $h");
 }
 
 #[test]
@@ -2262,6 +2262,121 @@ fn an_alias_in_value_position_is_a_handler_not_a_value() {
 fn a_base_frame_routes_a_pipeline_as_bytes() {
     ok("echo hi | grep .");
     ok("let xs = [a, b]; echo ...$xs | grep .");
+}
+
+// ─── The exec boundary is gated, statically where it can be ──────────────────
+//
+// An argv the shell renders itself is total: every value has a text form, so a
+// base frame and a handler arm refuse nothing.  An argv heading for `execve(2)`
+// is a list of operating-system words, and some shapes are not words — a list is
+// several arguments, a map is fields, a block has not run, bytes are a channel.
+// Shape is exactly what a type states, so wherever the type is concrete that
+// refusal is a diagnostic (T0057) rather than a failed run; where it is a
+// variable, `runtime::command::vet` keeps the question.
+
+/// Each refused shape, named where it is written, with the command named as the
+/// spawn-time refusal names it.
+#[test]
+fn a_concretely_unrenderable_argument_to_an_external_is_refused() {
+    for src in [
+        "let xs = [1, 2]; /bin/echo $xs",
+        "let r = [a: 1]; /bin/echo $r",
+        "let k = 'a'; let m = [$k: 2]; /bin/echo $m",
+        "let b = { echo hi }; /bin/echo $b",
+        "let f = { |x| return $x }; /bin/echo $f",
+        "let h = spawn { return 1 }; /bin/echo $h",
+        "let b = !{echo hi | from-bytes}; /bin/echo $b",
+    ] {
+        let errs = raw_errors(src);
+        let codes: Vec<_> = errs.iter().map(|e| e.kind.code()).collect();
+        assert_eq!(codes, ["T0057"], "{src:?}");
+        assert!(
+            errs[0]
+                .kind
+                .render_message()
+                .contains("to external command '/bin/echo'"),
+            "the refusal must name the command, got: {errs:?}"
+        );
+    }
+}
+
+/// A bare name resolving to no binding, builtin or handler is an external, and
+/// names itself in the refusal; a `~` head is named as the source wrote it,
+/// there being no `HOME` to expand it against before the run.
+#[test]
+fn the_refusal_names_the_head_as_written() {
+    for (src, head) in [
+        ("let xs = [1]; mycmd $xs", "mycmd"),
+        ("let xs = [1]; ~/bin/mycmd $xs", "~/bin/mycmd"),
+    ] {
+        let errs = raw_errors(src);
+        assert!(
+            errs.iter().any(|e| e
+                .kind
+                .render_message()
+                .contains(&format!("to external command '{head}'"))),
+            "expected the head {head:?} named, got: {errs:?}"
+        );
+    }
+}
+
+/// Each shape's hint names its own way down to words — the same sentence the
+/// spawn-time refusal carries, so one mistake is described in one language
+/// wherever it is caught.
+#[test]
+fn each_refused_shape_names_its_own_remedy() {
+    for (src, fragment) in [
+        ("let xs = [1, 2]; /bin/echo $xs", "...$xs"),
+        ("let r = [a: 1]; /bin/echo $r", "to-json"),
+        ("let b = { echo hi }; /bin/echo $b", "!{!$b}"),
+        ("let h = spawn { return 1 }; /bin/echo $h", "await"),
+        ("let b = !{echo hi | from-bytes}; /bin/echo $b", "to-bytes"),
+    ] {
+        assert!(
+            has_hint(&raw_errors(src), fragment),
+            "{src:?}: the hint should mention {fragment:?}"
+        );
+    }
+}
+
+/// Every remedy a hint names is itself a program that checks, so the guidance
+/// can be followed as written.
+#[test]
+fn the_remedies_the_hints_name_are_well_typed() {
+    ok("let xs = [1, 2]; /bin/echo ...$xs");
+    ok("let m = [a: 1]; /bin/echo $m[a]");
+    ok("let m = [a: 1]; /bin/echo !{to-json $m}");
+    ok("let b = { echo hi }; /bin/echo !{!$b}");
+    ok("let h = spawn { return 1 }; let r = await $h; /bin/echo $r[value]");
+    ok("let b = !{echo hi | from-bytes}; to-bytes $b | /bin/cat");
+}
+
+/// What the type does not say, the checker does not say: a parameter's shape is
+/// the run's business, and the pre-spawn gate is still there to refuse it.  This
+/// is why the static gate costs no program that ran before.
+#[test]
+fn a_polymorphic_argument_is_left_to_the_run() {
+    ok("let show = { |v| /bin/echo $v }; show [a: 1]");
+    ok("let show = { |v| /bin/echo $v }; show { echo hi }");
+}
+
+/// A spread is left to the run for a second reason: how many elements it
+/// contributes is dynamic, and an empty one contributes none — so a refusal here
+/// could reject a call that spawns cleanly.
+#[test]
+fn a_spread_of_unrenderable_elements_is_left_to_the_run() {
+    ok("let xss = [[1], [2]]; /bin/echo ...$xss");
+}
+
+/// The gate is the exec boundary's alone: an argv the shell renders itself takes
+/// every shape, and `echo [a: 1]` must keep working.
+#[test]
+fn an_in_shell_argv_refuses_nothing() {
+    ok("echo [a: 1]");
+    ok("let f = { |x| return $x }; echo $f [1, 2] !{str 3}");
+    ok(r"let f = { |x| return $x }; ^echo $f");
+    ok(r"alias mycmd { |args| ^echo ...$args }; mycmd [a: 1]");
+    ok(r"within [handlers: [mycmd: { |args| ^echo ...$args }]] { mycmd [a: 1] }");
 }
 
 // ─── Row termination and duplicate-key semantics ──────────────────────────────

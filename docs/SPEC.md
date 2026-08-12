@@ -1207,8 +1207,22 @@ they construct and destructure a list, and neither forms an argument list.
 Operating-system arguments must become text, and there the conversion is partial
 rather than total. ral formats strings, integers, floats, Booleans, `Unit`, and
 tagged values. `Unit` becomes an empty argument. ral rejects bytes, lists, maps,
-blocks, functions, native callables, and handles. Spread a list, and send bytes
-through a byte pipe or decode them first.
+records, blocks, functions, native callables, and handles. Spread a list, and
+send bytes through a byte pipe or decode them first.
+
+ral reports that rejection before execution when the argument's type states the
+shape, so nothing is started:
+
+```ral
+let r = [a: 1]
+cat $r                        # error: cannot pass [a: Integer] to external command 'cat'
+```
+
+Where the type does not state it — a parameter, or a value decoded at run time —
+the shape is known only to the run, and ral reports the same rejection at the
+call instead. A spread's elements are always reported at the call, because how
+many arguments a spread contributes is known only then, and an empty spread
+contributes none.
 
 Arguments are never split, globbed, or parsed again. A string containing spaces
 remains one argument.

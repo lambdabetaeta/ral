@@ -37,6 +37,16 @@ impl CommandName {
             Self::Path(_) | Self::TildePath(_) => None,
         }
     }
+
+    /// The head as the source wrote it — what a diagnostic raised before the
+    /// run can name it.  A `~` stays a `~`: expanding it wants a live `HOME`,
+    /// which is command resolution's business rather than the checker's.
+    pub fn written(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::Bare(name) | Self::Path(name) => std::borrow::Cow::Borrowed(name),
+            Self::TildePath(path) => std::borrow::Cow::Owned(path.to_literal()),
+        }
+    }
 }
 
 /// The CBPV value category: inert data, requiring no evaluation.  The typed

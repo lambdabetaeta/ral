@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 5afa1c81
+generated_at_commit: 9de08107
 generated_at_date: 2026-08-12
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
@@ -176,6 +176,27 @@ unifying with it whole — no live code unifies a route against a detached
 `CompTyMismatch` (T0011) whose one `CompDiff::ReturnType` names `Unit` against
 the arm's actual type, both under `Reason::HandlerRoutePin`. `HandlerEntry::vet`
 (`core/src/types/handler.rs`) renders both at the runtime install door.
+
+## The argv rule, and the exec gate
+
+`argv_ty` (`infer.rs`) is the one rule for every argv boundary — a handler arm, a
+base frame, an external — and yields `Ty::argv()`, `List String`: each element is
+inferred under its own span for the errors inside it and constrains the argv not
+at all, a `...` must still spread a list, and every element crosses rendered
+([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
+
+It carries *which* boundary it is at — `ArgvBoundary::InShell` or
+`Exec(shown)` — and that is the whole of the difference between them. `Exec`
+sends each written element through `gate_exec_arg`, which reads
+`RefusedArg::of_ty` (`core/src/types/exec_arg.rs`) — the same declaration
+`runtime::command::vet` reads at the spawn — and raises
+`TypeErrorKind::ExecArgNotText` (T0057) where the resolved shape is refused,
+saying nothing about a type variable or about a spread's elements.
+`explain.rs` composes the message and takes the guidance from
+`RefusedArg::remedy`, so the static refusal and the pre-spawn one carry one
+sentence per shape
+([[invariants/exec-argv-is-words|exec-argv-is-words]],
+[[decisions/260812_exec-boundary-gated-statically|exec-boundary-gated-statically]]).
 
 ## The pipeline rule
 

@@ -15,7 +15,21 @@ use crate::source::Span;
 use crate::source::WithSpan;
 use crate::syntax::ast::{BinaryOp, BinaryOpKind};
 use crate::syntax::tag::tag_row_label;
+use crate::types::RefusedArg;
 use std::sync::Arc;
+
+/// Which argv boundary `argv_ty` is walking, and so what crosses it.
+///
+/// The two are ral's own asymmetry: an argv the shell renders itself is total —
+/// every value has a text form — while one heading for `execve(2)` is a list of
+/// operating-system words, and some shapes are not words.
+#[derive(Clone, Copy)]
+enum ArgvBoundary<'a> {
+    /// A handler arm or a base frame, which refuse nothing.
+    InShell,
+    /// An external, named as its diagnostics will name it.
+    Exec(&'a str),
+}
 
 /// Labels of a *resolved* row spine in first-appearance order, stopping at the
 /// first non-`Extend`.  A repeated label keeps the deepest payload — last-wins,
@@ -534,7 +548,7 @@ impl Inferencer<'_> {
     /// arguments, as the runtime does.
     fn apply_alias_arm(&mut self, scheme: &Scheme, args: &crate::ir::Args) -> CompTy {
         let cty = self.instantiate_comp(scheme);
-        let argv = self.argv_ty(args);
+        let argv = self.argv_ty(args, ArgvBoundary::InShell);
         let CompTy::Fun(param, body) = self.ctx.unifier.resolve_comp_ty(&cty) else {
             return cty;
         };
@@ -635,7 +649,7 @@ impl Inferencer<'_> {
 
         // Anything left is an external command: prelude functions arrive as an
         // `App` on a bound variable, never as a bare `Exec` head.
-        self.external_exec_comp_ty(args)
+        self.external_exec_comp_ty(name, args)
     }
 
     /// An external takes an argv, and its payload is always captured from its
@@ -643,8 +657,8 @@ impl Inferencer<'_> {
     ///
     /// Nothing here declares a parameter for that argv to meet, so the rule's
     /// contribution is its walk and its refusals rather than its type.
-    fn external_exec_comp_ty(&mut self, args: &crate::ir::Args) -> CompTy {
-        let _argv = self.argv_ty(args);
+    fn external_exec_comp_ty(&mut self, shown: &str, args: &crate::ir::Args) -> CompTy {
+        let _argv = self.argv_ty(args, ArgvBoundary::Exec(shown));
         CompTy::bytes()
     }
 
@@ -655,16 +669,21 @@ impl Inferencer<'_> {
     /// `mycmd hello 1 true` becomes three strings.
     ///
     /// One rule for every argv boundary — a handler arm, a base frame, an
-    /// external — so the three differ only in the result they name.  Each
-    /// element is still inferred, under its own span, for the errors inside it,
-    /// and a `...` must still spread a list: what its elements are is free,
-    /// what it is is not.
-    fn argv_ty(&mut self, args: &crate::ir::Args) -> Ty {
+    /// external — so the three differ only in the result they name, and in
+    /// whether `boundary` gates what crosses.  Each element is still inferred,
+    /// under its own span, for the errors inside it, and a `...` must still
+    /// spread a list: what its elements are is free, what it is is not.
+    fn argv_ty(&mut self, args: &crate::ir::Args, boundary: ArgvBoundary<'_>) -> Ty {
         for entry in args {
             self.with_span(entry.span, |this| match &entry.item {
                 ValListElem::Single(arg) => {
-                    let _ = this.infer_val(arg);
+                    let ty = this.infer_val(arg);
+                    this.gate_exec_arg(&ty, boundary);
                 }
+                // A spread contributes as many elements as the list holds, and
+                // how many that is only the run knows: an empty one contributes
+                // none, and refuses nothing.  So its elements are left to the
+                // spawn-time gate, which counts them.
                 ValListElem::Spread(arg) => {
                     let spread_ty = this.infer_val(arg);
                     let elem = this.ctx.unifier.fresh_ty();
@@ -674,6 +693,32 @@ impl Inferencer<'_> {
             });
         }
         Ty::argv()
+    }
+
+    /// Refuse an argv element the exec boundary has no argument for, one step
+    /// before the spawn that would refuse it — which is what makes the promise
+    /// that argument-type errors are reported before execution true of an
+    /// external's arguments too.
+    ///
+    /// A concrete type only.  Where the type is still a variable the shape is
+    /// genuinely unknown here, and `runtime::command::vet` keeps the question:
+    /// nothing that runs today stops running, and the two answers come from one
+    /// declaration ([`RefusedArg`]) rather than from two matches that might
+    /// drift.
+    fn gate_exec_arg(&mut self, ty: &Ty, boundary: ArgvBoundary<'_>) {
+        let ArgvBoundary::Exec(command) = boundary else {
+            return;
+        };
+        // The head decides the verdict; the message shows the whole type.
+        let head = self.ctx.unifier.resolve_ty(ty);
+        if RefusedArg::of_ty(&head).is_none() {
+            return;
+        }
+        let ty = self.ctx.unifier.apply_ty(&head);
+        self.ctx.diagnose(TypeErrorKind::ExecArgNotText {
+            command: command.to_string(),
+            ty,
+        });
     }
 
     /// Infer every argument for the errors inside it, constraining nothing —
@@ -1338,10 +1383,10 @@ impl Inferencer<'_> {
                 CommandWord::External(CommandName::Bare(name)) => {
                     self.exec_comp_ty(name, &e.args, true)
                 }
-                CommandWord::Name(CommandName::Path(_) | CommandName::TildePath(_))
-                | CommandWord::External(CommandName::Path(_) | CommandName::TildePath(_)) => {
-                    self.external_exec_comp_ty(&e.args)
-                }
+                CommandWord::Name(path @ (CommandName::Path(_) | CommandName::TildePath(_)))
+                | CommandWord::External(
+                    path @ (CommandName::Path(_) | CommandName::TildePath(_)),
+                ) => self.external_exec_comp_ty(&path.written(), &e.args),
             },
             CompKind::Pipeline { stages, .. } => self.infer_pipeline(comp, stages),
             CompKind::Chain(parts) => self.infer_chain(parts),

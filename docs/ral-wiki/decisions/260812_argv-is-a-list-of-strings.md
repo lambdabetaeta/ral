@@ -32,7 +32,7 @@ its arguments (`core/src/builtins/codecs.rs`) — which is why
 `echo hello [a: 1]` prints `hello [a: 1]` and `echo $f` prints `<|x| block>`
 instead of either being an error. At the exec boundary an argv is bytes, and
 *there* the predicate is partial: `reject_exec_arg`
-(`core/src/runtime/command/vet.rs:105`) refuses maps, lists, blocks, functions,
+(`core/src/runtime/command/vet.rs`) refuses maps, lists, blocks, functions,
 native callables, handles, and bytes with **R0001**. So: **`List String` inside, bytes at the OS call.** Nowhere the
 checker could read said so — `docs/SPEC.md` §6.6 said an argv's elements
 "remain ral values", and the checker's argv paths said nothing at all.
@@ -166,14 +166,15 @@ each. Read it as such — and then take it as the templates' own plan, with that
 price list as its agenda. Five diagnostics are not to be smuggled out under a
 refactor.
 
-## The prize is reachable, and deliberately not taken
+## The prize is reachable, and taken next door
 
 With renderability a static predicate, R0001 *could* become a compile-time
 diagnostic — which `docs/SPEC.md` §6.5's promise that "ral checks known arity
-and argument-type errors before execution" already implies, and does not
-currently deliver for arguments, because the exec boundary inferred each
-argument and discarded the result. This decision makes the diagnostic reachable
-and **does not take it**; it lands in the commit after.
+and argument-type errors before execution" already implies, and did not then
+deliver for arguments, because the exec boundary inferred each argument and
+discarded the result. This decision makes the diagnostic reachable
+and **does not take it**: it is taken, as **T0057**, in
+[[decisions/260812_exec-boundary-gated-statically|exec-boundary-gated-statically]].
 
 The deferral is a matter of packaging, not of doubt. `reject_exec_arg` is a
 match on a value's *shape* — `List`, `Map`, `Lambda`, `Block`, `Native`,
@@ -239,6 +240,9 @@ longer one table to be read two ways.
 
 ## See also
 
+[[decisions/260812_exec-boundary-gated-statically|exec-boundary-gated-statically]]
+(takes the prize this one leaves reachable: the same refusal, from one declared
+set, before the run),
 [[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]
 (amended: the manifest is authored as two rather than partitioned by arity, and
 its §1 arity reading is a consequence rather than the classifier),

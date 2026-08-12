@@ -7,6 +7,7 @@ use super::fmt::{FmtCtx, fmt_route_ctx, fmt_ty_ctx};
 use super::ty::Ty;
 use crate::serial::plural;
 use crate::syntax::ast::BinaryOpKind;
+use crate::types::RefusedArg;
 
 impl TypeErrorKind {
     /// The headline sentence for this error.
@@ -90,6 +91,15 @@ impl TypeErrorKind {
                      which only a command, an external, or a handler has"
                 )
             }
+            // The wording `runtime::command::vet` uses at the spawn, the
+            // refusal being the same refusal one step earlier.
+            Self::ExecArgNotText { command, ty } => {
+                let ctx = FmtCtx::for_value_types(&[ty]);
+                format!(
+                    "cannot pass {} to external command '{command}'",
+                    fmt_ty_ctx(ty, &ctx)
+                )
+            }
             Self::FailStatusZero => {
                 "`fail [status: 0]` is not allowed — fail requires a nonzero status".into()
             }
@@ -158,6 +168,9 @@ impl TypeErrorKind {
             }
             Self::ErrorRecordMessage { .. } => "this `message` is not text".into(),
             Self::SpreadIntoApplication { .. } => "this spread has no argv to fill".into(),
+            Self::ExecArgNotText { .. } => {
+                "an external's arguments are words, and this is not one".into()
+            }
             Self::CaseOnNonVariant { .. }
             | Self::ControlOperatorAsValue { .. }
             | Self::HandlerNotFirstClass { .. }
@@ -319,6 +332,11 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
             "available: {} — did you mean one of those?",
             known.join(", ")
         )),
+        // The remedy is the shape's own, and the shape's own is where the
+        // spawn-time refusal reads it too.
+        TypeErrorKind::ExecArgNotText { command, ty } => {
+            RefusedArg::of_ty(ty).map(|refusal| refusal.remedy(command))
+        }
         TypeErrorKind::FailStatusZero => Some("use `return` for a clean exit".to_string()),
         TypeErrorKind::ErrorRecordMessage { .. } => Some(
             "the message is the text the failure carries — render the value first, \

@@ -191,7 +191,11 @@ fn pipeline_external_stage_rejects_list_arg_with_hint() {
     // The shared command::vet path is what enforces this — pipeline
     // stages and single-command exec both run vet before spawn, so a
     // list arg cannot reach `execve` as a (likely garbled) stringification.
-    let o = run("let xs = [1, 2, 3]; /bin/echo hi | /usr/bin/printf $xs");
+    //
+    // The list arrives decoded rather than written, so that this is the vet
+    // path and not the checker's: `from-json` returns a value of no particular
+    // type, and only the run knows it is a list.
+    let o = run("let xs = /bin/echo '[1, 2, 3]' | from-json; /bin/echo hi | /usr/bin/printf $xs");
     assert_ne!(o.status, 0);
     assert!(
         o.stderr.contains("cannot pass List"),
@@ -199,6 +203,27 @@ fn pipeline_external_stage_rejects_list_arg_with_hint() {
         o.stderr
     );
     assert!(o.stderr.contains("...$"), "hint missing: {}", o.stderr);
+}
+
+#[test]
+fn pipeline_external_stage_list_arg_written_out_is_a_static_error() {
+    // Written out, the shape is in the type, and the same refusal comes from
+    // the checker instead: nothing is spawned, and the stage never runs.
+    let o = run("let xs = [1, 2, 3]; /bin/echo hi | /usr/bin/printf $xs");
+    assert_ne!(o.status, 0);
+    assert!(
+        o.stderr.contains("T0057")
+            && o.stderr
+                .contains("cannot pass [Integer] to external command '/usr/bin/printf'"),
+        "stderr: {}",
+        o.stderr
+    );
+    assert!(o.stderr.contains("...$"), "hint missing: {}", o.stderr);
+    assert!(
+        !o.stdout.contains("hi"),
+        "a diagnosed pipeline must not run: {}",
+        o.stdout
+    );
 }
 
 #[test]

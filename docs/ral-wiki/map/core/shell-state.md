@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 5afa1c81
+generated_at_commit: 9de08107
 generated_at_date: 2026-08-12
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -25,6 +25,11 @@ everything `crate::types::*`.
   any non-lambda or wrong-arity value at every install boundary — the calling
   convention is never inferred from the runtime shape
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
+- `exec_arg.rs` — `RefusedArg`, the shapes `execve(2)` has no argument for, with
+  `of_value` for the spawn, `of_ty` for the checker, and one `remedy` each.
+  Rendering an argv inside the shell is total (`Value::render_argv`); this is the
+  one gate, declared once so the static refusal and the pre-spawn one cannot
+  disagree ([[invariants/exec-argv-is-words|exec-argv-is-words]]).
 - `list.rs` / `map.rs` — `List` and `Map`, opaque newtypes over persistent
   `imbl::Vector` / `imbl::OrdMap`.
 - `flow.rs` — the control-flow surface: `Settled`, `Escape`, `Break`, and the

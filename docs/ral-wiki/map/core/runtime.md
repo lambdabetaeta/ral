@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 5afa1c81
+generated_at_commit: 9de08107
 generated_at_date: 2026-08-12
 covers_paths: [core/src/runtime.rs, core/src/runtime/, core/src/child_eval.rs]
 ---
@@ -45,6 +45,13 @@ guards
     `Context::search_cwd` — the `within [dir: …]` override, else the `cd`-mutated
     cwd — so the grant gate judges the identity vet saw
     ([[decisions/260731_one-walk-one-anchor|one-walk-one-anchor]]).
+  - **The argv-shape step is one refused set read at two moments.**
+    `vet::reject_exec_arg` maps each argument through `RefusedArg::of_value`
+    (`core/src/types/exec_arg.rs`) and carries the shape's own `remedy`; the
+    checker maps the argument's *type* through `RefusedArg::of_ty` before the
+    run, so this is the backstop for what a type variable hid from it
+    ([[invariants/exec-argv-is-words|exec-argv-is-words]],
+    [[decisions/260812_exec-boundary-gated-statically|exec-boundary-gated-statically]]).
   - `detach.rs` is that same machinery — `CommandIdentity`, `vet`,
     `build_command` — up to the one act that differs: the child is born by
     `Launch::spawn_detached` ([[map/core/io-process|io-process]]), so its

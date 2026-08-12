@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f5720be
-generated_at_date: 2026-08-11
+generated_at_commit: 9de08107
+generated_at_date: 2026-08-12
 covers_paths: [core/src/ir.rs]
 ---
 
@@ -70,9 +70,13 @@ is what an unconstrained route defaults to anyway, and unreachable in practice
 since the checker runs before every evaluation.
 
 `CommandName` is the structured head for external dispatch (`Bare` / `Path` /
-`TildePath`). `IrPattern = Pattern<Arc<Comp>>` — the same `Pattern` shape as the
-AST, but map-pattern defaults are pre-elaborated computations, so no parser syntax
-leaks through ([[invariants/ir-pure-cbpv|ir-pure-cbpv]]).
+`TildePath`); `written()` gives it back as the source spelled it, `~`
+unexpanded, for a diagnostic raised before there is a `HOME` to expand it
+against.
+
+`IrPattern = Pattern<Arc<Comp>>` — the same `Pattern` shape as the AST, but
+map-pattern defaults are pre-elaborated computations, so no parser syntax leaks
+through ([[invariants/ir-pure-cbpv|ir-pure-cbpv]]).
 
 `referenced_names` (`pub(crate)`) collects a compiled program's variable and
 command-head names in one exhaustive, wildcard-free walk — the use-observation

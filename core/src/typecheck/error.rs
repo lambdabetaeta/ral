@@ -184,6 +184,16 @@ pub enum TypeErrorKind {
     SpreadIntoApplication {
         head: SpreadHead,
     },
+    /// An argument whose type the exec boundary has no argument for.  An
+    /// operating-system argument is one word, and `ty` is a shape with no single
+    /// word to give — a list, a map, a block, a handle, bytes.
+    ///
+    /// Raised on a concrete type only: what a type variable hides here,
+    /// `runtime::command::vet` still refuses at the spawn.
+    ExecArgNotText {
+        command: String,
+        ty: Ty,
+    },
     /// A nonzero status is required, so `fail` cannot masquerade as a clean exit.
     FailStatusZero,
     /// An error record's `message` is neither `String` nor `Bytes`: the one
@@ -235,6 +245,7 @@ impl TypeErrorKind {
             Self::DecoderTakesNoArgument { .. } => "T0054",
             Self::ErrorRecordMessage { .. } => "T0055",
             Self::SpreadIntoApplication { .. } => "T0056",
+            Self::ExecArgNotText { .. } => "T0057",
             Self::IndexIntoThunk => "T0060",
             Self::FieldOnNonRecord { .. } => "T0061",
             Self::DynamicIndexOnScalar { .. } => "T0062",
