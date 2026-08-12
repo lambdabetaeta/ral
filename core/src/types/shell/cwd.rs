@@ -67,9 +67,7 @@ impl Shell {
 
         let home = self.mobile.context.home();
         let home = if home.is_empty() { ".".into() } else { home };
-        let raw: String = if target.is_empty() {
-            home
-        } else if let Some(path) = TildePath::parse(target) {
+        let raw: String = if let Some(path) = TildePath::parse(target) {
             expand_tilde_path(path.user.as_deref(), path.suffix.as_deref(), &home).ok_or_else(
                 || {
                     Error::new(

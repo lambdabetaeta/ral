@@ -23,7 +23,7 @@ reserved to most peripheral:
   [[internals/builtins-registry|registry]] entry binding names, type rule, doc,
   and body together. The manifest is a *boot* manifest, not a resolution layer:
   a fixed-arity entry seeds the base scope as a native value and is reached as
-  a binding, a variadic one seeds a base frame and is reached as a handler
+  a binding, an open-argv one seeds a base frame and is reached as a handler
   ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
   [[invariants/fixed-arity|fixed-arity]]). What makes a capability one of these,
   and the shape of the set, is [[design/builtins|builtins]].

@@ -84,14 +84,13 @@ rule whose shape follows from how command-like the builtin is:
 - **`Sig`** — a *command signature*: argv shape and result computation read
   directly, without falling through to command-name classification. This is for
   builtins whose surface is not a curried function — *nullary* (`clear`, `reset`,
-  `help`, and the `from-X` codecs, which read stdin),
-  *optional-argument* (`cd`), *open-argv* (`echo`, `detach`), or *divergent*
-  (`fail`, result `Never`, carrying the nonzero-status diagnostic —
-  [[design/failure|failure]]).
+  `help`, and the `from-X` codecs, which read stdin), *open-argv* (`echo`,
+  `detach`), or *divergent* (`fail`, result `Never`, carrying the
+  nonzero-status diagnostic — [[design/failure|failure]]).
 
 A `Sig`'s first-class form is *derived* from it — the `Exact` argument templates
 become the curry spine and the result template the computation. The deriver is
-undefined exactly on the open and optional argv shapes, which is the
+undefined exactly on the open argv shape, which is the
 [[invariants/fixed-arity|arity partition]] holding by construction. The registry
 keeps a hand-written override slot for a value scheme the templates cannot
 state; no entry uses it.
@@ -115,11 +114,11 @@ existing mechanisms** ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-n
   type is the η-equivalent lambda's, uncurried all the way, so partial
   application in a typed position goes through a `let` rethunk rather than a
   provenance-sensitive rule.
-- **Variadic or optional arity → a *base frame*.** The entry has no function
-  type — nothing to curry, no meaning for partial application — so it is only
-  interpretable as command syntax and lives at the bottom of the handler stack
-  (`cd`, `echo`, `detach`, the REPL's `fg`/`bg`/`disown`). A user frame stacks
-  above it and forwards into it ([[internals/handler-dispatch|handler-dispatch]]).
+- **An open argv → a *base frame*.** The entry has no function type — nothing
+  to curry, no meaning for partial application — so it is only interpretable as
+  command syntax and lives at the bottom of the handler stack; `echo` and
+  `detach` are the two. A user frame stacks above it and forwards into it
+  ([[internals/handler-dispatch|handler-dispatch]]).
 
 Interception is therefore lexical shadowing rather than admission: a binding
 under a native's name shadows it, a handler under any name installs, and

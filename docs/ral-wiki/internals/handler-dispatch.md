@@ -20,10 +20,9 @@ which skips the env by definition, reaches it
 ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]).
 
 **The stack has two layers.** Above are the *run frames* pushed by `within` and
-`handle`; below is a permanent *base layer* of manifest rows for the
-variadic/optional builtins — `cd`, `echo`, `detach`, and the REPL's
-`fg`/`bg`/`disown` (`install_base`). Permanence is representational: the
-mutators (`strip_matched`, `remove_alias`) index the run frames alone, so no
+`handle`; below is a permanent *base layer* of manifest rows for the open-argv
+builtins — `echo` and `detach` (`install_base`). Permanence is representational:
+the mutators (`strip_matched`, `remove_alias`) index the run frames alone, so no
 operation can name a base frame. The base layer never crosses the wire — the
 wire form is a `Vec<HandlerFrame>` — so a receiving shell's own boot installs
 its own.

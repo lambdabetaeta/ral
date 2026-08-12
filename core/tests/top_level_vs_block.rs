@@ -23,7 +23,7 @@ use ral_core::transport::{Program, Run};
 #[cfg(unix)]
 use ral_core::types::FsPolicy;
 use ral_core::types::{Capabilities, Settled, Shell};
-use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value};
+use ral_core::{Break, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value};
 
 // ── Harness ─────────────────────────────────────────────────────────────
 
@@ -262,26 +262,56 @@ fn top_level_cd_persists_across_calls() {
     );
 }
 
-/// A user handler stacks on `cd`, and a `cd` call from inside its body
-/// reaches the base frame under self-masking rather than looping.
+/// The path slot holds a String, but the checker cannot ask for a non-empty
+/// one, and `""` would resolve to the cwd — a `cd` that succeeded nowhere.  So
+/// the empty path is refused by name, and the cwd stays where it was.
 #[test]
-fn stacked_cd_handler_forwards_to_base_frame_under_self_masking() {
+fn cd_refuses_the_empty_path_and_stays_put() {
+    let mut shell = fresh_shell();
+    let before = shell.cwd();
+    match top_level(&mut shell, "let d = ''\ncd $d") {
+        Err(Break::Error(e)) => assert!(
+            e.message.contains("the empty string names no directory"),
+            "expected the empty-path refusal, got {:?}",
+            e.message
+        ),
+        other => panic!("the empty path must be refused, got {other:?}"),
+    }
+    assert_eq!(shell.cwd(), before, "a refused `cd` moves nothing");
+}
+
+/// `cd` is a native, so the env answers its bare head before any handler
+/// frame: a `cd` handler installs, sits shadowed, and the directory really
+/// moves.  `^cd` skips the env and is where that handler answers.
+#[test]
+fn a_cd_handler_is_shadowed_at_the_bare_head_and_answers_under_caret() {
     let mut shell = fresh_shell();
     let tmp = std::env::temp_dir();
     let tmp_disp = display_no_trailing_sep(&tmp);
-    let result = top_level(
+    let handler = "[handlers: [cd: { |args| return intercepted }]]";
+
+    let moved = top_level(
         &mut shell,
-        &format!("within [handlers: [cd: {{ |args| cd ...$args }}]] {{ cd '{tmp_disp}'; cwd }}"),
+        &format!("within {handler} {{ cd '{tmp_disp}'; cwd }}"),
     )
-    .expect("the stacked handler should forward to the base cd frame");
+    .expect("the bare head is an env hit on the native");
     let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
-    let got = match result {
+    let got = match moved {
         Value::String(s) => s,
         other => panic!("cwd must return a String, got {other:?}"),
     };
     assert!(
         got == tmp_disp || got == canon,
-        "cwd inside the block after the forwarded cd: expected {tmp_disp:?} or {canon:?}, got {got:?}"
+        "the shadowed handler must not divert the move: expected {tmp_disp:?} or {canon:?}, got {got:?}"
+    );
+
+    assert_eq!(
+        top_level(
+            &mut shell,
+            &format!("within {handler} {{ ^cd '{tmp_disp}' }}")
+        )
+        .expect("`^cd` reaches the handler frame"),
+        Value::String("intercepted".into()),
     );
 }
 

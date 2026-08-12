@@ -17,8 +17,8 @@ guards
 - `command_call.rs` — `run_call`, the single site that resolves a head
   (env → handlers → external) and runs the chosen arm; the evaluator's
   down-seam for a bare command. There is no builtin arm: a fixed-arity manifest
-  entry is an `Env` hit on a native value, and a variadic one is a `Base` hit on
-  the handler stack's base layer, run by `run_base_frame` with the argv slice
+  entry is an `Env` hit on a native value, and an open-argv one is a `Base` hit
+  on the handler stack's base layer, run by `run_base_frame` with the argv slice
   ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]).
   `^name` skips the env, and therefore every native, but still consults
   handlers; a path-bearing head skips handlers too. **Grant admission is an

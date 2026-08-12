@@ -6,10 +6,10 @@ status: active
 
 **The builtin is not a kind of name. A manifest entry with *fixed arity* has a
 function type, so it is a first-class *native* value seeded into the base env
-scope; an entry with *variadic or optional* arity has no function type — nothing
-to curry, no meaning for partial application — so it is only interpretable as
-command syntax, and it lives where command syntax is interpreted, as a *base
-frame* at the bottom of the handler stack. Resolution is therefore
+scope; an entry with an *open argv* has no function type — nothing to curry,
+no meaning for partial application — so it is only interpretable as command
+syntax, and it lives where command syntax is interpreted, as a *base frame*
+at the bottom of the handler stack. Resolution is therefore
 `env → handlers → external` with no builtin arm, and resolution order is the
 only arbiter of interception: no install path admits or refuses a name.**
 
@@ -37,7 +37,7 @@ value is having no function type to inhabit.
 
 `BuiltinEntry::fixed_arity` (`core/src/types/builtin.rs:79`) is the whole
 classification, derived rather than declared: a `Sig`'s arity is structural
-(`ArgSig::Exact` gives its slot count, `Optional`/`Any` give none),
+(`ArgSig::Exact` gives its slot count, `ArgSig::Any` gives none),
 a `Scheme`'s is the curry-spine depth of its value form
 (`scheme_curry_depth`, `core/src/typecheck/builtins.rs:51`). `native_value`
 (`core/src/types/builtin.rs:219`) is the one door both boot and wire hydration
@@ -47,8 +47,12 @@ pass through, so nothing can classify an entry two ways.
   whole manifest, the nullary entries included: the `from-*` decoders are
   arity-0 natives, so `$from-json` exists as a thunk whose forcing reads the
   ambient channel, dynamic state like the cwd.
-- **Variadic or optional → a base frame.** `cd` (optional path), `detach` and
-  `echo` (`ArgSig::Any`), and the REPL's `fg`/`bg`/`disown` (optional job).
+- **An open argv → a base frame.** `detach` and `echo` (`ArgSig::Any`). This
+  decision also read `cd` and the REPL's `fg`/`bg`/`disown` on this side, on an
+  optional-argument third class of arity that is since deleted
+  ([[decisions/260812_no-value-has-an-optional-argument|no-value-has-an-optional-argument]]):
+  each declares its one argument, so each is a native, and the two frames above
+  are the whole base layer.
 
 `detach`'s command-only constraint — a partial application must not promise a
 process outliving the session — stops being a special case and becomes a
@@ -78,7 +82,7 @@ representational: `unalias` and `strip_matched` index run frames only, so no
 operation's index space contains a base frame. Lookup keeps its two passes —
 per-name over run frames then the base layer, then catch-all — so "any per-name
 handler beats any catch-all, whatever their relative depth" survives verbatim,
-and a catch-all never sees `echo`, `cd`, or `detach`. A user frame stacks above
+and a catch-all never sees `echo` or `detach`. A user frame stacks above
 a base frame and self-masked forwarding reaches it; a base hit calls the native
 body directly with the argv slice, with no adapter and no masking, because a
 native body never self-forwards (`run_base_frame`,
@@ -119,8 +123,8 @@ Hand-maintained restatements of the type rule are deleted rather than guarded:
 the registry's `arity:` field with its consistency check, and the hand-written
 value schemes, which now derive from the signature through the projections that
 already existed (`derive_sig_scheme`, `core/src/typecheck/builtins.rs:1058`).
-The deriver is total on `Exact` and undefined on `Optional`/`Any`, so
-"fixed arity ⇒ a value scheme, variadic ⇒ none" holds by construction. One
+The deriver is total on `Exact` and undefined on `Any`, so "fixed arity ⇒ a
+value scheme, an open argv ⇒ none" holds by construction. One
 override survived at the time of this decision: `_type`, whose scheme
 correlated an argument and a result (`α → F α`) — a fact the template
 vocabulary could not state, since it names an occurrence's *instantiated*
@@ -140,7 +144,7 @@ separate question this page does not answer.
 ## Consequences
 
 - Every fixed-arity entry is `$`-referenceable and composes like a user
-  function; every variadic entry is a frame a user frame can stack on.
+  function; every open-argv entry is a frame a user frame can stack on.
 - A user or prelude binding named after a native seeds and shadows it, closing a
   divergence the old seed-skip created: the checker typed such a name by the
   builtin rule while env-first dispatch honoured the binding.
@@ -181,6 +185,8 @@ in part: its "every builtin is a function, no builtin is a handler" resolves the
 other way, and `echo` is a base frame rather than elaborator sugar — the
 function/handler dichotomy itself stands, and this decision is what makes it
 exhaustive),
+[[decisions/260812_no-value-has-an-optional-argument|no-value-has-an-optional-argument]]
+(narrows the partition to two classes by deleting the optional one),
 [[invariants/fixed-arity|fixed-arity]] (the invariant this makes structural),
 [[design/builtins|builtins]], [[design/name-resolution|name-resolution]],
 [[internals/builtins-registry|builtins-registry]],

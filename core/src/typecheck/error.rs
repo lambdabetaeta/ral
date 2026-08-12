@@ -170,11 +170,11 @@ pub enum TypeErrorKind {
     BuiltinNotFirstClass {
         name: String,
     },
-    /// Wrong argument count: exactly `expected`, or at most it when `at_most`.
+    /// Wrong argument count for `name`, whose signature declares `expected`.
     BuiltinArity {
+        name: String,
         expected: usize,
         got: usize,
-        at_most: bool,
     },
     /// A `from-*` decoder reads the byte channel — no argument slot to fill.
     DecoderTakesNoArgument {

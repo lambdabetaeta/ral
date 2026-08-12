@@ -249,7 +249,7 @@ builtin_registry! {
         doc: "cwd  — return the current working directory as a String.",
         call: |_args, _mooring, shell| Ok(Value::String(shell.cwd().to_string_lossy().into_owned())), },
     Chdir { names: ["cd"], ty: Sig(sig::CHDIR),
-        doc: "cd [path]  — change the shell working directory; gated by shell.chdir capability. Empty/missing path means $HOME.",
+        doc: "cd <path>  — change the shell working directory; gated by shell.chdir capability. `cd ~` goes home.",
         call: |args, _mooring, shell| shell::builtin_chdir(args, shell), },
     Alias { names: ["alias"], ty: Sig(sig::ALIAS),
         doc: "alias NAME { |args| BODY }  — install BODY as a handler-frame alias for NAME; replaces any prior alias for the same name. Persists past `within` blocks; remove with `unalias`.",

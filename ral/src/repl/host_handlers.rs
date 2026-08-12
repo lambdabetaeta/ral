@@ -37,20 +37,17 @@ pub fn build(
 
 /// The plugin name a `load-plugin`/`unload-plugin` invocation targets.
 /// Both verbs are `STRING_TO_UNIT`, so type-checking guarantees the one
-/// argument; an empty slice can only be an internal error, handled like the
-/// job verbs' "no current job" via `cmd_error` rather than a raised fault.
+/// argument; an empty slice can only be an internal error, reported via
+/// `cmd_error` rather than a raised fault.
 fn plugin_name_arg(args: &[Value]) -> Option<String> {
     args.first().map(std::string::ToString::to_string)
 }
 
-/// Resolve the job id a `fg`/`bg`/`disown` invocation targets: the explicit
-/// Int argument when given, otherwise the most recent job — the "current job"
-/// default.  `None` means there is no job to act on.
-fn job_id_arg(args: &[Value], jobs: &crate::jobs::JobTable) -> Option<usize> {
-    match args.first().and_then(ral_core::Value::as_int) {
-        Some(n) => Some(usize::try_from(n).unwrap_or(usize::MAX)),
-        None => jobs.most_recent_id(),
-    }
+/// The job id a `fg`/`bg`/`disown` invocation names.  The checker guarantees
+/// one Int argument, so there is nothing to default to and nothing to refuse:
+/// a negative id simply resolves no job, which `NOT_A_PGID_JOB` already covers.
+fn job_id_arg(args: &[Value]) -> usize {
+    usize::try_from(args[0].as_int().unwrap_or(-1)).unwrap_or(usize::MAX)
 }
 
 /// The "no such job" elaboration for `fg`/`bg`/`disown`, which are pgid-only:
@@ -145,16 +142,13 @@ fn build_jobs(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
 fn build_fg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
     BuiltinEntry::new(
         Cow::Borrowed("fg"),
-        BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
-        "fg [id]  — bring pgid job [id] (default: most recent) to the foreground. \
+        BuiltinTypeRule::Sig(sig::INT_TO_UNIT),
+        "fg <id>  — bring pgid job <id> to the foreground. \
               pgid-only: a worker handle has no foreground — `await` is its fg.",
         BuiltinBody::Captured(Arc::new(move |args, mooring, shell| {
             let (id, pgid) = {
                 let mut jt = jobs.lock().unwrap();
-                let Some(id) = job_id_arg(args, &jt) else {
-                    diagnostic::cmd_error("fg", "no current job");
-                    return Ok(Value::Unit);
-                };
+                let id = job_id_arg(args);
                 (id, jt.resume(id))
             };
             match pgid {
@@ -180,17 +174,13 @@ fn build_fg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
 fn build_bg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
     BuiltinEntry::new(
         Cow::Borrowed("bg"),
-        BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
-        "bg [id]  — resume pgid job [id] (default: most recent) in the background. \
+        BuiltinTypeRule::Sig(sig::INT_TO_UNIT),
+        "bg <id>  — resume pgid job <id> in the background. \
               pgid-only: a worker handle already runs detached — see `jobs`.",
         BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
             let resumed = {
                 let mut jt = jobs.lock().unwrap();
-                let Some(id) = job_id_arg(args, &jt) else {
-                    diagnostic::cmd_error("bg", "no current job");
-                    return Ok(Value::Unit);
-                };
-                jt.resume_in_background(id)
+                jt.resume_in_background(job_id_arg(args))
             };
             if resumed.is_none() {
                 diagnostic::cmd_error("bg", NOT_A_PGID_JOB);
@@ -205,17 +195,13 @@ fn build_bg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
 fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
     BuiltinEntry::new(
         Cow::Borrowed("disown"),
-        BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
-        "disown [id]  — detach pgid job [id] (default: most recent) from the shell. \
+        BuiltinTypeRule::Sig(sig::INT_TO_UNIT),
+        "disown <id>  — detach pgid job <id> from the shell. \
               pgid-only: a worker handle has no disown — `cancel` is its kill.",
         BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
             let removed = {
                 let mut jt = jobs.lock().unwrap();
-                let Some(id) = job_id_arg(args, &jt) else {
-                    diagnostic::cmd_error("disown", "no current job");
-                    return Ok(Value::Unit);
-                };
-                jt.remove(id)
+                jt.remove(job_id_arg(args))
             };
             match removed {
                 // Windows keeps its pipeline groups in a side registry, so
@@ -283,23 +269,15 @@ mod tests {
     use super::*;
     use crate::jobs::{JobState, JobTable};
 
-    /// J7: a bare `fg`/`bg`/`disown` defaults to the most recent job; an
-    /// explicit id wins; an empty table yields no job.
+    /// J7: `fg`/`bg`/`disown` act on the job their argument names, and consult
+    /// no table to find it.  An id naming no job is left to `jt.resume` and
+    /// friends to report, so an out-of-range or negative one still resolves —
+    /// to a `usize` that matches nothing.
     #[test]
-    fn job_id_arg_defaults_to_most_recent() {
-        let mut jt = JobTable::new();
-
-        // No arg, empty table → no current job.
-        assert_eq!(job_id_arg(&[], &jt), None);
-
-        jt.add(1001, "first".into(), JobState::Running);
-        jt.add(1002, "second".into(), JobState::Stopped);
-
-        // No arg → the most recent (highest id) job.
-        assert_eq!(job_id_arg(&[], &jt), Some(2));
-
-        // Explicit id wins over the default.
-        assert_eq!(job_id_arg(&[Value::Int(1)], &jt), Some(1));
+    fn job_id_arg_is_the_argument() {
+        assert_eq!(job_id_arg(&[Value::Int(1)]), 1);
+        assert_eq!(job_id_arg(&[Value::Int(2)]), 2);
+        assert_eq!(job_id_arg(&[Value::Int(-1)]), usize::MAX);
     }
 
     /// A minimal registered-worker fixture, `running` toggling

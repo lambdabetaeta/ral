@@ -1234,7 +1234,7 @@ fn value_lookup_does_not_reify_aliases_or_command_only_builtins() {
         r#"alias greet { |args| return "hi" }; let f = $greet; return $f"#,
         "handler entry",
     );
-    has_error("let f = $cd; return $f", "builtin command");
+    has_error("let f = $echo; return $f", "builtin command");
 }
 
 /// Alias lambda parameters receive the argv list, not one scalar command
@@ -2097,6 +2097,59 @@ fn spreads_into_a_handler_or_alias_arm_are_legal() {
 fn list_literal_spreads_and_rest_patterns_are_untouched() {
     ok("let xs = [1]; return [1, ...$xs, 2]");
     ok("let [first, ...rest] = [1, 2, 3]; return $rest");
+}
+
+// ─── `cd` names its directory ────────────────────────────────────────────────
+//
+// `cd` takes exactly one String path, and nothing stands in for it: no `$HOME`,
+// no empty string.  So a bare `cd` is an arity error, and — a declared arity
+// being a curry spine — `$cd` is a value like any other native's.
+
+/// The arity error names the verb the user wrote and sends them to its own
+/// shape, rather than speaking anonymously of "a builtin".
+#[test]
+fn a_bare_cd_is_an_arity_error_that_names_cd() {
+    let errs = raw_errors("cd");
+    let codes: Vec<_> = errs.iter().map(|e| e.kind.code()).collect();
+    assert_eq!(codes, ["T0050"]);
+    assert!(
+        errs[0]
+            .kind
+            .render_message()
+            .contains("`cd` expected 1 argument"),
+        "the arity error must name `cd`, got: {errs:?}"
+    );
+    assert!(
+        has_hint(&errs, "explain cd"),
+        "the hint should point at the verb's own entry, got: {errs:?}"
+    );
+}
+
+/// One String is what the slot holds, `~` included; an Int is not a path.
+#[test]
+fn cd_takes_one_string_path() {
+    ok("cd '/tmp'");
+    ok("cd ~");
+    has_error("cd 3", "couldn't match");
+}
+
+/// A declared arity derives a value scheme, so `cd` is first-class — nameable
+/// as `$cd` and applicable to its path.
+#[test]
+fn cd_is_a_first_class_native() {
+    ok("let f = $cd; return $f");
+    ok("let f = $cd; $f '/tmp'");
+}
+
+/// The path being an argument taken by application, a spread into `cd` names no
+/// argv to fill.
+#[test]
+fn a_spread_into_cd_is_refused() {
+    let codes: Vec<_> = raw_errors("let xs = ['/tmp']; cd ...$xs")
+        .iter()
+        .map(|e| e.kind.code())
+        .collect();
+    assert_eq!(codes, ["T0056"]);
 }
 
 // ─── Row termination and duplicate-key semantics ──────────────────────────────

@@ -2,7 +2,7 @@
 //!
 //! The per-shell [`BuiltinTable`] is the boot manifest: it seeds the base env
 //! scope (fixed-arity entries, as `Value::Native`) and the base handler
-//! frames (variadic/optional entries) at construction, and backs `help` /
+//! frames (open-argv entries) at construction, and backs `help` /
 //! `explain`.  Dispatch never consults it — resolution is env → handlers →
 //! external — and it admits no names: a user handler installs under any.
 //!
@@ -213,7 +213,7 @@ pub(crate) fn language_constants() -> [(String, Value); 2] {
     ]
 }
 
-/// `entry`'s `Value::Native`, or `None` for a variadic/optional entry, which
+/// `entry`'s `Value::Native`, or `None` for an open-argv entry, which
 /// seeds a base handler frame instead.  Shared by boot and wire hydration,
 /// so the two never classify an entry differently.
 pub(crate) fn native_value(entry: &BuiltinEntry) -> Option<Value> {

@@ -477,7 +477,7 @@ impl Shell {
 }
 
 /// Partition freshly installed `entries` by [`BuiltinEntry::fixed_arity`]:
-/// fixed arity seeds the base env scope as a native value, variadic/optional
+/// fixed arity seeds the base env scope as a native value, an open argv
 /// installs as a base handler frame.  The one place either is populated, for
 /// core and host installs alike.
 fn seed_natives_and_base(shell: &mut Shell, entries: &[BuiltinEntry]) {

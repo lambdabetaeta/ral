@@ -1751,15 +1751,16 @@ mod tests {
         assert_eq!(catch_all, Value::String("my-server".into()));
     }
 
-    /// A base frame's name runs the frame in place of a birth: `cd` moves
-    /// the shell's cwd instead of naming a process image.
+    /// A base frame's name runs the frame in place of a birth, so it spends no
+    /// budget.  The witness is the contrast with `detach_refuses_past_its_budget`
+    /// directly below: the same exhausted budget refuses `/bin/echo`, a process
+    /// image, and admits `echo`, a frame — only the head's kind differs.
     #[cfg(unix)]
     #[test]
-    fn detach_reaches_cds_base_frame_instead_of_spawning_it() {
+    fn detach_reaches_a_base_frame_instead_of_spawning_it() {
         let mut shell = detach_test_shell(0);
-        run_source(&mut shell, r#"detach "a server" cd /tmp"#)
+        run_source(&mut shell, r#"detach "a server" echo hi"#)
             .expect("a base frame's name runs the frame, not a birth");
-        assert_eq!(shell.cwd().to_string_lossy(), "/tmp");
     }
 
     /// Vetting is reused wholesale, so an unresolvable head gives the usual 127.

@@ -31,8 +31,8 @@ enforces is the arity the body assumes with nothing to keep in agreement
 set seeds two places at once, partitioned by the derived arity
 (`seed_natives_and_base`, with `native_value` the single classifying door shared
 with wire hydration): a fixed-arity entry becomes a `Value::Native` in the
-shell's *base scope*, reached as an ordinary binding; a variadic or optional one
-becomes a *base frame* under the handler stack's run frames
+shell's *base scope*, reached as an ordinary binding; an open-argv one becomes a
+*base frame* under the handler stack's run frames
 ([[internals/handler-dispatch|handler-dispatch]]). Dispatch consults no builtin
 table ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]);
 the installed table remains as the manifest that the checker's rule side-table,
@@ -58,12 +58,13 @@ sibling helpers.
 `_ed-*` editor builtins and exarch adds its resident host atoms; both sit *above*
 core and core never inspects them
 ([[decisions/260514_repl-builtins-stay-in-repl|repl-builtins-stay-in-repl]]), and
-they seed through the same partition, so a host contributes base frames as well
-as natives (the REPL's `fg`/`bg`/`disown`, `detach` on a host that arms the
-policy). Three core-implemented builtins register this way too —
-`WATCH_BUILTIN`, `SERVICE_BUILTIN`, and `DETACH_BUILTIN`, each a public one-entry
-wrapper over a private body — so a host whose streams are capture buffers, or
-whose leases reap ordinary workers, simply lacks the verb it cannot honour
+they seed through the same partition, so a host contributes natives as well as
+base frames: the REPL's `jobs`/`fg`/`bg`/`disown` are natives, `detach` a base
+frame on a host that arms the policy. Three core-implemented builtins register
+this way too — `WATCH_BUILTIN`, `SERVICE_BUILTIN`, and `DETACH_BUILTIN`, each a
+public one-entry wrapper over a private body — so a host whose streams are
+capture buffers, or whose leases reap ordinary workers, simply lacks the verb it
+cannot honour
 ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]],
 [[map/core/builtins|builtins]]).
 

@@ -29,7 +29,7 @@ pub(crate) enum Resolution {
         entry: Box<HandlerEntry>,
         depth: usize,
     },
-    /// A base handler frame — a variadic/optional manifest entry.
+    /// A base handler frame — an open-argv manifest entry.
     Base(BuiltinEntry),
     External(CommandIdentity),
 }

@@ -35,7 +35,7 @@ pub enum BuiltinTypeRule {
 }
 
 impl BuiltinTypeRule {
-    /// `Some(n)` for fixed arity (including 0); `None` for variadic/optional.
+    /// `Some(n)` for fixed arity (including 0); `None` for an open argv.
     /// A `Scheme` rule's arity is its factory's curry-spine depth; a `Sig`
     /// rule's is [`BuiltinSig::fixed_arity`].
     pub fn fixed_arity(&self) -> Option<usize> {
@@ -73,20 +73,23 @@ pub struct BuiltinSig {
 }
 
 impl BuiltinSig {
-    /// `None` for optional or open argument policies.
+    /// `None` for an open argument policy.
     pub const fn fixed_arity(&self) -> Option<usize> {
         match self.args {
             ArgSig::Exact(t) => Some(t.len()),
-            _ => None,
+            ArgSig::Any => None,
         }
     }
 }
 
 /// Argument policy for a builtin command signature.
+///
+/// A declared arity, taken by application, or an open argv — and nothing
+/// between the two: a value's arity is the depth of its curry spine, so there
+/// is no arrow a caller may decline to supply.
 #[derive(Clone, Copy)]
 pub enum ArgSig {
     Exact(&'static [ArgTemplate]),
-    Optional(ArgTemplate),
     Any,
 }
 
@@ -246,6 +249,7 @@ pub mod sig {
     const ONE_ANY: &[ArgTemplate] = &[ANY];
     const ONE_ERROR_RECORD: &[ArgTemplate] = &[ArgTemplate::ErrorRecord];
     const ONE_STR: &[ArgTemplate] = &[STR];
+    const ONE_INT: &[ArgTemplate] = &[INT];
     const ONE_FLOAT: &[ArgTemplate] = &[FLOAT];
     const FLOAT_INT: &[ArgTemplate] = &[FLOAT, INT];
     const TO_BYTES_ARGS: &[ArgTemplate] = &[ArgTemplate::OneOf(BYTES_OR_INT_LIST)];
@@ -315,7 +319,7 @@ pub mod sig {
 
     pub const TO_LINES: BuiltinSig = command(ArgSig::Exact(TO_LINES_ARGS), ret_bytes(), None);
 
-    pub const CHDIR: BuiltinSig = command(ArgSig::Optional(STR), pure(TyTemplate::Unit), None);
+    pub const CHDIR: BuiltinSig = command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Unit), None);
     pub const PATH_BOOL: BuiltinSig = command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Bool), None);
 
     pub const INT_PARSE: BuiltinSig = command(ArgSig::Exact(ONE_ANY), pure(TyTemplate::Int), None);
@@ -349,13 +353,9 @@ pub mod sig {
     pub const ECHO: BuiltinSig = command(ArgSig::Any, ret_bytes(), None);
 
     /// `fg`/`bg`/`disown`, registered by the REPL host in
-    /// `ral/src/repl/host_handlers.rs`: zero or one Int, a bare call meaning
-    /// the most recent job.
-    pub const OPTIONAL_INT_TO_UNIT: BuiltinSig = command(
-        ArgSig::Optional(ArgTemplate::Ty(TyTemplate::Int)),
-        pure(TyTemplate::Unit),
-        None,
-    );
+    /// `ral/src/repl/host_handlers.rs`: the job to act on, named.
+    pub const INT_TO_UNIT: BuiltinSig =
+        command(ArgSig::Exact(ONE_INT), pure(TyTemplate::Unit), None);
 
     pub const STRING_TO_UNIT: BuiltinSig =
         command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Unit), None);
@@ -901,9 +901,9 @@ pub fn builtin_type_hint(table: &BuiltinTable, name: &str) -> Option<String> {
 }
 
 /// Derive a `Sig`-ruled builtin's value scheme: the `Exact` argument templates
-/// become the curry spine, the result template the comp.  `None` for
-/// `Optional`/`Any` — nothing to curry — so fixed arity yields a scheme
-/// and variadic arity none, by construction.  `OneOf` derives conservatively
+/// become the curry spine, the result template the comp.  `None` for `Any` —
+/// nothing to curry — so fixed arity yields a scheme and an open argv none,
+/// by construction.  `OneOf` derives conservatively
 /// to a fresh variable: command position keeps the precise diagnostic, and
 /// the body still refuses at runtime.
 ///
@@ -914,7 +914,7 @@ pub fn builtin_type_hint(table: &BuiltinTable, name: &str) -> Option<String> {
 fn derive_sig_scheme(sig: &BuiltinSig, u: &mut Unifier) -> Option<Scheme> {
     let args = match sig.args {
         ArgSig::Exact(a) => a,
-        ArgSig::Optional(_) | ArgSig::Any => return None,
+        ArgSig::Any => return None,
     };
     let params: Vec<Ty> = args.iter().map(|t| arg_template_ty(*t, u)).collect();
     let body = params
@@ -1155,9 +1155,9 @@ impl Inferencer<'_> {
                                 TypeErrorKind::DecoderTakesNoArgument { name: name.into() }
                             }
                             _ => TypeErrorKind::BuiltinArity {
+                                name: name.into(),
                                 expected: expected.len(),
                                 got: positional.len(),
-                                at_most: false,
                             },
                         });
                     }
@@ -1169,20 +1169,6 @@ impl Inferencer<'_> {
                         let _ = self.infer_val(arg);
                     }
                     &expected[positional.len().min(expected.len())..]
-                }
-                ArgSig::Optional(template) => {
-                    if positional.len() > 1 {
-                        self.ctx.diagnose(TypeErrorKind::BuiltinArity {
-                            expected: 1,
-                            got: positional.len(),
-                            at_most: true,
-                        });
-                    }
-                    for arg in &positional {
-                        let actual = self.infer_val(arg);
-                        self.unify_arg_template(&actual, template);
-                    }
-                    &[]
                 }
                 ArgSig::Any => {
                     self.infer_args(args);

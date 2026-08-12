@@ -188,13 +188,6 @@ impl JobTable {
         jobs
     }
 
-    /// Id of the most recently registered job, or `None` when the table is
-    /// empty.  Ids are monotone (see [`Self::add`]), so the maximum is the
-    /// "current job" a bare `fg`/`bg`/`disown` defaults to.
-    pub fn most_recent_id(&self) -> Option<usize> {
-        self.jobs.keys().max().copied()
-    }
-
     /// Flip a stopped job's bookkeeping back to `Running` and return
     /// its pgid.  Does **not** send `SIGCONT` — the order matters for
     /// `fg`, where the controlling terminal must be handed to the
@@ -539,17 +532,6 @@ mod tests {
         let id = jt.add(99_999_991, "x".into(), JobState::Stopped);
         assert_eq!(jt.resume(id), Some(pgid(99_999_991)));
         assert_eq!(jt.list()[0].state, JobState::Running);
-    }
-
-    #[test]
-    fn most_recent_id_is_the_highest() {
-        let mut jt = JobTable::new();
-        assert_eq!(jt.most_recent_id(), None);
-        jt.add(1001, "a".into(), JobState::Running);
-        jt.add(1002, "b".into(), JobState::Stopped);
-        assert_eq!(jt.most_recent_id(), Some(2));
-        jt.remove(2);
-        assert_eq!(jt.most_recent_id(), Some(1));
     }
 
     #[cfg(unix)]

@@ -294,8 +294,7 @@ impl HandlerStack {
         None
     }
 
-    /// Install base handler frames — manifest rows for variadic/optional
-    /// builtins.
+    /// Install base handler frames — manifest rows for open-argv builtins.
     pub(crate) fn install_base(&mut self, entries: &[BuiltinEntry]) {
         self.base.extend(entries.iter().cloned());
     }

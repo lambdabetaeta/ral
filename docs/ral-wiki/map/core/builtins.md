@@ -13,7 +13,7 @@ binds its facets at once — `names`, [[map/core/typecheck|type rule]] (`ty`),
 (`&[BuiltinEntry]`), so the facets cannot drift apart. Arity is no facet:
 `BuiltinEntry::fixed_arity` derives it from the type rule and caches it, and that
 derivation is the classification — fixed arity seeds a `Value::Native` in the
-base scope, a variadic or optional argv seeds a base handler frame
+base scope, an open argv seeds a base handler frame
 (`native_value`, `seed_natives_and_base` in `types/shell/host.rs`;
 [[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]).
 A body is a `BuiltinBody` — a `Static` `fn(&[Value], &Mooring, &mut Shell) ->

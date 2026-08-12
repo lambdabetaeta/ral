@@ -1,5 +1,5 @@
 ---
-status: 'superseded in part by [[decisions/260801_a-name-is-a-value-or-it-is-handled]] — the function/handler dichotomy stands, but §"Every builtin is a function" resolves the other way: a variadic or optional entry is a host-installed handler at the base of the stack, and `echo` is one of them rather than elaborator sugar. Still open from this ADR: §"Retiring alias" (`alias`/`unalias` still the surface, `install_alias` still the API). Done 2026-06-27: help→explain, ArgSig::Variadic retired. Done 2026-07-27: from-* codecs fixed at arity 0.'
+status: 'superseded in part by [[decisions/260801_a-name-is-a-value-or-it-is-handled]] — the function/handler dichotomy stands, but §"Every builtin is a function" resolves the other way: an open-argv entry is a host-installed handler at the base of the stack, and `echo` is one of them rather than elaborator sugar. Still open from this ADR: §"Retiring alias" (`alias`/`unalias` still the surface, `install_alias` still the API). Done 2026-06-27: help→explain, ArgSig::Variadic retired. Done 2026-07-27: from-* codecs fixed at arity 0. Done 2026-08-12: ArgSig::Optional deleted — `cd` and the REPL job verbs are natives, leaving `echo` and `detach` the only base frames.'
 ---
 
 # Functions and handlers, and the end of "alias"
@@ -58,6 +58,11 @@ argv-as-list remains. The current `arity: _` entries were never one shape:
 | `help` | `Sig(HELP)` | 0-or-1, extras ignored today | split into `help` (arity 0, overview) and `explain NAME` (arity 1, lookup) — two **functions** (below) |
 | `clear`, `reset` | `Sig(BYTES_VARIADIC)` | **nullary** | **function**, arity 0 |
 | `from-*` codecs | `Sig(… Optional)` | optional / stdin-driven | **function** — optionality is a [[design/codecs|codecs]] concern, not arity |
+
+> **2026-08-12.** `ArgSig::Optional`, the variant the `from-*` row names, is
+> itself deleted: an entry declares its arguments or it takes an open argv, and
+> nothing in between
+> ([[decisions/260812_no-value-has-an-optional-argument|no-value-has-an-optional-argument]]).
 
 Because every builtin is a function, no `Function | Handler` kind is recorded on
 the registry at all: the distinction lives entirely in the handler stack

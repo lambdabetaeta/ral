@@ -22,11 +22,14 @@ stopped, continued, exited, and signalled observations need no fallible enum dec
 ([[decisions/260720_total-wait-status|total-wait-status]]). The table backs the
 four captured builtins ([[map/repl/plugins|host handlers]]) — `jobs`, `fg`, `bg`,
 `disown` — and is reaped each iteration and on exit by the [[map/repl/loop|session]].
-A bare `fg`/`bg`/`disown` defaults to `most_recent_id` (the highest, == newest,
-job id) per SPEC §11.6. `reap` requests continued as well as stopped statuses, so
-a group resumed out-of-band by an external `kill -CONT` flips back to running
-(`mark_running`) rather than reading `stopped` forever. On exit a job group is
-taken down in three steps:
+`fg`/`bg`/`disown` name their job explicitly: each takes exactly one `Int` id
+(`ArgSig::Exact`), so the checker guarantees the argument and `job_id_arg` has
+nothing to default to. Fixed arity makes all three natives, so `$fg` is a value,
+host-captured and first-class at once, as the nullary `jobs` already is
+([[invariants/fixed-arity|fixed-arity]]). `reap` requests continued as well as
+stopped statuses, so a group resumed out-of-band by an external `kill -CONT`
+flips back to running (`mark_running`) rather than reading `stopped` forever.
+On exit a job group is taken down in three steps:
 
 - gracefully — SIGTERM then SIGCONT on Unix (a frozen group must run to act on
   the request); `CTRL_BREAK_EVENT` to every group on Windows;

@@ -2376,9 +2376,9 @@ The interactive builtins are:
 | `bg id` | Resume a stopped process-group job in the background. |
 | `disown id` | Remove a process-group job without signalling it; the session no longer owns it. |
 
-The id is optional for `fg`, `bg`, and `disown`; omission selects the most
-recent process-group job. Job designators are decimal integers. There is no
-`%1`, `%+`, or `%-` syntax.
+`fg`, `bg`, and `disown` each require their id: they take one argument, and no
+value has an optional one. `jobs` prints the designators to name. Job
+designators are decimal integers. There is no `%1`, `%+`, or `%-` syntax.
 
 `jobs` folds two kinds of residents into one listing. Process groups use `[N]`
 and report `running` or `stopped`, their pgid, and original command. Workers

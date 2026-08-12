@@ -56,20 +56,28 @@ pub(super) fn builtin_unalias(args: &[Value], shell: &mut Shell) -> Settled<Valu
     Ok(Value::Unit)
 }
 
-/// `cd [path]` — move the shell's logical cwd, never the OS process cwd.
+/// `cd <path>` — move the shell's logical cwd, never the OS process cwd.
 ///
 /// Only the REPL owns the plugin runtime that fires `chpwd`, so the
 /// `(old, new)` pair waits on `local.repl.pending_chpwd` for it to drain.
 pub(super) fn builtin_chdir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let path = match args.first() {
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => {
+    // The checker guarantees one String, but not a non-empty one, and
+    // `resolve_path` would read "" as the cwd — making `cd $d` a silent
+    // success that moved nowhere.
+    let path = match &args[0] {
+        Value::String(s) if s.is_empty() => {
+            return Err(sig(
+                "cd: the empty string names no directory — did you mean `cd .`, or `cd ~`?"
+                    .to_string(),
+            ));
+        }
+        Value::String(s) => s.clone(),
+        other => {
             return Err(sig(format!(
                 "cd: expected a String path, got {}",
                 other.type_name()
             )));
         }
-        None => String::new(),
     };
 
     shell.check_shell_chdir()?;

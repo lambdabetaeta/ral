@@ -420,7 +420,7 @@ impl Shell {
     /// `within` handlers are operation handlers, not first-class values, so no
     /// lookup here reaches the handler stack.  A fixed-arity builtin is a
     /// plain env hit — the native scope entry *is* the value — and a
-    /// variadic/optional one has no value form to find.
+    /// an open-argv one has no value form to find.
     pub fn lookup_value_name(&self, name: &str) -> Option<Value> {
         if let Some(v) = self.mobile.scope.get(name) {
             return Some(v.clone());

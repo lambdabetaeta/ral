@@ -68,15 +68,13 @@ impl TypeErrorKind {
                 format!("`{name}` is a builtin command, not a first-class value")
             }
             Self::BuiltinArity {
+                name,
                 expected,
                 got,
-                at_most: false,
-            } => format!("builtin expected {expected} argument(s), got {got}"),
-            Self::BuiltinArity {
-                expected,
-                got,
-                at_most: true,
-            } => format!("builtin expected at most {expected} argument(s), got {got}"),
+            } => format!(
+                "`{name}` expected {}, got {got}",
+                plural(*expected, "argument")
+            ),
             Self::DecoderTakesNoArgument { name } => {
                 format!("`{name}` takes no argument — it reads the byte channel")
             }
@@ -291,11 +289,8 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         TypeErrorKind::BuiltinNotFirstClass { name } => {
             Some(format!("did you mean to invoke `{name} ...` in command position?"))
         }
-        TypeErrorKind::BuiltinArity { at_most: false, .. } => {
-            Some("check the builtin's help entry for its command shape".to_string())
-        }
-        TypeErrorKind::BuiltinArity { at_most: true, .. } => {
-            Some("remove the extra arguments or pass a single list value".to_string())
+        TypeErrorKind::BuiltinArity { name, .. } => {
+            Some(format!("`explain {name}` gives its command shape"))
         }
         // Name the rewrite, not merely the refusal: this is the one place the
         // rule costs a user a program that ran.
