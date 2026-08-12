@@ -40,7 +40,10 @@ The cleanup forms differ only in what they do with the original failure:
 
 Failure propagates predictably through the rest of the grammar:
 
-- a sequence `a; b; c` halts at the first failure;
+- a sequence `a; b; c` halts at the first failure, and the error says how many
+  later parts it abandoned — otherwise the truncation is legible only as a short
+  `children` list in an enclosing `audit`, which reads the same as a sequence
+  that had fewer parts;
 - a [[design/pipelines|pipeline]] fails whole on any non-SIGPIPE stage failure;
 - `for` / `map` stop iterating on a failing body;
 - `spawn` captures failure in the handle and surfaces it on `await`;
@@ -51,6 +54,6 @@ See also [[design/syscalls-are-effects|syscalls-are-effects]] (failure is an ope
 [[design/control-operators|control-operators]], [[design/types|types]],
 [[design/cbpv|cbpv]].
 Cite: RATIONALE §"Failure is not truth", §"Pipelines follow their edges";
-`docs/SPEC.md` §2.5, §8, §8.6–§8.7; `eval_chain` / `eval_return` in
+`docs/SPEC.md` §2.5, §8, §8.6–§8.7; `eval_chain` / `eval_return` / `eval_seq` in
 `core/src/evaluator/comp.rs`, `try` / `guard` typing in
 `core/src/typecheck/scope.rs`.

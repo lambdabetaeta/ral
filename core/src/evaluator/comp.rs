@@ -415,13 +415,31 @@ fn eval_seq(comps: &[Arc<Comp>], tail: Tail, mooring: &Mooring, shell: &mut Shel
         result = if i + 1 == len {
             eval_comp(c, mooring, shell, tail)?
         } else {
-            super::capture::with_ambient_stdout(shell, |shell| {
+            let step = super::capture::with_ambient_stdout(shell, |shell| {
                 eval_comp(c, mooring, shell, Tail::No)
             })
-            .map_err(|e| shell.err(format!("statement sink: {e}"), 1))??
+            .map_err(|e| shell.err(format!("statement sink: {e}"), 1))?;
+            step.map_err(|control| note_abandoned_steps(control, len - i - 1))?
         };
     }
     Ok(result)
+}
+
+/// A failing part abandons the parts after it, and nothing downstream can tell
+/// that from a sequence that simply had fewer parts: `audit`'s `children` just
+/// stops short. Name the abandonment on the error, on the innermost sequence
+/// that suffered it — an outer one leaves the inner hint standing.
+fn note_abandoned_steps(control: Control, abandoned: usize) -> Control {
+    match control {
+        Control::Break(Break::Error(e)) if e.hint.is_none() => {
+            let steps = if abandoned == 1 { "step" } else { "steps" };
+            Control::Break(Break::Error(e.with_hint(format!(
+                "{abandoned} later {steps} in this block did not run; wrap a step in \
+                 `attempt` if its failure should not stop the rest"
+            ))))
+        }
+        other => other,
+    }
 }
 
 // ── Scope bracket ────────────────────────────────────────────────────────

@@ -61,6 +61,17 @@ impl Error {
         self
     }
 
+    /// Message and hint as one line, for the forensic string `audit` records.
+    /// A rendered diagnostic prints the hint beneath the message; a report read
+    /// as data has one field for both, and dropping the hint there would make
+    /// the record say less than the terminal does about the same failure.
+    pub fn message_with_hint(&self) -> String {
+        match &self.hint {
+            Some(hint) => format!("{} — {hint}", self.message),
+            None => self.message.clone(),
+        }
+    }
+
     /// Numeric exit code for process exit and `$status`.
     pub fn exit_code(&self) -> i32 {
         match &self.status {

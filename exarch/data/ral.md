@@ -82,6 +82,11 @@ Decoders read from the byte channel.  To decode bytes in a definition, use `byte
 
 * Escapes are a fixed set (`\n`, `\r`, `\t`, `\\`, `\"`, `\$`, `\!`, `\0`, `\e`, `\xNN` for ASCII, `\u{…}`, and backslash-newline continuation).
 - Raw strings `#'…'#` are the verbatim string form: no escapes, no interpolation. They can contain any character including apostrophes. If the content itself contains `'#`, add more hashes. A hash not followed by a single-quote starts a comment to end of line.
+
+  A raw string is also how an argument thick with metacharacters reaches an external tool: ral passes it through as one word, untouched, so a `sed` script needs no escaping at all and there is never a reason to hand it to a shell instead.
+
+      sed -i #'s|^INCLUDE_DIRS := $(PYTHON_INCLUDE)|INCLUDE_DIRS := /usr/include/opencv4|'# Makefile.config
+
 - `dedent` strips the common leading indentation from a multiline string.
 - There are no `<<EOF` heredocs. `cmd << #'…'#` (space after `<<` required) feeds the string to `cmd`'s stdin (a stored string works too: `cmd << $body`). One newline at the very front of the string is dropped, so the body can start on the line under the command. Write a file with `echo #'…'# > path`.
 
@@ -163,11 +168,32 @@ Prelude functions cover common cases:
 
 ## Audit
 
-`audit { … }` evaluates its body and returns a report with exactly four fields and no others: exit `status`, the ral `value` the body returned, an `error` string, and `children`. `children` is the flat list of what the body did, each entry carrying its own `kind`, `argv`, `status`, `stdout` and `stderr` (the last two `bytes`). Output lives there and nowhere else — a block has no `stdout` of its own, only the commands inside it do. `audit` turns any errors into record data, so it never fails, and it keeps each command's stdout and stderr apart, so you need not `2>&1` to capture stderr. This is how you read a tool whose exit code is *data* (e.g. `grep` exit 1 meaning no match), or a deliberate signal like `valgrind --error-exitcode=77`:
+`audit { … }` evaluates its body and returns a report with exactly four fields and no others: exit `status`, the ral `value` the body returned, an `error` string, and `children`. `children` is the flat list of what the body did. Every entry carries a `kind`; a `command` entry then carries its own `argv`, `status`, `stdout` and `stderr` (the last two `bytes`), while a `read`, `write` or `capability-check` entry carries different fields — so `argv` and `stdout` project off `children` only when the body ran nothing but commands, and a redirect in the body narrows every entry to `kind` alone. The report has no `stdout` field of its own: per-command output lives in `children`, and the merged output of a whole block comes from piping the block instead (see *Running several commands*). `audit` turns any errors into record data, so it never fails, and it keeps each command's stdout and stderr apart, so you need not `2>&1` to capture stderr. This is how you read a tool whose exit code is *data* (e.g. `grep` exit 1 meaning no match), or a deliberate signal like `valgrind --error-exitcode=77`:
 
     let r      = audit { valgrind --error-exitcode=77 --leak-check=full ./a.out }
     let report = bytes-to-string $r[children][0][stdout]
     if $[ $r[status] == 77 ] { "leaks:\n$report" } else { #'clean'# }
+
+## Running several commands
+
+A block runs its parts in order and abandons the rest at the first failure, so `audit { a; b; c }` reports on the steps that ran and says nothing of the steps it never reached. To run a whole battery and see every outcome, wrap each step in `attempt`:
+
+    let probe = audit { attempt { git --version }; attempt { cmake --version }; attempt { nvcc --version } }
+    map { |c| [tool: $c[argv][0], status: $c[status]] } $probe[children]
+
+One row per command, each with its own `argv`, `status`, `stdout` and `stderr` — always prefer this to one blob of text you must re-parse. `succeeds` answers a bare yes/no without a report at all:
+
+    map { |t| [tool: $t, ok: !{succeeds { which $t > /dev/null }}] } [#'git'#, #'cmake'#]
+
+When what you want is the merged text of every step, put the block on the byte channel — a pipe or a redirect takes what *every* part writes:
+
+    let steps = { attempt { make }; attempt { make test } }
+    let text  = !$steps | from-string     # every step's stdout, as one String
+    !$steps > build.log                   # or straight to a file
+
+Beware the one capture that does not merge: `let x = !$steps` binds the *final* command's output alone, and the earlier steps print visibly instead. Reach for `| from-string` whenever a block has more than one part.
+
+So never reach for `sh -c` to sequence commands, to fall back after a failure, or to change directory first: `;` sequences, `attempt` tolerates a failure, `?` supplies a fallback, `2>` and `>` redirect, and `within [dir: …]` changes directory. A `sh -c 'a; b; c'` payload throws away what ral would have told you — three commands collapse into one opaque child with one undifferentiated stdout, and a failure in the middle becomes invisible.
 
 ## Concurrency
 
@@ -179,7 +205,7 @@ Prelude functions cover common cases:
 
 If you truly have nothing else to do, `await` the handle with a long timeout.
 
-`await` returns `[value, stdout, stderr]`. Its `stdout` and `stderr` are the thread's whole output, already merged across every command in it; its `value` is an `audit` report on the block, which you can examine to find what ran. A thread is the one thing that does own its output, so this is the one record with a top-level `stdout` — `audit` alone has none.
+`await` returns `[value, stdout, stderr]`. Its `stdout` and `stderr` are the thread's whole output, already merged across every command in it; its `value` is an `audit` report on the block, which you can examine to find what ran. An `audit` report has no top-level `stdout`; a thread's result does.
 
     let r = await $h
     let ok         = $[$r[value][status] == 0]                       # did the block succeed?

@@ -310,7 +310,7 @@ pub(crate) fn eval_audit(body: &Val, mooring: &Mooring, shell: &mut Shell) -> Ra
     .map_err(Break::Escape)?;
     let (status, value, error) = match &body_result {
         BodyResult::Value(v) => (shell.mobile.control.last_status, v.clone(), None),
-        BodyResult::Error(e) => (e.exit_code(), Value::Unit, Some(e.message.clone())),
+        BodyResult::Error(e) => (e.exit_code(), Value::Unit, Some(e.message_with_hint())),
     };
     shell.mobile.control.last_status = status;
     Ok(tree_value(status, value, error, &children))

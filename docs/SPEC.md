@@ -2879,12 +2879,14 @@ The report is not itself an observation. It has four fields:
 ```
 
 `status`, `value`, and `error` describe the audited body's outcome. `error` is
-the empty string on success. `children` is the flat list of observations made
-during the body's dynamic extent: commands, redirect reads and writes, and
-capability checks. It is not itself a tree — an observation carries no
-`children` of its own, so nesting comes only from where `audit`, `try`,
-`guard`, `grant`, and `within` collect, never from one observation wrapping
-another.
+the empty string on success, and otherwise the failure's message followed by its
+hint, if it carries one, so that reading a report as data reveals no less than
+rendering the same failure as a diagnostic does. `children` is the flat list of
+observations made during the body's dynamic extent: commands, redirect reads
+and writes, and capability checks. It is not itself a tree — an observation
+carries no `children` of its own, so nesting comes only from where `audit`,
+`try`, `guard`, `grant`, and `within` collect, never from one observation
+wrapping another.
 
 Every observation shares this common shape:
 
