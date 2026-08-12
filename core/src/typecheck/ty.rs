@@ -51,6 +51,15 @@ pub enum Ty {
     Var(TyVar),
 }
 
+impl Ty {
+    /// An argv: `List String`, and the one place that type is written down.
+    /// Every argv boundary — a handler arm, a base frame, an external — takes
+    /// this and nothing else, because every element crosses it rendered.
+    pub fn argv() -> Self {
+        Self::List(Box::new(Self::String))
+    }
+}
+
 /// A finite sequence of labelled types, closed by `Empty` or left open by a
 /// tail variable.
 ///

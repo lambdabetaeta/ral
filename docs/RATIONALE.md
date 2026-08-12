@@ -234,11 +234,20 @@ within [handlers: [git: { |args| git ...$args }]] {
 ```
 
 The calling convention comes from the boundary being interpreted. A per-name
-handler is a unary function receiving the whole argv as one homogeneous list;
-the catch-all is a binary function receiving the name and that list. Ordinary
-functions still have the parameter list declared by their lambda. There is no
-variadic exception in the value calculus: variable shell arity is packed into
-one value.
+handler is a unary function receiving the whole argv as one `List String`; the
+catch-all is a binary function receiving the name and that list. The element
+type is what substitutability demands rather than a simplification: a handler
+exists to stand in for a command, and a command is sent text, so an arm which
+expected typed arguments could not be put in that command's place. Every
+argument is therefore rendered on the way in, and an arm reads `'1'` where the
+call site wrote `1`.
+
+Ordinary functions still have the parameter list declared by their lambda. There
+is no variadic exception in the value calculus: variable shell arity is packed
+into one value, and only the interpreted boundary has an argv — a handler, the
+host's base interpretation of a command-shaped name, and the operating system
+share one convention, differing in what they do with it rather than in what
+they receive.
 
 Arity is checked when a handler is installed. Inferring it at dispatch would be
 unsafe under currying: applying one argument to a binary lambda returns a

@@ -35,6 +35,15 @@ value is having no function type to inhabit.
 
 ### 1. The partition is arity, read off the type rule
 
+> **2026-08-12.** This reading is no longer the partition
+> ([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]): the
+> manifest is *authored* as two — a native table and a base-frame manifest —
+> `ArgSig` is deleted, and arity is a consequence of which half a name is in.
+> `fixed_arity` classifies nothing; it answers a `usize` for every entry left in
+> the table, and the argv half has no arity at all. §6's derive-do-not-assert
+> discipline is not weakened by that but finished, there being no longer one
+> table to be read two ways.
+
 `BuiltinEntry::fixed_arity` (`core/src/types/builtin.rs:79`) is the whole
 classification, derived rather than declared: a `Sig`'s arity is structural
 (`ArgSig::Exact` gives its slot count, `ArgSig::Any` gives none),
@@ -47,9 +56,12 @@ pass through, so nothing can classify an entry two ways.
   whole manifest, the nullary entries included: the `from-*` decoders are
   arity-0 natives, so `$from-json` exists as a thunk whose forcing reads the
   ambient channel, dynamic state like the cwd.
-- **An open argv → a base frame.** `detach` and `echo` (`ArgSig::Any`). This
-  decision also read `cd` and the REPL's `fg`/`bg`/`disown` on this side, on an
-  optional-argument third class of arity that is since deleted
+- **An open argv → a base frame.** `detach` and `echo`, `ArgSig::Any` at the
+  time; they are since rows of the base-frame manifest, typed
+  `List String -> F Any` and `List String -> Return(Bytes, Unit)`
+  ([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
+  This decision also read `cd` and the REPL's `fg`/`bg`/`disown` on this side, on
+  an optional-argument third class of arity that is since deleted
   ([[decisions/260812_no-value-has-an-optional-argument|no-value-has-an-optional-argument]]):
   each declares its one argument, so each is a native, and the two frames above
   are the whole base layer.
@@ -186,6 +198,9 @@ function/handler dichotomy itself stands, and this decision is what makes it
 exhaustive),
 [[decisions/260812_no-value-has-an-optional-argument|no-value-has-an-optional-argument]]
 (narrows the partition to two classes by deleting the optional one),
+[[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]] (amends
+§1: the manifest is authored as two rather than partitioned by arity, and this
+page's arity reading becomes a consequence rather than the classifier),
 [[invariants/fixed-arity|fixed-arity]] (the invariant this makes structural),
 [[design/builtins|builtins]], [[design/name-resolution|name-resolution]],
 [[internals/builtins-registry|builtins-registry]],

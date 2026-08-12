@@ -12,19 +12,21 @@ formal catalog to `docs/SPEC.md` §14.
 
 This is a taxonomy of *placement*, not the dispatch order — a head resolves
 env → handlers → external, and which of those three a layer below is reached
-through is the arity partition ([[map/core/runtime|runtime]]). From most
-reserved to most peripheral:
+through is which half of the manifest holds it
+([[map/core/runtime|runtime]]). From most reserved to most peripheral:
 
 - **Control operators** — `within`, `grant`, `try`, `guard`, `audit` (with the
   syntactic `if` / `case` / `?`). Grammar arms carried as dedicated IR nodes, not
   builtins, because each manipulates dynamic frames or audit ownership that no
   value can observe ([[design/control-operators|control-operators]]).
-- **Core builtins** — Rust atoms in `CORE_BUILTINS`, each a
+- **Core builtins** — Rust atoms of the boot manifest, each a
   [[internals/builtins-registry|registry]] entry binding names, type rule, doc,
-  and body together. The manifest is a *boot* manifest, not a resolution layer:
-  a fixed-arity entry seeds the base scope as a native value and is reached as
-  a binding, an open-argv one seeds a base frame and is reached as a handler
+  and body together. The manifest is a *boot* manifest, not a resolution layer,
+  and it is authored as two: a native table entry seeds the base scope as a
+  native value and is reached as a binding, a base-frame row seeds a base frame
+  and is reached as a handler
   ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
+  [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]],
   [[invariants/fixed-arity|fixed-arity]]). What makes a capability one of these,
   and the shape of the set, is [[design/builtins|builtins]].
 - **Underscore primitives** — `_ansi-ok` and the host `_ed-*` / `_plugin`:

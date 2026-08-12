@@ -30,10 +30,11 @@ type records and variants, never computations.
   resumes in place and never reifies — and at the clause interface: a Links
   handler binds each operation's arguments positionally, at the types its
   effect row assigns them; a ral handler is one lambda per name, unary over
-  the argv as a single `List α`, the catch-all binary over name and argv, its
-  arity fixed by the install site
+  the argv as a single `List String`, the catch-all binary over name and argv,
+  its arity fixed by the install site
   ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]],
-  [[decisions/260622_functions-and-handlers|functions-and-handlers]]).
+  [[decisions/260622_functions-and-handlers|functions-and-handlers]],
+  [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
 - **Equations are dropped on both sides.** "As with most other implementations
   of effect handlers, we do not consider equations" — ral agrees, with the
   sharper reason that its external-command theory is free

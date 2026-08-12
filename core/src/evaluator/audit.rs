@@ -110,7 +110,7 @@ fn finish_command(
     }
     let mut argv = Vec::with_capacity(args.len() + 1);
     argv.push(cmd.to_string());
-    argv.extend(args.iter().map(std::string::ToString::to_string));
+    argv.extend(Value::render_argv(args));
     let obs = Observation::spanning(
         start.site,
         start.time,

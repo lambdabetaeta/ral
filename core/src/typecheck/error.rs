@@ -44,9 +44,7 @@ pub enum Reason {
     ListPattern,
     RecordPattern,
     Argument,
-    /// A call argument against the element type of the arm's argv list.
-    AliasArgv,
-    /// An arm's declared parameter against the argv list shape.
+    /// An arm's declared parameter against the argv a call site hands it.
     AliasParam,
     BuiltinBlockArg,
     BuiltinTypedArg,

@@ -15,6 +15,12 @@
 //! value.  Builtins that need live resources (filesystem, stdin, spawned
 //! handles, a host event sink) cannot be swept by a pure reducer call and
 //! are listed in `RESOURCE_BACKED` with their reason.
+//!
+//! The roster is `CORE_BUILTINS`, the manifest's value half: a reducer taking
+//! its arguments is what a generated inhabitant can be applied to.  The argv
+//! half, `CORE_BASE_FRAMES`, is not swept here — each frame writes to a byte
+//! channel no pure call supplies, which is the same reason `RESOURCE_BACKED`
+//! exists — and is covered by `core/tests/argv_convention.rs`.
 
 mod common;
 

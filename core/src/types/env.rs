@@ -45,9 +45,9 @@ impl Env {
         }
     }
 
-    /// Seed the base native scope — a fixed-arity manifest entry's `Value`,
-    /// or a language-given constant.  Called only at boot, beside
-    /// builtin-table installation.
+    /// Seed the base native scope — a value manifest row's `Value`, or a
+    /// language-given constant.  Called only at boot, beside builtin-table
+    /// installation.
     pub(crate) fn install_natives(&mut self, entries: impl IntoIterator<Item = (String, Value)>) {
         let map = Arc::make_mut(&mut self.natives);
         map.extend(entries);

@@ -58,10 +58,11 @@ The core entries group by what they compute:
   non-blocking probe of a handle — total over a finished block, reporting completion
   or failure as one settle variant rather than blocking or re-raising
   ([[decisions/260615_poll-total-failed-arm|the settle decision]]).
-- **Byte writes** — `echo`: per-argument `str`, single-space intercalation, a
-  trailing newline, typed with `to-line`'s route so a value boundary reads the
-  bytes it wrote. Mixed argument types coexist because each is rendered
-  before any list is formed.
+- **Byte writes** — `echo`: every argument rendered through the total
+  `to-string`, single-space intercalation, a trailing newline, typed
+  `List String -> Return(Bytes, Unit)` so a value boundary reads the bytes it
+  wrote. Mixed argument types coexist because the argv boundary renders each
+  element before the list is formed.
 - **Session & terminal** — `cd` `cwd` `alias` / `unalias` `source` / `use`
   `exit` / `quit` `ask` `clear` `reset` `surface` `help` / `explain`, with the
   underscore probe `_ansi-ok`.
@@ -69,10 +70,11 @@ The core entries group by what they compute:
 `fail` sits outside these: it diverges rather than computing, and its role in
 fallback chains is [[design/failure|failure]].
 
-## Two ways a builtin is typed
+## How a builtin is typed
 
-The registry's [[internals/builtins-registry|six-facet entry]] carries a typing
-rule whose shape follows from how command-like the builtin is:
+The manifest is authored as two, and typing follows the split. A native table
+entry's [[internals/builtins-registry|six-facet entry]] carries a typing rule
+whose shape follows from whether its surface is a curried function:
 
 - **`Scheme`** — an ordinary first-class polytype, allocated fresh per call. The
   default: a curried function usable in command position *and* reifiable as a
@@ -81,18 +83,25 @@ rule whose shape follows from how command-like the builtin is:
   forwards from its callback is invisible to a structural projection of a
   command signature, so its scheme constructor writes it in directly
   ([[design/codecs|codecs]]).
-- **`Sig`** — a *command signature*: argv shape and result computation read
-  directly, without falling through to command-name classification. This is for
-  builtins whose surface is not a curried function — *nullary* (`clear`, `reset`,
-  `help`, and the `from-X` codecs, which read stdin), *open-argv* (`echo`,
-  `detach`), or *divergent* (`fail`, result `Never`, carrying the
-  nonzero-status diagnostic — [[design/failure|failure]]).
+- **`Sig`** — a *command signature*: the arguments declared as templates and the
+  result computation read directly, without falling through to command-name
+  classification. This is for builtins whose surface is not a curried function —
+  *nullary* (`clear`, `reset`, `help`, and the `from-X` codecs, which read
+  stdin) or *divergent* (`fail`, result `Never`, carrying the nonzero-status
+  diagnostic — [[design/failure|failure]]).
 
 A `Sig`'s first-class form is *derived* from it, and derivation is its only
-source — the `Exact` argument templates become the curry spine and the result
-template the computation. The deriver is undefined exactly on the open argv
-shape, which is the [[invariants/fixed-arity|arity partition]] holding by
-construction.
+source — the argument templates become the curry spine and the result template
+the computation. The deriver is total, because every entry in the table declares
+its arguments: a table entry has an arity and a value form, both by construction
+([[invariants/fixed-arity|fixed-arity]]).
+
+`echo` and `detach` are not table entries. They are the two rows of the
+*base-frame manifest*, typed `List String -> Return(Bytes, Unit)` and
+`List String -> F Any` — the argv convention a handler and an external already
+share, `List String` inside and bytes at the OS call — and their schemes are
+seeded into the checker's env at boot, so a base frame is looked up as a handler
+is ([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
 
 Each codec being its own `Sig` rather than one polymorphic `decode` / `encode` is
 what lets `from-json < file` dispatch straight through the command arm with the
@@ -101,22 +110,25 @@ rather than as a runtime "unknown codec" string.
 
 ## A name is a value or it is handled
 
-**The set is not a third kind of name: arity partitions it into ral's two
-existing mechanisms** ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]).
+**The set is not a third kind of name: the manifest is authored as two, one half
+for each of ral's two existing mechanisms**
+([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
+[[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
 
-- **Fixed arity → a *native* value.** The entry has a curried function type
-  (arity 0: a thunk type), so it is a first-class value bound in the base scope.
-  `$upper` *is* the entry, not a lambda around a name-dispatched command: it
-  curries by collecting arguments until the entry's arity is reached, prints as
-  `<native NAME>`, is equal by name plus collected arguments, and crosses the
-  scope envelope by name, re-linked against the receiving shell's manifest. Its
-  type is the η-equivalent lambda's, uncurried all the way, so partial
-  application in a typed position goes through a `let` rethunk rather than a
-  provenance-sensitive rule.
-- **An open argv → a *base frame*.** The entry has no function type — nothing
-  to curry, no meaning for partial application — so it is only interpretable as
-  command syntax and lives at the bottom of the handler stack; `echo` and
-  `detach` are the two. A user frame stacks above it and forwards into it
+- **A table entry → a *native* value.** It declares its arguments, so it has a
+  curried function type (arity 0: a thunk type) and is a first-class value bound
+  in the base scope. `$upper` *is* the entry, not a lambda around a
+  name-dispatched command: it curries by collecting arguments until the entry's
+  arity is reached, prints as `<native NAME>`, is equal by name plus collected
+  arguments, and crosses the scope envelope by name, re-linked against the
+  receiving shell's manifest. Its type is the η-equivalent lambda's, uncurried
+  all the way, so partial application in a typed position goes through a `let`
+  rethunk rather than a provenance-sensitive rule.
+- **A base-frame row → a *base frame*.** It is variadic over a list of strings,
+  so there is no arity, nothing to curry, and no meaning for partial
+  application: it is only interpretable as command syntax and lives at the
+  bottom of the handler stack; `echo` and `detach` are the two. A user frame
+  stacks above it and forwards into it
   ([[internals/handler-dispatch|handler-dispatch]]).
 
 Interception is therefore lexical shadowing rather than admission: a binding

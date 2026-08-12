@@ -808,11 +808,11 @@ mod tests {
     }
 
     /// A function under `aliases:` installs as an argv-handler alias (a
-    /// handler frame, not a scope binding).  An alias is a unary lambda
-    /// whose single parameter binds the argv list, so the heterogeneous
-    /// call `ws 'x' { echo lol }` forces the homogeneous argv element type
-    /// to be both String and Block — a [T0010] mismatch, confirming the
-    /// by-key split actually changes behaviour.
+    /// handler frame, not a scope binding).  An alias is a unary lambda whose
+    /// single parameter binds the argv, and an argv is a list of strings every
+    /// element crosses rendered — so where the `bindings:` function above has
+    /// two typed parameters, this one has no arity at all: the same
+    /// heterogeneous call lands, and so does a call with nothing to pass.
     #[test]
     fn rc_aliases_function_is_argv_alias() {
         let src = "return [\n    aliases: [\n        ws: { |args| echo $args },\n    ],\n]\n";
@@ -820,10 +820,12 @@ mod tests {
         // Alias handler frame, not a scope binding.
         assert!(shell.has_alias("ws"));
         assert!(shell.scope_lookup("ws").is_none());
-        let errs = typecheck_against_session(&shell, "ws 'x' { echo lol }\n");
-        assert!(
-            errs.iter().any(|e| e.kind.code() == "T0010"),
-            "heterogeneous call to an argv alias should fail [T0010]: {errs:?}"
-        );
+        for call in ["ws 'x' { echo lol }\n", "ws\n"] {
+            let errs = typecheck_against_session(&shell, call);
+            assert!(
+                errs.is_empty(),
+                "an argv alias takes any argv, rendered: `{call}` gave {errs:?}"
+            );
+        }
     }
 }

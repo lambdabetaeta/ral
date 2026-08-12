@@ -661,9 +661,10 @@ interactive hosts. They serve different purposes.
 
 Text conversion writes strings without quotes, writes `Unit` as empty text,
 and writes scalar values in their usual form. It shows lists, records, maps,
-and variants with brackets and tags. It shows bytes as lossy UTF-8. This form
-is readable but is not always valid ral source and is not a serialization
-format.
+and variants with brackets and tags. It shows bytes as lossy UTF-8, and a
+callable or a handle in an abbreviated form such as `<|x| block>`. It is total:
+every value has a text conversion. This form is readable but is not always
+valid ral source and is not a serialization format.
 
 The interactive value renderer quotes strings with a safe hash fence, writes
 `unit` for `Unit`, and lays out collections to fit the available width. Maps
@@ -1032,8 +1033,8 @@ let same = $f 3     # apply f explicitly
 
 `^name` is valid only at the start of a command. Its operand must be a plain
 name, not a path. The caret skips user bindings, prelude functions, and
-fixed-arity builtins. It still respects named handlers, base handlers,
-catch-all handlers, and active capabilities.
+builtins. It still respects named handlers, base handlers, catch-all handlers,
+and active capabilities.
 
 For example, `^echo` still reaches a user handler for `echo`, or ral's base
 `echo` handler when no user handler matches. Use an exact path to bypass all
@@ -1047,14 +1048,16 @@ control forms. A caret form such as `^try` uses caret lookup instead.
 ral resolves an ordinary bare head in this order. The first match wins.
 
 1. **A value binding.** ral searches the current lexical scopes, session
-   bindings, and prelude. Fixed-arity builtins are callable values in this
-   namespace. A matching value must be callable. Otherwise, lookup fails
-   without falling through.
+   bindings, and prelude. Builtins are callable values in this namespace. A
+   matching value must be callable. Otherwise, lookup fails without falling
+   through.
 2. **A named user handler.** This includes persistent handlers installed by
    `alias` and scoped handlers installed by `within [handlers: …]`. The
    innermost handler for the name wins.
-3. **A base handler.** Builtins without fixed surface arity live here. `echo`
-   is the standard example.
+3. **A base handler.** ral's own commands that take an argument list live
+   here. `echo` is the standard example, and a host may install more, such as
+   `detach`. A base handler has no arity: it takes the whole argument list, a
+   `List String`.
 4. **A catch-all handler.** `within [handler: …]` handles the call only if no
    binding, named handler, or base handler claimed it.
 5. **A bundled or external command.** A bundled command wins when the current
@@ -1064,19 +1067,19 @@ ral resolves an ordinary bare head in this order. The first match wins.
 Prelude functions behave like user functions: use their bare name as a head,
 and `$name` when passing one as a value.
 
-Fixed-arity builtins are callable values. They support partial application and
-higher-order use when their interface has a value form. A command-only builtin
-reports an error when used through `$name`.
+Builtins are callable values: each takes the arguments its entry declares, and
+supports partial application and higher-order use. A base handler is not a
+value. It is reached in command position only, so `$echo` is an error.
 
-A named handler may share a name with a binding or fixed-arity builtin. The
-ordinary bare name still selects the binding. `^name` skips the binding and
-reaches the handler. A named handler for a base handler such as `echo` already
-has higher priority, so it does not need a caret.
+A named handler may share a name with a binding or builtin. The ordinary bare
+name still selects the binding. `^name` skips the binding and reaches the
+handler. A named handler for a base handler such as `echo` already has higher
+priority, so it does not need a caret.
 
 ### 6.4. Handlers and aliases
 
-A named handler or alias takes one parameter. ral passes the arguments after
-the head as one list:
+A named handler or alias takes one parameter: the command's argument list. ral
+renders the arguments after the head and passes them as one `List String`:
 
 ```ral
 within [handlers: [deploy: { |args| audit-deploy $args }]] {
@@ -1091,6 +1094,13 @@ within [handler: { |name args| log-call $name $args }] {
     unknown-command 'arg'
 }
 ```
+
+An arm receives strings because a command receives strings. A handler stands in
+for a command, and it can only do that if it consumes what a call to that
+command would send; an arm that expected typed arguments would not be
+interchangeable with the command it replaces. So an arm cannot do arithmetic on
+`$args[0]`: it holds that argument's rendering, `'1'` rather than `1`. Use `int`
+or `float` when the arm wants a number.
 
 ral checks handler arity when the handler is installed. It also checks that the
 handler preserves where the command's payload lives. A handler for `echo`, for
@@ -1116,7 +1126,13 @@ over every catch-all handler.
 
 ### 6.5. Application and arity
 
-Parameterized blocks and fixed-arity builtins are curried:
+ral passes arguments in two ways, and they share nothing. A value — a block, a
+lambda, or a builtin — is **applied**: it takes one argument at a time, at the
+arity its definition declares. A handler, a base handler, or an external or
+bundled command instead receives an **argument list**, and has no arity at all;
+see *Arguments and spreading*. This section is about application.
+
+Parameterized blocks and builtins are curried:
 
 ```ral
 let add = { |a b| $[$a + $b] }
@@ -1130,21 +1146,38 @@ to the returned value. It reports an arity error when that value is not
 callable.
 
 ral checks known arity and argument-type errors before execution. An
-application's arity is always known: a value takes its arguments one at a time,
-at the arity its own definition declares, so the arguments written at a call
-site are exactly the arguments that arrive. Nothing in that position stands for
-an unknown number of them, because `...` forms an argument list and a value
-takes none; see *Arguments and spreading*.
+application's arity is always known, so the arguments written at a call site are
+exactly the arguments that arrive. Nothing in that position stands for an
+unknown number of them, because `...` forms an argument list and a value takes
+none.
 
 ### 6.6. Arguments and spreading
 
 Command arguments are values. Ordinary and quoted words produce strings.
 Numeric and Boolean literals keep their types. `$name` supplies a bound value,
-and `!{…}` supplies a forced block's result.
+and `!{…}` supplies a forced block's result. What becomes of them next depends
+on which of the two mechanisms of *Application and arity* the head uses.
 
-`...value` spreads a list into an argument list. An argument list is the flat
-sequence of arguments that a bundled or external command, a builtin without
-fixed surface arity, or a handler or alias arm receives:
+An argument list is the flat sequence of arguments that a base handler, a
+handler or alias arm, or a bundled or external command receives. Its type is
+`List String`.
+
+A base handler and a handler or alias arm receive it rendered. ral converts
+every argument with the text conversion of *Display*, the same conversion `str`
+performs and `echo` writes. That conversion is total, so no argument is refused
+there, and nothing crosses an argument list as an unrendered ral value:
+
+```ral
+echo hello [a: 1]             # hello [a: 1]
+let f = { |x| $x }
+echo $f                       # <|x| block>
+```
+
+A bundled or external command receives operating-system arguments instead, and
+those are bytes. That is a second boundary, and a narrower one; its rule is
+below.
+
+`...value` spreads a list into an argument list:
 
 ```ral
 let flags = ['--all', '--long']
@@ -1152,13 +1185,12 @@ ls ...$flags '/tmp'
 ```
 
 The spread value must be a list. Its elements are inserted in order at that
-position and remain ral values.
+position, and they are rendered like any other argument.
 
 A value receives no argument list. It takes its arguments by application, one at
 a time, at the arity its definition declares, so a spread among them has nothing
 to spread into. ral reports a spread in the argument position of a value — a
-block, a fixed-arity builtin, or anything reached through a binding — before
-execution:
+block, a builtin, or anything reached through a binding — before execution:
 
 ```ral
 let numbers = [1, 2]
@@ -1172,11 +1204,11 @@ The same `...` marker also builds a list (`[1, ...$middle, 4]`) and matches the
 tail of one (`[first, ...rest]`). Those are the forms of *Lists* and *Patterns*:
 they construct and destructure a list, and neither forms an argument list.
 
-Operating-system arguments must become text. ral formats strings, integers,
-floats, Booleans, `Unit`, and tagged values. `Unit` becomes an empty argument.
-ral rejects bytes, lists, maps, blocks, functions, native callables, and
-handles. Spread a list, and send bytes through a byte pipe or decode them
-first.
+Operating-system arguments must become text, and there the conversion is partial
+rather than total. ral formats strings, integers, floats, Booleans, `Unit`, and
+tagged values. `Unit` becomes an empty argument. ral rejects bytes, lists, maps,
+blocks, functions, native callables, and handles. Spread a list, and send bytes
+through a byte pipe or decode them first.
 
 Arguments are never split, globbed, or parsed again. A string containing spaces
 remains one argument.
@@ -1816,9 +1848,9 @@ within [handlers: [
 }
 ```
 
-Every value in `handlers` must be a unary lambda `{ |args| ... }`. It receives one `List` containing the command’s evaluated ral arguments.
+Every value in `handlers` must be a unary lambda `{ |args| ... }`. It receives the command’s argument list: a `List String` holding every argument after the head, rendered as text.
 
-The singular `handler` field is a catch-all and must be a binary lambda `{ |name args| ... }`. It receives the command name as a `String` and its arguments as a `List`.
+The singular `handler` field is a catch-all and must be a binary lambda `{ |name args| ... }`. It receives the command name as a `String` and its argument list as a `List String`.
 
 A bare block, non-lambda value, or lambda with the wrong number of parameters is rejected when the frame is installed. A named handler must also preserve the command head's payload route when that head already has one. A head whose payload is captured from standard output — every external command, for instance — admits only arms whose payload is too, and such an arm returns `Unit`. A handler may change what a command writes, and what it returns where the head's payload is a returned value, but not where the payload lives; use an explicit codec when conversion is intended.
 
@@ -1828,7 +1860,7 @@ Handlers are command operations, not first-class names. They are invoked in comm
 
 A bare command head is resolved in this order:
 
-1. the lexical value environment, including fixed-arity native commands;
+1. the lexical value environment, including native commands;
 2. the innermost named handler for that spelling, searching all active run frames;
 3. a base command supplied by ral or the embedding host;
 4. the innermost catch-all handler;
@@ -2263,10 +2295,11 @@ do not survive process exit; use `detach` when survival is the requirement.
 ### 11.5. Host-installed worker forms
 
 The core language provides `spawn`, `await`, `poll`, `race`, and `cancel`.
-`watch`, `service`, and `detach` are optional host builtins. If a host does not
-install one, its name is absent from that shell's base scope (`watch`, `service`)
-or its base frames (`detach`), and is checked and resolved like any other unknown
-command.
+`watch`, `service`, and `detach` are optional host commands: `watch` and
+`service` are builtins, and `detach` is a base handler taking an argument list.
+If a host does not install one, its name is absent from that shell's base scope
+(`watch`, `service`) or its base frames (`detach`), and is checked and resolved
+like any other unknown command.
 
 #### Live output with `watch`
 
@@ -2315,7 +2348,8 @@ handles; exarch exposes its live services in a host-owned register and provides
 #### Work that survives with `detach`
 
 `detach description command arguments...` starts an operating-system process
-that the session deliberately stops owning:
+that the session deliberately stops owning. It takes one argument list: the
+description first, then the command and its own arguments.
 
 ```ral
 let receipt = detach 'local documentation server' python -m http.server 8000
@@ -2350,7 +2384,7 @@ successful-birth budget. The budget is shared by nested workers, counts only
 committed births, and is not replenished because the session cannot observe a
 detached process's death. Exarch currently permits 16 births per session.
 Neither interactive nor batch `ral` installs `detach`; Windows has no such
-builtin.
+command.
 
 ### 11.6. Interactive job control
 
@@ -3088,7 +3122,7 @@ within [handlers: [fetch-clock: { |args| return '12:00' }]] {
 }
 ```
 
-The handler receives one list containing the command's evaluated arguments.
+The handler receives the command's argument list, a `List String`.
 Per-name handlers follow the ordinary command-dispatch rules, including inside
 byte pipelines. Returned values are composed by ordinary application and bind,
 so tests should mock those functions as values rather than pretending they are
@@ -3309,7 +3343,9 @@ JSON value per line.
 
 The core session family includes `fail`, `exit` and `quit`, `cd`, `alias` and
 `unalias`, `source` and `use`, `ask`, `echo`, `surface`, `clear`, `reset`,
-`help`, and `explain`.
+`help`, and `explain`. All of them are builtins except `echo`, which is a base
+handler: it takes an argument list, writes each argument's text conversion
+separated by single spaces, and ends with one newline.
 
 `fail` raises a recoverable failure from exactly one error record:
 

@@ -14,7 +14,9 @@ use crate::exit_hints::ExitHints;
 use crate::io::{Sink, TerminalState};
 use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
 use crate::source::SourceDb;
-use crate::types::{AuditFragment, BuiltinEntry, ReapNotice, Value, WorkerEntry, WorkerId};
+use crate::types::{
+    AuditFragment, BuiltinEntry, Convention, ReapNotice, Value, WorkerEntry, WorkerId,
+};
 use std::io::Write;
 use std::sync::Arc;
 
@@ -476,19 +478,26 @@ impl Shell {
     }
 }
 
-/// Partition freshly installed `entries` by [`BuiltinEntry::fixed_arity`]:
-/// fixed arity seeds the base env scope as a native value, an open argv
-/// installs as a base handler frame.  The one place either is populated, for
-/// core and host installs alike.
+/// Seed freshly installed `entries` into the two places the manifest's two
+/// halves live: a value row becomes a native in the base env scope, an argv
+/// row a base handler frame.  Each row says which it is
+/// ([`Convention`](crate::types::Convention)); the one place either is
+/// populated, for core and host installs alike.
 fn seed_natives_and_base(shell: &mut Shell, entries: &[BuiltinEntry]) {
-    let mut natives = Vec::new();
-    let mut base = Vec::new();
-    for entry in entries {
-        match crate::types::builtin::native_value(entry) {
-            Some(value) => natives.push((entry.name.clone().into_owned(), value)),
-            None => base.push(entry.clone()),
-        }
-    }
+    let natives = entries
+        .iter()
+        .filter(|entry| entry.convention == Convention::Value)
+        .map(|entry| {
+            (
+                entry.name.clone().into_owned(),
+                crate::types::builtin::native_value(entry),
+            )
+        });
+    let base: Vec<BuiltinEntry> = entries
+        .iter()
+        .filter(|entry| entry.convention == Convention::Argv)
+        .cloned()
+        .collect();
     shell.mobile.scope.install_natives(natives);
     shell.mobile.context.handlers.install_base(&base);
 }

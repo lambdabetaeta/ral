@@ -12,33 +12,36 @@ undefined ([[design/builtins|builtins]]).
 **An entry that takes an argv is not applied, so the rule does not reach it.**
 An external command, an intercepted operation, and a command-shaped builtin
 take an *argv*, not a curried argument sequence: an intercepted operation takes
-as many arguments as the call site writes, and `echo` and `detach` take a fully
-open argv (`ArgSig::Any`, `core/src/typecheck/builtins.rs`)
+as many arguments as the call site writes, and `echo` and `detach` are variadic
+over a list of strings, typed `List String -> Return(Bytes, Unit)` and
+`List String -> F Any`
 ([[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]).
 
-**Arity decides which mechanism a name is, and nothing declares it.** A
-manifest entry's arity is read off its type rule — a signature's argv shape, a
-scheme's curry-spine depth (`BuiltinEntry::fixed_arity`) — and that reading is
-the whole classification: fixed arity makes the name a first-class *native*
-value, an open argv makes it a *base frame* on the handler stack, whose
-arguments arrive as an argv like any command's
-([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]).
-So `$name` exists exactly where a fixed arity does, by construction rather than
-by agreement between a declaration and a check.
+**The manifest is authored as two, and arity is the consequence.** A native
+table entry declares its arguments, so it has an arity — read off its type rule,
+a signature's slot count or a scheme's curry-spine depth
+(`BuiltinEntry::fixed_arity`, a `usize` for every entry there) — and it is a
+first-class *native* value. A base-frame manifest row takes an argv instead, so
+the argv half has no arity at all: the row is a *base frame* on the handler
+stack, whose arguments arrive as an argv like any command's
+([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
+[[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]). So
+`$name` exists exactly where an arity does, by construction rather than by
+agreement between a declaration and a check.
 
-**That partition is the interception rule too.** A fixed-arity entry is a
-native seeded into the base env scope, which resolution reaches before the
-handler stack, so no installed handler intercepts it under its bare name —
-only `^name`, which skips the env by definition, reaches one. An open-argv entry
-*is* a frame at the bottom of that stack, so a user frame stacks above it and
-every bare call arrives there first. Handleability is therefore nothing an
-entry states about itself; it is what its arity has already said.
+**That split is the interception rule too.** A table entry is a native seeded
+into the base env scope, which resolution reaches before the handler stack, so
+no installed handler intercepts it under its bare name — only `^name`, which
+skips the env by definition, reaches one. A base-frame row *is* a frame at the
+bottom of that stack, so a user frame stacks above it and every bare call
+arrives there first. Handleability is therefore nothing an entry states about
+itself; it is which half of the manifest holds it.
 
 **A spread is the notation of an argv.** `...$xs` splices a list into an argv,
-so it may be written only where an argv exists: a command, an external, an
-open-argv builtin, or a handler or alias arm. A value takes its arguments by
-application at a declared arity, so it has no argv and `...` has nothing to
-spread into — a spread in a value's argument position is **T0056**
+so it may be written only where an argv exists: a command, an external, a base
+frame, or a handler or alias arm. A value takes its arguments by application at
+a declared arity, so it has no argv and `...` has nothing to spread into — a
+spread in a value's argument position is **T0056**
 (`SpreadIntoApplication`). A list literal's spread (`[1, ...$xs, 2]`) and a
 rest-pattern (`[first, ...rest]`) are a different construct, building and
 taking apart a list rather than an argument sequence, and this rule leaves them
@@ -47,9 +50,12 @@ alone.
 **The discipline survives at that boundary by packing, not by banning.**
 `run_handler` (`core/src/runtime/command_call.rs`) hands a handler its arguments
 as one list value — `[argv]` for a per-name entry, `[name, argv]` for a
-catch-all — so a variadic operation is consumed by a fixed-arity lambda typed
-`Fun(List α, B)` ([[internals/handler-dispatch|handler-dispatch]]). Variable
-arity is a surface phenomenon; at the value level it is always a list.
+catch-all — every element rendered as it is packed, so a variadic operation is
+consumed by a fixed-arity lambda typed `Fun(List String, B)`
+([[internals/handler-dispatch|handler-dispatch]],
+[[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
+Variable arity is a surface phenomenon; at the value level it is always a list
+of strings.
 
 Optionality is data too, never a hole in an argument list: an
 [[invariants/optionality-via-variants|open variant]] (`` `some v `` /
@@ -61,4 +67,4 @@ signature spells an argument the call site may leave out
 This is a hard rule, not a stylistic preference. Do not introduce variadic
 application, a splat parameter, a defaulted argument on a function or prelude
 binding, a spread in a value's argument position, or a first-class `$name` for
-an entry whose argv is open.
+an entry that takes an argv.

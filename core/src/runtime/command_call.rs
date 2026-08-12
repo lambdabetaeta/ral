@@ -29,7 +29,7 @@ pub(crate) enum Resolution {
         entry: Box<HandlerEntry>,
         depth: usize,
     },
-    /// A base handler frame — an open-argv manifest entry.
+    /// A base handler frame — a manifest row from the argv half.
     Base(BuiltinEntry),
     External(CommandIdentity),
 }
@@ -153,6 +153,10 @@ pub(crate) fn run_call(
 
 /// Run a base handler frame directly with the argv slice — no adapter, no
 /// masking: a native body never self-forwards.
+///
+/// The values arrive unrendered, unlike a ral arm's ([`run_handler`]): a native
+/// body renders what it writes and vets what it launches, and the exec
+/// boundary's refusal is a judgement on the value's shape.
 pub(crate) fn run_base_frame(
     entry: &BuiltinEntry,
     args: &[Value],
@@ -198,6 +202,11 @@ impl Drop for MaskedHandler<'_> {
 
 /// Run a user handler.  The matched frame is masked for the body's dynamic
 /// extent, so a same-name call from inside reaches the next outer match.
+///
+/// The arm receives the argv, and an argv is a list of strings: every element
+/// arrives rendered, by the same total text conversion a base frame and the
+/// exec boundary apply.  That is what makes an arm interchangeable with the
+/// command it stands for — it consumes what an exec call would.
 pub(crate) fn run_handler(
     entry: &HandlerEntry,
     depth: usize,
@@ -206,12 +215,17 @@ pub(crate) fn run_handler(
     shell: &mut Shell,
 ) -> Settled<Value> {
     let thunk = entry.thunk.clone();
+    let argv = Value::list(
+        Value::render_argv(args)
+            .into_iter()
+            .map(Value::String)
+            .collect(),
+    );
     let call_args = match entry.arity {
-        HandlerArity::CatchAll => vec![
-            Value::String(entry.name.clone().into_owned()),
-            Value::list(args.to_vec()),
-        ],
-        HandlerArity::Unary => vec![Value::list(args.to_vec())],
+        HandlerArity::CatchAll => {
+            vec![Value::String(entry.name.clone().into_owned()), argv]
+        }
+        HandlerArity::Unary => vec![argv],
     };
     let masked = MaskedHandler::strip(shell, depth);
     let result = crate::evaluator::apply(thunk, call_args, mooring, masked.shell);

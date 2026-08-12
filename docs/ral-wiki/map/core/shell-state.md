@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 635a1ae
-generated_at_date: 2026-07-28
+generated_at_commit: 5afa1c81
+generated_at_date: 2026-08-12
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -160,7 +160,7 @@ field name *is* the invariant** — joined by `Shell`
 
   The `detach` budget (`shell/detached.rs`) is the one member meant to
   outlive the session: `None` until `Shell::arm_detach`, which a host calls
-  in the same act that installs the `detach` builtin
+  in the same act that installs `detach`'s base frame
   ([[map/core/builtins|builtins]]), so the verb and the budget it spends
   cannot drift apart. `DetachPolicy::admit` counts *births*, not occupancy —
   a survivor's death is unobservable from here, so a release would be a

@@ -467,23 +467,19 @@ impl Inferencer<'_> {
         super::generalize::generalize(&mut self.ctx.unifier, self.env, &thunk_ty)
     }
 
-    /// Head `name`'s known payload route: from its handler scheme when one is
-    /// in scope, else from a base frame's `Sig`.  A plain native pins to
-    /// nothing — only `^name` reaches an arm under it — and an unknown head
-    /// or non-`Return` scheme gets a fresh route, leaving the grounding
-    /// obligation to whoever settles it.
+    /// Head `name`'s known payload route, from the handler scheme in scope for
+    /// it — a user arm's, or a base frame's, the two being one thing here.  A
+    /// plain native pins to nothing — only `^name` reaches an arm under it —
+    /// and an unknown head or non-`Return` scheme gets a fresh route, leaving
+    /// the grounding obligation to whoever settles it.
     fn head_pipe_route(&mut self, name: &str) -> PayloadRoute {
-        if let Some(handler) = self.env.lookup_handler(name).cloned() {
-            let cty = self.instantiate_comp(&handler.scheme);
-            return self.comp_route(&cty);
+        match self.env.lookup_handler(name).cloned() {
+            Some(handler) => {
+                let cty = self.instantiate_comp(&handler.scheme);
+                self.comp_route(&cty)
+            }
+            None => self.ctx.unifier.fresh_route(),
         }
-        if let Some(entry) = self.env.builtins.get(name)
-            && entry.fixed_arity().is_none()
-            && let super::builtins::BuiltinTypeRule::Sig(sig) = entry.type_rule
-        {
-            return super::builtins::sig_route(&sig.result, &mut self.ctx.unifier);
-        }
-        self.ctx.unifier.fresh_route()
     }
 
     /// Peel an alias arm's leading `Fun` arrows: the calling convention forces
@@ -532,54 +528,31 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Apply an alias/handler arm to a call site's arguments.  A parameterised
-    /// arm is `Fun(List(elem), body)`, so each argument unifies against `elem`
-    /// and each spread against `List(elem)`; without that, an arm whose body
-    /// pins `elem` accepts anything and defers the clash to runtime.  A nullary
-    /// arm discards its arguments, as the runtime does.
+    /// Apply an alias/handler arm — a user's or a base frame's — to a call
+    /// site's arguments.  A parameterised arm is `Fun(argv, body)`, and the
+    /// argv rule says what that parameter is; a nullary arm discards its
+    /// arguments, as the runtime does.
     fn apply_alias_arm(&mut self, scheme: &Scheme, args: &crate::ir::Args) -> CompTy {
         let cty = self.instantiate_comp(scheme);
+        let argv = self.argv_ty(args);
         let CompTy::Fun(param, body) = self.ctx.unifier.resolve_comp_ty(&cty) else {
-            self.infer_args(args);
             return cty;
         };
-        let elem = self.ctx.unifier.fresh_ty();
-        self.ctx.unify_ty(
-            &param,
-            &Ty::List(Box::new(elem.clone())),
-            Reason::AliasParam,
-        );
-        for entry in args {
-            let span = entry.span;
-            match &entry.item {
-                crate::ir::ValListElem::Single(arg) => {
-                    self.with_span(span, |this| {
-                        let arg_ty = this.infer_val(arg);
-                        this.ctx.unify_ty(&arg_ty, &elem, Reason::AliasArgv);
-                    });
-                }
-                crate::ir::ValListElem::Spread(arg) => {
-                    let spread_ty = self.infer_val(arg);
-                    self.ctx.unify_ty(
-                        &spread_ty,
-                        &Ty::List(Box::new(elem.clone())),
-                        Reason::ListSpread,
-                    );
-                }
-            }
-        }
+        self.ctx.unify_ty(&param, &argv, Reason::AliasParam);
         *body
     }
 
-    /// The runtime handler calling convention: an arm is forced on the argv
-    /// list, so a parameter binds a `Ty::List` and the arm keeps its
-    /// `Fun(argv, body)` shape for [`Self::apply_alias_arm`] to unify call-site
-    /// arguments against.
+    /// The runtime handler calling convention: an arm is forced on the argv, so
+    /// a parameter binds [`Ty::argv`] and the arm keeps its `Fun(argv, body)`
+    /// shape for [`Self::apply_alias_arm`] to meet a call site with.
+    ///
+    /// The parameter is `List String` at the arm, not a variable the call site
+    /// pins later, so an arm that reads an element as anything else is refused
+    /// where the mistake is written rather than where it is called.
     pub(super) fn infer_alias_arm(&mut self, param: Option<&IrPattern>, body: &Comp) -> CompTy {
         match param {
             Some(param) => {
-                let elem = self.ctx.unifier.fresh_ty();
-                let argv_ty = Ty::List(Box::new(elem));
+                let argv_ty = Ty::argv();
                 let body_cty = self.with_scope(|this| {
                     this.bind_pattern(param, &argv_ty, BindMode::Param);
                     this.infer_comp(body)
@@ -631,16 +604,21 @@ impl Inferencer<'_> {
         }
     }
 
+    /// A command head's type, by the lookup order the runtime uses — binding,
+    /// value builtin, handler, external.  A binding hit is final, and a
+    /// pristine native reaches here only through the rule table, the bindings
+    /// harvest walking user scopes alone.
+    ///
+    /// The four arms are ral's two worlds in order.  The first two are lambda
+    /// calculus: arguments by application, at an arity the head's own type
+    /// declares, so `...` has no argv to spread into and is refused.  The last
+    /// two take an argv, and `...` is exactly its notation.
     fn exec_comp_ty(&mut self, name: &str, args: &crate::ir::Args, external_only: bool) -> CompTy {
-        // Lookup order — binding, native rule, handler, external — mirroring
-        // the runtime's env-first order: a binding hit is final, and a
-        // pristine native reaches here only through the rule table, the
-        // bindings harvest walking user scopes alone.
         if !external_only && let Some(scheme) = self.env.lookup_binding(name).cloned() {
             return self.apply_scheme(&scheme, args);
         }
 
-        if !external_only && let Some(entry) = self.env.builtins.get(name) {
+        if !external_only && let Some(entry) = self.env.builtins.value(name) {
             use super::builtins::BuiltinTypeRule;
             match entry.type_rule {
                 BuiltinTypeRule::Scheme(factory) => {
@@ -660,14 +638,47 @@ impl Inferencer<'_> {
         self.external_exec_comp_ty(args)
     }
 
-    /// An external's payload is always captured from its stdout: the one
-    /// byte-routed computation, WF-2 by construction.
+    /// An external takes an argv, and its payload is always captured from its
+    /// stdout: the one byte-routed computation, WF-2 by construction.
+    ///
+    /// Nothing here declares a parameter for that argv to meet, so the rule's
+    /// contribution is its walk and its refusals rather than its type.
     fn external_exec_comp_ty(&mut self, args: &crate::ir::Args) -> CompTy {
-        self.infer_args(args);
+        let _argv = self.argv_ty(args);
         CompTy::bytes()
     }
 
-    pub(super) fn infer_args(&mut self, args: &crate::ir::Args) {
+    /// The argv rule: a command's arguments are an argv, and an argv is
+    /// [`Ty::argv`] — `List String`.  Every element crosses rendered, through
+    /// the total text conversion `str` writes and `Display` performs, so an
+    /// element's own type constrains the argv's not at all: this is where
+    /// `mycmd hello 1 true` becomes three strings.
+    ///
+    /// One rule for every argv boundary — a handler arm, a base frame, an
+    /// external — so the three differ only in the result they name.  Each
+    /// element is still inferred, under its own span, for the errors inside it,
+    /// and a `...` must still spread a list: what its elements are is free,
+    /// what it is is not.
+    fn argv_ty(&mut self, args: &crate::ir::Args) -> Ty {
+        for entry in args {
+            self.with_span(entry.span, |this| match &entry.item {
+                ValListElem::Single(arg) => {
+                    let _ = this.infer_val(arg);
+                }
+                ValListElem::Spread(arg) => {
+                    let spread_ty = this.infer_val(arg);
+                    let elem = this.ctx.unifier.fresh_ty();
+                    this.ctx
+                        .unify_ty(&spread_ty, &Ty::List(Box::new(elem)), Reason::ListSpread);
+                }
+            });
+        }
+        Ty::argv()
+    }
+
+    /// Infer every argument for the errors inside it, constraining nothing —
+    /// what a refused call still owes its subexpressions.
+    pub(super) fn infer_refused_args(&mut self, args: &crate::ir::Args) {
         for sub in crate::ir::args::iter_subvals(args) {
             let _ = self.infer_val(sub);
         }
@@ -850,14 +861,17 @@ impl Inferencer<'_> {
                                 &mut self.ctx.unifier,
                             ) {
                                 Some(scheme) => instantiate(&mut self.ctx.unifier, &scheme),
-                                None if self.env.lookup_handler(name).is_some() => {
-                                    self.ctx.diagnose(TypeErrorKind::HandlerNotFirstClass {
+                                // A base frame is a builtin *and* a handler:
+                                // name the builtin, which is what the user
+                                // wrote and what `explain` documents.
+                                None if self.env.builtins.get(name).is_some() => {
+                                    self.ctx.diagnose(TypeErrorKind::BuiltinNotFirstClass {
                                         name: name.clone(),
                                     });
                                     self.ctx.unifier.fresh_ty()
                                 }
-                                None if self.env.builtins.get(name).is_some() => {
-                                    self.ctx.diagnose(TypeErrorKind::BuiltinNotFirstClass {
+                                None if self.env.lookup_handler(name).is_some() => {
+                                    self.ctx.diagnose(TypeErrorKind::HandlerNotFirstClass {
                                         name: name.clone(),
                                     });
                                     self.ctx.unifier.fresh_ty()

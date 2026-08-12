@@ -211,7 +211,7 @@ pub(crate) fn install_shell_mobile(
 }
 
 /// A fresh shell wearing the host's builtin surface: `Shell::new` carries
-/// only `CORE_BUILTINS`, so the child-shell hook reinstalls the rest before
+/// core's manifest alone, so the child-shell hook reinstalls the rest before
 /// any [`WireDecoder`] is built against it.
 pub(crate) fn bare_child_shell() -> Shell {
     let mut shell = Shell::new(crate::io::TerminalState::default());

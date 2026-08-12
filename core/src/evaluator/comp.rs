@@ -204,7 +204,7 @@ pub(crate) fn step_force(val: &Val, mooring: &Mooring, shell: &mut Shell) -> Raw
         lam @ Value::Lambda { .. } => lam,
         // An arity-0 native is a thunk, run like a `Block`; any other native
         // returns unchanged, like a `Lambda`.
-        Value::Native { entry, applied } if entry.fixed_arity() == Some(0) => {
+        Value::Native { entry, applied } if entry.fixed_arity() == 0 => {
             super::audit::run_native(&entry, &applied, mooring, shell)?
         }
         native @ Value::Native { .. } => native,

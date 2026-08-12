@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: 5afa1c81
+generated_at_date: 2026-08-12
 covers_paths: [ral/src/jobs.rs, ral/src/repl/host_handlers.rs]
 ---
 
@@ -22,13 +22,14 @@ stopped, continued, exited, and signalled observations need no fallible enum dec
 ([[decisions/260720_total-wait-status|total-wait-status]]). The table backs the
 four captured builtins ([[map/repl/plugins|host handlers]]) — `jobs`, `fg`, `bg`,
 `disown` — and is reaped each iteration and on exit by the [[map/repl/loop|session]].
-`fg`/`bg`/`disown` name their job explicitly: each takes exactly one `Int` id
-(`ArgSig::Exact`), so the checker guarantees the argument and `job_id_arg` has
-nothing to default to. Fixed arity makes all three natives, so `$fg` is a value,
-host-captured and first-class at once, as the nullary `jobs` already is
-([[invariants/fixed-arity|fixed-arity]]). `reap` requests continued as well as
-stopped statuses, so a group resumed out-of-band by an external `kill -CONT`
-flips back to running (`mark_running`) rather than reading `stopped` forever.
+`fg`/`bg`/`disown` name their job explicitly: each declares exactly one `Int`
+id, so the checker guarantees the argument and `job_id_arg` has nothing to
+default to. Declaring their arguments makes all three table entries and so
+natives, and `$fg` is a value, host-captured and first-class at once, as the
+nullary `jobs` already is ([[invariants/fixed-arity|fixed-arity]]). `reap`
+requests continued as well as stopped statuses, so a group resumed out-of-band
+by an external `kill -CONT` flips back to running (`mark_running`) rather than
+reading `stopped` forever.
 On exit a job group is taken down in three steps:
 
 - gracefully — SIGTERM then SIGCONT on Unix (a frozen group must run to act on

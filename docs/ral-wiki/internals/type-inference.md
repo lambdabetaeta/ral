@@ -1,6 +1,6 @@
 ---
-verified_at_commit: a5ffb36
-verified_at_date: 2026-08-11
+verified_at_commit: 5afa1c81
+verified_at_date: 2026-08-12
 anchors: [Inferencer, Unifier, Pairs, unify_row, unify_route, generalize, instantiate, annotate, SessionSchemes, PayloadRoute, extract_return, force_return_shape, pin_arm_to_head, InferCtx, join_arm_results, solve_at_boundary, solve_and_finalize, ArmResults]
 ---
 
@@ -16,8 +16,11 @@ constraints as it goes; `infer_case` is kept whole at ~100 lines by decision
 ([[decisions/260530_infer-case-stays-whole|infer-case-stays-whole]]). Builtin
 signatures enter through per-builtin rules carried with the body
 ([[internals/builtins-registry|builtins registry]]: `fixed_arity`,
-`builtin_type_hint`), the one source of arity
-([[invariants/fixed-arity|fixed-arity]]).
+`builtin_type_hint`), the one source of a table entry's arity
+([[invariants/fixed-arity|fixed-arity]]). The base-frame manifest's rows have no
+arity at all: their schemes are seeded into the checker's env at boot, so a base
+frame is looked up as a handler is
+([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
 
 **The Unifier solves three sorts at once** (`unify.rs`):
 

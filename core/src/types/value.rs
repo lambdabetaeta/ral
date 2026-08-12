@@ -99,6 +99,19 @@ impl Value {
         Self::List(items.into())
     }
 
+    /// Render an argv: every element through the total text conversion
+    /// [`Display`](fmt::Display) performs and `str` exposes.
+    ///
+    /// The one rendering every argv boundary *inside* the shell shares —
+    /// `echo`'s write, a handler arm's argument list, the audit trail's record
+    /// of a call — so an argv is a list of strings wherever it is read.  It is
+    /// total on purpose, and so is unlike `runtime::command::vet`, which
+    /// refuses six shapes before rendering because it is heading for
+    /// `execve(2)`: total inside, gated at the OS call.
+    pub fn render_argv(args: &[Self]) -> Vec<String> {
+        args.iter().map(ToString::to_string).collect()
+    }
+
     /// On duplicate keys the *last* pair wins; a caller needing first-wins
     /// dedups beforehand, as `eval_map` does to keep explicit entries ahead
     /// of spreads.

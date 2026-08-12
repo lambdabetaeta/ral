@@ -33,7 +33,7 @@ pub(crate) use handle::pins_running_work;
 pub use handle::{CompletedHandle, HandleInner, HandleState, SurfaceBuffer};
 
 mod builtin;
-pub use builtin::{BuiltinBody, BuiltinEntry, BuiltinTable};
+pub use builtin::{BuiltinBody, BuiltinEntry, BuiltinTable, Convention};
 
 // The inner of `Value::List`.
 mod list;

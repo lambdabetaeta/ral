@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 9a0a1136
-verified_at_date: 2026-08-06
-anchors: [HandlerStack, lookup, HandlerLookup, install_base, strip_matched, restore_matched]
+verified_at_commit: 5afa1c81
+verified_at_date: 2026-08-12
+anchors: [HandlerStack, lookup, HandlerLookup, install_base, strip_matched, restore_matched, run_handler]
 ---
 
 # Handler dispatch: deep, self-masking, by frame
@@ -20,8 +20,9 @@ which skips the env by definition, reaches it
 ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]).
 
 **The stack has two layers.** Above are the *run frames* pushed by `within` and
-`handle`; below is a permanent *base layer* of manifest rows for the open-argv
-builtins — `echo` and `detach` (`install_base`). Permanence is representational:
+`handle`; below is a permanent *base layer* holding the *base-frame manifest*'s
+rows — `echo` and `detach`, each variadic over a list of strings
+(`install_base`). Permanence is representational:
 the mutators (`strip_matched`, `remove_alias`) index the run frames alone, so no
 operation can name a base frame. The base layer never crosses the wire — the
 wire form is a `Vec<HandlerFrame>` — so a receiving shell's own boot installs
@@ -36,19 +37,23 @@ returns names the two arm shapes: a run `Frame` with its `depth` — the count o
 frames from the top down to and including the match — or a `Base` entry.
 
 **Each arm runs honestly.** A run-frame hit applies the user thunk under the
-argv-list convention below, masked by depth; a base hit calls the native body
-directly with the argv slice, with no adapter and no masking, because a native
-body never self-forwards (`run_base_frame`). A user frame therefore stacks
+argv-list convention below, masked by depth; a base hit calls the row's Rust
+body directly with the argv slice, with no adapter and no masking, because a
+Rust body never self-forwards (`run_base_frame`). A user frame therefore stacks
 *above* a base frame and forwards into it by the same wrap-and-forward idiom
 that reaches an outer handler.
 
 **The calling convention is fixed by surface form, not value shape.** A per-name
 entry (and every alias) is a unary lambda `{ |args| … }`, applied to the command's
 argument list; a catch-all is a binary lambda `{ |name args| … }`, applied to the
-name and the argument list. Dispatch invokes the matched entry under the
-convention its install site demands rather than inspecting the stored value; a
-bare block, a non-lambda, or a wrong-arity lambda is rejected at install time
-(`docs/SPEC.md` §9.4), so no malformed entry ever reaches lookup.
+name and the argument list. That list is a `List String` — `run_handler` renders
+every element through the total `to-string` as it packs the argv, so an arm
+consumes what an exec call would
+([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
+Dispatch invokes the matched entry under the convention its install site demands
+rather than inspecting the stored value; a bare block, a non-lambda, or a
+wrong-arity lambda is rejected at install time (`docs/SPEC.md` §9.4), so no
+malformed entry ever reaches lookup.
 
 **Self-masking is a strip-and-restore of one frame.** For the dynamic extent of
 the matched handler's body, `strip_matched(depth)` lifts *only that frame* off the

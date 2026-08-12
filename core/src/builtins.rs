@@ -5,6 +5,11 @@
 //! them into the [`CORE_BUILTINS`] static every shell's builtin table is seeded
 //! from.  Arity is structural, read off the type rule by
 //! [`crate::types::BuiltinEntry::fixed_arity`].
+//!
+//! Those are the *value* half of the manifest.  The argv half — a name that
+//! takes an argv rather than arguments, and installs as a base handler frame —
+//! is authored beside it in [`CORE_BASE_FRAMES`], because the two conventions
+//! share nothing but a body signature.
 
 use crate::diagnostic;
 use crate::types::{
@@ -335,9 +340,6 @@ builtin_registry! {
     Cancel { names: ["cancel"], ty: Scheme(scheme::cancel_op),
         doc: "cancel <handle>  — cancel a running concurrent block.",
         call: |args, _mooring, shell| concurrency::builtin_cancel(args, shell), },
-    Echo { names: ["echo"], ty: Sig(sig::ECHO),
-        doc: "echo <args...>  — str each argument, join with a single space, write with a trailing newline. A base handler frame, not a value: stacking a handler on `echo` intercepts it, and `^echo` reaches this frame rather than a PATH binary.",
-        call: |args, _mooring, shell| codecs::builtin_echo(args, shell), },
     // The bundled uutils tools (cat, yes, head, wc, …) are deliberately absent:
     // `runtime::command` runs each as a `ral --ral-bundled-tool <tool>` child, so
     // they cross the same wait / signal / exit-code boundary as a system binary.
@@ -356,7 +358,21 @@ builtin_registry! {
         call: |_args, _mooring, _shell| Ok(Value::Bool(crate::ansi::use_ui_color())), },
 }
 
-/// A [`BuiltinTable`](crate::types::BuiltinTable) of [`CORE_BUILTINS`] alone.
+/// The argv half of core's manifest: names that take an argv rather than
+/// arguments, and so install as base handler frames instead of natives.
+///
+/// `echo` is core's only one.  [`DETACH_BUILTIN`] is the other frame core
+/// publishes, withheld from here for a host that also arms a birth budget.
+static CORE_BASE_FRAMES_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
+    Cow::Borrowed("echo"),
+    scheme::echo,
+    "echo <args...>  — write one line: every argument in its text form (what `str` gives, so a list or a map prints as it looks), joined by single spaces, with a trailing newline. It takes an argv rather than arguments, so there is no `$echo` to hold: a handler stacked on `echo` intercepts it, and `^echo` reaches this frame rather than a PATH binary.",
+    BuiltinBody::Static(codecs::builtin_echo),
+)];
+pub static CORE_BASE_FRAMES: &[BuiltinEntry] = &CORE_BASE_FRAMES_ARR;
+
+/// A [`BuiltinTable`](crate::types::BuiltinTable) of core's manifest, both
+/// halves, alone.
 ///
 /// This is what a checker with no live shell
 /// ([`SessionSchemes`](crate::typecheck::SessionSchemes)'s `Default`) types
@@ -364,6 +380,7 @@ builtin_registry! {
 pub(crate) fn core_builtin_table() -> crate::types::BuiltinTable {
     let mut table = crate::types::BuiltinTable::default();
     table.install_static(CORE_BUILTINS);
+    table.install_static(CORE_BASE_FRAMES);
     table
 }
 
@@ -408,14 +425,14 @@ pub static SERVICE_BUILTIN: &[BuiltinEntry] = &SERVICE_BUILTIN_ARR;
 /// question, asked of the live grant stack
 /// ([`crate::types::GrantStack::permits_detach`]) and answered as a refusal.
 ///
-/// The other three verbs vary policy over one type; this one changes it — a
-/// variadic effect, hence no `$detach`, returning a plain record rather than a
-/// [`Value::Handle`] because no eliminator here can reach what it births.  The
-/// birth is a double-fork, which Windows has no analogue of.
+/// The other three verbs vary policy over one type; this one changes it — it
+/// takes an argv, hence a base frame and no `$detach`, returning a plain record
+/// rather than a [`Value::Handle`] because no eliminator here can reach what it
+/// births.  The birth is a double-fork, which Windows has no analogue of.
 #[cfg(unix)]
-static DETACH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
+static DETACH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
     Cow::Borrowed("detach"),
-    BuiltinTypeRule::Sig(sig::DETACH),
+    scheme::detach,
     "detach <desc> <cmd> <args...>  — run a program that keeps running after this session is over. Returns a receipt {pid, desc}: data, not a handle — await, poll, race and cancel do not apply, and nothing in ral can stop it once it is born. It is also mute. Its stdin, stdout and stderr are all /dev/null, and its exit status is unrecoverable, since init reaps it and nothing here can ever wait for it: if it dies at startup — port already in use, bad flag, a missing import — nothing observes that, and a returned pid says only that the program was exec'd, never that it is alive or that it worked. The one way to learn whether it is running is to probe whatever it serves: connect to the port, fetch the URL, read the file it writes. Give it its own logging if you want a record of what it did. <pid> is the name it had at birth, not a capability over it — pids are recycled, so that number may later name something else entirely. Only cwd and env cross into it, from the enclosing `within`; bindings and the audit tree do not, and a head that a handler in scope intercepts runs that handler instead, birthing nothing. A grant you birth it inside confines it for the rest of its life: it keeps the fs, net and exec limits in force at that moment, and nothing later can widen them, since nothing later can name it. A grant may also withhold the verb outright with `detach: false`, in which case the call is refused and no process is born. <desc> is required, single-line and non-empty: once this session is gone it is all that says what the pid was for.",
     BuiltinBody::Static(concurrency::builtin_detach),
 )];

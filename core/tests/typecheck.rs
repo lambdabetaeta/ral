@@ -11,18 +11,33 @@ use ral_core::typecheck::{CompTy, CompTyVar, Scheme, Ty, fmt_scheme};
 use ral_core::{TypeError, elaborator::elaborate, syntax::parser::parse, typecheck};
 
 fn raw_errors(src: &str) -> Vec<TypeError> {
+    errors_against(src, &ral_core::HostSurface::default())
+}
+
+/// `src` as a session dressed with `surface` sees it.  Almost everything is
+/// checked against the bare core table `raw_errors` passes; a name only a host
+/// installs must be checked against a surface that carries it, or the checker
+/// reads it as an external and answers about something else.
+fn errors_against(src: &str, surface: &ral_core::HostSurface) -> Vec<TypeError> {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
     let comp = elaborate(&ast, std::collections::HashSet::default(), "")
         .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
     typecheck(
         &comp,
-        ral_core::SessionSchemes::from_schemes(
-            common::prelude_schemes(),
-            ral_core::HostSurface::default().builtin_table(),
-        ),
+        ral_core::SessionSchemes::from_schemes(common::prelude_schemes(), surface.builtin_table()),
     )
     .err()
     .unwrap_or_default()
+}
+
+/// A surface holding `detach`, the base frame core publishes but does not
+/// install: a host takes it together with the birth budget it spends.
+#[cfg(unix)]
+fn detach_surface() -> ral_core::HostSurface {
+    ral_core::HostSurface {
+        statics: vec![ral_core::builtins::DETACH_BUILTIN],
+        ..Default::default()
+    }
 }
 
 /// Whether some error's guidance sentence contains `fragment` — the suite's way
@@ -41,6 +56,19 @@ fn errors(src: &str) -> Vec<String> {
 
 fn ok(src: &str) {
     let errs = errors(src);
+    assert!(
+        errs.is_empty(),
+        "expected no errors in {src:?}, got: {errs:?}"
+    );
+}
+
+/// [`ok`], against a session dressed with `surface`.
+#[cfg(unix)]
+fn ok_against(src: &str, surface: &ral_core::HostSurface) {
+    let errs: Vec<_> = errors_against(src, surface)
+        .into_iter()
+        .map(|e| e.kind.render_message())
+        .collect();
     assert!(
         errs.is_empty(),
         "expected no errors in {src:?}, got: {errs:?}"
@@ -1249,19 +1277,22 @@ fn alias_parameter_receives_argv_list() {
     );
 }
 
-/// An alias whose body constrains its argv element type rejects a call site
-/// whose argument has the wrong type.  `$a[0]` is the first argv element;
-/// `$[$a[0] + 1]` constrains the element to `Integer`, so `inc hello` (a
-/// `String` argument) is a static error rather than a deferred runtime
-/// failure.  The arm's `Fun` shape must reach the call site for this to fire.
+/// An alias arm's parameter *is* the argv, so its elements are text: `$a[0]` is
+/// a `String`, and an arm that wants a number parses one.  Arithmetic straight
+/// on an element is an error at the arm, which no call site can repair —
+/// whatever was written, the arm consumes the rendering.
 #[test]
-fn alias_argument_checked_against_arm_parameter() {
-    has_error(
-        r"alias inc { |a| return $[$a[0] + 1] }; inc hello",
-        "couldn't match",
-    );
-    // The same arm called with an Integer argument is well-typed.
-    ok(r"alias inc { |a| return $[$a[0] + 1] }; inc 5");
+fn an_alias_arm_parses_its_argv_to_get_a_number() {
+    for call in ["inc 5", "inc hello"] {
+        has_error(
+            &format!(r"alias inc {{ |a| return $[$a[0] + 1] }}; {call}"),
+            "couldn't match",
+        );
+    }
+    // Parsed, the arm is well-typed, and takes either spelling: whether the
+    // text is a number is `int`'s refusal to make at run time, not a type error.
+    ok(r"alias inc { |a| return $[!{int $a[0]} + 1] }; inc 5");
+    ok(r"alias inc { |a| return $[!{int $a[0]} + 1] }; inc hello");
 }
 
 /// Last-pushed alias shadows earlier alias at typecheck: the second
@@ -2003,10 +2034,10 @@ fn saturated_encoders_typecheck() {
 
 // ─── A spread is the notation of an argv ─────────────────────────────────────
 //
-// `...` splices a list into an argv, and only a command, an external, an
-// open-argv builtin, or a handler arm has one.  A value takes its arguments by
-// application, curried, at the arity its own type declares, so a spread in a
-// value's argument position names nothing to fill: T0056.
+// `...` splices a list into an argv, and only a command, an external, a base
+// frame, or a handler arm has one.  A value takes its arguments by application,
+// curried, at the arity its own type declares, so a spread in a value's
+// argument position names nothing to fill: T0056.
 
 /// A fixed-arity builtin declares its arity, so the diagnostic can name both it
 /// and the rewrite.
@@ -2068,12 +2099,18 @@ fn a_refused_spread_still_reports_errors_inside_it() {
     assert_eq!(codes, ["T0020", "T0056"]);
 }
 
-/// `echo` and `detach` declare an open argv (`ArgSig::Any`), and `...` is
-/// exactly its notation.
+/// A base frame takes an argv, and `...` is exactly its notation.  `detach` is
+/// checked against a surface that installs it, because core's table alone
+/// publishes only `echo`: read as an external, `detach` would accept the spread
+/// for an external's reasons and say nothing about frames.
 #[test]
-fn spreads_into_an_open_argv_builtin_are_legal() {
+fn spreads_into_a_base_frame_are_legal() {
     ok("let xs = [hello, world]; echo ...$xs");
-    ok("let xs = ['300']; detach #'a long sleep'# /bin/sleep ...$xs");
+    #[cfg(unix)]
+    ok_against(
+        "let xs = ['300']; detach #'a long sleep'# /bin/sleep ...$xs",
+        &detach_surface(),
+    );
 }
 
 /// An external's argv is the operating system's, so a spread is how a list
@@ -2150,6 +2187,81 @@ fn a_spread_into_cd_is_refused() {
         .map(|e| e.kind.code())
         .collect();
     assert_eq!(codes, ["T0056"]);
+}
+
+// ─── An argv, or arguments ───────────────────────────────────────────────────
+//
+// ral passes arguments two ways, and the two share nothing.  A handler arm, a
+// base frame and an external are each variadic over an *argv*: one argument,
+// `List String`, every element crossing rendered.  Everything else is lambda
+// calculus — curried application at the arity its own type declares, and
+// first-class as `$name`.  Which half a name is in is declared, never read off
+// how it is called, so no call site moves it.
+
+/// An argv is `List String` whatever was written into it, so a heterogeneous
+/// call is the ordinary case: the elements are rendered on the way in, not
+/// unified with one another.
+#[test]
+fn a_handler_arm_takes_a_heterogeneous_argv() {
+    ok(r"within [handlers: [mycmd: { |args| echo ...$args }]] { mycmd hello 1 true }");
+    ok(r"alias mycmd { |args| echo ...$args }; mycmd hello 1 true");
+}
+
+/// The dual, and the price of the rule: an element is text, so arithmetic on
+/// one is an error at the arm.  An arm consumes what an exec call would, or it
+/// is not substitutable for the command it stands in for.
+#[test]
+fn an_argv_element_is_text_whatever_was_written() {
+    has_error(
+        r"within [handlers: [mycmd: { |args| return $[$args[0] + 1] }]] { mycmd 1 }",
+        "couldn't match",
+    );
+    // The argv is that list, too, not a scalar per atom — the diagnostic says so.
+    has_error(r"alias f { |a| return !{upper $a} }; f x", "type [String]");
+}
+
+/// `echo` is a base frame: an argv in command position, and no value to hold.
+#[test]
+fn echo_is_a_base_frame_not_a_value() {
+    let codes: Vec<_> = raw_errors("return $echo")
+        .iter()
+        .map(|e| e.kind.code())
+        .collect();
+    assert_eq!(codes, ["T0042"]);
+    ok("echo hello [a: 1] 3.5 true");
+    ok("let xs = [1, 2]; echo ...$xs");
+}
+
+/// `detach` is the other frame core publishes, and a frame for the same reason:
+/// it takes an argv, so there is no `$detach` either.  Checked against the
+/// surface that installs it — the bare table would answer about an external.
+#[cfg(unix)]
+#[test]
+fn detach_is_a_base_frame_not_a_value() {
+    let codes: Vec<_> = errors_against("return $detach", &detach_surface())
+        .iter()
+        .map(|e| e.kind.code())
+        .collect();
+    assert_eq!(codes, ["T0042"]);
+}
+
+/// A user alias is a handler entry, so it is a name and not a value either —
+/// the same refusal from the other half of name resolution, under its own code.
+#[test]
+fn an_alias_in_value_position_is_a_handler_not_a_value() {
+    let codes: Vec<_> = raw_errors("alias foo { |a| echo hi }; return $foo")
+        .iter()
+        .map(|e| e.kind.code())
+        .collect();
+    assert_eq!(codes, ["T0041"]);
+}
+
+/// A base frame's scheme is seeded as a handler binding, so a pipeline reads
+/// `echo`'s byte route off the frame itself.
+#[test]
+fn a_base_frame_routes_a_pipeline_as_bytes() {
+    ok("echo hi | grep .");
+    ok("let xs = [a, b]; echo ...$xs | grep .");
 }
 
 // ─── Row termination and duplicate-key semantics ──────────────────────────────

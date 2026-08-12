@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 95449d4
-generated_at_date: 2026-08-10
+generated_at_commit: 5afa1c81
+generated_at_date: 2026-08-12
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -11,11 +11,13 @@ shell process. `builtins.rs` holds the `builtin_registry!` macro: each entry
 binds its facets at once — `names`, [[map/core/typecheck|type rule]] (`ty`),
 `doc` line, and runtime body (`call`) — into the `CORE_BUILTINS` static
 (`&[BuiltinEntry]`), so the facets cannot drift apart. Arity is no facet:
-`BuiltinEntry::fixed_arity` derives it from the type rule and caches it, and that
-derivation is the classification — fixed arity seeds a `Value::Native` in the
-base scope, an open argv seeds a base handler frame
+`BuiltinEntry::fixed_arity` derives it from the type rule and caches it, a
+`usize` for every entry in the table. The manifest is *authored as two*, and
+that authoring — not the arity — is the classification: a table entry seeds a
+`Value::Native` in the base scope, a base-frame row seeds a base handler frame
 (`native_value`, `seed_natives_and_base` in `types/shell/host.rs`;
-[[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]).
+[[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
+[[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
 A body is a `BuiltinBody` — a `Static` `fn(&[Value], &Mooring, &mut Shell) ->
 Settled<Value>`, or a `Captured` closure of the same shape for a host frontend
 with state to carry — so the run's mooring arrives beside the shell
@@ -26,18 +28,19 @@ or `Scheme` (a first-class polytype). The streaming reducer `fold-lines`
 registers as an ordinary `Scheme` whose factory writes its forwarded
 [[design/types|payload route]] directly ([[map/core/typecheck|typecheck]]);
 there is no separate reducer arm. A `Sig`-ruled entry's first-class form is
-derived from the signature by `derive_sig_scheme` and nowhere else
+derived from the signature by `derive_sig_scheme` and nowhere else, and the
+derivation is total, every entry in the table having declared its arguments
 ([[invariants/fixed-arity|fixed-arity]]).
 Builtins are *shell-scoped*: each shell's session carries a `BuiltinTable`
 ([[map/core/shell-state|shell-state]]) seeded from `CORE_BUILTINS`
 (`core_builtin_table`), and a host's extra sets ride a `HostSurface` into
 `boot::boot_shell` (`core/src/boot.rs`), so the checker's rule table, the base
-scope, and the base frames all come from one manifest — there is no
-process-global registry, and every path that builds or hydrates a shell must
-seed through `install_builtins` or re-link a native by name. `register` clones the
-baked prelude's bindings into each fresh environment. Three builtins sit
-*outside* the macro, implemented in core but installed by a host. Two are a
-pair with the hosts swapped: the public `WATCH_BUILTIN`
+scope, and the base frames all come from the manifest the shell was booted with
+— there is no process-global registry, and every path that builds or hydrates a
+shell must seed through `install_builtins` or re-link a native by name.
+`register` clones the baked prelude's bindings into each fresh environment.
+Three entries sit *outside* the macro, implemented in core but installed by a
+host. Two are a pair with the hosts swapped: the public `WATCH_BUILTIN`
 (`&[BuiltinEntry]`) wraps the still-private `concurrency::builtin_watch` /
 `scheme::watch` so a host with a durable stdout sink (the interactive and
 batch ral hosts) installs it while an agent host omits it
@@ -46,10 +49,11 @@ batch ral hosts) installs it while an agent host omits it
 the agent host (exarch), whose lease frame reaps ordinary workers, installs
 the durable-birth verb while the ral hosts — which grant no lease, so every
 spawn of theirs already lives until cancel or exit — omit it. The third,
-`DETACH_BUILTIN` (`cfg(unix)`, `sig::DETACH` over
-`concurrency::builtin_detach`), is carried by a host that arms a detach
-policy: installing the verb and arming the budget (`Shell::arm_detach`) are
-one act, so absence is an unknown-name diagnostic rather than a veto, while
+`DETACH_BUILTIN` (`cfg(unix)`, over `concurrency::builtin_detach`), is the
+base-frame manifest's second row — typed `List String -> F Any`, no arity to it
+— and is carried by a host that arms a detach policy: installing the verb and
+arming the budget (`Shell::arm_detach`) are one act, so absence is an
+unknown-name diagnostic rather than a veto, while
 whether a given call may spend it is the live grant stack's question
 (`GrantStack::permits_detach`).
 
@@ -59,8 +63,9 @@ Bodies are grouped by concern, one submodule each:
   framing rule: blank lines around a multiline block fall away before the
   common margin is stripped, while content-line whitespace is preserved;
 - `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs` — the last is also
-  home to `builtin_echo`, `to-line`'s neighbour by nature: per-argument
-  `str`, single-space intercalation, a newline to the byte channel.
+  home to `builtin_echo`, `to-line`'s neighbour by nature: every argument
+  rendered through the total `to-string` — `Value`'s `Display`, mapped over the
+  argv — single-space intercalation, a newline to the byte channel.
   `write_encoded` (`codecs.rs`) writes its bytes to stdout and returns
   `Value::Unit`, so `to-csv`, `to-bytes`, `to-string`, `to-lines`, and
   `to-json` are writers: each types `A → F[Bytes] Unit`, and its

@@ -514,7 +514,10 @@ impl FOValue<Closure> {
                 captured: Arc::new(thunk.captured.into_runtime(dec)?),
             },
             Self::Ext(Closure::Native(n)) => {
-                let entry = dec.manifest.get(&n.name).ok_or_else(|| {
+                // The value half only: no `Value::Native` was ever built from
+                // a base frame, so a wire name that reaches one is not a
+                // native we could rebuild.
+                let entry = dec.manifest.value(&n.name).ok_or_else(|| {
                     Error::new(
                         format!("serial: unknown native '{}' in receiving manifest", n.name),
                         1,

@@ -124,7 +124,7 @@ fn apply_inner(
             // applications record identically as the entry's name.
             Value::Native { entry, applied } => {
                 let entry = entry.clone();
-                let needed = entry.fixed_arity().unwrap_or(applied.len());
+                let needed = entry.fixed_arity();
                 let take = needed.saturating_sub(applied.len()).min(args.len());
                 let mut collected = applied.clone();
                 collected.extend(args.drain(0..take));

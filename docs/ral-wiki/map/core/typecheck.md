@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f5720be
-generated_at_date: 2026-08-11
+generated_at_commit: 5afa1c81
+generated_at_date: 2026-08-12
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
 
@@ -37,7 +37,11 @@ Entry points (`typecheck.rs`):
   the scope's name-to-`Option<Scheme>` map, the alias arms' schemes, and the
   shell's own `BuiltinTable`. Builtins are shell-scoped, so the checker
   types against exactly the surface the booted shell dispatches
-  ([[map/core/builtins|builtins]]). `seed_env` is the one seeding routine.
+  ([[map/core/builtins|builtins]]). `seed_env` is the one seeding routine, and
+  the manifest reaches it as two: a table entry's rule, and a base-frame row's
+  scheme, which lands in the env so that `lookup_handler` finds a base frame as
+  it finds a handler
+  ([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
 - `bake_prelude(comp) -> (Comp, Vec<(String, Scheme)>)` — called by the consumer
   `build.rs`: returns the annotated prelude comp alongside the schemes harvested
   off its `Bind` nodes (`harvest_schemes`), one walk behind both the build-time
@@ -93,7 +97,10 @@ Internals:
 - `env.rs` — `TyEnv`, `InferCtx`;
 - `fmt.rs` — type display;
 - `builtins.rs` — per-builtin type rules (`fixed_arity`, `builtin_type_hint`),
-  whose arity rules enforce [[invariants/fixed-arity|fixed-arity]];
+  whose arity rules enforce [[invariants/fixed-arity|fixed-arity]], and
+  `derive_sig_scheme`, the total deriver of a `Sig`'s first-class form — every
+  entry in the table declares its arguments, so it has an arity and a value
+  form;
 - `scope.rs` — the five structural scope nodes.
 
 `infer.rs`'s `infer_case` is left whole by decision
@@ -134,9 +141,11 @@ A builtin's route is the projection of its declared signature, read once:
 route, and `Never` (`fail` alone) to a fresh variable, since a divergent
 computation joins either side of a byte/value split. `ret_bytes()` builds the
 byte shape and pairs it with `TyTemplate::Unit` at construction, so WF-2 holds
-structurally for every encoder, `echo`, `help`, `explain`, and the terminal
-controls. `external_exec_comp_ty` (`infer.rs`) gives every external command
-`Return(Bytes, Unit)` for the same reason.
+structurally for every encoder, `help`, `explain`, and the terminal controls.
+`external_exec_comp_ty` (`infer.rs`) gives every external command
+`Return(Bytes, Unit)` for the same reason, and `echo`'s base-frame row states it
+in its own type, `List String -> Return(Bytes, Unit)`
+([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
 
 `scheme::fold_lines` is the one hand-written route: it mints a single variable
 and uses it for both the callback's result and the reducer's, which is what

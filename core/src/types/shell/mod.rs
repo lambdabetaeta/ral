@@ -418,9 +418,9 @@ impl Shell {
     /// Resolve `name` at value position (`$name` and other
     /// [`crate::ir::Val::Variable`] uses).  Binding-only: user aliases and
     /// `within` handlers are operation handlers, not first-class values, so no
-    /// lookup here reaches the handler stack.  A fixed-arity builtin is a
-    /// plain env hit — the native scope entry *is* the value — and a
-    /// an open-argv one has no value form to find.
+    /// lookup here reaches the handler stack.  A value builtin is a plain env
+    /// hit — the native scope entry *is* the value — and a base frame has no
+    /// value form to find.
     pub fn lookup_value_name(&self, name: &str) -> Option<Value> {
         if let Some(v) = self.mobile.scope.get(name) {
             return Some(v.clone());

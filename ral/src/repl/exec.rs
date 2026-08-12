@@ -235,17 +235,24 @@ mod tests {
     use crate::repl::plugin::manifest::LoadedPlugin;
     use ral_core::Shell;
     use ral_core::source::Span;
-    use ral_core::typecheck::builtins::{BuiltinTypeRule, sig};
+    use ral_core::typecheck::builtins::{fun, mk_scheme, pure, thunk};
+    use ral_core::typecheck::{Scheme, Ty, Unifier};
     use ral_core::types::{BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring};
     use std::borrow::Cow;
 
-    /// A test-only sink builtin: `record` appends its argument values into
+    /// The sink's type: an argv in, `Unit` out — the base-frame convention,
+    /// since the sink takes whatever a hook body hands it, however much of it.
+    fn sink_scheme(_u: &mut Unifier) -> Scheme {
+        mk_scheme(&[], &[], &[], thunk(fun(Ty::argv(), pure(Ty::Unit))))
+    }
+
+    /// A test-only sink base frame: `record` appends its argument values into
     /// the shared vector, so a hook handler's projections out of the event
     /// record become observable.
     fn sink_builtin(sink: Arc<Mutex<Vec<Value>>>) -> BuiltinEntry {
-        BuiltinEntry::new(
+        BuiltinEntry::base_frame(
             Cow::Borrowed("record"),
-            BuiltinTypeRule::Sig(sig::ECHO),
+            sink_scheme,
             "record — test sink appending its arguments.",
             BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
                 sink.lock().unwrap().extend(args.iter().cloned());

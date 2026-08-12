@@ -1,17 +1,21 @@
 //! Builtin command bindings: command names implemented by host Rust code.
 //!
-//! The per-shell [`BuiltinTable`] is the boot manifest: it seeds the base env
-//! scope (fixed-arity entries, as `Value::Native`) and the base handler
-//! frames (open-argv entries) at construction, and backs `help` /
-//! `explain`.  Dispatch never consults it — resolution is env → handlers →
-//! external — and it admits no names: a user handler installs under any.
+//! The per-shell [`BuiltinTable`] is the boot manifest, and it is authored as
+//! two halves — ral's two argument conventions, one row apiece
+//! ([`Convention`]).  It seeds the base env scope from the value half (as
+//! `Value::Native`) and the base handler frames from the argv half at
+//! construction, and backs `help` / `explain`.  Dispatch never consults it —
+//! resolution is env → handlers → external — and it admits no names: a user
+//! handler installs under any.
 //!
-//! [`BuiltinEntry::new`] is the sole constructor: `BuiltinBody` has no
-//! bodiless variant, so no entry is expressible without a live body.
+//! [`BuiltinEntry::new`] and [`BuiltinEntry::base_frame`] are the only
+//! constructors, one per half: `BuiltinBody` has no bodiless variant, so no
+//! entry is expressible without a live body.
 
 use super::flow::Settled;
 use super::value::Value;
 use crate::typecheck::builtins::BuiltinTypeRule;
+use crate::typecheck::{Scheme, Unifier};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt;
@@ -43,20 +47,38 @@ impl fmt::Debug for BuiltinBody {
     }
 }
 
+/// Which of ral's two argument conventions a manifest row uses.  The manifest
+/// is authored as two, and what a name can do follows from which half it is in
+/// rather than from its arity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Convention {
+    /// Curried application at the arity the row's type declares, and
+    /// first-class as `$name`: the row seeds the base env scope as a
+    /// [`Value::Native`].
+    Value,
+    /// An argv, so the row seeds a base handler frame instead: intercepted,
+    /// stacked, reached by `^name`, and never a value.  Typed `List String`,
+    /// an argv's elements crossing rendered — though the body is handed the
+    /// values themselves, and renders what it writes (`echo`) or vets what it
+    /// launches (`detach`) as its own boundary demands.
+    Argv,
+}
+
 /// A builtin command binding; `doc` is the line `help` and `explain` print.
 pub struct BuiltinEntry {
     pub name: Cow<'static, str>,
+    pub convention: Convention,
     pub type_rule: BuiltinTypeRule,
     pub doc: &'static str,
     body: BuiltinBody,
     /// [`Self::fixed_arity`]'s cache: a `Scheme` rule needs a fresh
-    /// [`crate::typecheck::Unifier`] to derive its curry depth, so this
-    /// spares every application step of a native that re-derivation.
-    arity_cache: OnceLock<Option<usize>>,
+    /// [`Unifier`] to derive its curry depth, so this spares every
+    /// application step of a native that re-derivation.
+    arity_cache: OnceLock<usize>,
 }
 
 impl BuiltinEntry {
-    /// Build an entry with an empty arity cache — the one constructor.
+    /// A value row: applied at the arity `type_rule` declares.
     pub const fn new(
         name: Cow<'static, str>,
         type_rule: BuiltinTypeRule,
@@ -65,6 +87,7 @@ impl BuiltinEntry {
     ) -> Self {
         Self {
             name,
+            convention: Convention::Value,
             type_rule,
             doc,
             body,
@@ -72,11 +95,31 @@ impl BuiltinEntry {
         }
     }
 
-    /// Value-arg count a `$name` reference curries to; `None` when the argv
-    /// is not fixed.  Structural, read off the type rule
-    /// ([`BuiltinTypeRule::fixed_arity`]) once and cached: application calls
-    /// this every apply step, and a `Scheme` rule's derivation is not free.
-    pub fn fixed_arity(&self) -> Option<usize> {
+    /// A base-frame row, typed by the scheme `argv` names.  A signature of
+    /// argument templates is the value half's vocabulary and cannot be written
+    /// here: this half has one argument, the argv, and one type for it.
+    pub const fn base_frame(
+        name: Cow<'static, str>,
+        argv: fn(&mut Unifier) -> Scheme,
+        doc: &'static str,
+        body: BuiltinBody,
+    ) -> Self {
+        Self {
+            name,
+            convention: Convention::Argv,
+            type_rule: BuiltinTypeRule::Scheme(argv),
+            doc,
+            body,
+            arity_cache: OnceLock::new(),
+        }
+    }
+
+    /// The curry depth of this row's type — for a value row, the argument
+    /// count a `$name` reference saturates at.  Structural, read off the type
+    /// rule ([`BuiltinTypeRule::fixed_arity`]) once and cached: application
+    /// calls this every apply step, and a `Scheme` rule's derivation is not
+    /// free.
+    pub fn fixed_arity(&self) -> usize {
         *self
             .arity_cache
             .get_or_init(|| self.type_rule.fixed_arity())
@@ -110,6 +153,7 @@ impl Clone for BuiltinEntry {
         }
         Self {
             name: self.name.clone(),
+            convention: self.convention,
             type_rule: self.type_rule,
             doc: self.doc,
             body: self.body.clone(),
@@ -168,36 +212,52 @@ impl BuiltinTable {
         true
     }
 
-    /// Look up a builtin by name.
+    /// Every installed row, newest installed set first.
+    fn rows(&self) -> impl Iterator<Item = &BuiltinEntry> {
+        self.sets.iter().rev().flat_map(|set| set.iter())
+    }
+
+    /// Any manifest row by name, either half — what `help` and `explain`
+    /// document.
     pub fn get(&self, name: &str) -> Option<BuiltinEntry> {
-        self.sets
-            .iter()
-            .rev()
-            .flat_map(|set| set.iter())
-            .find(|entry| entry.name == name)
+        self.rows().find(|entry| entry.name == name).cloned()
+    }
+
+    /// The *value* row for `name`: the half an application and a `$name`
+    /// reference reach.  `None` for a base frame, which command position and
+    /// `^name` reach through the handler stack instead.
+    pub fn value(&self, name: &str) -> Option<BuiltinEntry> {
+        self.rows()
+            .find(|entry| entry.name == name && entry.convention == Convention::Value)
             .cloned()
+    }
+
+    /// Every value row — what the base native scope is built from.
+    fn values(&self) -> impl Iterator<Item = &BuiltinEntry> {
+        self.rows()
+            .filter(|entry| entry.convention == Convention::Value)
+    }
+
+    /// Every base-frame row — what the handler stack and the checker's handler
+    /// bindings are both seeded from.
+    pub fn base_frames(&self) -> impl Iterator<Item = &BuiltinEntry> {
+        self.rows()
+            .filter(|entry| entry.convention == Convention::Argv)
     }
 
     /// Names of installed builtins, newest installed set first.
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.sets
-            .iter()
-            .rev()
-            .flat_map(|set| set.iter().map(|entry| entry.name.as_ref()))
+        self.rows().map(|entry| entry.name.as_ref())
     }
 
-    /// The base native scope this manifest implies: every fixed-arity entry's
+    /// The base native scope this manifest implies: every value row's
     /// [`Value::Native`] plus the language constants — what a wire-hydrated
     /// `Env` carries, since natives cross the wire by name only and a
     /// receiver rebuilds them from its own manifest.
     pub(crate) fn natives_arc(&self) -> Arc<std::collections::HashMap<String, Value>> {
         let mut map = std::collections::HashMap::new();
-        for set in &self.sets {
-            for entry in set.iter() {
-                if let Some(value) = native_value(entry) {
-                    map.insert(entry.name.clone().into_owned(), value);
-                }
-            }
+        for entry in self.values() {
+            map.insert(entry.name.clone().into_owned(), native_value(entry));
         }
         map.extend(language_constants());
         Arc::new(map)
@@ -213,17 +273,13 @@ pub(crate) fn language_constants() -> [(String, Value); 2] {
     ]
 }
 
-/// `entry`'s `Value::Native`, or `None` for an open-argv entry, which
-/// seeds a base handler frame instead.  Shared by boot and wire hydration,
-/// so the two never classify an entry differently.
-pub(crate) fn native_value(entry: &BuiltinEntry) -> Option<Value> {
-    entry.fixed_arity().map(|_| {
-        let entry = Arc::new(entry.clone());
-        Value::Native {
-            entry,
-            applied: Vec::new(),
-        }
-    })
+/// A value row's `Value::Native`, unapplied.  Shared by boot and wire
+/// hydration, so the two never build one differently.
+pub(crate) fn native_value(entry: &BuiltinEntry) -> Value {
+    Value::Native {
+        entry: Arc::new(entry.clone()),
+        applied: Vec::new(),
+    }
 }
 
 fn same_builtin_names(a: &[BuiltinEntry], b: &[BuiltinEntry]) -> bool {

@@ -238,14 +238,14 @@ pub(super) fn builtin_to_line(args: &[Value], shell: &mut Shell) -> Settled<Valu
     Ok(Value::Unit)
 }
 
-/// `echo`'s base-frame body: `str` each argument (total, `Display`-based),
+/// `echo`'s base-frame body: the argv rendered ([`Value::render_argv`]),
 /// single-space intercalate, trailing newline to the byte channel.
-pub(super) fn builtin_echo(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let mut s = args
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(" ");
+pub(super) fn builtin_echo(
+    args: &[Value],
+    _mooring: &crate::types::Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
+    let mut s = Value::render_argv(args).join(" ");
     s.push('\n');
     write_stdout_ok("echo", s.as_bytes(), shell)?;
     Ok(Value::Unit)

@@ -26,7 +26,7 @@ use std::sync::OnceLock;
 /// Host-supplied constructor a re-exec'd child calls to rebuild its
 /// [`HostSurface`](crate::boot::HostSurface): a mobile cannot carry one across
 /// processes, its entries being function pointers, and `Shell::new` installs
-/// only `CORE_BUILTINS`.  `subprocess::bare_child_shell` runs the hook before
+/// core's manifest alone.  `subprocess::bare_child_shell` runs the hook before
 /// any [`crate::serial::WireDecoder`] is built, so the child's own manifest is
 /// what re-links a captured native's name.
 static CHILD_SHELL_HOOK: OnceLock<fn() -> crate::boot::HostSurface> = OnceLock::new();

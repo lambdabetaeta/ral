@@ -828,9 +828,10 @@ mod tests {
     fn every_ed_name_has_all_facets() {
         for entry in ED_BUILTINS {
             assert!(!entry.name.is_empty());
-            assert!(
-                entry.fixed_arity().is_some(),
-                "no fixed_arity for {:?}",
+            assert_eq!(
+                entry.convention,
+                ral_core::types::Convention::Value,
+                "the editor surface is applied, not an argv: {:?}",
                 entry.name
             );
             assert!(!entry.doc.is_empty(), "no doc for {:?}", entry.name);

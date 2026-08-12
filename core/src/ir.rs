@@ -537,7 +537,8 @@ impl ArmBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Exec {
     pub head: CommandWord,
-    /// Each element coerces to its string form at the syscall boundary.
+    /// An argv: each element crosses rendered, whichever boundary it reaches —
+    /// a handler arm, a base frame, or the syscall itself.
     pub args: Args,
     pub redirects: Vec<RedirectV>,
 }

@@ -77,8 +77,27 @@ impl SessionSchemes {
 /// No filter: natives never arrive in this harvest (the bindings walk is
 /// user scopes only), and a binding sharing a native's name shadows it, as
 /// at runtime.
-fn seed_env(env: &mut TyEnv, schemes: SessionSchemes) {
+///
+/// The manifest's argv half seeds handlers, because that is what a base frame
+/// is: an arm on a name, reached in command position, taking an argv.  It goes
+/// in first, so a user arm installed over one shadows it here as it does at
+/// runtime — and it is not removable by `unalias`, there being no frame under
+/// it to fall back to.
+fn seed_env(env: &mut TyEnv, schemes: SessionSchemes, u: &mut Unifier) {
     env.builtins = schemes.builtins;
+    let frames: Vec<(String, Scheme)> = env
+        .builtins
+        .base_frames()
+        .map(|entry| {
+            (
+                entry.name.as_ref().to_string(),
+                builtins::rule_scheme(&entry.type_rule, u),
+            )
+        })
+        .collect();
+    for (name, scheme) in frames {
+        env.bind_handler(name, scheme, false);
+    }
     for (name, scheme) in schemes.bindings {
         if let Some(scheme) = scheme {
             env.bind(name, scheme);
@@ -104,7 +123,7 @@ fn seed_env(env: &mut TyEnv, schemes: SessionSchemes) {
 pub fn typecheck(comp: &Comp, schemes: SessionSchemes) -> Result<Comp, Vec<TypeError>> {
     let mut ctx = InferCtx::new();
     let mut env = TyEnv::new();
-    seed_env(&mut env, schemes);
+    seed_env(&mut env, schemes, &mut ctx.unifier);
 
     infer::infer_comp(&mut ctx, &mut env, comp);
     ctx.solve_and_finalize();
@@ -187,7 +206,7 @@ pub fn alias_arm_scheme(
 ) -> Result<Scheme, PinFailure> {
     let mut ctx = InferCtx::new();
     let mut env = TyEnv::new();
-    seed_env(&mut env, schemes);
+    seed_env(&mut env, schemes, &mut ctx.unifier);
     let mut inferencer = infer::Inferencer {
         ctx: &mut ctx,
         env: &mut env,
@@ -219,7 +238,7 @@ pub fn binding_value_scheme(
 ) -> Scheme {
     let mut ctx = InferCtx::new();
     let mut env = TyEnv::new();
-    seed_env(&mut env, schemes);
+    seed_env(&mut env, schemes, &mut ctx.unifier);
     let mut inferencer = infer::Inferencer {
         ctx: &mut ctx,
         env: &mut env,

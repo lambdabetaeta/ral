@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 95449d4
-generated_at_date: 2026-08-10
+generated_at_commit: 5afa1c81
+generated_at_date: 2026-08-12
 covers_paths: [core/src/runtime.rs, core/src/runtime/, core/src/child_eval.rs]
 ---
 
@@ -16,10 +16,11 @@ guards
 
 - `command_call.rs` — `run_call`, the single site that resolves a head
   (env → handlers → external) and runs the chosen arm; the evaluator's
-  down-seam for a bare command. There is no builtin arm: a fixed-arity manifest
-  entry is an `Env` hit on a native value, and an open-argv one is a `Base` hit
-  on the handler stack's base layer, run by `run_base_frame` with the argv slice
-  ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]).
+  down-seam for a bare command. There is no builtin arm: a native table entry is
+  an `Env` hit on a native value, and a base-frame row is a `Base` hit on the
+  handler stack's base layer, run by `run_base_frame` with the argv slice
+  ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
+  [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
   `^name` skips the env, and therefore every native, but still consults
   handlers; a path-bearing head skips handlers too. **Grant admission is an
   external-command property**: only the `External` arm consults
@@ -159,12 +160,13 @@ guards
   under `runtime/`) — the one re-exec'd-child eval runner the pipeline stage
   helper drives, `run_child_eval` ([[decisions/260610_child-eval-unification|child-eval-unification]]).
   One request frame in, one response frame out: the child packs the body plus a
-  `WireMobile` snapshot, rebuilds its shell with `subprocess::reexec_child_shell`,
-  evaluates the stage against its byte input, drains its audit fragment, and
-  ships a single `ChildEvalResponse`. When the pipeline yields its last stage's
-  value, `FinalValue::Report` asks this helper response to carry it;
-  the final report remains helper-staged until a separate in-parent-tail
-  decision. The response frame travels its own socketpair, never aliased with an
+  `WireMobile` snapshot, rebuilds its shell through `subprocess::bare_child_shell`
+  and `install_shell_mobile` — the manifest first, so the `WireDecoder` re-links
+  natives against it — evaluates the stage against its byte input, drains its
+  audit fragment, and ships a single `ChildEvalResponse`. When the pipeline
+  yields its last stage's value, `FinalValue::Report` asks this helper response
+  to carry it; the final report remains helper-staged until a separate
+  in-parent-tail decision. The response frame travels its own socketpair, never aliased with an
   interior pipe, so there is no upstream typed-value edge.
 
 The `Shell` state these thread is [[map/core/shell-state|shell-state]]; the serde

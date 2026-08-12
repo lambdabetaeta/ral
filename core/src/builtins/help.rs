@@ -184,7 +184,9 @@ pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Value {
 
     let name = args[0].to_string();
     let source = which_line(&name, shell);
-    let type_str = type_for(&name, &shell.session.builtins);
+    // Every manifest row has a type to print — a value row's polytype, a base
+    // frame's argv type — so an em dash means the manifest has no such row.
+    let type_str = builtin_type_hint(&shell.session.builtins, &name).unwrap_or_else(|| "—".into());
 
     // A local binding shadows every other resolution at runtime, so it
     // answers first here too.
@@ -254,24 +256,6 @@ fn name_matches(pattern: &str, name: &str) -> bool {
 #[cfg(not(feature = "grep"))]
 fn name_matches(pattern: &str, name: &str) -> bool {
     name.to_lowercase().contains(&pattern.to_lowercase())
-}
-
-/// A command-only builtin has no first-class scheme for `builtin_type_hint`
-/// to format, so the fallback renders the `CompTy` its signature describes
-/// through [`fmt_comp_ty_ctx`], the same renderer a type error uses — one
-/// notation for both, payload route included.
-fn type_for(name: &str, table: &crate::types::BuiltinTable) -> String {
-    builtin_type_hint(table, name).unwrap_or_else(|| {
-        use crate::typecheck::builtins::{BuiltinTypeRule, sig_comp_ty};
-        use crate::typecheck::{FmtCtx, Unifier, fmt_comp_ty_ctx};
-        match table.get(name).map(|e| e.type_rule) {
-            Some(BuiltinTypeRule::Sig(sig)) => {
-                let mut u = Unifier::new();
-                fmt_comp_ty_ctx(&sig_comp_ty(&sig, &mut u), &FmtCtx::default())
-            }
-            _ => "—".into(),
-        }
-    })
 }
 
 /// Where the shell would find `name`.  Probes handlers before the manifest —

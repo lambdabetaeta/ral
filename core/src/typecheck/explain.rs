@@ -369,12 +369,6 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
              you're passing in"
                 .to_string(),
         ),
-        Reason::AliasArgv => Some(
-            "this argument is passed to an alias/handler arm — its \
-             type must match what the arm's body does with the argv \
-             elements"
-                .to_string(),
-        ),
         Reason::BuiltinBlockArg => Some("this builtin expects a block value here".to_string()),
         Reason::NotOperand => Some(
             "`not` flips a Bool — its operand has to be a Bool (`true` / `false` or a comparison)"
