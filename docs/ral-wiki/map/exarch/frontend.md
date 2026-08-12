@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 59173f57
-generated_at_date: 2026-07-31
+generated_at_commit: dae7e71d
+generated_at_date: 2026-08-12
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/event.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -212,13 +212,15 @@ Two `Sink` implementations:
   label from the flow rather than reconstructing it in the view. Closing the
   overlay sets its relaxed cancellation flag; browser accept polls it directly,
   while device polling checks it before each bounded request.
-- `headless.rs` — one-shot pipe: assistant tokens to `out` (or, under
-  `--output-format json`, one result object built from the root's `reply`),
-  every other event condensed to one line on `err`, exit after one seed exchange.
-  The sink projects onto an explicit writer pair: `run`/`converse` are the
-  CLI's wrappers over the process's real stdout/stderr, and `converse_on`
-  hands the same projection to a non-CLI host (synod's GUI) one exchange at a
-  time on a parked interactive trunk.
+- `headless.rs` — one-shot pipe: `--output-format text` suppresses incidental
+  root assistant tokens and writes the deliberate `reply` once as ral's
+  human-readable value projection; `--output-format json` writes one faithful
+  result object from that same reply. Every other event condenses to one line
+  on `err`, and the process exits after one seed exchange. The sink projects
+  onto an explicit writer pair: `run` is the CLI's headless wrapper, while
+  `converse_on` is the conversational projection that keeps streaming tokens
+  to a non-CLI host (synod's GUI) one exchange at a time on a parked interactive
+  trunk.
   Takes the default `Sink::drive` and a per-exchange bus, so its async children stay
   muted. It is a display only — the durable `transcript.jsonl` / `events.json`
   are written by each session's own `agent/transcript.rs` / `agent/event.rs`

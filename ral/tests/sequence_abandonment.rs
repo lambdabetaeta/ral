@@ -19,7 +19,8 @@ fn an_abandoned_tail_is_named_and_counted() {
         "echo first\n/usr/bin/false\necho second\necho third\n",
     );
     assert!(
-        out.stderr.contains("2 later steps in this block did not run"),
+        out.stderr
+            .contains("2 later steps in this block did not run"),
         "stderr: {}",
         out.stderr
     );
@@ -43,7 +44,8 @@ fn the_count_belongs_to_the_innermost_sequence() {
         "echo outer\n!{ echo inner; /usr/bin/false; echo a; echo b }\necho last\n",
     );
     assert!(
-        out.stderr.contains("2 later steps in this block did not run"),
+        out.stderr
+            .contains("2 later steps in this block did not run"),
         "the inner block abandoned two parts, the outer one; stderr: {}",
         out.stderr
     );
@@ -77,7 +79,8 @@ fn audit_records_the_hint_as_data() {
         "let r = audit { echo A; /usr/bin/false; echo B }\necho $r[error]\n",
     );
     assert!(
-        out.stdout.contains("1 later step in this block did not run"),
+        out.stdout
+            .contains("1 later step in this block did not run"),
         "a report read as data must say what the rendered diagnostic says; stdout: {}",
         out.stdout
     );

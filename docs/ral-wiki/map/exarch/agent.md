@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
-covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/registry.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
+generated_at_commit: dae7e71d
+generated_at_date: 2026-08-12
+covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/registry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
 # Map: exarch / agent
@@ -29,8 +29,8 @@ caps are fixed `agent/digest.rs` constants, not per-agent state.
 
 The **trunk** is the parent-less node (`parent = None`), built by
 `Agent::root(RootConfig, RootSeat, provider)`: `RootConfig` carries the
-prompt, caps, `fuel` (exarch's launch sites pass `SPAWN_FUEL`; synod passes
-`0`), and the IT-set `Egress` (`exarch/src/egress.rs`) — opened once at
+prompt, caps, `fuel` (exarch's and synod's launch sites pass `SPAWN_FUEL`),
+and the IT-set `Egress` (`exarch/src/egress.rs`) — opened once at
 launch and inherited verbatim by every fork — while `RootSeat` picks the seat
 kind
 (`Identity` boots its own shell from `scratch`; `Wire` adopts a built
@@ -73,11 +73,11 @@ never an `is_root` branch:
 
 `returns` (`agent.rs`) is a **construction-fixed field** — one bit read by
 `returns()`, parking's conversing predicate, the desk's `reply` refusal
-([[map/exarch/builtins|builtins]]), and the prompt's per-agent builtin index
-(resolved at `Agent::assemble` from the same bit, alongside `allow_schedule`
-for the self-wakeup family, so no agent is shown a verb the desk would
-certainly refuse) — the single source of truth, so the nudge layer, parking,
-reply availability, and the advertised vocabulary cannot disagree
+([[map/exarch/builtins|builtins]]), and the prompt's per-agent resolver. The
+resolver applies the index from `returns`, `allow_schedule`, and
+`spawns = fuel > 0`, so no agent is shown a verb or section the desk would
+certainly refuse; the nudge layer, parking, reply availability, and advertised
+vocabulary cannot disagree
 ([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]).
 `park_mode` (`agent/attend.rs`, returning a `ParkMode` of `Held` / `Engaged` /
 `HeldByChildren` / `UntilCancelled` / `Quiesce`, `bus/inbox.rs`) is the `should_park`
@@ -436,12 +436,13 @@ and the installed builtin table, and starts fresh in everything else — fresh
 control counters and a freshly-defaulted `SessionState`, so it holds **no
 terminal authority** (`TerminalAccess::Denied`, no lease — a sub-agent is not the
 foreground agent and can never seize the controlling terminal the TUI owns).
-There is no flow-back: the child's `cd`, env, and new bindings die with it. Every
-agent may spawn, but each fork hands the child one less unit of `fuel` than the
-parent holds (`SPAWN_FUEL = 3` at the trunk; the parent's own fuel is never
-debited, so fuel bounds depth, not fan-out); at `fuel == 0` the desk refuses
-`agent-start` with the exhaustion text — the
-spawn verb stays advertised, the desk is the wall
+There is no flow-back: the child's `cd`, env, and new bindings die with it. An
+agent with fuel left may spawn, and each fork hands the child one less unit of
+`fuel` than the parent holds (`SPAWN_FUEL = 3` at the trunk; the parent's own
+fuel is never debited, so fuel bounds depth, not fan-out). At `fuel == 0` the
+prompt drops the spawn family — `agent`, `agents`, `message`, and
+`agent-cancel` — and the desk refuses `agent-start` with the exhaustion text;
+the desk remains the runtime wall
 ([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]) — so a delegation
 chain bottoms out by refusal a fixed number of generations down. The fork
 mirrors on the bus as `Kind::Born` / `Kind::Died` regardless of remaining fuel.
@@ -454,6 +455,13 @@ spawn takes the decomposed path instead: the `agent` verb's body forks the
 session into the run's nursery (`Shell::fork_into_nursery`), and the desk's
 `agent-start` arm adopts it and calls `Agent::assemble` at one less unit of
 fuel ([[map/exarch/builtins|builtins]]).
+
+Prompt resolution is shared across the root, identity-fork, and wire-child
+paths. Each keeps the unresolved base and applies its own `returns`,
+`allow_schedule`, and child-fuel bits; the resolver appends `Spawning agents`
+iff fuel remains and `Agent` iff the child returns. The child's log bookend
+records that fully resolved prompt length, including the filtered index and
+late sections, so a child never inherits an already-appended `Agent` section.
 
 ### Wire-seat spawn: the desk's two-phase arm
 

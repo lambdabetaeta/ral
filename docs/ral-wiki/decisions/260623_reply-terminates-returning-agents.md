@@ -10,11 +10,21 @@ headless (non-interactive) mode — finishes through `reply`; it is the sole ret
 path, mandatory and enforced by bounded re-nudging rather than a final-prose
 scrape. The interactive root, which converses across turns and never returns,
 keeps `reply` withheld. The reply payload is rendered to its consumer: prose for a
-model parent, a faithful value for the headless harness.
+model parent, ral text for a human-readable headless sink, and a faithful value
+for the headless JSON harness.
 
 This extends [[decisions/260622_agent-reply-tool|agent-reply-tool]], whose
 "`reply` is sub-agent-only, withheld from the root" was reasoning about the
 *interactive* root and never reached the headless one.
+
+## Amendment — headless text uses the deliberate reply
+
+As of 2026-08-12, `--headless --output-format text` is a sink for the same
+deliberate `reply` artifact as JSON. It suppresses incidental root assistant
+tokens and writes the reply once on successful completion: strings remain raw
+text, structured values use ral's existing value renderer, and unit is empty.
+Progress, tool calls, cards, failures, and the run summary remain on stderr;
+`converse_on` remains the conversational token-streaming path.
 
 ## Context
 
@@ -26,15 +36,16 @@ scrape that lost reports. It made two choices this decision revisits:
   and never 'returns'… Unadvertised at the root, there is no root-level
   termination to define"). That premise is *interactive-only*. The **headless**
   root does return: it is seeded once, produces one result, and the process exits.
-  Today that result is the prose of the root's last completed message — `Headless`
+  The original implementation made that result the prose of the root's last
+  completed message — `Headless`
   rolls root tokens into `cur_msg` and, at each `Kind::Boundary`, does
   `self.final_msg = std::mem::take(&mut self.cur_msg)` (`headless.rs:270-272`),
   which `result_json` emits as `"result"` (`headless.rs:152`). That is exactly the
   positional scrape 260622 indicted: a thin final sign-off wins over the
   substantive earlier step, and a trailing tool-only step (no text tokens) blanks
   `cur_msg` and empties the result. **The headless root still carries the bug
-  260622 fixed for sub-agents, because 260622 never reached it.** (Text mode is
-  unaffected — it streams every root token to stdout live and has no `final_msg`.)
+  260622 fixed for sub-agents, because 260622 never reached it.** The amendment
+  above also removes the separate text-mode token scrape.
 
 - **It accepted a no-reply finish as one-shot-nudge-then-`Empty`** and explicitly
   rejected "mandatory `reply` with forced `tool_choice`." Fail-fast spares wasted
@@ -78,6 +89,9 @@ scrape that lost reports. It made two choices this decision revisits:
     the string field would double-encode it — the harness then re-parses
     JSON-out-of-a-JSON-string, the escaped-`\n` hazard `shell_eval.rs:298-300`
     already names.
+  - **Headless root → a human** (`--output-format text`). Its same value is
+    rendered once through ral's existing text projection; it is not a stream of
+    incidental assistant tokens.
 
 - **The headless `result` field becomes `string | object`.** A deliberate
   divergence from Claude Code's always-string shape. 260622's parity goal was

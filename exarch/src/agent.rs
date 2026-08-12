@@ -60,11 +60,11 @@ pub struct Agent {
     pub(crate) system: String,
     /// The template [`Self::system`] came from, still carrying
     /// [`crate::prompt::BUILTIN_INDEX_PLACEHOLDER`]: a child inherits *this*,
-    /// so it filters an index for its own bits rather than its parent's.
+    /// so it resolves for its own grants rather than its parent's.
     system_base: String,
-    /// The fleet-shared index table, resolved once at the trunk, so a fork
-    /// resolving its own index never needs a live [`Shell`](ral_core::Shell).
-    indexes: Arc<crate::prompt::BuiltinIndexes>,
+    /// The fleet-shared builtin index, resolved once at the trunk, so a fork
+    /// resolving its own prompt never needs a live [`Shell`](ral_core::Shell).
+    index: Arc<crate::prompt::BuiltinIndex>,
     /// Under its own lock so a per-call desk can capture it off `&mut Agent`.
     /// [`LogCell::lock`] panics on contention rather than blocking — the desk
     /// runs only while the attend thread is parked in `run_shell`.

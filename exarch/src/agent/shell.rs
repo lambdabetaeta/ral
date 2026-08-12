@@ -123,7 +123,7 @@ impl Agent {
             // The unresolved template, not this agent's own `system`: a
             // desk-spawned child always returns, so it refilters its own index.
             system_template: self.system_base.clone(),
-            indexes: self.indexes.clone(),
+            index: self.index.clone(),
             interactive: self.interactive,
             nursery,
             generation: self.agents.generation(),

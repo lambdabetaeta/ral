@@ -10,17 +10,19 @@ shares — the registry, the one event bus, and the transport engine.
 
 ## One predicate, fixed at construction
 
-There is no `is_root`, no `spawns`/`returns` axis pair. Whether an agent returns a
-value or converses with a human is a **construction-fixed `returns` bit** on the
-`Agent` — `true` for a `fork`ed sub-agent, `false` for a `/branch` child,
-`!interactive` at the trunk. One bit is the single source of truth for every
-reader: `returns()`, parking's conversing predicate, the desk's `reply` refusal
+There is no `is_root`. Whether an agent returns a value or converses with a human
+is a **construction-fixed `returns` bit** on the `Agent` — `true` for a `fork`ed
+sub-agent, `false` for a `/branch` child, `!interactive` at the trunk. One bit is
+the single source of truth for every role reader: `returns()`, parking's
+conversing predicate, the desk's `reply` refusal
 ([[map/exarch/builtins|builtins]]), and the per-agent builtin index resolved from
 the same bit at `Agent::assemble` — so reply availability, parking, and the
 advertised vocabulary cannot disagree
-([[decisions/260705_branch-minimal|branch-minimal]]). Position still does two jobs
-— it fixes the registry edge (`parent`) and the signal path (only the trunk's
-session is minted facing the ambient causes,
+([[decisions/260705_branch-minimal|branch-minimal]]). **Fuel is a separate
+construction-fixed depth budget:** an agent's spawn surface is present exactly
+when `fuel > 0`; it does not decide whether the agent returns. Position still
+does two jobs — it fixes the registry edge (`parent`) and the signal path (only
+the trunk's session is minted facing the ambient causes,
 [[decisions/260726_cancel-is-a-join|cancel-is-a-join]];
 [[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]) — but it does
 not decide who returns.
@@ -47,17 +49,35 @@ derived on every wake: a conversing agent parks `Held` while its registry entry
 lives, a returning agent a human has exchanged a message with parks `Engaged`
 bounded by the registry's idle lease, and everyone else quiesces.
 
+## Prompt obligations follow construction
+
+The prompt is an *agent-invariant base* plus one per-agent resolution step. The
+same construction facts that govern the desk govern what the model is taught:
+
+- **`returns` gates `# Agent`.** Returning agents receive the deliberate-return
+  contract; conversing agents do not.
+- **`interactive` gates `Surfacing`.** Human-facing guidance remains in the
+  shared base, so a returning interactive child can receive both it and
+  `# Agent`.
+- **`fuel > 0` gates `# Spawning agents`.** A leaf receives neither spawn
+  guidance nor the spawn family in its builtin index.
+- **The builtin index has three bits** — `returns`, `allow_schedule`, and
+  `spawns` (`fuel > 0`) — cached once from the booted shell. The unresolved base
+  stays on the node, and roots, identity forks, and wire children resolve their
+  own prompt before the log bookend records its byte length.
+
 ## Uniform spawning: bounded by spawn fuel
 
-Spawning is **universal** — every agent may spawn, so the spawn tree is not
-capped at one level. There is no `spawns()` axis: every agent holds the one
-`agent` spawn verb ([[map/exarch/builtins|builtins]]). Depth-N works structurally — a child
-registers in the fleet's registry and `fork` snapshots the parent's shell by
-value at any depth — but each `fork` hands its child one less unit of `fuel`
-than the parent holds (the parent's own `fuel` is untouched, so fan-out itself
-is unbounded), and a `fuel == 0` agent's spawn call is refused at the desk
-with the exhaustion text: a delegation chain terminates by refusal a fixed
-number of generations down rather than recursing forever
+Spawning is **available to every agent with fuel left**, so the spawn tree is
+not capped at one level. The effective `spawns` bit is `fuel > 0`; when it is
+false, the prompt index omits `agent`, `agents`, `message`, and `agent-cancel`
+as a dead family, while the desk remains the runtime authority. Depth-N works
+structurally — a child registers in the fleet's registry and `fork` snapshots
+the parent's shell by value at any depth — but each `fork` hands the child one
+less unit of `fuel` than the parent holds (the parent's own `fuel` is untouched,
+so fan-out itself is unbounded), and a `fuel == 0` agent's spawn call is refused
+at the desk with the exhaustion text: a delegation chain terminates by refusal
+a fixed number of generations down rather than recursing forever
 (uniform-agent-nodes, superseding the
 depth-1 cap of [[decisions/260617_async-agent-tool|async-agent-tool]];
 [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]], bounding the depth

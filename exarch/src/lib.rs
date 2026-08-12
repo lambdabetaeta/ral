@@ -233,7 +233,7 @@ pub fn run() -> Result<(), String> {
             &scratch,
             &cwd_path,
             &config_dir,
-            c.headless,
+            !c.headless,
             c.edit,
         )?
     };

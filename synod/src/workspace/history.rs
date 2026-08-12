@@ -192,7 +192,9 @@ impl HistoryStore {
         for item in std::fs::read_dir(&dir).map_err(could_not)? {
             let path = item.map_err(could_not)?.path();
             if path.extension().is_some_and(|ext| ext == "json")
-                && latest.as_ref().is_none_or(|held| held.as_path() < path.as_path())
+                && latest
+                    .as_ref()
+                    .is_none_or(|held| held.as_path() < path.as_path())
             {
                 latest = Some(path);
             }
@@ -396,7 +398,8 @@ fn sweep_one(history: &Path) -> Result<(), String> {
     let entries = std::fs::read_dir(history)
         .map_err(|e| format!("Synod could not read {}: {e}.", history.display()))?;
     for entry in entries {
-        let entry = entry.map_err(|e| format!("Synod could not read {}: {e}.", history.display()))?;
+        let entry =
+            entry.map_err(|e| format!("Synod could not read {}: {e}.", history.display()))?;
         if entry.file_name() == "lock" {
             continue;
         }
@@ -517,8 +520,7 @@ mod lock_imp {
     impl Handle {
         pub fn shared(path: &Path) -> Result<Self, String> {
             let file = open(path)?;
-            lock(&file, 0)
-                .map_err(|e| format!("Synod could not lock {}: {e}.", path.display()))?;
+            lock(&file, 0).map_err(|e| format!("Synod could not lock {}: {e}.", path.display()))?;
             Ok(Self(file))
         }
 
@@ -823,8 +825,14 @@ mod tests {
 
         store.wipe().expect("wipes");
 
-        assert!(!dir.join("history").exists(), "the store's own directory must be gone");
-        assert!(sibling.exists(), "a wipe must never touch anything beside its own directory");
+        assert!(
+            !dir.join("history").exists(),
+            "the store's own directory must be gone"
+        );
+        assert!(
+            sibling.exists(),
+            "a wipe must never touch anything beside its own directory"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

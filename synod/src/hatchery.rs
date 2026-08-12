@@ -309,7 +309,9 @@ mod tests {
         let mut buf = [0u8; preamble::LEN];
         std::io::Read::read_exact(&mut stream, &mut buf).expect("the preamble is still on it");
         assert_eq!(
-            preamble::Preamble::decode(&buf).expect("valid preamble").token,
+            preamble::Preamble::decode(&buf)
+                .expect("valid preamble")
+                .token,
             42
         );
 

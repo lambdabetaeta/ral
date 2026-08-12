@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
-covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
+generated_at_commit: dae7e71d
+generated_at_date: 2026-08-12
+covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs, exarch/data/system.md, exarch/data/agent.md, exarch/data/agent-spawn.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
 # Map: exarch
@@ -132,9 +132,11 @@ can inherit a live key.**
 
 ## System prompt
 
-`prompt::assemble` builds the prompt from `(heading, body)` sections walked by one
-uniform renderer, in order **persona, `Ral`, `Editing`, `Builtins`, `Tasks`,
-`Script style`, `Host`, [`Workspace`], [`Skills`], `Agent`|`Surfacing`**.
+`prompt::assemble` builds an agent-invariant base from `(heading, body)` sections
+walked by one uniform renderer, in order **persona, `Ral`, `Editing`, `Builtins`,
+`Tasks`, `Script style`, `Host`, [`Workspace`], [`Skills`], [`Surfacing`]**. The
+builtin placeholder and the late sections are resolved once per constructed
+agent, so a root, identity fork, and wire child each receive their own surface.
 
 - **Persona** (`data/system.md`, unheaded — it sets the tone, not a topic) frames
   the session as *one continuing shell script*: definitions, working directory,
@@ -153,9 +155,10 @@ uniform renderer, in order **persona, `Ral`, `Editing`, `Builtins`, `Tasks`,
   *name only* — a progressive-disclosure index the agent expands at runtime with
   `help`/`explain`, so the prompt cannot drift. `assemble` bakes a
   *placeholder* here: the real per-agent list — filtered to the harness verbs
-  that agent holds — is resolved by `BuiltinIndexes::apply` once the agent's
-  own `returns` and `allow_schedule` bits are in reach, without a live
-  `Shell`; every other section is agent-invariant.
+  that agent holds — is resolved by `BuiltinIndex::apply` once the agent's
+  own grants — `returns`, `allow_schedule`, `spawns` (`fuel > 0`) — are in reach,
+  without a live `Shell`; zero-fuel agents omit `agent`, `agents`, `message`, and
+  `agent-cancel` together.
 - **`Tasks`** (`data/tasks.md`) is the task-management kit API.
 - **`Script style`** (`data/script-style.md`) is the reuse guide: one program, not
   a nervous probe — define then query, parameterised blocks, records for knobs,
@@ -173,14 +176,17 @@ uniform renderer, in order **persona, `Ral`, `Editing`, `Builtins`, `Tasks`,
   ([[design/agents-md-injection|agents-md-injection]]).
 - **`Skills`** lists each discovered readable skill as one `name: description`
   line, loaded on demand with the `skill` builtin — progressive disclosure again.
-- The closing section is chosen by mode, last where recency carries: headless
-  gets **`Agent`** (`data/agent.md`), the `reply` return-channel contract;
-  interactive gets **`Surfacing`** (`data/surface.md`), the five Bertin marks and
-  the role set ([[decisions/260619_surface-carries-documents|surface-carries-documents]],
-  → [[map/exarch/cards|cards]]).
+- **`Surfacing`** (`data/surface.md`) belongs to the interactive base and carries
+  the five Bertin marks and role set
+  ([[decisions/260619_surface-carries-documents|surface-carries-documents]],
+  → [[map/exarch/cards|cards]]). Per-agent resolution then appends
+  **`Spawning agents`** (`data/agent-spawn.md`) iff `fuel > 0`, followed by
+  **`Agent`** (`data/agent.md`) iff `returns`; returning interactive children
+  therefore keep both obligations, while a returning headless root gets only
+  `Agent`.
 
 `--system FILE...` replaces *only* the persona slot with the user-supplied files;
-every other section stands.
+the per-agent index and optional sections still resolve from the stored base.
 
 ## Subsystems
 
@@ -236,10 +242,10 @@ indefinitely is real authority. The inbox/reaper mechanics live on the
 
 ## Where to look
 
-- `exarch/data/{system.md, ral.md, edit-hash.md, edit-replace.md, tasks.md, script-style.md, grant-legend.md, surface.md, agent.md, agent.ral}` —
+- `exarch/data/{system.md, ral.md, edit-hash.md, edit-replace.md, tasks.md, script-style.md, grant-legend.md, surface.md, agent.md, agent-spawn.md, agent.ral}` —
   the persona rules, ral reference, editing schemes, task kit, reusable-script
-  guide, grant legend, surfacing guidance, headless reply contract, and the
-  embedded agent helper library.
+  guide, grant legend, surfacing guidance, returning-agent and spawn contracts,
+  and the embedded agent helper library.
 - Provider configuration — a famous provider auto-populates from its env key, an
   unusual one from a hand-written XDG `config.ral`
   ([[decisions/260613_provider-config-ral-script|provider-config-ral-script]]).

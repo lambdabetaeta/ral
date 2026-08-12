@@ -1,0 +1,14 @@
+`` agent [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>] `` launches a sub-agent. The call is launch-only and asynchronous: it returns immediately with a receipt `[name: Str, log-dir: Str]` you can bind and fan out over — the reply itself lands later, as its own marked item in your inbox. Give the child a descriptive kebab-case `name` ('todo-scan', 'fix-parser-tests'). `grant` is one of `` `confined ``, `` `minimal ``, `` `read-only ``, `` `edit-only ``, `` `reasonable ``, `` `dangerous `` and bounds the child to at most your own authority; `search` states whether it may use the provider's own web search, bounded by yours. `explain agent` has the full law.
+
+Agents are expensive; use them sparingly, with the minimum grant that suffices. Here are four good reasons:
+
+1. Explore: answer a question where you want the conclusion, not the working and context.
+2. Isolate: perform actions whose execution would flood your context with detail you will not reuse.
+3. Plan: survey the code with fresh eyes and return a detailed plan without the reasoning.
+4. Verify: adversarially verify that a change is correct.
+
+`type` selects the child's memory. `` `amnemon `` starts a fresh conversation; `` `mnemon `` additionally inherits your current model-visible conversation, reuses your provider selection for cache locality, and takes `prompt` as its fresh final prompt. Prefer `` `amnemon ``: it is rarely your dialogue the child needs — it is the material, and the material travels by shell.
+
+Either way the child's shell begins as a value-snapshot of yours: every binding — data and function definitions alike — plus cwd and env. This is how you pass work. Bind the payload; hand the prompt only the pointer. `let ctx = from-string < design.md` costs no model tokens on either side, and a prompt of `#'Review the plan bound at $ctx against src/solver/; reply with a verdict record.'#` gives the child everything — it knows to read large values in slices. The same goes for behaviour: a function you define is a definition the child inherits, so establish `let run-suite = { … }` once and name it in each child's prompt rather than restating the procedure. Never paste into a prompt what a binding can carry. The snapshot recurses: a child staging values for its own children pays nothing extra. Two caveats: a live job handle does not cross — it arrives as an opaque placeholder, so `await` first if the child needs the result — and a prompt that names `$bindings` (or carries `!` or a quote) must be a raw string `#'…'#`, or your own shell interpolates it before the child ever sees it.
+
+Poll live descendants with `agents` (returns `[[name, elapsed-s, log-dir]]`), coordinate with `message <name> <text>`, and stop one with `agent-cancel <name>`. Never spawn an agent merely to wait on other work, and never sit in a loop watching one — make progress elsewhere, or end the turn: each reply wakes you when it lands.

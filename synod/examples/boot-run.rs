@@ -144,7 +144,11 @@ fn main() {
         .then(Reply::text("all set"));
 
     let engine = Engine::new();
-    let provider = Arc::new(Provider::scripted("test-model", ProviderKind::Openai, script));
+    let provider = Arc::new(Provider::scripted(
+        "test-model",
+        ProviderKind::Openai,
+        script,
+    ));
     let mut agent = Agent::root(
         RootConfig {
             system: "you are a helpful office assistant".to_string(),

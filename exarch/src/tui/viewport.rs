@@ -489,9 +489,7 @@ impl Viewport {
     /// The still-streaming phase's block.  Each phase seats its own, so this is
     /// simply the newest with no authoritative text yet — at most one exists.
     fn live_thinking(&self) -> Option<usize> {
-        self.blocks
-            .iter()
-            .rposition(|e| e.block.is_live_thinking())
+        self.blocks.iter().rposition(|e| e.block.is_live_thinking())
     }
 
     /// Push streamed text, committing any fence-safe paragraph at `context_floor`.

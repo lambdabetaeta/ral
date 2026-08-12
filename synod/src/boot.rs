@@ -224,8 +224,8 @@ fn inflate(archive: &Path, out: &Path) -> Result<String, String> {
             archive.display()
         )
     })?;
-    let mut decoder =
-        ruzstd::decoding::StreamingDecoder::new(std::io::BufReader::new(source)).map_err(|e| {
+    let mut decoder = ruzstd::decoding::StreamingDecoder::new(std::io::BufReader::new(source))
+        .map_err(|e| {
             format!(
                 "the guest image {} could not be read: {e}",
                 archive.display()

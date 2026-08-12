@@ -13,6 +13,7 @@ use crate::bootstrap::Scratch;
 use crate::bus::{AgentId, Inbox};
 use crate::fleet::hatch::PendingHatches;
 use crate::fleet::registry::{AgentRegistry, Registration};
+use crate::prompt::Grants;
 use crate::provider::{Provider, ProviderKind};
 use std::io;
 use std::sync::Arc;
@@ -39,14 +40,14 @@ pub(crate) struct Build {
     /// The still-unresolved template, carrying the builtin-index placeholder
     /// so the constructed agent's own children resolve from it in turn.
     pub(crate) system: String,
-    /// `system` resolved for this bundle's own `returns`/`allow_schedule` —
-    /// what reaches the model. The caller resolves it because the log's
-    /// `SessionStarted` bookend records the resolved length, and the log must
-    /// exist before the agent it describes does.
+    /// `system` resolved for this bundle's own [`Grants`] — what reaches the
+    /// model. The caller resolves it because the log's `SessionStarted`
+    /// bookend records the resolved length, and the log must exist before the
+    /// agent it describes does.
     pub(crate) system_prompt: String,
-    /// The fleet-shared index table, carried on so this agent's own forks
+    /// The fleet-shared builtin index, carried on so this agent's own forks
     /// resolve theirs without a live shell.
-    pub(crate) indexes: Arc<crate::prompt::BuiltinIndexes>,
+    pub(crate) index: Arc<crate::prompt::BuiltinIndex>,
     pub(crate) caps: ral_core::types::Capabilities,
     /// Already through its identity ceremony: `assemble` seats no engine of
     /// its own, so every construction site states which seat kind it builds.
@@ -136,7 +137,7 @@ impl Agent {
         let Build {
             system,
             system_prompt,
-            indexes,
+            index,
             caps,
             seat,
             log,
@@ -159,7 +160,7 @@ impl Agent {
             id: log.id(),
             system: system_prompt,
             system_base: system,
-            indexes,
+            index,
             log: LogCell::new(log),
             transcript,
             seat,
@@ -270,15 +271,27 @@ impl Agent {
         let id = fresh_id();
         // A binding of its own, so the stand-in outlives the borrow below.
         let throwaway_wire_shell;
-        let indexes =
-            crate::prompt::BuiltinIndexes::resolve(if let Some(shell) = &identity_shell {
-                shell
-            } else {
-                throwaway_wire_shell =
-                    crate::bootstrap::exarch_shell(ral_core::io::TerminalState::default());
-                &throwaway_wire_shell
-            });
-        let system_prompt = indexes.apply(&system, !interactive, allow_schedule);
+        let index = crate::prompt::BuiltinIndex::resolve(if let Some(shell) = &identity_shell {
+            shell
+        } else {
+            throwaway_wire_shell =
+                crate::bootstrap::exarch_shell(ral_core::io::TerminalState::default());
+            &throwaway_wire_shell
+        });
+        // Chat advertises no tool, so its prompt takes no builtin surface at
+        // all — no index, no taught section, the bare stand-in verbatim.
+        let system_prompt = if chat {
+            system.clone()
+        } else {
+            index.apply(
+                &system,
+                &Grants {
+                    returns: !interactive,
+                    allow_schedule,
+                    spawns: fuel > 0,
+                },
+            )
+        };
         let log = AgentLog::root(
             &sessions_root,
             id,
@@ -307,7 +320,7 @@ impl Agent {
         let agent = Self::assemble(Build {
             system,
             system_prompt,
-            indexes,
+            index,
             caps,
             seat,
             log,
@@ -369,13 +382,18 @@ impl Agent {
         // here can drift from it.  Per-agent state starts fresh.
         let shell = self.seat.shell_mut().shell.fork_session();
         let child_id = fresh_id();
-        // Against the *child's* bits, never this agent's: a `/branch` child
-        // withholds `reply` however its creator's own bit reads.
-        let system_prompt = self
-            .indexes
-            .apply(&self.system_base, returns, self.allow_schedule);
-        let log = self.log.lock().fork(child_id, system_prompt.len())?;
         let fuel = self.fuel.saturating_sub(1);
+        // Against the *child's* grants, never this agent's: a `/branch` child
+        // withholds `reply` however its creator's own bit reads.
+        let system_prompt = self.index.apply(
+            &self.system_base,
+            &Grants {
+                returns,
+                allow_schedule: self.allow_schedule,
+                spawns: fuel > 0,
+            },
+        );
+        let log = self.log.lock().fork(child_id, system_prompt.len())?;
         let seat = match &self.seat {
             // No detach: `fork_session` carries no such policy across, so
             // granting it here would grant nothing now and conjure the verb
@@ -390,7 +408,7 @@ impl Agent {
         Self::assemble(Build {
             system: self.system_base.clone(),
             system_prompt,
-            indexes: self.indexes.clone(),
+            index: self.index.clone(),
             caps,
             seat,
             log,
@@ -462,8 +480,15 @@ impl Agent {
             crate::bootstrap::EXARCH,
             &format!("agent-{id}"),
         )?);
-        let indexes = crate::prompt::BuiltinIndexes::resolve(&shell);
-        let system_prompt = indexes.apply(system, true, false);
+        let index = crate::prompt::BuiltinIndex::resolve(&shell);
+        let system_prompt = index.apply(
+            system,
+            &Grants {
+                returns: true,
+                allow_schedule: false,
+                spawns: SPAWN_FUEL > 0,
+            },
+        );
         let log = AgentLog::root(
             &dir.join("sessions"),
             id,
@@ -481,7 +506,7 @@ impl Agent {
         let agent = Self::assemble(Build {
             system: system.to_string(),
             system_prompt,
-            indexes,
+            index,
             caps: ral_core::types::Capabilities::default(),
             seat,
             log,
@@ -665,123 +690,6 @@ mod tests {
             child.fuel,
             parent.fuel - 1,
             "a branch is a fork: its fuel is one less than the parent's"
-        );
-    }
-
-    /// The index resolves from each node's own construction-fixed `returns`,
-    /// not its parent's, and every node keeps the unresolved `system_base` so
-    /// its children resolve afresh rather than inheriting a filtered list.
-    #[test]
-    fn builtin_index_resolves_per_agent_not_per_parent() {
-        let dir = tmp("builtin-index-per-agent");
-        let scratch = Scratch::for_test(crate::bootstrap::EXARCH, "builtin-index-per-agent")
-            .expect("scratch dir");
-        let template = format!(
-            "persona\n\n# Builtins\n\n{}",
-            crate::prompt::BUILTIN_INDEX_PLACEHOLDER
-        );
-        let root = Agent::root(
-            RootConfig {
-                system: template,
-                caps: ral_core::types::Capabilities::default(),
-                run_dir: dir,
-                model: "test-model".into(),
-                provider_label: "test".into(),
-                allow_schedule: false,
-                // The conversing trunk withholds `reply`.
-                interactive: true,
-                chat: false,
-                disk_warn_bytes: None,
-                fuel: SPAWN_FUEL,
-                egress: crate::egress::Egress::for_test(),
-                hatchery: None,
-            },
-            RootSeat::Identity {
-                scratch: Arc::new(scratch),
-                cwd: std::env::current_dir().expect("test process has a cwd"),
-                detach: false,
-            },
-            scripted("test-model", Script::new()),
-        )
-        .expect("root trunk");
-        assert!(
-            !root.system.contains("reply"),
-            "an interactive trunk's own index must not advertise `reply`: {}",
-            root.system
-        );
-        assert!(
-            root.system_base
-                .contains(crate::prompt::BUILTIN_INDEX_PLACEHOLDER),
-            "the base template stays unresolved so a child can resolve its own index"
-        );
-
-        let child = root.fork(root.caps().clone()).expect("fork child");
-        assert!(
-            child.system.contains("reply"),
-            "an ordinary fork returns and must see `reply`, unlike its conversing parent: {}",
-            child.system
-        );
-
-        let branch = root.branch().expect("branch child");
-        assert!(
-            !branch.system.contains("reply"),
-            "a branch withholds `reply` just like the trunk it forked from: {}",
-            branch.system
-        );
-
-        assert!(
-            trunk(&tmp("builtin-index-headless-trunk"), false).returns(),
-            "a headless trunk holds `reply`: returns is `!interactive`"
-        );
-    }
-
-    /// The resolved index is exactly the live shell's own surface.  Recomputes
-    /// the expected names independently of `builtin_index` — shell, prelude,
-    /// and library, filtered for a `for_test` agent's fixed bits — so the two
-    /// cannot drift apart unnoticed.
-    #[test]
-    fn builtin_index_equals_the_live_shells_own_surface() {
-        let dir = tmp("builtin-index-equals-live-shell");
-        let template = format!(
-            "persona\n\n# Builtins\n\n{}",
-            crate::prompt::BUILTIN_INDEX_PLACEHOLDER
-        );
-        let agent = Agent::for_test(&dir, &template).expect("test agent");
-
-        let guard = agent.seat.shell_mut();
-        let prelude = ral_core::builtins::help::prelude_names()
-            .into_iter()
-            .map(str::to_string);
-        let library = crate::shell_eval::builtins::agent_library_docs()
-            .into_iter()
-            .map(|(name, _doc)| name);
-        let mut expected: Vec<String> = guard
-            .shell
-            .builtin_names()
-            .map(str::to_string)
-            .chain(prelude)
-            .chain(library)
-            .filter(|n| !n.starts_with('_'))
-            // `for_test` fixes allow_schedule: false; returns: true keeps `reply`.
-            .filter(|n| !matches!(n.as_str(), "schedule" | "schedules" | "unschedule"))
-            .collect();
-        drop(guard);
-        expected.sort_unstable();
-        expected.dedup();
-
-        let marker = "docs:\n\n";
-        let names_blob = agent
-            .system
-            .split(marker)
-            .nth(1)
-            .expect("the resolved system must carry the builtin index preamble");
-        let mut resolved: Vec<String> = names_blob.split(", ").map(str::to_string).collect();
-        resolved.sort_unstable();
-        resolved.dedup();
-
-        assert_eq!(
-            resolved, expected,
-            "the resolved index must be exactly shell.builtin_names() ∪ prelude ∪ library, filtered"
         );
     }
 

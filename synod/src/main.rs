@@ -80,7 +80,9 @@ impl Accounts {
     /// The store and catalog, or a fresh copy of the startup failure that
     /// left this run with neither — every command answers with the same
     /// sentence rather than each restating how to unwrap it.
-    fn resolved(&self) -> Result<&(Mutex<CredentialStore>, Mutex<ModelCatalog<LiveSource>>), String> {
+    fn resolved(
+        &self,
+    ) -> Result<&(Mutex<CredentialStore>, Mutex<ModelCatalog<LiveSource>>), String> {
         self.0.as_ref().map_err(Clone::clone)
     }
 }

@@ -110,7 +110,10 @@ pub fn list(store: &Mutex<CredentialStore>) -> AccountList {
     AccountList {
         accounts,
         vault: KEYCHAIN.vault().to_string(),
-        protocols: config::protocols().into_iter().map(str::to_string).collect(),
+        protocols: config::protocols()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
     }
 }
 

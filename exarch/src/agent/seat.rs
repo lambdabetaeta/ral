@@ -369,7 +369,7 @@ mod tests {
             schedules: crate::fleet::schedule::ScheduleRegistry::new(),
             log: crate::agent::LogCell::new(test_log()),
             system_template: String::new(),
-            indexes: crate::prompt::BuiltinIndexes::resolve(&ral_core::Shell::new(
+            index: crate::prompt::BuiltinIndex::resolve(&ral_core::Shell::new(
                 ral_core::io::TerminalState::default(),
             )),
             interactive: false,

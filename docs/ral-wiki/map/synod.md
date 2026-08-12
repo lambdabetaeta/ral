@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 7c1c8ae6
-generated_at_date: 2026-07-30
-covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/transport.rs]
+generated_at_commit: dae7e71d
+generated_at_date: 2026-08-12
+covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/transport.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs]
 ---
 
 # Map: synod
@@ -62,7 +62,12 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
 - `prompt.rs` + `data/*.md` — the office persona and the office toolbox,
   assembled through exarch's own section renderer (`exarch::prompt::render`)
   and grant rendering (`exarch::prompt::grant_summary`), over a `host_section`
-  of synod's own that tells the agent guest truths only.
+  of synod's own that tells the agent guest truths only. Synod's base ends in
+  **Talking to the user** (`data/surface.md`); the shared exarch per-agent
+  resolver then appends **Agent** to returning helpers, after that office
+  guidance, while the conversing synod trunk receives no return section. The
+  same resolver appends spawn guidance while the trunk or helper still has fuel,
+  so synod's prompt composition stays on the shared construction rules.
 - `session.rs` — `Conversation`, one folder held open from first message to
   last. `begin` opens the grant, boots the machine, and seats exarch's agent
   on the wire the machine hands back (`exarch::agent::RootSeat::Wire` over

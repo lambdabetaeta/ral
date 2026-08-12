@@ -198,7 +198,7 @@ pub(crate) struct HostServices {
     /// filtered per agent, so only an unresolved template is shareable.
     pub system_template: String,
     /// Resolves `system_template` with no live `Shell` at the desk.
-    pub indexes: std::sync::Arc<crate::prompt::BuiltinIndexes>,
+    pub index: std::sync::Arc<crate::prompt::BuiltinIndex>,
     pub interactive: bool,
     /// The adoption end of the body's own [`ral_core::Shell::fork_into_nursery`];
     /// `agent-start` redeems a [`NurseryId`] here.
@@ -534,7 +534,7 @@ impl ExarchDesk {
         let child = Agent::assemble(Build {
             system: s.system_template.clone(),
             system_prompt,
-            indexes: s.indexes.clone(),
+            index: s.index.clone(),
             caps: child_caps,
             seat,
             log: child_log,
@@ -578,7 +578,14 @@ impl ExarchDesk {
         // same bits the `Build` below fixes, so the opening bookend records the
         // child's real system length rather than the template's.
         let child_id = crate::agent::fresh_id();
-        let system_prompt = s.indexes.apply(&s.system_template, true, s.allow_schedule);
+        let system_prompt = s.index.apply(
+            &s.system_template,
+            &crate::prompt::Grants {
+                returns: true,
+                allow_schedule: s.allow_schedule,
+                spawns: s.fuel.saturating_sub(1) > 0,
+            },
+        );
         let child_log = {
             let parent_log = s.log.lock();
             let mut child_log = parent_log
@@ -713,7 +720,7 @@ impl ExarchDesk {
         let child = Agent::assemble(Build {
             system: s.system_template.clone(),
             system_prompt: pending.system_prompt,
-            indexes: s.indexes.clone(),
+            index: s.index.clone(),
             caps: pending.child_caps,
             seat,
             log: pending.child_log,
@@ -1314,7 +1321,7 @@ mod tests {
             schedules: ScheduleRegistry::new(),
             log: LogCell::new(fresh_log()),
             system_template: String::new(),
-            indexes: crate::prompt::BuiltinIndexes::resolve(&ral_core::Shell::new(
+            index: crate::prompt::BuiltinIndex::resolve(&ral_core::Shell::new(
                 ral_core::io::TerminalState::default(),
             )),
             interactive: false,
@@ -1880,7 +1887,7 @@ mod tests {
         let root = root_shell();
         // The production seam: the index table resolves from the same booted
         // surface the parked child shells fork from.
-        desk.services.indexes = crate::prompt::BuiltinIndexes::resolve(&root);
+        desk.services.index = crate::prompt::BuiltinIndex::resolve(&root);
         let shell = forkable_child_shell(&root);
         let session = desk.services.nursery.park(shell);
 
@@ -1932,8 +1939,15 @@ mod tests {
 
         let expected = desk
             .services
-            .indexes
-            .apply(&template, true, desk.services.allow_schedule)
+            .index
+            .apply(
+                &template,
+                &crate::prompt::Grants {
+                    returns: true,
+                    allow_schedule: desk.services.allow_schedule,
+                    spawns: desk.services.fuel.saturating_sub(1) > 0,
+                },
+            )
             .len();
         assert_eq!(
             recorded_system_prompt_bytes(std::path::Path::new(&log_dir)),
@@ -3282,7 +3296,7 @@ mod wire_tests {
                 schedules: ScheduleRegistry::new(),
                 log: LogCell::new(fresh_log()),
                 system_template: String::new(),
-                indexes: crate::prompt::BuiltinIndexes::resolve(&ral_core::Shell::new(
+                index: crate::prompt::BuiltinIndex::resolve(&ral_core::Shell::new(
                     ral_core::io::TerminalState::default(),
                 )),
                 interactive: false,
@@ -3590,7 +3604,7 @@ mod wire_tests {
                 schedules: ScheduleRegistry::new(),
                 log: LogCell::new(fresh_log()),
                 system_template: String::new(),
-                indexes: crate::prompt::BuiltinIndexes::resolve(&ral_core::Shell::new(
+                index: crate::prompt::BuiltinIndex::resolve(&ral_core::Shell::new(
                     ral_core::io::TerminalState::default(),
                 )),
                 interactive: false,

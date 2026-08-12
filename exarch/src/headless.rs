@@ -1,9 +1,9 @@
 //! Headless frontend: a [`Sink`] projecting the bus onto a pair of writers.
 //!
-//! Only the root's tokens reach `out`, and only in text mode — under
-//! `--output-format json` they are dropped for one result object built from
-//! the root's deliberate `reply`; everything else goes to `err`.  A non-CLI
-//! host takes that same projection through [`converse_on`], or drives
+//! Headless text and JSON both project the root's deliberate `reply` to `out`
+//! once the run finishes; progress, tool calls, cards, failures, and the run
+//! summary go to `err`. A conversational host takes a different projection
+//! through [`converse_on`], which streams assistant tokens, or drives
 //! [`converse_sink`] with its own [`Sink`] for `Kind` events unflattened.
 //! Recording is not this module's concern: every session writes its own trace
 //! at the emit seam, through [`crate::agent::transcript`] and
@@ -24,12 +24,21 @@ use std::time::Instant;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum OutputFormat {
     Text,
-    /// Stdout carries one result object at the end, not the live token stream.
+    /// Stdout carries one result object at the end, not assistant narration.
     Json,
 }
 
+/// The three outbound projections have distinct names so a conversational
+/// token stream cannot be confused with either headless reply sink.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Projection {
+    HeadlessText,
+    HeadlessJson,
+    Conversation,
+}
+
 /// The [`Sink`] behind [`run`] and [`converse_on`], accumulating the run's
-/// totals for the closing `[done]` line and the json `result`.
+/// totals for the closing `[done]` line and the deliberate reply.
 pub struct Headless<'a> {
     out: &'a mut (dyn Write + Send),
     err: &'a mut (dyn Write + Send),
@@ -39,15 +48,14 @@ pub struct Headless<'a> {
     usage: Usage,
     root_id: AgentId,
     started: Instant,
-    json_mode: bool,
+    projection: Projection,
     /// Counted, not tracked: the per-segment `Kind::Step(n)` index restarts
     /// each time the root resumes after an async-spawned block.
     steps: u32,
     last_stop: Option<String>,
-    /// The root's `reply`, projected through [`user_json`] — not `FOValue`'s
-    /// own transport `serde`, which is internally tagged and carries floats by
-    /// bits.  `None` when the root finished without replying.
-    result: Option<serde_json::Value>,
+    /// The root's deliberate `reply`, kept as a value until the consuming
+    /// projection chooses ral text or [`user_json`].
+    reply: Option<ral_core::serial::FOValue>,
     /// `pump` recovers from a worker unwind and returns the worker value as
     /// normal, so without latching the panic here a crashed exchange would
     /// report as a clean, empty success.
@@ -57,7 +65,7 @@ pub struct Headless<'a> {
 
 impl<'a> Headless<'a> {
     fn new(
-        json_mode: bool,
+        projection: Projection,
         root_id: AgentId,
         out: &'a mut (dyn Write + Send),
         err: &'a mut (dyn Write + Send),
@@ -68,13 +76,30 @@ impl<'a> Headless<'a> {
             usage: Usage::default(),
             root_id,
             started: Instant::now(),
-            json_mode,
+            projection,
             steps: 0,
             last_stop: None,
-            result: None,
+            reply: None,
             panicked: false,
             ended_with_newline: false,
         }
+    }
+
+    /// Write the deliberate reply as ral's existing `VALUE` projection. A
+    /// unit reply has no textual projection and therefore writes nothing.
+    fn write_reply(&mut self) -> bool {
+        let Some(reply) = &self.reply else {
+            return false;
+        };
+        let Some(text) =
+            crate::shell_eval::ral_value_to_text(&ral_core::Value::from(reply.clone()))
+        else {
+            return false;
+        };
+        let _ = self.out.write_all(text.as_bytes());
+        let _ = self.out.flush();
+        self.ended_with_newline = text.as_bytes().last() == Some(&b'\n');
+        true
     }
 }
 
@@ -144,7 +169,7 @@ fn result_json(h: &Headless, r: &Result<(), String>, elapsed: std::time::Duratio
     let mut obj = json!({
         "type": "result",
         "is_error": r.is_err() || h.panicked,
-        "result": h.result,
+        "result": h.reply.as_ref().map(user_json),
         "stop_reason": h.last_stop.clone().unwrap_or_else(|| {
             // Neither fallback may default to "completed": a recovered panic
             // leaves no StopReason, and an error with none means the run ended
@@ -181,10 +206,12 @@ impl Sink for Headless<'_> {
     fn handle(&mut self, e: Event) {
         let id = e.id;
         match e.kind {
-            // json mode drops the stream because `result` comes from the attend
-            // digest's `reply`, not from whatever prose happened to arrive; a
-            // sub-agent's tokens are dropped because they would interleave.
-            Kind::Token(text) if id == self.root_id && !self.json_mode => {
+            // Conversational mode streams assistant tokens. Both headless
+            // projections wait for the deliberate reply, so incidental prose
+            // cannot become the answer; a sub-agent's tokens are always muted.
+            Kind::Token(text)
+                if id == self.root_id && self.projection == Projection::Conversation =>
+            {
                 let _ = self.out.write_all(text.as_bytes());
                 let _ = self.out.flush();
                 if let Some(last) = text.as_bytes().last() {
@@ -303,8 +330,9 @@ impl Sink for Headless<'_> {
     }
 }
 
-/// Attend `session` to quiescence in a one-shot headless run from `seed`,
-/// over the process's own stdout/stderr.
+/// Attend `session` to quiescence in a one-shot headless run from `seed`.
+/// Text and JSON both write the root's deliberate reply to stdout once; all
+/// progress and operational output goes to stderr.
 ///
 /// # Errors
 /// Returns `Err` if no launch prompt was supplied, if the attend worker
@@ -320,16 +348,20 @@ pub fn run(
 ) -> Result<(), String> {
     let prompt = seed
         .ok_or("--headless requires a seed prompt: --prompt, --file, or trailing words after --")?;
-    eprintln!(
+    let mut stdout = io::stdout();
+    let mut stderr = io::stderr();
+    let _ = writeln!(
+        stderr,
         "exarch: provider={} model={} base={}",
         p.id().label(),
         p.model(),
         info.base
     );
-    let json = format == OutputFormat::Json;
-    let mut stdout = io::stdout();
-    let mut stderr = io::stderr();
-    let mut headless = Headless::new(json, session.id, &mut stdout, &mut stderr);
+    let projection = match format {
+        OutputFormat::Text => Projection::HeadlessText,
+        OutputFormat::Json => Projection::HeadlessJson,
+    };
+    let mut headless = Headless::new(projection, session.id, &mut stdout, &mut stderr);
     // Bound before `session` is borrowed into the worker closure.
     let root_transcript = session.transcript();
     // A per-exchange bus over the trunk's *own* inbox, so the attend worker and
@@ -358,7 +390,7 @@ pub fn run(
     // `reply`.  A panic arrives as `Ok(None)`, already latched by the sink.
     let r: Result<(), String> = match outcome {
         Ok(Some((agent_outcome, payload))) => {
-            headless.result = payload.as_ref().map(user_json);
+            headless.reply = payload;
             match agent_outcome {
                 // A deliberate empty reply still honours the contract.
                 AgentOutcome::Complete | AgentOutcome::Empty => Ok(()),
@@ -374,14 +406,22 @@ pub fn run(
     // per-exchange bus whose usage never reached the sink.
     headless.usage = fleet.bus.usage_total();
     let elapsed = headless.started.elapsed();
-    if json {
-        println!("{}", result_json(&headless, &r, elapsed));
-    } else if !headless.ended_with_newline {
-        // So the next shell prompt lands at column 1.
-        println!();
+    match format {
+        OutputFormat::Json => {
+            let result = result_json(&headless, &r, elapsed);
+            let _ = writeln!(headless.out, "{result}");
+        }
+        OutputFormat::Text => {
+            let wrote_reply = r.is_ok() && headless.write_reply();
+            if wrote_reply && !headless.ended_with_newline {
+                // So the next shell prompt lands at column 1.
+                let _ = writeln!(headless.out);
+            }
+        }
     }
-    eprintln!("Agent log: {}", session.log_dir().display());
-    eprintln!(
+    let _ = writeln!(headless.err, "Agent log: {}", session.log_dir().display());
+    let _ = writeln!(
+        headless.err,
         "[done] {} steps · {:.1}s · {}",
         headless.steps,
         elapsed.as_secs_f64(),
@@ -402,8 +442,11 @@ pub fn converse(session: &mut Agent, message: String, engine: Arc<Engine>) -> Re
     converse_on(session, message, engine, &mut stdout, &mut stderr)
 }
 
-/// One exchange of a converse session, streaming what [`run`]'s text mode
-/// streams — tokens to `out`, everything else to `err`.
+/// One exchange of a converse session: assistant tokens stream to `out`,
+/// everything else to `err`.
+///
+/// This remains conversational — unlike headless text, it does not wait for
+/// or print a deliberate root reply.
 ///
 /// `session` must have been built with
 /// [`RootConfig::interactive`](crate::agent::RootConfig) set: a conversing
@@ -421,7 +464,7 @@ pub fn converse_on(
     out: &mut (dyn Write + Send),
     err: &mut (dyn Write + Send),
 ) -> Result<(), String> {
-    let mut sink = Headless::new(false, session.id, out, err);
+    let mut sink = Headless::new(Projection::Conversation, session.id, out, err);
     let outcome = converse_sink(session, message, engine, &mut sink);
     if outcome.is_ok() && !sink.ended_with_newline {
         let _ = writeln!(sink.out);
@@ -621,7 +664,7 @@ mod tests {
         let root: AgentId = 1;
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
-        let mut h = Headless::new(true, root, &mut sink_out, &mut sink_err);
+        let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
         h.handle(Event {
             id: root,
             kind: Kind::Error(format!("{}boom", crate::bus::WORKER_PANIC_PREFIX)),
@@ -640,7 +683,7 @@ mod tests {
         let sub: AgentId = 2;
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
-        let mut h = Headless::new(true, root, &mut sink_out, &mut sink_err);
+        let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
         // Two segments whose indices reset (1..3, then 1..2).
         for n in [1, 2, 3, 1, 2] {
             h.handle(Event {
@@ -670,8 +713,22 @@ mod tests {
         let root: AgentId = 1;
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
-        let mut h = Headless::new(true, root, &mut sink_out, &mut sink_err);
-        h.result = Some(serde_json::json!({ "files": ["a.rs", "b.rs"] }));
+        let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
+        h.reply = Some(ral_core::serial::FOValue::Map {
+            entries: vec![(
+                "files".into(),
+                ral_core::serial::FOValue::List {
+                    items: vec![
+                        ral_core::serial::FOValue::String {
+                            value: "a.rs".into(),
+                        },
+                        ral_core::serial::FOValue::String {
+                            value: "b.rs".into(),
+                        },
+                    ],
+                },
+            )],
+        });
         let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
         let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
         assert!(
@@ -690,7 +747,7 @@ mod tests {
         let root: AgentId = 1;
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
-        let h = Headless::new(true, root, &mut sink_out, &mut sink_err);
+        let h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
         let out = result_json(
             &h,
             &Err("ended without calling `reply`".to_string()),
@@ -709,11 +766,11 @@ mod tests {
         let root: AgentId = 1;
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
-        let mut h = Headless::new(true, root, &mut sink_out, &mut sink_err);
+        let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
         let payload = ral_core::serial::FOValue::String {
             value: "plain text reply".into(),
         };
-        h.result = Some(user_json(&payload));
+        h.reply = Some(payload);
         let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
         let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
         assert_eq!(v["result"], serde_json::json!("plain text reply"), "{out}");
@@ -726,7 +783,7 @@ mod tests {
         let root: AgentId = 1;
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
-        let mut h = Headless::new(true, root, &mut sink_out, &mut sink_err);
+        let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
         let payload = ral_core::serial::FOValue::Map {
             entries: vec![(
                 "files".to_string(),
@@ -742,7 +799,7 @@ mod tests {
                 },
             )],
         };
-        h.result = Some(user_json(&payload));
+        h.reply = Some(payload);
         let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
         let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
         assert!(v["result"].is_object(), "{out}");

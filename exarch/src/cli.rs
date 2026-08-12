@@ -68,14 +68,15 @@ pub struct Cli {
     /// Overrides any persisted effort.
     #[arg(long = "effort", value_name = "LEVEL")]
     pub effort: Option<String>,
-    /// Run one seed exchange non-interactively: the assistant's reply streams
-    /// to stdout, every other event condenses to one line on stderr, and the
-    /// process exits when the exchange finishes.  Requires a seed prompt.
+    /// Run one seed exchange non-interactively: the root's deliberate `reply`
+    /// is rendered once to stdout at completion, every other event condenses
+    /// to stderr, and the process exits when the exchange finishes. Requires a
+    /// seed prompt.
     #[arg(long)]
     pub headless: bool,
-    /// Headless stdout format.  `text` (default) streams the root agent's
-    /// assistant text live; `json` holds it back and emits one result object
-    /// — reply, stop reason, steps, duration, usage, cost — when the run ends.
+    /// Headless stdout format. `text` (default) renders the deliberate reply
+    /// once as human-readable ral text; `json` emits one result object — reply,
+    /// stop reason, steps, duration, usage, cost — when the run ends.
     #[arg(long = "output-format", value_enum, default_value_t = OutputFormat::Text, requires = "headless")]
     pub output_format: OutputFormat,
     /// Authorise the agent to schedule its own wakeups (`schedule`,
