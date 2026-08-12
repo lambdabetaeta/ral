@@ -85,6 +85,15 @@ disallowed_methods = "deny"
 broken_intra_doc_links = "deny"
 private_intra_doc_links = "allow"
 
+# Unpacked debuginfo — macOS's default — leaves a `.rcgu.o` per codegen unit and
+# prunes none, which grew target/debug/deps to 700k files and cost ~20s in dyld on
+# each test binary's first exec.  A .dSYM is replaced per link, so the directory
+# measures the build, not its history.  Line tables are all we ask: a file and a
+# line in every backtrace, and nothing here is read in a debugger.
+[profile.dev]
+split-debuginfo = "packed"
+debug = "line-tables-only"
+
 [profile.release]
 lto = true
 codegen-units = 1
