@@ -163,10 +163,10 @@ Prelude functions cover common cases:
 
 ## Audit
 
-`audit { … }` evaluates its body and returns a report: a ral record with various fields about the running of the block, including `args` (which arguments it ran with), `children` (any further calls it made), exit `status`, its `stdout` and `stder`, and a ral `value` that it returned. `audit` turns any errors into record data, so it never fails. It also keeps stdout/stderr apart, so you need not `2>&1` to capture stderr. This is how you read a tool whose exit code is *data* (e.g. `grep` exit 1 meaning no match), or deliberate signal like `valgrind --error-exitcode=77`:
+`audit { … }` evaluates its body and returns a report with exactly four fields and no others: exit `status`, the ral `value` the body returned, an `error` string, and `children`. `children` is the flat list of what the body did, each entry carrying its own `kind`, `argv`, `status`, `stdout` and `stderr` (the last two `bytes`). Output lives there and nowhere else — a block has no `stdout` of its own, only the commands inside it do. `audit` turns any errors into record data, so it never fails, and it keeps each command's stdout and stderr apart, so you need not `2>&1` to capture stderr. This is how you read a tool whose exit code is *data* (e.g. `grep` exit 1 meaning no match), or a deliberate signal like `valgrind --error-exitcode=77`:
 
     let r      = audit { valgrind --error-exitcode=77 --leak-check=full ./a.out }
-    $r
+    let report = bytes-to-string $r[children][0][stdout]
     if $[ $r[status] == 77 ] { "leaks:\n$report" } else { #'clean'# }
 
 ## Concurrency
@@ -179,10 +179,11 @@ Prelude functions cover common cases:
 
 If you truly have nothing else to do, `await` the handle with a long timeout.
 
-`await` returns an `audit` tree in its `value` field, which you can examine to find what ran in the thread..
+`await` returns `[value, stdout, stderr]`. Its `stdout` and `stderr` are the thread's whole output, already merged across every command in it; its `value` is an `audit` report on the block, which you can examine to find what ran. A thread is the one thing that does own its output, so this is the one record with a top-level `stdout` — `audit` alone has none.
 
     let r = await $h
     let ok         = $[$r[value][status] == 0]                       # did the block succeed?
+    let thread_out = bytes-to-string $r[stdout]                      # everything the thread printed
     let cmd_stdout = bytes-to-string $r[value][children][0][stdout]  # stdout of first command
     let result     = $r[value][value]                                # the block's own return value
 

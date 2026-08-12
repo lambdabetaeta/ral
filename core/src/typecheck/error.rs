@@ -126,6 +126,10 @@ pub enum TypeErrorKind {
     },
     RowExtraField {
         label: String,
+        /// The labels the rejecting record does have, so the message can offer
+        /// the alternatives and not only the miss.  Empty when neither side had
+        /// concrete labels to name.
+        known: Vec<String>,
     },
     RowMissingField {
         label: String,

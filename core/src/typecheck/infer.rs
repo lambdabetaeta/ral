@@ -1131,7 +1131,7 @@ impl Inferencer<'_> {
             .unify_row(&Row::Var(scrut_row_var), &closed_scrut)
         {
             let translated = match kind {
-                TypeErrorKind::RowExtraField { label } => TypeErrorKind::CaseNotExhaustive {
+                TypeErrorKind::RowExtraField { label, .. } => TypeErrorKind::CaseNotExhaustive {
                     missing: vec![],
                     extra: vec![label],
                 },

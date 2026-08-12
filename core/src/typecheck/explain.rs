@@ -36,7 +36,7 @@ impl TypeErrorKind {
                     fmt_route_ctx(actual, &ctx)
                 )
             }
-            Self::RowExtraField { label } => {
+            Self::RowExtraField { label, .. } => {
                 format!("this record has no field named '{label}'")
             }
             Self::RowMissingField { label } => {
@@ -132,7 +132,7 @@ impl TypeErrorKind {
                 format!("{} cannot be invoked as a command", fmt_ty_ctx(ty, &ctx))
             }
             Self::RouteMismatch { .. } => "these disagree about where their payload lives".into(),
-            Self::RowExtraField { label } => format!("no field '{label}' in this record"),
+            Self::RowExtraField { label, .. } => format!("no field '{label}' in this record"),
             Self::RowMissingField { label } => format!("this record needs field '{label}'"),
             Self::CaseNotExhaustive { missing, extra } => {
                 match (missing.as_slice(), extra.as_slice()) {
@@ -288,6 +288,12 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
              `to-string $x | from-json`"
                 .to_string(),
         ),
+        // Phrased as the runtime phrases its own missing-key hint, so a reader
+        // meeting the two errors meets one language.
+        TypeErrorKind::RowExtraField { known, .. } if !known.is_empty() => Some(format!(
+            "available: {} — did you mean one of those?",
+            known.join(", ")
+        )),
         TypeErrorKind::FailStatusZero => Some("use `return` for a clean exit".to_string()),
         TypeErrorKind::ErrorRecordMessage { .. } => Some(
             "the message is the text the failure carries — render the value first, \

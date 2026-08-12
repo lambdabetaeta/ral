@@ -736,7 +736,8 @@ impl Unifier {
             | (Ty::Map(a1), Ty::Map(b1))
             | (Ty::Handle(a1), Ty::Handle(b1)) => self.unify_ty_inner(&a1, &b1, pairs, depth),
             (Ty::Record(r1), Ty::Record(r2)) | (Ty::Variant(r1), Ty::Variant(r2)) => {
-                self.unify_row_inner(&r1, &r2, pairs, depth)
+                let r = self.unify_row_inner(&r1, &r2, pairs, depth);
+                self.name_alternatives(&r1, &r2, r)
             }
             (Ty::Thunk(a1), Ty::Thunk(b1)) => self.unify_comp_ty_inner(&a1, &b1, pairs, depth),
             // The one coercion: a record stands in for a homogeneous map.
@@ -760,7 +761,37 @@ impl Unifier {
     /// no solution, or [`TypeErrorKind::TypeTooDeep`].
     pub fn unify_row(&mut self, a: &Row, b: &Row) -> Result<(), TypeErrorKind> {
         let mut pairs = Pairs::default();
-        self.unify_row_inner(a, b, &mut pairs, 0)
+        let r = self.unify_row_inner(a, b, &mut pairs, 0);
+        self.name_alternatives(a, b, r)
+    }
+
+    /// Fill in a rejected read's alternatives from the rows as they stood on
+    /// entry.  The Rémy rewrite peels labels off as it searches, so by the time
+    /// a closed row runs out there is nothing left to enumerate — only a frame
+    /// still holding both original rows can say what was on offer.
+    ///
+    /// Which row to name is decided, not assumed: the record that rejected the
+    /// label is the one whose own labels lack it, and either side can be that
+    /// record.
+    fn name_alternatives(
+        &mut self,
+        a: &Row,
+        b: &Row,
+        result: Result<(), TypeErrorKind>,
+    ) -> Result<(), TypeErrorKind> {
+        let Err(TypeErrorKind::RowExtraField { label, known }) = result else {
+            return result;
+        };
+        if !known.is_empty() {
+            return Err(TypeErrorKind::RowExtraField { label, known });
+        }
+        let (a_labels, _) = self.row_spine(a);
+        let known = if a_labels.contains(&label) {
+            self.row_spine(b).0
+        } else {
+            a_labels
+        };
+        Err(TypeErrorKind::RowExtraField { label, known })
     }
 
     /// `depth` is where this row sits, set by the record/variant arm that
@@ -803,7 +834,12 @@ impl Unifier {
             match (a, b) {
                 (Row::Empty, Row::Empty) => return Ok(()),
                 (Row::Empty, Row::Extend(l, _, _)) => {
-                    return Err(TypeErrorKind::RowExtraField { label: l });
+                    // The alternatives are named by whoever still holds the
+                    // original rows; the rewrite below has consumed them here.
+                    return Err(TypeErrorKind::RowExtraField {
+                        label: l,
+                        known: Vec::new(),
+                    });
                 }
                 (Row::Extend(l, _, _), Row::Empty) => {
                     return Err(TypeErrorKind::RowMissingField { label: l });
