@@ -24,7 +24,7 @@ ripgrep = ["ral-core/ripgrep"]
 [dependencies]
 ral-core   = { path = "../core", features = ["grep", "coreutils"] }
 blake3     = "1"
-genai      = "0.7.0-beta.17"
+genai      = "0.7.0-beta.18"
 reqwest    = { version = "0.13", features = ["json", "form"] }
 rustls     = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }
 webpki-roots = "1"
@@ -43,7 +43,7 @@ two-face     = { version = "0.5", default-features = false, features = ["syntect
 os_info    = { version = "3", default-features = false }
 unicode-width = "0.2"
 textwrap = "0.16"
-fff-search = "0.9"
+fff-search = "0.10"
 prompt-editor = { path = "../prompt-editor" }
 # Fuzzy matcher for the `/model` picker surface; already compiled
 # transitively via `fff-search`, so this resolves to the same crate at no
