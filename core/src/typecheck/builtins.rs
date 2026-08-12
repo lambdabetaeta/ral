@@ -68,7 +68,6 @@ fn scheme_curry_depth(factory: fn(&mut Unifier) -> Scheme) -> usize {
 pub struct BuiltinSig {
     pub args: ArgSig,
     pub(in crate::typecheck) result: CompTemplate,
-    pub value: Option<fn(&mut Unifier) -> Scheme>,
     pub diagnostic: BuiltinDiagnostic,
 }
 
@@ -278,15 +277,10 @@ pub mod sig {
         }
     }
 
-    const fn command(
-        args: ArgSig,
-        result: CompTemplate,
-        value: Option<fn(&mut super::Unifier) -> super::Scheme>,
-    ) -> BuiltinSig {
+    const fn command(args: ArgSig, result: CompTemplate) -> BuiltinSig {
         BuiltinSig {
             args,
             result,
-            value,
             diagnostic: BuiltinDiagnostic::None,
         }
     }
@@ -297,47 +291,43 @@ pub mod sig {
         BuiltinSig {
             args: ArgSig::Exact(NO_ARGS),
             result,
-            value: None,
             diagnostic: BuiltinDiagnostic::Decoder,
         }
     }
 
-    pub const TERMINAL_CONTROL: BuiltinSig = command(ArgSig::Exact(NO_ARGS), ret_bytes(), None);
+    pub const TERMINAL_CONTROL: BuiltinSig = command(ArgSig::Exact(NO_ARGS), ret_bytes());
 
-    pub const RANGE: BuiltinSig = command(ArgSig::Exact(TWO_INTS), pure(TyTemplate::ListInt), None);
+    pub const RANGE: BuiltinSig = command(ArgSig::Exact(TWO_INTS), pure(TyTemplate::ListInt));
 
     pub const FROM_BYTES: BuiltinSig = decoder(ret(TyTemplate::Bytes));
     pub const FROM_STRING: BuiltinSig = decoder(ret(TyTemplate::String));
     pub const FROM_JSON: BuiltinSig = decoder(ret(TyTemplate::Any));
     pub const FROM_LINES: BuiltinSig = decoder(CompTemplate::LinesStep);
 
-    pub const TO_BYTES: BuiltinSig = command(ArgSig::Exact(TO_BYTES_ARGS), ret_bytes(), None);
+    pub const TO_BYTES: BuiltinSig = command(ArgSig::Exact(TO_BYTES_ARGS), ret_bytes());
 
-    pub const TO_ANY_BYTES: BuiltinSig = command(ArgSig::Exact(ONE_ANY), ret_bytes(), None);
+    pub const TO_ANY_BYTES: BuiltinSig = command(ArgSig::Exact(ONE_ANY), ret_bytes());
 
-    pub const TO_LINE: BuiltinSig = command(ArgSig::Exact(ONE_ANY), ret_bytes(), None);
+    pub const TO_LINE: BuiltinSig = command(ArgSig::Exact(ONE_ANY), ret_bytes());
 
-    pub const TO_LINES: BuiltinSig = command(ArgSig::Exact(TO_LINES_ARGS), ret_bytes(), None);
+    pub const TO_LINES: BuiltinSig = command(ArgSig::Exact(TO_LINES_ARGS), ret_bytes());
 
-    pub const CHDIR: BuiltinSig = command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Unit), None);
-    pub const PATH_BOOL: BuiltinSig = command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Bool), None);
+    pub const CHDIR: BuiltinSig = command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Unit));
+    pub const PATH_BOOL: BuiltinSig = command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Bool));
 
-    pub const INT_PARSE: BuiltinSig = command(ArgSig::Exact(ONE_ANY), pure(TyTemplate::Int), None);
-    pub const FLOAT_PARSE: BuiltinSig =
-        command(ArgSig::Exact(ONE_ANY), pure(TyTemplate::Float), None);
-    pub const STR_PARSE: BuiltinSig =
-        command(ArgSig::Exact(ONE_ANY), pure(TyTemplate::String), None);
-    pub const ROUND: BuiltinSig = command(ArgSig::Exact(FLOAT_INT), pure(TyTemplate::Float), None);
+    pub const INT_PARSE: BuiltinSig = command(ArgSig::Exact(ONE_ANY), pure(TyTemplate::Int));
+    pub const FLOAT_PARSE: BuiltinSig = command(ArgSig::Exact(ONE_ANY), pure(TyTemplate::Float));
+    pub const STR_PARSE: BuiltinSig = command(ArgSig::Exact(ONE_ANY), pure(TyTemplate::String));
+    pub const ROUND: BuiltinSig = command(ArgSig::Exact(FLOAT_INT), pure(TyTemplate::Float));
     /// Shared by `floor`, `ceil`, and `trunc`.
-    pub const FLOAT_TO_INT: BuiltinSig =
-        command(ArgSig::Exact(ONE_FLOAT), pure(TyTemplate::Int), None);
+    pub const FLOAT_TO_INT: BuiltinSig = command(ArgSig::Exact(ONE_FLOAT), pure(TyTemplate::Int));
 
-    pub const ALIAS: BuiltinSig = command(ArgSig::Exact(ALIAS_ARGS), pure(TyTemplate::Unit), None);
-    pub const UNALIAS: BuiltinSig = command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Unit), None);
+    pub const ALIAS: BuiltinSig = command(ArgSig::Exact(ALIAS_ARGS), pure(TyTemplate::Unit));
+    pub const UNALIAS: BuiltinSig = command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Unit));
 
-    pub const HELP: BuiltinSig = command(ArgSig::Exact(NO_ARGS), ret_bytes(), None);
+    pub const HELP: BuiltinSig = command(ArgSig::Exact(NO_ARGS), ret_bytes());
 
-    pub const EXPLAIN: BuiltinSig = command(ArgSig::Exact(ONE_STR), ret_bytes(), None);
+    pub const EXPLAIN: BuiltinSig = command(ArgSig::Exact(ONE_STR), ret_bytes());
 
     /// `detach`: any argv, and a `{pid, desc}` receipt the checker leaves as a
     /// fresh variable — a result template names a [`TyTemplate`], which has no
@@ -345,20 +335,18 @@ pub mod sig {
     ///
     /// Command-only, because a partially applied value must not promise a
     /// process that outlives the session.
-    pub const DETACH: BuiltinSig = command(ArgSig::Any, pure(TyTemplate::Any), None);
+    pub const DETACH: BuiltinSig = command(ArgSig::Any, pure(TyTemplate::Any));
 
     /// `echo`: any argv — mixed types coexist through per-argument `str`
     /// rather than a shared element type — with `to-line`'s route, so
     /// pipeline typing treats it as the byte write it is.
-    pub const ECHO: BuiltinSig = command(ArgSig::Any, ret_bytes(), None);
+    pub const ECHO: BuiltinSig = command(ArgSig::Any, ret_bytes());
 
     /// `fg`/`bg`/`disown`, registered by the REPL host in
     /// `ral/src/repl/host_handlers.rs`: the job to act on, named.
-    pub const INT_TO_UNIT: BuiltinSig =
-        command(ArgSig::Exact(ONE_INT), pure(TyTemplate::Unit), None);
+    pub const INT_TO_UNIT: BuiltinSig = command(ArgSig::Exact(ONE_INT), pure(TyTemplate::Unit));
 
-    pub const STRING_TO_UNIT: BuiltinSig =
-        command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Unit), None);
+    pub const STRING_TO_UNIT: BuiltinSig = command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Unit));
 
     /// `fail`: an error record, open at the tail so a caught error re-raises
     /// with the fields `try` gave it.  The nonzero-status rule is a literal
@@ -366,7 +354,6 @@ pub mod sig {
     pub const FAIL: BuiltinSig = BuiltinSig {
         args: ArgSig::Exact(ONE_ERROR_RECORD),
         result: CompTemplate::Never,
-        value: None,
         diagnostic: BuiltinDiagnostic::FailStatusNonzero,
     };
 }
@@ -880,16 +867,12 @@ pub mod scheme {
 /// name or the entry has no value form.
 ///
 /// Resolution runs against `table`, the checked session's own surface, so a
-/// name means what that session evaluates.  A `Sig` rule's own `value` is an
-/// override for a signature the template vocabulary cannot state; every
-/// other `Sig` gets its scheme by [`derive_sig_scheme`].
+/// name means what that session evaluates.  A `Sig` rule's scheme is derived
+/// from its own signature by [`derive_sig_scheme`], the only source there is.
 pub fn builtin_scheme(table: &BuiltinTable, name: &str, u: &mut Unifier) -> Option<Scheme> {
     match table.get(name)?.type_rule {
         BuiltinTypeRule::Scheme(factory) => Some(factory(u)),
-        BuiltinTypeRule::Sig(sig) => match sig.value {
-            Some(factory) => Some(factory(u)),
-            None => derive_sig_scheme(&sig, u),
-        },
+        BuiltinTypeRule::Sig(sig) => derive_sig_scheme(&sig, u),
     }
 }
 

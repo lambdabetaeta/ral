@@ -136,10 +136,9 @@ type where every other signature is closed before generalisation.
 occurrence, at the cost of generality — a name's declared scheme, not the
 type an argument happened to instantiate it to during inference. With `_type`
 gone, the override this section describes — `Sig::value: Option<fn(&mut
-Unifier) -> Scheme>` — has no entry left that sets it to `Some`. Whether the
-override mechanism itself should now come out, or stays as the honest escape
-hatch for the next signature the template vocabulary can't state, is a
-separate question this page does not answer.
+Unifier) -> Scheme>` — had no entry left setting it to `Some`, and is since
+deleted after it; `derive_sig_scheme` is the sole source of a `Sig`'s value
+scheme.
 
 ## Consequences
 

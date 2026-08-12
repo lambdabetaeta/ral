@@ -88,12 +88,11 @@ rule whose shape follows from how command-like the builtin is:
   `detach`), or *divergent* (`fail`, result `Never`, carrying the
   nonzero-status diagnostic — [[design/failure|failure]]).
 
-A `Sig`'s first-class form is *derived* from it — the `Exact` argument templates
-become the curry spine and the result template the computation. The deriver is
-undefined exactly on the open argv shape, which is the
-[[invariants/fixed-arity|arity partition]] holding by construction. The registry
-keeps a hand-written override slot for a value scheme the templates cannot
-state; no entry uses it.
+A `Sig`'s first-class form is *derived* from it, and derivation is its only
+source — the `Exact` argument templates become the curry spine and the result
+template the computation. The deriver is undefined exactly on the open argv
+shape, which is the [[invariants/fixed-arity|arity partition]] holding by
+construction.
 
 Each codec being its own `Sig` rather than one polymorphic `decode` / `encode` is
 what lets `from-json < file` dispatch straight through the command arm with the

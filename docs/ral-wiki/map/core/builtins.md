@@ -26,10 +26,8 @@ or `Scheme` (a first-class polytype). The streaming reducer `fold-lines`
 registers as an ordinary `Scheme` whose factory writes its forwarded
 [[design/types|payload route]] directly ([[map/core/typecheck|typecheck]]);
 there is no separate reducer arm. A `Sig`-ruled entry's first-class form is
-derived from the signature by `derive_sig_scheme`
-([[invariants/fixed-arity|fixed-arity]]); `BuiltinSig::value` remains as the
-hand-written override for a scheme the templates cannot state, and no entry sets
-it.
+derived from the signature by `derive_sig_scheme` and nowhere else
+([[invariants/fixed-arity|fixed-arity]]).
 Builtins are *shell-scoped*: each shell's session carries a `BuiltinTable`
 ([[map/core/shell-state|shell-state]]) seeded from `CORE_BUILTINS`
 (`core_builtin_table`), and a host's extra sets ride a `HostSurface` into
