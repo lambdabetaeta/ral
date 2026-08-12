@@ -1191,6 +1191,18 @@ impl Inferencer<'_> {
             },
             None => {
                 self.infer_args(args);
+                // A declared arity is an application, and an application has no
+                // argv.  `ArgSig::Any` is a genuine one, and `...` is its
+                // notation, so it passes.
+                if let Some(arity) = sig.fixed_arity() {
+                    self.refuse_spread(
+                        args,
+                        crate::typecheck::error::SpreadHead::Builtin {
+                            name: name.into(),
+                            arity,
+                        },
+                    );
+                }
                 &[]
             }
         };

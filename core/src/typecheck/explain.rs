@@ -2,9 +2,10 @@
 //! as data; every sentence a user reads is a pure function of that data,
 //! written here and nowhere else.
 
-use super::error::{CompDiff, Reason, TypeErrorKind};
+use super::error::{CompDiff, Reason, SpreadHead, TypeErrorKind};
 use super::fmt::{FmtCtx, fmt_route_ctx, fmt_ty_ctx};
 use super::ty::Ty;
+use crate::serial::plural;
 use crate::syntax::ast::BinaryOpKind;
 
 impl TypeErrorKind {
@@ -79,6 +80,18 @@ impl TypeErrorKind {
             Self::DecoderTakesNoArgument { name } => {
                 format!("`{name}` takes no argument — it reads the byte channel")
             }
+            Self::SpreadIntoApplication { head } => {
+                let takes = match head {
+                    SpreadHead::Builtin { name, arity } => {
+                        format!("`{name}` takes {}", plural(*arity, "argument"))
+                    }
+                    SpreadHead::Applied => "this head takes its arguments".into(),
+                };
+                format!(
+                    "{takes} by application, and `...` spreads an argv — \
+                     which only a command, an external, or a handler has"
+                )
+            }
             Self::FailStatusZero => {
                 "`fail [status: 0]` is not allowed — fail requires a nonzero status".into()
             }
@@ -146,6 +159,7 @@ impl TypeErrorKind {
                 }
             }
             Self::ErrorRecordMessage { .. } => "this `message` is not text".into(),
+            Self::SpreadIntoApplication { .. } => "this spread has no argv to fill".into(),
             Self::CaseOnNonVariant { .. }
             | Self::ControlOperatorAsValue { .. }
             | Self::HandlerNotFirstClass { .. }
@@ -283,6 +297,22 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         TypeErrorKind::BuiltinArity { at_most: true, .. } => {
             Some("remove the extra arguments or pass a single list value".to_string())
         }
+        // Name the rewrite, not merely the refusal: this is the one place the
+        // rule costs a user a program that ran.
+        TypeErrorKind::SpreadIntoApplication { head } => Some(match head {
+            SpreadHead::Builtin { name, arity } if *arity == 1 => {
+                format!("pass the element itself, as in `{name} $xs[0]`, or spread into a command")
+            }
+            SpreadHead::Builtin { name, arity } => format!(
+                "pass the {} one at a time, as in `{name} $xs[0] $xs[1]`, \
+                 or spread into a command",
+                plural(*arity, "argument")
+            ),
+            SpreadHead::Applied => {
+                "index the list at the call, as in `$f $xs[0]`, or spread into a command"
+                    .to_string()
+            }
+        }),
         TypeErrorKind::DecoderTakesNoArgument { .. } => Some(
             "to decode a value in hand, pipe it through the matching encoder: \
              `to-string $x | from-json`"

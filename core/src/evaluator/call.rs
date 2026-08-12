@@ -34,12 +34,7 @@ pub(crate) fn invoke(
             // Evaluated, not tail-called: the application consumes their values.
             let head_val = eval_comp(head, mooring, shell, Tail::No)?;
             let arg_vals = eval_call_args(app_args, shell)?;
-            // `f ...$xs` with an empty `$xs` leaves nothing to apply.
-            if arg_vals.is_empty() {
-                Ok(head_val)
-            } else {
-                eval_app(head_val, arg_vals, tail, mooring, shell)
-            }
+            eval_app(head_val, arg_vals, tail, mooring, shell)
         }
 
         CompKind::Scope(ScopeOp::Redirect { body, redirects }) => {

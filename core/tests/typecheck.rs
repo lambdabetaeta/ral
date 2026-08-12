@@ -2001,6 +2001,104 @@ fn saturated_encoders_typecheck() {
     ok("echo !{to-csv [[a: 1]]}");
 }
 
+// ─── A spread is the notation of an argv ─────────────────────────────────────
+//
+// `...` splices a list into an argv, and only a command, an external, an
+// open-argv builtin, or a handler arm has one.  A value takes its arguments by
+// application, curried, at the arity its own type declares, so a spread in a
+// value's argument position names nothing to fill: T0056.
+
+/// A fixed-arity builtin declares its arity, so the diagnostic can name both it
+/// and the rewrite.
+#[test]
+fn a_spread_into_a_fixed_arity_builtin_is_refused() {
+    let errs = raw_errors("let xs = [1]; to-json ...$xs");
+    let codes: Vec<_> = errs.iter().map(|e| e.kind.code()).collect();
+    assert_eq!(codes, ["T0056"]);
+    assert!(
+        has_hint(&errs, "to-json $xs[0]"),
+        "the hint should name the rewrite, got: {errs:?}"
+    );
+}
+
+/// A bound lambda has no signature to name an arity, so the diagnostic speaks
+/// of the head instead, and the hint sketches the rewrite's shape rather than
+/// this call's own names.
+#[test]
+fn a_spread_into_a_bound_lambda_is_refused() {
+    let errs = raw_errors("let g = { |x| return $x }; let ys = [1]; g ...$ys");
+    let codes: Vec<_> = errs.iter().map(|e| e.kind.code()).collect();
+    assert_eq!(codes, ["T0056"]);
+    assert!(
+        has_hint(&errs, "$f $xs[0]"),
+        "the hint should sketch the rewrite, got: {errs:?}"
+    );
+}
+
+/// The head may be a parameter, its arity unknown until the call site supplies
+/// it.  The refusal is structural, so a value reached through a parameter is
+/// refused where it is written, not where it is passed.
+#[test]
+fn a_spread_into_a_value_parameter_is_refused() {
+    let codes: Vec<_> = raw_errors("let appl = { |f args| $f ...$args }; appl $to-json [1]")
+        .iter()
+        .map(|e| e.kind.code())
+        .collect();
+    assert_eq!(codes, ["T0056"]);
+}
+
+/// Two spreads are one mistake, and one rewrite answers both.
+#[test]
+fn only_the_first_spread_of_a_call_is_reported() {
+    let codes: Vec<_> = raw_errors("let xs = [1]; to-json ...$xs ...$xs")
+        .iter()
+        .map(|e| e.kind.code())
+        .collect();
+    assert_eq!(codes, ["T0056"]);
+}
+
+/// An error inside a refused spread is still an error: the subexpressions are
+/// inferred before the spread itself is judged.
+#[test]
+fn a_refused_spread_still_reports_errors_inside_it() {
+    let codes: Vec<_> = raw_errors("let r = [a: 1]; to-json ...$r[missing]")
+        .iter()
+        .map(|e| e.kind.code())
+        .collect();
+    assert_eq!(codes, ["T0020", "T0056"]);
+}
+
+/// `echo` and `detach` declare an open argv (`ArgSig::Any`), and `...` is
+/// exactly its notation.
+#[test]
+fn spreads_into_an_open_argv_builtin_are_legal() {
+    ok("let xs = [hello, world]; echo ...$xs");
+    ok("let xs = ['300']; detach #'a long sleep'# /bin/sleep ...$xs");
+}
+
+/// An external's argv is the operating system's, so a spread is how a list
+/// becomes it.
+#[test]
+fn a_spread_into_an_external_is_legal() {
+    ok("let xs = ['-n', hi]; /bin/echo ...$xs");
+}
+
+/// A handler arm and an alias arm both take an argv, and both take a spread —
+/// into the arm's own body, and into the head the arm defines.
+#[test]
+fn spreads_into_a_handler_or_alias_arm_are_legal() {
+    ok(r"within [handlers: [foo: { |args| echo ...$args }]] { let xs = [1]; foo ...$xs }");
+    ok(r"alias myecho { |a| echo ...$a }; let xs = [hi]; myecho ...$xs");
+}
+
+/// A list literal's spread and a rest pattern are a different construct
+/// altogether — list surgery, not an argv — and the rule leaves them be.
+#[test]
+fn list_literal_spreads_and_rest_patterns_are_untouched() {
+    ok("let xs = [1]; return [1, ...$xs, 2]");
+    ok("let [first, ...rest] = [1, 2, 3]; return $rest");
+}
+
 // ─── Row termination and duplicate-key semantics ──────────────────────────────
 //
 // These pin three row-subsystem repairs: row unification must terminate with

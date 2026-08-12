@@ -315,13 +315,34 @@ impl Inferencer<'_> {
         }
     }
 
+    /// Refuse a spread that reached an application, blaming the spread itself
+    /// rather than the whole call.  Only the first is named: the rest are the
+    /// same mistake, and one fix answers them all.
+    pub(super) fn refuse_spread(&mut self, args: &crate::ir::Args, head: super::error::SpreadHead) {
+        let Some(span) = args
+            .iter()
+            .find(|e| matches!(e.item, ValListElem::Spread(_)))
+            .map(|e| e.span)
+        else {
+            return;
+        };
+        self.with_span(span, |this| {
+            this.ctx
+                .diagnose(TypeErrorKind::SpreadIntoApplication { head });
+        });
+    }
+
     pub(super) fn apply_args(&mut self, mut cty: CompTy, args: &crate::ir::Args) -> CompTy {
-        // A spread makes the arity dynamic: infer the subexpressions so errors
-        // inside them still surface, but constrain no parameter.
+        // A value takes its arguments by application, at an arity its own type
+        // declares, so it has no argv and `...` has nothing to spread into.
+        // Both callers are value-side, so the refusal needs no test on the head:
+        // there is no such thing as an open-argv value for it to discriminate.
+        // The subexpressions are still inferred, so errors inside them surface.
         let Some(positional) = crate::ir::args::positional(args) else {
             for sub in crate::ir::args::iter_subvals(args) {
                 let _ = self.infer_val(sub);
             }
+            self.refuse_spread(args, super::error::SpreadHead::Applied);
             return cty;
         };
         for (i, arg) in positional.into_iter().enumerate() {

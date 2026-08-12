@@ -104,6 +104,17 @@ pub enum Reason {
     RoutePin,
 }
 
+/// What a refused spread was aimed at — as much of the head as the refusing
+/// site can name, which is all the rewrite needs.
+#[derive(Debug, Clone)]
+pub enum SpreadHead {
+    /// A builtin, whose signature declares both name and arity.
+    Builtin { name: String, arity: usize },
+    /// Any other applied head — a lambda, a parameter, a bound name — whose
+    /// arity is not yet known, and need never be for the spread to be wrong.
+    Applied,
+}
+
 /// The structural cause of a type error, raised by the unifier or inferencer.
 /// `InferCtx` attaches the span; `diagnostic.rs` renders it.
 #[derive(Debug, Clone)]
@@ -169,6 +180,12 @@ pub enum TypeErrorKind {
     DecoderTakesNoArgument {
         name: String,
     },
+    /// `...` in the argument list of a value.  A spread is the notation of an
+    /// argv, which only a command, an external, or a handler has; a value takes
+    /// its arguments by application, at an arity its own type declares.
+    SpreadIntoApplication {
+        head: SpreadHead,
+    },
     /// A nonzero status is required, so `fail` cannot masquerade as a clean exit.
     FailStatusZero,
     /// An error record's `message` is neither `String` nor `Bytes`: the one
@@ -219,6 +236,7 @@ impl TypeErrorKind {
             Self::MalformedUnalias { .. } => "T0053",
             Self::DecoderTakesNoArgument { .. } => "T0054",
             Self::ErrorRecordMessage { .. } => "T0055",
+            Self::SpreadIntoApplication { .. } => "T0056",
             Self::IndexIntoThunk => "T0060",
             Self::FieldOnNonRecord { .. } => "T0061",
             Self::DynamicIndexOnScalar { .. } => "T0062",

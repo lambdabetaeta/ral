@@ -1129,8 +1129,12 @@ the body. If arguments remain after the call returns, ral tries to apply them
 to the returned value. It reports an arity error when that value is not
 callable.
 
-ral checks known arity and argument-type errors before execution. A spread can
-make the final arity unknown until runtime.
+ral checks known arity and argument-type errors before execution. An
+application's arity is always known: a value takes its arguments one at a time,
+at the arity its own definition declares, so the arguments written at a call
+site are exactly the arguments that arrive. Nothing in that position stands for
+an unknown number of them, because `...` forms an argument list and a value
+takes none; see *Arguments and spreading*.
 
 ### 6.6. Arguments and spreading
 
@@ -1138,15 +1142,35 @@ Command arguments are values. Ordinary and quoted words produce strings.
 Numeric and Boolean literals keep their types. `$name` supplies a bound value,
 and `!{…}` supplies a forced block's result.
 
-`...value` spreads a list into positional arguments:
+`...value` spreads a list into an argument list. An argument list is the flat
+sequence of arguments that a bundled or external command, a builtin without
+fixed surface arity, or a handler or alias arm receives:
 
 ```ral
 let flags = ['--all', '--long']
 ls ...$flags '/tmp'
 ```
 
-The spread value must be a list. Its elements are inserted in order and remain
-ral values when passed to a function, builtin, or handler.
+The spread value must be a list. Its elements are inserted in order at that
+position and remain ral values.
+
+A value receives no argument list. It takes its arguments by application, one at
+a time, at the arity its definition declares, so a spread among them has nothing
+to spread into. ral reports a spread in the argument position of a value — a
+block, a fixed-arity builtin, or anything reached through a binding — before
+execution:
+
+```ral
+let numbers = [1, 2]
+let add = { |a b| $[$a + $b] }
+add ...$numbers               # error: a value takes no argument list
+add 1 2                       # 3
+echo ...$numbers              # 1 2
+```
+
+The same `...` marker also builds a list (`[1, ...$middle, 4]`) and matches the
+tail of one (`[first, ...rest]`). Those are the forms of *Lists* and *Patterns*:
+they construct and destructure a list, and neither forms an argument list.
 
 Operating-system arguments must become text. ral formats strings, integers,
 floats, Booleans, `Unit`, and tagged values. `Unit` becomes an empty argument.

@@ -16,7 +16,9 @@ mod common;
 
 use ral_core::transport::{Program, Run};
 use ral_core::types::{Break, Capabilities, Escape, Settled, Shell, Status, Value};
-use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, builtins};
+use ral_core::{
+    RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, StaticDiagnostics, builtins,
+};
 
 fn fresh_shell() -> Shell {
     let mut shell = Shell::default();
@@ -77,8 +79,9 @@ fn expect_error(source: &str, needle: &str) {
     }
 }
 
-/// Run `source` expecting it to be rejected before evaluation.
-fn expect_static(source: &str) {
+/// Run `source` expecting it to be rejected before evaluation, and hand back
+/// the diagnostics that refused it.
+fn expect_static(source: &str) -> StaticDiagnostics {
     let mut shell = fresh_shell();
     match shell.run(RunRequest {
         run: Run {
@@ -99,11 +102,21 @@ fn expect_static(source: &str) {
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        RunReport::Static { .. } => {}
+        RunReport::Static { diagnostics } => diagnostics,
         RunReport::Ran { ending, .. } => {
             panic!("{source:?}: expected a static rejection, got {ending:?}")
         }
     }
+}
+
+/// Run `source` expecting one type error, whose code must be `code`.
+fn expect_type_code(source: &str, code: &str) {
+    let codes: Vec<_> = match expect_static(source) {
+        StaticDiagnostics::Types(errs) => errs.iter().map(|e| e.kind.code()).collect(),
+        StaticDiagnostics::Parse(e) => panic!("{source:?}: expected a type error, got parse {e:?}"),
+        StaticDiagnostics::Host(e) => panic!("{source:?}: expected a type error, got host {e:?}"),
+    };
+    assert_eq!(codes, [code], "{source:?}");
 }
 
 // ── B3 — `dedent` counts characters, preserves blanks and CRLF ────────────
@@ -342,28 +355,30 @@ fn lines_keeps_interior_blank() {
 // The deleted `__decode-captured` builtin indexed `args[0]` and a spread call
 // reached it with an empty argv, panicking past a catchable error. Its
 // sibling encoders (`to-json`, `to-csv`, `to-bytes`, `to-string`, `to-line`,
-// `to-lines`) share that same `&args[0]` shape, but each is fixed-arity-1:
-// application collects arguments before it will call a Native's body at all,
-// so an under-supplied spread curries instead of dispatching — there is
-// nothing here for a spread to reach empty-handed. These tests pin that
-// survival against a regression in that gate.
+// `to-lines`) share that same `&args[0]` shape, and each takes its one
+// argument by application: it has no argv, so `...` has nothing to spread
+// into and the checker refuses the call outright. These tests pin that the
+// shape is unreachable, at the door rather than in the body.
 
 #[test]
-fn to_json_survives_an_empty_spread_argument() {
-    let mut shell = fresh_shell();
-    assert!(eval(&mut shell, "let nothing = []\nto-json ...$nothing\nreturn unit").is_ok());
+fn a_spread_never_reaches_to_json() {
+    expect_type_code(
+        "let nothing = []\nto-json ...$nothing\nreturn unit",
+        "T0056",
+    );
 }
 
 #[test]
-fn to_csv_survives_an_empty_spread_argument() {
-    let mut shell = fresh_shell();
-    assert!(eval(&mut shell, "let nothing = []\nto-csv ...$nothing\nreturn unit").is_ok());
+fn a_spread_never_reaches_to_csv() {
+    expect_type_code("let nothing = []\nto-csv ...$nothing\nreturn unit", "T0056");
 }
 
 #[test]
-fn to_bytes_survives_an_empty_spread_argument() {
-    let mut shell = fresh_shell();
-    assert!(eval(&mut shell, "let nothing = []\nto-bytes ...$nothing\nreturn unit").is_ok());
+fn a_spread_never_reaches_to_bytes() {
+    expect_type_code(
+        "let nothing = []\nto-bytes ...$nothing\nreturn unit",
+        "T0056",
+    );
 }
 
 // ── an encoder omitting its value is refused before it runs ───────────────

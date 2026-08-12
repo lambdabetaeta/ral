@@ -394,7 +394,9 @@ impl<X> FOValue<X> {
     }
 }
 
-fn plural(n: usize, noun: &str) -> String {
+/// `n` of `noun`, agreeing in number: the one spelling of a count in prose,
+/// shared with the type errors' own sentences in `typecheck::explain`.
+pub(crate) fn plural(n: usize, noun: &str) -> String {
     if n == 1 {
         format!("1 {noun}")
     } else {
