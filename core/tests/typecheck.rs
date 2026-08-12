@@ -1951,6 +1951,56 @@ fn decoder_is_a_first_class_nullary_native() {
     ok("let f = $from-json; return $f");
 }
 
+// ─── Codec encoders take their value as an argument ──────────────────────────
+//
+// Dually, every `to-X` writes the byte channel and takes the value to encode as
+// its one argument.  Omitting it is an arity error (T0050); nothing supplies the
+// argument from the channel or from an upstream stage.
+
+/// One T0050 per encoder, and only one: the missing argument is the whole
+/// story in the bare form and under a capture alike.
+#[test]
+fn encoder_without_its_value_is_an_arity_error() {
+    for name in [
+        "to-bytes",
+        "to-string",
+        "to-line",
+        "to-lines",
+        "to-json",
+        "to-csv",
+    ] {
+        for src in [name.to_string(), format!("echo !{{{name}}}")] {
+            let codes: Vec<_> = raw_errors(&src).iter().map(|e| e.kind.code()).collect();
+            assert_eq!(codes, ["T0050"], "expected one T0050 for {src:?}");
+        }
+    }
+}
+
+/// A pipe carries bytes, so an upstream stage is no argument either: the
+/// encoder feeding an external consumer names its own value.  An unsaturated
+/// stage is typed as the function it is, which the stage shape rejects in turn,
+/// so the arity slip is both the first diagnostic and the cause of the second.
+#[test]
+fn an_encoder_stage_takes_its_value_not_the_upstream_one() {
+    let codes: Vec<_> = raw_errors("[1, 2] | to-lines | grep .")
+        .iter()
+        .map(|e| e.kind.code())
+        .collect();
+    assert_eq!(codes, ["T0050", "T0011"]);
+    ok("to-lines [1, 2] | grep .");
+}
+
+/// Written out, each encoder takes the value its registry doc promises.
+#[test]
+fn saturated_encoders_typecheck() {
+    ok("echo !{to-bytes [104, 105]}");
+    ok("echo !{to-string 'hi'}");
+    ok("echo !{to-line 1}");
+    ok("echo !{to-lines ['a', 'b']}");
+    ok("echo !{to-json [a: 1]}");
+    ok("echo !{to-csv [[a: 1]]}");
+}
+
 // ─── Row termination and duplicate-key semantics ──────────────────────────────
 //
 // These pin three row-subsystem repairs: row unification must terminate with

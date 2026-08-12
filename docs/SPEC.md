@@ -1344,7 +1344,7 @@ pipe, because `from-json` returns its value and writes nothing. Bind the
 decoded value and use ordinary application, or encode it again explicitly
 before another byte pipeline.
 
-An encoder takes a value in data-last position and writes bytes:
+An encoder takes its value as an ordinary argument and writes bytes:
 
 | Encoder | Accepted value | Output |
 |---|---|---|

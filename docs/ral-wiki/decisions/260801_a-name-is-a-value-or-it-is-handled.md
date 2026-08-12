@@ -37,7 +37,7 @@ value is having no function type to inhabit.
 
 `BuiltinEntry::fixed_arity` (`core/src/types/builtin.rs:79`) is the whole
 classification, derived rather than declared: a `Sig`'s arity is structural
-(`ArgSig::Exact`/`DataLast` give their slot count, `Optional`/`Any` give none),
+(`ArgSig::Exact` gives its slot count, `Optional`/`Any` give none),
 a `Scheme`'s is the curry-spine depth of its value form
 (`scheme_curry_depth`, `core/src/typecheck/builtins.rs:51`). `native_value`
 (`core/src/types/builtin.rs:219`) is the one door both boot and wire hydration
@@ -119,7 +119,7 @@ Hand-maintained restatements of the type rule are deleted rather than guarded:
 the registry's `arity:` field with its consistency check, and the hand-written
 value schemes, which now derive from the signature through the projections that
 already existed (`derive_sig_scheme`, `core/src/typecheck/builtins.rs:1058`).
-The deriver is total on `Exact`/`DataLast` and undefined on `Optional`/`Any`, so
+The deriver is total on `Exact` and undefined on `Optional`/`Any`, so
 "fixed arity ⇒ a value scheme, variadic ⇒ none" holds by construction. One
 override survived at the time of this decision: `_type`, whose scheme
 correlated an argument and a result (`α → F α`) — a fact the template

@@ -366,6 +366,28 @@ fn to_bytes_survives_an_empty_spread_argument() {
     assert!(eval(&mut shell, "let nothing = []\nto-bytes ...$nothing\nreturn unit").is_ok());
 }
 
+// ── an encoder omitting its value is refused before it runs ───────────────
+//
+// `!{to-json}` captures a byte-routed operand, whose value is `Unit` by typing
+// (WF-2) — something `eval_capture` asserts rather than checks. An encoder
+// without its argument is a partial `Native`, so the arity gate is what keeps
+// the assert honest: the run door refuses each of the six before evaluation,
+// and only saturated calls ever reach the capture.
+
+#[test]
+fn captured_encoders_without_a_value_are_rejected() {
+    for name in [
+        "to-bytes",
+        "to-string",
+        "to-line",
+        "to-lines",
+        "to-json",
+        "to-csv",
+    ] {
+        expect_static(&format!("echo !{{{name}}}"));
+    }
+}
+
 // ── B14 — coverage for previously untested builtins ───────────────────────
 
 #[test]

@@ -76,7 +76,7 @@ impl BuiltinSig {
     /// `None` for optional or open argument policies.
     pub const fn fixed_arity(&self) -> Option<usize> {
         match self.args {
-            ArgSig::Exact(t) | ArgSig::DataLast(t) => Some(t.len()),
+            ArgSig::Exact(t) => Some(t.len()),
             _ => None,
         }
     }
@@ -86,7 +86,6 @@ impl BuiltinSig {
 #[derive(Clone, Copy)]
 pub enum ArgSig {
     Exact(&'static [ArgTemplate]),
-    DataLast(&'static [ArgTemplate]),
     Optional(ArgTemplate),
     Any,
 }
@@ -308,13 +307,13 @@ pub mod sig {
     pub const FROM_JSON: BuiltinSig = decoder(ret(TyTemplate::Any));
     pub const FROM_LINES: BuiltinSig = decoder(CompTemplate::LinesStep);
 
-    pub const TO_BYTES: BuiltinSig = command(ArgSig::DataLast(TO_BYTES_ARGS), ret_bytes(), None);
+    pub const TO_BYTES: BuiltinSig = command(ArgSig::Exact(TO_BYTES_ARGS), ret_bytes(), None);
 
-    pub const TO_ANY_BYTES: BuiltinSig = command(ArgSig::DataLast(ONE_ANY), ret_bytes(), None);
+    pub const TO_ANY_BYTES: BuiltinSig = command(ArgSig::Exact(ONE_ANY), ret_bytes(), None);
 
-    pub const TO_LINE: BuiltinSig = command(ArgSig::DataLast(ONE_ANY), ret_bytes(), None);
+    pub const TO_LINE: BuiltinSig = command(ArgSig::Exact(ONE_ANY), ret_bytes(), None);
 
-    pub const TO_LINES: BuiltinSig = command(ArgSig::DataLast(TO_LINES_ARGS), ret_bytes(), None);
+    pub const TO_LINES: BuiltinSig = command(ArgSig::Exact(TO_LINES_ARGS), ret_bytes(), None);
 
     pub const CHDIR: BuiltinSig = command(ArgSig::Optional(STR), pure(TyTemplate::Unit), None);
     pub const PATH_BOOL: BuiltinSig = command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Bool), None);
@@ -901,9 +900,9 @@ pub fn builtin_type_hint(table: &BuiltinTable, name: &str) -> Option<String> {
     Some(fmt_scheme(&scheme))
 }
 
-/// Derive a `Sig`-ruled builtin's value scheme: `Exact`/`DataLast` argument
-/// templates become the curry spine, the result template the comp.  `None`
-/// for `Optional`/`Any` — nothing to curry — so fixed arity yields a scheme
+/// Derive a `Sig`-ruled builtin's value scheme: the `Exact` argument templates
+/// become the curry spine, the result template the comp.  `None` for
+/// `Optional`/`Any` — nothing to curry — so fixed arity yields a scheme
 /// and variadic arity none, by construction.  `OneOf` derives conservatively
 /// to a fresh variable: command position keeps the precise diagnostic, and
 /// the body still refuses at runtime.
@@ -914,7 +913,7 @@ pub fn builtin_type_hint(table: &BuiltinTable, name: &str) -> Option<String> {
 /// `comp_ty_bindings`.
 fn derive_sig_scheme(sig: &BuiltinSig, u: &mut Unifier) -> Option<Scheme> {
     let args = match sig.args {
-        ArgSig::Exact(a) | ArgSig::DataLast(a) => a,
+        ArgSig::Exact(a) => a,
         ArgSig::Optional(_) | ArgSig::Any => return None,
     };
     let params: Vec<Ty> = args.iter().map(|t| arg_template_ty(*t, u)).collect();
@@ -1143,12 +1142,12 @@ impl Inferencer<'_> {
             self.ctx.diagnose(TypeErrorKind::FailStatusZero);
         }
 
-        match crate::ir::args::positional(args) {
+        // The templates the call left unwritten.  Every policy but a short
+        // `Exact` consumes all it is given, so only that arm has a residue.
+        let residual: &[ArgTemplate] = match crate::ir::args::positional(args) {
             Some(positional) => match sig.args {
-                ArgSig::Exact(expected) | ArgSig::DataLast(expected) => {
-                    let missing_data_last = matches!(sig.args, ArgSig::DataLast(_))
-                        && positional.len() + 1 == expected.len();
-                    if positional.len() != expected.len() && !missing_data_last {
+                ArgSig::Exact(expected) => {
+                    if positional.len() != expected.len() {
                         // A decoder's `expected` is empty, so arriving here
                         // means an argument was written.
                         self.ctx.diagnose(match sig.diagnostic {
@@ -1169,6 +1168,7 @@ impl Inferencer<'_> {
                     for arg in positional.iter().skip(expected.len()) {
                         let _ = self.infer_val(arg);
                     }
+                    &expected[positional.len().min(expected.len())..]
                 }
                 ArgSig::Optional(template) => {
                     if positional.len() > 1 {
@@ -1182,13 +1182,28 @@ impl Inferencer<'_> {
                         let actual = self.infer_val(arg);
                         self.unify_arg_template(&actual, template);
                     }
+                    &[]
                 }
-                ArgSig::Any => self.infer_args(args),
+                ArgSig::Any => {
+                    self.infer_args(args);
+                    &[]
+                }
             },
-            None => self.infer_args(args),
-        }
+            None => {
+                self.infer_args(args);
+                &[]
+            }
+        };
 
-        sig_comp_ty(&sig, &mut self.ctx.unifier)
+        // An under-applied builtin is a value awaiting the rest, so its type is
+        // the residual spine — the same shape `apply_args` yields for an
+        // under-applied lambda.  Granting the saturated result here would make
+        // the recorded type an accomplice of the arity slip, and a computation
+        // boundary downstream would believe it.
+        let saturated = sig_comp_ty(&sig, &mut self.ctx.unifier);
+        residual.iter().rev().fold(saturated, |acc, template| {
+            fun(arg_template_ty(*template, &mut self.ctx.unifier), acc)
+        })
     }
 }
 
@@ -1213,7 +1228,7 @@ mod tests {
             let BuiltinTypeRule::Sig(sig) = entry.type_rule else {
                 continue;
             };
-            let fixed = matches!(sig.args, ArgSig::Exact(_) | ArgSig::DataLast(_));
+            let fixed = matches!(sig.args, ArgSig::Exact(_));
             let synopsis = entry.doc.split('—').next().unwrap_or(entry.doc);
             let optional_looking = synopsis.split('[').skip(1).any(|rest| {
                 let bracketed = rest.split(']').next().unwrap_or(rest);

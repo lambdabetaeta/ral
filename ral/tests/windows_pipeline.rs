@@ -99,7 +99,7 @@ fn helper_to_external_pipeline_runs() {
     let out = run(
         "win_pipeline_ral_to_ext",
         r#"
-        [a, b, c, ""] | to-lines | findstr /N .
+        to-lines [a, b, c, ""] | findstr /N .
         "#,
     );
     assert_eq!(out.status, 0, "stderr={}", out.stderr);
