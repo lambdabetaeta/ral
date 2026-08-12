@@ -4,9 +4,9 @@ Like every shell, `ral` runs commands:
     cat foo.txt | wc -l
     echo "hello" > /tmp/out
 
-Commands are sequenced by newlines or `;`. An uncaught failure aborts the whole script: `./configure; make` runs `make` only when configuration succeeds. `?` runs the second command when the first failed: `cat VERSION ? #'unversioned'#`. There is no `&&` nor `||`.
+Commands are sequenced by newlines or `;` (there isno `&&`). An uncaught failure aborts the whole script: `./configure; make` runs `make` only when configuration succeeds. `?` runs the second command when the first failed: `cat VERSION ? #'unversioned'#` (there is no `||`).
 
-`ral` is essentially call-by-push-value with recursion, recursive types, and one effect: an exec call. Its value types are `Unit`, `Bool`, `Int`, `Float`, String, Bytes, lists, records, maps, variants, thread handles, and blocks (= parameterized thunked commands). A command may not be used as a value. Should you wish to use one inline, you must make it into an anonymous block and force it: `!{cmd}`.
+`ral` is essentially call-by-push-value with recursion, recursive types, and one effect: an exec call. Its value types are `Unit`, `Bool`, `Int`, `Float`, String, Bytes, lists, records, maps, variants, thread handles, and blocks (= parameterized, thunked commands). A command may not be used as a value. Should you wish to use one inline, you must make it into an anonymous block and force it: `!{cmd}`.
 
 ## Definitions
 
@@ -17,7 +17,7 @@ Commands are sequenced by newlines or `;`. An uncaught failure aborts the whole 
     let n      = line-count notes.txt
     echo "$branch has $n lines of notes"
 
-The variables `branch`, `body`, and `n` are then **AVAILABLE IN EVERY RAL TOOL CALL, OVER EVERY TURN, FOR THE REST OF THE SESSION**. **YOU DO NOT NEED TO RE-DEFINE THEM IN THE NEXT TURN, JUST USE THEM AGAIN.**
+The variables `branch`, `body`, and `n` are then **AVAILABLE IN EVERY TURN, FOR THE REST OF THE SESSION**. **YOU DO NOT NEED TO RE-DEFINE THEM IN THE NEXT TURN, JUST USE THEM AGAIN.**
 
 Captured output is a `String`: split it with `lines`, parse it with `int`/`float`, or decode it by putting it back on the byte channel (`to-string $s | from-json`).
 
@@ -56,9 +56,9 @@ Blocks support recursive definitions.
 
 ## Pipelines
 
-`ral` has one pipe, and it carries bytes from one command to the next (UNIX-style). Every interior edge is bytes on both sides; only the *last* stage may return a value. Values are combined by ordinary application (`f $x`) and `let`, never by `|`: `[1,2] | length` is a type error, `length [1,2]` is the spelling.
+`ral` pipes carry bytes from the stdout of a script to the stdin of another (UNIX-style). The *last* stage in a pipeline may also return a `ral` value.
 
-Codecs bridge the world of bytes to the world of values: `from-line` takes `Bytes` to a `String` with no trailing `\n`, and `from-string` with it; `from-lines` gives a lazy stream of `String`; `from-json` turns JSON into a `ral` value. Decode where the bytes flow, and capture only after decoding:
+Codecs bridge bytes to values: `from-line` takes `Bytes` to a `String` with no trailing `\n`, and `from-string` with it; `from-lines` gives a lazy stream of `String`; `from-json` turns JSON bytes into a `ral` value:
 
     let cfg = curl -s https://api.example.com/cfg | from-json
     let os  = !{uname -s | from-line}
@@ -72,6 +72,35 @@ Decoders read from the byte channel.  To decode bytes in a definition, use `byte
     let commits = lines !{git log --oneline -5 | from-string}
     let src     = from-lines-list #'src/main.rs'#
 
+## Audit
+
+`audit { … }` evaluates its body and returns a report with four fields: exit `status`, the ral `value` the body returned, an `error` string, and `children`. `children` is a flat list of exec calls the body made, including its `argv`, exit `status`, `stdout` and `stderr`. `audit` turns any errors into record data, so it never fails, and it keeps each command's stdout and stderr apart, so you need not `2>&1` to capture stderr. This is how you read a tool whose exit code is data, e.g. `grep` exit 1 meaning no match, or a `valgrind --error-exitcode=77`:
+
+    let r      = audit { valgrind --error-exitcode=77 --leak-check=full ./a.out }
+    let report = bytes-to-string $r[children][0][stdout]
+    if $[ $r[status] == 77 ] { "leaks:\n$report" } else { #'clean'# }
+
+## Running several commands
+
+If an exec call in a script fails, it aborts the script. This may be stopped by wrapping a call in `audit { … }`. For example, to see if three binaries exist and what status they return:
+
+    let probe = audit { attempt { git --version }; attempt { cmake --version }; attempt { nvcc --version } }
+    map { |c| [tool: $c[argv][0], status: $c[status]] } $probe[children]
+
+One row per command, each with its own `argv`, `status`, `stdout` and `stderr`; always prefer this to one blob of text you must re-parse. `succeeds` answers a bare true/false:
+
+    map { |t| [tool: $t, ok: !{succeeds { which $t > /dev/null }}] } [#'git'#, #'cmake'#]
+
+When what you want is the merged text of every step, put the block on the byte channel — a pipe or a redirect takes what *every* part writes:
+
+    let steps = { attempt { make }; attempt { make test } }
+    let text  = !$steps | from-string     # every step's stdout, as one String
+    !$steps > build.log                   # or straight to a file
+
+Beware: `let text = !$steps` only binds the *final* command's stdout (i.e. `make test`), dropping the stdout of earlier steps. Reach for `| from-string` whenever a block has more than one part.
+
+In summary: `;` sequences, `attempt` tolerates a failure, `?` supplies a fallback, `2>` and `>` redirect, and `within [dir: …]` changes directory. Do not use `sh -c`, as e.g. `sh -c 'a; b; c'` payload throws away what `ral` would have told you — three commands collapse into one opaque child with one undifferentiated stdout, and a failure in the middle becomes invisible.
+
 ## Strings
 
 - Double quotes may be used to interpolate variables, fields, and forces:
@@ -81,7 +110,7 @@ Decoders read from the byte channel.  To decode bytes in a definition, use `byte
   `$(name)` delimits variables from post-fixes that do not belong to them. A composite path must be one quoted word: `echo hi > "$dir/file"`.
 
 * Escapes are a fixed set (`\n`, `\r`, `\t`, `\\`, `\"`, `\$`, `\!`, `\0`, `\e`, `\xNN` for ASCII, `\u{…}`, and backslash-newline continuation).
-- Raw strings `#'…'#` are the verbatim string form: no escapes, no interpolation. They can contain any character including apostrophes. If the content itself contains `'#`, add more hashes. A hash not followed by a single-quote starts a comment to end of line.
+- Raw strings `#'…'#` are the verbatim string form: no escapes, no interpolation. They can contain any character including apostrophes. If the content itself contains `'#`, add more hashes (`##'…'##`). A hash not followed by a single-quote starts a comment to end of line.
 
   A raw string is also how an argument thick with metacharacters reaches an external tool: ral passes it through as one word, untouched, so a `sed` script needs no escaping at all and there is never a reason to hand it to a shell instead.
 
@@ -98,7 +127,7 @@ Search and replacement are regex builtins (Rust regex syntax — #'a|b'#, DO NOT
 
 ## Numbers and booleans
 
-Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[$a + $b]`, `$[$x > 0 && $x < 10]`, `$[not !{re-match #'x'# $s}]` are computed to values. Note that negation is `not` (`!` forces). `$[…]` admits numbers and booleans only — string equality is the command `equal`, ordering `lt`/`gt`. Such blocks do not nest; one layer suffices.
+Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[$a + $b]`, `$[$x > 0 && $x < 10]`, `$[not !{re-match #'x'# $s}]` are computed to values. Note that boolean negation is `not` (`!` forces). `$[…]` admits numbers and booleans only — string equality is the command `equal`, ordering `lt`/`gt`. Such blocks do not nest; one layer suffices.
 
 `if` takes a Boolean value and blocks:
 
@@ -147,9 +176,7 @@ A nullary tag still binds a value (`unit`) — ignore it with `_`. An arm's body
 
 ## Failure
 
-`try` catches a failed command; without it, a non-zero exit aborts the entire script. When a tool reports through its exit code rather than failing (`grep`, `diff`, `test`, `valgrind --error-exitcode`), wrap it in `audit` to read its output as data instead of raising.
-
-Its handler receives an error record with fields `status`, `cmd`, `message`, `line`, `col`:
+`try` catches a failed command; without it, a non-zero exit aborts the entire script. Its handler receives an error record with fields `status`, `cmd`, `message`, `line`, `col`:
 
     let log =
       try { make 2>&1 | from-string } { |err| 
@@ -158,42 +185,18 @@ Its handler receives an error record with fields `status`, `cmd`, `message`, `li
 
 The handler block must start on the same line as the body's closing brace — `} { |err| … }`. `err[message]` is synthetic status text, not the failing command's stderr; wrap in `audit` when output is the data you need.
 
+Do NOT use `try` for tools that report through their exit codes (`grep`, `diff`, `test`, `valgrind --error-exitcode`): wrap them in `audit` to read its output as data instead of raising.
+
 Prelude functions cover common cases:
 
     if !{succeeds { cargo check -q }} { echo #'clean'# } else { echo #'broken'# }
     attempt { rm stale.lock }          # suppress any failure
     retry 3 { curl -s $url }           # up to 3 attempts
 
-`guard BODY CLEANUP` runs the cleanup block if the body fails, then propagates the failure. `fail [status: 2, message: #'…'#]` raises deliberately.
+`guard BODY CLEANUP` runs the cleanup block if the body fails, then propagates the failure. 
 
-## Audit
+An error may be raised deliberately using e.g. `fail [status: 2, message: #'failure caused by x'#]`.
 
-`audit { … }` evaluates its body and returns a report with exactly four fields and no others: exit `status`, the ral `value` the body returned, an `error` string, and `children`. `children` is the flat list of what the body did. Every entry carries a `kind`; a `command` entry then carries its own `argv`, `status`, `stdout` and `stderr` (the last two `bytes`), while a `read`, `write` or `capability-check` entry carries different fields — so `argv` and `stdout` project off `children` only when the body ran nothing but commands, and a redirect in the body narrows every entry to `kind` alone. The report has no `stdout` field of its own: per-command output lives in `children`, and the merged output of a whole block comes from piping the block instead (see *Running several commands*). `audit` turns any errors into record data, so it never fails, and it keeps each command's stdout and stderr apart, so you need not `2>&1` to capture stderr. This is how you read a tool whose exit code is *data* (e.g. `grep` exit 1 meaning no match), or a deliberate signal like `valgrind --error-exitcode=77`:
-
-    let r      = audit { valgrind --error-exitcode=77 --leak-check=full ./a.out }
-    let report = bytes-to-string $r[children][0][stdout]
-    if $[ $r[status] == 77 ] { "leaks:\n$report" } else { #'clean'# }
-
-## Running several commands
-
-A block runs its parts in order and abandons the rest at the first failure, so `audit { a; b; c }` reports on the steps that ran and says nothing of the steps it never reached. To run a whole battery and see every outcome, wrap each step in `attempt`:
-
-    let probe = audit { attempt { git --version }; attempt { cmake --version }; attempt { nvcc --version } }
-    map { |c| [tool: $c[argv][0], status: $c[status]] } $probe[children]
-
-One row per command, each with its own `argv`, `status`, `stdout` and `stderr` — always prefer this to one blob of text you must re-parse. `succeeds` answers a bare yes/no without a report at all:
-
-    map { |t| [tool: $t, ok: !{succeeds { which $t > /dev/null }}] } [#'git'#, #'cmake'#]
-
-When what you want is the merged text of every step, put the block on the byte channel — a pipe or a redirect takes what *every* part writes:
-
-    let steps = { attempt { make }; attempt { make test } }
-    let text  = !$steps | from-string     # every step's stdout, as one String
-    !$steps > build.log                   # or straight to a file
-
-Beware the one capture that does not merge: `let x = !$steps` binds the *final* command's output alone, and the earlier steps print visibly instead. Reach for `| from-string` whenever a block has more than one part.
-
-So never reach for `sh -c` to sequence commands, to fall back after a failure, or to change directory first: `;` sequences, `attempt` tolerates a failure, `?` supplies a fallback, `2>` and `>` redirect, and `within [dir: …]` changes directory. A `sh -c 'a; b; c'` payload throws away what ral would have told you — three commands collapse into one opaque child with one undifferentiated stdout, and a failure in the middle becomes invisible.
 
 ## Concurrency
 
