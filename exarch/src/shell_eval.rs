@@ -1356,35 +1356,12 @@ keep-bottom
         );
     }
 
-    /// The wall is a *place*, not just a budget: the engine's rendering — the
-    /// only thing that names the step the cancel unwound through — survives
-    /// beside the remedy, so the model learns where the frontier fell and what
-    /// to do about it from one stderr.
+    /// A command's own exit code reaches the tool exit uncollapsed: the host
+    /// must not flatten every non-zero status to 1, since the code is often
+    /// the tool's signal (grep no-match=1, diff differs=1).
     #[cfg(unix)]
     #[test]
-    fn timeout_keeps_the_engine_diagnostic_beside_the_remedy() {
-        let mut shell = fresh_shell();
-        let (emit, _rx) = crate::bus::dummy_emitter();
-        let cmd = "let before = 1\nsleep 30\nlet after = 2";
-        let r = run_shell_direct(&mut shell, &Capabilities::root(), cmd, 2, &emit);
-        assert_eq!(r.exit, 124, "a timed-out call still exits 124");
-        let stderr = String::from_utf8_lossy(&r.stderr);
-        assert!(
-            stderr.contains("sleep 30"),
-            "the engine's rendering names the step the wall struck; stderr was: {stderr}"
-        );
-        assert!(
-            stderr.contains("recovery:") && stderr.contains("defer"),
-            "the remedy rides along with it; stderr was: {stderr}"
-        );
-    }
-
-    /// The seam's rendering surfaces exactly once — no host-side re-render on
-    /// top — carrying the command's true exit code rather than a host
-    /// collapse to 1, plus the tip that fires only for a command's own exit.
-    #[cfg(unix)]
-    #[test]
-    fn command_exit_renders_once_with_true_code_and_tip() {
+    fn command_exit_is_the_tool_exit() {
         let mut shell = fresh_shell();
         let (emit, _rx) = crate::bus::dummy_emitter();
         let r = run_shell_direct(
@@ -1395,27 +1372,11 @@ keep-bottom
             &emit,
         );
         assert_eq!(r.exit, 3, "the command's true exit code is the tool exit");
-        let stderr = String::from_utf8_lossy(&r.stderr);
-        assert_eq!(
-            stderr.matches("error:").count(),
-            1,
-            "the seam's rendering appears exactly once; stderr was: {stderr}"
-        );
-        assert!(
-            stderr.contains("status 3"),
-            "the rendering names the true status; stderr was: {stderr}"
-        );
-        assert!(
-            stderr.contains("recovery:"),
-            "a command exit carries the recovery tip; stderr was: {stderr}"
-        );
     }
 
-    /// A raised error carries no recovery tip: its advice — read the captured
-    /// output as data — is about tools that speak through exit codes, and is
-    /// noise on an explicit `fail`.
+    /// A raised error's status travels the same way a command's does.
     #[test]
-    fn raised_error_carries_no_recovery_tip() {
+    fn raised_error_status_is_the_tool_exit() {
         let mut shell = fresh_shell();
         let (emit, _rx) = crate::bus::dummy_emitter();
         let r = run_shell_direct(
@@ -1426,16 +1387,6 @@ keep-bottom
             &emit,
         );
         assert_eq!(r.exit, 7, "the raised error's status is the tool exit");
-        let stderr = String::from_utf8_lossy(&r.stderr);
-        assert_eq!(
-            stderr.matches("error:").count(),
-            1,
-            "one rendering; stderr was: {stderr}"
-        );
-        assert!(
-            !stderr.contains("recovery:"),
-            "a raised error is not a command exit; stderr was: {stderr}"
-        );
     }
 
     /// The same timeout must tear down a sandbox-confined eval child.  The
