@@ -53,12 +53,6 @@ const PROTOCOL_FD: RawFd = 3;
 /// magic number.
 pub(crate) const RAL_ENGINE_SEED_FD_ENV: &str = "RAL_ENGINE_SEED_FD";
 
-/// The agent-port preamble's magic, published with the binary: it sorts the
-/// confused from the hostile and stops neither. `vm-manager` mints and reads
-/// the canonical copy on the host side; core cannot depend on vm-manager, so
-/// it writes the same eight bytes itself.
-const HATCH_MAGIC: &[u8; 8] = b"ralagent";
-
 /// `own`, the grant tag, the cwd — in, a narrowed [`Capabilities`] or a
 /// refusal out. What `set_grant_narrower` registers.
 type GrantNarrower = fn(&Capabilities, &str, &str) -> Result<Capabilities, String>;
@@ -181,7 +175,7 @@ fn hatch_over(connection: OwnedFd, token: u64, seed: &EngineSeed) -> Result<u32,
 
     let mut vsock = UnixStream::from(connection);
     let mut preamble = [0u8; 16];
-    preamble[..8].copy_from_slice(HATCH_MAGIC);
+    preamble[..8].copy_from_slice(&crate::hatch_preamble::MAGIC);
     preamble[8..].copy_from_slice(&token.to_le_bytes());
     vsock
         .write_all(&preamble)
@@ -253,34 +247,6 @@ fn hatch_over(connection: OwnedFd, token: u64, seed: &EngineSeed) -> Result<u32,
             seed: WireChannel::from_stream(parent_seed),
         });
     Ok(pid)
-}
-
-/// Read and validate a fresh dial's 16-byte agent-port preamble.
-///
-/// Reading it is the host embedding's own job, not `vm_manager`'s —
-/// `accept_agent` hands back raw handles and stays dumb — but the check lives
-/// here since both the guest that mints these bytes ([`hatch_over`]) and the
-/// host that reads them must agree on the one magic.
-///
-/// # Errors
-/// Returns a sentence if the stream closes before 16 bytes arrive, or the
-/// magic does not match — a stray dial, never a caller's bug.
-///
-/// # Panics
-/// Never: the slice handed to `try_into` is always exactly 8 bytes long.
-pub fn read_preamble(stream: &mut impl std::io::Read) -> Result<u64, String> {
-    let mut buf = [0u8; 16];
-    stream
-        .read_exact(&mut buf)
-        .map_err(|e| format!("hatch: failed to read the agent-port preamble: {e}"))?;
-    if &buf[..8] != HATCH_MAGIC {
-        return Err(
-            "hatch: this dial's preamble does not carry the expected magic — a stray connection, \
-             not a hatched child"
-                .to_string(),
-        );
-    }
-    Ok(u64::from_le_bytes(buf[8..].try_into().expect("8 bytes")))
 }
 
 /// Kill and reap the hatched child whose pid this is.
@@ -404,7 +370,7 @@ mod tests {
         .expect("hatch over a socketpair");
 
         let preamble = peer_thread.join().expect("peer thread");
-        assert_eq!(&preamble[..8], HATCH_MAGIC);
+        assert_eq!(&preamble[..8], &crate::hatch_preamble::MAGIC);
         assert_eq!(
             u64::from_le_bytes(preamble[8..].try_into().unwrap()),
             0xdead_beef_1234_5678

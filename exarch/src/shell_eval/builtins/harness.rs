@@ -219,6 +219,16 @@ fn enquire_hatched(mooring: &Mooring, shell: &Shell, token: u64) -> Settled<FOVa
     )?)
 }
 
+#[cfg(target_os = "linux")]
+fn kill_hatched(pid: u32) {
+    ral_core::hatch::kill_hatched(pid);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kill_hatched(_pid: u32) {
+    unreachable!("only the Linux run_hatch arm can return a child pid")
+}
+
 /// Best effort: the desk drops the pending hatch either way, and there is
 /// nothing more useful to do with a refusal here than with success.
 fn enquire_abort(mooring: &Mooring, shell: &Shell, token: u64) {
@@ -342,7 +352,7 @@ fn builtin_agent(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
                 // The dial never landed in time, or landed and was refused:
                 // either way the desk has given up, so this engine must not
                 // leave the hatched child dialling into silence.
-                ral_core::hatch::kill_hatched(pid);
+                kill_hatched(pid);
                 Err(e)
             }
         },

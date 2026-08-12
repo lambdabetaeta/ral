@@ -254,7 +254,7 @@ fn a_discarded_statements_bytes_reach_the_pipe() {
 /// A consumer need not read, and the pipeline's value is its final stage's.
 #[test]
 fn a_consumer_that_ignores_its_stdin_still_returns_its_value() {
-    let o = run_pipe("let r = echo x | !{ return 5 }\necho $r");
+    let o = run_pipe("let result = echo x | !{ return 5 }\necho $result");
     assert_eq!(o.status, 0, "expected acceptance: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "5", "full stdout: {:?}", o.stdout);
 }
@@ -390,8 +390,8 @@ fn a_final_folds_accumulator_is_the_pipelines_value() {
 fn spawn_forwards_its_bodys_route_to_the_awaited_result() {
     let byte_routed = run_pipe(
         "let h = spawn { echo hi }\n\
-         let r = await $h\n\
-         echo \"[!{bytes-to-string $r[stdout]}]\"",
+         let result = await $h\n\
+         echo \"[!{bytes-to-string $result[stdout]}]\"",
     );
     assert_eq!(byte_routed.status, 0, "stderr: {}", byte_routed.stderr);
     assert_eq!(
@@ -402,8 +402,8 @@ fn spawn_forwards_its_bodys_route_to_the_awaited_result() {
 
     let value_routed = run_pipe(
         "let h = spawn { return 5 }\n\
-         let r = await $h\n\
-         echo \"$r[value] [!{bytes-to-string $r[stdout]}]\"",
+         let result = await $h\n\
+         echo \"$result[value] [!{bytes-to-string $result[stdout]}]\"",
     );
     assert_eq!(value_routed.status, 0, "stderr: {}", value_routed.stderr);
     assert_eq!(
@@ -449,7 +449,7 @@ fn captured_native_crosses_the_final_report_boundary_and_relinks() {
 fn non_transferable_value_fails_at_the_final_report_boundary() {
     let o = run_pipe(
         "let hold = { from-line; let h = !{spawn { return 1 }}; return $h }\n\
-         let r = !{printf hi | !$hold}\n\
+         let result = !{printf hi | !$hold}\n\
          echo got",
     );
     assert_ne!(o.status, 0, "expected a boundary failure: {}", o.stdout);
@@ -571,8 +571,8 @@ fn failing_decoder_tail_surfaces_its_own_diagnostic() {
 fn producer_failure_before_any_bytes_wins_over_the_tail() {
     let o = run_pipe(
         "let boom = { fail [status: 3, message: 'producer failed'] }\n\
-         let r = !{!$boom | from-json}\n\
-         echo $r",
+         let result = !{!$boom | from-json}\n\
+         echo $result",
     );
     assert_ne!(o.status, 0, "expected failure: {}", o.stdout);
     assert!(
@@ -730,7 +730,7 @@ fn guard_body_bytes_flow_into_downstream_stage() {
 
 #[test]
 fn audit_receives_upstream_piped_bytes() {
-    let o = run_pipe("let r = !{ echo hi | audit { from-string } }\necho $r[value]");
+    let o = run_pipe("let result = !{ echo hi | audit { from-string } }\necho $result[value]");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "hi");
 }

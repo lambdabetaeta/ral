@@ -1,7 +1,7 @@
 ---
 generated_at_commit: 19d53bb
 generated_at_date: 2026-07-28
-covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs]
+covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/hatch.rs, core/src/hatch_preamble.rs]
 ---
 
 # Map: core / transport
@@ -18,12 +18,15 @@ Distinct from all of this is the crate-root `core/src/transport.rs`, the
 transport-parametric *host seam* — the frame algebra between a front-end and
 the engine, with `engine.rs` and the `wire.rs` socket channel —
 [[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]].
-A wire-seat child's hatch (`core/src/hatch.rs`,
+A wire-seat child's hatch (`core/src/hatch.rs`, with its host-port framing in
+the platform-neutral `core/src/hatch_preamble.rs`,
 [[map/exarch/agent|exarch / agent]]) sits below both seams and reuses this
 one's machinery rather than the host seam's: the 16-byte agent-port preamble
 (8-byte magic `b"ralagent"` + a little-endian `u64` token) is read before a
 single protocol byte is parsed, so a hatch never touches `Frame` or
-`PROTOCOL_VERSION` at all — no new frame, no version bump — and the seed a
+`PROTOCOL_VERSION` at all — no new frame, no version bump. The split is
+load-bearing: spawning and seed hydration are Unix guest machinery, while the
+desk that validates a dial can run on a Windows host. The seed a
 hatch carries is this page's `EngineSeed`, below.)
 
 **Every wire↔runtime hop is an exhaustive, field-complete map: no hop may pass

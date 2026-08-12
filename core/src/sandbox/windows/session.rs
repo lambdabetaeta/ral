@@ -564,11 +564,13 @@ mod tests {
         };
 
         // `cmd.exe` loads via the ALL APPLICATION PACKAGES system grants, so
-        // the only authority under test is the derived capability's.
+        // the only filesystem authority under test is the derived
+        // capability's. Redirection creates the file directly; `copy NUL`
+        // would additionally require access to a global DOS device.
         let cmd = Path::new(r"C:\Windows\System32\cmd.exe");
         let run_copy_to = |dest: &Path| -> bool {
             let mut launch = Launch::new(cmd);
-            launch.args(["/c", "copy", "NUL", &dest.to_string_lossy()]);
+            launch.args(["/d", "/s", "/c", &format!("echo ok>\"{}\"", dest.display())]);
             launch.current_dir(granted.path());
             launch.stdin(StdioSpec::null());
             launch.stdout(StdioSpec::null());

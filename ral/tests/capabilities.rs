@@ -36,7 +36,7 @@ fn write_profile(suffix: &str, body: &str) -> std::path::PathBuf {
 #[test]
 fn single_file_deny_blocks_command() {
     let prof = write_profile("single_deny", "return [exec: [ls: 'deny']]\n");
-    let out = ral(&["--capabilities", prof.to_str().unwrap(), "-c", "ls /tmp"]);
+    let out = ral(&["--capabilities", prof.to_str().unwrap(), "-c", "ls ."]);
     std::fs::remove_file(&prof).ok();
     assert_ne!(
         out.status, 0,
@@ -80,10 +80,10 @@ fn comma_separated_profiles_meet_both_denies() {
     let b = write_profile("meet_b", "return [exec: [cat: 'deny']]\n");
     let arg = format!("{},{}", a.display(), b.display());
 
-    let out_ls = ral(&["--capabilities", &arg, "-c", "ls /tmp"]);
+    let out_ls = ral(&["--capabilities", &arg, "-c", "ls ."]);
     assert_ne!(out_ls.status, 0, "ls denied by file a should fire");
 
-    let out_cat = ral(&["--capabilities", &arg, "-c", "cat /etc/hostname"]);
+    let out_cat = ral(&["--capabilities", &arg, "-c", "cat Cargo.toml"]);
     assert_ne!(out_cat.status, 0, "cat denied by file b should fire");
 
     std::fs::remove_file(&a).ok();
@@ -104,14 +104,14 @@ fn a_one_sided_allow_does_not_survive_the_meet() {
         format!("{},{}", a.display(), b.display()),
         format!("{},{}", b.display(), a.display()),
     ] {
-        let out_ls = ral(&["--capabilities", &arg, "-c", "ls /tmp"]);
+        let out_ls = ral(&["--capabilities", &arg, "-c", "ls ."]);
         assert_eq!(
             out_ls.status, 0,
             "both profiles allow ls, so the intersection must admit it; stderr:\n{}",
             out_ls.stderr
         );
 
-        let out_cat = ral(&["--capabilities", &arg, "-c", "cat /etc/hostname"]);
+        let out_cat = ral(&["--capabilities", &arg, "-c", "cat Cargo.toml"]);
         assert_ne!(out_cat.status, 0, "cat is allowed by one profile only");
         assert!(
             out_cat.stderr.contains("denied by active grant"),

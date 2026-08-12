@@ -477,7 +477,8 @@ trunk speaks — the arm is chosen on a stated fact (the seat's kind, read at
    grant-tag validity) runs first, before any process exists. On a wire
    trunk it mints a token, registers a pending hatch reserving the name, and
    answers `` `hatch [token, port] ``.
-2. The builtin runs the guest-side **hatch** (core's `core/src/hatch.rs`) —
+2. The builtin runs the guest-side **hatch** (core's Unix-only
+   `core/src/hatch.rs`) —
    dial the host on the named port, write the 16-byte preamble
    (`vm-manager/src/preamble.rs`: 8-byte magic `b"ralagent"` + the `u64`
    token, little-endian), spawn `current_exe --engine` with the dial on its
@@ -485,7 +486,8 @@ trunk speaks — the arm is chosen on a stated fact (the seat's kind, read at
    `` `agent-hatched [token] ``. The desk's handler awaits the correlated
    dial through its **hatchery** (`vm_manager`-free by construction — a
    capability object `RootConfig` carries, `None` for identity trunks),
-   reads and checks the preamble, adopts the stream as `Seat::Wire`, and
+   reads and checks the preamble through core's portable
+   `core/src/hatch_preamble.rs`, adopts the stream as `Seat::Wire`, and
    hands the child to the same `spawn_async` an identity fork reaches, at
    `fuel = parent - 1`. A wire trunk with fuel > 0 and no hatchery is a
    construction error, refused at `Agent::root` with a sentence.

@@ -133,15 +133,15 @@ fn spawn_inherits_grant_denial() {
         "ral_spawn_dyn",
         r"
         grant [exec: [ls: 'deny']] {
-            let h = spawn { ls /tmp }
+            let h = spawn { ls . }
             try {
-                let r = await $h
+                let result = await $h
                 echo LEAKED
             } { |_|
                 echo 'denied in worker'
             }
         }
-        let ok = !{ls /tmp | from-lines}
+        let ok = !{ls . | from-lines}
         echo 'parent still allowed'
     ",
     );

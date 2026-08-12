@@ -371,10 +371,10 @@ fn recursive_binding_is_usable_next_run() {
     let mut sh = shell();
     run(
         &mut sh,
-        "let go = { |n| if $[$n == 0] { return 0 } else { return !{go $[$n - 1]} } }",
+        "let recur = { |n| if $[$n == 0] { return 0 } else { return !{recur $[$n - 1]} } }",
     )
     .unwrap();
-    let errs = check_errors(&sh, "return !{go 3}");
+    let errs = check_errors(&sh, "return !{recur 3}");
     assert!(
         errs.is_empty(),
         "a recursive binding must stay usable across the run boundary, got: {:?}",

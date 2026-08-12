@@ -237,11 +237,14 @@ fn use_falls_through_to_ral_path_and_the_cwd_wins_when_it_can() {
     std::fs::create_dir_all(&here).unwrap();
     std::fs::write(d2.join("m.ral"), "let answer = 42\n").unwrap();
 
+    let ral_path = std::env::join_paths([&d1, &d2])
+        .expect("two ordinary scratch paths form RAL_PATH")
+        .to_string_lossy()
+        .into_owned();
     let source = format!(
-        "within [dir: '{}', env: [RAL_PATH: '{}:{}']] {{ use 'm.ral' }}",
+        "within [dir: '{}', env: [RAL_PATH: '{}']] {{ use 'm.ral' }}",
         here.display(),
-        d1.display(),
-        d2.display()
+        ral_path
     );
     let mut shell = fresh_shell();
     let found = top_level(&mut shell, &source).expect("RAL_PATH walk finds the module");

@@ -76,7 +76,7 @@ fn a_more_specific_hint_survives() {
 fn audit_records_the_hint_as_data() {
     let out = run(
         "ral_abandoned_in_audit",
-        "let r = audit { echo A; /usr/bin/false; echo B }\necho $r[error]\n",
+        "let result = audit { echo A; /usr/bin/false; echo B }\necho $result[error]\n",
     );
     assert!(
         out.stdout
@@ -90,9 +90,9 @@ fn audit_records_the_hint_as_data() {
 fn attempt_runs_every_step_and_reports_on_each() {
     let out = run(
         "ral_attempt_battery",
-        "let r = audit { attempt { echo A }; attempt { /usr/bin/false }; attempt { echo C } }\n\
-         echo $r[status]\n\
-         echo !{length $r[children]}\n",
+        "let result = audit { attempt { echo A }; attempt { /usr/bin/false }; attempt { echo C } }\n\
+         echo $result[status]\n\
+         echo !{length $result[children]}\n",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     let lines: Vec<&str> = out.stdout.lines().collect();

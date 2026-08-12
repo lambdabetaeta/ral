@@ -26,7 +26,30 @@
 mod common;
 
 use common::{run, run_with_env, run_with_timeout};
+use std::io::Write;
 use std::time::Duration;
+
+const FIREHOSE_ENV: &str = "RAL_WINDOWS_PIPE_FIREHOSE";
+
+/// Child mode for the firehose integration test below. The test executable is
+/// a convenient Windows-native producer whose contract we control: absent the
+/// marker it is inert in the ordinary suite; with the marker it writes until
+/// the pipe reports that its reader has gone away, then exits successfully.
+#[test]
+fn firehose_writer_helper() {
+    if std::env::var_os(FIREHOSE_ENV).is_none() {
+        return;
+    }
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    loop {
+        if out.write_all(b"DATA\n").is_err() {
+            // Bypass libtest: its success report would target the same closed
+            // pipe and could turn the intended broken pipe into a test panic.
+            std::process::exit(0);
+        }
+    }
+}
 
 /// A file in the directory the user just `cd`'d into is not on `PATH`, and a
 /// `PATH` ending in `;` — the ubiquitous Windows spelling — does not put it
@@ -216,23 +239,27 @@ fn a_failing_block_in_stage_position_never_fires() {
 }
 
 /// Neither side of a `|` promises traffic, and the producer's side of that
-/// symmetry is the one with teeth: `for /L %i in (1,0,2)` steps by zero and
-/// so never stops writing, while the consumer returns without touching
-/// stdin.  Finishing must close the consumer's read end promptly, or the
+/// symmetry is the one with teeth: a controlled helper never stops writing
+/// until Windows reports a broken pipe, while the consumer returns without
+/// touching stdin. Finishing must close the consumer's read end promptly, or the
 /// producer blocks on a full pipe nobody will ever drain.  The pipeline's
 /// value is the consumer's own `5`; not one byte of the firehose is in it.
 #[test]
 fn a_firehose_into_a_non_reading_consumer_terminates() {
-    let out = run_with_timeout(
-        "win_pipe_firehose",
-        &[],
+    let helper = std::env::current_exe()
+        .expect("current Windows integration-test executable")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let script = format!(
         r#"
-        let n = !{ cmd /c "for /L %i in (1,0,2) do @echo DATA" | !{ return 5 } }
+        let n = !{{ within [env: [{FIREHOSE_ENV}: yes]] {{
+            '{helper}' --exact firehose_writer_helper --nocapture
+        }} | !{{ return 5 }} }}
         echo $n
         "#,
-        Duration::from_secs(20),
-    )
-    .expect("firehose hung — the consumer's read end outlived the consumer");
+    );
+    let out = run_with_timeout("win_pipe_firehose", &[], &script, Duration::from_secs(20))
+        .expect("firehose hung — the consumer's read end outlived the consumer");
     assert_eq!(out.status, 0, "stderr={}", out.stderr);
     assert_eq!(out.stdout.trim(), "5", "stdout={}", out.stdout);
 }

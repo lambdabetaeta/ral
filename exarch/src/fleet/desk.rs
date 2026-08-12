@@ -691,7 +691,7 @@ impl ExarchDesk {
                     1,
                 )
             })?;
-        let dialed = ral_core::hatch::read_preamble(&mut stream).map_err(|e| Error::new(e, 1))?;
+        let dialed = ral_core::hatch_preamble::read(&mut stream).map_err(|e| Error::new(e, 1))?;
         if dialed != token {
             return Err(Error::new(
                 "agent-hatched refused: the dial's own token did not match the one this hatch \

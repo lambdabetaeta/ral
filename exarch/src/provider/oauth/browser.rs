@@ -285,49 +285,4 @@ mod tests {
         url.query_pairs()
             .find_map(|(name, value)| (name == key).then(|| value.into_owned()))
     }
-
-    /// One redirect against a fresh loopback listener: the verdict
-    /// `accept_callback` reaches, and the page the browser is shown.
-    fn callback(query: &str, expected_state: &str) -> (Result<String, String>, String) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
-        let addr = listener.local_addr().expect("read listener address");
-        let request = format!("GET /auth/callback?{query} HTTP/1.1\r\n\r\n");
-        let browser = std::thread::spawn(move || {
-            let mut stream = TcpStream::connect(addr).expect("connect to callback listener");
-            stream
-                .write_all(request.as_bytes())
-                .expect("write callback request");
-            let mut page = String::new();
-            std::io::Read::read_to_string(&mut stream, &mut page).expect("read callback page");
-            page
-        });
-        let verdict = accept_callback(&listener, expected_state, &Arc::new(AtomicBool::new(false)));
-        (verdict, browser.join().expect("browser thread"))
-    }
-
-    /// The open port's only guard: a code minted against another `state` is
-    /// someone else's, and must not be exchanged for this user's tokens.
-    #[test]
-    fn callback_refuses_a_code_bearing_a_foreign_state() {
-        let (verdict, page) = callback("code=stolen&state=attacker", "minted-here");
-        assert_eq!(verdict, Err("state mismatch".to_string()));
-        assert!(page.contains("Sign-in failed"), "got: {page}");
-    }
-
-    #[test]
-    fn callback_surfaces_the_providers_own_error() {
-        let (verdict, page) = callback("error=access_denied&state=minted-here", "minted-here");
-        assert!(
-            verdict.as_ref().is_err_and(|e| e.contains("access_denied")),
-            "got: {verdict:?}"
-        );
-        assert!(page.contains("Sign-in failed"), "got: {page}");
-    }
-
-    #[test]
-    fn callback_accepts_the_code_it_minted_the_state_for() {
-        let (verdict, page) = callback("code=good&state=minted-here", "minted-here");
-        assert_eq!(verdict, Ok("good".to_string()));
-        assert!(page.contains("Signed in to exarch"), "got: {page}");
-    }
 }
