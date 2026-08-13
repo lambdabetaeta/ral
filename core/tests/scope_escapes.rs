@@ -403,7 +403,10 @@ fn deep_tail_recursion_trampolines_through_every_eliminator() {
 #[test]
 fn audit_survives_a_spawn() {
     let mut shell = fresh_shell();
-    let tree = match top_level(&mut shell, "audit { echo one; spawn { sleep 0.02 }; echo two }") {
+    let tree = match top_level(
+        &mut shell,
+        "audit { echo one; spawn { sleep 0.02 }; echo two }",
+    ) {
         Ok(v) => v,
         Err(e) => panic!(
             "`audit {{ echo one; spawn {{ sleep 0.02 }}; echo two }}` must succeed; \

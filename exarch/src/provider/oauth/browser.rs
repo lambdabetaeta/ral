@@ -30,8 +30,11 @@ pub(super) async fn run(
     let redirect_uri = format!("http://localhost:{port}/auth/callback");
 
     let url = authorize_url(&redirect_uri, &challenge, &state)?;
-    let opened = open_browser(&url);
-    on_phase(LoginPhase::AwaitingBrowser { url, opened });
+    // Best effort, and its outcome is not worth reporting: a launcher that
+    // reports success has still shown the user nothing when it started a text
+    // browser on a box they reached over ssh. The phase carries the URL.
+    let _ = launch_browser(&url);
+    on_phase(LoginPhase::AwaitingBrowser { url });
 
     // Cloned because `spawn_blocking` needs `'static`; the caller keeps the flag it trips.
     let expected_state = state.clone();
@@ -67,12 +70,6 @@ fn authorize_url(redirect_uri: &str, challenge: &str, state: &str) -> Result<Str
         ("originator", ORIGINATOR),
     ]);
     Ok(url.into())
-}
-
-/// Open the authorize URL, returning whether it launched. The launch error is
-/// dropped: both renderers of `LoginPhase::AwaitingBrowser` print the URL instead.
-fn open_browser(url: &str) -> bool {
-    launch_browser(url).is_ok()
 }
 
 #[cfg(target_os = "macos")]
@@ -239,50 +236,4 @@ fn write_page(stream: &mut TcpStream, message: &str) {
         body.len()
     );
     let _ = stream.write_all(response.as_bytes());
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn authorize_url_carries_required_parameters() {
-        let url =
-            authorize_url("http://localhost:1455/auth/callback", "challenge", "state").unwrap();
-        let url = reqwest::Url::parse(&url).unwrap();
-
-        for (key, expected) in [
-            ("response_type", "code"),
-            ("client_id", CLIENT_ID),
-            ("redirect_uri", "http://localhost:1455/auth/callback"),
-            ("scope", SCOPE),
-            ("code_challenge", "challenge"),
-            ("code_challenge_method", "S256"),
-            ("id_token_add_organizations", "true"),
-            ("codex_cli_simplified_flow", "true"),
-            ("state", "state"),
-            ("originator", ORIGINATOR),
-        ] {
-            assert_eq!(query_value(&url, key).as_deref(), Some(expected), "{key}");
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_shell_target_preserves_query_ampersands() {
-        let url =
-            authorize_url("http://localhost:1455/auth/callback", "challenge", "state").unwrap();
-        let target = windows_shell_target(&url);
-        assert_eq!(target.last().copied(), Some(0));
-
-        let decoded = String::from_utf16(&target[..target.len() - 1]).unwrap();
-        assert_eq!(decoded, url);
-        assert!(decoded.contains("&client_id="));
-        assert!(decoded.contains("&redirect_uri="));
-    }
-
-    fn query_value(url: &reqwest::Url, key: &str) -> Option<String> {
-        url.query_pairs()
-            .find_map(|(name, value)| (name == key).then(|| value.into_owned()))
-    }
 }

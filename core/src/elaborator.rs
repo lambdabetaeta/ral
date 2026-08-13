@@ -524,7 +524,6 @@ impl Elaborator {
                 )
             }
 
-
             Ast::List(elems) => comp!(
                 self,
                 CompKind::Return(Val::List(

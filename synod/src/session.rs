@@ -237,20 +237,17 @@ fn to_model_choice(name: String) -> ModelChoice {
 pub struct SignInStep {
     /// What the window should say while this is the step in hand.
     pub say: String,
-    /// The sign-in link, when the window has to offer it itself rather
-    /// than the browser having been opened on the user's behalf.
+    /// The sign-in link, for the window to offer alongside its prose.
     pub link: Option<String>,
 }
 
 impl From<oauth::LoginPhase> for SignInStep {
     fn from(phase: oauth::LoginPhase) -> Self {
         match phase {
-            oauth::LoginPhase::AwaitingBrowser { opened: true, .. } => Self {
-                say: "Finish signing in, in the browser window that just opened.".to_string(),
-                link: None,
-            },
-            oauth::LoginPhase::AwaitingBrowser { url, opened: false } => Self {
-                say: "Synod could not open your browser.  Follow this link to sign in:".to_string(),
+            oauth::LoginPhase::AwaitingBrowser { url } => Self {
+                say: "Finish signing in, in your browser.  If no window opened, \
+                      follow this link:"
+                    .to_string(),
                 link: Some(url),
             },
             // The window never runs the device flow — a sign-in in a window

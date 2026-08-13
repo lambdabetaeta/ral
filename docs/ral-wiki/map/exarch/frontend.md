@@ -216,9 +216,13 @@ Two `Sink` implementations:
   bezel, shadow, palette, padding, title, and hint frame around distinct
   bodies. The login body drives browser or device OAuth on a background thread,
   receives typed `LoginPhase`s over a channel, and carries the device expiry
-  label from the flow rather than reconstructing it in the view. Closing the
-  overlay sets its relaxed cancellation flag; browser accept polls it directly,
-  while device polling checks it before each bounded request.
+  label from the flow rather than reconstructing it in the view. Every body row
+  is a `(label, value)` pair over one shared column, and a value too long for it
+  wraps instead of clipping; `y` sends the phase's one transcribable value — the URL, or the device code —
+  to the host clipboard over OSC 52, which is how it reaches a browser at the
+  other end of an ssh connection. Closing the overlay sets its relaxed
+  cancellation flag; browser accept polls it directly, while device polling
+  checks it before each bounded request.
 - `headless.rs` — one-shot pipe: `--output-format text` suppresses incidental
   root assistant tokens and writes the deliberate `reply` once as ral's
   human-readable value projection; `--output-format json` writes one faithful

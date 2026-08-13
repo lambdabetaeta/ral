@@ -35,8 +35,8 @@
 //!     downstream caller (and the pipeline lifecycle) cfg-free.
 
 use ral_core::process::Pgid;
-use ral_core::{PendingWrite, Shell};
 use ral_core::types::{Mooring, Resident};
+use ral_core::{PendingWrite, Shell};
 use std::collections::HashMap;
 
 #[cfg(unix)]
@@ -234,7 +234,6 @@ impl JobTable {
             }
         }
     }
-
 
     /// List all jobs.
     pub fn list(&self) -> Vec<&Job> {
@@ -567,7 +566,11 @@ mod tests {
     /// Stage a write the way an atomic `>` does — a temp beside the target,
     /// holding what the job would have put there — and hand back both paths
     /// plus the pending write that would finish it.
-    fn staged(dir: &std::path::Path, name: &str, bytes: &str) -> (PendingWrite, std::path::PathBuf) {
+    fn staged(
+        dir: &std::path::Path,
+        name: &str,
+        bytes: &str,
+    ) -> (PendingWrite, std::path::PathBuf) {
         let target = dir.join(name);
         let tmp = dir.join(format!(".{name}.ral-write.tmp"));
         std::fs::write(&tmp, bytes).expect("the staged temp is writable");

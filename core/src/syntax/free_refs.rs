@@ -83,9 +83,7 @@ impl Ast {
                     .collect_default_free_refs(candidates, scopes, out);
                 value.item.collect_free_refs(candidates, scopes, out);
             }
-            Self::Return(Some(value))
-            | Self::Spread(value)
-            | Self::Force(value) => {
+            Self::Return(Some(value)) | Self::Spread(value) | Self::Force(value) => {
                 value.item.collect_free_refs(candidates, scopes, out);
             }
             Self::Call {

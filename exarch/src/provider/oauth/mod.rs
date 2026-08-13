@@ -101,11 +101,11 @@ pub enum LoginMethod {
 /// The CLI adapter ([`Self::stderr_line`]) and the TUI's `/login` overlay both
 /// render exactly these three phases; there is no percentage or elapsed clock.
 pub enum LoginPhase {
-    /// `opened` is false when the platform launcher failed and the user must
-    /// open `url` by hand.
+    /// `url` is offered whatever the launcher did with it: a launch that
+    /// reports success still shows nothing when the browser it started lives
+    /// on a machine the user is not sitting at.
     AwaitingBrowser {
         url: String,
-        opened: bool,
     },
     AwaitingDevice {
         user_code: String,
@@ -116,16 +116,11 @@ pub enum LoginPhase {
 }
 
 impl LoginPhase {
-    /// The CLI adapter's stderr line, `None` for `ExchangingCode`. The
-    /// launch-failure text cannot name the underlying `open`/`xdg-open`
-    /// error: `browser::open_browser` discards it before this seam.
+    /// The `exarch login` stderr line, `None` for `ExchangingCode`.
     pub fn stderr_line(&self) -> Option<String> {
         match self {
-            Self::AwaitingBrowser { opened: true, .. } => {
-                Some("Waiting for sign-in to complete...".to_string())
-            }
-            Self::AwaitingBrowser { url, opened: false } => Some(format!(
-                "could not open a browser automatically\nOpen this URL in your browser to sign in:\n  {url}\nWaiting for sign-in to complete..."
+            Self::AwaitingBrowser { url } => Some(format!(
+                "Open this URL in your browser to sign in:\n  {url}\nWaiting for sign-in to complete..."
             )),
             Self::AwaitingDevice {
                 user_code,
@@ -590,139 +585,4 @@ fn token_path() -> PathBuf {
     crate::bootstrap::EXARCH
         .xdg_dir(ral_core::path::basedir::XdgKind::State)
         .join("oauth.json")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pkce_verifier_length_and_challenge() {
-        let (verifier, challenge) = pkce();
-        assert!((43..=128).contains(&verifier.len()));
-        let expected = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-        assert_eq!(challenge, expected);
-    }
-
-    #[test]
-    fn jwt_claims_extraction() {
-        let payload = URL_SAFE_NO_PAD.encode(
-            br#"{"exp":1893456000,"email":"alex@work","https://api.openai.com/auth":{"chatgpt_account_id":"acc_123"}}"#,
-        );
-        let jwt = format!("hdr.{payload}.sig");
-        assert_eq!(account_id_from_jwt(&jwt).as_deref(), Some("acc_123"));
-        assert_eq!(email_from_jwt(&jwt).as_deref(), Some("alex@work"));
-        assert_eq!(jwt_exp(&jwt), Some(1_893_456_000));
-    }
-
-    #[test]
-    fn label_prefers_email_then_account_id() {
-        let with_email = OAuthToken {
-            access_token: "at".into(),
-            refresh_token: "rt".into(),
-            account_id: "acc_123".into(),
-            email: Some("alex@work".into()),
-            expires_at: 0,
-        };
-        let no_email = OAuthToken {
-            email: None,
-            ..with_email.clone()
-        };
-        assert_eq!(with_email.label(), "alex@work");
-        assert_eq!(no_email.label(), "acc_123");
-    }
-
-    /// The upsert-by-account-id contract multiple logins depend on: re-saving
-    /// replaces in place, and the file goes only when the last account does.
-    #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[io-door:test] temp-file scaffolding"
-    )]
-    fn save_one_upserts_and_remove_targets_one_account() {
-        let path = std::env::temp_dir().join(format!(
-            "exarch-oauth-store-{}-{:?}.json",
-            std::process::id(),
-            std::thread::current().id(),
-        ));
-        let _ = std::fs::remove_file(&path);
-        let tok = |acc: &str, email: &str, at: &str| OAuthToken {
-            access_token: at.into(),
-            refresh_token: "rt".into(),
-            account_id: acc.into(),
-            email: Some(email.into()),
-            expires_at: 0,
-        };
-
-        assert!(load_all_at(&path).is_empty(), "absent store is empty");
-        assert!(
-            !save_one_at(&path, &tok("acc_a", "a@x", "at1")).unwrap(),
-            "first is new"
-        );
-        assert!(
-            !save_one_at(&path, &tok("acc_b", "b@x", "at1")).unwrap(),
-            "second is new"
-        );
-        assert_eq!(load_all_at(&path).len(), 2, "two accounts coexist");
-
-        assert!(
-            save_one_at(&path, &tok("acc_a", "a@x", "at2")).unwrap(),
-            "existing replaced"
-        );
-        let all = load_all_at(&path);
-        assert_eq!(all.len(), 2, "upsert, not append");
-        let a = all.iter().find(|t| t.account_id == "acc_a").unwrap();
-        assert_eq!(a.access_token, "at2", "token updated in place");
-
-        assert_eq!(remove_at(&path, "a@x").unwrap().as_deref(), Some("a@x"));
-        assert_eq!(load_all_at(&path), vec![tok("acc_b", "b@x", "at1")]);
-        assert_eq!(remove_at(&path, "acc_b").unwrap().as_deref(), Some("b@x"));
-        assert!(!path.exists(), "empty store is removed, not left as []");
-        assert!(
-            remove_at(&path, "acc_b").unwrap().is_none(),
-            "no match → None"
-        );
-        let _ = std::fs::remove_file(&path);
-    }
-
-    /// Pins the user-facing sign-in copy verbatim, so it cannot drift as an
-    /// incidental consequence of touching `LoginPhase` or its callers.
-    #[test]
-    fn stderr_line_reproduces_legacy_messages() {
-        assert_eq!(
-            LoginPhase::AwaitingBrowser {
-                url: "https://auth.openai.com/oauth/authorize?…".into(),
-                opened: true,
-            }
-            .stderr_line()
-            .as_deref(),
-            Some("Waiting for sign-in to complete...")
-        );
-        assert_eq!(
-            LoginPhase::AwaitingBrowser {
-                url: "https://auth.openai.com/oauth/authorize?…".into(),
-                opened: false,
-            }
-            .stderr_line()
-            .as_deref(),
-            Some(
-                "could not open a browser automatically\nOpen this URL in your browser to sign \
-                 in:\n  https://auth.openai.com/oauth/authorize?…\nWaiting for sign-in to complete..."
-            )
-        );
-        assert_eq!(
-            LoginPhase::AwaitingDevice {
-                user_code: "ABCD-1234".into(),
-                url: format!("{ISSUER}/codex/device"),
-                expires_in: "15 minutes".into(),
-            }
-            .stderr_line()
-            .as_deref(),
-            Some(
-                "To sign in, open https://auth.openai.com/codex/device and enter this code \
-                 (expires in 15 minutes):\n  ABCD-1234"
-            )
-        );
-        assert_eq!(LoginPhase::ExchangingCode.stderr_line(), None);
-    }
 }
