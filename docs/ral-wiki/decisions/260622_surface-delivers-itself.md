@@ -218,7 +218,7 @@ resources, never the foreground frame's emitter — holds by construction:
 - **It keeps one vocabulary.** Anything surfaceable in a foreground turn is
   surfaceable from a worker, rendered the same way, only later. A future event is a
   class on the one channel.
-- **`events.json` stays truthful with no special-casing.** Surfaced values are
+- **`events.jsonl` stays truthful with no special-casing.** Surfaced values are
   data, not live handles, so they serialise wherever they are delivered — unlike
   `surface-carries-control`, whose control event carried a handle and so had to be
   routed away from the log.
@@ -284,7 +284,7 @@ channel dispatched by class; the detached worker must not hold the live emitter;
   the session generation reuses `AgentRegistry`'s counter rather than minting a fresh
   epoch. Real host bookkeeping, but no new counter and smaller than
   `surface-carries-control`'s spawn registry.
-- `events.json` records the boundary batch only once it is minted as `Kind::Io`/
+- `events.jsonl` records the boundary batch only once it is minted as `Kind::Io`/
   `Kind::Card` (the rewiring above); given that, surfaced values are data, not live
   handles, so they serialise — unlike `surface-carries-control`'s handle-carrying
   control event.

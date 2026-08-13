@@ -217,7 +217,7 @@ The two frontends realise the wait differently:
 
 A wakeup renders as a *marked* user turn — e.g.
 `[scheduled 'nightly' · 0 3 * * *] run the full test suite …` — so the model can
-tell a wakeup from a human, and `events.json` records it as scheduled.
+tell a wakeup from a human, and `events.jsonl` records it as scheduled.
 
 ## Surface (illustrative)
 

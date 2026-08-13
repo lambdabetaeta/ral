@@ -11,7 +11,7 @@ language to the host, of which *presentation* is one class among several.** The
 fulcrum that forces the recognition is a **control event** — `` `spawn-started ``,
 carrying a live `Value::Handle` — that exarch consumes not to draw anything but
 to **register the handle and arm a completion waiter that posts to the inbox**.
-It binds to no `Card`, serialises to no `events.json` row, and lights no pixel.
+It binds to no `Card`, serialises to no `events.jsonl` row, and lights no pixel.
 Once one surfaced event renders nothing, "surface is presentation" is no longer
 the channel's meaning; it is the meaning of one arm of the host's decoder. The
 host dispatches surfaced values **by class** — *render* (`` `card ``, `io`) versus
@@ -43,7 +43,7 @@ So the framing "surface carries presentation" was already strained:
 `surface-reads-writes-execs` had core, not the kit, emit onto the channel, under
 the slogan *"core names the operation, exarch names its appearance."* But both
 classes still terminate in a `Card` on the rail and a structural row in
-`events.json`. The channel's *output* was still, uniformly, presentation.
+`events.jsonl`. The channel's *output* was still, uniformly, presentation.
 
 ### The problem that breaks it: notify, don't poll
 
@@ -95,7 +95,7 @@ where it is alive and correctly placed.
 `AgentSink::emit` gains a third arm, and with it a stated shape: a surfaced value
 is one of
 
-| class | example | what the host does | renders? | in `events.json`? |
+| class | example | what the host does | renders? | in `events.jsonl`? |
 |---|---|---|---|---|
 | **document** | `` `card `` | `value_to_card` → `Kind::Card` | yes | yes (mark tree) |
 | **I/O** | `{io: read, …}` | `IoEvent` + `Card` → `Kind::Io` | yes | yes (raw event) |
@@ -222,7 +222,7 @@ gets none.
 - **It deletes the instruction that caused the behaviour.** The poll loop was not
   a model failing — the harness prescribed it. Replacing the prescription with a
   notification is the smallest honest fix.
-- **It keeps `events.json` truthful.** Control events carry live runtime objects
+- **It keeps `events.jsonl` truthful.** Control events carry live runtime objects
   (a handle), so they *cannot* serialise — and they must not. Dispatch-by-class
   routes them away from the log, which records only the render classes, as before.
   The log stays a faithful trace of what was *shown*, not of host bookkeeping.
@@ -282,7 +282,7 @@ wakes, and its late post is generation-gated out — no leaked thread.
 - `spawn` notifies. The poll idiom and the poll-instructing timeout text retire.
 - The detachment invariant is preserved by construction; the unsafe variant is on
   the record as rejected.
-- `events.json` and the rail still see only render classes; control events are
+- `events.jsonl` and the rail still see only render classes; control events are
   invisible to both, honestly (they cannot serialise).
 - Core gains one public shell-free settle; the two-observer cache handoff is the
   sole concurrency risk.

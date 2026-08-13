@@ -5,10 +5,11 @@ status: accepted
 # Recording follows the event, not its emitter
 
 **What lands in a durable log must be decided by *what an event is*, not by *which
-thread happened to emit it*.** A session owns two records — `events.json`, the
-model view (what the model saw, replayable), and `transcript.jsonl`, the
-operational view (what the agent did) — and both are written *for every session*,
-root and each forked child, in headless exactly as in the TUI. The operational
+thread happened to emit it*.** A session owns two records — `events.jsonl`, the
+append-only log whose fold is the model view, and `transcript.jsonl`, the
+operational view (what the agent did) — and both are written *for every durable
+session*, root and each forked child, in headless exactly as in the TUI.
+`--no-logs` is the explicit transient exception. The operational
 trace is fed at the one emit seam ([`Emitter::emit`](../../../exarch/src/bus.rs)),
 so a fact is recorded because it *is* an operational event, regardless of who
 raised it. The screen is a *consumer* of that stream — it never invents events;
@@ -21,6 +22,31 @@ recorded**: name the *role* of a thing, not its appearance, and record it once a
 the point it is announced.
 
 All of this is **implemented**.
+
+## Superseding note: the model record is the log
+
+The context design [[decisions/260812_context-is-a-projection|context-is-a-projection]]
+supersedes the old shorthand "`events.jsonl` is the model view". `events.jsonl`
+is now the durable event log whose left fold determines the model view. Its
+membership test is therefore: does the event determine the projection, or is it
+a forensic breadcrumb? Both are legitimate log records. `ContextEdited` is the
+new example: its `Fold`/`Drop` operation and authority determine future context,
+while a `Nudge` may be retained as evidence without becoming a model message.
+The old `Compacted` record exposed the failure mode — it said that a compaction
+happened but did not record its cut, so replay could not reconstruct the view.
+
+The two durable records remain separate. Resume pays their rent through coupled
+rotation, a shared wall-clock stamp as the cross-file join key,
+`Transcript::rotate` swapping a writer inside a shared `Arc<Inner>`, and
+`ContextEdited` being recorded in both. The debt is named **two-record
+unification**. Events that project to no messages now provide the dissolving
+mechanism: the forensic record could become a filtered projection of the one
+log. What blocks deletion is the bus — emitters are cloned across threads,
+while `AgentLog` appends under one mutex on the attend thread. Keeping the split
+costs coupled rotation and its half-failure policy, timestamp/join machinery,
+shared writer indirection, duplicate edit emission, and two durable readers
+whose ordering must still be related. The next design should price those costs
+against deleting a record, not add a third trace by habit.
 
 ## The diagnosis
 
@@ -57,7 +83,7 @@ same fact, and three shortcuts were harmless that are not harmless now.
   reader learns the colour, not the meaning.
 
 - **Operational notes leak into the model view.** `note_dim` (`session.rs:922`)
-  writes *both* `events.json` (via `record_dim`, `exarch/src/event.rs:704` →
+  writes *both* `events.jsonl` (via `record_dim`, `exarch/src/event.rs:704` →
   `SessionEvent::Dim`, `:227`) and the bus. But a compaction notice or a model
   switch is not a message the model saw; it has no place in the artefact whose job
   is exact model-context replay.
@@ -67,7 +93,7 @@ same fact, and three shortcuts were harmless that are not harmless now.
 ### A per-session operational trace, fed at the emit seam
 
 `transcript.jsonl` is owned by the [`Session`](../../../exarch/src/session.rs),
-created in `Session::assemble` beside its `events.json`, so the root and every
+created in `Session::assemble` beside its `events.jsonl`, so the root and every
 forked child get one — in headless and the TUI alike. It is a
 [`Transcript`](../../../exarch/src/transcript.rs) handle the
 [`Emitter`](../../../exarch/src/bus.rs) carries; `Emitter::emit` tees every event
@@ -85,8 +111,8 @@ A driver nudge is the harness re-prompting the model; it is something that
 happened, not a thing drawn. `Kind::Nudge { used, max, cause }`
 (`exarch/src/bus.rs`) is recorded in the trace at the emit seam; the display
 chooses whether to surface it (a `[nudge n/m: cause]` line in headless, quiet on
-the TUI rail). Its `events.json` twin (`SessionEvent::Nudge`) stays the model-view
-forensic breadcrumb. This proved out the principle: "off the display" and "off the
+the TUI rail). Its `events.jsonl` twin (`SessionEvent::Nudge`) stays a forensic
+breadcrumb in the log. This proved out the principle: "off the display" and "off the
 trace" are now distinct, decided per consumer.
 
 ### Name the role, not the appearance: `Kind::Dim` → `Kind::SystemNote`
@@ -101,7 +127,8 @@ The trace records `{"kind":"system_note"}`, which says what it is.
 `SessionEvent::Dim` and `record_dim` (`event.rs`) are removed. `note_dim`
 (`session.rs:922`) becomes `note`, which emits `Kind::SystemNote` through the
 emitter — recorded in the **trace only**. Operational notes are uniformly
-transcript-only; the model view holds only what the model saw. This is the
+transcript-only; the model projection is determined by the event log, which may
+also retain forensic breadcrumbs. This is the
 model/operational split made total: the same kind of fact lives in one place
 whoever raised it.
 
@@ -135,10 +162,10 @@ events that arrive, and draw its own local decoration — and each former
   answers *how it looks*. `SystemNote` + a dim rendering restores that split, the
   same one [[decisions/260619_surface-carries-documents|surface-carries-documents]]
   draws between a mark's *level of measurement* and its visual variable.
-- **Two records, one job each.** `events.json` is the model view a replay or the
-  protocol state machine reads; `transcript.jsonl` is the operational view a
-  post-mortem reads. Pulling notes out of `events.json` is what makes that split
-  honest rather than nearly-honest.
+- **Two records, one job each.** `events.jsonl` is the event log a replay or the
+  protocol state machine folds into the model view; `transcript.jsonl` is the
+  operational view a post-mortem reads. Pulling ordinary notes out of the log
+  keeps the split honest, while projection-neutral breadcrumbs remain allowed.
 - **Recording survives muting.** Because the trace rides the emitter and not the
   channel, every forked child records its own trace whether or not anyone watches
   it — the property "all children are recorded" holds by construction.
@@ -151,9 +178,10 @@ events that arrive, and draw its own local decoration — and each former
 - **Keep `Kind::Dim`; let the trace filter it out.** Rejected: it leaves an
   appearance word in the operational vocabulary and pushes the role/appearance
   confusion downstream into every consumer.
-- **Keep operational notes in `events.json` too.** Rejected: it leaves the model
-  view carrying non-model events, so "model view" stays an approximation and a
-  replay must learn to skip them.
+- **Keep operational notes in `events.jsonl` too.** Rejected: it would make
+  ordinary operational notes part of the event vocabulary without making them
+  determine the projection. Forensic breadcrumbs are a different category and
+  are retained by the superseding context decision.
 - **A second emit path, "broadcast without recording," for worker-side view
   chrome** (to keep "nothing to compact" on screen). Rejected as YAGNI for a
   single no-op message; dropping it is the honest move, and the only genuine
@@ -170,7 +198,7 @@ events that arrive, and draw its own local decoration — and each former
   injections retire; the UI gains `push_note`/`push_error` and a recording emitter.
   The bus vocabulary shrinks by an appearance word and gains a role word.
 - The trace is uniform: every operational note is `system_note`, transcript-only,
-  whoever raised it; `events.json` holds only model-visible turns plus its
+  whoever raised it; `events.jsonl` holds projection-determining turns and its
   forensic breadcrumbs (`Nudge`, `ProviderError`).
 - The screen is a pure consumer again: it draws events and its own chrome, and can
   no longer fabricate durable state.
@@ -198,7 +226,7 @@ UI-thread emitter through the command path bundled the picker handles into a
 [[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphic]] (name the
 datum's role, never its appearance — the principle this extends from the rail to
 the event vocabulary), [[decisions/260619_surface-carries-documents|surface-carries-documents]]
-(the `Card`/`Mark` split between data and presentation; `events.json` as a
+(the `Card`/`Mark` split between data and presentation; `events.jsonl` as a
 structured machine record), [[decisions/260618_run-turn-host-loop|run-turn-host-loop]]
 (core carries raw `Value` and names no rail vocabulary; this is an exarch-only
 concern), and the as-built arm it re-grounds: [[map/exarch/frontend|frontend]],

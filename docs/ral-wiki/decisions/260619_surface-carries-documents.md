@@ -12,7 +12,7 @@ closed `Kind` enum with a bespoke renderer each.** The *set of cards* becomes op
 (compose marks in ral, zero Rust per card — so the kit can surface a captured file
 write, a build summary, a test matrix, anything); the *set of marks* stays closed
 and small, so the renderer is total and reflow, disclosure, aggregation, and the
-structured `events.json` log all keep working. The discipline is the one
+structured `events.jsonl` log all keep working. The discipline is the one
 [[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphic]] applied
 to the frontend's own *chrome* — encode each datum in the Bertin variable that
 fits its level of measurement — now extended to kit-authored *content*: the kit
@@ -83,7 +83,7 @@ magnitude on hue (the precise error
 [[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphic]] rejects
 in its "Alternatives considered": *"Encode magnitude in hue → rejected: hue is
 unordered."*). The encoding is correct by construction. The palette lives once in
-exarch (themeable); the TUI gets styled marks and `events.json` gets the data
+exarch (themeable); the TUI gets styled marks and `events.jsonl` gets the data
 plus its level — both from one description, never two.
 
 ### The marks — closed, small, composable
@@ -195,7 +195,7 @@ whole change.
 - **Correct by construction.** Because the kit names *level of measurement*, not
   RGB, magnitude can never land on hue and identity can never masquerade as
   size — the renderer binds, and there is exactly one binding table to get right.
-- **Two consumers, one description.** `events.json` is a machine record a harness
+- **Two consumers, one description.** `events.jsonl` is a machine record a harness
   parses (`headless.rs`); the mark tree serialises structurally, while the TUI
   styles the same tree. Raw bytes would have made the card opaque to the log;
   here only a `raw` mark is opaque, and honestly so.
@@ -233,7 +233,7 @@ the contracts.
 - `Kind::Card(Card)` added to the bus (`bus.rs:138`); `AgentSink::emit`
   (`shell_eval.rs:59`) calls `value_to_card` and emits `Kind::Card`. The four old
   Kinds stay this parcel so nothing breaks.
-- `serde::Serialize` on `Card`/`Mark`/`Span` for `events.json`.
+- `serde::Serialize` on `Card`/`Mark`/`Span` for `events.jsonl`.
 
 ### Parcel 1 — the generic renderer
 
@@ -270,7 +270,7 @@ Listed under **Test plan**.
 ## Alternatives considered
 
 - **Pure bytes the host prints (the original instinct).** Rejected as the *whole*
-  channel: opaque to `events.json`, kills width-reflow / click-to-disclose /
+  channel: opaque to `events.jsonl`, kills width-reflow / click-to-disclose /
   patch aggregation / matrix magnitude, and forces the kit to pick one rendering
   and to learn ANSI. Kept, correctly scoped, as the `raw` mark — the one place no
   encoding applies.
@@ -297,7 +297,7 @@ Listed under **Test plan**.
   folds into the shared `fields` path. Net Rust *shrinks*.
 - The encoding is correct by construction; chrome and content share the Bertin
   bindings, so the transcript reads as one graphic.
-- `events.json` stays structured (the mark tree); only a `raw` mark is opaque,
+- `events.jsonl` stays structured (the mark tree); only a `raw` mark is opaque,
   and that is honest.
 - Core is untouched; detached-worker card replay is free.
 - Cost, stated plainly: one upfront vocabulary + generic renderer, against which
@@ -318,7 +318,7 @@ Listed under **Test plan**.
 - **Bertin binding.** A larger `measure`/`diff` renders a brighter value and a
   fuller size bar than a smaller one; a nominal role renders a hue, never a size —
   i.e. magnitude and identity cannot be transposed.
-- **JSON shape.** A `card` serialises to a structured mark tree in `events.json`;
+- **JSON shape.** A `card` serialises to a structured mark tree in `events.jsonl`;
   a `raw` mark serialises its bytes; round-trips through `serde`.
 - **Detached replay.** `spawn { … surface `card … }` then `await $h` replays the
   card to the foreground rail; an un-awaited worker emits none — the byte-replay

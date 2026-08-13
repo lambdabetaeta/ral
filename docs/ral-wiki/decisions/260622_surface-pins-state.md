@@ -48,14 +48,14 @@ Each step refined the taxonomy by asking *what the host does with the value*.
 This step asks the question one level finer, *inside* the render class: a render
 is not always an **event**. `surface-carries-control`'s own table reads "render
 classes reach the rail **and the log**" — append-only scrollback, an
-`events.json` row. That is the right home for *a thing that happened*. It is the
+`events.jsonl` row. That is the right home for *a thing that happened*. It is the
 wrong home for *what is currently true*.
 
 ### The thing the taxonomy is missing: state
 
 Everything exarch puts on screen today is one of three:
 
-| kind | example | where it lives | overwritten? | in `events.json`? |
+| kind | example | where it lives | overwritten? | in `events.jsonl`? |
 |---|---|---|---|---|
 | **event** | a tool call, prose, a diff, an `io` effect | transcript (scrollback) | no — append-only | yes |
 | **host-authored state** | the agent matrix, `ctx%`, the phase bar | pinned chrome | yes — redrawn each frame | no |
@@ -86,7 +86,7 @@ The class dispatch of `surface-carries-control` is unchanged — render vs contr
 This ADR splits the **render** class along a second, orthogonal axis, the
 **disposition**:
 
-| class | disposition | example | host action | overwritten? | in `events.json`? |
+| class | disposition | example | host action | overwritten? | in `events.jsonl`? |
 |---|---|---|---|---|---|
 | render | **append** | `` `card ``, `io` | `value_to_card` → scrollback block | no | yes |
 | render | **pin** | `` `pin [key, body] `` | `value_to_card body` → register slot `key` | **yes** | **no** |
@@ -260,7 +260,7 @@ ambient state within the current one. Keeping pins off the inbox is what keeps
   fixed-position magnitude, never streamed" is, today, enforceable only on
   host-authored marks; a kit had no way to obey it. Pin extends the doctrine to
   kit-authored state and converts `tasks.ral` from violator to exemplar.
-- **It keeps `events.json` truthful.** State is not an event. A `tasks 1/3 →
+- **It keeps `events.jsonl` truthful.** State is not an event. A `tasks 1/3 →
   2/3` overwrite is not "a thing that happened" worth a log row; the *completions*
   that are land as events through the existing notify path. The log keeps
   recording what *happened*; the register shows what *is* — the matrix's logging
@@ -293,7 +293,7 @@ ambient state within the current one. Keeping pins off the inbox is what keeps
   carry an optional disposition; the wrapper keeps the card vocabulary and decoder
   untouched and composes by decode-the-body, the pattern `surface-carries-control`
   already uses for spawned-body surfaces.
-- **Persist the register to `events.json` as state snapshots.** Deferred (see
+- **Persist the register to `events.jsonl` as state snapshots.** Deferred (see
   open questions): the v1 register is ephemeral, the matrix's dual on the logging
   axis too.
 
@@ -307,7 +307,7 @@ ambient state within the current one. Keeping pins off the inbox is what keeps
   concurrency invariant.
 - `tasks.ral` stops streaming: `transition` pins one rollup gauge, overwritten in
   place; per-task changes append nothing.
-- `events.json` and the transcript still record only *events*; pinned state is
+- `events.jsonl` and the transcript still record only *events*; pinned state is
   ambient, like the matrix, and is not logged as a row.
 - The register is generation-bounded by `Viewport::reset` / `/clear`, exactly as
   scrollback is.

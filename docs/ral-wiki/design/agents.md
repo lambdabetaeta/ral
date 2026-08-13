@@ -125,6 +125,27 @@ isolation ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]):
   hit. If the parent is mid-tool-call, the unanswered assistant tool-call frame is
   not inherited; the child forks the request context, not a dangling protocol.
 
+### Bind and hand: context as a value
+
+Selective delegation is ordinary data flow, not a new memory mode. The parent
+surveys and reads closed spans, binds the returned transcript without printing
+it, slices or reshapes that `Str` in ral, drops the originals, and hands the
+binding to an `` `amnemon `` child:
+
+```ral
+let ctx = context-read [4, 7]
+let handoff = slice ctx 0 12000
+context-drop [4, 7]
+agent [prompt: handoff, name: 'researcher', type: `amnemon, grant: `read-only, search: false]
+```
+
+The child receives `handoff` through the ordinary serialisable value snapshot;
+the same idiom can recur down the delegation tree. The token cost is paid at
+the leaf for the slice that is actually handed over. Small, certainly needed
+material may still be spliced into a prompt; a large binding should remain a
+binding, since binding is silent while stdout and a final shell value become
+model material.
+
 ## Wire-seat children: the same snapshot, a different wire
 
 A `Seat::Wire` trunk ([[map/exarch/agent|agent]]) runs its shell in a guest

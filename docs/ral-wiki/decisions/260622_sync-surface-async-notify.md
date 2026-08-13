@@ -257,7 +257,7 @@ respects exactly that hazard while reading the invariant precisely:
   class, no exarch waiter thread, no shell-free blocking settle, no two-observer
   cache handoff. The worker is already a thread holding its own result; it *emits*,
   it is not *observed*.
-- **It keeps `events.json` truthful with no special-casing.** The async value is
+- **It keeps `events.jsonl` truthful with no special-casing.** The async value is
   data (no live handle), so it serialises like any surfaced value. The sibling must
   route its control event *away* from the log because a handle cannot serialise;
   here there is nothing to route around.
@@ -299,7 +299,7 @@ respects exactly that hazard while reading the invariant precisely:
   retire (shared with the sibling).
 - The detachment invariant holds **by construction**: the worker holds `notify`
   (session-owned), never the foreground `Emitter`.
-- `events.json` sees the async value as ordinary data; no special-casing and no
+- `events.jsonl` sees the async value as ordinary data; no special-casing and no
   serialisation problem, because nothing on `notify` carries a live handle.
 - Core gains **one** `TurnRequest` field and one structural `spawn-done` value — no
   waiter thread, no shell-free settle, no two-observer handoff.

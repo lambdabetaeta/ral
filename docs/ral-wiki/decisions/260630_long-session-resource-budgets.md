@@ -41,7 +41,7 @@ The current pressure points are distinct:
   like presentation: silent loss changes what the model sees.
 - **Compaction is not reclamation.** Auto-compaction shrinks the model view, but
   the event log's in-memory mirror and append-only files can still retain the
-  historical prefix. `events.json`, `transcript.jsonl`, and `user.log` are
+  historical prefix. `events.jsonl`, `transcript.jsonl`, and `user.log` are
   durable records, not memory budgets.
 - **The lexical env is cheap to clone, not cheap to fill.** `Env` is persistent
   copy-on-write, so a big env is not a clone bomb. The resident cost is the
@@ -73,14 +73,14 @@ allowed to become unbounded.
 
 - **Keep only a viewport window in memory.** A viewport owns the current reply,
   pins, and the last `N` blocks/rows/bytes; older blocks are already durable in
-  `user.log`/`events.json` and should not be duplicated forever. Dead sub-agent
+  `user.log`/`events.jsonl` and should not be duplicated forever. Dead sub-agent
   viewports are flushed, then evicted after linger into a tombstone carrying id,
   status, and the log path. `/clear` stays the explicit whole-subtree reset.
 
 - **Make compaction physically drop the model prefix in memory.** After a
   successful compaction, the in-memory `AgentLog.events` should match the live
   model view: summary plus suffix, not summary plus a pointer into an
-  ever-growing vector. The append-only `events.json` remains the forensic record;
+  ever-growing vector. The append-only `events.jsonl` remains the forensic record;
   reclamation is for heap, not history.
 
 - **Bound inboxes without silent loss.** The inbox carries model-facing facts, so

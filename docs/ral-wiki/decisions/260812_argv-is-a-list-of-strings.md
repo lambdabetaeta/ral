@@ -33,7 +33,7 @@ its arguments (`core/src/builtins/codecs.rs`) — which is why
 instead of either being an error. At the exec boundary an argv is bytes, and
 *there* the predicate is partial: `reject_exec_arg`
 (`core/src/runtime/command/vet.rs`) refuses maps, lists, blocks, functions,
-native callables, handles, and bytes with **R0001**. So: **`List String` inside, bytes at the OS call.** Nowhere the
+native functions, handles, and bytes with **R0001**. So: **`List String` inside, bytes at the OS call.** Nowhere the
 checker could read said so — `docs/SPEC.md` §6.6 said an argv's elements
 "remain ral values", and the checker's argv paths said nothing at all.
 

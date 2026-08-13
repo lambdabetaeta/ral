@@ -106,7 +106,7 @@ activity adds no new concept to core and does not breach
 (the event is a public `Value`, not core's private representation). exarch decodes that
 shape into an `IoEvent`, composes a `Card` from the existing marks, and emits a bus event
 that carries both: the TUI renders the card through the generic card interpreter, while
-`events.json` serialises the raw event beside the rendered mark tree. If parcel 0 reuses
+`events.jsonl` serialises the raw event beside the rendered mark tree. If parcel 0 reuses
 the existing `surface` `EventSink`, `AgentSink::emit` dispatches `io` values through this
 adapter and ordinary `` `card `` values through `value_to_card`; if it uses a dedicated
 telemetry seam, the same `IoEvent -> Card` adapter is still the boundary. The division
@@ -213,7 +213,7 @@ stack of the five marks (`text`/`measure`/`fields`/`diff`/`raw`) with nominal ro
   low-level primitive — it sits more naturally with its kin in Rust than as a ral closure
   edit and grep both reach for.
 - **Two consumers, one description.** As with cards, the I/O event serialises
-  structurally into `events.json` and styles into the TUI from one shape.
+  structurally into `events.jsonl` and styles into the TUI from one shape.
 
 ## What moves, what stays
 
@@ -333,7 +333,7 @@ compiles and tests alone.
 
 ```
 0  I/O event      core emits {io:read|write|exec, …} Value at redirect + external/bundled completion doors; pick carrier and Kind::Io shape
-1  Card binding   exarch IoEvent -> Card adapter; read/write/exec composers; events.json records raw event + card
+1  Card binding   exarch IoEvent -> Card adapter; read/write/exec composers; events.jsonl records raw event + card
 2  grep → builtin  fold witness stamp into _search-files's pass; builtin emits one grep surface
 3  window-hash     promote agent.ral:20 → exarch builtin; edit (:102) + grep call it; drop the ral def
 4  edit (fork)     recommended: edit → builtin surfacing its diff;  alt: quiet scope around its <,>
@@ -358,7 +358,7 @@ compiles and tests alone.
 - **Card shape & Bertin.** read/write/exec cards compose only existing marks; path,
   mode, argv, status, and outcome are nominal text roles. No file-size or byte-count
   measure is surfaced.
-- **events.json.** Each io event serialises structurally beside the card exarch rendered
+- **events.jsonl.** Each io event serialises structurally beside the card exarch rendered
   from it.
 - **Residual.** `source`/`use` produce no card (documented boundary).
 - **Totality.** Each surfacing door emits a terminal outcome on success and failure:

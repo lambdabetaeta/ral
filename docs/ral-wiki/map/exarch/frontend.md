@@ -1,6 +1,6 @@
 ---
-generated_at_commit: dae7e71d
-generated_at_date: 2026-08-12
+generated_at_commit: 7d9410f0
+generated_at_date: 2026-08-13
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/event.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -57,13 +57,15 @@ finishes, keeping async children muted to their own log.
 
 `agent/event.rs` is the canonical per-session record. `AgentLog` owns two things:
 
-- the in-memory event mirror — renders the next provider request, drives
+- the projection memo and resident part of the event ledger — renders the next
+  provider request, drives
   the protocol state machine (`is_ready` gates a fresh prompt and `quiesce` winds
   any in-flight exchange back to it, so an exchange never strands a prompt mid-protocol;
   [[invariants/turn-ends-ready|exchange-ends-ready]]);
-- a pretty-printed `events.json`, appended as each event lands — the post-mortem
-  "model view". Oversize tool-result sections are elided head+tail at the
-  [[map/exarch/agent|digest]] caps before they ever enter the log.
+- a compact JSONL `events.jsonl`, appended as each event lands — the durable log
+  whose fold is the model view, with projection-neutral breadcrumbs retained.
+  Oversize tool-result sections are elided head+tail at the [[map/exarch/agent|digest]]
+  caps before they ever enter the log.
 
 The TUI writes a sibling `user.log` from the same stream — the "user view" —
 flushed as each block lands so it survives an abnormal exit. Both files live
@@ -175,7 +177,7 @@ Two `Sink` implementations:
  dropped; no reload-from-`user.log` machinery is built. Every live viewport
  also caps its own retained window — `VIEWPORT_MAX_BLOCKS` blocks and
  `VIEWPORT_MAX_ROWS` rendered rows, oldest evicted first — since older
- blocks are already durable in `user.log`/`events.json`.
+ blocks are already durable in `user.log`/`events.jsonl`.
  `/clear` also cancels the in-flight exchange: `route_submit` raises
  `cancel::raise_interrupt` and cascades `agents.cancel_descendants(root)` *before* blanking
  the viewport, so the streaming `select!` in `provider::complete` unwinds within
@@ -222,7 +224,7 @@ Two `Sink` implementations:
   to a non-CLI host (synod's GUI) one exchange at a time on a parked interactive
   trunk.
   Takes the default `Sink::drive` and a per-exchange bus, so its async children stay
-  muted. It is a display only — the durable `transcript.jsonl` / `events.json`
+  muted. It is a display only — the durable `transcript.jsonl` / `events.jsonl`
   are written by each session's own `agent/transcript.rs` / `agent/event.rs`
   seams, in headless exactly as in the TUI.
 

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: 7d9410f0
+generated_at_date: 2026-08-13
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 
@@ -149,7 +149,7 @@ Sourced into the shell at boot:
 - `set-goal` / `clear-goal` — `pin-set`/`pin-clear` under the `goal`
   register key, kept visible by the [[map/exarch/agent|nudge]] reminder.
 
-## Harness verbs — spawn, schedule, reply
+## Harness verbs — context, spawn, schedule, reply
 
 Every verb below is a `BuiltinEntry` in
 `exarch/src/shell_eval/builtins/harness.rs`
@@ -166,6 +166,33 @@ retiring JSON tools validated as a schema enum is an open row checked at the
 door instead of a closed variant type: an unknown label errors before any
 enquiry crosses, naming the legal set, rather than a static row-unification
 error with no room for a didactic message.
+
+### Context stewardship
+
+The context verbs address the model view by the exchange and digest reaches
+reported by `context`; they do not expose the forensic event ledger as a
+queryable store.
+
+- **`context`** → `F [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int,
+  steps: Int, live: Bool]], total-bytes: Int, total-steps: Int, cache: Str]`.
+  A silent survey of the finite view. A digest is named by the last exchange it
+  reaches; `cache` says whether editing before the provider cache watermark
+  will make the next request reread the prefix.
+- **`context-read <exchanges>`** → `F Str`. Reads named closed exchanges as a
+  role-marked, step-delimited transcript. It may name a digest by its reach,
+  but not an exchange swallowed by that digest. Binding the result is silent;
+  stdout and the final value of a shell call are model material, so large reads
+  should be sliced rather than printed whole.
+- **`context-drop <exchanges>`** → `F [bytes-delta: Int]`. Sheds whole closed
+  exchanges immediately and records a `ContextEdited` model event. The live,
+  unknown, folded, duplicate, or empty selection is refused with an explanation;
+  a user-shaped rewind is the same closed-range operation. A negative byte
+  delta is honest when the remaining digest is larger than what it replaced.
+- **`context-fold [through: Int, digest: Str]`** → `F [bytes-delta: Int]`.
+  Replaces the visible prefix through a closed exchange with the supplied
+  digest, recording the edit immediately. The reach may extend the current
+  digest but cannot cross the live exchange; folding is curation, not a promise
+  of compression, so the byte delta may be negative.
 
 - **`agent [prompt: …, name: …, type: …, grant: …, search: …]`** →
   `F [name: Str, log-dir: Str]`. The one spawn verb, taking a single closed

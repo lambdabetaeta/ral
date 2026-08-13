@@ -50,7 +50,7 @@ So repeated Esc can never bump the counter past 1.
 The same effort makes the worker's silent synchronous phases legible and the
 late ones cancellable. A transient `Kind::Phase` label — rendering context /
 waiting for model / typechecking / compacting — shows beside the spinner and is
-recorded to the headless `events.json`, so a wedge names itself instead of
+recorded to the headless `events.jsonl`, so a wedge names itself instead of
 animating a bare dot. `compact` bails before its summarize request on a
 turn-boundary cancel rather than issuing a round-trip only to abort it. Which
 remaining phase, if any, actually wedges is left to measurement: the phase labels

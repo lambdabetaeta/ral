@@ -340,7 +340,7 @@ below is this page's own rewrite):
 Resolved, 260705:
 
 - **Prune events are transcript/display facts only, never model-visible tool
-  context.** Constraint 7 holds throughout: no `events.json` twin, no inbox
+  context.** Constraint 7 holds throughout: no `events.jsonl` twin, no inbox
   message. The only model-facing consequence of a prune is the ordinary
   undefined-variable diagnostic, unmodified, should the model name the pruned
   binding again.

@@ -78,7 +78,7 @@ already safe:
   symmetrically: the **rail owns the left edge** (what happened), the **register
   the right** (what is).
 - **Headless.** There is no register to overwrite, so a pin neither prints nor
-  logs — `events.json` records only events. Pinned state is ambient, like the
+  logs — `events.jsonl` records only events. Pinned state is ambient, like the
   matrix. `pin-read`/`pin-list` still answer headless, since they read the
   mirror, not the drawn column.
 

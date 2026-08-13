@@ -1,6 +1,6 @@
 ---
-generated_at_commit: dae7e71d
-generated_at_date: 2026-08-12
+generated_at_commit: 7d9410f0
+generated_at_date: 2026-08-13
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/registry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -211,7 +211,7 @@ registry's running/settled split with the nearest time-to-reap and the
 binding-ledger figures read as *data* through the transport's Enquiry desk
 (`probe_workers` and its sibling probes,
 [[decisions/260706_enquiry-channel|enquiry-channel]]), plus inbox depth per
-source, the event log's mirror length and history bytes, log-dir and scratch
+source, the event ledger's logical length and history bytes, log-dir and scratch
 disk walked at invocation, and the sub-agent idle lease as two rows (nearest
 time-to-reap, and the demote threshold) — and
 `emit_resources` posts one `Kind::Resources`
@@ -250,7 +250,8 @@ root's *first* `reply` back for self-verification before honouring the next,
 the one pinned-state reminder, and the context-pressure warning
 ([[decisions/260805_context-pressure-is-a-nudge|context-pressure-is-a-nudge]]:
 budget-free, latched once per crossing of the soft line one reserve ahead of
-auto-compaction, re-armed by the compaction itself) — are
+auto-compaction, re-armed when the measured context crosses back below the line
+or the session resets) — are
 driven off the same `react` rule. Live descendants make the agent wait:
 `must_reply` is suspended, and pin/no-pin reminders wait too, since the agent has
 already delegated the next actionable fact — though the pressure warning does
@@ -368,7 +369,7 @@ swap on one agent never disturbs another. `fork` seeds the child's own handle
 from the parent's current provider (`ProviderHandle::new(self.provider.current())`),
 so the child inherits the model in force at spawn and may diverge afterward.
 
-## Lifecycle: clear, compact, fork
+## Lifecycle: clear, compact, resume, fork
 
 `clear` rebuilds the focused agent without carrying cancellation residue forward:
 it re-runs the seat's ceremony (`Seat::clear`) — the identity seat reboots a
@@ -376,8 +377,11 @@ fresh shell from `boot_root_shell` (`agent/seat.rs`, the cwd- and
 scratch-seeding wrapper over `bootstrap::boot_shell`) onto the *same*
 interrupt target; a wire session instead clears by killing its engine
 process and booting a fresh one from the same recipe, so no caller routes
-`/clear` to that seat — truncates and restarts the event log, clears the
-schedule registry, and cascades cancel to its subtree. Replacing the
+`/clear` to that seat. The identity seat rotates `events.jsonl` and
+`transcript.jsonl` together to the same first-free `.n`, with one wall-clock
+stamp as their join key, then starts a fresh event ledger; it never truncates
+the old record. The event rename is the rotation commit point. Clear also
+clears the schedule registry and cascades cancel to its subtree. Replacing the
 transport drops the outgoing shell, whose `LocalState` teardown cancels
 every worker still registered on it — explicit destruction outranks every
 lease, the durable class included, with no host call site to forget
@@ -388,25 +392,34 @@ the same generation guard (`deferred_sink`'s admission check,
 drops that flush too, so no pre-clear worker output survives into the rebuilt
 context. It is the focused agent's, not a fleet-wide reset.
 
-`compact` runs `provider.summarize` over the history when context pressure
+`--resume` is a trunk-only lifecycle: it validates and replays session 0's
+`events.jsonl`, quarantining only an unterminated crash fragment, then reopens
+the file for append. The live model and provider are selected again, while the
+shell is fresh and receives a note describing the bindings, workers, cwd,
+scratch, pins, and schedules that were not durable. Wire seats and child logs
+are refused rather than half-resumed.
+
+`--no-logs` chooses the mirror-only path at birth: no event ledger, transcript,
+or run lock is created, children inherit the choice, and there is consequently
+nothing for `--resume` to reopen.
+
+`compact` runs `provider.summarize` over the closed prefix when context pressure
 crosses the window's reserve (`digest.rs`'s `compaction_due` — used tokens
 into the top 15% of a known window; `COMPACT_THRESHOLD`, 500 KiB of serialised
 history, is the fallback when the window is unknown) and `AgentLog::can_compact`
-holds (no pending tool results). It is called at the **top of `deliberate`**, where the agent is
-`ReadyForUser` ([[invariants/turn-ends-ready|exchange-ends-ready]]) and the gate
-actually holds — every provider round-trip (`step`) passes through here, so long
-autonomous and headless sessions stay bounded without an interactive `/compact`. An
-exchange-boundary Esc bails before the summarize request
-([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
-A successful `AgentLog::apply_compaction` physically drains
-`events[..suffix_start]` from the in-memory mirror after the archival
-`Compacted` breadcrumb is durably recorded — `event_count`/`history_bytes`
-shrink to summary + suffix, heap reclamation rather than just a narrower
-read-time view. `events.json` is append-only and untouched either way: a
-failed compaction (tool results pending) drops nothing, and a successful
-one never rewrites what is already on disk
-(leases-and-budgets, "Compaction
-physically drops the model prefix in memory").
+holds (no pending tool results). It is called at the **top of `deliberate`**,
+where the agent is `ReadyForUser` ([[invariants/turn-ends-ready|exchange-ends-ready]])
+and the gate actually holds — every provider round-trip (`step`) passes through
+here, so long autonomous and headless sessions stay bounded without an
+interactive `/compact`. An exchange-boundary Esc bails before the summarize
+request ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
+
+A successful compaction records `ContextEdited { op: Fold, by: Harness }` with
+the digest and cut. The same fold step removes the prefix spans from the model
+view and evicts their resident events, retaining only their byte ranges in
+`events.jsonl`; this is residency following the view, not a second drain rule.
+There is no `Compacted` state or archival cut to infer. A failed attempt records
+nothing and sheds nothing. The durable log is appended to, never rewritten.
 
 `Agent::check_disk_warn` is the disk half of the same ADR ("Disk: report
 and warn only") — report-and-warn only, never rotation or deletion.

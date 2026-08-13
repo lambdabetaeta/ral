@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 5ee3d0c
-generated_at_date: 2026-07-31
+generated_at_commit: 7d9410f0
+generated_at_date: 2026-08-13
 covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/event.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/headless.rs, exarch/src/agent/transcript.rs, exarch/src/tui/surface.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
 ---
 
@@ -222,7 +222,7 @@ the byte fields (`stdout`, `stderr`, `new_bytes`, `old_bytes`) — a write or
 command's shape belongs in the log, its content does not. The kept fields
 include `script`/`line`/`col`/`start`/`end`/`principal` alongside each kind's
 own; the rendered card is a rendering and lives only in the TUI's `user.log`.
-The model-protocol `events.json` ([[map/exarch/frontend|frontend]]) carries no
+The model-protocol `events.jsonl` ([[map/exarch/frontend|frontend]]) carries no
 cards and is unchanged.
 
 ## Enforcement — every door is accounted for
