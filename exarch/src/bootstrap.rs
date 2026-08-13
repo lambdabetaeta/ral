@@ -31,14 +31,24 @@ impl RunLock {
             .read(true)
             .write(true)
             .open(run_dir.join("run.lock"))?;
-        let mut lock = fd_lock::RwLock::new(file);
-        let guard = lock.try_write()?;
-        // The flock is tied to the fd, which `lock`'s own `File` keeps open for
-        // the process's lifetime; forgetting `guard` only skips fd-lock's
-        // unlock-on-drop, not the OS lock itself.
-        std::mem::forget(guard);
-        Ok(Self { _lock: lock })
+        Ok(Self {
+            _lock: hold_exclusive(file)?,
+        })
     }
+}
+
+/// Take `file`'s exclusive advisory lock and keep it for as long as this
+/// process lives.
+///
+/// The lock belongs to the open file description, which the returned value
+/// holds open, so forgetting the guard forgoes fd-lock's unlock-on-drop and
+/// nothing else.  The OS releases the lock when the process ends, by whatever
+/// means it ends — which is what makes the lock an honest answer to "is
+/// anyone still using this?".
+fn hold_exclusive(file: File) -> io::Result<fd_lock::RwLock<File>> {
+    let mut lock = fd_lock::RwLock::new(file);
+    std::mem::forget(lock.try_write()?);
+    Ok(lock)
 }
 
 /// The one terminal probe both boot sites take: [`boot_shell`] here, and the
@@ -121,12 +131,36 @@ pub(crate) fn seed_no_color(shell: &mut Shell) {
 /// `$EXARCH_SCRATCH`, `$SYNOD_SCRATCH`.
 ///
 /// Everything ephemeral the agent scribbles belongs here, because
-/// `reasonable` denies writes to the user's real cache dirs.  Left on disk
-/// at session end: this is OS-managed temp space.
+/// `reasonable` denies writes to the user's real cache dirs.
+///
+/// A scratch holds whole tool caches — see [`LEGACY_TOOL_HOMES`] — and the
+/// temp directory around it is swept by the OS on no schedule worth trusting:
+/// Windows never sweeps it, macOS only across a reboot, and Linux only where
+/// `/tmp` is not a tmpfs.  So exarch sweeps its own: a session holds a lock
+/// beside its scratch for as long as it runs, and [`Scratch::new`] deletes
+/// the scratches no lock answers for.
 pub struct Scratch {
     app: App,
     dir: PathBuf,
+    _hold: Hold,
 }
+
+/// What answers for a scratch's life, and so what ends it.
+///
+/// A session's lock is read by the next session's [`reap_unheld`]; a test's
+/// guard is read by nobody, because the test's own end deletes the directory.
+#[expect(
+    dead_code,
+    reason = "each variant is held for what its Drop does — closing the lock's fd, deleting the test's directory — and so is never read"
+)]
+enum Hold {
+    Session(fd_lock::RwLock<File>),
+    Test(tempfile::TempDir),
+}
+
+/// The lock file's name is its scratch's plus this, so each stands beside the
+/// other and either names the other by [`Path::with_extension`].
+const LOCK_SUFFIX: &str = ".lock";
 
 /// Build-tool homes that pre-date or ignore XDG, each given its own scratch
 /// subdir.  Anything that respects `$XDG_CACHE_HOME` needs no entry here.
@@ -140,23 +174,37 @@ const LEGACY_TOOL_HOMES: &[(&str, &str)] = &[
 ];
 
 impl Scratch {
-    /// Create the process's disposable scratch, wiping a stale dir an earlier
-    /// run with the same pid left behind.
+    /// Create this session's scratch under a lock that says it is live, and
+    /// delete the scratches whose sessions are over.
+    ///
+    /// The lock file is made first and the directory takes its name from it,
+    /// so a scratch is never visible unheld: any directory another session can
+    /// find already has a held lock beside it.
     ///
     /// # Errors
-    /// Returns `Err` if the removal or the creation fails.
+    /// Returns `Err` if the lock file or the directory cannot be created.
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:silent:scratch-bootstrap] disposable scratch-dir setup; not turn-time data I/O"
     )]
     pub fn new(app: App) -> io::Result<Self> {
-        let dir =
-            std::env::temp_dir().join(format!("{}-scratch-{}", app.name(), std::process::id()));
-        if dir.exists() {
-            fs::remove_dir_all(&dir)?;
-        }
-        fs::create_dir_all(&dir)?;
-        Ok(Self { app, dir })
+        let temp = std::env::temp_dir();
+        let prefix = format!("{}-scratch-", app.name());
+        let (file, lock) = tempfile::Builder::new()
+            .prefix(&prefix)
+            .suffix(LOCK_SUFFIX)
+            .tempfile_in(&temp)?
+            .keep()
+            .map_err(|kept| kept.error)?;
+        let hold = hold_exclusive(file)?;
+        let dir = lock.with_extension("");
+        fs::create_dir(&dir)?;
+        reap_unheld(&temp, &prefix, &lock);
+        Ok(Self {
+            app,
+            dir,
+            _hold: Hold::Session(hold),
+        })
     }
 
     pub fn path(&self) -> &std::path::Path {
@@ -174,28 +222,29 @@ impl Scratch {
         format!("{}_SCRATCH", self.app.name().to_uppercase())
     }
 
-    /// A uniquely-named scratch for tests: [`Self::new`] keys on pid alone, so
-    /// concurrent tests would contend on one path.  Public and hidden because
-    /// synod's tests need the same scaffolding.
+    /// A scratch for one test, deleted when the returned value falls.  A test
+    /// process ends normally, so the guard suffices and no lock is taken.
+    ///
+    /// `tag` names the test, and only so that the rare directory outliving a
+    /// killed test run says which test left it.
+    ///
+    /// Deliberately outside [`Self::new`]'s `<app>-scratch-` prefix, so a live
+    /// session's [`reap_unheld`] never considers a test's directory.
+    ///
+    /// Public and hidden because synod's tests need the same scaffolding.
     ///
     /// # Errors
-    /// Returns `Err` if the removal or the creation fails.
+    /// Returns `Err` if the directory cannot be created.
     #[doc(hidden)]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[io-door:test] test fs scaffolding — a per-test scratch dir"
-    )]
     pub fn for_test(app: App, tag: &str) -> io::Result<Self> {
-        let dir = std::env::temp_dir().join(format!(
-            "{}-scratch-test-{}-{tag}",
-            app.name(),
-            std::process::id()
-        ));
-        if dir.exists() {
-            fs::remove_dir_all(&dir)?;
-        }
-        fs::create_dir_all(&dir)?;
-        Ok(Self { app, dir })
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("{}-test-{tag}-", app.name()))
+            .tempdir()?;
+        Ok(Self {
+            app,
+            dir: dir.path().to_owned(),
+            _hold: Hold::Test(dir),
+        })
     }
 
     /// Seed [`Scratch::var`] and the legacy-tool homes into `shell`, overriding
@@ -209,6 +258,59 @@ impl Scratch {
             let value = format!("{scratch}/{sub}");
             seed_var(shell, var, &value);
         }
+    }
+}
+
+/// Delete the scratches no live session answers for.
+///
+/// Every scratch has a lock file beside it, held for as long as its session
+/// runs, so one question settles ownership: can the lock be taken?  The OS
+/// releases it however the session ended — a clean exit, a panic, a `SIGKILL`,
+/// a power cut — and no lock outlives a reboot, so this single test covers
+/// every way a session can fail to tidy up after itself.  Nothing here reads a
+/// pid or a boot identifier: each of those only approximates what the lock
+/// states exactly.
+///
+/// `mine` is skipped by name rather than trusted to fail the test.  `flock`
+/// keys on the open file description, so a second attempt from this same
+/// process does answer "held" — but only on the platforms that have `flock`,
+/// and a scratch must not depend on that to survive its own reaping.
+///
+/// Failures are silent throughout: a scratch that resists deletion is a
+/// nuisance, never a reason to refuse the session it was made for.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:scratch-bootstrap] disposable scratch-dir setup; not turn-time data I/O"
+)]
+fn reap_unheld(temp: &Path, prefix: &str, mine: &Path) {
+    let Ok(entries) = fs::read_dir(temp) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let lock = entry.path();
+        let Some(name) = lock.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if lock == mine || !name.starts_with(prefix) || !name.ends_with(LOCK_SUFFIX) {
+            continue;
+        }
+        // Opened, never created: a lock file that has just been deleted names
+        // a scratch that is already somebody else's business.
+        let Ok(file) = OpenOptions::new().read(true).write(true).open(&lock) else {
+            continue;
+        };
+        let mut unheld = fd_lock::RwLock::new(file);
+        if unheld.try_write().is_err() {
+            continue;
+        }
+        // Released and closed before the deletion, because Windows will not
+        // unlink a file this process still holds open.  Another session may
+        // take it in between and delete the same scratch; one of the two then
+        // fails harmlessly, and no *live* session can be the one that takes
+        // it, since a new session always makes a new name.
+        drop(unheld);
+        let _ = fs::remove_dir_all(lock.with_extension(""));
+        let _ = fs::remove_file(&lock);
     }
 }
 
@@ -434,8 +536,62 @@ pub(crate) fn seed_var(shell: &mut Shell, name: &str, value: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_resume_target, project_slug, resume_candidates_in};
+    use super::{
+        LOCK_SUFFIX, hold_exclusive, normalize_resume_target, project_slug, reap_unheld,
+        resume_candidates_in,
+    };
     use std::fs;
+
+    /// Seed a scratch and its lock file, as [`super::Scratch::new`] would.
+    fn seed_scratch(temp: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let lock = temp.join(format!("{name}{LOCK_SUFFIX}"));
+        fs::write(&lock, b"").expect("seed lock file");
+        fs::create_dir_all(temp.join(name)).expect("seed scratch dir");
+        lock
+    }
+
+    /// The lock alone divides the living from the dead, and nothing outside
+    /// the prefix is any of the reaper's business.
+    #[test]
+    fn a_scratch_survives_exactly_while_its_lock_is_held() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let held = seed_scratch(temp.path(), "exarch-scratch-held");
+        let unheld = seed_scratch(temp.path(), "exarch-scratch-unheld");
+        let mine = seed_scratch(temp.path(), "exarch-scratch-mine");
+        let synod = seed_scratch(temp.path(), "synod-scratch-elsewhere");
+        let fixture = temp.path().join("exarch-test-some-tag-a7bx");
+        fs::create_dir_all(&fixture).expect("seed fixture");
+
+        let file = fs::File::options()
+            .read(true)
+            .write(true)
+            .open(&held)
+            .expect("open the lock to hold");
+        let _live_session = hold_exclusive(file).expect("hold the lock");
+
+        reap_unheld(temp.path(), "exarch-scratch-", &mine);
+
+        assert!(
+            held.with_extension("").exists(),
+            "a held lock is a session still running: its scratch must survive"
+        );
+        assert!(
+            !unheld.with_extension("").exists() && !unheld.exists(),
+            "an unheld lock answers for nobody, so the scratch and the lock both go"
+        );
+        assert!(
+            mine.with_extension("").exists(),
+            "this session's own scratch is never its own to reap"
+        );
+        assert!(
+            synod.with_extension("").exists(),
+            "synod's scratches are outside exarch's prefix and untouchable"
+        );
+        assert!(
+            fixture.exists(),
+            "a test fixture has no lock and sits outside the prefix: not the reaper's business"
+        );
+    }
 
     #[test]
     fn slug_joins_path_components_with_dashes() {
