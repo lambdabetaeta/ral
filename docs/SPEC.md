@@ -2609,13 +2609,13 @@ Capability paths must be absolute after expansion. These sigils make portable ab
 - `xdg:config`, `xdg:data`, `xdg:cache`, `xdg:state`, `xdg:runtime`, and their subpaths;
 - `cwd:` — the working directory at decode time;
 - `tempdir:` — the platform temporary directory at decode time;
-- `gitdir:` — the current repository’s real Git directory, or `cwd:` outside a repository.
+- `gitdir:` — the current repository’s real Git directory, or `cwd:` outside a repository. Where `.git` is a file naming that directory, the directory must name the working tree back — as a linked worktree’s `gitdir` file does, and as a `--separate-git-dir` repository’s `core.worktree` setting does — since the file itself lies inside the tree the grant confines.
 
 Sigils, `.` and `..`, environment-derived bases, and symlink identities are frozen when the inline grant or profile is decoded. Later `cd`, `$HOME`, `$TMPDIR`, XDG, or repository changes do not retarget the grant.
 
 Ordinary relative paths are rejected. Use `cwd:relative/path` when that is intended.
 
-An XDG sigil must resolve beneath the effective home directory. ral rejects an unknown XDG name, an unset home needed by `~` or `xdg:`, or an XDG environment override that would escape the home directory. A path rooted for another operating-system family is ignored as a dead, non-matching grant so one profile can contain host-specific entries.
+An XDG sigil must resolve beneath the effective home directory. ral rejects an unknown XDG name, an unset home needed by `~` or `xdg:`, an XDG environment override that would escape the home directory, or a `.git` pointer file no Git directory claims. A path rooted for another operating-system family is ignored as a dead, non-matching grant so one profile can contain host-specific entries.
 
 ### 12.5. `net`
 

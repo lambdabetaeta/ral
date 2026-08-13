@@ -9,7 +9,8 @@
 //! once, so a later `chdir` or `$TMPDIR` change cannot retroactively widen a
 //! grant.  XDG uses the Linux defaults on every platform, macOS included
 //! ([`crate::path::basedir`]); `gitdir:` follows a worktree `.git` pointer via
-//! [`crate::path::discover_git_dir`], falling back to the cwd outside a repo.
+//! [`crate::path::discover_git_dir`] — only as far as a git directory that
+//! claims the working tree — and falls back to the cwd outside a repo.
 //!
 //! `path:` and `system:` ([`system_tool_roots`]) are exec-only, each expanding
 //! to many directories rather than one path, and `capability::decode`'s
@@ -102,14 +103,17 @@ pub fn freeze_path_list(
 /// Expand one entry's sigil against `ctx`, then fold `.`/`..` and wrap, so every
 /// frozen entry is sigil-free and in the normal form the gate matches against.
 ///
-/// Only `xdg:` carries the under-`home` guard: `$TMPDIR` and a worktree's git
-/// directory legitimately live outside `home`, so those two sigils trust their
-/// source as given.
+/// Two sigils read a source the session does not own, and each guards it in the
+/// terms of what would otherwise author the grant: an `$XDG_*_HOME` must land
+/// under `home` ([`resolve_xdg_safe`]), and a `.git` pointer file must be
+/// answered by a git directory that claims the working tree
+/// ([`crate::path::discover_git_dir`]).  `tempdir:` alone trusts its source as
+/// given, `$TMPDIR` being the launching user's to set.
 ///
 /// # Errors
 /// An unknown `xdg:` token, an `xdg:` path that escapes `$HOME` once folded, an
-/// unset `$HOME` under a home-relative sigil (`~`, `xdg:`), or a `~user` naming
-/// another user's home off Unix.
+/// unset `$HOME` under a home-relative sigil (`~`, `xdg:`), a `~user` naming
+/// another user's home off Unix, or a `.git` pointer no git directory claims.
 #[allow(clippy::disallowed_methods)]
 pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, PolicyError> {
     if looks_like_xdg(entry) {
@@ -125,7 +129,7 @@ pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, 
         return Ok(join_sub(std::env::temp_dir(), sub));
     }
     if let Some(sub) = parse_literal_sigil(entry, "gitdir") {
-        let base = crate::path::discover_git_dir(ctx.cwd).unwrap_or_else(|| ctx.cwd.to_path_buf());
+        let base = crate::path::discover_git_dir(ctx.cwd)?.unwrap_or_else(|| ctx.cwd.to_path_buf());
         return Ok(join_sub(base, sub));
     }
     if let Some(t) = TildePath::parse(entry) {

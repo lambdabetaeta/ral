@@ -1,5 +1,5 @@
 ---
-generated_at_commit: dcd9739a
+generated_at_commit: 1eff3390
 generated_at_date: 2026-08-13
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -73,7 +73,9 @@ plus `which.rs` for PATH search.
 
 - expand — `sigil.rs` (the five path-prefix sigils: `~`, `xdg:`, `cwd:`,
   `tempdir:`, `gitdir:` — the last three policy-only, expanded at freeze;
-  `git.rs` backs `gitdir:` discovery), `tilde.rs` (`~user` resolves honestly
+  `git.rs` backs `gitdir:` discovery, following a `.git` pointer file only to a
+  git directory whose `gitdir` back-pointer or `core.worktree` names the working
+  tree back), `tilde.rs` (`~user` resolves honestly
   per platform: off-Unix `get_user_home` declines rather than fabricating a
   home, and each call site picks its own fallback);
 - lex — `lex.rs`;

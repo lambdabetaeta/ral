@@ -165,6 +165,13 @@ Each file is frozen as it loads: `~`, `xdg:`, `cwd:`, `tempdir:`, `gitdir:`,
 and `system:` resolve to fixed paths for that session before the capabilities
 are composed. Changing the environment later cannot move those grants.
 
+Two of them are read from a source the session does not author, and each is
+checked rather than trusted. An `xdg:` path must land under the home directory.
+A `gitdir:` in a worktree or submodule — where `.git` is a file naming the real
+Git directory — is followed only as far as a Git directory that names the
+working tree back, since that file sits in the tree the agent may write. A
+pointer nothing claims refuses the session and names both paths.
+
 A restriction file is itself added to the filesystem deny set, so the agent
 cannot rewrite the file that defines its boundary.
 

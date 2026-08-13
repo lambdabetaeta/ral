@@ -21,10 +21,12 @@ function. It walks a `.ral` profile's terminal map — or the inline
 `grant [...] { body }` map — into a bundle, then runs a *freeze pass* before
 returning. In that pass it:
 
-- **resolves** every `~` / `xdg:` / `cwd:` / `tempdir:` sigil against a
+- **resolves** every `~` / `xdg:` / `cwd:` / `tempdir:` / `gitdir:` sigil against a
   `FreezeCtx { home, cwd }` (and `tempdir:` against the process temp dir);
 - **rejects** an `xdg:` value that escapes `home` — defence in depth against an
   attacker-set `XDG_*_HOME=/etc` silently widening a grant;
+- **rejects** a `gitdir:` whose `.git` pointer file names a directory that does
+  not name the working tree back;
 - **rejects** a non-sigil *relative* entry — it would otherwise anchor to the
   live cwd at the access rather than the grant, so the same rule would mean a
   different region after a `cd`. Authors write `cwd:sub` to pin "relative to
@@ -86,6 +88,27 @@ the offending input is refused at the door, not that its rejection depends on
 what survives the lattice. Error attribution is per-profile — exarch's loader
 prepends `--restrict <path>` (or `--extend-base`), so the message names the file
 that carried the bad token.
+
+## A `gitdir:` pointer is answered, not obeyed
+
+**Two sigils read a source the session does not author — an `XDG_*_HOME` and a
+`.git` pointer file — and each is guarded in the terms of whoever could write
+it.** The `xdg:` guard is containment, because an environment variable's harm is
+where it lands. The `gitdir:` guard cannot be: a linked worktree's git directory
+legitimately lies outside the tree, so no region bounds it. What bounds it is
+*mutual reference*.
+
+- A `.git` file lives in the working tree, which under exarch's `reasonable`
+  base is granted for write. So the pointer is a sentence the confined body may
+  compose, and `gitdir:` is granted read **and** write.
+- Freeze therefore follows the pointer only as far as a git directory that names
+  this tree back — a linked worktree's `gitdir` file, or `core.worktree` in the
+  config of a repository split off with `--separate-git-dir`, the two records git
+  itself keeps. Both ends must agree, and only one end is writable from inside
+  the tree.
+- A pointer nothing claims is a `PolicyError` at the door, like an escaping
+  `xdg:`. Silently narrowing to the cwd would be safe and unreadable — the same
+  fail-closed-and-say-so reading the XDG guard takes.
 
 ## Composition is over resolved paths
 

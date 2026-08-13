@@ -31,6 +31,12 @@ return [
   #     vars with the Linux defaults universally.
   #   * `cwd:[/sub]` — the working directory at session start.
   #   * `tempdir:[/sub]` — `std::env::temp_dir()`.
+  #   * `gitdir:[/sub]` — the git directory of the repository the cwd is in.
+  #     Where `.git` is a *file* naming that directory, the directory must
+  #     name this working tree back (a linked worktree's `gitdir` file, or
+  #     `core.worktree` in a `--separate-git-dir` config) — the file itself
+  #     sits in the tree this grant makes writable, so on its own it would
+  #     choose the grant.  A pointer nothing claims refuses the session.
   #
   # See `core/src/path/sigil.rs` for the recognised tokens.
   #
@@ -56,7 +62,7 @@ return [
   fs: [
     read: [
       'cwd:',                   # the project tree the agent is working in
-      'gitdir:',               # the actual git directory (handles worktrees)
+      'gitdir:',                # the actual git directory (handles worktrees)
       '/tmp',
       'tempdir:',               # `$TMPDIR` on macOS — distinct from /tmp
       'xdg:config',             # ${XDG_CONFIG_HOME:-~/.config}
