@@ -151,13 +151,15 @@ bind that `mkdir` returns `EROFS` and kills the envelope — `reasonable` denies
 `xdg:config/gcloud` beneath a readable `xdg:config`, so on any host that never
 installed gcloud every external command under the grant died in sandbox setup
 rather than running. The deny survives its own absence: creation is the only
-access an absent name has, and the read-only bind already refuses it. Which
-bind governs is a depth question, not a membership one —`mountpoint_is_creatable`
-takes the deepest containing bind of either kind, because read-only binds are
-mounted before writable ones and a write prefix nested inside a read prefix (a
-project tree inside a readable home) makes creation possible again and the mask
-owed again. A name under no bind at all falls on the new root's own tmpfs,
-where creation succeeds, so it keeps its mask. Both masks refuse
+access an absent name has, and the read-only bind already refuses it.
+`mountpoint_is_creatable` decides by membership, not depth: every writable bind
+is mounted after every read-only one and each is an identity bind, so a
+writable bind governs its whole subtree however shallow it is beside a
+read-only one — which is also what the capability model reads off a write
+prefix, so backend and model agree. A write prefix nested inside a read prefix
+(a project tree inside a readable home) therefore keeps the mask, and a name
+under no bind at all falls on the new root's own tmpfs, where creation
+succeeds, so it keeps the mask too. Both masks refuse
 with `EACCES` against macOS's `EPERM`, so a cross-platform test should assert
 the bytes are unreachable rather than an errno — and because the failure mode
 is a sandbox that never launches, one test per backend must spawn the envelope
