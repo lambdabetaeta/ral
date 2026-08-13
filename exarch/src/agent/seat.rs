@@ -293,15 +293,12 @@ mod tests {
         }
     }
 
-    /// Unique per call, as in `fleet::desk`'s fixture: a fixed path would
-    /// race a parallel sibling's `remove_dir_all` against this call's own.
+    /// Each log takes the next session id, as in `fleet::desk`'s fixture, so
+    /// two of them are never the same session to the wire.
     fn test_log() -> AgentLog {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("exarch-wire-seat-test-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        AgentLog::root(&root, n, "test", "test", 0).expect("session log")
+        AgentLog::for_test(n, "test", "test").expect("session log")
     }
 
     /// Hand-rolls `WireTransport::new`'s fd-3 handoff so the host end can

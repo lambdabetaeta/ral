@@ -263,10 +263,8 @@ mod tests {
         Emitter::new(tx, 0)
     }
 
-    fn fresh_log(tag: &str) -> AgentLog {
-        let root = std::env::temp_dir().join(format!("exarch-nudge-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        AgentLog::root(&root, 0, "test", "test", 0).expect("session log")
+    fn fresh_log() -> AgentLog {
+        AgentLog::for_test(0, "test", "test").expect("session log")
     }
 
     /// The transient exhausted the provider loop before the model produced output;
@@ -274,7 +272,7 @@ mod tests {
     #[test]
     fn transient_surfaces_without_nudge() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("transient");
+        let mut log = fresh_log();
         let attempt = || {
             Err(ProviderError::Transient {
                 cause: "stream idle: no response within timeout".into(),
@@ -301,7 +299,7 @@ mod tests {
     #[test]
     fn provider_failures_do_not_consume_budget() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("ratelimit-budget");
+        let mut log = fresh_log();
         let attempt = || {
             Err(ProviderError::RateLimited {
                 retry_after: None,
@@ -328,7 +326,7 @@ mod tests {
     #[test]
     fn empty_turn_nudges_and_consumes_budget() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("empty");
+        let mut log = fresh_log();
         match reg.react(
             &Ok(deliberate::Outcome::Empty),
             &NudgeCtx {
@@ -350,7 +348,7 @@ mod tests {
     #[test]
     fn exhausted_budget_stops() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("budget");
+        let mut log = fresh_log();
         for _ in 0..BUDGET {
             assert!(
                 reg.react(
@@ -391,7 +389,7 @@ mod tests {
     #[test]
     fn no_reply_finish_re_nudges_up_to_budget_then_fails() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("no-reply");
+        let mut log = fresh_log();
         let ctx = || NudgeCtx {
             must_reply: true,
             is_headless_root: false,
@@ -434,7 +432,7 @@ mod tests {
     #[test]
     fn root_completion_is_never_reply_nudged() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("root-complete");
+        let mut log = fresh_log();
         assert!(
             reg.react(
                 &Ok(deliberate::Outcome::Complete("answer to the user".into())),
@@ -456,7 +454,7 @@ mod tests {
     #[test]
     fn headless_root_first_reply_is_turned_back_for_verification() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("verify-first");
+        let mut log = fresh_log();
         let ctx = || NudgeCtx {
             must_reply: true,
             is_headless_root: true,
@@ -483,7 +481,7 @@ mod tests {
     #[test]
     fn headless_root_second_reply_is_honoured() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("verify-second");
+        let mut log = fresh_log();
         let ctx = || NudgeCtx {
             must_reply: true,
             is_headless_root: true,
@@ -522,7 +520,7 @@ mod tests {
     #[test]
     fn peer_reply_is_never_verify_nudged() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("verify-peer");
+        let mut log = fresh_log();
         assert!(
             reg.react(
                 &Ok(deliberate::Outcome::Replied(FOValue::String {
@@ -548,7 +546,7 @@ mod tests {
     #[test]
     fn pinned_state_keeps_completion_restless() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("pinned-state");
+        let mut log = fresh_log();
         let ctx = || NudgeCtx {
             must_reply: false,
             is_headless_root: false,
@@ -575,7 +573,7 @@ mod tests {
     #[test]
     fn pinned_state_waits_while_children_live() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("pinned-state-waiting");
+        let mut log = fresh_log();
         assert!(
             reg.react(
                 &Ok(deliberate::Outcome::Complete(
@@ -602,7 +600,7 @@ mod tests {
     #[test]
     fn returning_agent_gets_both_reply_and_pinned_nudges() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("returning-agent-both");
+        let mut log = fresh_log();
         let ctx = || NudgeCtx {
             must_reply: true,
             is_headless_root: false,
@@ -634,7 +632,7 @@ mod tests {
     #[test]
     fn pressure_part_composes_budget_free_on_complete() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("pressure-budget-free");
+        let mut log = fresh_log();
         let ctx = NudgeCtx {
             must_reply: false,
             is_headless_root: false,
@@ -665,7 +663,7 @@ mod tests {
     #[test]
     fn pressure_composes_alongside_reply_and_pinned_parts() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("pressure-composes-with-both");
+        let mut log = fresh_log();
         let ctx = NudgeCtx {
             must_reply: true,
             is_headless_root: false,
@@ -692,7 +690,7 @@ mod tests {
     #[test]
     fn pressure_fires_even_while_waiting_on_children() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("pressure-waiting-on-children");
+        let mut log = fresh_log();
         let ctx = NudgeCtx {
             must_reply: false,
             is_headless_root: false,
@@ -722,7 +720,7 @@ mod tests {
     #[test]
     fn pressure_is_not_delivered_on_replied() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("pressure-not-on-replied");
+        let mut log = fresh_log();
         let ctx = NudgeCtx {
             must_reply: false,
             is_headless_root: false,
@@ -747,7 +745,7 @@ mod tests {
     #[test]
     fn reset_clears_budget() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("reset");
+        let mut log = fresh_log();
         let ctx = || NudgeCtx {
             must_reply: false,
             is_headless_root: false,
@@ -764,7 +762,7 @@ mod tests {
     #[test]
     fn context_edit_budget_reset_does_not_advance_exchange_reminders() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("reset-budget");
+        let mut log = fresh_log();
         let ctx = NudgeCtx {
             must_reply: false,
             is_headless_root: false,
@@ -789,7 +787,7 @@ mod tests {
     #[test]
     fn no_pins_reminder_fires_every_remind_every_exchanges() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("no-pin-reminder");
+        let mut log = fresh_log();
         let ctx = || NudgeCtx {
             must_reply: false,
             is_headless_root: false,

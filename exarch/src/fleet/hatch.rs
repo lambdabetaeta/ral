@@ -110,14 +110,7 @@ mod tests {
     use super::*;
 
     fn fresh_log() -> AgentLog {
-        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "exarch-pending-hatch-test-{}-{n}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        AgentLog::root(&root, 0, "test", "test", 0).expect("session log")
+        AgentLog::for_test(0, "test", "test").expect("session log")
     }
 
     fn pending(name: &str) -> PendingHatch {

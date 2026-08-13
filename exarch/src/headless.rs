@@ -580,16 +580,14 @@ mod tests {
     use crate::provider::scripted::{Reply, Script};
     use crate::shell_eval::tools::agent::{AsyncSpawn, spawn_async};
 
-    /// A fresh conversing trunk over a scripted provider, in a throwaway run dir.
+    /// A fresh conversing trunk over a scripted provider, in a throwaway run
+    /// dir beside its scratch — both go when the trunk does.
     fn converse_trunk(tag: &str, script: Script) -> Agent {
-        let dir =
-            std::env::temp_dir().join(format!("exarch-converse-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp run dir");
         let scratch = Arc::new(
             crate::bootstrap::Scratch::for_test(crate::bootstrap::EXARCH, tag)
                 .expect("scratch dir"),
         );
+        let dir = scratch.test_sibling("run").expect("temp run dir");
         Agent::root(
             RootConfig {
                 system: "system".into(),
@@ -918,13 +916,11 @@ mod tests {
     /// genuine live child under it — [`converse_trunk`]'s `fuel: 0` exists
     /// precisely to refuse that.
     fn settled_trunk(tag: &str, script: Script, allow_schedule: bool) -> Agent {
-        let dir = std::env::temp_dir().join(format!("exarch-settled-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp run dir");
         let scratch = Arc::new(
             crate::bootstrap::Scratch::for_test(crate::bootstrap::EXARCH, tag)
                 .expect("scratch dir"),
         );
+        let dir = scratch.test_sibling("run").expect("temp run dir");
         Agent::root(
             RootConfig {
                 system: "system".into(),

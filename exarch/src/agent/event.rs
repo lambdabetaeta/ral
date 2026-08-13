@@ -2237,16 +2237,17 @@ mod tests {
     use super::*;
     use genai::chat::{ContentPart, ToolCall};
 
-    fn sessions_root(tag: &str) -> PathBuf {
-        let p =
-            std::env::temp_dir().join(format!("exarch-event-test-{}-{tag}", std::process::id()));
-        let _ = fs::remove_dir_all(&p);
-        p
+    /// A sessions root for one test, deleted when the returned guard falls.
+    /// Hold the guard: binding only its path deletes the directory on the spot.
+    fn sessions_root(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("exarch-event-test-{tag}-"))
+            .tempdir()
+            .expect("sessions root")
     }
 
-    fn fresh_root(tag: &str) -> AgentLog {
-        let root = sessions_root(tag);
-        AgentLog::root(&root, 0, "model", "provider", 0).expect("log")
+    fn fresh_root() -> AgentLog {
+        AgentLog::for_test(0, "model", "provider").expect("log")
     }
 
     fn assistant_with_tool(id: &str) -> ChatMessage {
@@ -2398,7 +2399,7 @@ mod tests {
 
     #[test]
     fn span_partition_records_steering_imports_and_unaddressable_prefixes() {
-        let mut s = fresh_root("span-partition");
+        let mut s = fresh_root();
         s.record_error("before the first prompt".into()).unwrap();
         s.import_context(vec![ChatMessage::user("inherited")])
             .unwrap();
@@ -2442,7 +2443,7 @@ mod tests {
 
     #[test]
     fn exchange_ids_mint_monotonically_across_edits() {
-        let mut s = fresh_root("minting");
+        let mut s = fresh_root();
         complete_exchange(&mut s, "one", "one");
         complete_exchange(&mut s, "two", "two");
         assert_eq!(s.current_exchange(), Some(2));
@@ -2464,13 +2465,13 @@ mod tests {
 
     #[test]
     fn continues_resolution_requires_maximum_and_survival() {
-        let mut joins = fresh_root("continues-joins");
+        let mut joins = fresh_root();
         complete_exchange(&mut joins, "one", "one");
         joins.append_user("nudge".into(), Some(1)).unwrap();
         assert_eq!(joins.current_exchange(), Some(1));
         assert_eq!(joins.view().spans.len(), 1);
 
-        let mut rewound = fresh_root("continues-rewound");
+        let mut rewound = fresh_root();
         complete_exchange(&mut rewound, "one", "one");
         rewound
             .apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::Model)
@@ -2478,13 +2479,13 @@ mod tests {
         rewound.append_user("fresh".into(), Some(1)).unwrap();
         assert_eq!(rewound.current_exchange(), Some(2));
 
-        let mut intervened = fresh_root("continues-intervened");
+        let mut intervened = fresh_root();
         complete_exchange(&mut intervened, "one", "one");
         complete_exchange(&mut intervened, "two", "two");
         intervened.append_user("fresh".into(), Some(1)).unwrap();
         assert_eq!(intervened.current_exchange(), Some(3));
 
-        let mut drop_n_plus_one = fresh_root("continues-drop-n-plus-one");
+        let mut drop_n_plus_one = fresh_root();
         complete_exchange(&mut drop_n_plus_one, "one", "one");
         complete_exchange(&mut drop_n_plus_one, "two", "two");
         drop_n_plus_one
@@ -2502,7 +2503,7 @@ mod tests {
 
     #[test]
     fn edit_admissibility_refuses_live_unknown_folded_and_empty_names() {
-        let mut live = fresh_root("edit-live");
+        let mut live = fresh_root();
         live.append_user("live".into(), None).unwrap();
         let err = live
             .apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::Model)
@@ -2512,7 +2513,7 @@ mod tests {
             "exchange 1 is the one you are in — a context edit may only name closed exchanges"
         );
 
-        let mut unknown = fresh_root("edit-unknown");
+        let mut unknown = fresh_root();
         complete_exchange(&mut unknown, "one", "one");
         let err = unknown
             .apply_edit(ContextOp::Drop { exchanges: vec![7] }, EditAuthority::User)
@@ -2544,7 +2545,7 @@ mod tests {
 
     #[test]
     fn context_read_marks_roles_delimits_steps_and_addresses_digest_by_reach() {
-        let mut s = fresh_root("context-read");
+        let mut s = fresh_root();
         s.append_user("first prompt".into(), None).unwrap();
         s.record_step(1, Tuning::default()).unwrap();
         s.append_assistant(ChatMessage::assistant("first answer"), vec![], None)
@@ -2586,7 +2587,7 @@ mod tests {
 
     #[test]
     fn fold_of_fold_updates_one_digest_and_keeps_the_suffix() {
-        let mut s = fresh_root("fold-of-fold");
+        let mut s = fresh_root();
         complete_exchange(&mut s, "one", "one");
         complete_exchange(&mut s, "two", "two");
         s.apply_edit(
@@ -2625,7 +2626,7 @@ mod tests {
 
     #[test]
     fn digest_addressing_drops_the_digest_at_its_reach() {
-        let mut s = fresh_root("digest-address");
+        let mut s = fresh_root();
         complete_exchange(&mut s, "one", "one");
         complete_exchange(&mut s, "two", "two");
         s.apply_edit(
@@ -2651,7 +2652,7 @@ mod tests {
 
     #[test]
     fn fold_log_equals_memo_proves_wiring() {
-        let mut s = fresh_root("fold-memo");
+        let mut s = fresh_root();
         assert_wiring(&s);
         s.record_error("breadcrumb".into()).unwrap();
         assert_wiring(&s);
@@ -2664,7 +2665,7 @@ mod tests {
 
     #[test]
     fn independent_batch_reference_proves_the_step() {
-        let mut s = fresh_root("batch-reference");
+        let mut s = fresh_root();
         s.record_error("before".into()).unwrap();
         complete_exchange(&mut s, "one", "one");
         complete_exchange(&mut s, "two", "two");
@@ -2690,7 +2691,7 @@ mod tests {
 
     #[test]
     fn fold_only_histories_keep_model_messages_byte_identical() {
-        let mut s = fresh_root("fold-only-identity");
+        let mut s = fresh_root();
         s.record_error("not visible".into()).unwrap();
         complete_exchange(&mut s, "one", "one");
         s.append_user("steering".into(), Some(1)).unwrap();
@@ -2708,7 +2709,7 @@ mod tests {
 
     #[test]
     fn edits_free_removed_spans_and_the_tail_edit_itself() {
-        let mut dropped = fresh_root("residency-drop");
+        let mut dropped = fresh_root();
         complete_exchange(&mut dropped, "one", "one");
         complete_exchange(&mut dropped, "two", "two");
         complete_exchange(&mut dropped, "three", "three");
@@ -2724,7 +2725,7 @@ mod tests {
         );
         assert_wiring(&dropped);
 
-        let mut tail = fresh_root("residency-tail-edit");
+        let mut tail = fresh_root();
         complete_exchange(&mut tail, "one", "one");
         complete_exchange(&mut tail, "two", "two");
         let mut removed_tail = tail.view().spans[1].events.clone();
@@ -2740,7 +2741,7 @@ mod tests {
         );
         assert_wiring(&tail);
 
-        let mut folded = fresh_root("residency-fold");
+        let mut folded = fresh_root();
         complete_exchange(&mut folded, "one", "one");
         complete_exchange(&mut folded, "two", "two");
         complete_exchange(&mut folded, "three", "three");
@@ -2768,7 +2769,7 @@ mod tests {
     #[test]
     fn freed_projection_and_resume_match_the_logical_history() {
         let sessions = sessions_root("residency-resume");
-        let mut live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
+        let mut live = AgentLog::root(sessions.path(), 0, "model", "provider", 0).unwrap();
         complete_exchange(&mut live, "one", "one");
         complete_exchange(&mut live, "two", "two");
         complete_exchange(&mut live, "three", "three");
@@ -2779,7 +2780,7 @@ mod tests {
         assert!(!live.log.freed_ranges().is_empty());
         let (never_freed_log, never_freed_projection) = replay_without_eviction(events.clone());
         let mut never_freed =
-            AgentLog::root_without_logs(&sessions, 1, "model", "provider", 0).unwrap();
+            AgentLog::root_without_logs(sessions.path(), 1, "model", "provider", 0).unwrap();
         never_freed.log = never_freed_log;
         never_freed.projection = never_freed_projection;
         let expected = serde_json::to_vec(&never_freed.model_messages()).unwrap();
@@ -2792,11 +2793,11 @@ mod tests {
             serde_json::to_vec(&independent_messages(&events, &reference)).unwrap(),
             expected
         );
-        let path = sessions.join("0/events.jsonl");
+        let path = sessions.path().join("0/events.jsonl");
         let before = fs::read(&path).unwrap();
         drop(live);
 
-        let resumed = AgentLog::resume(&sessions, 0).expect("resume");
+        let resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
         assert_eq!(
             serde_json::to_vec(&resumed.model_messages()).unwrap(),
             expected
@@ -2806,7 +2807,7 @@ mod tests {
 
     #[test]
     fn clear_discards_the_old_ledger_with_the_rotated_file() {
-        let mut s = fresh_root("residency-clear");
+        let mut s = fresh_root();
         complete_exchange(&mut s, "one", "one");
         complete_exchange(&mut s, "two", "two");
         s.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
@@ -2827,7 +2828,7 @@ mod tests {
     #[test]
     fn transient_eviction_keeps_no_byte_ranges() {
         let sessions = sessions_root("residency-no-logs");
-        let mut s = AgentLog::root_without_logs(&sessions, 0, "model", "provider", 0).unwrap();
+        let mut s = AgentLog::root_without_logs(sessions.path(), 0, "model", "provider", 0).unwrap();
         complete_exchange(&mut s, "one", "one");
         s.apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::User)
             .unwrap();
@@ -2837,7 +2838,7 @@ mod tests {
 
     #[test]
     fn interior_lost_stub_seam_is_repaired_by_projection() {
-        let mut s = fresh_root("interior-seam");
+        let mut s = fresh_root();
         s.append_user("first".into(), None).unwrap();
         s.quiesce(QuiesceReason::Aborted);
         complete_exchange(&mut s, "second", "answer");
@@ -2871,7 +2872,7 @@ mod tests {
 
     #[test]
     fn user_ending_import_span_is_never_torn() {
-        let mut s = fresh_root("user-ending-import");
+        let mut s = fresh_root();
         s.import_context(vec![ChatMessage::user("imported user")])
             .unwrap();
         complete_exchange(&mut s, "normal", "answer");
@@ -2888,7 +2889,7 @@ mod tests {
 
     #[test]
     fn compaction_plan_walks_newest_spans_and_folds_by_exchange() {
-        let mut s = fresh_root("compaction-plan");
+        let mut s = fresh_root();
         complete_exchange(&mut s, "one", "one");
         complete_exchange(&mut s, "two", "two");
         complete_exchange(&mut s, "three", "three");
@@ -2918,7 +2919,7 @@ mod tests {
 
     #[test]
     fn jsonl_round_trip_contains_context_edit_events() {
-        let mut s = fresh_root("jsonl-round-trip");
+        let mut s = fresh_root();
         complete_exchange(&mut s, "one", "one");
         s.apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::User)
             .unwrap();
@@ -2941,7 +2942,7 @@ mod tests {
 
     #[test]
     fn diagnostic_events_round_trip_through_jsonl() {
-        let mut s = fresh_root("diagnostic-roundtrip");
+        let mut s = fresh_root();
         s.record_error("boom".into()).unwrap();
         s.record_nudge(2, 3, "stop=length".into()).unwrap();
         let file = File::open(s.dir().join("events.jsonl")).unwrap();
@@ -2959,7 +2960,7 @@ mod tests {
 
     #[test]
     fn quiesce_after_abort_admits_next_prompt() {
-        let mut s = fresh_root("quiesce-abort");
+        let mut s = fresh_root();
         s.append_user("p".into(), None).unwrap();
         s.quiesce(QuiesceReason::Aborted);
         assert!(s.is_ready());
@@ -2969,7 +2970,7 @@ mod tests {
     #[test]
     fn resume_replays_a_scripted_history_and_preserves_the_model_view() {
         let sessions = sessions_root("resume-round-trip");
-        let mut live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
+        let mut live = AgentLog::root(sessions.path(), 0, "model", "provider", 0).unwrap();
         live.import_context(vec![ChatMessage::user("inherited")])
             .unwrap();
         complete_exchange(&mut live, "one", "answer one");
@@ -2985,7 +2986,7 @@ mod tests {
         let expected = serde_json::to_vec(&live.model_messages()).unwrap();
         drop(live);
 
-        let resumed = AgentLog::resume(&sessions, 0).expect("resume");
+        let resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
         assert!(resumed.is_ready());
         assert_eq!(
             serde_json::to_vec(&resumed.model_messages()).unwrap(),
@@ -2996,14 +2997,14 @@ mod tests {
     #[test]
     fn resume_quiesces_a_torn_exchange_after_reopening_append_mode() {
         let sessions = sessions_root("resume-mid-exchange");
-        let mut live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
+        let mut live = AgentLog::root(sessions.path(), 0, "model", "provider", 0).unwrap();
         live.append_user("run the tool".into(), None).unwrap();
         live.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
             .unwrap();
         drop(live);
 
-        let path = sessions.join("0/events.jsonl");
-        let mut resumed = AgentLog::resume(&sessions, 0).expect("resume");
+        let path = sessions.path().join("0/events.jsonl");
+        let mut resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
         assert!(resumed.is_ready());
         let events = logical_events(&resumed.log);
         assert!(
@@ -3035,8 +3036,8 @@ mod tests {
     #[test]
     fn resume_quarantines_only_an_unterminated_final_fragment() {
         let sessions = sessions_root("resume-tail");
-        let live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
-        let path = sessions.join("0/events.jsonl");
+        let live = AgentLog::root(sessions.path(), 0, "model", "provider", 0).unwrap();
+        let path = sessions.path().join("0/events.jsonl");
         drop(live);
         let prefix = fs::read(&path).unwrap();
         let fragment = b"{\"kind\":\"user_prompt\"";
@@ -3044,11 +3045,11 @@ mod tests {
         file.write_all(fragment).unwrap();
         file.flush().unwrap();
 
-        let resumed = AgentLog::resume(&sessions, 0).expect("torn tail is recoverable");
+        let resumed = AgentLog::resume(sessions.path(), 0).expect("torn tail is recoverable");
         assert!(resumed.is_ready());
         assert_eq!(fs::read(&path).unwrap(), prefix);
         assert_eq!(
-            fs::read(sessions.join("0/events.jsonl.crash")).unwrap(),
+            fs::read(sessions.path().join("0/events.jsonl.crash")).unwrap(),
             fragment
         );
     }
@@ -3056,15 +3057,15 @@ mod tests {
     #[test]
     fn resume_refuses_a_complete_garbage_line_without_mutating_the_file() {
         let sessions = sessions_root("resume-garbage");
-        let live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
-        let path = sessions.join("0/events.jsonl");
+        let live = AgentLog::root(sessions.path(), 0, "model", "provider", 0).unwrap();
+        let path = sessions.path().join("0/events.jsonl");
         drop(live);
         let mut file = OpenOptions::new().append(true).open(&path).unwrap();
         file.write_all(b"garbage\n").unwrap();
         file.flush().unwrap();
         let before = fs::read(&path).unwrap();
 
-        let error = AgentLog::resume(&sessions, 0)
+        let error = AgentLog::resume(sessions.path(), 0)
             .err()
             .expect("garbage is not a crash tail");
         let text = error.to_string();
@@ -3072,14 +3073,14 @@ mod tests {
         assert!(text.contains("line 2"));
         assert!(text.contains("newer exarch"));
         assert_eq!(fs::read(&path).unwrap(), before);
-        assert!(!sessions.join("0/events.jsonl.crash").exists());
+        assert!(!sessions.path().join("0/events.jsonl.crash").exists());
     }
 
     #[test]
     fn resume_refuses_foreign_protocol_data_without_mutating_the_file() {
         let sessions = sessions_root("resume-foreign");
-        let live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
-        let path = sessions.join("0/events.jsonl");
+        let live = AgentLog::root(sessions.path(), 0, "model", "provider", 0).unwrap();
+        let path = sessions.path().join("0/events.jsonl");
         drop(live);
         let foreign = SessionEvent::AssistantMessage {
             message: ChatMessage::user("wrong role"),
@@ -3092,7 +3093,7 @@ mod tests {
         file.flush().unwrap();
         let before = fs::read(&path).unwrap();
 
-        let error = AgentLog::resume(&sessions, 0)
+        let error = AgentLog::resume(sessions.path(), 0)
             .err()
             .expect("foreign data must refuse");
         let text = error.to_string();
@@ -3105,10 +3106,10 @@ mod tests {
     #[test]
     fn resume_refuses_a_stale_exchange_id_as_foreign_data() {
         let sessions = sessions_root("resume-stale-id");
-        let mut live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
+        let mut live = AgentLog::root(sessions.path(), 0, "model", "provider", 0).unwrap();
         complete_exchange(&mut live, "one", "one");
         complete_exchange(&mut live, "two", "two");
-        let path = sessions.join("0/events.jsonl");
+        let path = sessions.path().join("0/events.jsonl");
         drop(live);
         let stale = SessionEvent::UserPrompt {
             exchange: 1,
@@ -3120,7 +3121,7 @@ mod tests {
         file.flush().unwrap();
         let before = fs::read(&path).unwrap();
 
-        let error = AgentLog::resume(&sessions, 0)
+        let error = AgentLog::resume(sessions.path(), 0)
             .err()
             .expect("a stale exchange id is foreign data");
         let text = error.to_string();
@@ -3132,9 +3133,9 @@ mod tests {
     #[test]
     fn resume_refuses_nonzero_session_ids_as_transient_children() {
         let sessions = sessions_root("resume-child");
-        let child = AgentLog::root(&sessions, 1, "model", "provider", 0).unwrap();
+        let child = AgentLog::root(sessions.path(), 1, "model", "provider", 0).unwrap();
         drop(child);
-        let error = AgentLog::resume(&sessions, 1)
+        let error = AgentLog::resume(sessions.path(), 1)
             .err()
             .expect("child logs are transient");
         assert!(
@@ -3147,11 +3148,11 @@ mod tests {
     #[test]
     fn resume_repairs_an_interior_stub_lost_from_disk() {
         let sessions = sessions_root("resume-interior-seam");
-        let mut live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
+        let mut live = AgentLog::root(sessions.path(), 0, "model", "provider", 0).unwrap();
         live.append_user("first".into(), None).unwrap();
         live.quiesce(QuiesceReason::Aborted);
         complete_exchange(&mut live, "second", "answer");
-        let path = sessions.join("0/events.jsonl");
+        let path = sessions.path().join("0/events.jsonl");
         drop(live);
 
         let data = fs::read(&path).unwrap();
@@ -3172,7 +3173,7 @@ mod tests {
         }
         fs::write(&path, repaired).unwrap();
 
-        let mut resumed = AgentLog::resume(&sessions, 0).expect("interior seam repair");
+        let mut resumed = AgentLog::resume(sessions.path(), 0).expect("interior seam repair");
         assert!(resumed.is_ready());
         assert!(resumed.model_messages().iter().any(|message| {
             message.content.first_text() == Some("(no reply: exchange aborted)")
@@ -3184,7 +3185,7 @@ mod tests {
     fn resume_matches_live_after_a_small_edit_sequence_family() {
         for pattern in 0..8 {
             let sessions = sessions_root(&format!("resume-edits-{pattern}"));
-            let mut live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
+            let mut live = AgentLog::root(sessions.path(), 0, "model", "provider", 0).unwrap();
             complete_exchange(&mut live, "one", "one");
             complete_exchange(&mut live, "two", "two");
             complete_exchange(&mut live, "three", "three");
@@ -3259,7 +3260,7 @@ mod tests {
             );
             let expected = serde_json::to_vec(&live.model_messages()).unwrap();
             drop(live);
-            let resumed = AgentLog::resume(&sessions, 0).expect("resume edit sequence");
+            let resumed = AgentLog::resume(sessions.path(), 0).expect("resume edit sequence");
             assert!(resumed.is_ready());
             assert_eq!(
                 serde_json::to_vec(&resumed.model_messages()).unwrap(),
@@ -3272,7 +3273,7 @@ mod tests {
     #[test]
     fn mirror_only_roots_have_no_durable_records() {
         let sessions = sessions_root("no-logs");
-        let log = AgentLog::root_without_logs(&sessions, 0, "model", "provider", 0).unwrap();
+        let log = AgentLog::root_without_logs(sessions.path(), 0, "model", "provider", 0).unwrap();
         assert!(!log.is_durable());
         assert!(!log.dir().join("events.jsonl").exists());
         assert!(!log.dir().join("transcript.jsonl").exists());
