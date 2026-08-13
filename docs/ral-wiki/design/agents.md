@@ -307,11 +307,21 @@ is one of the three reasons an agent parks (`ParkMode::UntilCancelled`).
 ## Permissions: the child's ceiling is `parent ⊓ base`
 
 **Every spawn states the child's ceiling explicitly**, through a *mandatory*
-`grant` field naming one of the six capability bake-ins — the same
-vocabulary as the `--base` CLI flag (`confined`, `minimal`, `read-only`,
+`grant` field naming one of five capability bake-ins (`confined`, `read-only`,
 `edit-only`, `reasonable`, `dangerous`; ordered loosest-to-tightest in
 [[map/exarch/policy|policy]]). An unknown tag is refused at the runtime door,
-naming all six. The child is born with
+naming all five.
+
+The five are a *subset* of the `--base` CLI vocabulary, and the door's
+`PERMISSION_LABELS` is where the two part company. A grantable base must admit
+the bundled coreutils (`ral_core::uutils`), which spawn by bare name and so
+match no directory prefix: `read-only` and `edit-only` name each tool literally
+for exactly this reason. A base whose `exec` block is prefixes alone leaves the
+child unable to run `ls`, and — the ceiling being non-escalating — with no way
+to ask for it back. A human at the CLI can see that and reach for
+`--extend-base`; a child can only spend turns discovering it.
+
+The child is born with
 
 ```text
   child = parent ⊓ resolve_base(grant)
@@ -324,7 +334,7 @@ child below the parent but can **never escalate** it past the parent's reach
 ([[design/grant|the grant lattice]]):
 
 - naming a base *looser* than the parent simply changes nothing — a network-off
-  `confined` parent stays offline even under `minimal`, since `false ⊓ true =
+  `confined` parent stays offline even under `reasonable`, since `false ⊓ true =
   false`;
 - `dangerous` resolves to the lattice top (`Capabilities::root`), so it means
   *no narrowing — inherit the parent's authority verbatim*.

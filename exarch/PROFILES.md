@@ -125,8 +125,13 @@ It is shaped after
 
 - **Reads and writes:** project and scratch only.
 - **Programs:** platform system roots, `/usr/local/bin`, project executables,
-  and scratch executables.
+  scratch executables, and the coreutils built into the binary.
 - **Network:** off.
+
+`rm`, `mv` and `truncate` are admitted like any other tool. What a confined
+agent can destroy is settled by the write paths above, which stop at the project
+and scratch; withholding the commands as well would break `make clean` without
+protecting a single byte the path check does not already hold.
 
 The platform supplies runtime and toolchain paths needed by the sandbox. On
 macOS, that includes Command Line Tools and Xcode, so a compiler can reach its

@@ -80,6 +80,30 @@ pub(crate) fn is_uutils_tool(name: &str) -> bool {
     false
 }
 
+/// Every bundled tool this build dispatches, in one slice.
+///
+/// A capability profile that states its exec admissions as directory prefixes
+/// must name these outright: they are spawned by bare name and never resolved
+/// on disk, so no prefix can reach them. Exposed so exarch's bake-in profiles
+/// can be checked against the set rather than tracking it by hand.
+#[cfg_attr(
+    not(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")),
+    allow(
+        unused_mut,
+        reason = "no bundled-tool feature is active, so nothing is pushed and the set is empty"
+    )
+)]
+pub fn bundled_tools() -> Vec<&'static str> {
+    let mut names = Vec::new();
+    #[cfg(feature = "coreutils")]
+    names.extend_from_slice(COREUTILS_TOOLS);
+    #[cfg(feature = "diffutils")]
+    names.extend_from_slice(DIFFUTILS_TOOLS);
+    #[cfg(feature = "ripgrep")]
+    names.extend_from_slice(RIPGREP_TOOLS);
+    names
+}
+
 /// Restore SIGPIPE to `SIG_DFL`, once per binary at startup.
 ///
 /// Rust's runtime ignores it before `main`, so a uucore write to a closed

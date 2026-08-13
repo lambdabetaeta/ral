@@ -20,11 +20,16 @@ use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled, sig};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 
-/// The bases a spawn's `grant` may name — exactly those
-/// `crate::policy::base::resolve_base` resolves, and kept in step by hand.
-const PERMISSION_LABELS: [&str; 6] = [
+/// The bases a spawn's `grant` may name — a subset of what
+/// `crate::policy::base::resolve_base` offers a launching human, and kept in
+/// step by hand.
+///
+/// Each admits the bundled coreutils (`ral_core::uutils`). Those spawn by bare
+/// name, so a base that states its exec admissions as directory prefixes alone
+/// denies every one of them, and a child that cannot run `ls` cannot widen its
+/// own grant to get it back.
+const PERMISSION_LABELS: [&str; 5] = [
     "confined",
-    "minimal",
     "read-only",
     "edit-only",
     "reasonable",
@@ -69,7 +74,7 @@ fn permission_label(v: &Value) -> Settled<String> {
         return Ok(label.clone());
     }
     Err(sig(format!(
-        "grant must be one of `confined, `minimal, `read-only, `edit-only, `reasonable, `dangerous — got {v}"
+        "grant must be one of `confined, `read-only, `edit-only, `reasonable, `dangerous — got {v}"
     )))
 }
 
@@ -987,7 +992,7 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 14] = [
     BuiltinEntry::new(
         Cow::Borrowed("agent"),
         BuiltinTypeRule::Scheme(scheme_agent),
-        "agent [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>]  — launch a sub-agent. Launch-only and always asynchronous: returns immediately with a receipt [name: Str, log-dir: Str]; the child's reply is NOT this call's result — it arrives later, as its own marked item in your inbox. `type` selects the child's memory: `amnemon` starts blank (no shared history), while `mnemon` inherits your current model-visible conversation and reuses your provider selection for cache locality. Every child receives the value-snapshot of the parent's bindings, cwd, and env — `mnemon` too; the serializable fragment crosses, while a live job handle becomes an opaque placeholder. `prompt` is a computed string and becomes the child's fresh final prompt. Keep large material in a named binding rather than splicing it into prompt; small, certainly-needed material may still be spliced. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `minimal (working tree + /tmp + network), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all six. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "agent [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>]  — launch a sub-agent. Launch-only and always asynchronous: returns immediately with a receipt [name: Str, log-dir: Str]; the child's reply is NOT this call's result — it arrives later, as its own marked item in your inbox. `type` selects the child's memory: `amnemon` starts blank (no shared history), while `mnemon` inherits your current model-visible conversation and reuses your provider selection for cache locality. Every child receives the value-snapshot of the parent's bindings, cwd, and env — `mnemon` too; the serializable fragment crosses, while a live job handle becomes an opaque placeholder. `prompt` is a computed string and becomes the child's fresh final prompt. Keep large material in a named binding rather than splicing it into prompt; small, certainly-needed material may still be spliced. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all five. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_agent),
     ),
     BuiltinEntry::new(
@@ -1104,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn permission_label_rejects_an_unknown_tag_naming_all_six() {
+    fn permission_label_rejects_an_unknown_tag_naming_every_offered_base() {
         let v = Value::Variant {
             label: "bogus".to_string(),
             payload: None,
@@ -1122,11 +1127,10 @@ mod tests {
         }
     }
 
-    /// The door's table and `policy::base::resolve_base`'s match are two hands
-    /// on one enumeration: every label the door admits must resolve to a
-    /// bake-in profile — which also parses and evaluates all six bundled
-    /// `data/*.exarch.ral` — and the policy layer's refusal must name exactly
-    /// the labels the door holds, so a base added on either side alone shows up.
+    /// Every label the door admits must resolve to a bake-in profile — which
+    /// also parses and evaluates that profile's `data/*.exarch.ral` — so a label
+    /// added here alone shows up. The door's table is the narrower of the two:
+    /// the policy layer offers a launching human bases a child is not handed.
     #[test]
     fn every_permission_label_resolves_to_a_bake_in_base() {
         let root = ral_core::types::Capabilities::root();
@@ -1143,10 +1147,9 @@ mod tests {
             .1
             .split(", ")
             .collect();
-        assert_eq!(
-            offered,
-            PERMISSION_LABELS.into_iter().collect(),
-            "the door's table and the policy layer's bases are one enumeration"
+        assert!(
+            PERMISSION_LABELS.iter().all(|l| offered.contains(l)),
+            "every door label must be a base the policy layer offers, got: {offered:?}"
         );
     }
 

@@ -207,9 +207,17 @@ mod tests {
         let caps = load("confined", CONFINED_RAL, &ctx);
         assert_eq!(caps.net, Some(false), "confined must have net off");
         let exec = caps.exec.as_ref().expect("confined declares exec");
+        let bundled = ral_core::uutils::bundled_tools();
+        let host_named: Vec<&str> = exec
+            .literals
+            .keys()
+            .map(String::as_str)
+            .filter(|name| !bundled.contains(name))
+            .collect();
         assert!(
-            exec.literals.is_empty(),
-            "confined exec has literal keys; build jail uses directory prefixes only"
+            host_named.is_empty(),
+            "confined names host binaries {host_named:?}; the build jail admits those by \
+             directory prefix, and only the bundled tools — which have no path — are listed"
         );
         let fs = caps.fs.as_ref().expect("confined declares fs");
         for prefix in fs.read_prefixes.iter().chain(fs.write_prefixes.iter()) {
@@ -629,6 +637,44 @@ mod tests {
                     "{name} should carry a {expected} verdict for the live system tool root {normalized}"
                 );
             }
+        }
+    }
+
+    /// A bundled tool (`ral_core::uutils`) is spawned by bare name and never
+    /// resolved on disk, so a directory prefix can never admit one: a profile
+    /// that omits one leaves an agent unable to run it. Every base a *spawn*
+    /// may name must therefore settle each bundled tool by literal — `allow`
+    /// or `deny`, but never silence, which denies it with no decision recorded.
+    /// The list is the door's `PERMISSION_LABELS`; `dangerous` is absent
+    /// because it declares no exec map to restrict.
+    #[test]
+    fn every_grantable_base_settles_the_bundled_tools() {
+        let home = ral_core::host::home();
+        let cwd = std::env::temp_dir();
+        let ctx = FreezeCtx {
+            home: &home,
+            cwd: &cwd,
+        };
+        for (name, text) in [
+            ("reasonable", REASONABLE_RAL),
+            ("edit-only", EDIT_ONLY_RAL),
+            ("read-only", READ_ONLY_RAL),
+            ("confined", CONFINED_RAL),
+        ] {
+            let caps = load(name, text, &ctx);
+            let exec = caps
+                .exec
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} should declare exec"));
+            let unsettled: Vec<&str> = ral_core::uutils::bundled_tools()
+                .into_iter()
+                .filter(|tool| !exec.literals.contains_key(*tool))
+                .collect();
+            assert!(
+                unsettled.is_empty(),
+                "{name} leaves these bundled tools unnamed — a bare name matches no prefix, \
+                 so silence makes them unrunnable: {unsettled:?}"
+            );
         }
     }
 

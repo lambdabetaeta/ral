@@ -1,7 +1,8 @@
 # `confined` bake-in.  Build-jail profile shaped after
 # BrianSwift/macOSSandboxBuild's `confined.sb`: tight reads (working
 # tree + scratch + system base), tight writes (working tree + scratch),
-# no network, exec admits via subpaths only — no per-name lattice.
+# no network, exec admits host binaries by subpath — the per-name
+# entries below name the bundled tools, which have no path to match.
 #
 # Use when the agent's job is to compile or process *this one tree*
 # and nothing else: `--base confined` for ad-hoc invocations,
@@ -30,18 +31,88 @@ return [
     ],
   ],
 
-  # Exec by subpath only.  No per-name allow-list: the build sandbox
-  # trusts whatever lives in the platform's tool roots (`system:` —
-  # see `core/src/path/sigil.rs`), including a Homebrew tree when the
-  # host has one — a build jail plausibly needs a Homebrew-installed
-  # compiler.  Apple's toolchain (CommandLineTools, Xcode) is folded
-  # in automatically by the OS sandbox base, so `gcc → cc1 → as → ld`
-  # resolves without listing each tool here.
+  # Host binaries are admitted by subpath, never enumerated: the build
+  # sandbox trusts whatever lives in the platform's tool roots
+  # (`system:` — see `core/src/path/sigil.rs`), including a Homebrew
+  # tree when the host has one — a build jail plausibly needs a
+  # Homebrew-installed compiler.  Apple's toolchain (CommandLineTools,
+  # Xcode) is folded in automatically by the OS sandbox base, so
+  # `gcc → cc1 → as → ld` resolves without listing each tool here.
   exec: [
     'system:':         'allow',      # sh, bash, uname, dirname, env, sed, awk, …
     '/usr/local/bin/': 'allow',      # user-installed CLI tools
     'cwd:/':           'allow',      # ./configure, ./build.sh, etc.
     'tempdir:/':       'allow',      # build-tree-shadowed scratch
     '/tmp/':           'allow',
+
+    # The coreutils linked into the ral binary (`core/src/uutils.rs`).
+    # These are the one exception to "host binaries by subpath": a
+    # bundled tool is spawned by bare name and never resolved on disk, so
+    # no prefix above can reach it and it must be named.  Silence here is
+    # not tightness — it is an agent that cannot `ls`.  `cmp`, `diff` and
+    # `rg` bundle only under non-default features, so they are host
+    # binaries here; a build that turns those on fails
+    # `every_grantable_base_settles_the_bundled_tools`, which names them.
+    #
+    # `rm`, `mv` and `truncate` are admitted like any other: what a
+    # confined child may destroy is settled by the `fs.write` prefixes
+    # above, which stop at the working tree and scratch.  Withholding the
+    # verbs as well would break `make clean` without protecting one byte
+    # the fs gate does not already hold.
+    #
+    # The `unix:` half of the set (`id`, `kill`, `stat`, `tac`, `test`,
+    # `timeout`) cannot link on Windows; `policy::base::drop_dead_exec_grants`
+    # strips those there, so listing them here stays honest on every host.
+    base64:    'allow',
+    basename:  'allow',
+    cat:       'allow',
+    comm:      'allow',
+    cp:        'allow',
+    cut:       'allow',
+    date:      'allow',
+    df:        'allow',
+    dirname:   'allow',
+    du:        'allow',
+    env:       'allow',
+    head:      'allow',
+    hostname:  'allow',
+    id:        'allow',
+    join:      'allow',
+    kill:      'allow',
+    ln:        'allow',
+    ls:        'allow',
+    mkdir:     'allow',
+    mktemp:    'allow',
+    mv:        'allow',
+    nproc:     'allow',
+    paste:     'allow',
+    printenv:  'allow',
+    printf:    'allow',
+    pwd:       'allow',
+    readlink:  'allow',
+    realpath:  'allow',
+    rm:        'allow',
+    rmdir:     'allow',
+    seq:       'allow',
+    sha256sum: 'allow',
+    sha512sum: 'allow',
+    shuf:      'allow',
+    sleep:     'allow',
+    sort:      'allow',
+    split:     'allow',
+    stat:      'allow',
+    tac:       'allow',
+    tail:      'allow',
+    tee:       'allow',
+    test:      'allow',
+    timeout:   'allow',
+    touch:     'allow',
+    tr:        'allow',
+    truncate:  'allow',
+    uname:     'allow',
+    uniq:      'allow',
+    wc:        'allow',
+    whoami:    'allow',
+    yes:       'allow',
   ],
 ]

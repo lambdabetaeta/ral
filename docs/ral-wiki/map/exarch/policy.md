@@ -71,7 +71,24 @@ via `include_str!`, ordered from most to least authority:
 - `read-only` — reasonable's reads/exec, writes only to scratch;
 - `minimal` — system binaries + cwd + scratch + net + chdir; a deliberately
   narrow base for additive `--extend-base`;
-- `confined` — offline build jail, exec by subpath only.
+- `confined` — offline build jail; host binaries by subpath, no per-name lattice.
+
+**Every profile that restricts exec must name the bundled tools** (`core/src/uutils.rs`
+— coreutils, and diffutils/ripgrep under their features). `command::vet` routes
+those to an `ExecImage::BundledTool` and skips the `PATH` probe entirely, so they
+reach the gate as a bare name with no resolved path: a directory prefix cannot
+match one, and silence denies it. That is why `read-only`, `edit-only`,
+`reasonable` and `confined` each carry a per-name coreutils block that looks
+redundant beside their `system:` subpath rule and is not.
+`every_grantable_base_settles_the_bundled_tools` pins it, per build
+configuration — turn on the `ripgrep` feature without naming `rg` in a profile
+and it fails, naming the tool.
+
+The consequence for spawning: a base whose `exec` is prefixes alone is
+unusable as a child's `grant`, since the child cannot widen its own ceiling to
+recover `ls`. `minimal` is such a base, and is offered by `--base` only —
+`harness.rs::PERMISSION_LABELS` withholds it from `agent`
+([[design/agents|agents]]).
 
 Each is a ral script whose terminal expression is a map shaped like the argument
 of `grant [...] { body }`, loaded through
