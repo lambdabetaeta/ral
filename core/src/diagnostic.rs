@@ -3,7 +3,7 @@
 
 use crate::ansi::{self, BOLD_CYAN, BOLD_RED, BOLD_YELLOW, RESET};
 use crate::source::{SourceDb, Span, byte_to_line_col};
-use crate::syntax::lexer::{LexErrorKind, StringForm};
+use crate::syntax::lexer::LexErrorKind;
 use crate::syntax::parser::ParseError;
 use crate::text::byte_to_char;
 use crate::typecheck::TypeError;
@@ -157,8 +157,10 @@ fn byte_span_to_char_range(source: &str, span: Span) -> std::ops::Range<usize> {
     caret_range(source, s, e.saturating_sub(s).max(1))
 }
 
+/// End of input, anchored on the *last* char rather than one past it: a
+/// range outside the source is dropped by ariadne, and its label with it.
 fn eof_char_range(source: &str) -> std::ops::Range<usize> {
-    caret_range(source, source.chars().count(), 1)
+    caret_range(source, source.chars().count().saturating_sub(1), 1)
 }
 
 /// Prose for the help line — "`{…}` opened at 1:6, which itself contains …".
@@ -215,10 +217,7 @@ fn lex_error_report(source: &str, kind: &LexErrorKind) -> Option<LexErrorReport>
             inner,
             ..
         } => {
-            let close = match form {
-                StringForm::DoubleQuoted => '"',
-                StringForm::SingleQuoted | StringForm::BumpedSingle(_) => '\'',
-            };
+            let close = form.closing();
             let primary = LabelRange {
                 range: byte_span_to_char_range(source, *opened),
                 label: format!("{form} opened here"),
@@ -235,7 +234,7 @@ fn lex_error_report(source: &str, kind: &LexErrorKind) -> Option<LexErrorReport>
             });
             Some(LexErrorReport {
                 code: "L0001",
-                message: format!("unterminated {form}"),
+                message: format!("unterminated {form}: expected closing `{close}`"),
                 primary,
                 secondary: Some(secondary),
                 hint,
@@ -431,6 +430,7 @@ macro_rules! dbg_trace {
 mod tests {
     use super::*;
     use crate::source::{FileId, Source};
+    use crate::syntax::lexer::StringForm;
     use crate::typecheck::{TypeError, TypeErrorKind};
 
     fn parse_error_with(message: &str, span: Option<Span>) -> ParseError {
@@ -473,6 +473,23 @@ mod tests {
         assert!(output.contains("L0001"), "got:\n{output}");
         assert!(output.contains("unterminated double-quoted string"));
         assert!(output.contains("opened here"));
+    }
+
+    #[test]
+    fn lex_error_ariadne_names_the_bumped_closing_delimiter() {
+        // The `#` run is the whole difficulty of the form: a reader who is
+        // told only "unterminated" retypes `'` and fails again.  Both the
+        // headline and the end-of-input label must show `'##`.
+        let err = parse_error_from(LexErrorKind::UnterminatedString {
+            form: StringForm::BumpedSingle(2),
+            opened: Span::new(crate::source::FileId::DUMMY, 0, 1),
+            inner: None,
+        });
+        let output = format_parse_error_ariadne("test.al", "##'foo", &err);
+        assert!(
+            output.matches("expected closing `'##`").count() == 2,
+            "got:\n{output}"
+        );
     }
 
     #[test]

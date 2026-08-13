@@ -191,12 +191,27 @@ pub enum StringForm {
     BumpedSingle(usize),
 }
 
+impl StringForm {
+    /// The exact delimiter that closes this form — what the user must type.
+    /// A bumped string wants its `#` run back after the `'`, so the reflex
+    /// of a bare `'` leaves it open however often it is tried.
+    pub fn closing(&self) -> String {
+        match self {
+            Self::SingleQuoted => "'".into(),
+            Self::DoubleQuoted => "\"".into(),
+            Self::BumpedSingle(n) => format!("'{}", "#".repeat(*n)),
+        }
+    }
+}
+
 impl fmt::Display for StringForm {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SingleQuoted => f.write_str("single-quoted string"),
             Self::DoubleQuoted => f.write_str("double-quoted string"),
-            Self::BumpedSingle(n) => write!(f, "bumped single-quoted string ({n} hashes)"),
+            // The `#` level is not spelled out here: every diagnostic that
+            // names a form also quotes its `closing()`, which shows the run.
+            Self::BumpedSingle(_) => f.write_str("bumped single-quoted string"),
         }
     }
 }
@@ -249,7 +264,8 @@ impl LexErrorKind {
     pub fn message(&self) -> String {
         match self {
             Self::UnterminatedString { form, inner, .. } => {
-                let mut msg = format!("unterminated {form}");
+                let mut msg =
+                    format!("unterminated {form}: expected closing `{}`", form.closing());
                 if let Some(inner) = inner {
                     msg.push_str("; nested ");
                     msg.push_str(&inner.message());
@@ -2307,9 +2323,13 @@ mod tests {
 
     #[test]
     fn bumped_string_unterminated_needs_hash() {
-        // A bare `'` with no `#` never closes a level-1 literal.
+        // A bare `'` with no `#` never closes a level-1 literal, so the
+        // message must spell out the `#` run the closer still wants —
+        // otherwise it says what is wrong without saying what to type.
         let err = lex("#'body with ' but no hash").expect_err("should fail");
-        assert!(err.message().contains("unterminated"));
+        assert!(err.message().contains("expected closing `'#`"), "{err}");
+        let deep = lex("###'body").expect_err("should fail");
+        assert!(deep.message().contains("expected closing `'###`"), "{deep}");
     }
 
     #[test]
