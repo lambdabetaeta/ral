@@ -70,6 +70,7 @@ gray_matter = { version = "0.3", default-features = false, features = ["yaml"] }
 # Secret Service), behind one entry type; `provider::keychain` is the only
 # caller.
 keyring    = "4.1"
+fd-lock = "4"
 
 # Unix-only bundled tools (id / kill / stat / timeout / test / tac).  Pulled
 # in through `ral-core/coreutils-unix-only` only on Unix targets — the

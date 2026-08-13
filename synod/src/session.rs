@@ -695,6 +695,9 @@ impl Conversation {
                     system,
                     caps,
                     run_dir,
+                    resume: None,
+                    no_logs: false,
+                    run_lock: None,
                     model,
                     provider_label: id.label().to_string(),
                     // Synod's agent may not schedule its own wakeups: a

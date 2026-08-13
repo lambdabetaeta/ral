@@ -174,17 +174,24 @@ fn opens_rail_run(prev: Option<&Block>, block: &Block) -> bool {
     !(block.markdown_src().is_some() && prev.is_some_and(|p| p.markdown_src().is_some()))
 }
 
-/// Open the session's rendered-text log, truncating any prior content.  Falls
-/// back to a discarding sink, so a log-path failure never disables the viewport.
+/// Open the session's rendered-text log, appending when resuming and truncating
+/// otherwise. Falls back to a discarding sink, so a log-path failure never
+/// disables the viewport.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:viewport-log] opens the viewport's rendered-text log; render dump infra, not turn-time data I/O"
 )]
-fn open_log(path: &Path) -> io::BufWriter<Box<dyn io::Write + Send>> {
+fn open_log(path: &Path, append: bool) -> io::BufWriter<Box<dyn io::Write + Send>> {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let sink: Box<dyn io::Write + Send> = match fs::File::create(path) {
+    let sink: Box<dyn io::Write + Send> = match std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(append)
+        .truncate(!append)
+        .open(path)
+    {
         Ok(f) => Box::new(f),
         Err(_) => Box::new(io::sink()),
     };
@@ -203,7 +210,7 @@ pub(super) fn export_log(src: &Path, dest: &Path) -> io::Result<u64> {
 }
 
 impl Viewport {
-    pub(super) fn new(log_path: PathBuf, agent: AgentSlot) -> Self {
+    pub(super) fn new(log_path: PathBuf, agent: AgentSlot, append: bool) -> Self {
         Self {
             blocks: Vec::new(),
             tombstone: None,
@@ -213,7 +220,7 @@ impl Viewport {
             offset: 0,
             sticky: true,
             flat: Flat::default(),
-            log: open_log(&log_path),
+            log: open_log(&log_path, append),
             log_path,
             log_prev_blank: true,
             state: StateSpan::new(AgentState::Ready),
@@ -302,7 +309,7 @@ impl Viewport {
     /// Wipe scrollback, scroll state, and streaming buffers, truncating
     /// `user.log` by reopening it.  `/clear` on the root.
     pub(super) fn reset(&mut self) {
-        *self = Self::new(self.log_path.clone(), self.agent);
+        *self = Self::new(self.log_path.clone(), self.agent, false);
     }
 
     /// Drop this view's heap state for a [`Tombstone`], reading the final status
@@ -610,7 +617,7 @@ impl Viewport {
         for (entry, lines) in self.blocks.iter_mut().zip(&rendered) {
             entry.rows = lines.len();
         }
-        self.log = open_log(&self.log_path);
+        self.log = open_log(&self.log_path, false);
         self.log_prev_blank = true;
         for lines in rendered {
             self.write_log_lines(lines);
@@ -992,7 +999,7 @@ mod tests {
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed),
         ));
-        Viewport::new(path, AgentSlot(0))
+        Viewport::new(path, AgentSlot(0), false)
     }
 
     fn rail_rows(lines: &[Line<'static>], glyph: &str) -> Vec<usize> {

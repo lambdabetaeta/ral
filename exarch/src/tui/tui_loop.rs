@@ -47,11 +47,12 @@ impl Tui {
         root_log_dir: &Path,
         stderr_log: &Path,
         vi: bool,
+        append_log: bool,
         inbox: Inbox,
         agents: AgentRegistry,
     ) -> io::Result<Self> {
         let guard = TerminalGuard::enter(stderr_log)?;
-        let app = App::new(root_id, root_log_dir, vi, inbox, agents);
+        let app = App::new(root_id, root_log_dir, vi, append_log, inbox, agents);
         Ok(Self { guard, app })
     }
 }
@@ -81,7 +82,11 @@ impl Control for ReplControl {
         }
         match trimmed {
             "/clear" => {
-                let _ = session.clear();
+                let result = session.clear();
+                emit.emit(crate::bus::Kind::Cleared);
+                if let Err(error) = result {
+                    session.note_error(format!("clear failed: {error}"), emit);
+                }
                 Verdict::Continue
             }
             "/compact" => {
@@ -129,6 +134,7 @@ pub fn run(
         &session.log_dir(),
         &stderr_log,
         vi,
+        session.is_resumed(),
         session.inbox(),
         session.agents.clone(),
     )
@@ -160,6 +166,12 @@ pub fn run(
     // The UI thread's own emitter, carrying the same transcript, so a UI-caused
     // event (a `/model` switch) is recorded and drawn like any worker note.
     let ui_emit = fleet.bus.emitter(session.id, session.transcript());
+    if let Some((exchanges, bytes)) = session.resume_summary() {
+        Agent::note(
+            format!("resumed: {exchanges} exchanges, {} KB", bytes.div_ceil(1024)),
+            &ui_emit,
+        );
+    }
     // Without a way to wake the parked worker with a `/quit`, the `join` below
     // would deadlock whenever the UI loop dies first.
     let quit_mailbox = session.inbox().mailbox();

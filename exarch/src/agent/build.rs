@@ -20,8 +20,29 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) fn fresh_id() -> AgentId {
-    static N: AtomicU64 = AtomicU64::new(0);
-    N.fetch_add(1, Ordering::Relaxed)
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+fn seed_id_counter(sessions_root: &std::path::Path) -> io::Result<()> {
+    let max = match std::fs::read_dir(sessions_root) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                entry
+                    .file_type()
+                    .ok()
+                    .filter(std::fs::FileType::is_dir)?;
+                entry.file_name().to_str()?.parse::<AgentId>().ok()
+            })
+            .max()
+            .unwrap_or(0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error),
+    };
+    NEXT_ID.fetch_max(max.saturating_add(1), Ordering::Relaxed);
+    Ok(())
 }
 
 /// The trunk's registry name. Never shown — the trunk lists its descendants,
@@ -53,6 +74,9 @@ pub(crate) struct Build {
     /// its own, so every construction site states which seat kind it builds.
     pub(crate) seat: Seat,
     pub(crate) log: AgentLog,
+    pub(crate) run_lock: Option<crate::bootstrap::RunLock>,
+    pub(crate) resume_summary: Option<(u64, u64)>,
+    pub(crate) resumed_at_unix_ms: Option<u64>,
     pub(crate) parent: Option<AgentId>,
     pub(crate) fuel: u32,
     pub(crate) provider: ProviderHandle,
@@ -89,6 +113,9 @@ pub struct RootConfig {
     pub system: String,
     pub caps: ral_core::types::Capabilities,
     pub run_dir: std::path::PathBuf,
+    pub resume: Option<std::path::PathBuf>,
+    pub no_logs: bool,
+    pub run_lock: Option<crate::bootstrap::RunLock>,
     pub model: String,
     pub provider_label: String,
     pub allow_schedule: bool,
@@ -150,12 +177,22 @@ impl Agent {
             tool_enabled,
             search,
             agents,
+            run_lock,
+            resume_summary,
+            resumed_at_unix_ms,
             disk_warn_bytes,
             egress,
             hatchery,
             pending_hatches,
         } = b;
-        let transcript = Transcript::create(&log.dir().join("transcript.jsonl"))?;
+        let transcript_path = log.dir().join("transcript.jsonl");
+        let transcript = if let Some(at_unix_ms) = resumed_at_unix_ms {
+            Transcript::open_append(&transcript_path, at_unix_ms)?
+        } else if log.is_durable() {
+            Transcript::create(&transcript_path)?
+        } else {
+            Transcript::none()
+        };
         Ok(Self {
             id: log.id(),
             system: system_prompt,
@@ -163,6 +200,8 @@ impl Agent {
             index,
             log: LogCell::new(log),
             transcript,
+            _run_lock: run_lock,
+            resume_summary,
             seat,
             caps,
             parent,
@@ -234,6 +273,9 @@ impl Agent {
             system,
             caps,
             run_dir,
+            resume,
+            no_logs,
+            run_lock,
             model,
             provider_label,
             allow_schedule,
@@ -244,6 +286,21 @@ impl Agent {
             egress,
             hatchery,
         } = cfg;
+        if resume.is_some() && no_logs {
+            return Err(io::Error::other(
+                "--resume cannot be combined with --no-logs — a transient session writes nothing to reopen",
+            ));
+        }
+        if resume.is_some() && chat {
+            return Err(io::Error::other(
+                "--resume cannot be combined with --chat — chat sessions have no resumable harness history",
+            ));
+        }
+        if resume.is_some() && matches!(&root_seat, RootSeat::Wire { .. }) {
+            return Err(io::Error::other(
+                "--resume is unavailable for a wire seat — the engine process is gone; resume an identity session instead",
+            ));
+        }
         // Stated, not discovered by a model calling `agent`: a fuelled wire
         // trunk with no hatchery to dial helpers through cannot ever answer
         // `agent-start`'s wire arm, so refuse the construction itself.
@@ -267,8 +324,6 @@ impl Agent {
             } => Some(seat::boot_root_shell(scratch, cwd.clone(), *detach)),
             RootSeat::Wire { .. } => None,
         };
-        let sessions_root = run_dir.join("sessions");
-        let id = fresh_id();
         // A binding of its own, so the stand-in outlives the borrow below.
         let throwaway_wire_shell;
         let index = crate::prompt::BuiltinIndex::resolve(if let Some(shell) = &identity_shell {
@@ -292,13 +347,47 @@ impl Agent {
                 },
             )
         };
-        let log = AgentLog::root(
-            &sessions_root,
-            id,
-            &model,
-            &provider_label,
-            system_prompt.len(),
-        )?;
+        let sessions_root = resume
+            .as_deref()
+            .unwrap_or(&run_dir)
+            .join("sessions");
+        let run_lock = if no_logs {
+            None
+        } else {
+            match run_lock {
+                Some(lock) => Some(lock),
+                None => Some(crate::bootstrap::RunLock::try_acquire(&run_dir)?),
+            }
+        };
+        let (log, resume_summary, resumed_at_unix_ms) =
+            if resume.is_some() {
+                seed_id_counter(&sessions_root)?;
+                let mut log = AgentLog::resume(&sessions_root, 0)?;
+                let summary = log.resumed_summary();
+                let at_unix_ms = crate::bootstrap::now_unix_ms();
+                log.record_resumed(&model, &provider_label, system_prompt.len(), at_unix_ms)?;
+                (log, Some(summary), Some(at_unix_ms))
+            } else {
+                let id = fresh_id();
+                let log = if no_logs {
+                    AgentLog::root_without_logs(
+                        &sessions_root,
+                        id,
+                        &model,
+                        &provider_label,
+                        system_prompt.len(),
+                    )?
+                } else {
+                    AgentLog::root(
+                        &sessions_root,
+                        id,
+                        &model,
+                        &provider_label,
+                        system_prompt.len(),
+                    )?
+                };
+                (log, None, None)
+            };
         let seat = match root_seat {
             RootSeat::Identity {
                 scratch,
@@ -334,17 +423,57 @@ impl Agent {
             tool_enabled: !chat,
             search,
             agents: AgentRegistry::new(),
+            run_lock,
+            resume_summary,
+            resumed_at_unix_ms,
             disk_warn_bytes,
             egress,
             hatchery,
             pending_hatches: PendingHatches::new(),
         })?;
+        if resume.is_some() {
+            agent
+                .log
+                .lock()
+                .import_context(vec![genai::chat::ChatMessage::user(
+                    "session resumed from disk; the shell is fresh: bindings, workers, and cwd from before are gone, the scratch dir is new ($EXARCH_SCRATCH is per-pid, so scratch paths in the old context are dead), pinned state and scheduled events are gone (pin-list and schedule-list to confirm), and any sub-agents from before have ended.",
+                )])
+                .map_err(io::Error::other)?;
+        }
         agent.register_self();
         Ok(agent)
     }
 
     pub(crate) fn clear(&mut self) -> io::Result<()> {
-        self.log.lock().clear(self.system.len())?;
+        let at_unix_ms = crate::bootstrap::now_unix_ms();
+        let (transcript_path, record) = {
+            let mut log = self.log.lock();
+            let transcript_path = log.dir().join("transcript.jsonl");
+            let record = log.clear(self.system.len(), at_unix_ms, &transcript_path)?;
+            drop(log);
+            (transcript_path, record)
+        };
+        let mut error = record.events_error;
+        if let Some(rotation) = record.rotation
+            && let Err(transcript_error) =
+                self.transcript
+                    .rotate_at(&transcript_path, rotation, at_unix_ms)
+        {
+            let events_path = transcript_path.with_file_name("events.jsonl");
+            let rotated_events = events_path.with_file_name(format!("events.jsonl.{rotation}"));
+            error = Some(match error {
+                Some(events_error) => io::Error::other(format!(
+                    "clear committed, but paired files {} and {} could not both be rotated: {events_error}; {transcript_error}",
+                    rotated_events.display(),
+                    transcript_path.display(),
+                )),
+                None => io::Error::other(format!(
+                    "clear committed, but paired files {} and {} could not both be rotated: the event log was moved, but the transcript failed: {transcript_error}",
+                    rotated_events.display(),
+                    transcript_path.display(),
+                )),
+            });
+        }
         // Rebooting the seat drops the outgoing shell, whose teardown cancels
         // its registered workers — `/clear` outranks every lease.
         self.seat.clear(&self.log.lock());
@@ -362,7 +491,7 @@ impl Agent {
         // The frontend wipes its pin register on `/clear`, so the session's
         // mirror must follow.
         self.pins.lock().expect("pin register poisoned").clear();
-        Ok(())
+        error.map_or(Ok(()), Err)
     }
 
     /// A plain returning fork.  Tests only: a production spawn assembles its
@@ -427,6 +556,9 @@ impl Agent {
             // Never a fresh grant: a child's reach is bounded by its parent's.
             search: self.search,
             agents: self.agents.clone(),
+            run_lock: None,
+            resume_summary: None,
+            resumed_at_unix_ms: None,
             disk_warn_bytes: self.disk_warn_bytes,
             egress: self.egress.clone(),
             hatchery: self.hatchery.clone(),
@@ -520,6 +652,9 @@ impl Agent {
             // Matches `Egress::for_test`'s own permissive policy below.
             search: true,
             agents: AgentRegistry::new(),
+            run_lock: None,
+            resume_summary: None,
+            resumed_at_unix_ms: None,
             // A test exercising the disk-warn check sets this directly.
             disk_warn_bytes: None,
             egress: crate::egress::Egress::for_test(),
@@ -552,8 +687,11 @@ impl Drop for Agent {
 mod tests {
     use super::*;
     use crate::agent::testkit::*;
-    use crate::bus::{Emitter, Item};
+    use crate::agent::event::SessionEvent;
+    use crate::bus::{Emitter, Item, Kind};
     use crate::provider::scripted::Script;
+    use genai::chat::ChatMessage;
+    use std::fs::{self, File};
 
     /// A forked child inherits the parent's installed builtin surface, not
     /// just the core set a bare `Shell::new` seeds.
@@ -728,6 +866,9 @@ mod tests {
                 system: template,
                 caps: ral_core::types::Capabilities::default(),
                 run_dir: dir,
+                resume: None,
+                no_logs: false,
+                run_lock: None,
                 model: "test-model".into(),
                 provider_label: "test".into(),
                 allow_schedule: false,
@@ -990,5 +1131,242 @@ mod tests {
             "inherited parent scratch is baseline in the child — never pruned, however \
              many boundary prunes the idle calls above ran"
         );
+    }
+
+    #[test]
+    fn resumed_agent_adds_only_the_fresh_shell_note() {
+        let dir = tmp("resume-agent");
+        let sessions = dir.join("sessions");
+        let mut log = AgentLog::root(&sessions, 0, "old-model", "old-provider", 0).unwrap();
+        log.append_user("before the crash".into(), None).unwrap();
+        log.append_assistant(ChatMessage::assistant("saved answer"), vec![], None)
+            .unwrap();
+        let before = log.history_messages();
+        drop(log);
+
+        let scratch = Scratch::for_test(crate::bootstrap::EXARCH, "resume-agent")
+            .expect("scratch dir");
+        let agent = Agent::root(
+            RootConfig {
+                system: "system".into(),
+                caps: ral_core::types::Capabilities::default(),
+                run_dir: dir.clone(),
+                resume: Some(dir.clone()),
+                no_logs: false,
+                run_lock: None,
+                model: "new-model".into(),
+                provider_label: "new-provider".into(),
+                allow_schedule: false,
+                interactive: true,
+                chat: false,
+                disk_warn_bytes: None,
+                fuel: 0,
+                egress: crate::egress::Egress::for_test(),
+                hatchery: None,
+            },
+            RootSeat::Identity {
+                scratch: Arc::new(scratch),
+                cwd: std::env::current_dir().expect("test process has a cwd"),
+                detach: false,
+            },
+            scripted("new-model", Script::new()),
+        )
+        .expect("resumed agent");
+
+        assert!(agent.is_ready());
+        let messages = agent.rendered_messages();
+        assert_eq!(
+            serde_json::to_vec(&messages[..before.len()]).unwrap(),
+            serde_json::to_vec(&before).unwrap()
+        );
+        assert_eq!(messages.len(), before.len() + 1);
+        let note = messages.last().expect("fresh-shell note");
+        assert_eq!(note.role, genai::chat::ChatRole::User);
+        let text = note.content.first_text().expect("note text");
+        for loss in [
+            "shell is fresh",
+            "bindings",
+            "workers",
+            "cwd",
+            "scratch",
+            "pinned state",
+            "scheduled events",
+            "sub-agents",
+        ] {
+            assert!(text.contains(loss), "resume note must name {loss}: {text}");
+        }
+        let events: Vec<SessionEvent> = serde_json::Deserializer::from_reader(
+            File::open(dir.join("sessions/0/events.jsonl")).unwrap(),
+        )
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .unwrap();
+        let resumed_at = events
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::SessionResumed { at_unix_ms, .. } => Some(*at_unix_ms),
+                _ => None,
+            })
+            .expect("SessionResumed breadcrumb");
+        let trace: Vec<serde_json::Value> = serde_json::Deserializer::from_reader(
+            File::open(dir.join("sessions/0/transcript.jsonl")).unwrap(),
+        )
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .unwrap();
+        assert_eq!(trace[0]["kind"], "resumed");
+        assert_eq!(trace[0]["at_unix_ms"], resumed_at);
+    }
+
+    #[test]
+    fn clear_rotates_both_records_and_shared_emitters_follow_the_new_trace() {
+        let dir = tmp("clear-rotation");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let events = session.log_dir().join("events.jsonl");
+        let transcript = session.log_dir().join("transcript.jsonl");
+        fs::write(events.with_file_name("events.jsonl.0"), b"reserved").unwrap();
+        fs::write(
+            transcript.with_file_name("transcript.jsonl.0"),
+            b"reserved",
+        )
+        .unwrap();
+
+        let bus = crate::bus::FleetBus::session(&session.inbox());
+        let first = bus.emitter(session.id, session.transcript());
+        let second = first.clone();
+        session.clear().expect("clear rotation");
+
+        let rotated_events = events.with_file_name("events.jsonl.1");
+        let rotated_transcript = transcript.with_file_name("transcript.jsonl.1");
+        assert!(rotated_events.is_file());
+        assert!(rotated_transcript.is_file());
+        assert!(events.is_file());
+        assert!(transcript.is_file());
+        assert!(fs::read(events.with_file_name("events.jsonl.0"))
+            .unwrap()
+            .starts_with(b"reserved"));
+
+        let current_events: Vec<SessionEvent> = serde_json::Deserializer::from_reader(
+            File::open(&events).unwrap(),
+        )
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .unwrap();
+        let stamp = match current_events.first().expect("new session head") {
+            SessionEvent::SessionStarted { at_unix_ms, .. } => *at_unix_ms,
+            other => panic!("new event segment must start with SessionStarted, got {other:?}"),
+        };
+        let trace: Vec<serde_json::Value> = serde_json::Deserializer::from_reader(
+            File::open(&transcript).unwrap(),
+        )
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .unwrap();
+        assert_eq!(trace[0]["kind"], "cleared");
+        assert_eq!(trace[0]["at_unix_ms"], stamp);
+
+        first.emit(Kind::SystemNote("from first emitter".into()));
+        second.emit(Kind::SystemNote("from second emitter".into()));
+        let current = fs::read_to_string(&transcript).unwrap();
+        let rotated = fs::read_to_string(&rotated_transcript).unwrap();
+        assert!(current.contains("from first emitter"));
+        assert!(current.contains("from second emitter"));
+        assert!(!rotated.contains("from first emitter"));
+        assert!(!rotated.contains("from second emitter"));
+    }
+
+    #[test]
+    fn no_logs_is_process_wide_and_never_mints_durable_files() {
+        let dir = tmp("no-logs-agent");
+        let scratch = Scratch::for_test(crate::bootstrap::EXARCH, "no-logs-agent")
+            .expect("scratch dir");
+        let agent = Agent::root(
+            RootConfig {
+                system: "system".into(),
+                caps: ral_core::types::Capabilities::default(),
+                run_dir: dir.clone(),
+                resume: None,
+                no_logs: true,
+                run_lock: None,
+                model: "test-model".into(),
+                provider_label: "test".into(),
+                allow_schedule: false,
+                interactive: true,
+                chat: false,
+                disk_warn_bytes: None,
+                fuel: 1,
+                egress: crate::egress::Egress::for_test(),
+                hatchery: None,
+            },
+            RootSeat::Identity {
+                scratch: Arc::new(scratch),
+                cwd: std::env::current_dir().expect("test process has a cwd"),
+                detach: false,
+            },
+            scripted("test-model", Script::new()),
+        )
+        .expect("mirror-only agent");
+        let root_log = agent.log_dir();
+        let child = agent
+            .fork(ral_core::types::Capabilities::default())
+            .expect("mirror-only child");
+        let child_log = child.log_dir();
+        for log_dir in [&root_log, &child_log] {
+            assert!(!log_dir.join("events.jsonl").exists());
+            assert!(!log_dir.join("transcript.jsonl").exists());
+        }
+        assert!(!dir.join("run.lock").exists());
+        drop(child);
+        drop(agent);
+    }
+
+    #[test]
+    fn resume_seeds_child_ids_past_existing_session_directories() {
+        let dir = tmp("resume-id-seed");
+        let sessions = dir.join("sessions");
+        let log = AgentLog::root(&sessions, 0, "old-model", "old-provider", 0).unwrap();
+        fs::create_dir_all(sessions.join("1")).unwrap();
+        fs::write(sessions.join("1/sentinel"), b"keep").unwrap();
+        drop(log);
+
+        let scratch = Scratch::for_test(crate::bootstrap::EXARCH, "resume-id-seed")
+            .expect("scratch dir");
+        let root = Agent::root(
+            RootConfig {
+                system: "system".into(),
+                caps: ral_core::types::Capabilities::default(),
+                run_dir: dir.clone(),
+                resume: Some(dir),
+                no_logs: false,
+                run_lock: None,
+                model: "new-model".into(),
+                provider_label: "new-provider".into(),
+                allow_schedule: false,
+                interactive: true,
+                chat: false,
+                disk_warn_bytes: None,
+                fuel: 1,
+                egress: crate::egress::Egress::for_test(),
+                hatchery: None,
+            },
+            RootSeat::Identity {
+                scratch: Arc::new(scratch),
+                cwd: std::env::current_dir().expect("test process has a cwd"),
+                detach: false,
+            },
+            scripted("new-model", Script::new()),
+        )
+        .expect("resumed root");
+        let child = root
+            .fork(ral_core::types::Capabilities::default())
+            .expect("post-resume child");
+        let child_id = child
+            .log_dir()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.parse::<u64>().ok())
+            .expect("numeric child session directory");
+        assert!(child_id >= 2);
+        assert_eq!(fs::read(sessions.join("1/sentinel")).unwrap(), b"keep");
     }
 }

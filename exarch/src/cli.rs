@@ -74,6 +74,13 @@ pub struct Cli {
     /// seed prompt.
     #[arg(long)]
     pub headless: bool,
+    /// Reopen the newest run, or the named run/session directory.
+    #[arg(long, value_name = "TARGET", num_args = 0..=1)]
+    pub resume: Option<Option<std::path::PathBuf>>,
+    /// Keep only the in-memory model mirror; no durable records or run lock
+    /// are created, and the session cannot be resumed.
+    #[arg(long = "no-logs")]
+    pub no_logs: bool,
     /// Headless stdout format. `text` (default) renders the deliberate reply
     /// once as human-readable ral text; `json` emits one result object — reply,
     /// stop reason, steps, duration, usage, cost — when the run ends.
@@ -206,5 +213,20 @@ mod tests {
         let seed = load_seed(Some("from flag".into()), None, Vec::new()).expect("seed loads");
 
         assert_eq!(seed.as_deref(), Some("from flag"));
+    }
+
+    #[test]
+    fn resume_distinguishes_bare_and_named_targets() {
+        let bare = Cli::try_parse_from(["exarch", "--resume"]).expect("bare resume");
+        assert_eq!(bare.resume, Some(None));
+
+        let named = Cli::try_parse_from(["exarch", "--resume", "/tmp/run"])
+            .expect("named resume");
+        assert_eq!(
+            named.resume,
+            Some(Some(std::path::PathBuf::from("/tmp/run")))
+        );
+        let transient = Cli::try_parse_from(["exarch", "--no-logs"]).expect("no logs");
+        assert!(transient.no_logs);
     }
 }

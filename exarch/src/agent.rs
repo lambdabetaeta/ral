@@ -72,6 +72,8 @@ pub struct Agent {
     /// The operational trace (`transcript.jsonl`): what the agent did, where
     /// [`Self::log`] is what the model saw.
     transcript: Transcript,
+    _run_lock: Option<crate::bootstrap::RunLock>,
+    resume_summary: Option<(u64, u64)>,
     /// Every engine-side reach goes through this seat's methods.
     pub(crate) seat: Seat,
     caps: ral_core::types::Capabilities,
@@ -229,6 +231,14 @@ impl Agent {
     /// For the frontend's emitter, and for a forked child's own trace.
     pub(crate) fn transcript(&self) -> Transcript {
         self.transcript.clone()
+    }
+
+    pub(crate) fn is_resumed(&self) -> bool {
+        self.resume_summary.is_some()
+    }
+
+    pub(crate) fn resume_summary(&self) -> Option<(u64, u64)> {
+        self.resume_summary
     }
 
     /// For `schedule` to arm wakeups into its *own* inbox, and for the spawn

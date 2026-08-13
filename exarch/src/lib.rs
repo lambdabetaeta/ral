@@ -128,6 +128,18 @@ pub fn run() -> Result<(), String> {
     if c.output_format == headless::OutputFormat::Json && !c.headless {
         return Err("--output-format is only meaningful with --headless".into());
     }
+    if c.resume.is_some() && c.chat {
+        return Err(
+            "--resume cannot be combined with --chat — chat sessions have no resumable harness history"
+                .into(),
+        );
+    }
+    if c.resume.is_some() && c.no_logs {
+        return Err(
+            "--resume cannot be combined with --no-logs — a transient session writes nothing to reopen"
+                .into(),
+        );
+    }
     let seed = cli::load_seed(c.prompt, c.file, c.trailing_prompt)?;
 
     let custom = config::load()?;
@@ -214,9 +226,8 @@ pub fn run() -> Result<(), String> {
     let scratch = Arc::new(
         bootstrap::Scratch::new(bootstrap::EXARCH).map_err(|e| format!("scratch dir: {e}"))?,
     );
-    let run_dir = bootstrap::EXARCH
-        .log_run_dir(&cwd)
-        .map_err(|e| format!("log dir: {e}"))?;
+    let (run_dir, run_lock, resume) =
+        resolve_run(&cwd, c.resume.clone(), c.no_logs)?;
     let config_dir = bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Config);
     let cwd_path = std::path::PathBuf::from(&cwd);
     // Whether the double fork exists on this host at all; whether a given call
@@ -255,6 +266,9 @@ pub fn run() -> Result<(), String> {
             system,
             caps,
             run_dir: run_dir.clone(),
+            resume,
+            no_logs: c.no_logs,
+            run_lock,
             model,
             provider_label: label.to_string(),
             allow_schedule: c.allow_schedule,
@@ -309,14 +323,78 @@ pub fn run() -> Result<(), String> {
     }
 }
 
-/// Resolve the initial provider+model, in priority order: a `--provider` pin, a
-/// `--model` override (its provider found by
-/// [`provider::models::resolve_model_provider`]), the persisted selection while
-/// its provider is still available, else the first available provider's default
-/// model.  The result always names an *available* provider, so a saved selection
-/// whose key is gone falls through rather than failing.  A `--provider` pin is
-/// taken verbatim, consulting neither listing nor saved state — the way to reach
-/// a model the provider does not advertise.
+/// Resolve a fresh or resumable run directory, retaining the lock for the
+/// process that owns it.
+#[allow(clippy::option_option, reason = "the CLI distinguishes absent, bare, and named resume")]
+fn resolve_run(
+    cwd: &str,
+    resume: Option<Option<std::path::PathBuf>>,
+    no_logs: bool,
+) -> Result<
+    (
+        std::path::PathBuf,
+        Option<bootstrap::RunLock>,
+        Option<std::path::PathBuf>,
+    ),
+    String,
+> {
+    if let Some(target) = resume {
+        let explicit = target.is_some();
+        let candidates = match target {
+            Some(target) => vec![
+                bootstrap::normalize_resume_target(&target)?,
+            ],
+            None => bootstrap::EXARCH
+                .resume_candidates(cwd)
+                .map_err(|error| format!("could not inspect resumable runs: {error}"))?,
+        };
+        for run_dir in candidates {
+            let events = run_dir.join("sessions/0/events.jsonl");
+            if !events.is_file() {
+                if explicit {
+                    return Err(format!(
+                        "--resume target {} has no {}; pass a run directory containing sessions/0/events.jsonl",
+                        run_dir.display(),
+                        events.display()
+                    ));
+                }
+                continue;
+            }
+            match bootstrap::RunLock::try_acquire(&run_dir) {
+                Ok(lock) => return Ok((run_dir.clone(), Some(lock), Some(run_dir))),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if explicit {
+                        return Err(format!(
+                            "--resume target {} is already running; run.lock is held by another exarch",
+                            run_dir.display()
+                        ));
+                    }
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "cannot resume {}: could not acquire {}: {error}",
+                        run_dir.display(),
+                        run_dir.join("run.lock").display()
+                    ));
+                }
+            }
+        }
+        return Err(format!(
+            "--resume found no unlocked run with sessions/0/events.jsonl under {}",
+            bootstrap::EXARCH.project_dir(cwd).display()
+        ));
+    }
+
+    let run_dir = bootstrap::EXARCH
+        .log_run_dir(cwd)
+        .map_err(|error| format!("log dir: {error}"))?;
+    let lock = (!no_logs)
+        .then(|| bootstrap::RunLock::try_acquire(&run_dir))
+        .transpose()
+        .map_err(|error| format!("could not lock {}: {error}", run_dir.display()))?;
+    Ok((run_dir, lock, None))
+}
+
 fn resolve_initial_selection(
     provider_override: Option<&str>,
     model_override: Option<&str>,

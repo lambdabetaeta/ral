@@ -272,6 +272,7 @@ impl Sink for Headless<'_> {
             Kind::SystemNote(text) => {
                 let _ = writeln!(self.err, "{text}");
             }
+            Kind::Cleared => {}
             Kind::ContextEdited { .. } => {}
             Kind::Nudge {
                 used, max, cause, ..
@@ -593,6 +594,9 @@ mod tests {
                 system: "system".into(),
                 caps: ral_core::types::Capabilities::default(),
                 run_dir: dir,
+                resume: None,
+                no_logs: false,
+                run_lock: None,
                 model: "test-model".into(),
                 provider_label: "test".into(),
                 allow_schedule: false,
@@ -925,6 +929,9 @@ mod tests {
                 system: "system".into(),
                 caps: ral_core::types::Capabilities::default(),
                 run_dir: dir,
+                resume: None,
+                no_logs: false,
+                run_lock: None,
                 model: "test-model".into(),
                 provider_label: "test".into(),
                 allow_schedule,

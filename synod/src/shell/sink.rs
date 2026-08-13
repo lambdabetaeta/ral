@@ -221,7 +221,8 @@ pub fn project(kind: Kind) -> Option<SynodEvent> {
         | Kind::HarnessResult(_)
         | Kind::SubagentDone { .. }
         | Kind::Pin { .. }
-        | Kind::Unpin { .. } => return None,
+        | Kind::Unpin { .. }
+        | Kind::Cleared => return None,
     })
 }
 

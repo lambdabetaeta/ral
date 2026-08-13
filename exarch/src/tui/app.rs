@@ -74,7 +74,7 @@ pub(crate) struct App {
     pub(super) matrix_sort: MatrixSort,
     /// Armed by [`Self::clear`]: drops root's straggler events — tokens the
     /// worker emitted before the streaming select noticed the cancel — until
-    /// the next `UserPromptEcho`. Sub-agent tabs are covered instead by the
+    /// the clear acknowledgement. Sub-agent tabs are covered instead by the
     /// `dying` window in [`Self::handle`].
     root_clear_drain: bool,
     pub(super) cwd_basename: String,
@@ -87,10 +87,11 @@ impl App {
         root_id: AgentId,
         root_log_dir: &Path,
         vi: bool,
+        append_log: bool,
         inbox: Inbox,
         agents: AgentRegistry,
     ) -> Self {
-        let tabs = Tabs::new(root_id, root_log_dir);
+        let tabs = Tabs::new(root_id, root_log_dir, append_log);
         let cwd_basename = std::env::current_dir()
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -252,12 +253,12 @@ impl App {
         if self.tabs.is_dying(id) {
             return;
         }
-        // The first `UserPromptEcho` is the genuine next prompt: disarm and let
-        // it through. Everything the cancelled exchange left queued is dropped.
+        // The clear acknowledgement is the boundary: everything before it is
+        // cancelled-exchange residue, and everything after it is new context.
         if id == self.tabs.root() && self.root_clear_drain {
-            let echo = matches!(kind, Kind::UserPromptEcho(_));
-            self.root_clear_drain = !echo;
-            if !echo {
+            if matches!(kind, Kind::Cleared) {
+                self.root_clear_drain = false;
+            } else {
                 return;
             }
         }
@@ -371,7 +372,7 @@ impl App {
             ),
             // Quiet on the rail, recorded in the trace at the emit seam. A desk
             // result is always one line, so a size bar would be constant ink.
-            Kind::Nudge { .. } | Kind::HarnessResult(_) => {}
+            Kind::Cleared | Kind::Nudge { .. } | Kind::HarnessResult(_) => {}
             Kind::ProviderError(error) => {
                 self.push_chrome(id, RailShape::Error, line::provider_error(&error));
             }
@@ -744,6 +745,7 @@ mod tests {
         let app = App::new(
             1,
             &std::env::temp_dir(),
+            false,
             false,
             Inbox::new(),
             AgentRegistry::new(),

@@ -139,14 +139,16 @@ pub enum Kind {
     HarnessResult(String),
     /// The text of *any* item as it enters context — human prompt, wakeup, or
     /// peer agent message alike (`agent::attend::announce`), despite the name;
-    /// an agent result goes through [`Kind::SubagentDone`].  Untraced, and the
-    /// first one after a clear disarms the TUI's post-cancel drain guard.
+    /// an agent result goes through [`Kind::SubagentDone`]. Untraced.
     UserPromptEcho(String),
     StopReason(String),
     Error(String),
     /// An operational note the attend loop issued — a truncation recovery.
     /// Traced, but no `events.jsonl` twin: the model never saw it.
     SystemNote(String),
+    /// A clear command finished its durable boundary. Display-only: the
+    /// following error, if any, must not be swallowed by the clear drain.
+    Cleared,
     ContextEdited {
         op: ContextOp,
         by: EditAuthority,

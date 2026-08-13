@@ -44,11 +44,11 @@ pub(super) struct Tabs {
 }
 
 impl Tabs {
-    pub fn new(root_id: AgentId, root_log_dir: &Path) -> Self {
+    pub fn new(root_id: AgentId, root_log_dir: &Path, append: bool) -> Self {
         let mut viewports = HashMap::new();
         viewports.insert(
             root_id,
-            Viewport::new(root_log_dir.join("user.log"), AgentSlot::default()),
+            Viewport::new(root_log_dir.join("user.log"), AgentSlot::default(), append),
         );
         let mut names = HashMap::new();
         names.insert(root_id, ROOT_NAME.to_string());
@@ -129,7 +129,7 @@ impl Tabs {
         agent_slot: AgentSlot,
     ) {
         if let std::collections::hash_map::Entry::Vacant(slot) = self.viewports.entry(id) {
-            slot.insert(Viewport::new(log_dir.join("user.log"), agent_slot));
+            slot.insert(Viewport::new(log_dir.join("user.log"), agent_slot, false));
             self.dispatch_order.push(id);
         }
         self.names.insert(id, name);
@@ -279,7 +279,7 @@ mod tests {
         let root = 1;
         let child = 2;
         let grandchild = 3;
-        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test"));
+        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test"), false);
         tabs.parents.insert(child, root);
         tabs.parents.insert(grandchild, child);
         tabs.dying.insert(child, Instant::now());
@@ -294,7 +294,7 @@ mod tests {
     fn tick_tombstones_only_the_expired_view_leaving_a_live_sibling_untouched() {
         let root = 1;
         let child = 2;
-        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test-root"));
+        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test-root"), false);
         tabs.born(
             child,
             std::path::Path::new("/tmp/test-child"),
@@ -347,7 +347,7 @@ mod tests {
         let root = 1;
         let promoted = 2;
         let demoted = 3;
-        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test-focus-next"));
+        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test-focus-next"), false);
         tabs.tabs.push(promoted);
         tabs.tabs.push(demoted);
 

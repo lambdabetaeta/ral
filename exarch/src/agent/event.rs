@@ -162,6 +162,13 @@ pub enum SessionEvent {
         provider: String,
         system_prompt_bytes: usize,
         log_dir: PathBuf,
+        at_unix_ms: u64,
+    },
+    SessionResumed {
+        model: String,
+        provider: String,
+        system_prompt_bytes: usize,
+        at_unix_ms: u64,
     },
     /// A user-role turn: the seed or typed prompt, a nudge continuation the
     /// attend loop self-posts, or a steering message drained after a tool batch.
@@ -332,6 +339,7 @@ pub struct AgentLog {
     events_file: Option<BufWriter<File>>,
     log: Vec<SessionEvent>,
     projection: Projection,
+    durable: bool,
     /// Held, with [`Self::provider`], so `clear` re-emits `SessionStarted`
     /// unchanged and `fork` passes both down to the child.
     model: String,
@@ -345,6 +353,11 @@ pub struct AgentLog {
 pub struct CompactionPlan {
     pub through_exchange: u64,
     pub prefix_messages: Vec<ChatMessage>,
+}
+
+pub(crate) struct ClearRecord {
+    pub(crate) rotation: Option<u64>,
+    pub(crate) events_error: Option<io::Error>,
 }
 
 fn summary_prompt(summary: &str) -> String {
@@ -369,8 +382,31 @@ impl AgentLog {
             session_id,
             model.to_string(),
             provider.to_string(),
+            true,
         )?;
-        s.record_started(None, system_prompt_bytes)?;
+        s.record_started(None, system_prompt_bytes, crate::bootstrap::now_unix_ms())?;
+        Ok(s)
+    }
+
+    /// Build a mirror-only root without creating events.jsonl.
+    ///
+    /// # Errors
+    /// Returns an error when the session directory cannot be created.
+    pub fn root_without_logs(
+        sessions_root: &Path,
+        session_id: AgentId,
+        model: &str,
+        provider: &str,
+        system_prompt_bytes: usize,
+    ) -> io::Result<Self> {
+        let mut s = Self::open_fresh(
+            sessions_root.to_path_buf(),
+            session_id,
+            model.to_string(),
+            provider.to_string(),
+            false,
+        )?;
+        s.record_started_lossy(None, system_prompt_bytes, crate::bootstrap::now_unix_ms());
         Ok(s)
     }
 
@@ -385,9 +421,140 @@ impl AgentLog {
             child_id,
             self.model.clone(),
             self.provider.clone(),
+            self.durable,
         )?;
-        s.record_started(Some(self.id), system_prompt_bytes)?;
+        if self.durable {
+            s.record_started(
+                Some(self.id),
+                system_prompt_bytes,
+                crate::bootstrap::now_unix_ms(),
+            )?;
+        } else {
+            s.record_started_lossy(
+                Some(self.id),
+                system_prompt_bytes,
+                crate::bootstrap::now_unix_ms(),
+            );
+        }
         Ok(s)
+    }
+
+    /// Read the trunk event ledger, repair only a torn final fragment, and
+    /// reopen the live file for append.
+    ///
+    /// # Errors
+    /// Returns an error when the ledger is missing, malformed, foreign, or
+    /// cannot be reopened after validation.
+    pub fn resume(sessions_root: &Path, session_id: AgentId) -> io::Result<Self> {
+        if session_id != 0 {
+            return Err(io::Error::other(format!(
+                "cannot resume session {session_id}: children are transient by design and only session 0 can be resumed"
+            )));
+        }
+        let dir = sessions_root.join(session_id.to_string());
+        let events_path = dir.join("events.jsonl");
+        let (events, tail) = read_events(&events_path)?;
+        let Some(first) = events.first() else {
+            return Err(io::Error::other(format!(
+                "cannot resume {}: no complete session events were found; is the file truncated?",
+                events_path.display()
+            )));
+        };
+        let (model, provider) = match first {
+            SessionEvent::SessionStarted {
+                session_id: 0,
+                parent: None,
+                model,
+                provider,
+                ..
+            } => (model.clone(), provider.clone()),
+            SessionEvent::SessionStarted {
+                session_id: found,
+                parent,
+                ..
+            } => {
+                return Err(io::Error::other(format!(
+                    "cannot resume {}: line 1 starts session {found:?} with parent {parent:?}; expected SessionStarted {{ session_id: 0, parent: None }} — is this a child log?",
+                    events_path.display()
+                )));
+            }
+            other => {
+                return Err(io::Error::other(format!(
+                    "cannot resume {}: line 1 is {other:?}; expected SessionStarted {{ session_id: 0, parent: None }} — is this a copied child log?",
+                    events_path.display()
+                )));
+            }
+        };
+
+        validate_resume_events(&events, &events_path)?;
+        if let Some(fragment) = tail {
+            quarantine_tail(&events_path, &fragment).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "cannot resume {}: could not quarantine the crash tail in events.jsonl.crash ({error})",
+                        events_path.display()
+                    ),
+                )
+            })?;
+        }
+        let events_file = open_events_append(&dir).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "cannot resume {}: could not reopen events.jsonl in append mode ({error})",
+                    events_path.display()
+                ),
+            )
+        })?;
+        let log = events;
+        let projection = fold(&log);
+        let mut resumed = Self {
+            id: session_id,
+            dir,
+            events_file: Some(events_file),
+            log,
+            projection,
+            durable: true,
+            model,
+            provider,
+            sessions_root: sessions_root.to_path_buf(),
+        };
+        if !resumed.is_ready() {
+            resumed.quiesce(QuiesceReason::Aborted);
+        }
+        Ok(resumed)
+    }
+
+    pub fn is_durable(&self) -> bool {
+        self.durable
+    }
+
+    pub fn resumed_summary(&self) -> (u64, u64) {
+        let bytes = fs::metadata(self.dir.join("events.jsonl"))
+            .map_or(0, |metadata| metadata.len());
+        (self.projection.max_exchange, bytes)
+    }
+
+    /// Record the live model selection and the shared resume boundary stamp.
+    ///
+    /// # Errors
+    /// Returns an error if the resumed breadcrumb cannot be appended.
+    pub fn record_resumed(
+        &mut self,
+        model: &str,
+        provider: &str,
+        system_prompt_bytes: usize,
+        at_unix_ms: u64,
+    ) -> io::Result<()> {
+        self.model = model.to_string();
+        self.provider = provider.to_string();
+        self.record(SessionEvent::SessionResumed {
+            model: self.model.clone(),
+            provider: self.provider.clone(),
+            system_prompt_bytes,
+            at_unix_ms,
+        })
     }
 
     pub fn id(&self) -> AgentId {
@@ -807,11 +974,57 @@ impl AgentLog {
     ///
     /// # Errors
     /// Reopening `events.jsonl`, or writing `SessionStarted`, failed.
-    pub fn clear(&mut self, system_prompt_bytes: usize) -> io::Result<()> {
+    pub(crate) fn clear(
+        &mut self,
+        system_prompt_bytes: usize,
+        at_unix_ms: u64,
+        transcript_path: &Path,
+    ) -> io::Result<ClearRecord> {
+        if !self.durable {
+            self.log.clear();
+            self.projection = Projection::default();
+            self.record_started_lossy(None, system_prompt_bytes, at_unix_ms);
+            return Ok(ClearRecord {
+                rotation: None,
+                events_error: None,
+            });
+        }
+
+        let events_path = self.events_path();
+        if let Some(events_file) = self.events_file.as_mut() {
+            events_file.flush().map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "clear was not committed for {}; the event log could not be flushed: {error}",
+                        events_path.display()
+                    ),
+                )
+            })?;
+        }
+        drop(self.events_file.take());
+
+        let rotation = match first_free_rotation(&events_path, transcript_path) {
+            Ok(n) => n,
+            Err(error) => return Err(self.refuse_clear(&error)),
+        };
+        let rotated = rotation_path(&events_path, rotation);
+        if let Err(error) = fs::rename(&events_path, &rotated) {
+            return Err(self.refuse_clear(&error));
+        }
+
         self.log.clear();
         self.projection = Projection::default();
-        self.events_file = Some(open_events_file(&self.dir)?);
-        self.record_started(None, system_prompt_bytes)
+        self.events_file = None;
+        let started = self.started_event(None, system_prompt_bytes, at_unix_ms);
+        self.log.push(started.clone());
+        let index = self.log.len() - 1;
+        advance_projection(&mut self.projection, &started, index);
+        let events_error = self.establish_head(&started);
+        Ok(ClearRecord {
+            rotation: Some(rotation),
+            events_error,
+        })
     }
 
     // ── Meta-events ───────────────────────────────────────────────────────
@@ -872,19 +1085,21 @@ impl AgentLog {
         session_id: AgentId,
         model: String,
         provider: String,
+        durable: bool,
     ) -> io::Result<Self> {
         let dir = sessions_root.join(session_id.to_string());
         if dir.exists() {
             fs::remove_dir_all(&dir)?;
         }
         fs::create_dir_all(&dir)?;
-        let events_file = open_events_file(&dir)?;
+        let events_file = durable.then(|| open_events_file(&dir)).transpose()?;
         Ok(Self {
             id: session_id,
             dir,
-            events_file: Some(events_file),
+            events_file,
             log: Vec::new(),
             projection: Projection::default(),
+            durable,
             model,
             provider,
             sessions_root,
@@ -896,21 +1111,99 @@ impl AgentLog {
         &mut self,
         parent: Option<AgentId>,
         system_prompt_bytes: usize,
+        at_unix_ms: u64,
     ) -> io::Result<()> {
-        let ev = SessionEvent::SessionStarted {
+        self.record(self.started_event(parent, system_prompt_bytes, at_unix_ms))
+    }
+
+    fn record_started_lossy(
+        &mut self,
+        parent: Option<AgentId>,
+        system_prompt_bytes: usize,
+        at_unix_ms: u64,
+    ) {
+        self.record_lossy(self.started_event(parent, system_prompt_bytes, at_unix_ms));
+    }
+
+    fn started_event(
+        &self,
+        parent: Option<AgentId>,
+        system_prompt_bytes: usize,
+        at_unix_ms: u64,
+    ) -> SessionEvent {
+        SessionEvent::SessionStarted {
             session_id: self.id,
             parent,
             model: self.model.clone(),
             provider: self.provider.clone(),
             system_prompt_bytes,
             log_dir: self.dir.clone(),
-        };
-        self.record(ev)
+            at_unix_ms,
+        }
+    }
+
+    fn events_path(&self) -> PathBuf {
+        self.dir.join("events.jsonl")
+    }
+
+    fn refuse_clear(&mut self, error: &io::Error) -> io::Error {
+        match open_events_append(&self.dir) {
+            Ok(events_file) => {
+                self.events_file = Some(events_file);
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "clear was not committed for {}; the event log was reopened in append mode: {error}",
+                        self.events_path().display()
+                    ),
+                )
+            }
+            Err(reopen) => {
+                self.events_file = None;
+                io::Error::other(format!(
+                    "clear was not committed for {}; the event log could not be reopened after {error}: {reopen}",
+                    self.events_path().display()
+                ))
+            }
+        }
+    }
+
+    fn establish_head(&mut self, started: &SessionEvent) -> Option<io::Error> {
+        let mut last_error = None;
+        for _ in 0..2 {
+            self.events_file = match open_events_file(&self.dir) {
+                Ok(events_file) => Some(events_file),
+                Err(error) => {
+                    last_error = Some(error);
+                    None
+                }
+            };
+            if self.events_file.is_none() {
+                continue;
+            }
+            match self.write_event(started) {
+                Ok(()) => return None,
+                Err(error) => {
+                    last_error = Some(error);
+                    drop(self.events_file.take());
+                }
+            }
+        }
+        self.events_file = None;
+        Some(io::Error::other(format!(
+            "the new event-log head {} could not be established after two attempts; the session is continuing without durable events: {}",
+            self.events_path().display(),
+            last_error
+                .map_or_else(|| "unknown I/O error".into(), |error| error.to_string())
+        )))
     }
 
     /// The disk half of [`Self::record`], apart so [`Self::record_lossy`] can
     /// go on without it.
     fn write_event(&mut self, ev: &SessionEvent) -> io::Result<()> {
+        if !self.durable {
+            return Ok(());
+        }
         let Some(events_file) = self.events_file.as_mut() else {
             return Err(io::Error::other("the session event log is not writable"));
         };
@@ -1194,7 +1487,135 @@ fn unknown_exchange_refusal(id: u64) -> String {
     format!("exchange {id} is not present in the current view")
 }
 
-/// Truncate-on-open: both callers, the constructor and `clear`, want it fresh.
+struct CrashTail {
+    bytes: Vec<u8>,
+    complete_len: u64,
+}
+
+fn read_events(path: &Path) -> io::Result<(Vec<SessionEvent>, Option<CrashTail>)> {
+    let data = fs::read(path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "cannot resume {}: could not read events.jsonl ({error}); check that the target path is a session log",
+                path.display()
+            ),
+        )
+    })?;
+    let mut events = Vec::new();
+    let mut complete_len = 0usize;
+    for (index, fragment) in data
+        .split_inclusive(|byte| *byte == b'\n')
+        .enumerate()
+    {
+        if fragment.last() != Some(&b'\n') {
+            break;
+        }
+        let line = index + 1;
+        let value = &fragment[..fragment.len() - 1];
+        let event = serde_json::from_slice(value).map_err(|error| {
+            io::Error::other(format!(
+                "cannot resume {}: line {line} is not a valid session event ({error}); was this session written by a newer exarch or hand-edited?",
+                path.display()
+            ))
+        })?;
+        events.push(event);
+        complete_len += fragment.len();
+    }
+    let tail = (complete_len < data.len()).then(|| CrashTail {
+        bytes: data[complete_len..].to_vec(),
+        complete_len: complete_len as u64,
+    });
+    Ok((events, tail))
+}
+
+fn validate_resume_events(events: &[SessionEvent], path: &Path) -> io::Result<()> {
+    let mut state = State::ReadyForUser;
+    for (index, event) in events.iter().enumerate() {
+        if !admissible_event(&state, event) {
+            if !stub_repairable(event) {
+                return Err(io::Error::other(format!(
+                    "cannot resume {}: line {} is foreign protocol data, not a seam that quiesce can repair; was the file hand-edited or written by an incompatible exarch?",
+                    path.display(),
+                    index + 1
+                )));
+            }
+            repair_state(&mut state);
+        }
+        state = advance(state, event);
+    }
+    Ok(())
+}
+
+fn repair_state(state: &mut State) {
+    if let State::AwaitingToolResults { pending_ids } = state.clone() {
+        let results = pending_ids
+            .into_iter()
+            .map(|id| ToolResult {
+                id,
+                content: String::new(),
+            })
+            .collect();
+        *state = advance(
+            std::mem::replace(state, State::ReadyForUser),
+            &SessionEvent::ToolResults { results },
+        );
+    }
+    if !matches!(state, State::ReadyForUser) {
+        *state = advance(
+            std::mem::replace(state, State::ReadyForUser),
+            &SessionEvent::AssistantMessage {
+                message: ChatMessage::assistant("(no reply: exchange aborted)"),
+                pending_tool_ids: Vec::new(),
+                stop_reason: Some("aborted".into()),
+            },
+        );
+    }
+}
+
+fn quarantine_tail(path: &Path, tail: &CrashTail) -> io::Result<()> {
+    let sidecar = path.with_file_name("events.jsonl.crash");
+    let mut quarantine = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&sidecar)?;
+    quarantine.write_all(&tail.bytes)?;
+    quarantine.flush()?;
+    quarantine.sync_all()?;
+
+    let events = OpenOptions::new().write(true).open(path)?;
+    events.set_len(tail.complete_len)?;
+    events.sync_all()?;
+    eprintln!(
+        "exarch: quarantined {} bytes from {} in {} before trimming the live log",
+        tail.bytes.len(),
+        path.display(),
+        sidecar.display()
+    );
+    Ok(())
+}
+
+fn first_free_rotation(events: &Path, transcript: &Path) -> io::Result<u64> {
+    let mut n = 0;
+    loop {
+        let events_rotated = rotation_path(events, n);
+        let transcript_rotated = rotation_path(transcript, n);
+        if !events_rotated.exists() && !transcript_rotated.exists() {
+            return Ok(n);
+        }
+        n = n
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("no free rotation number remains"))?;
+    }
+}
+
+fn rotation_path(path: &Path, n: u64) -> PathBuf {
+    let name = path
+        .file_name()
+        .map_or_else(|| "record".into(), |name| name.to_string_lossy().into_owned());
+    path.with_file_name(format!("{name}.{n}"))
+}
+
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:events-file] opens events.jsonl for the session event log; infra, not turn-time data I/O"
@@ -1204,6 +1625,17 @@ fn open_events_file(dir: &Path) -> io::Result<BufWriter<File>> {
         .write(true)
         .create(true)
         .truncate(true)
+        .open(dir.join("events.jsonl"))?;
+    Ok(BufWriter::new(f))
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:events-file] reopens the durable session log for append during resume or clear recovery"
+)]
+fn open_events_append(dir: &Path) -> io::Result<BufWriter<File>> {
+    let f = OpenOptions::new()
+        .append(true)
         .open(dir.join("events.jsonl"))?;
     Ok(BufWriter::new(f))
 }
@@ -1772,5 +2204,286 @@ mod tests {
         s.quiesce(QuiesceReason::Aborted);
         assert!(s.is_ready());
         s.append_user("next".into(), None).unwrap();
+    }
+
+    #[test]
+    fn resume_replays_a_scripted_history_and_preserves_the_model_view() {
+        let sessions = sessions_root("resume-round-trip");
+        let mut live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
+        live.import_context(vec![ChatMessage::user("inherited")])
+            .unwrap();
+        complete_exchange(&mut live, "one", "answer one");
+        complete_exchange(&mut live, "two", "answer two");
+        live.apply_edit(
+            ContextOp::Fold {
+                through_exchange: 2,
+                digest: "the old work is complete".into(),
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+        let expected = serde_json::to_vec(&live.model_messages()).unwrap();
+        drop(live);
+
+        let resumed = AgentLog::resume(&sessions, 0).expect("resume");
+        assert!(resumed.is_ready());
+        assert_eq!(
+            serde_json::to_vec(&resumed.model_messages()).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn resume_quiesces_a_torn_exchange_after_reopening_append_mode() {
+        let sessions = sessions_root("resume-mid-exchange");
+        let mut live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
+        live.append_user("run the tool".into(), None).unwrap();
+        live.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
+            .unwrap();
+        drop(live);
+
+        let path = sessions.join("0/events.jsonl");
+        let mut resumed = AgentLog::resume(&sessions, 0).expect("resume");
+        assert!(resumed.is_ready());
+        assert!(resumed
+            .log
+            .iter()
+            .any(|event| matches!(event, SessionEvent::ToolResults { .. })));
+        assert!(resumed.log.iter().any(|event| {
+            matches!(
+                event,
+                SessionEvent::AssistantMessage {
+                    stop_reason: Some(reason),
+                    ..
+                } if reason == "aborted"
+            )
+        }));
+        resumed.append_user("continue".into(), None).unwrap();
+        let events = read_events(&path).unwrap().0;
+        assert!(matches!(events.last(), Some(SessionEvent::UserPrompt { text, .. }) if text == "continue"));
+    }
+
+    #[test]
+    fn resume_quarantines_only_an_unterminated_final_fragment() {
+        let sessions = sessions_root("resume-tail");
+        let live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
+        let path = sessions.join("0/events.jsonl");
+        drop(live);
+        let prefix = fs::read(&path).unwrap();
+        let fragment = b"{\"kind\":\"user_prompt\"";
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(fragment).unwrap();
+        file.flush().unwrap();
+
+        let resumed = AgentLog::resume(&sessions, 0).expect("torn tail is recoverable");
+        assert!(resumed.is_ready());
+        assert_eq!(fs::read(&path).unwrap(), prefix);
+        assert_eq!(
+            fs::read(sessions.join("0/events.jsonl.crash")).unwrap(),
+            fragment
+        );
+    }
+
+    #[test]
+    fn resume_refuses_a_complete_garbage_line_without_mutating_the_file() {
+        let sessions = sessions_root("resume-garbage");
+        let live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
+        let path = sessions.join("0/events.jsonl");
+        drop(live);
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"garbage\n").unwrap();
+        file.flush().unwrap();
+        let before = fs::read(&path).unwrap();
+
+        let error = AgentLog::resume(&sessions, 0)
+            .err()
+            .expect("garbage is not a crash tail");
+        let text = error.to_string();
+        assert!(text.contains(&path.display().to_string()));
+        assert!(text.contains("line 2"));
+        assert!(text.contains("newer exarch"));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!sessions.join("0/events.jsonl.crash").exists());
+    }
+
+    #[test]
+    fn resume_refuses_foreign_protocol_data_without_mutating_the_file() {
+        let sessions = sessions_root("resume-foreign");
+        let live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
+        let path = sessions.join("0/events.jsonl");
+        drop(live);
+        let foreign = SessionEvent::AssistantMessage {
+            message: ChatMessage::user("wrong role"),
+            pending_tool_ids: Vec::new(),
+            stop_reason: None,
+        };
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        serde_json::to_writer(&mut file, &foreign).unwrap();
+        file.write_all(b"\n").unwrap();
+        file.flush().unwrap();
+        let before = fs::read(&path).unwrap();
+
+        let error = AgentLog::resume(&sessions, 0)
+            .err()
+            .expect("foreign data must refuse");
+        let text = error.to_string();
+        assert!(text.contains(&path.display().to_string()));
+        assert!(text.contains("line 2"));
+        assert!(text.contains("foreign protocol data"));
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn resume_refuses_nonzero_session_ids_as_transient_children() {
+        let sessions = sessions_root("resume-child");
+        let child = AgentLog::root(&sessions, 1, "model", "provider", 0).unwrap();
+        drop(child);
+        let error = AgentLog::resume(&sessions, 1)
+            .err()
+            .expect("child logs are transient");
+        assert!(error.to_string().contains("children are transient by design"));
+    }
+
+    #[test]
+    fn resume_repairs_an_interior_stub_lost_from_disk() {
+        let sessions = sessions_root("resume-interior-seam");
+        let mut live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
+        live.append_user("first".into(), None).unwrap();
+        live.quiesce(QuiesceReason::Aborted);
+        complete_exchange(&mut live, "second", "answer");
+        let path = sessions.join("0/events.jsonl");
+        drop(live);
+
+        let data = fs::read(&path).unwrap();
+        let mut repaired = Vec::with_capacity(data.len());
+        for fragment in data.split_inclusive(|byte| *byte == b'\n') {
+            let event: SessionEvent = serde_json::from_slice(&fragment[..fragment.len() - 1])
+                .unwrap();
+            if matches!(
+                event,
+                SessionEvent::AssistantMessage {
+                    stop_reason: Some(reason),
+                    ..
+                } if reason == "aborted"
+            ) {
+                continue;
+            }
+            repaired.extend_from_slice(fragment);
+        }
+        fs::write(&path, repaired).unwrap();
+
+        let mut resumed = AgentLog::resume(&sessions, 0).expect("interior seam repair");
+        assert!(resumed.is_ready());
+        assert!(resumed.model_messages().iter().any(|message| {
+            message.content.first_text() == Some("(no reply: exchange aborted)")
+        }));
+        resumed.append_user("next".into(), None).unwrap();
+    }
+
+    #[test]
+    fn resume_matches_live_after_a_small_edit_sequence_family() {
+        for pattern in 0..8 {
+            let sessions = sessions_root(&format!("resume-edits-{pattern}"));
+            let mut live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
+            complete_exchange(&mut live, "one", "one");
+            complete_exchange(&mut live, "two", "two");
+            complete_exchange(&mut live, "three", "three");
+            match pattern {
+                0 => {}
+                1 => {
+                    live.apply_edit(
+                        ContextOp::Drop { exchanges: vec![2] },
+                        EditAuthority::User,
+                    )
+                    .unwrap();
+                }
+                2 => {
+                    live.apply_edit(
+                        ContextOp::Fold {
+                            through_exchange: 2,
+                            digest: "folded".into(),
+                        },
+                        EditAuthority::Harness,
+                    )
+                    .unwrap();
+                }
+                3 => {
+                    live.apply_edit(
+                        ContextOp::Drop { exchanges: vec![1] },
+                        EditAuthority::Model,
+                    )
+                    .unwrap();
+                    live.apply_edit(
+                        ContextOp::Drop { exchanges: vec![2] },
+                        EditAuthority::User,
+                    )
+                    .unwrap();
+                }
+                4 => {
+                    live.apply_edit(
+                        ContextOp::Fold {
+                            through_exchange: 2,
+                            digest: "folded".into(),
+                        },
+                        EditAuthority::Harness,
+                    )
+                    .unwrap();
+                    live.apply_edit(
+                        ContextOp::Drop { exchanges: vec![2] },
+                        EditAuthority::Model,
+                    )
+                    .unwrap();
+                }
+                5 => {
+                    live.apply_edit(
+                        ContextOp::Drop { exchanges: vec![2] },
+                        EditAuthority::User,
+                    )
+                    .unwrap();
+                    complete_exchange(&mut live, "four", "four");
+                }
+                6 => {
+                    live.apply_edit(
+                        ContextOp::Fold {
+                            through_exchange: 1,
+                            digest: "first".into(),
+                        },
+                        EditAuthority::Harness,
+                    )
+                    .unwrap();
+                    live.apply_edit(
+                        ContextOp::Fold {
+                            through_exchange: 1,
+                            digest: "second".into(),
+                        },
+                        EditAuthority::Model,
+                    )
+                    .unwrap();
+                }
+                7 => {
+                    live.record_error("forensics".into()).unwrap();
+                    live.record_nudge(1, 2, "retry".into()).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let expected = serde_json::to_vec(&live.model_messages()).unwrap();
+            drop(live);
+            let resumed = AgentLog::resume(&sessions, 0).expect("resume edit sequence");
+            assert!(resumed.is_ready());
+            assert_eq!(
+                serde_json::to_vec(&resumed.model_messages()).unwrap(),
+                expected,
+                "pattern {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn mirror_only_roots_have_no_durable_records() {
+        let sessions = sessions_root("no-logs");
+        let log = AgentLog::root_without_logs(&sessions, 0, "model", "provider", 0).unwrap();
+        assert!(!log.is_durable());
+        assert!(!log.dir().join("events.jsonl").exists());
+        assert!(!log.dir().join("transcript.jsonl").exists());
     }
 }

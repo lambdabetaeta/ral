@@ -9,9 +9,34 @@ use crate::shell_eval;
 use crate::shell_eval::builtins;
 use ral_core::io::TerminalState;
 use ral_core::{Shell, diagnostic};
-use std::fs;
+use std::cmp::Ordering;
+use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub struct RunLock {
+    _lock: fd_lock::RwLock<File>,
+}
+
+impl RunLock {
+    /// Acquire the run's advisory write lock without waiting.
+    ///
+    /// # Errors
+    /// Returns an error when another exarch owns the lock.
+    pub fn try_acquire(run_dir: &Path) -> io::Result<Self> {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(run_dir.join("run.lock"))?;
+        let mut lock = fd_lock::RwLock::new(file);
+        let guard = lock.try_write()?;
+        std::mem::forget(guard);
+        Ok(Self { _lock: lock })
+    }
+}
 
 /// The one terminal probe both boot sites take: [`boot_shell`] here, and the
 /// `TerminalEndpoint` the identity seat attaches with in `agent::seat`.
@@ -245,15 +270,106 @@ impl App {
         fs::create_dir_all(&dir)?;
         Ok(dir)
     }
+
+    /// List eligible run directories from newest to oldest.
+    ///
+    /// # Errors
+    /// Returns an error when the project state directory cannot be inspected.
+    pub fn resume_candidates(self, cwd: &str) -> io::Result<Vec<PathBuf>> {
+        resume_candidates_in(&self.project_dir(cwd))
+    }
+}
+
+fn resume_candidates_in(project: &Path) -> io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(project) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut candidates = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let is_dir = entry.file_type().ok()?.is_dir();
+            let events = path.join("sessions/0/events.jsonl");
+            is_dir.then_some((path, events.is_file()))
+        })
+        .filter(|(_, has_events)| *has_events)
+        .filter_map(|(path, _)| {
+            let name = path.file_name()?.to_str()?;
+            let (stamp, pid) = name.rsplit_once('-')?;
+            let timestamp = jiff::civil::DateTime::strptime("%Y-%m-%d-%H%M%S", stamp).ok()?;
+            let modified = fs::metadata(&path).ok()?.modified().ok()?;
+            Some((timestamp, modified, pid.to_string(), path))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    Ok(candidates
+        .into_iter()
+        .rev()
+        .map(|(_, _, _, path)| path)
+        .collect())
 }
 
 /// The current time in whole unix seconds, 0 if the clock predates the epoch.
 /// One spelling for the run-dir stamp, `provider::models`'s cache freshness
 /// check, and `provider::oauth`'s token expiry.
 pub(crate) fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+pub(crate) fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis().try_into().unwrap_or(u64::MAX))
+}
+
+/// Normalize a run directory or its session-0 child to the run directory.
+///
+/// # Errors
+/// Returns a sentence when the target names a child or malformed session
+/// directory.
+pub fn normalize_resume_target(target: &Path) -> Result<PathBuf, String> {
+    let Some(session) = target.file_name().and_then(|name| name.to_str()) else {
+        return Err(format!(
+            "cannot resume {}: the target has no session or run directory name",
+            target.display()
+        ));
+    };
+    let Some(sessions) = target.parent().and_then(Path::file_name) else {
+        return Ok(target.to_path_buf());
+    };
+    if sessions != "sessions" {
+        return Ok(target.to_path_buf());
+    }
+    let Ok(id) = session.parse::<u64>() else {
+        return Err(format!(
+            "cannot resume {}: the session directory name must be a number",
+            target.display()
+        ));
+    };
+    if id != 0 {
+        return Err(format!(
+            "cannot resume {}: session {id} is a child log; children are transient by design and only session 0 can be resumed",
+            target.display()
+        ));
+    }
+    target
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            format!(
+                "cannot resume {}: the session directory has no run-directory parent",
+                target.display()
+            )
+        })
 }
 
 /// Format a unix timestamp as `YYYY-MM-DD-HHMMSS` (UTC), or the raw seconds if
@@ -312,11 +428,57 @@ pub(crate) fn seed_var(shell: &mut Shell, name: &str, value: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::project_slug;
+    use super::{normalize_resume_target, project_slug, resume_candidates_in};
+    use std::fs;
 
     #[test]
     fn slug_joins_path_components_with_dashes() {
         assert_eq!(project_slug("/Users/x/ral-private"), "-Users-x-ral-private");
         assert_eq!(project_slug("/"), "-");
+    }
+
+    #[test]
+    fn resume_candidates_parse_timestamps_and_skip_mirror_only_runs() {
+        let root = tempfile::tempdir().expect("temp root");
+        let project = root.path().join("project");
+        let transient = project.join("2026-08-13-120001-1");
+        let older = project.join("2026-08-13-120000-9");
+        let newer = project.join("2026-08-13-120002-10");
+        for run in [&transient, &older, &newer] {
+            fs::create_dir_all(run.join("sessions/0")).unwrap();
+        }
+        fs::write(older.join("sessions/0/events.jsonl"), b"durable").unwrap();
+        fs::write(
+            newer.join("sessions/0/events.jsonl"),
+            b"durable",
+        )
+        .unwrap();
+
+        let candidates = resume_candidates_in(&project).expect("candidates");
+        assert_eq!(candidates, vec![newer, older]);
+        assert!(!candidates.contains(&transient));
+    }
+
+    #[test]
+    fn resume_target_normalizes_session_zero_and_refuses_children() {
+        let run = std::path::Path::new("/tmp/exarch-run");
+        assert_eq!(
+            normalize_resume_target(&run.join("sessions/0")).unwrap(),
+            run
+        );
+        let error = normalize_resume_target(&run.join("sessions/1")).unwrap_err();
+        assert!(error.contains("children are transient by design"));
+    }
+
+    #[test]
+    fn run_lock_is_exclusive_until_its_owner_dies() {
+        let root = tempfile::tempdir().expect("temp root");
+        let first = super::RunLock::try_acquire(root.path()).expect("first lock");
+        let error = super::RunLock::try_acquire(root.path())
+            .err()
+            .expect("second lock");
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        drop(first);
+        super::RunLock::try_acquire(root.path()).expect("lock after release");
     }
 }

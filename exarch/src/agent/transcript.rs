@@ -12,8 +12,8 @@
 use crate::agent::event::EditReceipt;
 use crate::bus::card::observation_json;
 use crate::bus::{AgentId, Emitter, Kind};
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -27,7 +27,7 @@ pub struct Transcript(Option<Arc<Inner>>);
 
 struct Inner {
     /// Flushed per record, so the file is always tail-able.
-    file: Mutex<BufWriter<File>>,
+    file: Mutex<Option<BufWriter<File>>>,
     /// Origin of the `t_ms` offset stamped on each record.
     started: Instant,
 }
@@ -44,14 +44,77 @@ impl Transcript {
     pub fn create(path: &Path) -> std::io::Result<Self> {
         let file = File::create(path)?;
         Ok(Self(Some(Arc::new(Inner {
-            file: Mutex::new(BufWriter::new(file)),
+            file: Mutex::new(Some(BufWriter::new(file))),
             started: Instant::now(),
         }))))
+    }
+
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:transcript-file] appends a resume marker to the session trace"
+    )]
+    /// Open the trace without truncating it and write the resume marker first.
+    ///
+    /// # Errors
+    /// Returns an error if the trace cannot be opened or the marker cannot be
+    /// written.
+    pub fn open_append(path: &Path, at_unix_ms: u64) -> io::Result<Self> {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        let transcript = Self(Some(Arc::new(Inner {
+            file: Mutex::new(Some(BufWriter::new(file))),
+            started: Instant::now(),
+        })));
+        transcript.write_marker("resumed", at_unix_ms)?;
+        Ok(transcript)
     }
 
     /// A trace that records nothing — tests, and any emitter with no log dir.
     pub fn none() -> Self {
         Self(None)
+    }
+
+    /// Rotate the shared trace to its first free numbered sibling.
+    ///
+    /// # Errors
+    /// Returns an error if the old trace cannot be sealed, renamed, or
+    /// replaced.
+    pub fn rotate(&self, path: &Path) -> io::Result<()> {
+        let n = first_free_rotation(path)?;
+        self.rotate_at(path, n, crate::bootstrap::now_unix_ms())
+    }
+
+    pub(crate) fn rotate_at(&self, path: &Path, n: u64, at_unix_ms: u64) -> io::Result<()> {
+        let Some(inner) = &self.0 else {
+            return Ok(());
+        };
+        let mut file = inner
+            .file
+            .lock()
+            .map_err(|_| io::Error::other("transcript writer lock poisoned"))?;
+        let result = (|| {
+            let Some(writer) = file.as_mut() else {
+                return Err(io::Error::other(
+                    "the transcript writer is already dead; no further records can be rotated",
+                ));
+            };
+            writer.flush()?;
+            drop(file.take());
+            let rotated = rotation_path(path, n);
+            std::fs::rename(path, &rotated)?;
+            let replacement = File::create(path)?;
+            let mut replacement = BufWriter::new(replacement);
+            write_marker_to(&mut replacement, "cleared", at_unix_ms)?;
+            replacement.flush()?;
+            *file = Some(replacement);
+            Ok(())
+        })();
+        if result.is_err() {
+            *file = None;
+        }
+        result
     }
 
     /// Record one bus event as a JSONL line. Rendering-only events project to
@@ -66,11 +129,60 @@ impl Transcript {
         let Ok(line) = serde_json::to_string(&rec) else {
             return;
         };
-        if let Ok(mut file) = inner.file.lock() {
+        if let Ok(mut file) = inner.file.lock()
+            && let Some(file) = file.as_mut()
+        {
             let _ = writeln!(file, "{line}");
             let _ = file.flush();
         }
     }
+
+    fn write_marker(&self, kind: &str, at_unix_ms: u64) -> io::Result<()> {
+        let Some(inner) = &self.0 else {
+            return Ok(());
+        };
+        let mut file = inner
+            .file
+            .lock()
+            .map_err(|_| io::Error::other("transcript writer lock poisoned"))?;
+        let result = {
+            let Some(file) = file.as_mut() else {
+                return Err(io::Error::other("the transcript writer is not writable"));
+            };
+            write_marker_to(file, kind, at_unix_ms)?;
+            file.flush()
+        };
+        drop(file);
+        result
+    }
+}
+
+fn write_marker_to(file: &mut BufWriter<File>, kind: &str, at_unix_ms: u64) -> io::Result<()> {
+    let marker = serde_json::json!({
+        "kind": kind,
+        "at_unix_ms": at_unix_ms,
+    });
+    serde_json::to_writer(&mut *file, &marker).map_err(io::Error::other)?;
+    file.write_all(b"\n")
+}
+
+fn first_free_rotation(path: &Path) -> io::Result<u64> {
+    let mut n = 0;
+    loop {
+        if !rotation_path(path, n).exists() {
+            return Ok(n);
+        }
+        n = n
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("no free transcript rotation number remains"))?;
+    }
+}
+
+fn rotation_path(path: &Path, n: u64) -> std::path::PathBuf {
+    let name = path
+        .file_name()
+        .map_or_else(|| "record".into(), |name| name.to_string_lossy().into_owned());
+    path.with_file_name(format!("{name}.{n}"))
 }
 
 pub(crate) fn emit_context_edited(emit: &Emitter, receipt: &EditReceipt) {
@@ -200,6 +312,7 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
         | Kind::Token(_)
         | Kind::Thinking(_)
         | Kind::Boundary
+        | Kind::Cleared
         | Kind::Reasoning { .. }
         | Kind::UserPromptEcho(_)
         | Kind::Pin { .. }
