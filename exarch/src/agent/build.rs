@@ -612,15 +612,19 @@ impl Agent {
     /// # Panics
     /// If the test process has no cwd.
     pub fn for_test(dir: &std::path::Path, system: &str) -> io::Result<Self> {
-        let shell = crate::bootstrap::boot_shell();
+        let mut shell = crate::bootstrap::boot_shell();
         let id = fresh_id();
         // Keyed by this agent's own fresh id, so concurrent tests never
-        // contend on one dir.  The baked shell above is not seeded from it, so
-        // probes read the absence a bare boot has.
+        // contend on one dir.  Seeded into the shell exactly as a real boot
+        // seeds it, and before the seat arms the ledgers: unseeded, an
+        // `$EXARCH_SCRATCH` probe falls through to the host process env, and a
+        // suite run from inside a live exarch session would measure *that*
+        // session's scratch.
         let scratch = Arc::new(Scratch::for_test(
             crate::bootstrap::EXARCH,
             &format!("agent-{id}"),
         )?);
+        scratch.install_into(&mut shell);
         let index = crate::prompt::BuiltinIndex::resolve(&shell);
         let system_prompt = index.apply(
             system,
