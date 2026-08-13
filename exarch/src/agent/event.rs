@@ -1,4 +1,4 @@
-//! Per-session canonical event log: one session's event vector and the
+//! Per-session canonical event log: one session's stable ledger and the
 //! `events.jsonl` it is appended to.
 //!
 //! This is the model view; `tui::viewport` writes the rendered `user.log`
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -303,6 +303,392 @@ pub struct View {
     pub spans: Vec<Span>,
 }
 
+enum SpanStore {
+    Resident(Vec<SessionEvent>),
+    /// Ranges into events.jsonl: one from freeing a resident span, plus one
+    /// for each straggler later committed into a removed tail span.
+    Spilled {
+        bytes: Vec<Range<u64>>,
+    },
+}
+
+struct LedgerSegment {
+    id: Option<u64>,
+    events: Range<usize>,
+    store: SpanStore,
+    offsets: Vec<Option<Range<u64>>>,
+}
+
+struct Ledger {
+    segments: Vec<LedgerSegment>,
+    len: usize,
+    tail: Option<usize>,
+    opened_span: bool,
+    durable: bool,
+    events_path: Option<PathBuf>,
+}
+
+impl Ledger {
+    fn new(durable: bool, events_path: Option<PathBuf>) -> Self {
+        Self {
+            segments: Vec::new(),
+            len: 0,
+            tail: None,
+            opened_span: false,
+            durable,
+            events_path,
+        }
+    }
+
+    fn append(
+        &mut self,
+        event: SessionEvent,
+        offset: Option<Range<u64>>,
+        projection: &Projection,
+    ) -> (usize, Option<SessionEvent>) {
+        let index = self.len;
+        self.len += 1;
+
+        match event_exchange(&event) {
+            Some(id) if id > projection.max_exchange => {
+                self.opened_span = true;
+                let segment = LedgerSegment {
+                    id: Some(id),
+                    events: index..index + 1,
+                    store: SpanStore::Resident(vec![event]),
+                    offsets: vec![offset],
+                };
+                self.segments.push(segment);
+                self.tail = Some(self.segments.len() - 1);
+                (index, None)
+            }
+            Some(id) if self.tail_id() == Some(id) => {
+                let detached =
+                    self.append_to_segment(self.tail.expect("tail id exists"), event, offset);
+                (index, detached)
+            }
+            Some(_) => self.append_free(index, event, offset),
+            None => match self.tail {
+                Some(tail) => {
+                    let detached = self.append_to_segment(tail, event, offset);
+                    (index, detached)
+                }
+                None => self.append_free(index, event, offset),
+            },
+        }
+    }
+
+    fn append_free(
+        &mut self,
+        index: usize,
+        event: SessionEvent,
+        offset: Option<Range<u64>>,
+    ) -> (usize, Option<SessionEvent>) {
+        if self.opened_span {
+            if self.durable
+                && let Some(offset) = offset
+            {
+                self.segments.push(LedgerSegment {
+                    id: None,
+                    events: index..index + 1,
+                    store: SpanStore::Spilled {
+                        bytes: vec![offset.clone()],
+                    },
+                    offsets: vec![Some(offset)],
+                });
+            }
+            return (index, Some(event));
+        }
+
+        let append_to_head = self
+            .segments
+            .last()
+            .is_some_and(|segment| segment.id.is_none() && segment.events.end == index);
+        if append_to_head {
+            let detached = self.append_to_segment(self.segments.len() - 1, event, offset);
+            (index, detached)
+        } else {
+            self.segments.push(LedgerSegment {
+                id: None,
+                events: index..index + 1,
+                store: SpanStore::Resident(vec![event]),
+                offsets: vec![offset],
+            });
+            (index, None)
+        }
+    }
+
+    fn append_to_segment(
+        &mut self,
+        segment: usize,
+        event: SessionEvent,
+        offset: Option<Range<u64>>,
+    ) -> Option<SessionEvent> {
+        let target = &mut self.segments[segment];
+        target.events.end += 1;
+        target.offsets.push(offset.clone());
+        match &mut target.store {
+            SpanStore::Resident(events) => {
+                events.push(event);
+                None
+            }
+            SpanStore::Spilled { bytes } => {
+                if let Some(offset) = offset {
+                    bytes.push(offset);
+                }
+                Some(event)
+            }
+        }
+    }
+
+    fn tail_id(&self) -> Option<u64> {
+        self.tail
+            .and_then(|index| self.segments.get(index))
+            .and_then(|segment| segment.id)
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn event(&self, index: usize) -> Option<&SessionEvent> {
+        self.segments.iter().find_map(|segment| {
+            if !segment.events.contains(&index) {
+                return None;
+            }
+            match &segment.store {
+                SpanStore::Resident(events) => events.get(index - segment.events.start),
+                SpanStore::Spilled { .. } => None,
+            }
+        })
+    }
+
+    fn last(&self) -> Option<&SessionEvent> {
+        self.len.checked_sub(1).and_then(|index| self.event(index))
+    }
+
+    fn resident_events(&self, range: Range<usize>) -> Option<&[SessionEvent]> {
+        self.segments
+            .iter()
+            .find(|segment| segment.events == range)
+            .and_then(|segment| match &segment.store {
+                SpanStore::Resident(events) => Some(events.as_slice()),
+                SpanStore::Spilled { .. } => None,
+            })
+    }
+
+    fn evict(&mut self, ranges: &[Range<usize>]) {
+        let mut indexes = self
+            .segments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, segment)| {
+                (segment.id.is_some() && ranges.contains(&segment.events)).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if self.durable {
+            for index in indexes {
+                self.spill(index);
+            }
+            self.merge_free_segments();
+        } else {
+            indexes.sort_unstable_by(|left, right| right.cmp(left));
+            for index in indexes {
+                self.remove_segment(index);
+            }
+        }
+    }
+
+    fn spill(&mut self, index: usize) {
+        let segment = &mut self.segments[index];
+        segment.id = None;
+        let store = std::mem::replace(&mut segment.store, SpanStore::Spilled { bytes: Vec::new() });
+        segment.store = match store {
+            SpanStore::Resident(_) => SpanStore::Spilled {
+                bytes: coalesce_offsets(&segment.offsets),
+            },
+            SpanStore::Spilled { bytes } => SpanStore::Spilled { bytes },
+        };
+    }
+
+    fn merge_free_segments(&mut self) {
+        let mut index = 0;
+        while index + 1 < self.segments.len() {
+            let merge = self.segments[index].id.is_none()
+                && self.segments[index + 1].id.is_none()
+                && self.segments[index].events.end == self.segments[index + 1].events.start
+                && matches!(self.segments[index].store, SpanStore::Spilled { .. })
+                && matches!(self.segments[index + 1].store, SpanStore::Spilled { .. });
+            if !merge {
+                index += 1;
+                continue;
+            }
+
+            let right = self.segments.remove(index + 1);
+            let right_tail = self.tail == Some(index + 1);
+            let right_end = right.events.end;
+            self.segments[index].events.end = right_end;
+            self.segments[index].offsets.extend(right.offsets);
+            let left_store = std::mem::replace(
+                &mut self.segments[index].store,
+                SpanStore::Spilled { bytes: Vec::new() },
+            );
+            self.segments[index].store = merge_spilled(left_store, right.store);
+
+            self.tail = match self.tail {
+                Some(_) if right_tail => Some(index),
+                Some(tail) if tail > index + 1 => Some(tail - 1),
+                Some(tail) => Some(tail),
+                None => None,
+            };
+        }
+    }
+
+    fn remove_segment(&mut self, index: usize) {
+        self.segments.remove(index);
+        self.tail = match self.tail {
+            Some(tail) if tail == index => None,
+            Some(tail) if tail > index => Some(tail - 1),
+            other => other,
+        };
+    }
+
+    fn fold_events(&self) -> io::Result<Vec<(usize, SessionEvent)>> {
+        let mut events = Vec::with_capacity(self.len);
+        let mut file = None;
+        for segment in &self.segments {
+            match &segment.store {
+                SpanStore::Resident(segment_events) => {
+                    if segment_events.len() != segment.events.len() {
+                        return Err(io::Error::other(
+                            "the in-memory event ledger has a broken stable-index range",
+                        ));
+                    }
+                    events.extend(
+                        segment_events
+                            .iter()
+                            .cloned()
+                            .enumerate()
+                            .map(|(offset, event)| (segment.events.start + offset, event)),
+                    );
+                }
+                SpanStore::Spilled { bytes } => {
+                    if file.is_none() {
+                        let Some(path) = self.events_path.as_ref() else {
+                            return Err(io::Error::other(
+                                "the spilled event ledger has no readable events.jsonl",
+                            ));
+                        };
+                        file = Some(File::open(path)?);
+                    }
+                    let reader = file.as_mut().expect("the fold opened events.jsonl");
+                    Self::read_spilled(segment, bytes, reader, &mut events)?;
+                }
+            }
+        }
+        Ok(events)
+    }
+
+    fn read_spilled(
+        segment: &LedgerSegment,
+        ranges: &[Range<u64>],
+        reader: &mut File,
+        output: &mut Vec<(usize, SessionEvent)>,
+    ) -> io::Result<()> {
+        for range in ranges {
+            let length = usize::try_from(range.end.saturating_sub(range.start))
+                .map_err(|_| io::Error::other("a spilled event range is too large to read"))?;
+            reader.seek(SeekFrom::Start(range.start))?;
+            let mut bytes = vec![0; length];
+            reader.read_exact(&mut bytes)?;
+            let mut position = range.start;
+            for fragment in bytes.split_inclusive(|byte| *byte == b'\n') {
+                if fragment.last() != Some(&b'\n') {
+                    return Err(io::Error::other(
+                        "a spilled event range does not end on a complete JSONL record",
+                    ));
+                }
+                let line_start = position;
+                position += u64::try_from(fragment.len())
+                    .map_err(|_| io::Error::other("a spilled event line is too large"))?;
+                let event = serde_json::from_slice(&fragment[..fragment.len() - 1])
+                    .map_err(io::Error::other)?;
+                let Some((slot, _)) = segment.offsets.iter().enumerate().find(|(_, offset)| {
+                    offset
+                        .as_ref()
+                        .is_some_and(|offset| offset.start == line_start)
+                }) else {
+                    return Err(io::Error::other(
+                        "a spilled event range has no stable ledger index",
+                    ));
+                };
+                output.push((segment.events.start + slot, event));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn store_covering(&self, range: Range<usize>) -> Option<&SpanStore> {
+        self.segments
+            .iter()
+            .find(|segment| segment.events.start <= range.start && segment.events.end >= range.end)
+            .map(|segment| &segment.store)
+    }
+
+    #[cfg(test)]
+    fn is_resident(&self, index: usize) -> bool {
+        self.event(index).is_some()
+    }
+
+    #[cfg(test)]
+    fn spilled_ranges(&self) -> Vec<Range<u64>> {
+        self.segments
+            .iter()
+            .filter_map(|segment| match &segment.store {
+                SpanStore::Resident(_) => None,
+                SpanStore::Spilled { bytes } => Some(bytes),
+            })
+            .flatten()
+            .cloned()
+            .collect()
+    }
+}
+
+fn coalesce_offsets(offsets: &[Option<Range<u64>>]) -> Vec<Range<u64>> {
+    let mut ranges: Vec<Range<u64>> = Vec::new();
+    for offset in offsets.iter().flatten() {
+        if let Some(previous) = ranges.last_mut()
+            && previous.end == offset.start
+        {
+            previous.end = offset.end;
+        } else {
+            ranges.push(offset.clone());
+        }
+    }
+    ranges
+}
+
+fn merge_spilled(left: SpanStore, right: SpanStore) -> SpanStore {
+    let (SpanStore::Spilled { mut bytes }, SpanStore::Spilled { bytes: right_bytes }) =
+        (left, right)
+    else {
+        unreachable!("only spilled segments are merged")
+    };
+    bytes.extend(right_bytes);
+    let mut merged: Vec<Range<u64>> = Vec::new();
+    for range in bytes {
+        if let Some(previous) = merged.last_mut()
+            && previous.end == range.start
+        {
+            previous.end = range.end;
+        } else {
+            merged.push(range);
+        }
+    }
+    SpanStore::Spilled { bytes: merged }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Projection {
     state: State,
@@ -374,16 +760,17 @@ impl ContextSurvey {
     }
 }
 
-/// One session's log: a stable-index event vector, its `events.jsonl` writer,
-/// and the projection folded from that vector.
+/// One session's log: a stable-index ledger, its `events.jsonl` writer, and
+/// the projection folded from that ledger.
 pub struct AgentLog {
     id: AgentId,
     dir: PathBuf,
     /// Held open, flushed per event, so the file is always tail-able.
     events_file: Option<BufWriter<File>>,
-    log: Vec<SessionEvent>,
+    log: Ledger,
     projection: Projection,
     durable: bool,
+    events_offset: u64,
     /// Held, with [`Self::provider`], so `clear` re-emits `SessionStarted`
     /// unchanged and `fork` passes both down to the child.
     model: String,
@@ -516,14 +903,14 @@ impl AgentLog {
         }
         let dir = sessions_root.join(session_id.to_string());
         let events_path = dir.join("events.jsonl");
-        let (events, tail) = read_events(&events_path)?;
-        let Some(first) = events.first() else {
+        let read = read_events(&events_path)?;
+        let Some(first) = read.events.first() else {
             return Err(io::Error::other(format!(
                 "cannot resume {}: no complete session events were found; is the file truncated?",
                 events_path.display()
             )));
         };
-        let (model, provider) = match first {
+        let (model, provider) = match &first.event {
             SessionEvent::SessionStarted {
                 session_id: 0,
                 parent: None,
@@ -549,8 +936,8 @@ impl AgentLog {
             }
         };
 
-        validate_resume_events(&events, &events_path)?;
-        if let Some(fragment) = tail {
+        validate_resume_events(&read.events, &events_path)?;
+        if let Some(fragment) = read.tail {
             quarantine_tail(&events_path, &fragment).map_err(|error| {
                 io::Error::new(
                     error.kind(),
@@ -570,19 +957,37 @@ impl AgentLog {
                 ),
             )
         })?;
-        let log = events;
-        let projection = fold(&log);
         let mut resumed = Self {
             id: session_id,
             dir,
             events_file: Some(events_file),
-            log,
-            projection,
+            log: Ledger::new(true, Some(events_path.clone())),
+            projection: Projection::default(),
             durable: true,
+            events_offset: read.complete_len,
             model,
             provider,
             sessions_root: sessions_root.to_path_buf(),
         };
+        for recorded in read.events {
+            resumed.append_mirror(recorded.event, Some(recorded.bytes));
+        }
+        let replayed = resumed.projection.clone();
+        let folded = fold(&resumed.log).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "cannot resume {}: could not fold the recorded events ({error})",
+                    events_path.display()
+                ),
+            )
+        })?;
+        if folded != replayed {
+            return Err(io::Error::other(format!(
+                "cannot resume {}: replay disagreed with the ledger fold",
+                events_path.display()
+            )));
+        }
         if !resumed.is_ready() {
             resumed.quiesce(QuiesceReason::Aborted);
         }
@@ -594,8 +999,8 @@ impl AgentLog {
     }
 
     pub fn resumed_summary(&self) -> (u64, u64) {
-        let bytes = fs::metadata(self.dir.join("events.jsonl"))
-            .map_or(0, |metadata| metadata.len());
+        let bytes =
+            fs::metadata(self.dir.join("events.jsonl")).map_or(0, |metadata| metadata.len());
         (self.projection.max_exchange, bytes)
     }
 
@@ -656,6 +1061,8 @@ impl AgentLog {
         &self.projection.view
     }
 
+    /// # Panics
+    /// Panics if a view span is not resident in the ledger.
     pub fn context_survey(&self) -> ContextSurvey {
         let mut survey = ContextSurvey::default();
         if let Some(digest) = &self.projection.view.digest {
@@ -671,7 +1078,10 @@ impl AgentLog {
             survey.add(item);
         }
         for span in &self.projection.view.spans {
-            let events = &self.log[span.events.clone()];
+            let events = self
+                .log
+                .resident_events(span.events.clone())
+                .expect("view spans are resident in the ledger");
             let kind = match events.first() {
                 Some(SessionEvent::ContextMessage { .. }) => ContextSpanKind::Import,
                 _ => ContextSpanKind::Exchange,
@@ -1184,7 +1594,7 @@ impl AgentLog {
         transcript_path: &Path,
     ) -> io::Result<ClearRecord> {
         if !self.durable {
-            self.log.clear();
+            self.log = Ledger::new(false, None);
             self.projection = Projection::default();
             self.record_started_lossy(None, system_prompt_bytes, at_unix_ms);
             return Ok(ClearRecord {
@@ -1216,14 +1626,12 @@ impl AgentLog {
             return Err(self.refuse_clear(&error));
         }
 
-        self.log.clear();
+        self.log = Ledger::new(true, Some(events_path));
         self.projection = Projection::default();
         self.events_file = None;
+        self.events_offset = 0;
         let started = self.started_event(None, system_prompt_bytes, at_unix_ms);
-        self.log.push(started.clone());
-        let index = self.log.len() - 1;
-        advance_projection(&mut self.projection, &started, index);
-        let events_error = self.establish_head(&started);
+        let events_error = self.establish_head(started);
         Ok(ClearRecord {
             rotation: Some(rotation),
             events_error,
@@ -1296,13 +1704,15 @@ impl AgentLog {
         }
         fs::create_dir_all(&dir)?;
         let events_file = durable.then(|| open_events_file(&dir)).transpose()?;
+        let events_path = durable.then(|| dir.join("events.jsonl"));
         Ok(Self {
             id: session_id,
             dir,
             events_file,
-            log: Vec::new(),
+            log: Ledger::new(durable, events_path),
             projection: Projection::default(),
             durable,
+            events_offset: 0,
             model,
             provider,
             sessions_root,
@@ -1353,6 +1763,8 @@ impl AgentLog {
         match open_events_append(&self.dir) {
             Ok(events_file) => {
                 self.events_file = Some(events_file);
+                self.events_offset =
+                    fs::metadata(self.events_path()).map_or(0, |metadata| metadata.len());
                 io::Error::new(
                     error.kind(),
                     format!(
@@ -1371,7 +1783,7 @@ impl AgentLog {
         }
     }
 
-    fn establish_head(&mut self, started: &SessionEvent) -> Option<io::Error> {
+    fn establish_head(&mut self, started: SessionEvent) -> Option<io::Error> {
         let mut last_error = None;
         for _ in 0..2 {
             self.events_file = match open_events_file(&self.dir) {
@@ -1381,11 +1793,15 @@ impl AgentLog {
                     None
                 }
             };
+            self.events_offset = 0;
             if self.events_file.is_none() {
                 continue;
             }
-            match self.write_event(started) {
-                Ok(()) => return None,
+            match self.write_event(&started) {
+                Ok(offset) => {
+                    self.append_mirror(started, offset);
+                    return None;
+                }
                 Err(error) => {
                     last_error = Some(error);
                     drop(self.events_file.take());
@@ -1393,34 +1809,40 @@ impl AgentLog {
             }
         }
         self.events_file = None;
+        self.append_mirror(started, None);
         Some(io::Error::other(format!(
             "the new event-log head {} could not be established after two attempts; the session is continuing without durable events: {}",
             self.events_path().display(),
-            last_error
-                .map_or_else(|| "unknown I/O error".into(), |error| error.to_string())
+            last_error.map_or_else(|| "unknown I/O error".into(), |error| error.to_string())
         )))
     }
 
     /// The disk half of [`Self::record`], apart so [`Self::record_lossy`] can
     /// go on without it.
-    fn write_event(&mut self, ev: &SessionEvent) -> io::Result<()> {
+    fn write_event(&mut self, ev: &SessionEvent) -> io::Result<Option<Range<u64>>> {
         if !self.durable {
-            return Ok(());
+            return Ok(None);
         }
+        let mut bytes = serde_json::to_vec(ev).map_err(io::Error::other)?;
+        bytes.push(b'\n');
+        let length = u64::try_from(bytes.len())
+            .map_err(|_| io::Error::other("the serialized session event is too large"))?;
+        let start = self.events_offset;
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| io::Error::other("the session event log is too large"))?;
         let Some(events_file) = self.events_file.as_mut() else {
             return Err(io::Error::other("the session event log is not writable"));
         };
-        serde_json::to_writer(&mut *events_file, ev).map_err(io::Error::other)?;
-        events_file.write_all(b"\n")?;
-        events_file.flush()
+        events_file.write_all(&bytes)?;
+        events_file.flush()?;
+        self.events_offset = end;
+        Ok(Some(start..end))
     }
 
     fn record(&mut self, ev: SessionEvent) -> io::Result<()> {
-        self.write_event(&ev)?;
-        self.log.push(ev);
-        let index = self.log.len() - 1;
-        let event = self.log.last().expect("the event was just appended");
-        advance_projection(&mut self.projection, event, index);
+        let offset = self.write_event(&ev)?;
+        self.append_mirror(ev, offset);
         Ok(())
     }
 
@@ -1434,11 +1856,20 @@ impl AgentLog {
     /// [`Self::quiesce`] may use it: the protocol must reach
     /// [`State::ReadyForUser`] even when `events.jsonl` cannot be written.
     fn record_lossy(&mut self, ev: SessionEvent) {
-        let _ = self.write_event(&ev);
-        self.log.push(ev);
-        let index = self.log.len() - 1;
-        let event = self.log.last().expect("the event was just appended");
-        advance_projection(&mut self.projection, event, index);
+        let offset = self.write_event(&ev).ok().flatten();
+        self.append_mirror(ev, offset);
+    }
+
+    fn append_mirror(&mut self, event: SessionEvent, offset: Option<Range<u64>>) {
+        let (index, detached) = self.log.append(event, offset, &self.projection);
+        let removed = {
+            let event = detached
+                .as_ref()
+                .or_else(|| self.log.event(index))
+                .expect("the appended event is resident or retained for the fold");
+            advance_projection(&mut self.projection, event, index)
+        };
+        self.log.evict(&removed);
     }
 
     fn state(&self) -> &State {
@@ -1525,7 +1956,10 @@ impl AgentLog {
         repair_end: bool,
     ) -> Vec<ChatMessage> {
         let end = span.events.end - usize::from(omit_tail_assistant);
-        let events = &self.log[span.events.start..end];
+        let events = self
+            .log
+            .resident_events(span.events.start..end)
+            .expect("view spans are resident in the ledger");
         if matches!(events.first(), Some(SessionEvent::ContextMessage { .. })) {
             return events
                 .iter()
@@ -1568,13 +2002,40 @@ fn advance(state: State, event: &SessionEvent) -> State {
     }
 }
 
-fn advance_projection(projection: &mut Projection, event: &SessionEvent, index: usize) {
+fn advance_projection(
+    projection: &mut Projection,
+    event: &SessionEvent,
+    index: usize,
+) -> Vec<Range<usize>> {
     let state = std::mem::replace(&mut projection.state, State::ReadyForUser);
     projection.state = advance(state, event);
     record_event_span(projection, event, index);
     if let SessionEvent::ContextEdited { op, .. } = event {
+        let removed = removed_event_ranges(&projection.view, op);
         apply_context_op(&mut projection.view, op);
         projection.newest_edit = Some(index);
+        removed
+    } else {
+        Vec::new()
+    }
+}
+
+fn removed_event_ranges(view: &View, op: &ContextOp) -> Vec<Range<usize>> {
+    match op {
+        ContextOp::Fold {
+            through_exchange, ..
+        } => view
+            .spans
+            .iter()
+            .filter(|span| span.id <= *through_exchange)
+            .map(|span| span.events.clone())
+            .collect(),
+        ContextOp::Drop { exchanges } => view
+            .spans
+            .iter()
+            .filter(|span| exchanges.contains(&span.id))
+            .map(|span| span.events.clone())
+            .collect(),
     }
 }
 
@@ -1640,13 +2101,12 @@ fn apply_context_op(view: &mut View, op: &ContextOp) {
     }
 }
 
-#[allow(dead_code)]
-fn fold(log: &[SessionEvent]) -> Projection {
+fn fold(log: &Ledger) -> io::Result<Projection> {
     let mut projection = Projection::default();
-    for (index, event) in log.iter().enumerate() {
-        advance_projection(&mut projection, event, index);
+    for (index, event) in log.fold_events()? {
+        advance_projection(&mut projection, &event, index);
     }
-    projection
+    Ok(projection)
 }
 
 fn admissible_event(state: &State, event: &SessionEvent) -> bool {
@@ -1705,7 +2165,7 @@ fn append_aborted_stubs(state: &mut State, messages: &mut Vec<ChatMessage>) {
     }
 }
 
-fn render_context_transcript(events: &[SessionEvent], view: &View, named: &HashSet<u64>) -> String {
+fn render_context_transcript(log: &Ledger, view: &View, named: &HashSet<u64>) -> String {
     let mut transcript = String::new();
     let mut first_section = true;
     if let Some(digest) = &view.digest
@@ -1727,7 +2187,10 @@ fn render_context_transcript(events: &[SessionEvent], view: &View, named: &HashS
             &mut first_section,
             &format!("exchange {}", span.id),
         );
-        for event in &events[span.events.clone()] {
+        let events = log
+            .resident_events(span.events.clone())
+            .expect("view spans are resident in the ledger");
+        for event in events {
             match event {
                 SessionEvent::UserPrompt { text, .. } => render_role(&mut transcript, "user", text),
                 SessionEvent::ContextMessage { message, .. }
@@ -1820,7 +2283,18 @@ struct CrashTail {
     complete_len: u64,
 }
 
-fn read_events(path: &Path) -> io::Result<(Vec<SessionEvent>, Option<CrashTail>)> {
+struct LoggedEvent {
+    event: SessionEvent,
+    bytes: Range<u64>,
+}
+
+struct ReadEvents {
+    events: Vec<LoggedEvent>,
+    tail: Option<CrashTail>,
+    complete_len: u64,
+}
+
+fn read_events(path: &Path) -> io::Result<ReadEvents> {
     let data = fs::read(path).map_err(|error| {
         io::Error::new(
             error.kind(),
@@ -1832,14 +2306,12 @@ fn read_events(path: &Path) -> io::Result<(Vec<SessionEvent>, Option<CrashTail>)
     })?;
     let mut events = Vec::new();
     let mut complete_len = 0usize;
-    for (index, fragment) in data
-        .split_inclusive(|byte| *byte == b'\n')
-        .enumerate()
-    {
+    for (line_index, fragment) in data.split_inclusive(|byte| *byte == b'\n').enumerate() {
         if fragment.last() != Some(&b'\n') {
             break;
         }
-        let line = index + 1;
+        let line = line_index + 1;
+        let start = complete_len as u64;
         let value = &fragment[..fragment.len() - 1];
         let event = serde_json::from_slice(value).map_err(|error| {
             io::Error::other(format!(
@@ -1847,19 +2319,27 @@ fn read_events(path: &Path) -> io::Result<(Vec<SessionEvent>, Option<CrashTail>)
                 path.display()
             ))
         })?;
-        events.push(event);
+        events.push(LoggedEvent {
+            event,
+            bytes: start..start + fragment.len() as u64,
+        });
         complete_len += fragment.len();
     }
     let tail = (complete_len < data.len()).then(|| CrashTail {
         bytes: data[complete_len..].to_vec(),
         complete_len: complete_len as u64,
     });
-    Ok((events, tail))
+    Ok(ReadEvents {
+        events,
+        tail,
+        complete_len: complete_len as u64,
+    })
 }
 
-fn validate_resume_events(events: &[SessionEvent], path: &Path) -> io::Result<()> {
+fn validate_resume_events(events: &[LoggedEvent], path: &Path) -> io::Result<()> {
     let mut state = State::ReadyForUser;
-    for (index, event) in events.iter().enumerate() {
+    for (index, recorded) in events.iter().enumerate() {
+        let event = &recorded.event;
         if !admissible_event(&state, event) {
             if !stub_repairable(event) {
                 return Err(io::Error::other(format!(
@@ -1938,9 +2418,10 @@ fn first_free_rotation(events: &Path, transcript: &Path) -> io::Result<u64> {
 }
 
 fn rotation_path(path: &Path, n: u64) -> PathBuf {
-    let name = path
-        .file_name()
-        .map_or_else(|| "record".into(), |name| name.to_string_lossy().into_owned());
+    let name = path.file_name().map_or_else(
+        || "record".into(),
+        |name| name.to_string_lossy().into_owned(),
+    );
     path.with_file_name(format!("{name}.{n}"))
 }
 
@@ -2027,10 +2508,49 @@ mod tests {
 
     fn assert_wiring(s: &AgentLog) {
         assert_eq!(
-            fold(&s.log),
+            fold(&s.log).expect("from-scratch fold"),
             s.projection,
             "fold(log) == memo after the append or edit"
         );
+    }
+
+    fn logical_events(log: &Ledger) -> Vec<SessionEvent> {
+        log.fold_events()
+            .expect("logical event sequence")
+            .into_iter()
+            .map(|(_, event)| event)
+            .collect()
+    }
+
+    fn replay_resident(events: Vec<SessionEvent>) -> (Ledger, Projection) {
+        let mut log = Ledger::new(true, None);
+        let mut projection = Projection::default();
+        for event in events {
+            let (index, detached) = log.append(event, None, &projection);
+            let removed = {
+                let event = detached
+                    .as_ref()
+                    .or_else(|| log.event(index))
+                    .expect("the replay event is resident");
+                advance_projection(&mut projection, event, index)
+            };
+            log.evict(&removed);
+        }
+        (log, projection)
+    }
+
+    fn replay_without_eviction(events: Vec<SessionEvent>) -> (Ledger, Projection) {
+        let mut log = Ledger::new(true, None);
+        let mut projection = Projection::default();
+        for event in events {
+            let (index, detached) = log.append(event, None, &projection);
+            let event = detached
+                .as_ref()
+                .or_else(|| log.event(index))
+                .expect("the replay event is resident");
+            advance_projection(&mut projection, event, index);
+        }
+        (log, projection)
     }
 
     fn independent_advance(state: State, event: &SessionEvent) -> State {
@@ -2171,7 +2691,9 @@ mod tests {
         );
         assert_eq!(s.view().spans[0].events.start, 2);
         assert_eq!(
-            s.log[s.view().spans[2].events.clone()]
+            s.log
+                .resident_events(s.view().spans[2].events.clone())
+                .expect("view span is resident")
                 .iter()
                 .filter_map(event_exchange)
                 .collect::<Vec<_>>(),
@@ -2423,10 +2945,11 @@ mod tests {
         s.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::Model)
             .unwrap();
 
-        let reference = independent_batch_reference(&s.log);
+        let events = logical_events(&s.log);
+        let reference = independent_batch_reference(&events);
         assert_eq!(reference, s.projection);
         assert_eq!(
-            serde_json::to_vec(&independent_messages(&s.log, &reference)).unwrap(),
+            serde_json::to_vec(&independent_messages(&events, &reference)).unwrap(),
             serde_json::to_vec(&s.history_messages()).unwrap(),
         );
     }
@@ -2440,11 +2963,138 @@ mod tests {
         s.append_assistant(ChatMessage::assistant("done"), vec![], None)
             .unwrap();
 
-        let expected = independent_messages(&s.log, &fold(&s.log));
+        let events = logical_events(&s.log);
+        let projection = fold(&s.log).expect("from-scratch fold");
+        let expected = independent_messages(&events, &projection);
         assert_eq!(
             serde_json::to_vec(&expected).unwrap(),
             serde_json::to_vec(&s.history_messages()).unwrap()
         );
+    }
+
+    #[test]
+    fn edits_free_removed_spans_and_the_tail_edit_itself() {
+        let mut dropped = fresh_root("residency-drop");
+        complete_exchange(&mut dropped, "one", "one");
+        complete_exchange(&mut dropped, "two", "two");
+        complete_exchange(&mut dropped, "three", "three");
+        let removed = dropped.view().spans[1].events.clone();
+        dropped
+            .apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
+            .unwrap();
+        assert!(!dropped.log.is_resident(removed.start));
+        assert!(matches!(
+            dropped.log.store_covering(removed),
+            Some(SpanStore::Spilled { bytes }) if !bytes.is_empty()
+        ));
+        assert_wiring(&dropped);
+
+        let mut tail = fresh_root("residency-tail-edit");
+        complete_exchange(&mut tail, "one", "one");
+        complete_exchange(&mut tail, "two", "two");
+        let removed_tail = tail.view().spans[1].events.clone();
+        tail.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
+            .unwrap();
+        let edit_index = tail.log_len() - 1;
+        assert!(!tail.log.is_resident(edit_index));
+        assert!(matches!(
+            tail.log.store_covering(removed_tail),
+            Some(SpanStore::Spilled { bytes }) if !bytes.is_empty()
+        ));
+        assert_wiring(&tail);
+
+        let mut folded = fresh_root("residency-fold");
+        complete_exchange(&mut folded, "one", "one");
+        complete_exchange(&mut folded, "two", "two");
+        complete_exchange(&mut folded, "three", "three");
+        let first = folded.view().spans[0].events.clone();
+        let second = folded.view().spans[1].events.clone();
+        folded
+            .apply_edit(
+                ContextOp::Fold {
+                    through_exchange: 2,
+                    digest: "old work".into(),
+                },
+                EditAuthority::Harness,
+            )
+            .unwrap();
+        assert!(!folded.log.is_resident(first.start));
+        assert!(!folded.log.is_resident(second.start));
+        assert!(matches!(
+            folded.log.store_covering(first),
+            Some(SpanStore::Spilled { bytes }) if !bytes.is_empty()
+        ));
+        assert_wiring(&folded);
+    }
+
+    #[test]
+    fn spilled_projection_and_resume_match_the_logical_history() {
+        let sessions = sessions_root("residency-resume");
+        let mut live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
+        complete_exchange(&mut live, "one", "one");
+        complete_exchange(&mut live, "two", "two");
+        complete_exchange(&mut live, "three", "three");
+        live.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
+            .unwrap();
+
+        let events = logical_events(&live.log);
+        assert!(!live.log.spilled_ranges().is_empty());
+        let (never_spilled_log, never_spilled_projection) = replay_without_eviction(events.clone());
+        let mut never_spilled =
+            AgentLog::root_without_logs(&sessions, 1, "model", "provider", 0).unwrap();
+        never_spilled.log = never_spilled_log;
+        never_spilled.projection = never_spilled_projection;
+        let expected = serde_json::to_vec(&never_spilled.model_messages()).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&live.model_messages()).unwrap(),
+            expected
+        );
+        let reference = fold(&live.log).expect("from-scratch fold");
+        assert_eq!(
+            serde_json::to_vec(&independent_messages(&events, &reference)).unwrap(),
+            expected
+        );
+        let path = sessions.join("0/events.jsonl");
+        let before = fs::read(&path).unwrap();
+        drop(live);
+
+        let resumed = AgentLog::resume(&sessions, 0).expect("resume");
+        assert_eq!(
+            serde_json::to_vec(&resumed.model_messages()).unwrap(),
+            expected
+        );
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn clear_discards_the_old_ledger_with_the_rotated_file() {
+        let mut s = fresh_root("residency-clear");
+        complete_exchange(&mut s, "one", "one");
+        complete_exchange(&mut s, "two", "two");
+        s.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
+            .unwrap();
+        assert!(!s.log.spilled_ranges().is_empty());
+
+        let events = s.dir().join("events.jsonl");
+        let transcript = s.dir().join("transcript.jsonl");
+        let result = s.clear(0, 2, &transcript).expect("clear");
+        assert_eq!(result.rotation, Some(0));
+        assert!(events.with_extension("jsonl.0").exists());
+        assert!(s.log.spilled_ranges().is_empty());
+        assert_eq!(s.log_len(), 1);
+        assert!(s.view().spans.is_empty());
+        assert!(s.log.is_resident(0));
+    }
+
+    #[test]
+    fn transient_eviction_discards_without_spilling() {
+        let sessions = sessions_root("residency-no-logs");
+        let mut s = AgentLog::root_without_logs(&sessions, 0, "model", "provider", 0).unwrap();
+        complete_exchange(&mut s, "one", "one");
+        s.apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::User)
+            .unwrap();
+        assert!(s.log.spilled_ranges().is_empty());
+        assert_eq!(s.event_count(), 0);
     }
 
     #[test]
@@ -2454,8 +3104,8 @@ mod tests {
         s.quiesce(QuiesceReason::Aborted);
         complete_exchange(&mut s, "second", "answer");
 
-        let removed = s
-            .log
+        let mut events = logical_events(&s.log);
+        let removed = events
             .iter()
             .position(|event| {
                 matches!(
@@ -2467,8 +3117,10 @@ mod tests {
                 )
             })
             .expect("aborted stub");
-        s.log.remove(removed);
-        s.projection = fold(&s.log);
+        events.remove(removed);
+        let (log, projection) = replay_resident(events);
+        s.log = log;
+        s.projection = projection;
 
         let messages = s.history_messages();
         assert!(
@@ -2615,11 +3267,13 @@ mod tests {
         let path = sessions.join("0/events.jsonl");
         let mut resumed = AgentLog::resume(&sessions, 0).expect("resume");
         assert!(resumed.is_ready());
-        assert!(resumed
-            .log
-            .iter()
-            .any(|event| matches!(event, SessionEvent::ToolResults { .. })));
-        assert!(resumed.log.iter().any(|event| {
+        let events = logical_events(&resumed.log);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::ToolResults { .. }))
+        );
+        assert!(events.iter().any(|event| {
             matches!(
                 event,
                 SessionEvent::AssistantMessage {
@@ -2629,8 +3283,15 @@ mod tests {
             )
         }));
         resumed.append_user("continue".into(), None).unwrap();
-        let events = read_events(&path).unwrap().0;
-        assert!(matches!(events.last(), Some(SessionEvent::UserPrompt { text, .. }) if text == "continue"));
+        let events = read_events(&path)
+            .unwrap()
+            .events
+            .into_iter()
+            .map(|recorded| recorded.event)
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(events.last(), Some(SessionEvent::UserPrompt { text, .. }) if text == "continue")
+        );
     }
 
     #[test]
@@ -2711,7 +3372,11 @@ mod tests {
         let error = AgentLog::resume(&sessions, 1)
             .err()
             .expect("child logs are transient");
-        assert!(error.to_string().contains("children are transient by design"));
+        assert!(
+            error
+                .to_string()
+                .contains("children are transient by design")
+        );
     }
 
     #[test]
@@ -2727,8 +3392,8 @@ mod tests {
         let data = fs::read(&path).unwrap();
         let mut repaired = Vec::with_capacity(data.len());
         for fragment in data.split_inclusive(|byte| *byte == b'\n') {
-            let event: SessionEvent = serde_json::from_slice(&fragment[..fragment.len() - 1])
-                .unwrap();
+            let event: SessionEvent =
+                serde_json::from_slice(&fragment[..fragment.len() - 1]).unwrap();
             if matches!(
                 event,
                 SessionEvent::AssistantMessage {
@@ -2761,11 +3426,8 @@ mod tests {
             match pattern {
                 0 => {}
                 1 => {
-                    live.apply_edit(
-                        ContextOp::Drop { exchanges: vec![2] },
-                        EditAuthority::User,
-                    )
-                    .unwrap();
+                    live.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
+                        .unwrap();
                 }
                 2 => {
                     live.apply_edit(
@@ -2778,16 +3440,10 @@ mod tests {
                     .unwrap();
                 }
                 3 => {
-                    live.apply_edit(
-                        ContextOp::Drop { exchanges: vec![1] },
-                        EditAuthority::Model,
-                    )
-                    .unwrap();
-                    live.apply_edit(
-                        ContextOp::Drop { exchanges: vec![2] },
-                        EditAuthority::User,
-                    )
-                    .unwrap();
+                    live.apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::Model)
+                        .unwrap();
+                    live.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
+                        .unwrap();
                 }
                 4 => {
                     live.apply_edit(
@@ -2798,18 +3454,12 @@ mod tests {
                         EditAuthority::Harness,
                     )
                     .unwrap();
-                    live.apply_edit(
-                        ContextOp::Drop { exchanges: vec![2] },
-                        EditAuthority::Model,
-                    )
-                    .unwrap();
+                    live.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::Model)
+                        .unwrap();
                 }
                 5 => {
-                    live.apply_edit(
-                        ContextOp::Drop { exchanges: vec![2] },
-                        EditAuthority::User,
-                    )
-                    .unwrap();
+                    live.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
+                        .unwrap();
                     complete_exchange(&mut live, "four", "four");
                 }
                 6 => {
