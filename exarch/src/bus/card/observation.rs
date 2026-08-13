@@ -87,10 +87,10 @@ pub(crate) fn rail_place(what: &Observed) -> Option<RailPlace> {
 
 /// Compose an [`Observed`] into a [`Card`]: one [`Mark::Text`] heading of a
 /// muted verb, the path, program, or resource as its [`Role::Path`] subject,
-/// and the outcome, status, or decision roled by its level. A committed write
-/// appends a [`write_preview`] below; a denied capability check has none.
+/// and the outcome, status, or decision roled by its level. A write is the one
+/// observation that carries a body, and so the one that departs — see
+/// [`write_card`].
 pub(crate) fn observation_card(what: &Observed) -> Card {
-    let mut body: Vec<Mark> = Vec::new();
     let spans = match what {
         Observed::Read { path } => read_spans(path),
         Observed::Write {
@@ -100,14 +100,7 @@ pub(crate) fn observation_card(what: &Observed) -> Card {
             old_bytes,
             ..
         } => {
-            if *outcome == WriteOutcome::Committed {
-                body.extend(write_preview(
-                    path,
-                    old_bytes.as_deref(),
-                    new_bytes.as_deref(),
-                ));
-            }
-            write_spans(path, *outcome)
+            return write_card(path, *outcome, old_bytes.as_deref(), new_bytes.as_deref());
         }
         Observed::Command { argv, status, .. } => {
             let mut spans = vec![Span::plain("$ ")];
@@ -132,7 +125,25 @@ pub(crate) fn observation_card(what: &Observed) -> Card {
             unreachable!("an `Act` never reaches the rail from the engine seam")
         }
     };
-    let mut marks = vec![Mark::Text { spans }];
+    Card(vec![Mark::Text { spans }])
+}
+
+/// A write's card: its [`write_preview`] under a `write <path> <outcome>`
+/// heading — save when that preview is a diff, which names the file and shows
+/// the change itself.  A heading above it would only say the same twice, so the
+/// diff stands as the whole card and an `edit` reads as the edit it is.
+fn write_card(path: &str, outcome: WriteOutcome, old: Option<&[u8]>, new: Option<&[u8]>) -> Card {
+    let body = if outcome == WriteOutcome::Committed {
+        write_preview(path, old, new)
+    } else {
+        Vec::new()
+    };
+    if let [Mark::Diff { .. }] = body.as_slice() {
+        return Card(body);
+    }
+    let mut marks = vec![Mark::Text {
+        spans: write_spans(path, outcome),
+    }];
     marks.extend(body);
     Card(marks)
 }
