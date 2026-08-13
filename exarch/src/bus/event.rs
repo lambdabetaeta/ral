@@ -4,6 +4,7 @@
 
 use super::AgentId;
 use crate::agent::event::ProviderErrorRecord;
+use crate::agent::event::{ContextOp, EditAuthority};
 use crate::bus::card::Card;
 use crate::bus::post::AgentOutcome;
 use crate::provider::{Tuning, Usage};
@@ -143,11 +144,15 @@ pub enum Kind {
     UserPromptEcho(String),
     StopReason(String),
     Error(String),
-    /// An operational note the attend loop issued — a truncation recovery, a
-    /// compaction step.  Traced, but no `events.json` twin: the model never saw it.
+    /// An operational note the attend loop issued — a truncation recovery.
+    /// Traced, but no `events.jsonl` twin: the model never saw it.
     SystemNote(String),
+    ContextEdited {
+        op: ContextOp,
+        by: EditAuthority,
+    },
     /// A recovery nudge the attend loop issued between attempts.  Unlike
-    /// [`Kind::SystemNote`] it does have an `events.json` twin.
+    /// [`Kind::SystemNote`] it does have an `events.jsonl` twin.
     Nudge {
         used: u32,
         max: u32,

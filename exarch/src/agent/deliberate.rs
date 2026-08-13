@@ -13,7 +13,10 @@ use crate::agent::digest::{
     COMPACT_THRESHOLD, SUMMARY_CAP_FALLBACK_TOKENS, compaction_due, suffix_keep_budget,
     summary_cap_tokens,
 };
-use crate::agent::event::{QuiesceReason, ToolResult as SessionToolResult};
+use crate::agent::event::{
+    ContextOp, EditAuthority, QuiesceReason, ToolResult as SessionToolResult,
+};
+use crate::agent::transcript::emit_context_edited;
 use crate::bus::{AgentState, Emitter, Item, Kind};
 use crate::provider::{CutShort, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use ral_core::serial::FOValue;
@@ -60,6 +63,7 @@ impl Agent {
         &mut self,
         provider: &Arc<Provider>,
         prompt: Option<String>,
+        continues: Option<u64>,
         token: &cancel::Token,
         emit: &Emitter,
     ) -> Result<Outcome, ProviderError> {
@@ -70,12 +74,12 @@ impl Agent {
         // Entry is `ReadyForUser`, before the prompt is committed: the only
         // place `can_compact()` is guaranteed to hold, and every exchange and
         // nudge alike crosses it.
-        self.compact(provider, emit, false, token);
+        self.compact(provider, emit, false, token, continues);
         let mut last_text = String::new();
         if let Some(p) = prompt {
             self.log
                 .lock()
-                .append_user(p)
+                .append_user(p, continues)
                 .map_err(ProviderError::Other)?;
         }
         let mut n = 0u32;
@@ -291,6 +295,7 @@ impl Agent {
         emit: &Emitter,
         requested: bool,
         token: &cancel::Token,
+        continues: Option<u64>,
     ) {
         if !self.log.lock().can_compact() {
             if requested {
@@ -304,19 +309,11 @@ impl Agent {
         // `/compact` overrides the trigger entirely.
         let used = self.last_input;
         let window = provider.context_window();
-        let (due, detail, summary_cap) = match window {
-            Some(w) if w > 0 => (
-                compaction_due(used, w),
-                format!("{used} of {w} tokens"),
-                summary_cap_tokens(w),
-            ),
+        let (due, summary_cap) = match window {
+            Some(w) if w > 0 => (compaction_due(used, w), summary_cap_tokens(w)),
             _ => {
                 let bytes = self.log.lock().history_bytes();
-                (
-                    bytes >= COMPACT_THRESHOLD,
-                    format!("{} KB", bytes / 1024),
-                    SUMMARY_CAP_FALLBACK_TOKENS,
-                )
+                (bytes >= COMPACT_THRESHOLD, SUMMARY_CAP_FALLBACK_TOKENS)
             }
         };
         if !requested && !due {
@@ -329,11 +326,14 @@ impl Agent {
         }
         // Keep the recent half verbatim; summarise the older prefix.
         let keep = suffix_keep_budget(self.log.lock().history_bytes());
-        let Some(plan) = self.log.lock().plan_compaction(keep) else {
+        let plan = match continues {
+            Some(exchange) => self.log.lock().plan_compaction_before(keep, exchange),
+            None => self.log.lock().plan_compaction(keep),
+        };
+        let Some(plan) = plan else {
             // No exchange old enough to summarise: a no-op, not an event.
             return;
         };
-        Self::note(format!("[Compacting history: {detail} → summary]"), emit);
         emit.emit(Kind::State(AgentState::Compacting));
         match provider.summarize(&self.system, plan.prefix_messages, summary_cap, token) {
             Ok(summary) => {
@@ -343,24 +343,22 @@ impl Agent {
                     return;
                 }
                 emit.emit(Kind::Usage(summary.usage));
-                let compacted = self
-                    .log
-                    .lock()
-                    .apply_compaction(summary.summary, plan.suffix_start);
-                if let Err(e) = compacted {
-                    self.note_error(format!("compact failed: {e}"), emit);
-                    return;
-                }
-                // The excursion that was warned about is now behind a summary;
-                // a fresh one past the soft line earns a fresh warning.
-                self.context_warn_latched = false;
-                Self::note(
-                    format!(
-                        "[Compacted: now {} KB]",
-                        self.log.lock().history_bytes() / 1024
-                    ),
-                    emit,
+                let edited = self.log.lock().apply_edit(
+                    ContextOp::Fold {
+                        through_exchange: plan.through_exchange,
+                        digest: summary.summary,
+                    },
+                    EditAuthority::Harness,
                 );
+                let receipt = match edited {
+                    Ok(receipt) => receipt,
+                    Err(e) => {
+                        self.note_error(format!("compact failed: {e}"), emit);
+                        return;
+                    }
+                };
+                emit_context_edited(emit, &receipt);
+                self.context_warn_latched = false;
             }
             Err(e) => self.note_error(format!("compact failed: {e}"), emit),
         }
@@ -669,7 +667,13 @@ mod tests {
         );
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
-        match session.deliberate(&provider, Some("go".into()), &cancel::Token::new(), &emit) {
+        match session.deliberate(
+            &provider,
+            Some("go".into()),
+            None,
+            &cancel::Token::new(),
+            &emit,
+        ) {
             Ok(Outcome::Complete(s)) => assert_eq!(s, "ok"),
             other => panic!("the steering prompt must be admitted mid-exchange, got {other:?}"),
         }
@@ -807,7 +811,7 @@ mod tests {
         );
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
-        match session.deliberate(&provider, Some("go".into()), &token, &emit) {
+        match session.deliberate(&provider, Some("go".into()), None, &token, &emit) {
             Ok(Outcome::Cancelled) => {}
             other => panic!("expected the cancel to win before the reply drains, got {other:?}"),
         }
@@ -822,7 +826,7 @@ mod tests {
                 .then(Reply::tool_calls(vec![ral_call("c3", "1")]))
                 .then(Reply::text("done")),
         );
-        match session.deliberate(&provider2, Some("continue".into()), &token2, &emit) {
+        match session.deliberate(&provider2, Some("continue".into()), None, &token2, &emit) {
             Ok(Outcome::Complete(s)) => assert_eq!(s, "done"),
             other => panic!(
                 "a reply staged in a cancelled batch must not leak into the next deliberation, got {other:?}"

@@ -87,7 +87,7 @@ impl Control for ReplControl {
             "/compact" => {
                 let p = session.current_provider();
                 let token = session.cancel_token().clone();
-                session.compact(&p, emit, true, &token);
+                session.compact(&p, emit, true, &token, None);
                 Verdict::Continue
             }
             // Surveyed on the thread that owns the shell the rows describe,
@@ -202,7 +202,7 @@ pub fn run(
     if let Ok(paths) = &logs {
         for p in paths {
             match p.parent() {
-                Some(dir) => println!("Agent logs: {} (user.log + events.json)", dir.display()),
+                Some(dir) => println!("Agent logs: {} (user.log + events.jsonl)", dir.display()),
                 None => println!("Agent log: {}", p.display()),
             }
         }

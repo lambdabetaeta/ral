@@ -147,11 +147,11 @@ impl Shared {
                     q.push_back(Post::UserSteering(text));
                 }
             }
-            Post::Nudge(text) => {
-                let existing = q.iter().position(|m| matches!(m, Post::Nudge(_)));
+            Post::Nudge { .. } => {
+                let existing = q.iter().position(|m| matches!(m, Post::Nudge { .. }));
                 match existing {
-                    Some(pos) => q[pos] = Post::Nudge(text),
-                    None => q.push_back(Post::Nudge(text)),
+                    Some(pos) => q[pos] = msg,
+                    None => q.push_back(msg),
                 }
             }
             other => {
@@ -502,7 +502,7 @@ fn to_item(msg: Post, epoch: u64) -> Option<Item> {
         } => Item::Wakeup(format!("[scheduled '{label}' · {trigger}] {prompt}")),
         Post::AgentResult(r) => Item::Agent(r),
         Post::AgentMessage(m) => Item::Message(m),
-        Post::Nudge(s) => Item::Nudge(s),
+        Post::Nudge { exchange, text } => Item::Nudge { exchange, text },
         Post::Command(s) => Item::Command(s),
         Post::Surface {
             id,
@@ -1119,16 +1119,31 @@ mod tests {
     #[test]
     fn inbox_nudge_replaces_a_still_queued_one_newest_wins() {
         let inbox = Inbox::new();
-        inbox.push(Post::Nudge("retry".into())).unwrap();
-        inbox.push(Post::Nudge("retry".into())).unwrap();
-        inbox.push(Post::Nudge("different".into())).unwrap();
+        inbox
+            .push(Post::Nudge {
+                exchange: 1,
+                text: "retry".into(),
+            })
+            .unwrap();
+        inbox
+            .push(Post::Nudge {
+                exchange: 1,
+                text: "retry".into(),
+            })
+            .unwrap();
+        inbox
+            .push(Post::Nudge {
+                exchange: 2,
+                text: "different".into(),
+            })
+            .unwrap();
         assert_eq!(
             depth_of(&inbox, "nudge"),
             1,
             "a nudge never grows past one outstanding entry"
         );
         assert!(
-            matches!(inbox.next_item(), Some(Item::Nudge(s)) if s == "different"),
+            matches!(inbox.next_item(), Some(Item::Nudge { text, .. }) if text == "different"),
             "the newest nudge is the one delivered"
         );
     }
@@ -1175,7 +1190,10 @@ mod tests {
         let inbox = Inbox::new();
         for i in 0..(INBOX_SOURCE_CAP * 3) {
             inbox
-                .push(Post::Nudge(format!("n{i}")))
+                .push(Post::Nudge {
+                    exchange: i as u64,
+                    text: format!("n{i}"),
+                })
                 .expect("nudge never rejects");
             inbox
                 .push(wakeup(i as u64, "s", "@", "p"))

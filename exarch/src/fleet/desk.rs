@@ -1847,13 +1847,13 @@ mod tests {
     }
 
     /// Read `system_prompt_bytes` off a session's opening bookend — the first
-    /// event in its `events.json`.
+    /// event in its `events.jsonl`.
     fn recorded_system_prompt_bytes(log_dir: &std::path::Path) -> usize {
-        let body = std::fs::read_to_string(log_dir.join("events.json")).expect("events.json");
+        let body = std::fs::read_to_string(log_dir.join("events.jsonl")).expect("events.jsonl");
         let first: crate::agent::event::SessionEvent = serde_json::Deserializer::from_str(&body)
             .into_iter()
             .next()
-            .expect("events.json must have at least one event")
+            .expect("events.jsonl must have at least one event")
             .expect("first event must parse");
         match first {
             crate::agent::event::SessionEvent::SessionStarted {
@@ -2956,7 +2956,7 @@ mod tests {
     }
 
     /// Poll `path` until it contains `needle` or `timeout` elapses. A child's
-    /// `events.json` records every turn, and it is the only channel into a
+    /// `events.jsonl` records every turn, and it is the only channel into a
     /// thread the test does not otherwise touch mid-flight.
     fn eventually_logged(path: &std::path::Path, needle: &str, timeout: Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
@@ -3008,7 +3008,7 @@ mod tests {
         );
         assert!(
             eventually_logged(
-                &log_dir.join("events.json"),
+                &log_dir.join("events.jsonl"),
                 "first response, no reply yet",
                 Duration::from_secs(5),
             ),

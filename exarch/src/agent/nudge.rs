@@ -176,7 +176,7 @@ impl Registry {
     }
 }
 
-/// Record to both views: the `events.json` forensic breadcrumb and the
+/// Record to both views: the `events.jsonl` forensic breadcrumb and the
 /// operational trace ([`Kind::Nudge`]), which the display surfaces as it sees fit.
 fn record_nudge(emit: &Emitter, log: &mut AgentLog, used: u32, cause: String) {
     let _ = log.record_nudge(used, BUDGET, cause.clone());

@@ -364,6 +364,11 @@ impl App {
             }
             Kind::Error(msg) => self.push_chrome(id, RailShape::Error, line::error(&msg)),
             Kind::SystemNote(text) => self.push_chrome(id, RailShape::Plain, line::note(&text)),
+            Kind::ContextEdited { op, by } => self.push_chrome(
+                id,
+                RailShape::Plain,
+                line::note(&format!("[context edited: {op:?} by {by:?}]")),
+            ),
             // Quiet on the rail, recorded in the trace at the emit seam. A desk
             // result is always one line, so a size bar would be constant ink.
             Kind::Nudge { .. } | Kind::HarnessResult(_) => {}

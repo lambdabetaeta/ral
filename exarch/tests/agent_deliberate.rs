@@ -13,7 +13,7 @@
 //! round-tripping the committed messages through the same genai
 //! `ChatMessage` serialisation the live request uses.
 
-use exarch::agent::event::ProviderErrorRecord;
+use exarch::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord, SessionEvent};
 use exarch::agent::{Agent, deliberate};
 use exarch::bus::{AgentId, AgentState, Emitter, Kind, channel};
 use exarch::provider::scripted::{Reply, Script};
@@ -56,7 +56,7 @@ fn drive_deliberate(
     let (tx, rx) = channel();
     let emit = Emitter::new(tx, id);
     let token = exarch::agent::cancel::Token::new();
-    let outcome = session.deliberate(provider, prompt.map(str::to_string), &token, &emit);
+    let outcome = session.deliberate(provider, prompt.map(str::to_string), None, &token, &emit);
     drop(emit);
     let kinds = rx.into_iter().map(|e| e.kind).collect();
     (outcome, kinds)
@@ -328,13 +328,6 @@ fn compaction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
             .any(|k| matches!(k, Kind::State(AgentState::Compacting))),
         "the compaction must announce its own state"
     );
-    assert!(
-        kinds
-            .iter()
-            .any(|k| matches!(k, Kind::SystemNote(t) if t.starts_with("[Compacting history"))),
-        "the user is told the history is being compacted"
-    );
-
     let view = session.rendered_messages();
     assert_eq!(view[0].role, ChatRole::User);
     let summary = view[0].content.first_text().unwrap_or_default();
@@ -354,16 +347,31 @@ fn compaction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
     assert!(session.is_ready());
 
     // Reclamation is heap-only: the forensic record keeps every byte.
-    let events = std::fs::read_to_string(
-        dir.join("sessions")
-            .join(session.id.to_string())
-            .join("events.json"),
-    )
+    let events = serde_json::Deserializer::from_reader(std::io::BufReader::new(
+        std::fs::File::open(
+            dir.join("sessions")
+                .join(session.id.to_string())
+                .join("events.jsonl"),
+        )
+        .unwrap(),
+    ))
+    .into_iter::<SessionEvent>()
+    .collect::<Result<Vec<_>, _>>()
     .unwrap();
     assert!(
-        events.contains("EXCHANGE1"),
+        events.iter().any(|event| matches!(
+            event,
+            SessionEvent::UserPrompt { text, .. } if text.contains("EXCHANGE1")
+        )),
         "compaction must not touch the durable event log"
     );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::ContextEdited {
+            op: ContextOp::Fold { .. },
+            by: EditAuthority::Harness,
+        }
+    )));
 }
 
 /// X2: a tool call whose `fn_arguments` is not a JSON object is repaired to

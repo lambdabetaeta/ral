@@ -230,7 +230,7 @@ impl App {
 
     /// The per-run log directory, `<project>/<YYYY-MM-DD-HHMMSS>-<pid>/` — the
     /// pid keeps two runs launched in the same second and project apart.  Holds
-    /// `stderr.log` and `sessions/<id>/{events.json,transcript.jsonl,user.log}`,
+    /// `stderr.log` and `sessions/<id>/{events.jsonl,transcript.jsonl,user.log}`,
     /// durably, unlike the disposable [`Scratch`].
     ///
     /// # Errors

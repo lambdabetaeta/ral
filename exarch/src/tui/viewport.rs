@@ -2,7 +2,7 @@
 //!
 //! A [`Viewport`] turns one session's content events into [`Block`]s, flattens
 //! those into the renderer's visual rows, and tees every committed line to the
-//! session's `user.log` — the durable counterpart to `events.json`.  The whole
+//! session's `user.log` — the durable counterpart to `events.jsonl`.  The whole
 //! alt-screen frame is redrawn each tick, so scrollback is ours, not the host
 //! terminal's, and every tab keeps its own scroll position.
 
@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Scrollback blocks held in heap; past this they are evicted oldest-first,
-/// already durable in `user.log`/`events.json`.
+/// already durable in `user.log`/`events.jsonl`.
 pub(super) const VIEWPORT_MAX_BLOCKS: usize = 500;
 /// Rendered-row cap — a second eviction trigger, for the oversized block that
 /// blows the row budget long before the block count does.

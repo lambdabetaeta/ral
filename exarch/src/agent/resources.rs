@@ -417,7 +417,7 @@ impl Agent {
             self.log.lock().event_count() as u64,
             None,
             "evict",
-            Some("prefix drops with compaction".to_string()),
+            Some("counts the events still owned by the model view".to_string()),
         ));
         rows.extend(pressure_rows(
             self.last_input,
@@ -706,10 +706,14 @@ mod tests {
             "a settled entry carries its retention remaining in ral calls"
         );
 
-        assert!(row(&rows, "log.events").current > 0);
+        assert_eq!(
+            row(&rows, "log.events").current,
+            0,
+            "shell-only work has not entered the model view"
+        );
         assert!(
             row(&rows, "disk.log_dir").current > 0,
-            "a session dir with a written events.json probes nonzero"
+            "a session dir with a written events.jsonl probes nonzero"
         );
 
         assert_eq!(
@@ -725,7 +729,13 @@ mod tests {
             .inbox
             .push(Post::UserSteering("hold".into()))
             .unwrap();
-        session.inbox.push(Post::Nudge("go on".into())).unwrap();
+        session
+            .inbox
+            .push(Post::Nudge {
+                exchange: 1,
+                text: "go on".into(),
+            })
+            .unwrap();
         let depths_before = session.inbox.source_depths();
         let rows = session.resource_rows();
         assert_eq!(row(&rows, "inbox[user]").current, 1);

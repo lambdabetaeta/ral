@@ -203,8 +203,9 @@ impl Agent {
         let active = self.provider.current();
         let token = self.cancel.clone();
         let prompt = Some(item.text());
+        let continues = item.continues();
         let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.deliberate(&active, prompt, &token, emit)
+            self.deliberate(&active, prompt, continues, &token, emit)
         }));
         let outcome = match attempt {
             Ok(o) => o,
@@ -258,8 +259,16 @@ impl Agent {
             None => None,
         };
         if let Some(msg) = &nudge_msg {
+            let exchange = self
+                .log
+                .lock()
+                .current_exchange()
+                .expect("a nudge follows an exchange in the session log");
             self.inbox
-                .push(Post::Nudge(msg.clone()))
+                .push(Post::Nudge {
+                    exchange,
+                    text: msg.clone(),
+                })
                 .expect("Nudge is idempotent and never rejects");
         }
         // Latch only once the warning actually rode a message out: on the
@@ -461,7 +470,7 @@ pub(super) fn announce(item: &Item, emit: &Emitter) {
                 }
             }
         }
-        Item::Nudge(_) | Item::Command(_) => {}
+        Item::Nudge { .. } | Item::Command(_) => {}
     }
 }
 
@@ -688,7 +697,7 @@ mod tests {
         );
         assert!(session.is_ready());
 
-        let events = std::fs::read_to_string(session.log_dir().join("events.json")).unwrap();
+        let events = std::fs::read_to_string(session.log_dir().join("events.jsonl")).unwrap();
         let parsed: Vec<SessionEvent> = serde_json::Deserializer::from_str(&events)
             .into_iter()
             .collect::<Result<_, _>>()
@@ -1119,10 +1128,10 @@ mod tests {
     }
 
     /// A binding prune is transcript/TUI-only: it must never grow the
-    /// model-view `events.json`.
+    /// model-view `events.jsonl`.
     #[test]
-    fn prune_event_is_absent_from_events_json() {
-        let dir = tmp("prune-events-json");
+    fn prune_does_not_add_model_events() {
+        let dir = tmp("prune-model-events");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
             .seat
@@ -1157,7 +1166,7 @@ mod tests {
         assert_eq!(
             after_prune_call - after_bind,
             after_plain_call - after_prune_call,
-            "a binding prune must never write a model-view events.json entry"
+            "a binding prune must never write a model-view events.jsonl entry"
         );
     }
 }

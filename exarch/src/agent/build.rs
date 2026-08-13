@@ -655,7 +655,7 @@ mod tests {
         parent
             .log
             .lock()
-            .append_user("what did we learn?".into())
+            .append_user("what did we learn?".into(), None)
             .unwrap();
         parent
             .log
@@ -694,13 +694,13 @@ mod tests {
     }
 
     /// Read `system_prompt_bytes` off a session's `SessionStarted` bookend,
-    /// the first event in its `events.json`.
+    /// the first event in its `events.jsonl`.
     fn recorded_system_prompt_bytes(log_dir: &std::path::Path) -> usize {
-        let body = std::fs::read_to_string(log_dir.join("events.json")).expect("events.json");
+        let body = std::fs::read_to_string(log_dir.join("events.jsonl")).expect("events.jsonl");
         let first: crate::agent::event::SessionEvent = serde_json::Deserializer::from_str(&body)
             .into_iter()
             .next()
-            .expect("events.json must have at least one event")
+            .expect("events.jsonl must have at least one event")
             .expect("first event must parse");
         match first {
             crate::agent::event::SessionEvent::SessionStarted {

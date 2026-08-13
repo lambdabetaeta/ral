@@ -1,13 +1,11 @@
 //! Per-session canonical event log: one session's event vector and the
-//! `events.json` it is appended to.
+//! `events.jsonl` it is appended to.
 //!
 //! This is the model view; `tui::viewport` writes the rendered `user.log`
 //! beside it, `agent::transcript` the operational `transcript.jsonl`.
 //!
-//! `events.json` is a whitespace-separated stream of pretty-printed JSON
-//! values — no array, no line per event — so appending closes no bracket and
-//! `serde_json::Deserializer::from_reader(f).into_iter::<SessionEvent>()`
-//! reads it back.
+//! `events.jsonl` is one compact JSON value per line, so standard line tools
+//! can inspect it while `serde_json::Deserializer` still reads it back.
 
 use crate::bus::AgentId;
 use crate::provider::{ProviderError, Tuning, Usage};
@@ -16,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 /// One tool result as the model sees it: the rendered, per-section-capped
@@ -53,7 +52,7 @@ impl From<Usage> for UsageDelta {
 /// Serialisable mirror of [`ProviderError`], flattening its `&'static str` and
 /// `Duration` fields to owned strings and whole seconds.
 ///
-/// `tui::line` renders from this shape, so `events.json` reconstructs the
+/// `tui::line` renders from this shape, so `events.jsonl` reconstructs the
 /// on-screen block.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -86,6 +85,25 @@ pub enum ProviderErrorRecord {
     },
     Other {
         cause: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditAuthority {
+    Model,
+    User,
+    Harness,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContextOp {
+    Fold {
+        through_exchange: u64,
+        digest: String,
+    },
+    Drop {
+        exchanges: Vec<u64>,
     },
 }
 
@@ -148,12 +166,14 @@ pub enum SessionEvent {
     /// A user-role turn: the seed or typed prompt, a nudge continuation the
     /// attend loop self-posts, or a steering message drained after a tool batch.
     UserPrompt {
+        exchange: u64,
         text: String,
     },
     /// A message a `mnemon` child inherits from its parent's context.  Replayed
     /// to the provider verbatim but drives no state transition — the child's own
     /// [`Self::UserPrompt`] is still the turn it must answer.
     ContextMessage {
+        exchange: u64,
         message: ChatMessage,
     },
     /// One inner step of [`crate::agent::Agent::deliberate`]; several share a
@@ -181,12 +201,9 @@ pub enum SessionEvent {
     /// Ctrl-C or Esc mid-exchange; [`AgentLog::quiesce`] has already synthesised
     /// whatever the transcript needed to reach [`State::ReadyForUser`].
     Cancelled,
-    /// Archival breadcrumb for a compaction.  The live model view is
-    /// [`AgentLog::compaction`] plus the kept suffix, not this.
-    Compacted {
-        before_bytes: usize,
-        after_bytes: usize,
-        summary: String,
+    ContextEdited {
+        op: ContextOp,
+        by: EditAuthority,
     },
     /// A diagnostic for the user alone — about the orchestration, not the
     /// conversation, so it never reaches the model.
@@ -220,8 +237,8 @@ impl SessionEvent {
     /// step, and usage events; one per result for a tool batch.
     fn into_chat_messages(self) -> Vec<ChatMessage> {
         match self {
-            Self::UserPrompt { text } => vec![ChatMessage::user(text)],
-            Self::ContextMessage { message }
+            Self::UserPrompt { text, .. } => vec![ChatMessage::user(text)],
+            Self::ContextMessage { message, .. }
             // Whole, reasoning included: genai's OpenAI chat-completions
             // adapter (the DeepSeek/Kimi reasoners) 400s unless
             // `reasoning_content` is echoed across a tool-use sequence, and
@@ -260,20 +277,61 @@ pub enum QuiesceReason {
     Replied,
 }
 
-/// One session's log: the event vector, the `events.json` writer, the protocol
-/// state machine, and the origin metadata `clear` and `fork` re-record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Digest {
+    pub through_exchange: u64,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Span {
+    pub id: u64,
+    pub events: Range<usize>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct View {
+    pub digest: Option<Digest>,
+    pub spans: Vec<Span>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Projection {
+    state: State,
+    view: View,
+    max_exchange: u64,
+    newest_edit: Option<usize>,
+}
+
+impl Default for Projection {
+    fn default() -> Self {
+        Self {
+            state: State::ReadyForUser,
+            view: View::default(),
+            max_exchange: 0,
+            newest_edit: None,
+        }
+    }
+}
+
+/// The result of a context edit, including its effect on the model-visible
+/// message budget.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditReceipt {
+    pub op: ContextOp,
+    pub by: EditAuthority,
+    pub bytes_delta: i64,
+}
+
+/// One session's log: a stable-index event vector, its `events.jsonl` writer,
+/// and the projection folded from that vector.
 pub struct AgentLog {
     id: AgentId,
     dir: PathBuf,
     /// Held open, flushed per event, so the file is always tail-able.
-    events_file: BufWriter<File>,
-    /// Mirror of the events on disk.  `/compact` drops from this alone, since
-    /// the file only ever grows; `/clear` wipes both.
-    events: Vec<SessionEvent>,
-    state: State,
-    /// See [`Compaction`] for the invariant.  In-memory only; the on-disk
-    /// [`SessionEvent::Compacted`] is the breadcrumb, not the state.
-    compaction: Option<Compaction>,
+    events_file: Option<BufWriter<File>>,
+    log: Vec<SessionEvent>,
+    projection: Projection,
     /// Held, with [`Self::provider`], so `clear` re-emits `SessionStarted`
     /// unchanged and `fork` passes both down to the child.
     model: String,
@@ -282,30 +340,15 @@ pub struct AgentLog {
     sessions_root: PathBuf,
 }
 
-/// The summary standing in for a dropped prefix.  [`AgentLog::apply_compaction`]
-/// physically drops that prefix, so `events` *is* the kept verbatim suffix and
-/// the model view is this summary followed by all of it — no cut index to carry.
-struct Compaction {
-    summary: String,
-}
-
-/// A planned cut: everything before `suffix_start` becomes `prefix_messages`,
-/// the messages to summarise — any prior summary among them.
+/// A planned cut: the visible prefix through `through_exchange` becomes the
+/// messages to summarise, while the newer spans stay verbatim.
 pub struct CompactionPlan {
-    pub suffix_start: usize,
+    pub through_exchange: u64,
     pub prefix_messages: Vec<ChatMessage>,
 }
 
 fn summary_prompt(summary: &str) -> String {
     format!("Summary of prior work in this session:\n\n{summary}")
-}
-
-fn event_message_bytes(e: &SessionEvent) -> usize {
-    e.clone()
-        .into_chat_messages()
-        .iter()
-        .map(|m| serde_json::to_string(m).map_or(0, |s| s.len()))
-        .sum()
 }
 
 impl AgentLog {
@@ -359,17 +402,28 @@ impl AgentLog {
     /// Whether a fresh user prompt is admissible.  The attend loop leaves every
     /// exchange here, and compaction demands it.
     pub fn is_ready(&self) -> bool {
-        matches!(self.state, State::ReadyForUser)
+        matches!(self.state(), State::ReadyForUser)
     }
 
     pub fn can_compact(&self) -> bool {
         self.is_ready()
     }
 
-    /// Length of the in-memory mirror, for the host's resource probe: a count,
-    /// never the events, and it shrinks with them on `/compact` and `/clear`.
+    /// Number of event slots still owned by the model view, for the host's
+    /// resource probe; the append-only log retains the slots an edit removes.
     pub fn event_count(&self) -> usize {
-        self.events.len()
+        let events = self
+            .projection
+            .view
+            .spans
+            .iter()
+            .map(|span| span.events.len())
+            .sum::<usize>();
+        events + usize::from(self.projection.view.digest.is_some())
+    }
+
+    pub fn view(&self) -> &View {
+        &self.projection.view
     }
 
     /// Approximate context size in serialised model-view bytes.  The fallback
@@ -388,12 +442,12 @@ impl AgentLog {
     /// The session is not awaiting an assistant reply.
     pub fn render_messages(&self) -> Result<Vec<ChatMessage>, String> {
         if !matches!(
-            self.state,
+            self.state(),
             State::AwaitingAssistantAfterUser | State::AwaitingAssistantAfterToolResults
         ) {
             return Err(format!(
                 "cannot render request while session is in state {:?}",
-                self.state
+                self.state()
             ));
         }
         Ok(self.model_messages())
@@ -409,20 +463,16 @@ impl AgentLog {
     /// child, so that unfinished assistant frame is dropped: the child starts
     /// from the request context, not a dangling tool protocol.
     pub fn inherited_context_messages(&self) -> Vec<ChatMessage> {
-        let mut events = self.events.as_slice();
-        if matches!(self.state, State::AwaitingToolResults { .. })
+        let omit_tail_assistant = matches!(self.state(), State::AwaitingToolResults { .. })
             && matches!(
-                events.last(),
+                self.log.last(),
                 Some(SessionEvent::AssistantMessage {
                     pending_tool_ids,
                     ..
                 }) if !pending_tool_ids.is_empty()
-            )
-        {
-            events = &events[..events.len() - 1];
-        }
+            );
 
-        self.project(events)
+        self.project_view(omit_tail_assistant)
     }
 
     /// Import parent context without appending a prompt: a `mnemon` child's
@@ -432,14 +482,15 @@ impl AgentLog {
     /// # Errors
     /// The session is not at a ready boundary, or recording a message failed.
     pub fn import_context(&mut self, messages: Vec<ChatMessage>) -> Result<(), String> {
-        if !matches!(self.state, State::ReadyForUser) {
+        if !matches!(self.state(), State::ReadyForUser) {
             return Err(format!(
                 "cannot import context while session is in state {:?}",
-                self.state
+                self.state()
             ));
         }
+        let exchange = self.next_exchange();
         for message in messages {
-            self.record_or_string_err(SessionEvent::ContextMessage { message })?;
+            self.record_or_string_err(SessionEvent::ContextMessage { exchange, message })?;
         }
         Ok(())
     }
@@ -450,16 +501,18 @@ impl AgentLog {
     ///
     /// # Errors
     /// The session is mid-exchange, or recording the prompt failed.
-    pub fn append_user(&mut self, text: String) -> Result<(), String> {
-        if !matches!(self.state, State::ReadyForUser) {
+    pub fn append_user(&mut self, text: String, continues: Option<u64>) -> Result<(), String> {
+        if !matches!(self.state(), State::ReadyForUser) {
             return Err(format!(
                 "cannot accept a new user prompt while session is in state {:?}",
-                self.state
+                self.state()
             ));
         }
-        self.record_or_string_err(SessionEvent::UserPrompt { text })?;
-        self.state = State::AwaitingAssistantAfterUser;
-        Ok(())
+        let exchange = continues
+            .filter(|id| *id == self.projection.max_exchange)
+            .filter(|id| self.projection.view.spans.iter().any(|span| span.id == *id))
+            .unwrap_or_else(|| self.next_exchange());
+        self.record_or_string_err(SessionEvent::UserPrompt { exchange, text })
     }
 
     /// Append a user message between a complete tool-result batch and the next
@@ -469,15 +522,17 @@ impl AgentLog {
     /// # Errors
     /// The tool-result batch is incomplete, or recording the prompt failed.
     pub fn append_steering(&mut self, text: String) -> Result<(), String> {
-        if !matches!(self.state, State::AwaitingAssistantAfterToolResults) {
+        if !matches!(self.state(), State::AwaitingAssistantAfterToolResults) {
             return Err(format!(
                 "tool results must be complete before accepting a steering prompt; session is in state {:?}",
-                self.state
+                self.state()
             ));
         }
-        self.record_or_string_err(SessionEvent::UserPrompt { text })?;
-        self.state = State::AwaitingAssistantAfterUser;
-        Ok(())
+        let exchange = self.projection.max_exchange;
+        if exchange == 0 {
+            return Err("cannot accept a steering prompt before an exchange has started".into());
+        }
+        self.record_or_string_err(SessionEvent::UserPrompt { exchange, text })
     }
 
     /// Commit an assistant reply, moving the exchange on to await tool results
@@ -493,12 +548,12 @@ impl AgentLog {
         stop_reason: Option<String>,
     ) -> Result<(), String> {
         if !matches!(
-            self.state,
+            self.state(),
             State::AwaitingAssistantAfterUser | State::AwaitingAssistantAfterToolResults
         ) {
             return Err(format!(
                 "assistant message is not expected while session is in state {:?}",
-                self.state
+                self.state()
             ));
         }
         if message.role != ChatRole::Assistant {
@@ -507,19 +562,11 @@ impl AgentLog {
                 message.role,
             ));
         }
-        let next = if pending_tool_ids.is_empty() {
-            State::ReadyForUser
-        } else {
-            State::AwaitingToolResults {
-                pending_ids: pending_tool_ids.clone(),
-            }
-        };
         self.record_or_string_err(SessionEvent::AssistantMessage {
             message,
             pending_tool_ids,
             stop_reason,
         })?;
-        self.state = next;
         Ok(())
     }
 
@@ -529,18 +576,17 @@ impl AgentLog {
     /// No results are expected, they do not match the pending ids (wrong count,
     /// unknown id, duplicate), or recording the batch failed.
     pub fn append_tool_results(&mut self, results: Vec<ToolResult>) -> Result<(), String> {
-        let pending_ids = match &self.state {
+        let pending_ids = match self.state() {
             State::AwaitingToolResults { pending_ids } => pending_ids.clone(),
             _ => {
                 return Err(format!(
                     "tool results are not expected while session is in state {:?}",
-                    self.state
+                    self.state()
                 ));
             }
         };
         validate_result_ids(&pending_ids, &results)?;
         self.record_or_string_err(SessionEvent::ToolResults { results })?;
-        self.state = State::AwaitingAssistantAfterToolResults;
         Ok(())
     }
 
@@ -571,7 +617,7 @@ impl AgentLog {
             ),
         };
         loop {
-            match &self.state {
+            match self.state().clone() {
                 State::ReadyForUser => break,
                 State::AwaitingToolResults { pending_ids } => {
                     let results = pending_ids
@@ -582,7 +628,6 @@ impl AgentLog {
                         })
                         .collect();
                     self.record_lossy(SessionEvent::ToolResults { results });
-                    self.state = State::AwaitingAssistantAfterToolResults;
                 }
                 State::AwaitingAssistantAfterUser | State::AwaitingAssistantAfterToolResults => {
                     let message = ChatMessage::assistant(assistant_stub);
@@ -591,7 +636,6 @@ impl AgentLog {
                         pending_tool_ids: vec![],
                         stop_reason: Some(stop_label.into()),
                     });
-                    self.state = State::ReadyForUser;
                 }
             }
         }
@@ -602,95 +646,156 @@ impl AgentLog {
         }
     }
 
-    /// Indices of the top-level user prompts — the boundaries a compaction may
-    /// cut at.  Replays the ready/in-exchange state so a steering prompt is
-    /// skipped and no cut can split an assistant message from its tool results.
-    fn exchange_start_indices(&self) -> Vec<usize> {
-        let mut ready = true;
-        let mut starts = Vec::new();
-        for (i, e) in self.events.iter().enumerate() {
-            match e {
-                SessionEvent::UserPrompt { .. } if ready => {
-                    starts.push(i);
-                    ready = false;
-                }
-                SessionEvent::AssistantMessage {
-                    pending_tool_ids, ..
-                } => {
-                    ready = pending_tool_ids.is_empty();
-                }
-                SessionEvent::ToolResults { .. } => ready = false,
-                // A compaction only ever commits at a ready boundary, so
-                // whatever state the scan carried into this marker is
-                // superseded.
-                SessionEvent::Compacted { .. } => ready = true,
-                _ => {}
-            }
-        }
-        starts
+    pub fn plan_compaction(&self, keep_budget_bytes: usize) -> Option<CompactionPlan> {
+        self.plan_compaction_impl(keep_budget_bytes, None)
     }
 
-    /// Plan a compaction: the recent exchanges fitting in `keep_budget_bytes`
-    /// stay verbatim, the older prefix becomes the messages to summarise.
-    /// `None` when everything visible already fits.
-    pub fn plan_compaction(&self, keep_budget_bytes: usize) -> Option<CompactionPlan> {
-        let candidates = self.exchange_start_indices();
+    pub fn plan_compaction_before(
+        &self,
+        keep_budget_bytes: usize,
+        before_exchange: u64,
+    ) -> Option<CompactionPlan> {
+        self.plan_compaction_impl(keep_budget_bytes, Some(before_exchange))
+    }
 
-        // Walk the starts newest-first; the cut is the oldest one the budget
-        // still holds.  The default keeps nothing, so a lone exchange bigger
-        // than the whole budget falls back to summarising everything.
-        let mut cut = self.events.len();
-        let mut acc = 0usize;
-        let mut upper = self.events.len();
-        for &cand in candidates.iter().rev() {
-            acc += self.events[cand..upper]
+    fn plan_compaction_impl(
+        &self,
+        keep_budget_bytes: usize,
+        before_exchange: Option<u64>,
+    ) -> Option<CompactionPlan> {
+        let spans = &self.projection.view.spans;
+        let cap = before_exchange.map(|id| {
+            spans
                 .iter()
-                .map(event_message_bytes)
-                .sum::<usize>();
-            if acc <= keep_budget_bytes {
-                cut = cand;
-                upper = cand;
-            } else {
+                .position(|span| span.id >= id)
+                .unwrap_or(spans.len())
+        });
+        let mut suffix_start = cap.unwrap_or(spans.len());
+        if suffix_start == 0 {
+            return None;
+        }
+
+        let mut suffix_bytes = spans[suffix_start..]
+            .iter()
+            .map(|span| self.span_message_bytes(span))
+            .sum::<usize>();
+        for index in (0..suffix_start).rev() {
+            let bytes = self.span_message_bytes(&spans[index]);
+            let Some(total) = suffix_bytes.checked_add(bytes) else {
+                break;
+            };
+            if total > keep_budget_bytes {
                 break;
             }
+            suffix_bytes = total;
+            suffix_start = index;
         }
-        if cut == 0 {
+        if suffix_start == 0 {
             return None;
         }
 
         Some(CompactionPlan {
-            suffix_start: cut,
-            prefix_messages: self.project(&self.events[..cut]),
+            through_exchange: spans[suffix_start - 1].id,
+            prefix_messages: self.messages_for_spans(&spans[..suffix_start]),
         })
     }
 
-    /// Commit a planned compaction: record the `Compacted` breadcrumb, then
-    /// physically drop `events[..suffix_start]` from the in-memory mirror —
-    /// heap reclaimed, not merely a narrower read-time view.  Nothing leaves
-    /// `events.json`, and the failure path drops nothing at all.
-    ///
     /// # Errors
-    /// Tool results are pending, or recording the `Compacted` marker failed.
-    pub fn apply_compaction(&mut self, summary: String, suffix_start: usize) -> Result<(), String> {
-        if !self.can_compact() {
-            return Err("cannot compact while tool results are pending".into());
-        }
-        let before_bytes = self.history_bytes();
-        self.record_or_string_err(SessionEvent::Compacted {
-            before_bytes,
-            // Patched in memory below; the on-disk `0` stands, rather than
-            // rewrite a pretty-printed object in place.
-            after_bytes: 0,
-            summary: summary.clone(),
+    /// Refuses an empty drop, an unknown or folded exchange, or a live exchange.
+    pub fn apply_edit(&mut self, op: ContextOp, by: EditAuthority) -> Result<EditReceipt, String> {
+        self.validate_edit(&op)?;
+        let before = self.history_bytes();
+        self.record_or_string_err(SessionEvent::ContextEdited {
+            op: op.clone(),
+            by: by.clone(),
         })?;
-        // The marker just recorded sits at the tail, at or past `suffix_start`,
-        // so the drain takes only the summarised prefix.
-        self.events.drain(..suffix_start);
-        self.compaction = Some(Compaction { summary });
-        self.state = State::ReadyForUser;
         let after = self.history_bytes();
-        if let Some(SessionEvent::Compacted { after_bytes, .. }) = self.events.last_mut() {
-            *after_bytes = after;
+        let before = i64::try_from(before).unwrap_or(i64::MAX);
+        let after = i64::try_from(after).unwrap_or(i64::MAX);
+        Ok(EditReceipt {
+            op,
+            by,
+            bytes_delta: before.saturating_sub(after),
+        })
+    }
+
+    fn validate_edit(&self, op: &ContextOp) -> Result<(), String> {
+        match op {
+            ContextOp::Fold {
+                through_exchange, ..
+            } => {
+                if let Some(reach) = self
+                    .projection
+                    .view
+                    .digest
+                    .as_ref()
+                    .map(|d| d.through_exchange)
+                {
+                    if *through_exchange < reach {
+                        return Err(folded_exchange_refusal(*through_exchange, reach));
+                    }
+                    if *through_exchange == reach {
+                        return Ok(());
+                    }
+                }
+                if !self
+                    .projection
+                    .view
+                    .spans
+                    .iter()
+                    .any(|span| span.id == *through_exchange)
+                {
+                    return Err(unknown_exchange_refusal(*through_exchange));
+                }
+                if self.is_live_exchange(*through_exchange) {
+                    return Err(live_exchange_refusal(*through_exchange));
+                }
+            }
+            ContextOp::Drop { exchanges } => {
+                if exchanges.is_empty() {
+                    return Err("a context edit must name at least one exchange".into());
+                }
+                let mut named = HashSet::with_capacity(exchanges.len());
+                for exchange in exchanges {
+                    if !named.insert(*exchange) {
+                        return Err(format!("exchange {exchange} was named more than once"));
+                    }
+                    if self
+                        .projection
+                        .view
+                        .digest
+                        .as_ref()
+                        .is_some_and(|digest| *exchange < digest.through_exchange)
+                    {
+                        let reach = self
+                            .projection
+                            .view
+                            .digest
+                            .as_ref()
+                            .unwrap()
+                            .through_exchange;
+                        return Err(folded_exchange_refusal(*exchange, reach));
+                    }
+                    let is_digest = self
+                        .projection
+                        .view
+                        .digest
+                        .as_ref()
+                        .is_some_and(|digest| digest.through_exchange == *exchange);
+                    let is_span = self
+                        .projection
+                        .view
+                        .spans
+                        .iter()
+                        .any(|span| span.id == *exchange);
+                    if !is_digest && !is_span {
+                        return Err(unknown_exchange_refusal(*exchange));
+                    }
+                    if self.is_live_exchange(*exchange) {
+                        return Err(live_exchange_refusal(*exchange));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -701,19 +806,18 @@ impl AgentLog {
     /// survive.
     ///
     /// # Errors
-    /// Reopening `events.json`, or writing `SessionStarted`, failed.
+    /// Reopening `events.jsonl`, or writing `SessionStarted`, failed.
     pub fn clear(&mut self, system_prompt_bytes: usize) -> io::Result<()> {
-        self.events.clear();
-        self.state = State::ReadyForUser;
-        self.compaction = None;
-        self.events_file = open_events_file(&self.dir)?;
+        self.log.clear();
+        self.projection = Projection::default();
+        self.events_file = Some(open_events_file(&self.dir)?);
         self.record_started(None, system_prompt_bytes)
     }
 
     // ── Meta-events ───────────────────────────────────────────────────────
     //
     // One non-protocol breadcrumb each; all fail only on serialising or
-    // writing to `events.json`.
+    // writing to `events.jsonl`.
 
     /// # Errors
     /// See the meta-events note above.
@@ -778,10 +882,9 @@ impl AgentLog {
         Ok(Self {
             id: session_id,
             dir,
-            events_file,
-            events: Vec::new(),
-            state: State::ReadyForUser,
-            compaction: None,
+            events_file: Some(events_file),
+            log: Vec::new(),
+            projection: Projection::default(),
             model,
             provider,
             sessions_root,
@@ -808,14 +911,20 @@ impl AgentLog {
     /// The disk half of [`Self::record`], apart so [`Self::record_lossy`] can
     /// go on without it.
     fn write_event(&mut self, ev: &SessionEvent) -> io::Result<()> {
-        serde_json::to_writer_pretty(&mut self.events_file, ev).map_err(io::Error::other)?;
-        self.events_file.write_all(b"\n")?;
-        self.events_file.flush()
+        let Some(events_file) = self.events_file.as_mut() else {
+            return Err(io::Error::other("the session event log is not writable"));
+        };
+        serde_json::to_writer(&mut *events_file, ev).map_err(io::Error::other)?;
+        events_file.write_all(b"\n")?;
+        events_file.flush()
     }
 
     fn record(&mut self, ev: SessionEvent) -> io::Result<()> {
         self.write_event(&ev)?;
-        self.events.push(ev);
+        self.log.push(ev);
+        let index = self.log.len() - 1;
+        let event = self.log.last().expect("the event was just appended");
+        advance_projection(&mut self.projection, event, index);
         Ok(())
     }
 
@@ -827,42 +936,275 @@ impl AgentLog {
 
     /// [`Self::record`] with the disk write made best-effort.  Only
     /// [`Self::quiesce`] may use it: the protocol must reach
-    /// [`State::ReadyForUser`] even when `events.json` cannot be written.
+    /// [`State::ReadyForUser`] even when `events.jsonl` cannot be written.
     fn record_lossy(&mut self, ev: SessionEvent) {
         let _ = self.write_event(&ev);
-        self.events.push(ev);
+        self.log.push(ev);
+        let index = self.log.len() - 1;
+        let event = self.log.last().expect("the event was just appended");
+        advance_projection(&mut self.projection, event, index);
     }
 
-    /// The one place the model view's shape is spelled out: any live compaction
-    /// summary as a leading user message, then the slice.
-    fn project(&self, events: &[SessionEvent]) -> Vec<ChatMessage> {
-        let mut msgs = Vec::new();
-        if let Some(c) = &self.compaction {
-            msgs.push(ChatMessage::user(summary_prompt(&c.summary)));
-        }
-        for e in events {
-            msgs.extend(e.clone().into_chat_messages());
-        }
-        msgs
+    fn state(&self) -> &State {
+        &self.projection.state
     }
 
-    /// [`Self::project`] over every live event.
+    fn next_exchange(&self) -> u64 {
+        self.projection.max_exchange.saturating_add(1)
+    }
+
+    pub fn current_exchange(&self) -> Option<u64> {
+        (self.projection.max_exchange != 0).then_some(self.projection.max_exchange)
+    }
+
+    fn is_live_exchange(&self, id: u64) -> bool {
+        !self.is_ready() && self.projection.max_exchange == id
+    }
+
+    fn span_message_bytes(&self, span: &Span) -> usize {
+        self.span_messages(span, false, true)
+            .iter()
+            .map(|message| serde_json::to_string(message).map_or(0, |s| s.len()))
+            .sum()
+    }
+
+    fn messages_for_spans(&self, spans: &[Span]) -> Vec<ChatMessage> {
+        let mut messages = Vec::new();
+        if let Some(digest) = &self.projection.view.digest {
+            messages.push(ChatMessage::user(summary_prompt(&digest.text)));
+        }
+        for span in spans {
+            messages.extend(self.span_messages(span, false, true));
+        }
+        messages
+    }
+
+    fn project_view(&self, omit_tail_assistant: bool) -> Vec<ChatMessage> {
+        let spans = &self.projection.view.spans;
+        let mut messages = Vec::new();
+        if let Some(digest) = &self.projection.view.digest {
+            messages.push(ChatMessage::user(summary_prompt(&digest.text)));
+        }
+        for (index, span) in spans.iter().enumerate() {
+            let omit = omit_tail_assistant && index + 1 == spans.len();
+            let repair_end = index + 1 < spans.len() && !omit;
+            messages.extend(self.span_messages(span, omit, repair_end));
+        }
+        messages
+    }
+
+    fn span_messages(
+        &self,
+        span: &Span,
+        omit_tail_assistant: bool,
+        repair_end: bool,
+    ) -> Vec<ChatMessage> {
+        let end = span.events.end - usize::from(omit_tail_assistant);
+        let events = &self.log[span.events.start..end];
+        if matches!(events.first(), Some(SessionEvent::ContextMessage { .. })) {
+            return events
+                .iter()
+                .cloned()
+                .flat_map(SessionEvent::into_chat_messages)
+                .collect();
+        }
+
+        let mut state = State::ReadyForUser;
+        let mut messages = Vec::new();
+        for event in events {
+            if !admissible_event(&state, event) && stub_repairable(event) {
+                append_aborted_stubs(&mut state, &mut messages);
+            }
+            messages.extend(event.clone().into_chat_messages());
+            state = advance(state, event);
+        }
+        if repair_end && !matches!(state, State::ReadyForUser) {
+            append_aborted_stubs(&mut state, &mut messages);
+        }
+        messages
+    }
+
     fn model_messages(&self) -> Vec<ChatMessage> {
-        self.project(&self.events)
+        self.project_view(false)
     }
+}
+
+fn advance(state: State, event: &SessionEvent) -> State {
+    match event {
+        SessionEvent::UserPrompt { .. } => State::AwaitingAssistantAfterUser,
+        SessionEvent::AssistantMessage {
+            pending_tool_ids, ..
+        } if !pending_tool_ids.is_empty() => State::AwaitingToolResults {
+            pending_ids: pending_tool_ids.clone(),
+        },
+        SessionEvent::AssistantMessage { .. } => State::ReadyForUser,
+        SessionEvent::ToolResults { .. } => State::AwaitingAssistantAfterToolResults,
+        _ => state,
+    }
+}
+
+fn advance_projection(projection: &mut Projection, event: &SessionEvent, index: usize) {
+    let state = std::mem::replace(&mut projection.state, State::ReadyForUser);
+    projection.state = advance(state, event);
+    record_event_span(projection, event, index);
+    if let SessionEvent::ContextEdited { op, .. } = event {
+        apply_context_op(&mut projection.view, op);
+        projection.newest_edit = Some(index);
+    }
+}
+
+fn record_event_span(projection: &mut Projection, event: &SessionEvent, index: usize) {
+    if let Some(id) = event_exchange(event) {
+        let extended = projection
+            .view
+            .spans
+            .iter_mut()
+            .find(|span| span.id == id && span.events.end == index)
+            .map(|span| span.events.end = index + 1)
+            .is_some();
+        if !extended && id > projection.max_exchange {
+            projection.view.spans.push(Span {
+                id,
+                events: index..index + 1,
+            });
+        }
+        projection.max_exchange = projection.max_exchange.max(id);
+    } else if projection.max_exchange != 0 {
+        let id = projection.max_exchange;
+        if let Some(span) = projection
+            .view
+            .spans
+            .iter_mut()
+            .find(|span| span.id == id && span.events.end == index)
+        {
+            span.events.end = index + 1;
+        }
+    }
+}
+
+fn event_exchange(event: &SessionEvent) -> Option<u64> {
+    match event {
+        SessionEvent::UserPrompt { exchange, .. }
+        | SessionEvent::ContextMessage { exchange, .. } => Some(*exchange),
+        _ => None,
+    }
+}
+
+fn apply_context_op(view: &mut View, op: &ContextOp) {
+    match op {
+        ContextOp::Fold {
+            through_exchange,
+            digest,
+        } => {
+            view.digest = Some(Digest {
+                through_exchange: *through_exchange,
+                text: digest.clone(),
+            });
+            view.spans.retain(|span| span.id > *through_exchange);
+        }
+        ContextOp::Drop { exchanges } => {
+            let remove_digest = view
+                .digest
+                .as_ref()
+                .is_some_and(|digest| exchanges.contains(&digest.through_exchange));
+            if remove_digest {
+                view.digest = None;
+            }
+            view.spans.retain(|span| !exchanges.contains(&span.id));
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn fold(log: &[SessionEvent]) -> Projection {
+    let mut projection = Projection::default();
+    for (index, event) in log.iter().enumerate() {
+        advance_projection(&mut projection, event, index);
+    }
+    projection
+}
+
+fn admissible_event(state: &State, event: &SessionEvent) -> bool {
+    match event {
+        SessionEvent::UserPrompt { .. } => matches!(
+            state,
+            State::ReadyForUser | State::AwaitingAssistantAfterToolResults,
+        ),
+        SessionEvent::ContextMessage { .. } => matches!(state, State::ReadyForUser),
+        SessionEvent::AssistantMessage { message, .. } => {
+            message.role == ChatRole::Assistant
+                && matches!(
+                    state,
+                    State::AwaitingAssistantAfterUser | State::AwaitingAssistantAfterToolResults,
+                )
+        }
+        SessionEvent::ToolResults { results } => {
+            if let State::AwaitingToolResults { pending_ids } = state {
+                validate_result_ids(pending_ids, results).is_ok()
+            } else {
+                false
+            }
+        }
+        _ => true,
+    }
+}
+
+fn stub_repairable(event: &SessionEvent) -> bool {
+    matches!(
+        event,
+        SessionEvent::UserPrompt { .. } | SessionEvent::ContextMessage { .. }
+    )
+}
+
+fn append_aborted_stubs(state: &mut State, messages: &mut Vec<ChatMessage>) {
+    if let State::AwaitingToolResults { pending_ids } = state.clone() {
+        let results = pending_ids
+            .into_iter()
+            .map(|id| ToolResult {
+                id,
+                content: "no result: exchange aborted before tool execution".into(),
+            })
+            .collect();
+        let event = SessionEvent::ToolResults { results };
+        messages.extend(event.clone().into_chat_messages());
+        *state = advance(std::mem::replace(state, State::ReadyForUser), &event);
+    }
+    if !matches!(state, State::ReadyForUser) {
+        let event = SessionEvent::AssistantMessage {
+            message: ChatMessage::assistant("(no reply: exchange aborted)"),
+            pending_tool_ids: Vec::new(),
+            stop_reason: Some("aborted".into()),
+        };
+        messages.extend(event.clone().into_chat_messages());
+        *state = advance(std::mem::replace(state, State::ReadyForUser), &event);
+    }
+}
+
+fn live_exchange_refusal(id: u64) -> String {
+    format!("exchange {id} is the one you are in — a context edit may only name closed exchanges")
+}
+
+fn folded_exchange_refusal(id: u64, reach: u64) -> String {
+    format!(
+        "exchange {id} is folded into the digest through {reach} — name {reach} to drop the digest whole, or fold further"
+    )
+}
+
+fn unknown_exchange_refusal(id: u64) -> String {
+    format!("exchange {id} is not present in the current view")
 }
 
 /// Truncate-on-open: both callers, the constructor and `clear`, want it fresh.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:events-file] opens events.json for the session event log; infra, not turn-time data I/O"
+    reason = "[io-door:silent:events-file] opens events.jsonl for the session event log; infra, not turn-time data I/O"
 )]
 fn open_events_file(dir: &Path) -> io::Result<BufWriter<File>> {
     let f = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(dir.join("events.json"))?;
+        .open(dir.join("events.jsonl"))?;
     Ok(BufWriter::new(f))
 }
 
@@ -896,7 +1238,6 @@ mod tests {
     use super::*;
     use genai::chat::{ContentPart, ToolCall};
 
-    /// A `sessions/` root keyed to `tag` and this process, so tests never share.
     fn sessions_root(tag: &str) -> PathBuf {
         let p =
             std::env::temp_dir().join(format!("exarch-event-test-{}-{tag}", std::process::id()));
@@ -918,410 +1259,518 @@ mod tests {
         })])
     }
 
-    #[test]
-    fn rejects_user_while_tool_results_pending() {
-        let mut s = fresh_root("user-while-pending");
-        s.append_user("p".into()).unwrap();
-        s.append_assistant(assistant_with_tool("a"), vec!["a".into()], None)
+    fn complete_exchange(s: &mut AgentLog, user: &str, answer: &str) {
+        s.append_user(user.into(), None).unwrap();
+        s.append_assistant(ChatMessage::assistant(answer), vec![], None)
             .unwrap();
-        let err = s.append_user("next".into()).unwrap_err();
-        assert!(err.contains("cannot accept a new user prompt"));
     }
 
-    #[test]
-    fn validates_tool_result_ids() {
-        let mut s = fresh_root("validate-ids");
-        s.append_user("p".into()).unwrap();
-        s.append_assistant(assistant_with_tool("a"), vec!["a".into()], None)
-            .unwrap();
-        let err = s
-            .append_tool_results(vec![ToolResult {
-                id: "b".into(),
-                content: "x".into(),
-            }])
-            .unwrap_err();
-        assert!(err.contains("unknown tool result id"));
-    }
-
-    #[test]
-    fn renders_tool_results_as_chat_messages() {
-        let mut s = fresh_root("render-results");
-        s.append_user("p".into()).unwrap();
-        s.append_assistant(assistant_with_tool("t1"), vec!["t1".into()], None)
-            .unwrap();
-        s.append_tool_results(vec![ToolResult {
-            id: "t1".into(),
-            content: "ok".into(),
-        }])
-        .unwrap();
-        let ms = s.render_messages().unwrap();
-        let last = ms.last().unwrap();
-        assert_eq!(last.role, ChatRole::Tool);
-    }
-
-    #[test]
-    fn rejects_compaction_while_tools_pending() {
-        let mut s = fresh_root("compact-pending");
-        s.append_user("p".into()).unwrap();
-        s.append_assistant(assistant_with_tool("a"), vec!["a".into()], None)
-            .unwrap();
-        let err = s.apply_compaction("summary".into(), 0).unwrap_err();
-        assert!(err.contains("cannot compact"));
-    }
-
-    #[test]
-    fn inherited_context_drops_the_unanswered_tool_call() {
-        let mut s = fresh_root("inherit-pending");
-        s.append_user("parent task".into()).unwrap();
-        s.append_assistant(assistant_with_tool("a"), vec!["a".into()], None)
-            .unwrap();
-
-        let inherited = s.inherited_context_messages();
-
-        assert_eq!(inherited.len(), 1);
-        assert_eq!(inherited[0].role, ChatRole::User);
-        let view = serde_json::to_string(&inherited).unwrap();
-        assert!(view.contains("parent task"));
-        assert!(!view.contains("ToolCall"));
-        assert!(
-            !view.contains("\"ral\""),
-            "the pending assistant tool-call frame must not be inherited: {view}"
-        );
-    }
-
-    #[test]
-    fn import_context_keeps_the_child_ready_for_a_seeded_prompt() {
-        let mut s = fresh_root("import-context");
-        s.import_context(vec![
-            ChatMessage::user("old question"),
-            ChatMessage::assistant("old answer"),
-        ])
-        .unwrap();
-        assert!(s.is_ready());
-        s.append_user("fresh task".into()).unwrap();
-
-        let ms = s.render_messages().unwrap();
+    fn assert_wiring(s: &AgentLog) {
         assert_eq!(
-            ms.iter().map(|m| m.role.clone()).collect::<Vec<_>>(),
-            vec![ChatRole::User, ChatRole::Assistant, ChatRole::User]
-        );
-        let view = serde_json::to_string(&ms).unwrap();
-        assert!(view.contains("old question"));
-        assert!(view.contains("old answer"));
-        assert!(
-            view.rfind("fresh task") > view.rfind("old answer"),
-            "the child prompt must be the final model-visible message: {view}"
+            fold(&s.log),
+            s.projection,
+            "fold(log) == memo after the append or edit"
         );
     }
 
-    #[test]
-    fn compaction_truncates_model_view_but_preserves_disk_log() {
-        let mut s = fresh_root("compact-view");
-        s.append_user("first".into()).unwrap();
-        s.append_assistant(ChatMessage::assistant("done"), vec![], None)
-            .unwrap();
-        // Keep no suffix, as when no exchange fits the budget at all.
-        let cut = s.events.len();
-        s.apply_compaction("did stuff".into(), cut).unwrap();
-        // Compaction lands ready; prime a prompt the way the REPL would.
-        s.append_user("next".into()).unwrap();
-        let ms = s.render_messages().unwrap();
-        // Summary prompt plus the new user message, and no history.
-        assert_eq!(ms.len(), 2);
-        assert!(matches!(ms[0].role, ChatRole::User));
-        assert!(matches!(ms[1].role, ChatRole::User));
-        let contents = fs::read_to_string(s.dir().join("events.json")).unwrap();
-        assert!(contents.contains("first"));
-        assert!(contents.contains("compacted"));
-    }
-
-    #[test]
-    fn compaction_keeps_the_recent_suffix_and_summarises_the_prefix() {
-        let mut s = fresh_root("compact-suffix");
-        for (u, a) in [("USER1", "ASST1"), ("USER2", "ASST2"), ("USER3", "ASST3")] {
-            s.append_user(u.into()).unwrap();
-            s.append_assistant(ChatMessage::assistant(a), vec![], None)
-                .unwrap();
-        }
-
-        // A budget holding exactly the last exchange keeps it verbatim.
-        let last_exchange = &s.events[s.events.len() - 2..];
-        let keep = last_exchange.iter().map(event_message_bytes).sum::<usize>();
-        let plan = s.plan_compaction(keep).expect("a prefix to summarise");
-        s.apply_compaction("PRIOR-WORK".into(), plan.suffix_start)
-            .unwrap();
-
-        let view = serde_json::to_string(&s.history_messages()).unwrap();
-        assert!(view.contains("PRIOR-WORK"));
-        assert!(view.contains("USER3") && view.contains("ASST3"));
-        // The summarised prefix is gone from the model view…
-        assert!(!view.contains("USER1") && !view.contains("USER2"));
-        // …but still on disk.
-        let disk = fs::read_to_string(s.dir().join("events.json")).unwrap();
-        assert!(disk.contains("USER1") && disk.contains("ASST2"));
-    }
-
-    /// Two tool-bearing exchanges, the second steered mid-batch: the shapes the
-    /// bare user/assistant fixtures above never put in a compaction's way.
-    fn tool_bearing_log(tag: &str) -> AgentLog {
-        let mut s = fresh_root(tag);
-        for (u, id) in [("U1", "a"), ("U2", "b")] {
-            s.append_user(u.into()).unwrap();
-            s.append_assistant(assistant_with_tool(id), vec![id.into()], None)
-                .unwrap();
-            s.append_tool_results(vec![ToolResult {
-                id: id.into(),
-                content: "ok".into(),
-            }])
-            .unwrap();
-            if id == "b" {
-                s.append_steering("STEER".into()).unwrap();
-            }
-            s.append_assistant(ChatMessage::assistant("A"), vec![], None)
-                .unwrap();
-        }
-        s
-    }
-
-    /// Whatever the keep budget, the kept suffix is a whole exchange: no cut
-    /// orphans a tool result from the assistant turn that called it, and none
-    /// opens the suffix on a steering prompt, which is mid-exchange user text
-    /// rather than an exchange boundary.  Either would 400 every provider.
-    #[test]
-    fn no_compaction_cut_orphans_a_tool_result() {
-        let total = tool_bearing_log("orphan-total")
-            .events
-            .iter()
-            .map(event_message_bytes)
-            .sum::<usize>();
-
-        for keep in [0, 1].into_iter().chain((0..=10).map(|i| total * i / 10)) {
-            let mut s = tool_bearing_log("orphan-sweep");
-            let Some(plan) = s.plan_compaction(keep) else {
-                continue;
-            };
-            s.apply_compaction("SUMMARY".into(), plan.suffix_start)
-                .unwrap();
-            let ms = s.history_messages();
-            assert_ne!(
-                ms.get(1).and_then(|m| m.content.first_text()),
-                Some("STEER"),
-                "keep={keep}: a steering prompt must never open the kept suffix"
-            );
-            for (i, m) in ms.iter().enumerate() {
-                for part in &m.content {
-                    let ContentPart::ToolResponse(r) = part else {
-                        continue;
-                    };
-                    assert!(
-                        ms[..i]
-                            .iter()
-                            .rev()
-                            .take_while(|p| p.role != ChatRole::User)
-                            .any(|p| p.content.iter().any(|q| matches!(
-                                q,
-                                ContentPart::ToolCall(tc) if tc.call_id == r.call_id
-                            ))),
-                        "keep={keep}: tool result {} answers a call no longer in context",
-                        r.call_id
-                    );
+    fn independent_advance(state: State, event: &SessionEvent) -> State {
+        match event {
+            SessionEvent::UserPrompt { .. } => State::AwaitingAssistantAfterUser,
+            SessionEvent::AssistantMessage {
+                pending_tool_ids, ..
+            } => {
+                if pending_tool_ids.is_empty() {
+                    State::ReadyForUser
+                } else {
+                    State::AwaitingToolResults {
+                        pending_ids: pending_tool_ids.clone(),
+                    }
                 }
             }
+            SessionEvent::ToolResults { .. } => State::AwaitingAssistantAfterToolResults,
+            _ => state,
         }
     }
 
-    /// A successful compaction reclaims heap: `event_count` and `history_bytes`
-    /// shrink, not just the read-time model view.
-    #[test]
-    fn apply_compaction_physically_drops_the_prefix_from_the_event_mirror() {
-        let mut s = fresh_root("compact-drops-prefix");
-        for (u, a) in [("USER1", "ASST1"), ("USER2", "ASST2"), ("USER3", "ASST3")] {
-            s.append_user(u.into()).unwrap();
-            s.append_assistant(ChatMessage::assistant(a), vec![], None)
-                .unwrap();
+    fn independent_batch_reference(log: &[SessionEvent]) -> Projection {
+        let mut projection = Projection::default();
+        let mut tail_id = None;
+
+        for (index, event) in log.iter().enumerate() {
+            projection.state = independent_advance(projection.state.clone(), event);
+
+            let exchange = match event {
+                SessionEvent::UserPrompt { exchange, .. }
+                | SessionEvent::ContextMessage { exchange, .. } => Some(*exchange),
+                _ => None,
+            };
+            if let Some(exchange) = exchange {
+                if tail_id == Some(exchange) {
+                    if let Some(span) = projection
+                        .view
+                        .spans
+                        .iter_mut()
+                        .find(|span| span.id == exchange && span.events.end == index)
+                    {
+                        span.events.end = index + 1;
+                    }
+                } else if exchange > projection.max_exchange {
+                    projection.view.spans.push(Span {
+                        id: exchange,
+                        events: index..index + 1,
+                    });
+                    tail_id = Some(exchange);
+                }
+                projection.max_exchange = projection.max_exchange.max(exchange);
+            } else if let Some(tail_id) = tail_id
+                && let Some(span) = projection
+                    .view
+                    .spans
+                    .iter_mut()
+                    .find(|span| span.id == tail_id && span.events.end == index)
+            {
+                span.events.end = index + 1;
+            }
+
+            if let SessionEvent::ContextEdited { op, .. } = event {
+                match op {
+                    ContextOp::Fold {
+                        through_exchange,
+                        digest,
+                    } => {
+                        projection.view.digest = Some(Digest {
+                            through_exchange: *through_exchange,
+                            text: digest.clone(),
+                        });
+                        projection
+                            .view
+                            .spans
+                            .retain(|span| span.id > *through_exchange);
+                    }
+                    ContextOp::Drop { exchanges } => {
+                        let remove_digest = projection
+                            .view
+                            .digest
+                            .as_ref()
+                            .is_some_and(|digest| exchanges.contains(&digest.through_exchange));
+                        if remove_digest {
+                            projection.view.digest = None;
+                        }
+                        projection
+                            .view
+                            .spans
+                            .retain(|span| !exchanges.contains(&span.id));
+                    }
+                }
+                projection.newest_edit = Some(index);
+            }
         }
-        let count_before = s.event_count();
-        let bytes_before = s.history_bytes();
 
-        let last_exchange = &s.events[s.events.len() - 2..];
-        let keep = last_exchange.iter().map(event_message_bytes).sum::<usize>();
-        let plan = s.plan_compaction(keep).expect("a prefix to summarise");
-        let kept_len = s.events.len() - plan.suffix_start;
-        s.apply_compaction("PRIOR-WORK".into(), plan.suffix_start)
-            .unwrap();
-
-        // The mirror is the kept suffix plus the marker just recorded.
-        assert_eq!(
-            s.event_count(),
-            kept_len + 1,
-            "event_count drops to summary + suffix, not before-compaction size"
-        );
-        assert!(
-            s.event_count() < count_before,
-            "the mirror is strictly smaller than before compaction"
-        );
-        assert!(
-            s.history_bytes() < bytes_before,
-            "history_bytes drops along with the physically-dropped prefix"
-        );
+        projection
     }
 
-    /// Reclamation is for heap, never history: what was on disk before a
-    /// compaction survives as an exact prefix of what is on disk after.
-    #[test]
-    fn apply_compaction_leaves_the_durable_events_file_byte_for_byte_intact() {
-        let mut s = fresh_root("compact-disk-untouched");
-        for (u, a) in [("USER1", "ASST1"), ("USER2", "ASST2"), ("USER3", "ASST3")] {
-            s.append_user(u.into()).unwrap();
-            s.append_assistant(ChatMessage::assistant(a), vec![], None)
-                .unwrap();
+    fn independent_messages(log: &[SessionEvent], projection: &Projection) -> Vec<ChatMessage> {
+        let mut messages = Vec::new();
+        if let Some(digest) = &projection.view.digest {
+            messages.push(ChatMessage::user(summary_prompt(&digest.text)));
         }
-        let before = fs::read_to_string(s.dir().join("events.json")).unwrap();
+        for span in &projection.view.spans {
+            for event in &log[span.events.clone()] {
+                messages.extend(event.clone().into_chat_messages());
+            }
+        }
+        messages
+    }
 
-        let last_exchange = &s.events[s.events.len() - 2..];
-        let keep = last_exchange.iter().map(event_message_bytes).sum::<usize>();
-        let plan = s.plan_compaction(keep).expect("a prefix to summarise");
-        s.apply_compaction("PRIOR-WORK".into(), plan.suffix_start)
+    #[test]
+    fn span_partition_records_steering_imports_and_unaddressable_prefixes() {
+        let mut s = fresh_root("span-partition");
+        s.record_error("before the first prompt".into()).unwrap();
+        s.import_context(vec![ChatMessage::user("inherited")])
             .unwrap();
-
-        let after = fs::read_to_string(s.dir().join("events.json")).unwrap();
-        assert!(
-            after.starts_with(&before),
-            "the pre-compaction file contents survive untouched as a prefix; \
-             compaction only ever appends, never rewrites"
-        );
-        assert!(
-            after.len() > before.len(),
-            "the Compacted breadcrumb is appended, so the file grows"
-        );
-    }
-
-    /// A failed compaction drops nothing: the drop only ever runs after the
-    /// breadcrumb is durably recorded.
-    #[test]
-    fn apply_compaction_failure_drops_nothing() {
-        let mut s = fresh_root("compact-fails-drops-nothing");
-        s.append_user("p".into()).unwrap();
-        s.append_assistant(assistant_with_tool("a"), vec!["a".into()], None)
-            .unwrap();
-        let count_before = s.event_count();
-        let bytes_before = s.history_bytes();
-
-        let err = s.apply_compaction("summary".into(), 0).unwrap_err();
-        assert!(err.contains("cannot compact"));
-        assert_eq!(
-            s.event_count(),
-            count_before,
-            "a failed compaction drops nothing from the mirror"
-        );
-        assert_eq!(
-            s.history_bytes(),
-            bytes_before,
-            "a failed compaction leaves history_bytes unchanged"
-        );
-        assert!(s.compaction.is_none(), "no compaction state was installed");
-    }
-
-    #[test]
-    fn quiesce_after_user_admits_next_prompt() {
-        let mut s = fresh_root("quiesce-user");
-        s.append_user("p".into()).unwrap();
-        s.quiesce(QuiesceReason::Cancelled);
-        s.append_user("next".into()).unwrap();
-    }
-
-    #[test]
-    fn quiesce_during_tool_results_admits_next_prompt() {
-        let mut s = fresh_root("quiesce-tools");
-        s.append_user("p".into()).unwrap();
-        s.append_assistant(assistant_with_tool("a"), vec!["a".into()], None)
-            .unwrap();
-        s.quiesce(QuiesceReason::Cancelled);
-        s.append_user("next".into()).unwrap();
-    }
-
-    #[test]
-    fn quiesce_after_tool_results_admits_next_prompt() {
-        let mut s = fresh_root("quiesce-after");
-        s.append_user("p".into()).unwrap();
-        s.append_assistant(assistant_with_tool("a"), vec!["a".into()], None)
+        complete_exchange(&mut s, "prompt", "answer");
+        s.append_user("tool prompt".into(), None).unwrap();
+        s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
             .unwrap();
         s.append_tool_results(vec![ToolResult {
-            id: "a".into(),
-            content: "ok".into(),
+            id: "call".into(),
+            content: "result".into(),
         }])
         .unwrap();
-        s.quiesce(QuiesceReason::Cancelled);
-        s.append_user("next".into()).unwrap();
-    }
+        s.append_steering("steer".into()).unwrap();
+        s.append_assistant(ChatMessage::assistant("finished"), vec![], None)
+            .unwrap();
 
-    #[test]
-    fn quiesce_when_ready_is_a_noop() {
-        let mut s = fresh_root("quiesce-noop");
-        s.quiesce(QuiesceReason::Cancelled);
-        // Nothing was pending, so no breadcrumb.
-        assert!(
-            !s.events
+        assert_eq!(
+            s.view()
+                .spans
                 .iter()
-                .any(|e| matches!(e, SessionEvent::Cancelled))
+                .map(|span| span.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(s.view().spans[0].events.start, 2);
+        assert_eq!(
+            s.log[s.view().spans[2].events.clone()]
+                .iter()
+                .filter_map(event_exchange)
+                .collect::<Vec<_>>(),
+            vec![3, 3]
+        );
+        assert!(
+            !s.history_messages()
+                .iter()
+                .any(|message| message.content.first_text() == Some("before the first prompt"))
         );
     }
 
-    /// An abort, not a cancel, must still wind a committed-but-unanswered
-    /// prompt back: stranded, the session rejects every prompt until `/clear`.
     #[test]
-    fn quiesce_after_abort_admits_next_prompt() {
-        let mut s = fresh_root("quiesce-abort");
-        s.append_user("p".into()).unwrap();
-        // The provider call errored out, so no assistant reply arrives.
-        assert!(!s.is_ready());
+    fn exchange_ids_mint_monotonically_across_edits() {
+        let mut s = fresh_root("minting");
+        complete_exchange(&mut s, "one", "one");
+        complete_exchange(&mut s, "two", "two");
+        assert_eq!(s.current_exchange(), Some(2));
+        s.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::Model)
+            .unwrap();
+        complete_exchange(&mut s, "three", "three");
+        assert_eq!(s.current_exchange(), Some(3));
+        s.apply_edit(
+            ContextOp::Fold {
+                through_exchange: 1,
+                digest: "old".into(),
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+        complete_exchange(&mut s, "four", "four");
+        assert_eq!(s.current_exchange(), Some(4));
+    }
+
+    #[test]
+    fn continues_resolution_requires_maximum_and_survival() {
+        let mut joins = fresh_root("continues-joins");
+        complete_exchange(&mut joins, "one", "one");
+        joins.append_user("nudge".into(), Some(1)).unwrap();
+        assert_eq!(joins.current_exchange(), Some(1));
+        assert_eq!(joins.view().spans.len(), 1);
+
+        let mut rewound = fresh_root("continues-rewound");
+        complete_exchange(&mut rewound, "one", "one");
+        rewound
+            .apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::Model)
+            .unwrap();
+        rewound.append_user("fresh".into(), Some(1)).unwrap();
+        assert_eq!(rewound.current_exchange(), Some(2));
+
+        let mut intervened = fresh_root("continues-intervened");
+        complete_exchange(&mut intervened, "one", "one");
+        complete_exchange(&mut intervened, "two", "two");
+        intervened.append_user("fresh".into(), Some(1)).unwrap();
+        assert_eq!(intervened.current_exchange(), Some(3));
+
+        let mut drop_n_plus_one = fresh_root("continues-drop-n-plus-one");
+        complete_exchange(&mut drop_n_plus_one, "one", "one");
+        complete_exchange(&mut drop_n_plus_one, "two", "two");
+        drop_n_plus_one
+            .apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::Model)
+            .unwrap();
+        drop_n_plus_one
+            .append_user("fresh".into(), Some(1))
+            .unwrap();
+        assert_eq!(
+            drop_n_plus_one.current_exchange(),
+            Some(3),
+            "last-in-view is not enough when the log has moved past n"
+        );
+    }
+
+    #[test]
+    fn edit_admissibility_refuses_live_unknown_folded_and_empty_names() {
+        let mut live = fresh_root("edit-live");
+        live.append_user("live".into(), None).unwrap();
+        let err = live
+            .apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::Model)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "exchange 1 is the one you are in — a context edit may only name closed exchanges"
+        );
+
+        let mut unknown = fresh_root("edit-unknown");
+        complete_exchange(&mut unknown, "one", "one");
+        let err = unknown
+            .apply_edit(ContextOp::Drop { exchanges: vec![7] }, EditAuthority::User)
+            .unwrap_err();
+        assert_eq!(err, "exchange 7 is not present in the current view");
+
+        let err = unknown
+            .apply_edit(ContextOp::Drop { exchanges: vec![] }, EditAuthority::User)
+            .unwrap_err();
+        assert_eq!(err, "a context edit must name at least one exchange");
+
+        unknown
+            .apply_edit(
+                ContextOp::Fold {
+                    through_exchange: 1,
+                    digest: "summary".into(),
+                },
+                EditAuthority::Harness,
+            )
+            .unwrap();
+        let err = unknown
+            .apply_edit(ContextOp::Drop { exchanges: vec![0] }, EditAuthority::Model)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "exchange 0 is folded into the digest through 1 — name 1 to drop the digest whole, or fold further"
+        );
+    }
+
+    #[test]
+    fn fold_of_fold_updates_one_digest_and_keeps_the_suffix() {
+        let mut s = fresh_root("fold-of-fold");
+        complete_exchange(&mut s, "one", "one");
+        complete_exchange(&mut s, "two", "two");
+        s.apply_edit(
+            ContextOp::Fold {
+                through_exchange: 1,
+                digest: "first digest".into(),
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+        s.apply_edit(
+            ContextOp::Fold {
+                through_exchange: 1,
+                digest: "second digest".into(),
+            },
+            EditAuthority::Model,
+        )
+        .unwrap();
+
+        assert_eq!(
+            s.view().digest,
+            Some(Digest {
+                through_exchange: 1,
+                text: "second digest".into(),
+            })
+        );
+        assert_eq!(
+            s.view()
+                .spans
+                .iter()
+                .map(|span| span.id)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn digest_addressing_drops_the_digest_at_its_reach() {
+        let mut s = fresh_root("digest-address");
+        complete_exchange(&mut s, "one", "one");
+        complete_exchange(&mut s, "two", "two");
+        s.apply_edit(
+            ContextOp::Fold {
+                through_exchange: 1,
+                digest: "digest".into(),
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+        s.apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::User)
+            .unwrap();
+        assert!(s.view().digest.is_none());
+        assert_eq!(
+            s.view()
+                .spans
+                .iter()
+                .map(|span| span.id)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn fold_log_equals_memo_proves_wiring() {
+        let mut s = fresh_root("fold-memo");
+        assert_wiring(&s);
+        s.record_error("breadcrumb".into()).unwrap();
+        assert_wiring(&s);
+        complete_exchange(&mut s, "one", "one");
+        assert_wiring(&s);
+        s.apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::User)
+            .unwrap();
+        assert_wiring(&s);
+    }
+
+    #[test]
+    fn independent_batch_reference_proves_the_step() {
+        let mut s = fresh_root("batch-reference");
+        s.record_error("before".into()).unwrap();
+        complete_exchange(&mut s, "one", "one");
+        complete_exchange(&mut s, "two", "two");
+        s.apply_edit(
+            ContextOp::Fold {
+                through_exchange: 1,
+                digest: "digest".into(),
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+        s.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::Model)
+            .unwrap();
+
+        let reference = independent_batch_reference(&s.log);
+        assert_eq!(reference, s.projection);
+        assert_eq!(
+            serde_json::to_vec(&independent_messages(&s.log, &reference)).unwrap(),
+            serde_json::to_vec(&s.history_messages()).unwrap(),
+        );
+    }
+
+    #[test]
+    fn fold_only_histories_keep_model_messages_byte_identical() {
+        let mut s = fresh_root("fold-only-identity");
+        s.record_error("not visible".into()).unwrap();
+        complete_exchange(&mut s, "one", "one");
+        s.append_user("steering".into(), Some(1)).unwrap();
+        s.append_assistant(ChatMessage::assistant("done"), vec![], None)
+            .unwrap();
+
+        let expected = independent_messages(&s.log, &fold(&s.log));
+        assert_eq!(
+            serde_json::to_vec(&expected).unwrap(),
+            serde_json::to_vec(&s.history_messages()).unwrap()
+        );
+    }
+
+    #[test]
+    fn interior_lost_stub_seam_is_repaired_by_projection() {
+        let mut s = fresh_root("interior-seam");
+        s.append_user("first".into(), None).unwrap();
         s.quiesce(QuiesceReason::Aborted);
-        assert!(s.is_ready());
-        s.append_user("next".into()).unwrap();
-        // An abort's marker is the surfaced `ProviderError`, not `Cancelled`.
+        complete_exchange(&mut s, "second", "answer");
+
+        let removed = s
+            .log
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    SessionEvent::AssistantMessage {
+                        stop_reason: Some(reason),
+                        ..
+                    } if reason == "aborted"
+                )
+            })
+            .expect("aborted stub");
+        s.log.remove(removed);
+        s.projection = fold(&s.log);
+
+        let messages = s.history_messages();
         assert!(
-            !s.events
-                .iter()
-                .any(|e| matches!(e, SessionEvent::Cancelled))
+            messages.iter().any(|message| {
+                message.content.first_text() == Some("(no reply: exchange aborted)")
+            }),
+            "the lost interior stub must be interposed"
         );
     }
 
     #[test]
-    fn events_json_is_appended_pretty_per_event() {
-        let mut s = fresh_root("pretty");
-        s.append_user("hi".into()).unwrap();
-        let body = fs::read_to_string(s.dir().join("events.json")).unwrap();
-        // Pretty printing puts the `"kind"` field on its own indented line.
-        assert!(body.contains("\n  \"kind\":"));
-        // session_started + user_prompt = 2.
-        let parsed: Vec<SessionEvent> = serde_json::Deserializer::from_str(&body)
+    fn user_ending_import_span_is_never_torn() {
+        let mut s = fresh_root("user-ending-import");
+        s.import_context(vec![ChatMessage::user("imported user")])
+            .unwrap();
+        complete_exchange(&mut s, "normal", "answer");
+
+        let messages = s.history_messages();
+        assert_eq!(
+            messages
+                .iter()
+                .filter_map(|message| message.content.first_text())
+                .collect::<Vec<_>>(),
+            vec!["imported user", "normal", "answer"]
+        );
+    }
+
+    #[test]
+    fn compaction_plan_walks_newest_spans_and_folds_by_exchange() {
+        let mut s = fresh_root("compaction-plan");
+        complete_exchange(&mut s, "one", "one");
+        complete_exchange(&mut s, "two", "two");
+        complete_exchange(&mut s, "three", "three");
+        let keep = s.span_message_bytes(&s.view().spans[2]);
+        let plan = s.plan_compaction(keep).expect("old spans to fold");
+        assert_eq!(plan.through_exchange, 2);
+        assert!(
+            plan.prefix_messages
+                .iter()
+                .any(|message| { message.content.first_text() == Some("one") })
+        );
+        s.apply_edit(
+            ContextOp::Fold {
+                through_exchange: plan.through_exchange,
+                digest: "summary".into(),
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+        assert_eq!(s.view().digest.as_ref().unwrap().through_exchange, 2);
+        assert!(
+            !s.history_messages()
+                .iter()
+                .any(|message| { message.content.first_text() == Some("one") })
+        );
+    }
+
+    #[test]
+    fn jsonl_round_trip_contains_context_edit_events() {
+        let mut s = fresh_root("jsonl-round-trip");
+        complete_exchange(&mut s, "one", "one");
+        s.apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::User)
+            .unwrap();
+
+        let file = File::open(s.dir().join("events.jsonl")).unwrap();
+        let parsed: Vec<SessionEvent> = serde_json::Deserializer::from_reader(file)
             .into_iter::<SessionEvent>()
             .collect::<Result<_, _>>()
             .expect("round-trip");
-        assert_eq!(parsed.len(), 2);
-        assert!(matches!(parsed[0], SessionEvent::SessionStarted { .. }));
-        assert!(matches!(parsed[1], SessionEvent::UserPrompt { .. }));
+        assert!(parsed.iter().any(|event| {
+            matches!(
+                event,
+                SessionEvent::ContextEdited {
+                    op: ContextOp::Drop { exchanges },
+                    by: EditAuthority::User,
+                } if exchanges == &[1]
+            )
+        }));
     }
 
-    /// The breadcrumbs — an error diagnostic, a nudge — round-trip as typed
-    /// events.  Operational notes deliberately do not: they belong only to
-    /// `transcript.jsonl`.
     #[test]
-    fn diagnostic_events_round_trip_through_disk() {
+    fn diagnostic_events_round_trip_through_jsonl() {
         let mut s = fresh_root("diagnostic-roundtrip");
         s.record_error("boom".into()).unwrap();
         s.record_nudge(2, 3, "stop=length".into()).unwrap();
-        let body = fs::read_to_string(s.dir().join("events.json")).unwrap();
-        let parsed: Vec<SessionEvent> = serde_json::Deserializer::from_str(&body)
+        let file = File::open(s.dir().join("events.jsonl")).unwrap();
+        let parsed: Vec<SessionEvent> = serde_json::Deserializer::from_reader(file)
             .into_iter::<SessionEvent>()
             .collect::<Result<_, _>>()
             .expect("round-trip");
-        // session_started + 2 diagnostics.
         assert_eq!(parsed.len(), 3);
         assert!(matches!(&parsed[1], SessionEvent::Error { text } if text == "boom"));
         assert!(matches!(
             &parsed[2],
             SessionEvent::Nudge { used: 2, max: 3, cause } if cause == "stop=length"
         ));
+    }
+
+    #[test]
+    fn quiesce_after_abort_admits_next_prompt() {
+        let mut s = fresh_root("quiesce-abort");
+        s.append_user("p".into(), None).unwrap();
+        s.quiesce(QuiesceReason::Aborted);
+        assert!(s.is_ready());
+        s.append_user("next".into(), None).unwrap();
     }
 }

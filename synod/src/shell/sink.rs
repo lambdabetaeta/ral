@@ -205,7 +205,7 @@ pub fn project(kind: Kind) -> Option<SynodEvent> {
         // never shown live.  `Pin`/`Unpin` write a TUI register slot synod
         // does not have.  `Nudge` and `SystemNote` are the harness minding
         // itself — an empty-turn correction, a truncation recovery, a
-        // compaction's byte counts — named in the operator's terms, so the
+        // context-edit and compaction state — named in the operator's terms, so the
         // window is not told; the state a compaction announces is its whole
         // user-facing surface.
         Kind::Born { .. }
@@ -214,6 +214,7 @@ pub fn project(kind: Kind) -> Option<SynodEvent> {
         | Kind::Thinking(_)
         | Kind::Nudge { .. }
         | Kind::SystemNote(_)
+        | Kind::ContextEdited { .. }
         | Kind::Reasoning { .. }
         | Kind::UserPromptEcho(_)
         | Kind::ToolResult(_)

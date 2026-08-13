@@ -272,6 +272,7 @@ impl Sink for Headless<'_> {
             Kind::SystemNote(text) => {
                 let _ = writeln!(self.err, "{text}");
             }
+            Kind::ContextEdited { .. } => {}
             Kind::Nudge {
                 used, max, cause, ..
             } if id == self.root_id => {

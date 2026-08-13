@@ -80,7 +80,7 @@ impl Agent {
     }
 
     /// An operational note: it reaches the transcript and the display, but has
-    /// no model-view `events.json` twin, since the model never saw it.
+    /// no model-view `events.jsonl` twin, since the model never saw it.
     pub(crate) fn note(text: String, emit: &Emitter) {
         emit.emit(Kind::SystemNote(text));
     }
@@ -335,7 +335,7 @@ mod tests {
         let emit = Emitter::new(tx, session.id);
         let token = cancel::Token::new();
         let _slot = cancel::publish(&token);
-        match session.deliberate(&provider2, Some("continue".into()), &token, &emit) {
+        match session.deliberate(&provider2, Some("continue".into()), None, &token, &emit) {
             Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "ok"),
             other => panic!("next exchange on the healed shell must complete, got {other:?}"),
         }

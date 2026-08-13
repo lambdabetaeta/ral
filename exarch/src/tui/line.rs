@@ -157,7 +157,7 @@ pub(super) fn thinking_header(
 // ── Public line builders ─────────────────────────────────────────────────────
 
 /// Step separator: one blank line.  The number itself reaches only
-/// `events.json` / `user.log`; on screen the boundary is whitespace alone.
+/// `events.jsonl` / `user.log`; on screen the boundary is whitespace alone.
 pub(super) fn step(_n: usize) -> Vec<Line<'static>> {
     vec![Line::default()]
 }

@@ -1401,6 +1401,7 @@ mod tests {
         let outcome = session.deliberate(
             &provider_handle,
             Some("go".into()),
+            None,
             &crate::agent::cancel::Token::new(),
             &emit,
         );

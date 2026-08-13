@@ -135,7 +135,10 @@ pub(crate) enum Post {
     /// The synthetic continuation the agent posts to *itself* when the nudge
     /// registry turns an attempt back — the same exchange continuing, pushed
     /// through the agent's own `Inbox` and never across agents.
-    Nudge(String),
+    Nudge {
+        exchange: u64,
+        text: String,
+    },
     /// A session-affecting slash command (`/clear`, `/model`, `/compact`,
     /// `/quit`), raw.  The attend loop owns the session it mutates, so it hands
     /// the line to its [`Control`](crate::agent::Control); view-only commands
@@ -188,7 +191,7 @@ pub(super) fn source_name(msg: &Post) -> &'static str {
         Post::ScheduledWakeup { .. } => "schedule",
         Post::AgentResult(_) => "agent",
         Post::AgentMessage(_) => "message",
-        Post::Nudge(_) => "nudge",
+        Post::Nudge { .. } => "nudge",
         Post::Command(_) => "command",
         Post::Surface { .. } => "surface",
     }
@@ -230,7 +233,7 @@ pub(crate) enum Item {
     Message(AgentMessage),
     /// The agent's continuation of its own exchange: no human chrome, and it
     /// opens no new exchange.
-    Nudge(String),
+    Nudge { exchange: u64, text: String },
     /// A raw slash command for the attend loop's [`Control`](crate::agent::Control).
     Command(String),
     /// A detached `spawn` worker's deferred `surface` batch.
@@ -251,7 +254,8 @@ impl Item {
     /// The text the model sees when this item drains into context.
     pub(crate) fn text(&self) -> String {
         match self {
-            Self::Human(s) | Self::Wakeup(s) | Self::Nudge(s) | Self::Command(s) => s.clone(),
+            Self::Human(s) | Self::Wakeup(s) | Self::Command(s) => s.clone(),
+            Self::Nudge { text, .. } => text.clone(),
             Self::Agent(r) => r.render(),
             Self::Message(m) => m.render(),
             Self::Surface { values, .. } => surface_notice(values),
@@ -262,6 +266,13 @@ impl Item {
     /// latches and a prior exchange's bare interrupt.  A self-nudge is the same
     /// exchange continuing, so it alone does not.
     pub(crate) fn opens_exchange(&self) -> bool {
-        !matches!(self, Self::Nudge(_))
+        !matches!(self, Self::Nudge { .. })
+    }
+
+    pub(crate) fn continues(&self) -> Option<u64> {
+        match self {
+            Self::Nudge { exchange, .. } => Some(*exchange),
+            _ => None,
+        }
     }
 }

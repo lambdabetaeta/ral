@@ -3,14 +3,15 @@
 //!
 //! What the agent *did* — every tool call and result, step, usage delta,
 //! structural I/O effect, stop reason, error, sub-agent boundary — sibling to
-//! the model-view `events.json` that `AgentLog` keeps. A rendering is not an
+//! the model-view `events.jsonl` that `AgentLog` keeps. A rendering is not an
 //! effect, so composed cards and progress labels stay out; they are the TUI's
 //! `user.log`. The writer is fed at the emit seam (`Emitter::emit`), not by
 //! whoever drains the live bus, so a child muted off the display still records
 //! its full trace.
 
+use crate::agent::event::EditReceipt;
 use crate::bus::card::observation_json;
-use crate::bus::{AgentId, Kind};
+use crate::bus::{AgentId, Emitter, Kind};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -72,6 +73,13 @@ impl Transcript {
     }
 }
 
+pub(crate) fn emit_context_edited(emit: &Emitter, receipt: &EditReceipt) {
+    emit.emit(Kind::ContextEdited {
+        op: receipt.op.clone(),
+        by: receipt.by.clone(),
+    });
+}
+
 /// Project one bus event into its `transcript.jsonl` record, or `None` for a
 /// variant the operational trace omits. The exhaustive match means a new
 /// [`Kind`] cannot silently fall out of the trace.
@@ -120,6 +128,7 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
         Kind::StopReason(raw) => ("stop_reason", json!({ "raw": raw })),
         Kind::Error(msg) => ("error", json!({ "msg": msg })),
         Kind::SystemNote(text) => ("system_note", json!({ "text": text })),
+        Kind::ContextEdited { op, by } => ("context_edited", json!({ "op": op, "by": by })),
         Kind::Nudge { used, max, cause } => {
             ("nudge", json!({ "used": used, "max": max, "cause": cause }))
         }
@@ -208,4 +217,29 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
     map.insert("id".into(), json!(id));
     map.insert("kind".into(), json!(name));
     Some(obj)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::event::{ContextOp, EditAuthority};
+
+    #[test]
+    fn context_edit_transcript_records_each_authority() {
+        for by in [
+            EditAuthority::Model,
+            EditAuthority::User,
+            EditAuthority::Harness,
+        ] {
+            let op = ContextOp::Drop { exchanges: vec![7] };
+            let kind = Kind::ContextEdited {
+                op: op.clone(),
+                by: by.clone(),
+            };
+            let record = event_record(0, 42, &kind).expect("context edits are operational");
+            assert_eq!(record["kind"], "context_edited");
+            assert_eq!(record["by"], serde_json::to_value(&by).unwrap());
+            assert_eq!(record["op"], serde_json::to_value(op).unwrap());
+        }
+    }
 }
