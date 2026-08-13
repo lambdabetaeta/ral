@@ -294,10 +294,9 @@ mod tests {
     /// their absence is not an error.
     #[test]
     fn assemble_admits_house_rules_from_the_config_directory() {
-        let dir = std::env::temp_dir().join(format!("synod-prompt-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp config dir");
+        let dir = crate::test_fixture::workshop("prompt-house-rules");
         std::fs::write(
-            dir.join(HOUSE_RULES),
+            dir.path().join(HOUSE_RULES),
             "Letters are signed by the Registrar.",
         )
         .expect("write house rules");
@@ -305,10 +304,9 @@ mod tests {
             &Capabilities::root(),
             Path::new("/work"),
             "Admissions",
-            &dir,
+            dir.path(),
         )
         .expect("house rules read");
-        std::fs::remove_dir_all(&dir).expect("clean up");
         assert!(p.contains("# House rules"));
         assert!(p.contains("signed by the Registrar"));
         assert!(!prompt().contains("# House rules"));
