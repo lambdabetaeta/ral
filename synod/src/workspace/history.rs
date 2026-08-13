@@ -637,7 +637,7 @@ mod tests {
 
     #[test]
     fn a_capture_keeps_the_bytes_and_the_shape() {
-        let (dir, folder, store) = workshop("history-capture");
+        let (_dir, folder, store) = workshop("history-capture");
         std::fs::write(folder.join("letter.txt"), b"dear all").expect("fixture");
         std::fs::create_dir(folder.join("empty")).expect("fixture");
 
@@ -654,7 +654,6 @@ mod tests {
             b"dear all",
             "the file's bytes must be recoverable from the store"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -671,12 +670,11 @@ mod tests {
             .capture(&folder, Moment::After)
             .expect("second capture");
         assert_eq!(object_count(dir.path()), 1, "a repeat capture adds nothing");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn the_latest_job_pairs_before_with_its_after() {
-        let (dir, folder, store) = workshop("history-pairing");
+        let (_dir, folder, store) = workshop("history-pairing");
         std::fs::write(folder.join("a.txt"), b"one").expect("fixture");
         let b1 = store.capture(&folder, Moment::Before).expect("captures");
         let a1 = store.capture(&folder, Moment::After).expect("captures");
@@ -691,7 +689,6 @@ mod tests {
         let (before, after) = store.latest_job().expect("reads").expect("a job exists");
         assert_eq!(before.id, b2.id);
         assert!(after.is_none(), "a crashed run left no after-checkpoint");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A conversation captures one before and many afters, one per
@@ -700,7 +697,7 @@ mod tests {
     /// which is all a plain `find` would ever see.
     #[test]
     fn a_conversations_many_afters_pair_with_the_before_by_the_last_one() {
-        let (dir, folder, store) = workshop("history-many-afters");
+        let (_dir, folder, store) = workshop("history-many-afters");
         std::fs::write(folder.join("a.txt"), b"one").expect("fixture");
         let before = store.capture(&folder, Moment::Before).expect("captures");
         store.capture(&folder, Moment::After).expect("exchange 1");
@@ -717,12 +714,11 @@ mod tests {
             last.id,
             "the report must reflect the most recent exchange, not the first"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn checkpoints_come_back_oldest_first() {
-        let (dir, folder, store) = workshop("history-order");
+        let (_dir, folder, store) = workshop("history-order");
         std::fs::write(folder.join("a.txt"), b"x").expect("fixture");
         let first = store.capture(&folder, Moment::Before).expect("captures");
         let second = store.capture(&folder, Moment::After).expect("captures");
@@ -732,7 +728,6 @@ mod tests {
             all.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
             vec![first.id.as_str(), second.id.as_str()]
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn set_mtime(path: &Path, when: std::time::SystemTime) {
@@ -758,7 +753,7 @@ mod tests {
     /// bytes were never re-read.
     #[test]
     fn a_stat_match_older_than_the_reference_is_reused_without_reopening() {
-        let (dir, folder, store) = workshop("history-quick-check-reuse");
+        let (_dir, folder, store) = workshop("history-quick-check-reuse");
         std::fs::write(folder.join("a.txt"), b"dear all").expect("fixture");
         set_mtime(
             &folder.join("a.txt"),
@@ -784,7 +779,6 @@ mod tests {
             !object.exists(),
             "a quick-checked file must never be reopened, so its object stays gone"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Git's racy guard: a file stamped at or after the reference
@@ -793,7 +787,7 @@ mod tests {
     /// reread regardless.
     #[test]
     fn a_stat_match_not_older_than_the_reference_is_reread_regardless() {
-        let (dir, folder, store) = workshop("history-quick-check-racy");
+        let (_dir, folder, store) = workshop("history-quick-check-racy");
         let path = folder.join("a.txt");
         std::fs::write(&path, b"one-two").expect("fixture");
         let future = std::time::SystemTime::now() + std::time::Duration::from_hours(1);
@@ -812,7 +806,6 @@ mod tests {
             "a same-tick rewrite must not hide behind an unchanged stat"
         );
         assert_eq!(second_hash, ContentHash::of_bytes(b"two-one"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -833,7 +826,6 @@ mod tests {
             sibling.exists(),
             "a wipe must never touch anything beside its own directory"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -844,7 +836,6 @@ mod tests {
 
         drop(first);
         drop(second);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -872,7 +863,6 @@ mod tests {
         );
 
         drop(held_store);
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -891,6 +881,5 @@ mod tests {
             sibling.exists(),
             "a sibling file beside `history/` is not the sweep's to touch"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

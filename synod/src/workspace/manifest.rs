@@ -337,7 +337,6 @@ mod tests {
             Some(&EntryKind::Folder),
             "an empty folder must round-trip"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A link is its target text — never followed, so a dangling one is
@@ -354,7 +353,6 @@ mod tests {
                 target: "nowhere/at-all".into(),
             })
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -365,7 +363,6 @@ mod tests {
             hash_file(&missing).expect("a missing file is not an error"),
             None
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -379,6 +376,5 @@ mod tests {
         let measure = measure(dir.path()).expect("an ordinary folder measures");
         assert_eq!(measure.files, 2);
         assert_eq!(measure.bytes, 8 + 4);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

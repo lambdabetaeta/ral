@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn the_report_names_each_change() {
-        let (dir, folder, store) = workshop("report-report");
+        let (_dir, folder, store) = workshop("report-report");
         std::fs::write(folder.join("invoices-2026.xlsx"), b"v1").expect("fixture");
         store.capture(&folder, Moment::Before).expect("baseline");
         std::fs::write(folder.join("invoices-2026.xlsx"), b"v2").expect("job");
@@ -147,19 +147,17 @@ mod tests {
             path: "reminder-letters".into(),
             folder: true,
         }));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_quiet_job_says_so() {
-        let (dir, folder, store) = workshop("report-quiet");
+        let (_dir, folder, store) = workshop("report-quiet");
         std::fs::write(folder.join("a.txt"), b"same").expect("fixture");
         store.capture(&folder, Moment::Before).expect("baseline");
         store.capture(&folder, Moment::After).expect("after");
 
         let report = job_report(&store, &folder).expect("reports");
         assert!(report.changes.changes.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A run that died before its closing checkpoint still gets a report:
@@ -167,7 +165,7 @@ mod tests {
     /// took, so a job that rewrote documents is never reported as quiet.
     #[test]
     fn a_crashed_run_is_reported_against_the_folder_as_it_stands() {
-        let (dir, folder, store) = workshop("report-crashed");
+        let (_dir, folder, store) = workshop("report-crashed");
         std::fs::write(folder.join("letter.docx"), b"v1").expect("fixture");
         std::fs::write(folder.join("notes.txt"), b"kept").expect("fixture");
         store.capture(&folder, Moment::Before).expect("baseline");
@@ -190,24 +188,22 @@ mod tests {
             path: "notes.txt".into(),
             folder: false,
         }));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn before_any_job_there_is_nothing_to_report_or_undo() {
-        let (dir, folder, store) = workshop("report-nothing");
+        let (_dir, folder, store) = workshop("report-nothing");
         let message = job_report(&store, &folder).expect_err("no job yet");
         assert!(message.contains("nothing to report"), "{message}");
         let message = undo_all(&store, &folder, Resolution::KeepCurrent).expect_err("no job yet");
         assert!(message.contains("nothing to undo"), "{message}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A rename undone by either of its names undoes both sides: the old
     /// name comes back and the new one goes away — never half a rename.
     #[test]
     fn undoing_a_rename_by_either_name_undoes_both_sides() {
-        let (dir, folder, store) = workshop("report-rename");
+        let (_dir, folder, store) = workshop("report-rename");
         std::fs::write(folder.join("scan001.pdf"), b"the scan").expect("fixture");
         store.capture(&folder, Moment::Before).expect("baseline");
         std::fs::rename(folder.join("scan001.pdf"), folder.join("enrolment.pdf")).expect("job");
@@ -219,7 +215,6 @@ mod tests {
         assert_eq!(outcome.removed, ["enrolment.pdf"]);
         assert!(folder.join("scan001.pdf").exists());
         assert!(!folder.join("enrolment.pdf").exists());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Undoing the folder a file was renamed *into* must not strand the
@@ -228,7 +223,7 @@ mod tests {
     /// instead of the file simply vanishing with the folder.
     #[test]
     fn undoing_a_created_folder_also_undoes_a_rename_into_it() {
-        let (dir, folder, store) = workshop("report-rename-into-folder");
+        let (_dir, folder, store) = workshop("report-rename-into-folder");
         std::fs::write(folder.join("draft.docx"), b"the draft").expect("fixture");
         store.capture(&folder, Moment::Before).expect("baseline");
         std::fs::create_dir(folder.join("reports")).expect("job");
@@ -245,7 +240,6 @@ mod tests {
         assert_eq!(outcome.removed, ["reports/draft.docx", "reports"]);
         assert!(folder.join("draft.docx").exists());
         assert!(!folder.join("reports").exists());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The mirror case: undoing a deleted folder a file was renamed *out
@@ -253,7 +247,7 @@ mod tests {
     /// once under the restored folder, once at the name it was moved to.
     #[test]
     fn undoing_a_deleted_folder_also_undoes_a_rename_out_of_it() {
-        let (dir, folder, store) = workshop("report-rename-out-of-folder");
+        let (_dir, folder, store) = workshop("report-rename-out-of-folder");
         std::fs::create_dir(folder.join("archive")).expect("fixture");
         std::fs::write(folder.join("archive").join("report.docx"), b"the report").expect("fixture");
         store.capture(&folder, Moment::Before).expect("baseline");
@@ -271,12 +265,11 @@ mod tests {
         assert_eq!(outcome.removed, ["report.docx"]);
         assert!(folder.join("archive").join("report.docx").exists());
         assert!(!folder.join("report.docx").exists());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn undo_all_and_undo_file_reach_the_driver() {
-        let (dir, folder, store) = workshop("report-undo");
+        let (_dir, folder, store) = workshop("report-undo");
         std::fs::write(folder.join("a.txt"), b"a original").expect("fixture");
         std::fs::write(folder.join("b.txt"), b"b original").expect("fixture");
         store.capture(&folder, Moment::Before).expect("baseline");
@@ -297,6 +290,5 @@ mod tests {
             std::fs::read(folder.join("b.txt")).expect("rereads"),
             b"b original"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

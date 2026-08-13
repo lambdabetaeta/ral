@@ -197,7 +197,7 @@ mod tests {
     /// back, and says so.
     #[test]
     fn a_full_undo_returns_the_folder_to_its_baseline() {
-        let (dir, folder, store) = workshop("restore-full");
+        let (_dir, folder, store) = workshop("restore-full");
         std::fs::write(folder.join("edited.txt"), b"original").expect("fixture");
         std::fs::write(folder.join("deleted.txt"), b"kept safe").expect("fixture");
         std::fs::create_dir(folder.join("emptied")).expect("fixture");
@@ -236,7 +236,6 @@ mod tests {
             "the folder must match its baseline exactly, bytes and mode; a restore \
              writes fresh bytes and so a fresh mtime, which is not part of its promise"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A restore's promise is bytes and mode; the stat clock a quick
@@ -255,7 +254,7 @@ mod tests {
     /// overwritten, and forcing it keeps the newer bytes first.
     #[test]
     fn an_edit_after_the_job_is_a_conflict_and_never_destroyed() {
-        let (dir, folder, store) = workshop("restore-conflict");
+        let (_dir, folder, store) = workshop("restore-conflict");
         std::fs::write(folder.join("report.txt"), b"original").expect("fixture");
         let baseline = store.capture(&folder, Moment::Before).expect("baseline");
         std::fs::write(folder.join("report.txt"), b"the job's version").expect("job");
@@ -300,14 +299,13 @@ mod tests {
                 .expect("the overwritten edit was kept first"),
             b"my later edit"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Without the job's closing checkpoint nothing can be told apart
     /// from a later edit, so everything differing conflicts.
     #[test]
     fn a_crashed_run_makes_every_difference_a_conflict() {
-        let (dir, folder, store) = workshop("restore-crashed");
+        let (_dir, folder, store) = workshop("restore-crashed");
         std::fs::write(folder.join("a.txt"), b"original").expect("fixture");
         let baseline = store.capture(&folder, Moment::Before).expect("baseline");
         std::fs::write(folder.join("a.txt"), b"changed by someone").expect("job");
@@ -323,13 +321,12 @@ mod tests {
         .expect("restores");
         assert_eq!(outcome.conflicts.len(), 1);
         assert!(outcome.put_back.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A one-file undo touches that file and nothing else.
     #[test]
     fn undoing_one_file_leaves_the_rest_of_the_job_standing() {
-        let (dir, folder, store) = workshop("restore-one-file");
+        let (_dir, folder, store) = workshop("restore-one-file");
         std::fs::write(folder.join("a.txt"), b"a original").expect("fixture");
         std::fs::write(folder.join("b.txt"), b"b original").expect("fixture");
         let baseline = store.capture(&folder, Moment::Before).expect("baseline");
@@ -356,12 +353,11 @@ mod tests {
             b"b rewritten",
             "the other file keeps the job's version"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_name_nobody_has_ever_seen_is_refused_plainly() {
-        let (dir, folder, store) = workshop("restore-unknown");
+        let (_dir, folder, store) = workshop("restore-unknown");
         std::fs::write(folder.join("a.txt"), b"x").expect("fixture");
         let baseline = store.capture(&folder, Moment::Before).expect("baseline");
         let after = store.capture(&folder, Moment::After).expect("after");
@@ -379,6 +375,5 @@ mod tests {
             message.contains("nothing called no-such-file.txt"),
             "the refusal must name the file: {message}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

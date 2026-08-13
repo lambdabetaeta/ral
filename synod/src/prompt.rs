@@ -257,7 +257,6 @@ mod tests {
                 p.split("# Host").nth(1).unwrap_or(&p)
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The Host section carries guest truths: the guest scratch, the mount

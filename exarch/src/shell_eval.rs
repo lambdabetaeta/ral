@@ -634,14 +634,13 @@ mod tests {
     #[test]
     fn view_tags_lines_with_hash() {
         let mut shell = fresh_shell();
-        let (tmp, path_str) = scratch_file("view-tag", "alpha.txt", "alpha\n");
+        let (_tmp, path_str) = scratch_file("view-tag", "alpha.txt", "alpha\n");
         let r = run_once(
             &mut shell,
             &format!(
                 "let rows = view-text '{path_str}' 1 2; [line: $rows[0][line], hash: $rows[0][hash], text: $rows[0][text]]"
             ),
         );
-        let _ = std::fs::remove_dir_all(&tmp);
         assert_eq!(
             r.exit,
             0,
@@ -807,7 +806,6 @@ target
             ),
         );
         let after_run = std::fs::read_to_string(&run).expect("read run fixture after edit");
-        let _ = std::fs::remove_dir_all(&tmp);
         assert_eq!(
             buried.exit,
             0,
@@ -864,7 +862,6 @@ keep-bottom
             ),
         );
         let after = std::fs::read_to_string(&path).expect("read after clean batch");
-        let _ = std::fs::remove_dir_all(&tmp);
 
         assert_eq!(
             ok.exit,
@@ -922,7 +919,6 @@ keep-bottom
             ),
         );
         let after = std::fs::read_to_string(dir.path().join("f.txt")).expect("read after clean batch");
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             ok.exit,
             0,
@@ -938,7 +934,7 @@ keep-bottom
     #[test]
     fn edit_notes_changed_lines_on_stderr() {
         let mut shell = fresh_shell();
-        let (dir, path) = scratch_file("edit-note", "f.txt", "a\nb\nc\n");
+        let (_dir, path) = scratch_file("edit-note", "f.txt", "a\nb\nc\n");
 
         let one = run_once(
             &mut shell,
@@ -961,7 +957,6 @@ keep-bottom
                  edit-hash '{path}' [[hash: $rows[1][hash], line: 'B'], [hash: $rows[2][hash], line: 'C\\n']]"
             ),
         );
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(batch.exit, 0, "batch edit must succeed");
         assert_eq!(
             String::from_utf8_lossy(&batch.stderr),
@@ -979,7 +974,7 @@ keep-bottom
     #[test]
     fn edit_replace_notes_changed_line_range_on_stderr() {
         let mut shell = fresh_shell();
-        let (dir, path) = scratch_file("edit-replace-note", "f.txt", "x\nhello world\ny\n");
+        let (_dir, path) = scratch_file("edit-replace-note", "f.txt", "x\nhello world\ny\n");
         let r = run_once(
             &mut shell,
             &format!("edit-replace '{path}' 'hello world' 'hi\\tthere'"),
@@ -994,13 +989,11 @@ keep-bottom
             "a single-line match notes the singular form with an escape warning"
         );
 
-        let (dir2, path2) = scratch_file("edit-replace-note-span", "g.txt", "one\ntwo\nthree\n");
+        let (_dir2, path2) = scratch_file("edit-replace-note-span", "g.txt", "one\ntwo\nthree\n");
         let spanning = run_once(
             &mut shell,
             &format!("edit-replace '{path2}' 'two\nthree' 'TWO\nTHREE'"),
         );
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&dir2);
         assert_eq!(
             spanning.exit, 0,
             "a match spanning a real newline must succeed"
@@ -1076,7 +1069,6 @@ keep-bottom
                 &format!("edit-hash '{path_str}' [[hash: {witness}, line: 'REPLACED']]"),
             );
             let after = std::fs::read_to_string(tmp.path().join("fixture.txt")).unwrap_or_default();
-            let _ = std::fs::remove_dir_all(&tmp);
 
             assert_eq!(
                 er.exit,
@@ -1586,7 +1578,6 @@ return !{{length $hits}}"
             std::fs::read_to_string(tmp.path().join("b.txt")).expect("read b"),
             "gamma\ndelta [DONE] three\n"
         );
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// `edit-replace` (defined in `data/agent.ral`) collapses the
@@ -1637,8 +1628,6 @@ return !{{length $hits}}"
             "USE_OPENCV := 1\nUSE_LEVELDB := 1\n",
             "a rejected batch must leave the file untouched"
         );
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// `edit-replace` goes through core's atomic write door, so it raises the
@@ -1657,7 +1646,6 @@ return !{{length $hits}}"
             &format!("edit-replace '{path}' 'world' 'friend'"),
         );
         let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             r.exit,
             0,
@@ -1711,7 +1699,6 @@ return !{{length $hits}}"
             let (r, kinds) =
                 run_capturing(&mut shell, &format!("edit-replace '{path}' 'HEAD' 'TAIL'"));
             let wrote = std::fs::read_to_string(dir.path().join("big.txt")).ok();
-            let _ = std::fs::remove_dir_all(&dir);
             assert_eq!(
                 r.exit,
                 0,
@@ -1764,7 +1751,6 @@ return !{{length $hits}}"
 
         let r = run_once(&mut shell, &format!("edit-replace '{path}' 'old' 'new'"));
         let mode = std::fs::metadata(dir.path().join("run.sh")).map(|m| m.permissions().mode() & 0o777);
-        let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(
             r.exit,
@@ -1817,8 +1803,6 @@ return !{{length $hits}}"
                 "a name that could climb out of the root is refused unread"
             );
         }
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// One tool call through `run_shell` over a real bus `Emitter`, returning
@@ -1874,10 +1858,9 @@ return !{{length $hits}}"
     #[test]
     fn bare_read_redirect_surfaces_one_read_card() {
         let mut shell = fresh_shell();
-        let (dir, path) = scratch_file("cov-read", "a", "hello\n");
+        let (_dir, path) = scratch_file("cov-read", "a", "hello\n");
 
         let (r, kinds) = run_capturing(&mut shell, &format!("from-string < '{path}'"));
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             r.exit,
             0,
@@ -1911,7 +1894,6 @@ return !{{length $hits}}"
 
         let (r, kinds) = run_capturing(&mut shell, &format!("to-string 'x' > '{path}'"));
         let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             r.exit,
             0,
@@ -1956,7 +1938,6 @@ return !{{length $hits}}"
             &format!("to-string \"hello\\nfriend\\n\" > '{path}'"),
         );
         let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             r.exit,
             0,
@@ -2009,7 +1990,6 @@ return !{{length $hits}}"
 
         let (r, kinds) = run_capturing(&mut shell, &format!("to-string 'short' > '{path}'"));
         let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             r.exit,
             0,
@@ -2091,10 +2071,9 @@ return !{{length $hits}}"
     #[test]
     fn view_is_a_helper_not_an_exec_image() {
         let mut shell = fresh_shell();
-        let (dir, path) = scratch_file("cov-view", "a", "alpha\nbeta\ngamma\n");
+        let (_dir, path) = scratch_file("cov-view", "a", "alpha\nbeta\ngamma\n");
 
         let (r, kinds) = run_capturing(&mut shell, &format!("view-text '{path}' 1 2"));
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             r.exit,
             0,
@@ -2126,10 +2105,9 @@ return !{{length $hits}}"
     fn cat_redirect_surfaces_read_then_exec_in_order() {
         use ral_core::types::{AuditIo, CommandOrigin};
         let mut shell = fresh_shell();
-        let (dir, path) = scratch_file("cov-cat", "a", "one\ntwo\n");
+        let (_dir, path) = scratch_file("cov-cat", "a", "one\ntwo\n");
 
         let (r, kinds) = run_capturing(&mut shell, &format!("/bin/cat < '{path}'"));
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             r.exit,
             0,
@@ -2173,7 +2151,7 @@ return !{{length $hits}}"
     #[test]
     fn sourcing_a_ral_file_raises_no_io_card() {
         let mut shell = fresh_shell();
-        let (dir, path) = scratch_file("cov-source", "lib.ral", "let answer = 42\n");
+        let (_dir, path) = scratch_file("cov-source", "lib.ral", "let answer = 42\n");
 
         let (sr, source_kinds) = run_capturing(&mut shell, &format!("source '{path}'"));
         assert_eq!(
@@ -2189,7 +2167,6 @@ return !{{length $hits}}"
         );
 
         let (ur, use_kinds) = run_capturing(&mut shell, &format!("use '{path}'"));
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             ur.exit,
             0,

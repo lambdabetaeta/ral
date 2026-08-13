@@ -409,7 +409,6 @@ mod tests {
             message.contains("There is nothing at") && message.contains("picker"),
             "a missing folder should say so and say what to do: {message}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -422,7 +421,6 @@ mod tests {
             message.contains("is a single file, not a folder"),
             "a file should be refused in the user's vocabulary: {message}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The disk root is caught before the home rule, since the home
@@ -474,7 +472,6 @@ mod tests {
         .expect("an ordinary folder must open");
         assert_eq!(grant.root(), admissions);
         assert_eq!(grant.name(), "Admissions");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Fixture: a granted folder under a private workshop, so paths
@@ -494,7 +491,7 @@ mod tests {
     /// point-of-use gate rather than by reading the struct's fields.
     #[test]
     fn the_policy_admits_the_guest_namespace_and_denies_the_host_one() {
-        let (dir, grant) = granted("grant-fs");
+        let (_dir, grant) = granted("grant-fs");
         let caps = grant.capabilities();
 
         let mut shell = Shell::default();
@@ -522,7 +519,6 @@ mod tests {
                 "the granted folder's host path must not be writable"
             );
         });
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The bytes the guest will be handed, which the test above cannot
@@ -538,7 +534,7 @@ mod tests {
     /// the whole of what crosses the wire.
     #[test]
     fn the_guest_prefixes_are_spelled_the_guests_way_on_every_host() {
-        let (dir, grant) = granted("grant-guest-spelling");
+        let (_dir, grant) = granted("grant-guest-spelling");
         let fs = grant
             .capabilities()
             .fs
@@ -551,17 +547,15 @@ mod tests {
                 "the fs {which} set must name the guest's paths as the guest spells them"
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The user's home is outside the grant even when the grant is a
     /// folder inside it: unreachable by absence, not by a rule.
     #[test]
     fn the_home_folder_is_unreachable_from_inside_a_grant() {
-        let (dir, grant) = granted("grant-home-unreachable");
+        let (_dir, grant) = granted("grant-home-unreachable");
         let home = ral_core::host::home();
         if home.is_empty() {
-            let _ = std::fs::remove_dir_all(&dir);
             return;
         }
         let mut shell = Shell::default();
@@ -572,12 +566,11 @@ mod tests {
                 "the office grant must not reach into $HOME"
             );
         });
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn the_office_toolbox_is_admitted_and_the_developer_one_is_not() {
-        let (dir, grant) = granted("grant-exec");
+        let (_dir, grant) = granted("grant-exec");
         let caps = grant.capabilities();
         let mut shell = Shell::default();
         shell.with_capabilities(caps, |sh| {
@@ -596,24 +589,22 @@ mod tests {
                 );
             }
         });
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn the_guest_reaches_the_network_through_the_hosts_allowlist() {
-        let (dir, grant) = granted("grant-net");
+        let (_dir, grant) = granted("grant-net");
         assert_eq!(
             grant.capabilities().net,
             Some(true),
             "the guest has a wire; `core/src/sandbox/linux.rs` turns \
              Some(false) into `bwrap --unshare-net`, which would strip it back off"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn the_machine_holds_exactly_the_granted_folder() {
-        let (dir, grant) = granted("grant-machine");
+        let (_dir, grant) = granted("grant-machine");
         let spec = grant.machine_spec();
         assert_eq!(spec.workspace.host_path, grant.root());
         assert_eq!(
@@ -624,7 +615,6 @@ mod tests {
             !spec.workspace.read_only,
             "the agent works in the folder; the accept gate is what makes changes real"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Synod sizes its own machine rather than taking the folder default's
@@ -632,8 +622,7 @@ mod tests {
     /// helpers rather than one office-suite conversion at a time.
     #[test]
     fn the_machine_is_sized_for_a_few_helpers_at_once() {
-        let (dir, grant) = granted("grant-machine-memory");
+        let (_dir, grant) = granted("grant-machine-memory");
         assert_eq!(grant.machine_spec().memory_mib, 6144);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
