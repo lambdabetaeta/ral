@@ -70,6 +70,17 @@ What builds up the trail is itself scoped:
   the denial message;
 - `audit` collects the full trail its body produces.
 
+**A write that changed nothing in the world is not a fact.** A redirect onto
+the discard device — `/dev/null`, or `NUL` on Windows — records nothing: no
+card, no rail barrier, and no line in an agent's trail claiming it wrote a
+file. One predicate says so, `ResolvedPath::is_discard`
+(`core/src/path/resolved.rs`), asked at both doors that have an opinion: the
+capability gate, which excuses such a target from an *access*
+([[internals/capability-enforcement|capability-enforcement]]), and
+`observe_stamped` itself, the one fan-out door, which excuses it from a
+*mutation*. Every redirect seam already passes through that door, so the rule
+is stated once and no seam can forget it.
+
 See also [[design/syscalls-are-effects|syscalls-are-effects]] — an audit trail
 is a trace of the operations performed and the scopes that framed them.
 

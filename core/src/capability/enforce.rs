@@ -124,9 +124,10 @@ impl GrantStack {
     /// to audit through — exarch's boot-time skill discovery asks it of a
     /// one-frame [`GrantStack::of`].  The same [`fs_verdict`] the gate runs,
     /// canonicalising leniently inside as [`check_fs_op`] does, so there is no
-    /// surface-form spelling of the question.  The `/dev/null` exemption is
-    /// [`check_fs_op`]'s alone: it excuses a discard device from an *access*,
-    /// and this door decides membership, not access.
+    /// surface-form spelling of the question.  The
+    /// [`ResolvedPath::is_discard`](crate::path::ResolvedPath::is_discard)
+    /// exemption is [`check_fs_op`]'s alone: it excuses a discard device from
+    /// an *access*, and this door decides membership, not access.
     pub fn admits_fs(
         &self,
         op: &FsOp,
@@ -142,7 +143,9 @@ impl GrantStack {
 
 /// Decide an `op` on one resolved path, audit it, and mint the `Break` on
 /// denial: [`fs_verdict`] is the decision, this the reporting around it.
-/// `/dev/null` is exempt from both regions as a discard device.
+/// A [discard device](crate::path::ResolvedPath::is_discard) is exempt from
+/// both regions — asked before canonicalisation, since the question is about
+/// the name, not about what is on the disk under it.
 pub(crate) fn check_fs_op(
     ctx: &Context,
     path: &crate::path::ResolvedPath,
@@ -150,7 +153,7 @@ pub(crate) fn check_fs_op(
     audit: &mut Audit,
     site: CallSite,
 ) -> Settled<()> {
-    if path.as_path().as_os_str() == "/dev/null" {
+    if path.is_discard() {
         return Ok(());
     }
     let resolved = path.canonicalise_lenient();

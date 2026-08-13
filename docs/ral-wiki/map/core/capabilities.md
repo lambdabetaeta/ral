@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 5ee3d0c
-generated_at_date: 2026-07-31
+generated_at_commit: dcd9739a
+generated_at_date: 2026-08-13
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -30,7 +30,9 @@ Submodules:
   audit-bearing exec/fs checks (`check_exec_args`, `check_fs_op`), and
   the editor/shell bool gates. The fs gate is split so the judgment is
   reusable without the report: `fs_verdict` is the pure decision, and
-  `check_fs_op` is the layer that audits it and mints the `Break`;
+  `check_fs_op` is the layer that audits it and mints the `Break`, and the
+  one layer that excuses the discard device (`ResolvedPath::is_discard`)
+  before either region is consulted;
 - `sandbox.rs` — the OS-renderable `sandbox_projection` builder;
 - `deputy.rs` — `deputy_prefixes`, the confused-deputy predicate: a
   prefix both `exec`-admitted and `fs`-writable, judged with `path::covers`
@@ -79,7 +81,13 @@ plus `which.rs` for PATH search.
 - match — `lex::path_within`, which folds `starts_with_identity` over the
   alias pairs; under Windows path semantics that comparison unifies case,
   `/` vs `\`, and `\\?\`-verbatim spellings, so the fs-grant, exec-dir, and
-  prefix-set matchers all inherit one notion of path identity.
+  prefix-set matchers all inherit one notion of path identity;
+- name a device — `lex::is_discard_device`, behind
+  `ResolvedPath::is_discard`: `/dev/null`, or on Windows a *last component*
+  named `NUL` (the reserved name answers from any directory, in any case,
+  behind an extension, and under `\\.\`). Like the identity rules above it
+  takes `windows` as a parameter rather than reading `cfg!`, so neither
+  table is dark on the other host.
 
 `resolver.rs` composes the stages — `Resolver::resolve` is the *sole*
 constructor of a `ResolvedPath` (`resolved.rs`, with its grant-side twin

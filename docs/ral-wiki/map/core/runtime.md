@@ -91,8 +91,10 @@ guards
     and `BundledTool` completion) each build an `Observation`
     (`core/src/types/observation.rs`) and pass it to `observe`
     (`core/src/evaluator/audit.rs`), the one fan-out door: it reports to the
-    run's `Mooring` and to the open audit trail alike, judging neither — the
-    host filters the rail. Core emits plain `Value::Map`s through
+    run's `Mooring` and to the open audit trail alike, judging neither's
+    interest — the host filters the rail. It judges only whether anything
+    happened: a write onto the discard device is dropped there
+    ([[design/audit|audit]]). Core emits plain `Value::Map`s through
     `Observation::to_value`; a host (exarch) decodes them back with
     `Observation::from_value`. The observation *shapes* and their card
     rendering live in [[map/exarch/io-surface|io-surface]]

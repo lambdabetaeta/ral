@@ -1,7 +1,9 @@
 //! The fan-out door: one observation, broadcast to whoever is listening.
 //!
-//! [`observe_stamped`] reports to both consumers and judges neither: the host
-//! decides what the rail draws, and `audit { }` decides what the trail keeps.
+//! [`observe_stamped`] reports to both consumers and judges neither's
+//! interest: the host decides what the rail draws, and `audit { }` decides
+//! what the trail keeps.  It judges only whether anything happened at all —
+//! a redirect onto the discard device is not a write.
 //! Every evaluator door that settles a fact routes through it.  Two sites
 //! stand outside, each reaching only one consumer: `capability::enforce` and
 //! `Shell::audit_deputy_prefixes` have no [`Mooring`].
@@ -42,7 +44,20 @@ pub(crate) struct AuditStart {
 /// open trail (`Mooring::surface` and `Audit::push` are each already a no-op
 /// when their consumer is absent).  Core does not judge what is worth
 /// hearing — the host filters the rail, and `audit { }` filters the trail.
+///
+/// It does judge what *happened*.  A redirect onto the [discard
+/// device](crate::path::ResolvedPath::is_discard) left the world as it found
+/// it, so there is nothing to report: no card, no rail barrier, and no line
+/// in an agent's trail claiming it wrote a file.  The same predicate
+/// `capability::check_fs_op` asks, of the same resolver — what is not an
+/// access is not a mutation either — asked here, at the one door every seam
+/// passes through, rather than at each seam that mints the fact.
 pub(crate) fn observe_stamped(shell: &mut Shell, mooring: &Mooring, obs: Observation) {
+    if let Observed::Write { path, .. } = &obs.what
+        && shell.resolve(path).is_discard()
+    {
+        return;
+    }
     mooring.surface(&obs.to_value());
     shell.local.audit.push(obs);
 }

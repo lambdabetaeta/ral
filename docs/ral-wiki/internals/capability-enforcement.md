@@ -91,6 +91,13 @@ spawned process does on its own.**
   invariant needs no differential test — the two cannot disagree. All that
   separates them is when the fold runs: afresh on every check for the gate,
   once at spawn for the profile, because that is when the profile is written.
+  One target is excused before either region is consulted: the *discard
+  device* — `/dev/null`, or `NUL` on Windows — which `ResolvedPath::is_discard`
+  names on either host, and which needs no authority because nothing reaches
+  the disk through it. `GrantStack::admits_fs` deliberately does not share the
+  exemption: it decides *membership* in a region, and a device excused from an
+  access is not thereby a member of anything. The same predicate settles
+  whether the act is a fact at all ([[design/audit|audit]]).
 - *Network* — no in-process gate at all, since ral dispatches no network
   operation itself, so the OS sandbox is the sole enforcer; on Windows the
   enforcement is the withheld network capability SIDs — a LowBox token
@@ -136,7 +143,21 @@ without `MS_DEV` and so unopenable either way; a directory or an absent name
 takes `--perms 0000 --tmpfs`, absent names included because a mask must occupy
 the name before the body runs or a child creates the file itself. Nothing
 mounts over a symlink, so a symlinked `deny` is masked at the resolved target
-`sandbox_projection` carries beside the surface spelling. Both masks refuse
+`sandbox_projection` carries beside the surface spelling.
+
+**An absent name under a read-only bind is the one deny that must *not* be
+masked.** Its mountpoint does not exist, bwrap `mkdir`s one, and on a read-only
+bind that `mkdir` returns `EROFS` and kills the envelope — `reasonable` denies
+`xdg:config/gcloud` beneath a readable `xdg:config`, so on any host that never
+installed gcloud every external command under the grant died in sandbox setup
+rather than running. The deny survives its own absence: creation is the only
+access an absent name has, and the read-only bind already refuses it. Which
+bind governs is a depth question, not a membership one —`mountpoint_is_creatable`
+takes the deepest containing bind of either kind, because read-only binds are
+mounted before writable ones and a write prefix nested inside a read prefix (a
+project tree inside a readable home) makes creation possible again and the mask
+owed again. A name under no bind at all falls on the new root's own tmpfs,
+where creation succeeds, so it keeps its mask. Both masks refuse
 with `EACCES` against macOS's `EPERM`, so a cross-platform test should assert
 the bytes are unreachable rather than an errno — and because the failure mode
 is a sandbox that never launches, one test per backend must spawn the envelope

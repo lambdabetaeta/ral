@@ -66,6 +66,19 @@ impl ResolvedPath {
         self.0.display()
     }
 
+    /// True iff this path names the host's discard device — `/dev/null` on
+    /// Unix, `NUL` on Windows ([`super::lex::is_discard_device`] holds both
+    /// tables).
+    ///
+    /// The one question two doors ask about such a write: the capability
+    /// gate (`capability::check_fs_op`), which calls it no *access*, and the
+    /// observation fan-out (`evaluator::audit::observe_stamped`), which calls
+    /// it no *mutation* — nothing changed in the world, so nothing is
+    /// reported.
+    pub fn is_discard(&self) -> bool {
+        super::lex::is_discard_device(&self.0.to_string_lossy(), cfg!(windows))
+    }
+
     /// Strict `realpath(3)`.  The input is already absolute and folded, so
     /// nothing here can anchor against the *process* cwd.
     ///

@@ -127,6 +127,34 @@ pub(crate) fn is_foreign_rooted(path: &str, windows: bool) -> bool {
     windows && matches!(path.as_bytes().first(), Some(b'/' | b'\\')) && !is_windows_absolute(path)
 }
 
+/// True iff `path` names the discard device: the sink that swallows every
+/// byte and keeps none.  `/dev/null` under POSIX rules; under Windows' the
+/// reserved name `NUL`, which the object manager answers to from *any*
+/// directory, in any case, behind any extension (`nul.txt`, `nul.tar.gz`),
+/// with the trailing blanks Win32 trims, and under the `\\.\` device
+/// namespace — hence a last-component test rather than a whole-path one.
+///
+/// The Windows table is deliberately shy of the DOS corners it does not
+/// cover (`C:nul`, `nul:`): a missed device merely reports a write that
+/// changed nothing, where a false claim of device-hood would silence a real
+/// one.
+///
+/// `windows` is a parameter rather than a `cfg!` read, as in
+/// [`starts_with_identity`], so both tables are pinned on every host; the
+/// platform gate sits at the sole call site,
+/// [`ResolvedPath::is_discard`](super::ResolvedPath::is_discard).
+pub(crate) fn is_discard_device(path: &str, windows: bool) -> bool {
+    if !windows {
+        return path == "/dev/null";
+    }
+    path.rsplit(['/', '\\'])
+        .find(|c| !c.is_empty())
+        .is_some_and(|last| {
+            let stem = last.split('.').next().unwrap_or(last);
+            stem.trim_end_matches(' ').eq_ignore_ascii_case("nul")
+        })
+}
+
 /// Resolve `path` against `cwd`, or against the process cwd when `cwd` is
 /// `None`, folding `.` and `..`.  Purely lexical — no symlink resolution —
 /// so the answer can differ from `canonicalize`.
