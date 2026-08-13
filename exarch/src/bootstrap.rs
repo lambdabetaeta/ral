@@ -142,7 +142,7 @@ pub(crate) fn seed_no_color(shell: &mut Shell) {
 pub struct Scratch {
     app: App,
     dir: PathBuf,
-    _hold: Hold,
+    hold: Hold,
 }
 
 /// What answers for a scratch's life, and so what ends it.
@@ -203,7 +203,7 @@ impl Scratch {
         Ok(Self {
             app,
             dir,
-            _hold: Hold::Session(hold),
+            hold: Hold::Session(hold),
         })
     }
 
@@ -237,14 +237,38 @@ impl Scratch {
     /// Returns `Err` if the directory cannot be created.
     #[doc(hidden)]
     pub fn for_test(app: App, tag: &str) -> io::Result<Self> {
-        let dir = tempfile::Builder::new()
+        let root = tempfile::Builder::new()
             .prefix(&format!("{}-test-{tag}-", app.name()))
             .tempdir()?;
+        let dir = root.path().join("scratch");
+        fs::create_dir(&dir)?;
         Ok(Self {
             app,
-            dir: dir.path().to_owned(),
-            _hold: Hold::Test(dir),
+            dir,
+            hold: Hold::Test(root),
         })
+    }
+
+    /// A directory beside this test scratch rather than inside it, deleted
+    /// along with it.
+    ///
+    /// Beside, because a real session's log and scratch are separate roots,
+    /// and `check_disk_warn` sums the two: nested, the log would be counted
+    /// twice and a test double would measure what no session ever does.
+    ///
+    /// # Errors
+    /// Returns `Err` on a session's scratch, which has no room beside it, or
+    /// if the directory cannot be created.
+    #[doc(hidden)]
+    pub fn test_sibling(&self, name: &str) -> io::Result<PathBuf> {
+        let Hold::Test(root) = &self.hold else {
+            return Err(io::Error::other(
+                "only a test scratch has room beside it; a session's scratch stands alone",
+            ));
+        };
+        let path = root.path().join(name);
+        fs::create_dir_all(&path)?;
+        Ok(path)
     }
 
     /// Seed [`Scratch::var`] and the legacy-tool homes into `shell`, overriding

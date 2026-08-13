@@ -33,18 +33,6 @@ fn scripted(model: &str, script: Script) -> Arc<Provider> {
 // reject; see [`exarch::dispatch_pre_main`].
 exarch::pre_main_ctor!();
 
-/// A unique scratch directory per test so concurrent runs don't share
-/// session logs.
-fn tmp(tag: &str) -> std::path::PathBuf {
-    let p = std::env::temp_dir().join(format!(
-        "exarch-deliberate-test-{}-{tag}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&p);
-    std::fs::create_dir_all(&p).unwrap();
-    p
-}
-
 /// Run one `deliberate` against a fresh `Emitter`/collector pair, returning
 /// the outcome plus every event the worker emitted.
 fn drive_deliberate(
@@ -92,8 +80,7 @@ fn assert_admissible(session: &Agent) {
 
 #[test]
 fn plain_text_reaches_quiescence() {
-    let dir = tmp("plain-text");
-    let mut session = Agent::for_test(&dir, "system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let provider = scripted("test-model", Script::new().then(Reply::text("hello")));
 
     let (outcome, _kinds) = drive_deliberate(&mut session, &provider, Some("hi"));
@@ -108,8 +95,7 @@ fn plain_text_reaches_quiescence() {
 
 #[test]
 fn tool_call_then_completion() {
-    let dir = tmp("tool-then-complete");
-    let mut session = Agent::for_test(&dir, "system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let provider = scripted(
         "test-model",
         Script::new()
@@ -137,8 +123,7 @@ fn tool_call_then_completion() {
 /// next tool call — the persistent-shell contract `deliberate` relies on.
 #[test]
 fn bindings_persist_across_tool_calls() {
-    let dir = tmp("bindings-persist");
-    let mut session = Agent::for_test(&dir, "system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let provider = scripted(
         "test-model",
         Script::new()
@@ -179,8 +164,7 @@ fn bindings_persist_across_tool_calls() {
 /// reply reaches quiescence.
 #[test]
 fn truncated_with_tool_calls_runs_and_continues() {
-    let dir = tmp("truncated-with-tools");
-    let mut session = Agent::for_test(&dir, "system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let provider = scripted(
         "test-model",
         Script::new()
@@ -216,8 +200,7 @@ fn truncated_with_tool_calls_runs_and_continues() {
 /// which is why the kind is its own and not `Kind::ProviderError`.
 #[test]
 fn stalled_stream_commits_partial_and_truncates() {
-    let dir = tmp("stalled-stream");
-    let mut session = Agent::for_test(&dir, "system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let provider = scripted(
         "test-model",
         Script::new().then(Reply::stalled("partial answer before the stall")),
@@ -269,8 +252,7 @@ fn stalled_stream_commits_partial_and_truncates() {
 /// admissible — while the outcome still surfaces as `Empty` for the nudge.
 #[test]
 fn empty_reply_commits_a_stub_not_empty_content() {
-    let dir = tmp("empty-reply");
-    let mut session = Agent::for_test(&dir, "system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let provider = scripted("test-model", Script::new().then(Reply::empty()));
 
     let (outcome, _kinds) = drive_deliberate(&mut session, &provider, Some("say nothing"));
@@ -300,8 +282,7 @@ fn empty_reply_commits_a_stub_not_empty_content() {
 /// history holds the newer one whole.
 #[test]
 fn compaction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
-    let dir = tmp("auto-compaction");
-    let mut session = Agent::for_test(&dir, "system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let provider = scripted(
         "test-model",
         Script::new()
@@ -348,12 +329,7 @@ fn compaction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
 
     // Reclamation is heap-only: the forensic record keeps every byte.
     let events = serde_json::Deserializer::from_reader(std::io::BufReader::new(
-        std::fs::File::open(
-            dir.join("sessions")
-                .join(session.id.to_string())
-                .join("events.jsonl"),
-        )
-        .unwrap(),
+        std::fs::File::open(session.log_dir().join("events.jsonl")).unwrap(),
     ))
     .into_iter::<SessionEvent>()
     .collect::<Result<Vec<_>, _>>()
@@ -383,8 +359,7 @@ fn compaction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
 /// tool (which reports the missing fields), and it reaches quiescence.
 #[test]
 fn malformed_tool_arguments_are_normalised_to_object() {
-    let dir = tmp("malformed-tool-args");
-    let mut session = Agent::for_test(&dir, "system").unwrap();
+    let mut session = Agent::for_test("system").unwrap();
     let bad_call = ToolCall {
         call_id: "c1".into(),
         fn_name: "ral".into(),

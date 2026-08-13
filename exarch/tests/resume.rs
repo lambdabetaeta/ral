@@ -127,7 +127,16 @@ fn resume_child() {
         return;
     };
     let dir = std::path::PathBuf::from(dir);
-    let mut session = Agent::for_test(&dir, "system").expect("child agent");
+    // Through the real root, at the run dir the parent chose: the parent
+    // resumes from that ledger after the kill, so it cannot live in a scratch
+    // of this child's own.  A real launch finds its run dir already made.
+    std::fs::create_dir_all(&dir).expect("child run dir");
+    let mut session = Agent::root(
+        root_config(&dir, false),
+        identity_seat("resume-child"),
+        scripted("test-model", Script::new()),
+    )
+    .expect("child agent");
     let provider = scripted("test-model", Script::new().then(Reply::text("before kill")));
     drive(&mut session, &provider, "before the kill");
 

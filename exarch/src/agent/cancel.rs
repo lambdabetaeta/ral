@@ -463,10 +463,7 @@ mod tests {
         let _g = SERIAL.lock().unwrap();
         ral_core::process::clear();
 
-        let dir =
-            std::env::temp_dir().join(format!("exarch-clear-interrupt-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let mut session = Agent::for_test(&dir, "system").expect("test session");
+        let mut session = Agent::for_test("system").expect("test session");
 
         // Seed the ladder exactly as a delivered SIGTERM would.  No run is
         // running, so the published cancel slots are null and the delivery is
@@ -494,7 +491,6 @@ mod tests {
         );
 
         ral_core::process::clear();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Drive the two `#[ignore]`d tests above in a child process they own.

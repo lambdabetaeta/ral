@@ -560,10 +560,10 @@ mod tests {
     #[test]
     fn park_mode_reads_engagement_from_the_registry() {
         let dir = tmp("park-engaged");
-        let held = trunk(&dir, true);
+        let held = trunk(true);
         assert_eq!(held.park_mode(), ParkMode::Held);
 
-        let parent = Agent::for_test(&dir, "system").unwrap();
+        let parent = Agent::for_test("system").unwrap();
         let child = parent.fork(parent.caps().clone()).expect("fork child");
         child
             .agents
@@ -572,7 +572,7 @@ mod tests {
                 parent: Some(parent.id),
                 lease: Some(AGENT_LEASE_IDLE),
                 name: "child".into(),
-                log_dir: dir.join("child"),
+                log_dir: dir.path().join("child"),
                 cancel: child.cancel_token().clone(),
                 reach: child.seat.eval_reach(),
                 mailbox: child.mailbox(),
@@ -597,8 +597,7 @@ mod tests {
     /// trunk-ness, and is an ordinary call error rather than a termination.
     #[test]
     fn reply_refused_identically_for_trunk_and_branch_conversing_agents() {
-        let dir = tmp("reply-refused-conversing");
-        let mut root = trunk(&dir, true);
+        let mut root = trunk(true);
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, root.id);
         let root_result = root.run_shell("c1".into(), "reply 1", 5, &emit);
@@ -630,8 +629,7 @@ mod tests {
     /// — the final prose is never scraped as the answer.
     #[test]
     fn sub_agent_without_reply_is_re_nudged_then_fails() {
-        let dir = tmp("reply-missing");
-        let parent = Agent::for_test(&dir, "system").unwrap();
+        let parent = Agent::for_test("system").unwrap();
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child.seed("do the thing".into());
         // More prose-only replies than the budget will consume, so the test
@@ -658,8 +656,7 @@ mod tests {
     /// `Shell::run` rolls those back long before the loop sees them.
     #[test]
     fn host_panic_is_recorded_and_the_next_prompt_still_deliberates() {
-        let dir = tmp("host-panic-recovery");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         // The first prompt unwinds; the rest answer the second and the no-reply
         // nudges it draws.
         let mut script = Script::new().then(Reply::panicking());
@@ -747,8 +744,7 @@ mod tests {
     /// surfaces at the next run, and exactly once.
     #[test]
     fn ready_boundary_reap_notice_surfaces_at_the_next_run() {
-        let dir = tmp("drain-worker-reaps");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -813,8 +809,7 @@ mod tests {
     /// retired the moment no durable service remains.
     #[test]
     fn reconcile_service_pins_births_and_retires_the_services_pin() {
-        let dir = tmp("reconcile-service-pins");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -901,8 +896,7 @@ mod tests {
     /// write direction is covered at `shell_eval::reject_protected_pin`.
     #[test]
     fn program_cannot_write_the_services_pin() {
-        let dir = tmp("services-pin-protected");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
 
@@ -928,8 +922,7 @@ mod tests {
     /// live register.
     #[test]
     fn pinned_state_reminder_reads_the_live_register_and_becomes_the_next_prompt() {
-        let dir = tmp("pinned-reminder-live");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
         session.run_shell(
@@ -974,7 +967,7 @@ mod tests {
     /// stands as the model left it, and no synthetic prompt is committed.
     #[test]
     fn chat_trunk_never_nudges() {
-        let mut session = chat_trunk(&tmp("chat-no-nudge"));
+        let mut session = chat_trunk();
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
         session.provider =
@@ -1003,8 +996,7 @@ mod tests {
     /// left idle.  The tiny re-armed bound is for speed only.
     #[test]
     fn boundary_prune_notice_rides_the_runs_own_stream() {
-        let dir = tmp("reap-bindings");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -1059,8 +1051,7 @@ mod tests {
     /// no emission, no cost.
     #[test]
     fn check_disk_warn_unconfigured_never_walks_or_warns() {
-        let dir = tmp("disk-warn-unconfigured");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         assert!(session.disk_warn_bytes.is_none());
 
         let (tx, rx) = crate::bus::channel();
@@ -1077,8 +1068,7 @@ mod tests {
     /// The latch suppresses a repeat until the figure falls back under.
     #[test]
     fn check_disk_warn_still_above_does_not_repeat() {
-        let dir = tmp("disk-warn-still-above");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         let baseline = crate::agent::resources::dir_size(&session.log_dir());
         std::fs::write(session.log_dir().join("big.txt"), vec![0u8; 4096]).unwrap();
         session.disk_warn_bytes = Some(baseline + 100);
@@ -1100,8 +1090,7 @@ mod tests {
     /// Falling back under clears the latch, so a re-crossing warns again.
     #[test]
     fn check_disk_warn_falling_below_rearms_the_latch() {
-        let dir = tmp("disk-warn-rearm");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         // The ceiling sits just above the session's own baseline, so the big
         // file alone decides whether it is crossed.
         let baseline = crate::agent::resources::dir_size(&session.log_dir());
@@ -1140,8 +1129,7 @@ mod tests {
     /// model-view `events.jsonl`.
     #[test]
     fn prune_does_not_add_model_events() {
-        let dir = tmp("prune-model-events");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         session
             .seat
             .shell_mut()

@@ -490,11 +490,7 @@ mod tests {
     /// round-trip.
     #[test]
     fn resources_command_routes_through_attend_and_emits_once() {
-        let dir =
-            std::env::temp_dir().join(format!("exarch-resources-route-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         session
             .mailbox()
             .push(Post::Command("/resources".into()))
@@ -540,10 +536,7 @@ mod tests {
 
     #[test]
     fn rewind_command_with_argument_reaches_attend_control() {
-        let dir = std::env::temp_dir().join(format!("exarch-rewind-route-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         session
             .mailbox()
             .push(Post::Command("/rewind 7".into()))

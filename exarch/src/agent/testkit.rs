@@ -56,11 +56,14 @@ pub(crate) fn scope_has(session: &mut Agent, name: &str) -> bool {
     false
 }
 
-pub(crate) fn tmp(tag: &str) -> std::path::PathBuf {
-    let p = std::env::temp_dir().join(format!("exarch-a4-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&p);
-    std::fs::create_dir_all(&p).unwrap();
-    p
+/// A directory for one test, deleted when the returned guard falls.  Hold the
+/// guard for as long as the test needs the directory: binding only its path
+/// deletes it on the spot.
+pub(crate) fn tmp(tag: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("exarch-a4-{tag}-"))
+        .tempdir()
+        .expect("test scratch dir")
 }
 
 /// Swap `session`'s live provider handle — the test-only door onto what
@@ -84,29 +87,26 @@ pub(crate) fn ral_call(id: &str, cmd: &str) -> ToolCall {
 }
 
 /// A trunk through the real `Agent::root` path; `interactive` makes it converse.
-pub(crate) fn trunk(dir: &std::path::Path, interactive: bool) -> Agent {
-    root(dir, interactive, false)
+pub(crate) fn trunk(interactive: bool) -> Agent {
+    root(interactive, false)
 }
 
 /// The toolless `--chat` trunk, conversing by construction: the flag is
 /// interactive-only.
-pub(crate) fn chat_trunk(dir: &std::path::Path) -> Agent {
-    root(dir, true, true)
+pub(crate) fn chat_trunk() -> Agent {
+    root(true, true)
 }
 
-fn root(dir: &std::path::Path, interactive: bool, chat: bool) -> Agent {
-    // Tagged by the caller's `tmp` dir: `Scratch::for_test` wipes any scratch
-    // of the same tag, and the pid alone is shared by concurrent tests.
-    let tag = dir
-        .file_name()
-        .expect("tmp dir has a name")
-        .to_string_lossy();
-    let scratch = Scratch::for_test(crate::bootstrap::EXARCH, &tag).expect("scratch dir");
+fn root(interactive: bool, chat: bool) -> Agent {
+    // The run dir sits beside the scratch, which the seat below owns, so the
+    // trunk's whole footprint goes when the trunk does.
+    let scratch = Scratch::for_test(crate::bootstrap::EXARCH, "trunk").expect("scratch dir");
+    let run_dir = scratch.test_sibling("run").expect("run dir");
     Agent::root(
         RootConfig {
             system: "system".into(),
             caps: ral_core::types::Capabilities::default(),
-            run_dir: dir.to_path_buf(),
+            run_dir,
             resume: None,
             no_logs: false,
             run_lock: None,

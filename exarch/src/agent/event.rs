@@ -555,6 +555,10 @@ pub struct AgentLog {
     provider: String,
     /// `<scratch>/sessions/`, under which `fork` makes each child's dir.
     sessions_root: PathBuf,
+    /// The directory this log has to itself, when a test made it: dropped with
+    /// the log.  A real session's log lives under the session's scratch and
+    /// owns no directory of its own.
+    _scratch: Option<tempfile::TempDir>,
 }
 
 /// A planned cut: the visible prefix through `through_exchange` becomes the
@@ -614,6 +618,25 @@ impl AgentLog {
         )?;
         s.record_started(None, system_prompt_bytes, crate::bootstrap::now_unix_ms())?;
         Ok(s)
+    }
+
+    /// A root log in a directory of its own, deleted when the log is.
+    ///
+    /// A forked child lives inside that directory without owning it, so a test
+    /// keeping a child must keep its root alive too.
+    ///
+    /// # Errors
+    /// Returns `Err` if the directory or the session log cannot be created.
+    #[doc(hidden)]
+    pub fn for_test(session_id: AgentId, model: &str, provider: &str) -> io::Result<Self> {
+        let scratch = tempfile::Builder::new()
+            .prefix("exarch-agent-log-test-")
+            .tempdir()?;
+        let log = Self::root(scratch.path(), session_id, model, provider, 0)?;
+        Ok(Self {
+            _scratch: Some(scratch),
+            ..log
+        })
     }
 
     /// Build a mirror-only root without creating events.jsonl.
@@ -746,6 +769,7 @@ impl AgentLog {
             model,
             provider,
             sessions_root: sessions_root.to_path_buf(),
+            _scratch: None,
         };
         for recorded in read.events {
             resumed.append_mirror(recorded.event, Some(recorded.bytes));
@@ -1393,6 +1417,7 @@ impl AgentLog {
             model,
             provider,
             sessions_root,
+            _scratch: None,
         })
     }
 

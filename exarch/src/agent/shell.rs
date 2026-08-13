@@ -284,8 +284,7 @@ mod tests {
 
     #[test]
     fn let_bound_context_read_does_not_echo_the_transcript() {
-        let dir = tmp("context-read-no-echo");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         {
             let mut log = session.log.lock();
             log.append_user("material that must stay bound".into(), None)
@@ -332,8 +331,7 @@ mod tests {
     /// recovery under test is the engine's own run door catching the unwind.
     #[test]
     fn worker_panic_preserves_completed_bindings_and_clean_context() {
-        let dir = tmp("panic-recovery");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -392,8 +390,7 @@ mod tests {
     /// armed out of reach, so only the size axis is in play.
     #[test]
     fn large_binding_install_warns_on_its_own_run_stderr() {
-        let dir = tmp("reap-large-binding");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -439,8 +436,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_non_zero_exit_carries_the_audit_of_what_already_stands() {
-        let dir = tmp("audit-on-command-exit");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
 
@@ -483,8 +479,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_wall_names_the_workers_that_survived_it() {
-        let dir = tmp("surviving-workers");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
 
@@ -518,8 +513,7 @@ mod tests {
     /// worker is nobody's orphan, so nothing is said about it.
     #[test]
     fn a_call_that_returns_says_nothing_about_its_workers() {
-        let dir = tmp("no-surviving-note");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
 
@@ -538,8 +532,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_non_zero_exit_with_a_live_birth_names_the_orphan() {
-        let dir = tmp("exit-names-orphan");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
 
@@ -569,8 +562,7 @@ mod tests {
     /// the prune is already part of the state being checkpointed.
     #[test]
     fn panic_after_prune_does_not_resurrect_binding() {
-        let dir = tmp("panic-after-prune");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -628,8 +620,7 @@ mod tests {
     /// boot-seeded name is baseline and never ages out.
     #[test]
     fn boot_names_survive_past_the_idle_bound() {
-        let dir = tmp("boot-names-survive");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
 
@@ -656,8 +647,7 @@ mod tests {
     /// notice riding a later run's surface stream back to the bus.
     #[test]
     fn run_shell_epoch_stamps_and_retention_renders_through_the_drain() {
-        let dir = tmp("ral-epoch-retention");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         // A tiny bound so the expiry is a couple of calls away; this replaces
         // the production constant the seat's identity ceremony armed.
         session.seat.shell_mut().shell.arm_worker_retention(1);

@@ -698,8 +698,7 @@ mod tests {
     /// fallback when nothing has forked.
     #[test]
     fn resource_rows_survey_the_agents_accumulators() {
-        let dir = tmp("resource-rows");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -813,8 +812,7 @@ mod tests {
     /// `last_observed` cell without touching it.
     #[test]
     fn resource_rows_renew_no_lease() {
-        let dir = tmp("resource-rows-no-renew");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -850,8 +848,7 @@ mod tests {
     /// alone carries the cap, and no `context.tokens` row appears.
     #[test]
     fn resource_rows_unknown_window_falls_back_to_capped_log_bytes() {
-        let dir = tmp("resource-rows-unknown-window");
-        let session = Agent::for_test(&dir, "system").unwrap();
+        let session = Agent::for_test("system").unwrap();
         let rows = session.resource_rows();
         let bytes = row(&rows, "log.bytes");
         assert_eq!(

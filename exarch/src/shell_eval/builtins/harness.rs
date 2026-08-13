@@ -1163,21 +1163,11 @@ mod tests {
         assert!(permission_label(&v).is_err());
     }
 
-    /// A scratch path unique per test and per process, so concurrent runs
-    /// never share a session log.
-    fn tmp(tag: &str) -> std::path::PathBuf {
-        let p =
-            std::env::temp_dir().join(format!("exarch-harness-test-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        p
-    }
-
     /// The door validates `name`, `type`, and `grant` before
     /// `fork_into_nursery`/`enquire` ever run, so no child is registered.
     #[test]
     fn unknown_grant_label_errors_before_any_enquiry_crosses() {
-        let dir = tmp("unknown-grant");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
@@ -1201,8 +1191,7 @@ mod tests {
 
     #[test]
     fn unknown_type_tag_errors_before_any_enquiry_crosses() {
-        let dir = tmp("unknown-type");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
@@ -1225,8 +1214,7 @@ mod tests {
 
     #[test]
     fn invalid_name_errors_before_any_enquiry_crosses() {
-        let dir = tmp("invalid-name");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
@@ -1246,8 +1234,7 @@ mod tests {
     /// which label is absent.
     #[test]
     fn missing_agent_field_errors_statically_naming_the_field() {
-        let dir = tmp("missing-agent-field");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
@@ -1273,8 +1260,7 @@ mod tests {
     /// exchange and its child races over which gets which stage.
     #[test]
     fn agent_full_stack_round_trip_delivers_receipt_and_settles_into_inbox() {
-        let dir = tmp("full-stack-round-trip");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::ProviderKind::Openai,
@@ -1333,8 +1319,7 @@ mod tests {
 
     #[test]
     fn bad_cron_expr_errors_before_any_enquiry_crosses() {
-        let dir = tmp("bad-cron-expr");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
@@ -1356,8 +1341,7 @@ mod tests {
 
     #[test]
     fn bad_duration_errors_before_any_enquiry_crosses() {
-        let dir = tmp("bad-duration");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
@@ -1379,8 +1363,7 @@ mod tests {
 
     #[test]
     fn trigger_neither_cron_nor_after_errors_before_any_enquiry_crosses() {
-        let dir = tmp("bad-trigger");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
@@ -1401,8 +1384,7 @@ mod tests {
     /// reports which label is absent.
     #[test]
     fn missing_spec_field_errors_statically_naming_the_field() {
-        let dir = tmp("missing-spec-field");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
@@ -1426,8 +1408,7 @@ mod tests {
     /// trigger/label/prompt.
     #[test]
     fn unknown_extra_spec_field_errors_statically_naming_the_field() {
-        let dir = tmp("extra-spec-field");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
         let result = session.run_shell(
@@ -1451,8 +1432,7 @@ mod tests {
     /// away: `parse_duration`'s smallest unit is whole seconds.
     #[test]
     fn schedule_full_stack_round_trip_answers_receipt_and_fires_into_inbox() {
-        let dir = tmp("schedule-full-stack");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         session.allow_schedule = true;
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
@@ -1506,8 +1486,7 @@ mod tests {
 
     #[test]
     fn unschedule_full_stack_removes_by_label() {
-        let dir = tmp("unschedule-full-stack");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         session.allow_schedule = true;
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
@@ -1562,8 +1541,7 @@ mod tests {
     /// gives.
     #[test]
     fn reply_full_stack_round_trip_delivers_structured_record_to_parent_inbox() {
-        let dir = tmp("reply-full-stack-round-trip");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::ProviderKind::Openai,
@@ -1619,8 +1597,7 @@ mod tests {
     /// well-formed `reply` still succeeds.
     #[test]
     fn reply_refuses_a_non_first_order_value_and_does_not_terminate() {
-        let dir = tmp("reply-non-first-order");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
 
@@ -1641,8 +1618,7 @@ mod tests {
 
     #[test]
     fn double_reply_in_one_exchange_is_last_wins() {
-        let dir = tmp("double-reply-last-wins");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::ProviderKind::Openai,
@@ -1687,8 +1663,7 @@ mod tests {
     /// canonical card to its parent.
     #[test]
     fn pin_read_full_stack_round_trip_returns_canonical_card_to_parent() {
-        let dir = tmp("pin-read-full-stack-round-trip");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::ProviderKind::Openai,
@@ -1747,8 +1722,7 @@ mod tests {
     /// empty rendering.
     #[test]
     fn pin_read_full_stack_absent_key_replies_unit() {
-        let dir = tmp("pin-read-full-stack-absent");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::ProviderKind::Openai,
@@ -1813,8 +1787,7 @@ mod tests {
         // field, not as a slow machine.
         const BUDGET: u64 = 60;
 
-        let dir = tmp("kit-round-trip");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
 
@@ -1895,8 +1868,7 @@ mod tests {
     /// run still sees it.
     #[test]
     fn add_task_inside_a_function_body_survives_the_block_and_the_call() {
-        let dir = tmp("block-survival");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
 
@@ -1919,8 +1891,7 @@ mod tests {
     /// reach the parent's "tasks" pin.
     #[test]
     fn sub_agent_pinning_tasks_leaves_the_parents_register_untouched() {
-        let dir = tmp("pin-isolation");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
 
@@ -1983,8 +1954,7 @@ mod tests {
     /// `pin-read "services"` still answers (reads are not writes).
     #[test]
     fn services_pin_refuses_writes_but_pin_read_still_answers() {
-        let dir = tmp("protected-pin-full-stack");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
 
@@ -2012,8 +1982,7 @@ mod tests {
     /// finds no register and restarts id allocation at 1.
     #[test]
     fn transitioning_the_last_open_task_to_done_clears_the_pin_and_restarts_ids() {
-        let dir = tmp("all-done-clears");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
 
@@ -2042,8 +2011,7 @@ mod tests {
     /// silently discarding it.
     #[test]
     fn a_foreign_card_under_tasks_fails_the_kit_didactically() {
-        let dir = tmp("schema-collision");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
 

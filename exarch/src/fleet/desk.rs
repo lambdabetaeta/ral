@@ -1502,15 +1502,8 @@ mod tests {
     use ral_core::transport::{DispatchId, IdentityTransport, Program, Run, Transport};
     use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 
-    /// Unique per call: tests run in parallel, so a shared root would race this
-    /// `remove_dir_all` against a sibling's `create_dir_all` on the same path.
     fn fresh_log() -> AgentLog {
-        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("exarch-desk-test-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        AgentLog::root(&root, 0, "test", "test", 0).expect("session log")
+        AgentLog::for_test(0, "test", "test").expect("session log")
     }
 
     fn scripted_provider() -> Arc<Provider> {
@@ -1713,11 +1706,12 @@ mod tests {
         }
     }
 
-    /// A scratch directory unique to `tag`, cleared before use.
-    fn tmp(tag: &str) -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(format!("exarch-desk-full-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        p
+    /// A scratch directory for one test, deleted when the guard falls.
+    fn tmp(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("exarch-desk-full-{tag}-"))
+            .tempdir()
+            .expect("test scratch dir")
     }
 
     /// Booted exactly once per test. `boot_shell` resets process-global signal
@@ -2881,8 +2875,7 @@ mod tests {
     /// through a real `agent` spawn rather than a stub class.
     #[test]
     fn surface_then_spawn_observes_the_surface_first() {
-        let dir = tmp("surface-then-spawn");
-        let mut session = crate::agent::Agent::for_test(&dir, "system").unwrap();
+        let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, rx) = channel();
         let emit = Emitter::new(tx, session.id);
         let _ = session.run_shell(
@@ -3508,7 +3501,7 @@ mod tests {
     #[test]
     fn engaged_child_answers_a_second_steer_with_no_focus_involved() {
         let dir = tmp("engaged-second-steer");
-        let parent = Agent::for_test(&dir, "system").unwrap();
+        let parent = Agent::for_test("system").unwrap();
         let child = parent.fork(parent.caps().clone()).expect("fork child");
         child.provider_handle().swap(Arc::new(Provider::scripted(
             "test-model",
@@ -3526,7 +3519,7 @@ mod tests {
         let registry = child.agents.clone();
 
         let generation = register_lease_child(parent.id, None, "helper", &child);
-        register_keepalive(&registry, child_id, &dir.join("keepalive"));
+        register_keepalive(&registry, child_id, &dir.path().join("keepalive"));
         let handle = attend_and_deliver(child, "helper", generation, parent.mailbox());
 
         assert!(
@@ -3568,7 +3561,7 @@ mod tests {
     #[test]
     fn ms_lease_child_never_renewed_is_cancelled_but_a_renewed_one_survives() {
         let dir = tmp("ms-lease-integration");
-        let parent = Agent::for_test(&dir, "system").unwrap();
+        let parent = Agent::for_test("system").unwrap();
         // Child A's ttl must expire well inside the round-trip loop's own
         // `MAX_STEPS` cap, so the lease and not the step cap ends its exchange.
         // Child B's is generous instead: its renewal is paced by `thread::sleep`
@@ -3610,7 +3603,7 @@ mod tests {
         let child_b = parent.fork(parent.caps().clone()).expect("fork child b");
         let id_b = child_b.id;
         let gen_b = register_lease_child(parent.id, Some(ttl_b), "child-b", &child_b);
-        register_keepalive(&registry, id_b, &dir.join("keepalive-b"));
+        register_keepalive(&registry, id_b, &dir.path().join("keepalive-b"));
         let handle_b = attend_and_deliver(child_b, "child-b", gen_b, parent.mailbox());
 
         std::thread::sleep(ttl_b / 2);
@@ -3658,13 +3651,12 @@ mod wire_tests {
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
+    /// Each log takes the next session id, so two of them are never the same
+    /// session to the wire.
     fn fresh_log() -> AgentLog {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("exarch-desk-wire-test-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        AgentLog::root(&root, n, "test", "test", 0).expect("session log")
+        AgentLog::for_test(n, "test", "test").expect("session log")
     }
 
     fn scripted_provider(script: Script) -> Arc<Provider> {

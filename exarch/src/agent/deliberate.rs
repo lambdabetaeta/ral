@@ -507,8 +507,7 @@ mod tests {
     /// it settles `Complete`, and the run ends `ReadyForUser`.
     #[test]
     fn sub_agent_returns_through_reply() {
-        let dir = tmp("reply-terminal");
-        let parent = Agent::for_test(&dir, "system").unwrap();
+        let parent = Agent::for_test("system").unwrap();
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child.seed("write a report".into());
         let provider = scripted(
@@ -538,7 +537,7 @@ mod tests {
     #[test]
     fn reply_cancels_live_descendants() {
         let dir = tmp("reply-cancels-children");
-        let parent = Agent::for_test(&dir, "system").unwrap();
+        let parent = Agent::for_test("system").unwrap();
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child.seed("return early".into());
 
@@ -558,7 +557,7 @@ mod tests {
                 parent: Some(parent.id),
                 lease: Some(AGENT_LEASE_IDLE),
                 name: "child".into(),
-                log_dir: dir.join("child"),
+                log_dir: dir.path().join("child"),
                 cancel: child.cancel_token().clone(),
                 reach: child.seat.eval_reach(),
                 mailbox: child.mailbox(),
@@ -570,7 +569,7 @@ mod tests {
             parent: Some(child.id),
             lease: Some(AGENT_LEASE_IDLE),
             name: "direct".into(),
-            log_dir: dir.join("direct"),
+            log_dir: dir.path().join("direct"),
             cancel: direct_token.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(direct_root.clone()),
@@ -584,7 +583,7 @@ mod tests {
             parent: Some(direct),
             lease: Some(AGENT_LEASE_IDLE),
             name: "grandchild".into(),
-            log_dir: dir.join("grandchild"),
+            log_dir: dir.path().join("grandchild"),
             cancel: grandchild_token.clone(),
             reach: EvalReach::Identity {
                 eval_root: Some(ral_core::process::DurableRoot::default()),
@@ -600,7 +599,7 @@ mod tests {
                 parent: Some(parent.id),
                 lease: Some(AGENT_LEASE_IDLE),
                 name: "sibling".into(),
-                log_dir: dir.join("sibling"),
+                log_dir: dir.path().join("sibling"),
                 cancel: sibling_token.clone(),
                 reach: EvalReach::Identity {
                     eval_root: Some(ral_core::process::DurableRoot::default()),
@@ -648,8 +647,7 @@ mod tests {
     /// message, blank-line joined.
     #[test]
     fn steering_typed_during_a_tool_batch_is_committed_between_results_and_reply() {
-        let dir = tmp("steering-mid-batch");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         session
             .inbox
             .push(Post::UserSteering("actually, stop after this".into()))
@@ -708,8 +706,7 @@ mod tests {
     /// quiesce must leave the next prompt admissible.
     #[test]
     fn provider_error_mid_deliberation_does_not_wedge_session() {
-        let dir = tmp("x12-provider-error");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         // A tool call that completes, then a stream error mid-protocol, then
         // clean replies for the second exchange and its nudges.
         let provider = scripted(
@@ -751,8 +748,7 @@ mod tests {
 
     #[test]
     fn stale_token_measure_is_unknown_until_the_next_completion() {
-        let dir = tmp("stale-token-measure");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         {
             let mut log = session.log.lock();
             log.append_user("old context".into(), None).unwrap();
@@ -836,8 +832,7 @@ mod tests {
     /// token `deliberate` watches, landing between `run_batch` and the drain.
     #[test]
     fn cancel_between_run_batch_and_drain_does_not_leak_reply_into_next_deliberation() {
-        let dir = tmp("t2-cancel-mid-batch");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -883,8 +878,7 @@ mod tests {
     /// `/clear` still reaches the inbox and must be dropped here.
     #[test]
     fn stale_agent_result_is_dropped_by_generation_admission() {
-        let dir = tmp("generation-admission-stale");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         let stale = session.agents.generation();
         session.agents.clear_subtree(session.id);
         session
@@ -913,8 +907,7 @@ mod tests {
     /// provider.
     #[test]
     fn current_generation_agent_result_is_delivered() {
-        let dir = tmp("generation-admission-live");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         session
             .inbox
             .push(Post::AgentResult(crate::bus::AgentResult {
@@ -951,8 +944,7 @@ mod tests {
     /// attend thread, so the producer cannot judge its own staleness.
     #[test]
     fn stale_surface_batch_is_dropped_by_generation_admission() {
-        let dir = tmp("generation-admission-stale-surface");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         let stale = session.agents.generation();
         session.agents.clear_subtree(session.id);
         session
@@ -979,8 +971,7 @@ mod tests {
     /// drives the provider.
     #[test]
     fn current_generation_surface_batch_is_delivered() {
-        let dir = tmp("generation-admission-live-surface");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         session
             .inbox
             .push(Post::Surface {
@@ -1017,8 +1008,7 @@ mod tests {
     /// Pinned because it must keep holding with no wiring of its own.
     #[test]
     fn cancel_cascade_reaches_a_cancelled_sub_agents_workers() {
-        let dir = tmp("cascade-cancels-sub-agent-workers");
-        let parent = Agent::for_test(&dir, "system").unwrap();
+        let parent = Agent::for_test("system").unwrap();
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child
             .seat

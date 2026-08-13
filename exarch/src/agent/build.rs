@@ -607,11 +607,11 @@ impl Agent {
     /// any returning agent and `attend` never blocks.
     ///
     /// # Errors
-    /// If the throwaway session log under `dir` cannot be created.
+    /// If the throwaway scratch or the session log inside it cannot be created.
     ///
     /// # Panics
     /// If the test process has no cwd.
-    pub fn for_test(dir: &std::path::Path, system: &str) -> io::Result<Self> {
+    pub fn for_test(system: &str) -> io::Result<Self> {
         let mut shell = crate::bootstrap::boot_shell();
         let id = fresh_id();
         // Keyed by this agent's own fresh id, so concurrent tests never
@@ -634,8 +634,10 @@ impl Agent {
                 spawns: SPAWN_FUEL > 0,
             },
         );
+        // Beside the scratch, which the seat below owns: the session's whole
+        // footprint is then one directory, and it goes when the agent does.
         let log = AgentLog::root(
-            &dir.join("sessions"),
+            &scratch.test_sibling("sessions")?,
             id,
             "test-model",
             "test",
@@ -710,8 +712,7 @@ mod tests {
     /// just the core set a bare `Shell::new` seeds.
     #[test]
     fn fork_inherits_host_builtins() {
-        let dir = tmp("fork-builtins");
-        let session = Agent::for_test(&dir, "system").unwrap();
+        let session = Agent::for_test("system").unwrap();
         assert!(
             session
                 .seat
@@ -737,8 +738,7 @@ mod tests {
     /// wrapping.
     #[test]
     fn fork_fans_out_without_spending_the_parents_fuel() {
-        let dir = tmp("spawn-fuel");
-        let parent = Agent::for_test(&dir, "system").unwrap();
+        let parent = Agent::for_test("system").unwrap();
         assert_eq!(parent.fuel, SPAWN_FUEL);
         for _ in 0..3 {
             let child = parent.fork(parent.caps().clone()).expect("fork child");
@@ -765,8 +765,7 @@ mod tests {
     /// — the ceiling the desk's own clamp narrows a spawn against.
     #[test]
     fn fork_inherits_its_parents_search_reach() {
-        let dir = tmp("fork-search");
-        let mut parent = Agent::for_test(&dir, "system").unwrap();
+        let mut parent = Agent::for_test("system").unwrap();
         assert!(parent.fork(parent.caps().clone()).unwrap().search);
         parent.search = false;
         assert!(
@@ -779,8 +778,7 @@ mod tests {
     /// the other — what `/model` on the focused agent relies on.
     #[test]
     fn fork_seeds_its_own_provider_handle() {
-        let dir = tmp("provider-per-agent");
-        let parent = Agent::for_test(&dir, "system").unwrap();
+        let parent = Agent::for_test("system").unwrap();
         parent.provider.swap(scripted("p-a", Script::new()));
         let child = parent.fork(parent.caps().clone()).expect("fork child");
         assert_eq!(
@@ -801,8 +799,7 @@ mod tests {
     /// otherwise an ordinary fork: caps verbatim, one less fuel.
     #[test]
     fn branch_imports_context_and_withholds_reply() {
-        let dir = tmp("branch-child");
-        let parent = Agent::for_test(&dir, "system").unwrap();
+        let parent = Agent::for_test("system").unwrap();
         parent
             .log
             .lock()
@@ -878,7 +875,7 @@ mod tests {
             RootConfig {
                 system: template,
                 caps: ral_core::types::Capabilities::default(),
-                run_dir: dir,
+                run_dir: dir.path().to_owned(),
                 resume: None,
                 no_logs: false,
                 run_lock: None,
@@ -940,8 +937,7 @@ mod tests {
     /// batch instead, leaving this straggler path unexercised.
     #[test]
     fn clear_cancels_registered_workers_and_drops_their_late_surface() {
-        let dir = tmp("clear-cancels-workers");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -1031,8 +1027,7 @@ mod tests {
     /// pointed at it, so `Drop` is the only thing that reaches its workers.
     #[test]
     fn agent_drop_cancels_its_own_unclosed_workers() {
-        let dir = tmp("drop-cancels-own-workers");
-        let mut agent = Agent::for_test(&dir, "system").unwrap();
+        let mut agent = Agent::for_test("system").unwrap();
         agent
             .seat
             .shell_mut()
@@ -1062,8 +1057,7 @@ mod tests {
     /// clear, a settled agent's cron fires into an inbox nobody drains.
     #[test]
     fn agent_drop_clears_its_own_armed_schedules() {
-        let dir = tmp("drop-clears-own-schedules");
-        let agent = Agent::for_test(&dir, "system").unwrap();
+        let agent = Agent::for_test("system").unwrap();
         let schedules = agent.schedules.clone();
         schedules
             .schedule(
@@ -1089,8 +1083,7 @@ mod tests {
     /// old `Shell`, ledger included.
     #[test]
     fn clear_reseals_baseline_and_forgets_ledger() {
-        let dir = tmp("clear-reseals-baseline");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         session.run_shell("c0".into(), "let pre_clear_x = 1", 5, &emit);
@@ -1105,8 +1098,7 @@ mod tests {
 
     #[test]
     fn rewind_validates_the_anchor_drops_the_digest_whole_and_sheds_nudges() {
-        let dir = tmp("rewind");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         {
             let mut log = session.log.lock();
             for (prompt, answer) in [
@@ -1174,8 +1166,7 @@ mod tests {
     /// many idle calls it runs.
     #[test]
     fn fork_child_inherited_scratch_is_baseline() {
-        let dir = tmp("fork-inherited-baseline");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         session.run_shell("c0".into(), "let parent_scratch = 1", 5, &emit);
@@ -1214,7 +1205,7 @@ mod tests {
     #[test]
     fn resumed_agent_adds_only_the_fresh_shell_note() {
         let dir = tmp("resume-agent");
-        let sessions = dir.join("sessions");
+        let sessions = dir.path().join("sessions");
         let mut log = AgentLog::root(&sessions, 0, "old-model", "old-provider", 0).unwrap();
         log.append_user("before the crash".into(), None).unwrap();
         log.append_assistant(ChatMessage::assistant("saved answer"), vec![], None)
@@ -1228,8 +1219,8 @@ mod tests {
             RootConfig {
                 system: "system".into(),
                 caps: ral_core::types::Capabilities::default(),
-                run_dir: dir.clone(),
-                resume: Some(dir.clone()),
+                run_dir: dir.path().to_owned(),
+                resume: Some(dir.path().to_owned()),
                 no_logs: false,
                 run_lock: None,
                 model: "new-model".into(),
@@ -1274,7 +1265,7 @@ mod tests {
             assert!(text.contains(loss), "resume note must name {loss}: {text}");
         }
         let events: Vec<SessionEvent> = serde_json::Deserializer::from_reader(
-            File::open(dir.join("sessions/0/events.jsonl")).unwrap(),
+            File::open(dir.path().join("sessions/0/events.jsonl")).unwrap(),
         )
         .into_iter()
         .collect::<Result<_, _>>()
@@ -1287,7 +1278,7 @@ mod tests {
             })
             .expect("SessionResumed breadcrumb");
         let trace: Vec<serde_json::Value> = serde_json::Deserializer::from_reader(
-            File::open(dir.join("sessions/0/transcript.jsonl")).unwrap(),
+            File::open(dir.path().join("sessions/0/transcript.jsonl")).unwrap(),
         )
         .into_iter()
         .collect::<Result<_, _>>()
@@ -1298,8 +1289,7 @@ mod tests {
 
     #[test]
     fn clear_rotates_both_records_and_shared_emitters_follow_the_new_trace() {
-        let dir = tmp("clear-rotation");
-        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test("system").unwrap();
         let events = session.log_dir().join("events.jsonl");
         let transcript = session.log_dir().join("transcript.jsonl");
         fs::write(events.with_file_name("events.jsonl.0"), b"reserved").unwrap();
@@ -1358,7 +1348,7 @@ mod tests {
             RootConfig {
                 system: "system".into(),
                 caps: ral_core::types::Capabilities::default(),
-                run_dir: dir.clone(),
+                run_dir: dir.path().to_owned(),
                 resume: None,
                 no_logs: true,
                 run_lock: None,
@@ -1389,7 +1379,7 @@ mod tests {
             assert!(!log_dir.join("events.jsonl").exists());
             assert!(!log_dir.join("transcript.jsonl").exists());
         }
-        assert!(!dir.join("run.lock").exists());
+        assert!(!dir.path().join("run.lock").exists());
         drop(child);
         drop(agent);
     }
@@ -1397,7 +1387,7 @@ mod tests {
     #[test]
     fn resume_seeds_child_ids_past_existing_session_directories() {
         let dir = tmp("resume-id-seed");
-        let sessions = dir.join("sessions");
+        let sessions = dir.path().join("sessions");
         let log = AgentLog::root(&sessions, 0, "old-model", "old-provider", 0).unwrap();
         fs::create_dir_all(sessions.join("1")).unwrap();
         fs::write(sessions.join("1/sentinel"), b"keep").unwrap();
@@ -1409,8 +1399,8 @@ mod tests {
             RootConfig {
                 system: "system".into(),
                 caps: ral_core::types::Capabilities::default(),
-                run_dir: dir.clone(),
-                resume: Some(dir),
+                run_dir: dir.path().to_owned(),
+                resume: Some(dir.path().to_owned()),
                 no_logs: false,
                 run_lock: None,
                 model: "new-model".into(),

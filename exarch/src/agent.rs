@@ -242,7 +242,9 @@ impl Agent {
         self.provider.current()
     }
 
-    pub(crate) fn log_dir(&self) -> std::path::PathBuf {
+    /// Where this agent's own session log is written — `events.jsonl` and its
+    /// siblings sit directly inside.
+    pub fn log_dir(&self) -> std::path::PathBuf {
         self.log.lock().dir().to_path_buf()
     }
 
