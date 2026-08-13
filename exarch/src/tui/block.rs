@@ -415,6 +415,20 @@ impl Block {
         matches!(self.kind, BlockKind::PlainTool { .. })
     }
 
+    /// The one barrier a call's own effects may fall behind: a redirect writes
+    /// at the seam, mid-call, so the effects after it are still that call's.
+    /// [`super::viewport::Viewport::issuing_call`] crosses these and nothing
+    /// else to find the call a continuation belongs to.
+    pub(super) fn is_write_card(&self) -> bool {
+        matches!(
+            self.kind,
+            BlockKind::Card {
+                origin: CardOrigin::Write,
+                ..
+            }
+        )
+    }
+
     /// A landing result walks back to the nearest of these, so a plain call
     /// halts the search rather than being reached past.
     pub(super) fn is_call(&self) -> bool {

@@ -2,9 +2,12 @@
 //!
 //! A contiguous run of observation-only `ral` calls (reads, greps, execs) reads
 //! as one dialable object; a diff or a write is a barrier that ends the run and
-//! renders as its own always-visible block.  Nothing about how blocks are pushed
-//! or logged changes — [`super::viewport`] gathers the run in arrival order and
-//! this module renders its body at one of four [`Reveal`] rungs:
+//! renders as its own always-visible block.  A write lands at the redirect seam,
+//! mid-call, so the effects behind it are still their call's: they render as a
+//! [`continuation`], railless under the call the barrier split them from.
+//! Nothing about how blocks are pushed or logged changes —
+//! [`super::viewport`] gathers the run in arrival order and this module renders
+//! its body at one of four [`Reveal`] rungs:
 //!
 //! - `Census` — one line tallying the run's `|>` effects by verb.  A run is the
 //!   only object that reaches this floor, and only by being dialed *down* to it.
@@ -121,6 +124,23 @@ pub(super) fn body(calls: &[Call], level: Reveal, width: usize) -> Vec<Line<'sta
         Reveal::Summary => live_tip(calls, width),
         Reveal::Context => full_list(calls, false, width),
         Reveal::Full => full_list(calls, true, width),
+    }
+}
+
+/// Render a continuation — effects a barrier split from the call that issued
+/// them — at that call's `level`.  They hang at the indent their level gives a
+/// call's effects, so they read as the continuation they are, and
+/// [`super::viewport`] seats no rail on them: the call above still wears it.
+/// `Census` folds effects into a count, and a continuation shows nothing there.
+pub(super) fn continuation(
+    effects: &[Line<'static>],
+    level: Reveal,
+    width: usize,
+) -> Vec<Line<'static>> {
+    match level {
+        Reveal::Census => Vec::new(),
+        Reveal::Summary => indent_rows(effects, &" ".repeat(RAIL_W), width),
+        Reveal::Context | Reveal::Full => indent_rows(effects, BODY_INDENT, width),
     }
 }
 

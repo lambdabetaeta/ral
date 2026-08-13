@@ -899,10 +899,26 @@ impl Viewport {
             // `append_visual_rows`, the one place the content width is known.
             let (anchor, lines, prompt) = if self.blocks[i].block.observation() {
                 let end = self.observation_run_end(i);
-                let anchor = self.group_anchor(i, end);
-                let segment = (anchor, self.render_group(i, end, anchor, content_w), false);
-                i = end;
-                segment
+                let head = (i..end).find(|&j| self.blocks[j].block.is_tool_call());
+                if head == Some(i) {
+                    let segment = (i, self.render_group(i, end, content_w), false);
+                    i = end;
+                    segment
+                } else {
+                    // Effects reaching the projection ahead of any call are a
+                    // *continuation*: a barrier split them from the call that
+                    // issued them, which stands behind it already wearing the
+                    // rail.  They run until the fragment's own first call opens.
+                    let stop = head.unwrap_or(end);
+                    let anchor = self.issuing_call(i).unwrap_or(i);
+                    let segment = (
+                        anchor,
+                        self.render_continuation(i, stop, anchor, content_w),
+                        false,
+                    );
+                    i = stop;
+                    segment
+                }
             } else {
                 let prompt = self.blocks[i].block.is_prompt();
                 let lead = opens_rail_run(
@@ -958,16 +974,11 @@ impl Viewport {
     }
 
     /// Render the observation run `start..end` as one coalesced ral block: a
-    /// [`group::Call`] per tool call, the body at the `anchor` call's disclosure
-    /// level, and the rail — triangle, hue, aggregate magnitude — on row one.
-    fn render_group(
-        &self,
-        start: usize,
-        end: usize,
-        anchor: usize,
-        width: u16,
-    ) -> Vec<Line<'static>> {
-        let level = self.blocks[anchor].block.level();
+    /// [`group::Call`] per tool call, the body at the run's disclosure level —
+    /// its opening call's — and the rail — triangle, hue, aggregate magnitude —
+    /// on row one.  A run opens with a call, so its body is never empty.
+    fn render_group(&self, start: usize, end: usize, width: u16) -> Vec<Line<'static>> {
+        let level = self.blocks[start].block.level();
         let calls = self.group_calls(start, end);
         let mut lines = group::body(&calls, level, width as usize);
         let open = level >= Reveal::Context;
@@ -980,17 +991,42 @@ impl Viewport {
         lines
     }
 
-    /// A run's anchor: its first tool call, whose [`Block::level`] is the run's
-    /// disclosure level.  Falls back to the head if, defensively, none leads it.
-    fn group_anchor(&self, start: usize, end: usize) -> usize {
-        (start..end)
-            .find(|&i| self.blocks[i].block.is_tool_call())
-            .unwrap_or(start)
+    /// Render `start..end` as a continuation of the call at `anchor`: the
+    /// effects a barrier split from it, hanging under it at its own disclosure
+    /// level with no rail of their own.  Their addressing follows —
+    /// [`Self::reflow`] maps these rows to `anchor`, so dial, click and copy
+    /// reach the call that made them rather than the fragment they landed in.
+    fn render_continuation(
+        &self,
+        start: usize,
+        end: usize,
+        anchor: usize,
+        width: u16,
+    ) -> Vec<Line<'static>> {
+        let effects: Vec<Line<'static>> = self.blocks[start..end]
+            .iter()
+            .flat_map(|entry| entry.block.effect_lines())
+            .collect();
+        let level = self.blocks[anchor].block.level();
+        group::continuation(&effects, level, width as usize)
+    }
+
+    /// The call a continuation belongs to: the one standing behind the barriers
+    /// that split it from its effects.  Only a [`Block::is_write_card`] barrier
+    /// may be crossed — a fragment opening for any other reason was issued by
+    /// nobody, and answers `None`.
+    fn issuing_call(&self, start: usize) -> Option<usize> {
+        let call = self.blocks[..start]
+            .iter()
+            .rposition(|entry| !entry.block.is_write_card())?;
+        // `call + 1 == start` means no barrier stood between: not a continuation.
+        (call + 1 < start && self.blocks[call].block.is_tool_call()).then_some(call)
     }
 
     /// The run's calls in arrival order: each tool call opens a [`group::Call`],
     /// and the observation cards up to the next call are its effects — rendered
-    /// rows plus a [`group::Tally`] folded by `|>` kind.
+    /// rows plus a [`group::Tally`] folded by `|>` kind.  A run opens with its
+    /// call, so no effect precedes one and none is dropped.
     fn group_calls(&self, start: usize, end: usize) -> Vec<group::Call> {
         let mut calls: Vec<group::Call> = Vec::new();
         let mut effects: Vec<Line<'static>> = Vec::new();
