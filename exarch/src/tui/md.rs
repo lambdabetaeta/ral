@@ -1,5 +1,8 @@
 //! Markdown to ratatui lines: `pulldown-cmark` events walked straight into
-//! spans, with syntect-highlighted fenced code from the `two-face` syntax set.
+//! spans.  A ral code block is coloured by [`super::highlight`], the same
+//! lexer-backed pass the tool-call panels use, so the language looks the same
+//! wherever it appears; any other language falls to syntect and the
+//! `two-face` syntax set.
 //!
 //! `super::viewport` commits only fence-safe paragraph prefixes, so every call
 //! here sees a structurally complete slice and needs no repair pass.
@@ -16,6 +19,7 @@ use syntect::parsing::SyntaxSet;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::fidelity::Fidelity;
+use super::highlight::highlight_ral;
 use super::line::{is_blank, wrap_line};
 use super::palette::{CYAN, LIME, READ_W, SLATE};
 use super::rail::{desaturate, mix};
@@ -756,7 +760,22 @@ fn theme() -> &'static Theme {
     })
 }
 
+/// Fence tags that mean ral, plus the untagged case: the agent's only tool is
+/// the shell, so a bare block in its prose is ral until it says otherwise, and
+/// `ral.md` teaches the language in indented blocks, which carry no tag at all.
+fn is_ral_block(lang: Option<&str>) -> bool {
+    match lang {
+        None => true,
+        Some(l) => matches!(l.to_ascii_lowercase().as_str(), "ral" | "ral-sh"),
+    }
+}
+
 fn highlight_block(body: &str, lang: Option<&str>) -> Vec<Line<'static>> {
+    if is_ral_block(lang) {
+        let mut out = highlight_ral(body);
+        trim_trailing_blanks(&mut out);
+        return out;
+    }
     let ss = syntax_set();
     let syntax = lang
         .and_then(|l| {

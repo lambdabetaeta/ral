@@ -86,7 +86,12 @@ Two `Sink` implementations:
  the one collapsible block — its summary shows shut, the full ral script when
  a click opens it; the wheel scrolls, click-drag selects and copies the
  rail-stripped text via OSC-52, and Shift-drag falls through to the terminal's
- own selection. `tui/md.rs` is the streaming markdown renderer; `tui/group.rs`
+ own selection. `tui/md.rs` is the streaming markdown renderer — a ral code
+ block in the model's prose (tagged `ral`, or untagged, which is what the
+ indented blocks of `data/ral.md` teach) goes to `tui/highlight.rs`, the same
+ lexer-backed colouring the tool-call panels use, so the language reads the
+ same wherever it appears, and only a foreign language falls to syntect and
+ the `two-face` set; `tui/group.rs`
  the coalescing projection that folds an observation run into one dialable
  object; `tui/viewport.rs` the per-session block buffer, scroll position, and
  `user.log` writer; `tui/rail.rs` the data-encoding marginal rail. The
