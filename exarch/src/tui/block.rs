@@ -47,8 +47,9 @@ pub(super) enum CardOrigin {
     /// A read / grep / exec a call produced: foldable, carrying its `|>` kind
     /// and how many it folds (one card may comma-join several) for the census.
     Observation { kind: ObservationKind, count: u32 },
-    /// A write redirect — an effect, but a barrier all the same: like a diff it
-    /// ends the current ral block.
+    /// A write — an effect, but a barrier all the same: like a diff it ends the
+    /// current ral block, and it wears the `▎` a mutation deserves rather than
+    /// dissolving into the run's tally.
     Write,
     /// A diff or a deliberately `surface`d card — the model's own
     /// communication, a barrier.
@@ -413,20 +414,6 @@ impl Block {
 
     pub(super) fn is_plain_call(&self) -> bool {
         matches!(self.kind, BlockKind::PlainTool { .. })
-    }
-
-    /// The one barrier a call's own effects may fall behind: a redirect writes
-    /// at the seam, mid-call, so the effects after it are still that call's.
-    /// [`super::viewport::Viewport::issuing_call`] crosses these and nothing
-    /// else to find the call a continuation belongs to.
-    pub(super) fn is_write_card(&self) -> bool {
-        matches!(
-            self.kind,
-            BlockKind::Card {
-                origin: CardOrigin::Write,
-                ..
-            }
-        )
     }
 
     /// A landing result walks back to the nearest of these, so a plain call

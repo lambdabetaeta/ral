@@ -897,28 +897,15 @@ impl Viewport {
         while i < self.blocks.len() {
             // `prompt` carries the human turn's rule fence down to
             // `append_visual_rows`, the one place the content width is known.
-            let (anchor, lines, prompt) = if self.blocks[i].block.observation() {
+            // A run is opened by its call and by nothing else: an effect card is
+            // buffered until its call has landed ([`super::surface`]), so one
+            // reaching the projection with no call behind it belongs to no run
+            // and renders alone, through the ordinary path below.
+            let (anchor, lines, prompt) = if self.blocks[i].block.is_tool_call() {
                 let end = self.observation_run_end(i);
-                let head = (i..end).find(|&j| self.blocks[j].block.is_tool_call());
-                if head == Some(i) {
-                    let segment = (i, self.render_group(i, end, content_w), false);
-                    i = end;
-                    segment
-                } else {
-                    // Effects reaching the projection ahead of any call are a
-                    // *continuation*: a barrier split them from the call that
-                    // issued them, which stands behind it already wearing the
-                    // rail.  They run until the fragment's own first call opens.
-                    let stop = head.unwrap_or(end);
-                    let anchor = self.issuing_call(i).unwrap_or(i);
-                    let segment = (
-                        anchor,
-                        self.render_continuation(i, stop, anchor, content_w),
-                        false,
-                    );
-                    i = stop;
-                    segment
-                }
+                let segment = (i, self.render_group(i, end, content_w), false);
+                i = end;
+                segment
             } else {
                 let prompt = self.blocks[i].block.is_prompt();
                 let lead = opens_rail_run(
@@ -989,38 +976,6 @@ impl Viewport {
             line.spans.insert(0, rail);
         }
         lines
-    }
-
-    /// Render `start..end` as a continuation of the call at `anchor`: the
-    /// effects a barrier split from it, hanging under it at its own disclosure
-    /// level with no rail of their own.  Their addressing follows —
-    /// [`Self::reflow`] maps these rows to `anchor`, so dial, click and copy
-    /// reach the call that made them rather than the fragment they landed in.
-    fn render_continuation(
-        &self,
-        start: usize,
-        end: usize,
-        anchor: usize,
-        width: u16,
-    ) -> Vec<Line<'static>> {
-        let effects: Vec<Line<'static>> = self.blocks[start..end]
-            .iter()
-            .flat_map(|entry| entry.block.effect_lines())
-            .collect();
-        let level = self.blocks[anchor].block.level();
-        group::continuation(&effects, level, width as usize)
-    }
-
-    /// The call a continuation belongs to: the one standing behind the barriers
-    /// that split it from its effects.  Only a [`Block::is_write_card`] barrier
-    /// may be crossed — a fragment opening for any other reason was issued by
-    /// nobody, and answers `None`.
-    fn issuing_call(&self, start: usize) -> Option<usize> {
-        let call = self.blocks[..start]
-            .iter()
-            .rposition(|entry| !entry.block.is_write_card())?;
-        // `call + 1 == start` means no barrier stood between: not a continuation.
-        (call + 1 < start && self.blocks[call].block.is_tool_call()).then_some(call)
     }
 
     /// The run's calls in arrival order: each tool call opens a [`group::Call`],
@@ -1508,6 +1463,65 @@ mod tests {
         assert_eq!(
             plain(&w.lines[act[0]]),
             "message    hunter              focus on the renderer first"
+        );
+    }
+
+    /// A write ends a run; it does not cut one in half.  Its call's effects
+    /// reach the projection ahead of it ([`super::surface`]), so the run folds
+    /// them whatever its rung — and at the census, where a run is only its
+    /// tally, the read is counted rather than silently dropped.
+    #[test]
+    fn a_write_closes_a_run_and_the_census_counts_what_it_closed() {
+        use crate::bus::card::{Mark, ObservationKind, Span, reads_card};
+        let mut vp = viewport();
+        vp.push_tool_call(
+            "ral",
+            "write and read back".into(),
+            "'hi' |> 'f'; read 'g'".into(),
+            0,
+        );
+        vp.push_observation_card(
+            reads_card(&["g".to_string()]).expect("a read card"),
+            ObservationKind::Read,
+            1,
+        );
+        vp.push_write_card(Card(vec![Mark::Text {
+            spans: vec![Span::plain("write f committed")],
+        }]));
+
+        let rows = |vp: &mut Viewport| -> Vec<String> {
+            vp.render_window(READ_W, 40)
+                .lines
+                .iter()
+                .map(plain)
+                .collect()
+        };
+        let all = rows(&mut vp).join("\n");
+        assert!(
+            all.contains("read g"),
+            "the call's read is folded under it, not orphaned: {all:?}"
+        );
+
+        let w = vp.render_window(READ_W, 40);
+        let run = rail_rows(&w.lines, "▸ ");
+        let barrier = rail_rows(&w.lines, "▎ ");
+        assert_eq!(run.len(), 1, "one run, opened by the one call");
+        assert_eq!(barrier.len(), 1, "the write wears its own `▎`");
+        assert!(
+            run[0] < barrier[0],
+            "and closes the run rather than splitting it"
+        );
+
+        // Dialled to its floor the run is one line — and that line must account
+        // for the read, which is the whole point of a tally.
+        assert!(vp.dial_block(0, -1), "a run dials down to its census");
+        let census = rows(&mut vp)
+            .into_iter()
+            .find(|r| r.contains("Ran "))
+            .expect("a census line");
+        assert!(
+            census.contains("Ran 1 script, read 1 file."),
+            "the census counts the read the write closed over: {census:?}"
         );
     }
 

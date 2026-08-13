@@ -171,10 +171,17 @@ as `read…`, `$…`, `read…`, `$…` — noisy clutter at the rail. An
 buckets a consecutive run — even *interleaved*, order-independent — into deduped
 buckets (reads by path, execs by argv, greps by `(scope, pattern)`), flushed at
 natural boundaries through per-kind group helpers into **one card per
-non-empty kind** in a fixed Read → Exec → Grep order. Writes and capability
-checks never join the buffer: each lands alone (a write's diff/listing preview
-is a barrier, not a foldable observation; a capability check is rare and
-high-signal enough to earn its own line). Each group reuses the exact
+non-empty kind** in a fixed Read → Exec → Grep order. A capability check never
+joins the buffer — rare and high-signal enough to earn its own line. A **write**
+joins it but no group: its diff/listing preview is a barrier, not a foldable
+observation, so it flushes as its own card, *last*, after the read/exec/grep
+groups. That last position is the point. A redirect writes at the *seam*,
+mid-call, so a write landed eagerly would sit between a call and the reads it
+had yet to make — stranding those reads behind a barrier, where the coalescing
+projection could not fold them into the run and the run's census would not count
+them. Buffered, every effect of one call reaches
+[[map/exarch/frontend|the projection]] contiguously and the barrier merely
+*closes* the run. Each group reuses the exact
 `observation_card` span vocabulary, so a lone surface renders identically; the
 one departure is that the exec group **drops the `→ status` tail** — a
 comma-joined run reads as the *set* of commands run, and per-command status

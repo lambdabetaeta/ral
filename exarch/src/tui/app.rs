@@ -490,19 +490,14 @@ impl App {
                 }
             }
             Kind::Io { event, card } => match rail_place(&event.what) {
-                // A read, exec, or grep. Each lands as its own event, so a burst
+                // A call's own effects. Each lands as its own event, so a burst
                 // reads as `Read…, $…, Read…, $…` clutter — the buffer collapses
-                // a run, even interleaved, into one block per kind. The `card` is
-                // dropped here: flush rebuilds it grouped.
-                Some(RailPlace::Grouped(_)) => {
+                // a run, even interleaved, into one block per kind, and holds a
+                // write back until the reads around it have landed. The `card` is
+                // dropped here: flush rebuilds it.
+                Some(RailPlace::Grouped(_) | RailPlace::Barrier) => {
                     self.surface
                         .absorb_observation(self.tabs.viewports_mut(), id, event.what);
-                }
-                // A write ends the ral block, so it never buffers:
-                // `with_viewport` flushes any pending run first and the write
-                // lands after it on the rail.
-                Some(RailPlace::Barrier) => {
-                    self.with_viewport(id, |vp| vp.push_write_card(card));
                 }
                 // A denial — the line a reader of the rail most needs to see,
                 // so it lands whole rather than dissolving into a tally.
