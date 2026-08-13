@@ -565,7 +565,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_denied_subtree_is_skipped_by_grep_and_explore() {
-        let tmp = scratch_dir("denied-walk")
+        let scratch = scratch_dir("denied-walk");
+        // Canonical, because the walk reports the paths it resolved: on macOS
+        // the temp directory is itself a symlink.
+        let tmp = scratch
+            .path()
             .canonicalize()
             .expect("canonical scratch dir");
         for sub in ["public", "secret"] {
@@ -749,7 +753,7 @@ mod tests {
         let mut shell = fresh_shell();
         let tmp = scratch_dir("window-edit");
 
-        let repeated = tmp.join("repeated.txt");
+        let repeated = tmp.path().join("repeated.txt");
         let original = "\
 section one:
 target
@@ -790,7 +794,7 @@ target
             "only the first `target` changes; the second is untouched"
         );
 
-        let run = tmp.join("run.txt");
+        let run = tmp.path().join("run.txt");
         let run_original = "head\ndup\ndup\ndup\ndup\ndup\ndup\ndup\ndup\ntail\n";
         std::fs::write(&run, run_original).expect("write run fixture");
         let run_str = display_no_trailing_sep(&run);
@@ -824,7 +828,7 @@ target
     fn edit_batch_is_atomic_and_non_interfering() {
         let mut shell = fresh_shell();
         let tmp = scratch_dir("batch-edit");
-        let path = tmp.join("batch.txt");
+        let path = tmp.path().join("batch.txt");
         let original = "\
 keep-top
 replace-me
@@ -903,7 +907,7 @@ keep-bottom
             "the diagnostic names the colliding line and the file, got: {stderr}"
         );
         assert_eq!(
-            std::fs::read_to_string(dir.join("f.txt")).expect("read after clashing batch"),
+            std::fs::read_to_string(dir.path().join("f.txt")).expect("read after clashing batch"),
             "a\nb\nc\n",
             "a rejected batch rebuilds nothing"
         );
@@ -917,7 +921,7 @@ keep-bottom
                  edit-hash '{path}' [[hash: $rows[1][hash], line: 'FIRST'], [hash: $rows[2][hash], line: 'SECOND']]"
             ),
         );
-        let after = std::fs::read_to_string(dir.join("f.txt")).expect("read after clean batch");
+        let after = std::fs::read_to_string(dir.path().join("f.txt")).expect("read after clean batch");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             ok.exit,
@@ -1071,7 +1075,7 @@ keep-bottom
                 &mut shell,
                 &format!("edit-hash '{path_str}' [[hash: {witness}, line: 'REPLACED']]"),
             );
-            let after = std::fs::read_to_string(tmp.join("fixture.txt")).unwrap_or_default();
+            let after = std::fs::read_to_string(tmp.path().join("fixture.txt")).unwrap_or_default();
             let _ = std::fs::remove_dir_all(&tmp);
 
             assert_eq!(
@@ -1540,12 +1544,12 @@ keep-bottom
         let mut shell = fresh_shell();
         let tmp = scratch_dir("todo-sweep");
         std::fs::write(
-            tmp.join("a.txt"),
+            tmp.path().join("a.txt"),
             "alpha [TODO] one\nplain\nbeta [TODO] two\n",
         )
         .expect("write a");
-        std::fs::write(tmp.join("b.txt"), "gamma\ndelta [TODO] three\n").expect("write b");
-        let tmp_str = display_no_trailing_sep(&tmp);
+        std::fs::write(tmp.path().join("b.txt"), "gamma\ndelta [TODO] three\n").expect("write b");
+        let tmp_str = display_no_trailing_sep(tmp.path());
 
         let src = format!(
             r"cd '{tmp_str}'
@@ -1574,12 +1578,12 @@ return !{{length $hits}}"
             "three [TODO] hits across the tree"
         );
         assert_eq!(
-            std::fs::read_to_string(tmp.join("a.txt")).expect("read a"),
+            std::fs::read_to_string(tmp.path().join("a.txt")).expect("read a"),
             "alpha [DONE] one\nplain\nbeta [DONE] two\n",
             "both TODOs in a.txt rewritten in one atomic edit"
         );
         assert_eq!(
-            std::fs::read_to_string(tmp.join("b.txt")).expect("read b"),
+            std::fs::read_to_string(tmp.path().join("b.txt")).expect("read b"),
             "gamma\ndelta [DONE] three\n"
         );
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1608,7 +1612,7 @@ return !{{length $hits}}"
             String::from_utf8_lossy(&r.stderr)
         );
         assert_eq!(
-            std::fs::read_to_string(tmp.join("config.txt")).expect("read after edit"),
+            std::fs::read_to_string(tmp.path().join("config.txt")).expect("read after edit"),
             "USE_OPENCV := 1\nUSE_LEVELDB := 1\n"
         );
 
@@ -1629,7 +1633,7 @@ return !{{length $hits}}"
             "a repeated match must error, not guess which one"
         );
         assert_eq!(
-            std::fs::read_to_string(tmp.join("config.txt")).expect("read after failed edit"),
+            std::fs::read_to_string(tmp.path().join("config.txt")).expect("read after failed edit"),
             "USE_OPENCV := 1\nUSE_LEVELDB := 1\n",
             "a rejected batch must leave the file untouched"
         );
@@ -1652,7 +1656,7 @@ return !{{length $hits}}"
             &mut shell,
             &format!("edit-replace '{path}' 'world' 'friend'"),
         );
-        let wrote = std::fs::read_to_string(dir.join("b")).ok();
+        let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             r.exit,
@@ -1706,7 +1710,7 @@ return !{{length $hits}}"
 
             let (r, kinds) =
                 run_capturing(&mut shell, &format!("edit-replace '{path}' 'HEAD' 'TAIL'"));
-            let wrote = std::fs::read_to_string(dir.join("big.txt")).ok();
+            let wrote = std::fs::read_to_string(dir.path().join("big.txt")).ok();
             let _ = std::fs::remove_dir_all(&dir);
             assert_eq!(
                 r.exit,
@@ -1755,11 +1759,11 @@ return !{{length $hits}}"
         use std::os::unix::fs::PermissionsExt;
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("edit-replace-mode", "run.sh", "#!/bin/sh\necho old\n");
-        std::fs::set_permissions(dir.join("run.sh"), std::fs::Permissions::from_mode(0o755))
+        std::fs::set_permissions(dir.path().join("run.sh"), std::fs::Permissions::from_mode(0o755))
             .expect("chmod the fixture executable");
 
         let r = run_once(&mut shell, &format!("edit-replace '{path}' 'old' 'new'"));
-        let mode = std::fs::metadata(dir.join("run.sh")).map(|m| m.permissions().mode() & 0o777);
+        let mode = std::fs::metadata(dir.path().join("run.sh")).map(|m| m.permissions().mode() & 0o777);
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(
@@ -1782,7 +1786,7 @@ return !{{length $hits}}"
     fn skill_name_validation_confines_the_join_to_the_skills_root() {
         let mut shell = fresh_shell();
         let tmp = scratch_dir("skill-root");
-        let skills = tmp.join(".exarch").join("skills");
+        let skills = tmp.path().join(".exarch").join("skills");
         std::fs::create_dir_all(skills.join("demo")).expect("create skill dir");
         std::fs::write(
             skills.join("demo").join("SKILL.md"),
@@ -1790,13 +1794,13 @@ return !{{length $hits}}"
         )
         .expect("write skill fixture");
         // A sibling of the skills root, reachable by `..` and nothing else.
-        std::fs::create_dir_all(tmp.join(".exarch").join("secret")).expect("create secret dir");
+        std::fs::create_dir_all(tmp.path().join(".exarch").join("secret")).expect("create secret dir");
         std::fs::write(
-            tmp.join(".exarch").join("secret").join("SKILL.md"),
+            tmp.path().join(".exarch").join("secret").join("SKILL.md"),
             "TOPSECRET\n",
         )
         .expect("write secret fixture");
-        let root = display_no_trailing_sep(&tmp);
+        let root = display_no_trailing_sep(tmp.path());
 
         let loaded = run_once(&mut shell, &format!("cd '{root}'; skill 'demo'"));
         let body = loaded.value.as_deref().expect("skill returns its body");
@@ -1846,20 +1850,20 @@ return !{{length $hits}}"
             .collect()
     }
 
-    /// Fresh, empty per-test temp dir named after `tag`; any stale dir from a
-    /// prior run is removed first.
-    fn scratch_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("exarch-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create scratch dir");
-        dir
+    /// A directory for one test, deleted when the returned guard falls.  Hold
+    /// the guard: binding only its path deletes the directory on the spot.
+    fn scratch_dir(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("exarch-{tag}-"))
+            .tempdir()
+            .expect("create scratch dir")
     }
 
-    /// Write `body` into a fresh per-test temp dir, returning the dir and the
-    /// display path of the file inside it.
-    fn scratch_file(tag: &str, name: &str, body: &str) -> (std::path::PathBuf, String) {
+    /// Write `body` into a directory of this test's own, returning the guard
+    /// and the display path of the file inside it.
+    fn scratch_file(tag: &str, name: &str, body: &str) -> (tempfile::TempDir, String) {
         let dir = scratch_dir(tag);
-        let path = dir.join(name);
+        let path = dir.path().join(name);
         std::fs::write(&path, body).expect("write scratch fixture");
         let disp = display_no_trailing_sep(&path);
         (dir, disp)
@@ -1903,10 +1907,10 @@ return !{{length $hits}}"
         let mut shell = fresh_shell();
         // No fixture file: the write creates the target.
         let dir = scratch_dir("cov-write");
-        let path = display_no_trailing_sep(&dir.join("b"));
+        let path = display_no_trailing_sep(&dir.path().join("b"));
 
         let (r, kinds) = run_capturing(&mut shell, &format!("to-string 'x' > '{path}'"));
-        let wrote = std::fs::read_to_string(dir.join("b")).ok();
+        let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             r.exit,
@@ -1951,7 +1955,7 @@ return !{{length $hits}}"
             &mut shell,
             &format!("to-string \"hello\\nfriend\\n\" > '{path}'"),
         );
-        let wrote = std::fs::read_to_string(dir.join("b")).ok();
+        let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             r.exit,
@@ -2004,7 +2008,7 @@ return !{{length $hits}}"
         let (dir, path) = scratch_file("cov-write-oversized", "b", &big);
 
         let (r, kinds) = run_capturing(&mut shell, &format!("to-string 'short' > '{path}'"));
-        let wrote = std::fs::read_to_string(dir.join("b")).ok();
+        let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             r.exit,

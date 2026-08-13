@@ -317,12 +317,12 @@ mod tests {
     #[test]
     fn files_folders_and_empty_folders_are_all_recorded() {
         let dir = workshop("manifest-record");
-        std::fs::write(dir.join("letter.txt"), b"dear all").expect("fixture");
-        std::fs::create_dir(dir.join("sent")).expect("fixture");
-        std::fs::write(dir.join("sent").join("a.txt"), b"gone").expect("fixture");
-        std::fs::create_dir(dir.join("empty")).expect("fixture");
+        std::fs::write(dir.path().join("letter.txt"), b"dear all").expect("fixture");
+        std::fs::create_dir(dir.path().join("sent")).expect("fixture");
+        std::fs::write(dir.path().join("sent").join("a.txt"), b"gone").expect("fixture");
+        std::fs::create_dir(dir.path().join("empty")).expect("fixture");
 
-        let manifest = Manifest::of_folder(&dir).expect("an ordinary folder reads");
+        let manifest = Manifest::of_folder(dir.path()).expect("an ordinary folder reads");
         match manifest.entries.get("letter.txt") {
             Some(EntryKind::File { size, hash, .. }) => {
                 assert_eq!(*size, 8);
@@ -346,8 +346,8 @@ mod tests {
     #[test]
     fn a_link_is_recorded_as_its_target_and_never_followed() {
         let dir = workshop("manifest-link");
-        std::os::unix::fs::symlink("nowhere/at-all", dir.join("dangling")).expect("fixture");
-        let manifest = Manifest::of_folder(&dir).expect("a dangling link must not break the walk");
+        std::os::unix::fs::symlink("nowhere/at-all", dir.path().join("dangling")).expect("fixture");
+        let manifest = Manifest::of_folder(dir.path()).expect("a dangling link must not break the walk");
         assert_eq!(
             manifest.entries.get("dangling"),
             Some(&EntryKind::Link {
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn hash_file_on_a_missing_path_answers_gone_rather_than_erring() {
         let dir = workshop("manifest-hash-missing");
-        let missing = dir.join("never-existed.txt");
+        let missing = dir.path().join("never-existed.txt");
         assert_eq!(
             hash_file(&missing).expect("a missing file is not an error"),
             None
@@ -371,12 +371,12 @@ mod tests {
     #[test]
     fn measure_counts_files_and_bytes_without_reading_them() {
         let dir = workshop("manifest-measure");
-        std::fs::write(dir.join("a.txt"), b"dear all").expect("fixture");
-        std::fs::create_dir(dir.join("sub")).expect("fixture");
-        std::fs::write(dir.join("sub").join("b.txt"), b"gone").expect("fixture");
-        std::fs::create_dir(dir.join("empty")).expect("fixture");
+        std::fs::write(dir.path().join("a.txt"), b"dear all").expect("fixture");
+        std::fs::create_dir(dir.path().join("sub")).expect("fixture");
+        std::fs::write(dir.path().join("sub").join("b.txt"), b"gone").expect("fixture");
+        std::fs::create_dir(dir.path().join("empty")).expect("fixture");
 
-        let measure = measure(&dir).expect("an ordinary folder measures");
+        let measure = measure(dir.path()).expect("an ordinary folder measures");
         assert_eq!(measure.files, 2);
         assert_eq!(measure.bytes, 8 + 4);
         let _ = std::fs::remove_dir_all(&dir);

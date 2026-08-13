@@ -67,3 +67,7 @@ windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_IO",
 ] }
+
+[dev-dependencies]
+# `test_fixture::workshop`'s per-test directory, which deletes itself.
+tempfile = "3.27"

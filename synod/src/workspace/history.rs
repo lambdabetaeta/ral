@@ -666,11 +666,11 @@ mod tests {
         store
             .capture(&folder, Moment::Before)
             .expect("first capture");
-        assert_eq!(object_count(&dir), 1, "identical files share one object");
+        assert_eq!(object_count(dir.path()), 1, "identical files share one object");
         store
             .capture(&folder, Moment::After)
             .expect("second capture");
-        assert_eq!(object_count(&dir), 1, "a repeat capture adds nothing");
+        assert_eq!(object_count(dir.path()), 1, "a repeat capture adds nothing");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -820,13 +820,13 @@ mod tests {
         let (dir, folder, store) = workshop("history-wipe");
         std::fs::write(folder.join("a.txt"), b"kept once").expect("fixture");
         store.capture(&folder, Moment::Before).expect("captures");
-        let sibling = dir.join("run.log");
+        let sibling = dir.path().join("run.log");
         std::fs::write(&sibling, b"a run log, not this store's business").expect("fixture");
 
         store.wipe().expect("wipes");
 
         assert!(
-            !dir.join("history").exists(),
+            !dir.path().join("history").exists(),
             "the store's own directory must be gone"
         );
         assert!(
@@ -839,8 +839,8 @@ mod tests {
     #[test]
     fn two_stores_over_the_same_directory_coexist() {
         let dir = bare_workshop("history-shared-shared");
-        let first = HistoryStore::open_at(&dir).expect("first store opens");
-        let second = HistoryStore::open_at(&dir).expect("a second shared open must not refuse");
+        let first = HistoryStore::open_at(dir.path()).expect("first store opens");
+        let second = HistoryStore::open_at(dir.path()).expect("a second shared open must not refuse");
 
         drop(first);
         drop(second);
@@ -850,8 +850,8 @@ mod tests {
     #[test]
     fn sweep_removes_an_unheld_store_and_skips_a_held_one() {
         let root = bare_workshop("history-sweep-root");
-        let held_history = root.join("held").join("history");
-        let free_history = root.join("free").join("history");
+        let held_history = root.path().join("held").join("history");
+        let free_history = root.path().join("free").join("history");
         // Held: its `HistoryStore` stays alive across the sweep below, so
         // its shared lock is still out there for the sweep's exclusive
         // probe to refuse.
@@ -860,7 +860,7 @@ mod tests {
         // its lock any more — exactly what a crashed run leaves behind.
         drop(HistoryStore::open_at(&free_history).expect("free store opens"));
 
-        sweep_stale_under(&root);
+        sweep_stale_under(root.path());
 
         assert!(
             held_history.exists(),
@@ -878,13 +878,13 @@ mod tests {
     #[test]
     fn a_swept_slugs_siblings_outside_history_survive() {
         let root = bare_workshop("history-sweep-siblings");
-        let slug = root.join("a-project");
+        let slug = root.path().join("a-project");
         let free_history = slug.join("history");
         HistoryStore::open_at(&free_history).expect("store opens");
         let sibling = slug.join("run.log");
         std::fs::write(&sibling, b"another door's business").expect("fixture");
 
-        sweep_stale_under(&root);
+        sweep_stale_under(root.path());
 
         assert!(!free_history.exists(), "the unheld store must be swept");
         assert!(

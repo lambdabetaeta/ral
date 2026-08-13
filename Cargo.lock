@@ -7045,6 +7045,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "tempfile",
  "tokio",
  "vm-manager",
  "windows-sys 0.61.2",

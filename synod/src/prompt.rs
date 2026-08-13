@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn the_grant_bullets_name_the_guests_paths_as_the_guest_spells_them() {
         let dir = crate::test_fixture::workshop("prompt-grant-bullets");
-        let root = dir.join("Admissions");
+        let root = dir.path().join("Admissions");
         std::fs::create_dir(&root).expect("granted folder");
         let grant = crate::grant::Grant::open(&root).expect("fixture folder must open");
         let p = assemble(

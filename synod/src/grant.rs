@@ -404,7 +404,7 @@ mod tests {
     #[test]
     fn a_missing_folder_is_refused_by_name() {
         let dir = workshop("grant-missing");
-        let message = refusal(&dir.join("Admissions"));
+        let message = refusal(&dir.path().join("Admissions"));
         assert!(
             message.contains("There is nothing at") && message.contains("picker"),
             "a missing folder should say so and say what to do: {message}"
@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn a_file_is_not_a_folder() {
         let dir = workshop("grant-file");
-        let letter = dir.join("letter.docx");
+        let letter = dir.path().join("letter.docx");
         std::fs::write(&letter, b"not a folder").expect("write fixture");
         let message = refusal(&letter);
         assert!(
@@ -463,10 +463,10 @@ mod tests {
     #[test]
     fn an_ordinary_folder_opens_resolved() {
         let dir = workshop("grant-ordinary");
-        let admissions = dir.join("Admissions");
+        let admissions = dir.path().join("Admissions");
         std::fs::create_dir(&admissions).expect("fixture folder");
         let grant = Grant::open(
-            &dir.join("Admissions")
+            &dir.path().join("Admissions")
                 .join(".")
                 .join("..")
                 .join("Admissions"),
@@ -478,10 +478,11 @@ mod tests {
     }
 
     /// Fixture: a granted folder under a private workshop, so paths
-    /// beside it are host paths *outside* the grant.
-    fn granted(tag: &str) -> (PathBuf, Grant) {
+    /// beside it are host paths *outside* the grant.  The workshop comes back
+    /// as its guard: hold it, or the folder the grant names goes away.
+    fn granted(tag: &str) -> (tempfile::TempDir, Grant) {
         let dir = workshop(tag);
-        let root = dir.join("Admissions");
+        let root = dir.path().join("Admissions");
         std::fs::create_dir(&root).expect("granted folder");
         let grant = Grant::open(&root).expect("fixture folder must open");
         (dir, grant)
