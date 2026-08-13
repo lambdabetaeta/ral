@@ -10,8 +10,7 @@ use crate::agent::Agent;
 use crate::agent::attend::announce;
 use crate::agent::cancel;
 use crate::agent::digest::{
-    COMPACT_THRESHOLD, SUMMARY_CAP_FALLBACK_TOKENS, compaction_due, suffix_keep_budget,
-    summary_cap_tokens,
+    COMPACT_THRESHOLD, SUMMARY_CAP_FALLBACK_TOKENS, suffix_keep_budget, summary_cap_tokens,
 };
 use crate::agent::event::{
     ContextOp, EditAuthority, QuiesceReason, ToolResult as SessionToolResult,
@@ -181,11 +180,14 @@ impl Agent {
             }
             emit.emit(Kind::Boundary);
             // The live numerator the next `compact` weighs against the window.
-            self.last_input = usage.input;
-            self.log
-                .lock()
-                .record_usage(usage.into())
-                .map_err(|e| ProviderError::Other(e.to_string()))?;
+            let input_tokens = usage.input;
+            let measured_at = {
+                let mut log = self.log.lock();
+                log.record_usage(usage.into())
+                    .map_err(|e| ProviderError::Other(e.to_string()))?;
+                log.log_len()
+            };
+            self.last_input = (input_tokens, measured_at);
             emit.emit(Kind::Usage(usage));
             // Routine boundaries and `MaxTokens` (handled below) stay silent.
             if let Some(reason) = &stop_reason {
@@ -290,7 +292,7 @@ impl Agent {
     }
 
     pub(crate) fn compact(
-        &mut self,
+        &self,
         provider: &Arc<Provider>,
         emit: &Emitter,
         requested: bool,
@@ -307,10 +309,9 @@ impl Agent {
         // last saw against its window, firing once they grow into the reserve.
         // An unknown window falls back to the byte heuristic; a manual
         // `/compact` overrides the trigger entirely.
-        let used = self.last_input;
         let window = provider.context_window();
         let (due, summary_cap) = match window {
-            Some(w) if w > 0 => (compaction_due(used, w), summary_cap_tokens(w)),
+            Some(w) if w > 0 => (self.token_compaction_due(w), summary_cap_tokens(w)),
             _ => {
                 let bytes = self.log.lock().history_bytes();
                 (bytes >= COMPACT_THRESHOLD, SUMMARY_CAP_FALLBACK_TOKENS)
@@ -358,7 +359,6 @@ impl Agent {
                     }
                 };
                 emit_context_edited(emit, &receipt);
-                self.context_warn_latched = false;
             }
             Err(e) => self.note_error(format!("compact failed: {e}"), emit),
         }
@@ -747,6 +747,54 @@ mod tests {
             }
             other => panic!("expected Failed from no-reply nudges, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn stale_token_measure_is_unknown_until_the_next_completion() {
+        let dir = tmp("stale-token-measure");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        {
+            let mut log = session.log.lock();
+            log.append_user("old context".into(), None).unwrap();
+            log.append_assistant(genai::chat::ChatMessage::assistant("answer"), vec![], None)
+                .unwrap();
+        }
+        let measured_at = session.log.lock().log_len();
+        session.last_input = (99_000, measured_at);
+        session
+            .log
+            .lock()
+            .apply_edit(
+                ContextOp::Drop { exchanges: vec![1] },
+                EditAuthority::Model,
+            )
+            .unwrap();
+
+        assert!(
+            !session.token_compaction_due(100_000),
+            "a stale token measure must not trigger compaction"
+        );
+        assert_eq!(
+            session.token_pressure(100_000),
+            None,
+            "a stale token measure must not warn as high pressure"
+        );
+
+        let provider = scripted(
+            "test-model",
+            Script::new().then(Reply::text("fresh completion")),
+        );
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::new(tx, session.id);
+        let outcome = session.deliberate(
+            &provider,
+            Some("new context".into()),
+            None,
+            &cancel::Token::new(),
+            &emit,
+        );
+        assert!(matches!(outcome, Ok(Outcome::Complete(text)) if text == "fresh completion"));
+        assert_eq!(session.measured_input(), Some(0));
     }
 
     thread_local! {

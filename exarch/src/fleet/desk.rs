@@ -7,6 +7,8 @@
 //! [`DeskBinding`] wraps the seam for the identity transport, where a
 //! handler's chrome would otherwise outrun the run's earlier surface output.
 
+use crate::agent::event::{ContextOp, EditAuthority};
+use crate::agent::transcript::emit_context_edited;
 use crate::agent::{Agent, Build, LogCell, ProviderHandle, ReplyCell};
 use crate::bus::{AgentId, Emitter, Kind, Mailbox};
 use crate::egress;
@@ -51,6 +53,8 @@ pub(crate) enum DeskAct {
     Schedule,
     Unschedule,
     Reply,
+    ContextDrop,
+    ContextFold,
 }
 
 impl DeskAct {
@@ -63,6 +67,8 @@ impl DeskAct {
             Self::Schedule => "schedule",
             Self::Unschedule => "unschedule",
             Self::Reply => "reply",
+            Self::ContextDrop => "context-drop",
+            Self::ContextFold => "context-fold",
         }
     }
 
@@ -76,6 +82,8 @@ impl DeskAct {
             "schedule" => Self::Schedule,
             "unschedule" => Self::Unschedule,
             "reply" => Self::Reply,
+            "context-drop" => Self::ContextDrop,
+            "context-fold" => Self::ContextFold,
             other => unreachable!("desk act fragment carries an unknown verb `{other}`"),
         }
     }
@@ -95,6 +103,8 @@ impl DeskAct {
             // The one act with no addressee: a returning agent replies to its
             // parent and to nobody else.
             Self::Reply => "staged your reply".to_string(),
+            Self::ContextDrop => named("dropped context"),
+            Self::ContextFold => named("folded context"),
         }
     }
 }
@@ -314,6 +324,38 @@ fn payload_int(v: FOValue, class: &str, field: &str) -> Result<i64, Error> {
     }
 }
 
+fn payload_exchange(v: FOValue, class: &str, field: &str) -> Result<u64, Error> {
+    let value = payload_int(v, class, field)?;
+    u64::try_from(value).map_err(|_| {
+        Error::new(
+            format!("`{class}`: `{field}` must be a non-negative exchange number"),
+            1,
+        )
+    })
+}
+
+fn payload_exchanges(v: FOValue, class: &str) -> Result<Vec<u64>, Error> {
+    let FOValue::List { items } = v else {
+        return Err(Error::new(
+            format!("`{class}`: `exchanges` must be a list of non-negative Ints"),
+            1,
+        ));
+    };
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| payload_exchange(item, class, &format!("exchanges[{index}]")))
+        .collect()
+}
+
+fn usize_to_i64(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn u64_to_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
 fn payload_string(v: FOValue, class: &str, field: &str) -> Result<String, Error> {
     match v {
         FOValue::String { value } => Ok(value),
@@ -449,6 +491,9 @@ impl ExarchDesk {
             "reply" => self.reply(payload),
             "pin-read" => self.pin_read(payload),
             "pin-list" => Ok(self.pin_list()),
+            "context" => Ok(self.context()),
+            "context-drop" => self.context_drop(payload),
+            "context-fold" => self.context_fold(payload),
             other => Err(Error::new(
                 format!("unrecognised enquiry class `{other}`"),
                 1,
@@ -1163,6 +1208,146 @@ impl ExarchDesk {
             }),
         }
     }
+
+    fn context(&self) -> FOValue {
+        let survey = self.services.log.lock().context_survey();
+        let spans = survey
+            .items
+            .into_iter()
+            .map(|item| FOValue::Map {
+                entries: vec![
+                    (
+                        "exchange".to_string(),
+                        FOValue::Int {
+                            value: u64_to_i64(item.exchange),
+                        },
+                    ),
+                    (
+                        "kind".to_string(),
+                        FOValue::String {
+                            value: item.kind.as_str().to_string(),
+                        },
+                    ),
+                    (
+                        "prompt".to_string(),
+                        FOValue::String {
+                            value: item.opening,
+                        },
+                    ),
+                    (
+                        "bytes".to_string(),
+                        FOValue::Int {
+                            value: usize_to_i64(item.bytes),
+                        },
+                    ),
+                    (
+                        "steps".to_string(),
+                        FOValue::Int {
+                            value: usize_to_i64(item.steps),
+                        },
+                    ),
+                    ("live".to_string(), FOValue::Bool { value: item.live }),
+                ],
+            })
+            .collect();
+        FOValue::Map {
+            entries: vec![
+                ("spans".to_string(), FOValue::List { items: spans }),
+                (
+                    "total-bytes".to_string(),
+                    FOValue::Int {
+                        value: usize_to_i64(survey.total_bytes),
+                    },
+                ),
+                (
+                    "total-steps".to_string(),
+                    FOValue::Int {
+                        value: usize_to_i64(survey.total_steps),
+                    },
+                ),
+                (
+                    "cache".to_string(),
+                    FOValue::String {
+                        value: "editing before the cache watermark re-reads the prefix on the next request"
+                            .to_string(),
+                    },
+                ),
+            ],
+        }
+    }
+
+    fn context_drop(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+        let [exchanges] = payload_list(payload, "context-drop", "[exchanges]")?;
+        let exchanges = payload_exchanges(exchanges, "context-drop")?;
+        let subject = format!(
+            "exchanges [{}]",
+            exchanges
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        self.context_edit(
+            DeskAct::ContextDrop,
+            Some(&subject),
+            subject.clone(),
+            ContextOp::Drop { exchanges },
+        )
+    }
+
+    fn context_fold(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+        let [through, digest] = payload_list(payload, "context-fold", "[through, digest]")?;
+        let through = payload_exchange(through, "context-fold", "through")?;
+        let digest = payload_string(digest, "context-fold", "digest")?;
+        let subject = format!("through {through}");
+        let payload = format!("{subject}, digest {digest}");
+        self.context_edit(
+            DeskAct::ContextFold,
+            Some(&subject),
+            payload,
+            ContextOp::Fold {
+                through_exchange: through,
+                digest,
+            },
+        )
+    }
+
+    fn context_edit(
+        &self,
+        act: DeskAct,
+        subject: Option<&str>,
+        payload: String,
+        op: ContextOp,
+    ) -> Result<FOValue, Error> {
+        let result = self
+            .services
+            .log
+            .lock()
+            .apply_edit(op, EditAuthority::Model);
+        match result {
+            Ok(receipt) => {
+                self.services.commit_act(act, subject, payload, false);
+                emit_context_edited(&self.services.emit, &receipt);
+                self.services.emit.emit(Kind::HarnessResult(format!(
+                    "context changed by {:+} serialized bytes",
+                    receipt.bytes_delta
+                )));
+                Ok(FOValue::Map {
+                    entries: vec![(
+                        "bytes-delta".to_string(),
+                        FOValue::Int {
+                            value: receipt.bytes_delta,
+                        },
+                    )],
+                })
+            }
+            Err(error) => {
+                self.services.commit_act(act, subject, payload, true);
+                self.services.emit.emit(Kind::HarnessResult(error.clone()));
+                Err(Error::new(error, 1))
+            }
+        }
+    }
 }
 
 /// Decodes a surfaced value onto the bus, folding a `` `pin ``/`` `unpin ``
@@ -1350,6 +1535,56 @@ mod tests {
         }
     }
 
+    fn complete_exchange(log: &mut AgentLog, prompt: &str, answer: &str) {
+        log.append_user(prompt.to_string(), None).expect("prompt");
+        log.append_assistant(
+            genai::chat::ChatMessage::assistant(answer),
+            Vec::new(),
+            None,
+        )
+        .expect("answer");
+    }
+
+    fn context_drop_request(exchanges: &[i64]) -> FOValue {
+        FOValue::Variant {
+            label: "context-drop".to_string(),
+            payload: Some(Box::new(FOValue::List {
+                items: exchanges
+                    .iter()
+                    .map(|value| FOValue::Int { value: *value })
+                    .collect(),
+            })),
+        }
+    }
+
+    fn context_fold_request(through: i64, digest: &str) -> FOValue {
+        FOValue::Variant {
+            label: "context-fold".to_string(),
+            payload: Some(Box::new(FOValue::List {
+                items: vec![
+                    FOValue::Int { value: through },
+                    FOValue::String {
+                        value: digest.to_string(),
+                    },
+                ],
+            })),
+        }
+    }
+
+    fn int_field(value: FOValue, key: &str) -> i64 {
+        let FOValue::Map { entries } = value else {
+            panic!("expected a record")
+        };
+        entries
+            .into_iter()
+            .find_map(|(name, value)| (name == key).then_some(value))
+            .and_then(|value| match value {
+                FOValue::Int { value } => Some(value),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("record has no Int field `{key}`"))
+    }
+
     /// [`desk`] holding the self-wakeup grant, so a schedule test reaches past it.
     fn granted_desk() -> ExarchDesk {
         ExarchDesk {
@@ -1456,6 +1691,147 @@ mod tests {
             "error must name the expected shape, got: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn context_survey_lists_digest_import_and_live_exchange() {
+        let desk = desk();
+        {
+            let mut log = desk.services.log.lock();
+            complete_exchange(&mut log, "closed\nexchange", "answer");
+            complete_exchange(&mut log, "folded", "answer");
+            log.apply_edit(
+                ContextOp::Fold {
+                    through_exchange: 1,
+                    digest: "kept summary".into(),
+                },
+                EditAuthority::Model,
+            )
+            .expect("fold");
+            log.import_context(vec![genai::chat::ChatMessage::user("inherited\ncontext")])
+                .expect("import");
+            log.append_user("live".into(), None).expect("live prompt");
+        }
+        let expected_bytes = desk.services.log.lock().history_bytes();
+
+        let FOValue::Map { entries } = desk
+            .handle(FOValue::Variant {
+                label: "context".into(),
+                payload: None,
+            })
+            .expect("context survey")
+        else {
+            panic!("context must answer a record")
+        };
+        let spans = entries
+            .iter()
+            .find_map(|(key, value)| (key == "spans").then_some(value))
+            .expect("survey spans");
+        let FOValue::List { items } = spans else {
+            panic!("survey spans must be a list")
+        };
+        assert_eq!(items.len(), 4);
+        let kinds = items
+            .iter()
+            .map(|item| {
+                let FOValue::Map { entries } = item else {
+                    panic!("survey item must be a record")
+                };
+                entries
+                    .iter()
+                    .find_map(|(key, value)| {
+                        (key == "kind").then(|| match value {
+                            FOValue::String { value } => value.as_str(),
+                            _ => panic!("survey kind must be a string"),
+                        })
+                    })
+                    .expect("survey kind")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, vec!["digest", "exchange", "import", "exchange"]);
+        let total_bytes = entries
+            .iter()
+            .find_map(|(key, value)| {
+                (key == "total-bytes").then(|| match value {
+                    FOValue::Int { value } => *value,
+                    _ => panic!("survey total bytes must be an Int"),
+                })
+            })
+            .expect("survey total bytes");
+        assert_eq!(total_bytes, i64::try_from(expected_bytes).unwrap());
+        let live = items.last().expect("live exchange");
+        assert!(matches!(
+            live,
+            FOValue::Map { entries }
+                if entries.iter().any(|(key, value)| key == "live" && matches!(value, FOValue::Bool { value: true }))
+        ));
+    }
+
+    #[test]
+    fn context_edit_refusals_surface_the_admissibility_sentence() {
+        let live_desk = desk();
+        {
+            let mut log = live_desk.services.log.lock();
+            log.append_user("live".into(), None).expect("live prompt");
+        }
+        let err = live_desk
+            .handle(context_drop_request(&[1]))
+            .expect_err("the live exchange is not editable");
+        assert_eq!(
+            err.message,
+            "exchange 1 is the one you are in — a context edit may only name closed exchanges"
+        );
+
+        let unknown_desk = desk();
+        {
+            let mut log = unknown_desk.services.log.lock();
+            complete_exchange(&mut log, "one", "answer");
+        }
+        let err = unknown_desk
+            .handle(context_drop_request(&[7]))
+            .expect_err("an unknown exchange is not editable");
+        assert_eq!(err.message, "exchange 7 is not present in the current view");
+
+        let folded_desk = desk();
+        {
+            let mut log = folded_desk.services.log.lock();
+            complete_exchange(&mut log, "one", "answer");
+            complete_exchange(&mut log, "two", "answer");
+        }
+        folded_desk
+            .handle(context_fold_request(2, "kept summary"))
+            .expect("fold");
+        let err = folded_desk
+            .handle(context_drop_request(&[1]))
+            .expect_err("an exchange inside the digest is not addressable");
+        assert_eq!(
+            err.message,
+            "exchange 1 is folded into the digest through 2 — name 2 to drop the digest whole, or fold further"
+        );
+
+        let err = folded_desk
+            .handle(context_drop_request(&[]))
+            .expect_err("an empty drop is not an edit");
+        assert_eq!(err.message, "a context edit must name at least one exchange");
+    }
+
+    #[test]
+    fn context_drop_receipt_reports_the_view_byte_delta() {
+        let desk = desk();
+        let before = {
+            let mut log = desk.services.log.lock();
+            complete_exchange(&mut log, "one", "a longer answer");
+            complete_exchange(&mut log, "two", "another answer");
+            log.history_bytes()
+        };
+        let delta = int_field(
+            desk.handle(context_drop_request(&[1]))
+                .expect("context drop"),
+            "bytes-delta",
+        );
+        let after = desk.services.log.lock().history_bytes();
+        assert_eq!(delta, i64::try_from(before).unwrap() - i64::try_from(after).unwrap());
+        assert!(delta > 0, "dropping a visible exchange should shed bytes");
     }
 
     /// `enquire` is called bare, off the dispatching thread: the adapter's drain

@@ -135,9 +135,9 @@ pub struct Agent {
     /// Live wakeups (cron / after), posted into this agent's own inbox; the
     /// builtins that arm them gate on `allow_schedule`.
     pub(crate) schedules: crate::fleet::schedule::ScheduleRegistry,
-    /// Input tokens on the most recent completion — the numerator for the
-    /// compaction trigger and for the TUI's fidelity gauge.
-    last_input: u64,
+    /// Input tokens and the event-log position at which that measurement
+    /// landed — the numerator for the compaction trigger and pressure nudge.
+    last_input: (u64, usize),
     /// Pins flow straight past the session to the frontend; the periodic
     /// [`nudge`] reminder reads this mirror to name what the model has pinned.
     pins: shell_eval::PinDigests,
@@ -157,8 +157,8 @@ pub struct Agent {
     disk_warn_latched: bool,
     /// Latched on crossing the pressure soft line ahead of auto-compaction
     /// ([`digest::pressure_due`]), so the nudge fires once per excursion
-    /// rather than on every clean completion.  Cleared when [`Self::compact`]
-    /// (deliberate.rs) applies a compaction successfully.
+    /// rather than on every clean completion.  Re-armed in `context_pressure`
+    /// after the measure falls back under the line.
     context_warn_latched: bool,
     /// The IT-set network policy and its audit ledger — shared verbatim by
     /// every fork, like [`Self::disk_warn_bytes`].
@@ -172,6 +172,24 @@ pub struct Agent {
     /// 2 enquiries may land on different `ral` calls, so what phase 1
     /// reserves must outlive that call.
     pending_hatches: PendingHatches,
+}
+
+impl Agent {
+    pub(crate) fn measured_input(&self) -> Option<u64> {
+        let (tokens, measured_at) = self.last_input;
+        (!self.log.lock().token_measure_is_stale(measured_at)).then_some(tokens)
+    }
+
+    pub(crate) fn token_compaction_due(&self, window: u64) -> bool {
+        self.measured_input()
+            .is_some_and(|tokens| crate::agent::digest::compaction_due(tokens, window))
+    }
+
+    pub(crate) fn token_pressure(&self, window: u64) -> Option<String> {
+        self.measured_input()
+            .filter(|tokens| crate::agent::digest::pressure_due(*tokens, window))
+            .map(|tokens| format!("{tokens} of {window} tokens"))
+    }
 }
 
 /// The depth budget exarch's trunks start with.

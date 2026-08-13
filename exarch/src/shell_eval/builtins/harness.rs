@@ -1,5 +1,6 @@
 //! The harness builtins — `agent`, `agents`, `message`, `agent-cancel`,
-//! `schedule`, `schedules`, `unschedule`, `reply`, `pin-read`, `pin-list` —
+//! `schedule`, `schedules`, `unschedule`, `reply`, `pin-read`, `pin-list`,
+//! `context`, `context-drop`, `context-fold` —
 //! with the type schemes that gate them.
 //!
 //! Each body validates at the door before it enquires, so a malformed call
@@ -566,6 +567,137 @@ fn builtin_pin_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     Ok(Value::list(items.into_iter().map(Value::from).collect()))
 }
 
+fn context_receipt(answer: FOValue) -> Settled<Value> {
+    let FOValue::Map { .. } = answer else {
+        return Err(sig(
+            "context: host answered an unexpected shape for the survey",
+        ));
+    };
+    Ok(Value::from(answer))
+}
+
+fn edit_receipt(answer: FOValue, verb: &str) -> Settled<Value> {
+    let FOValue::Map { entries } = &answer else {
+        return Err(sig(format!(
+            "{verb}: host answered an unexpected shape for the receipt"
+        )));
+    };
+    if entries
+        .iter()
+        .any(|(key, value)| key == "bytes-delta" && matches!(value, FOValue::Int { .. }))
+    {
+        Ok(Value::from(answer))
+    } else {
+        Err(sig(format!(
+            "{verb}: host answered an unexpected shape for the receipt"
+        )))
+    }
+}
+
+fn context_drop_payload(value: &Value) -> Settled<FOValue> {
+    let Value::List(items) = value else {
+        return Err(sig(format!(
+            "context-drop: expected a List of non-negative exchange Ints, got {}",
+            value.type_name()
+        )));
+    };
+    let mut exchanges = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let Value::Int(exchange) = item else {
+            return Err(sig(format!(
+                "context-drop: exchange at index {index} must be an Int, got {}",
+                item.type_name()
+            )));
+        };
+        if *exchange < 0 {
+            return Err(sig(format!(
+                "context-drop: exchange at index {index} must be non-negative, got {exchange}"
+            )));
+        }
+        exchanges.push(FOValue::Int { value: *exchange });
+    }
+    Ok(FOValue::List { items: exchanges })
+}
+
+fn context_fold_payload(value: &Value) -> Settled<FOValue> {
+    let Value::Map(spec) = value else {
+        return Err(sig(format!(
+            "context-fold: expected [through: Int, digest: Str], got {}",
+            value.type_name()
+        )));
+    };
+    let Some(through) = spec.get("through") else {
+        return Err(sig(
+            "context-fold: the spec record needs a `through` field — the last exchange to fold",
+        ));
+    };
+    let Value::Int(through) = through else {
+        return Err(sig(format!(
+            "context-fold: `through` must be an Int, got {}",
+            through.type_name()
+        )));
+    };
+    if *through < 0 {
+        return Err(sig(format!(
+            "context-fold: `through` must be non-negative, got {through}"
+        )));
+    }
+    let Some(digest) = spec.get("digest") else {
+        return Err(sig(
+            "context-fold: the spec record needs a `digest` field — the model's summary text",
+        ));
+    };
+    let Value::String(digest) = digest else {
+        return Err(sig(format!(
+            "context-fold: `digest` must be a Str, got {}",
+            digest.type_name()
+        )));
+    };
+    Ok(FOValue::List {
+        items: vec![
+            FOValue::Int { value: *through },
+            FOValue::String {
+                value: digest.clone(),
+            },
+        ],
+    })
+}
+
+fn builtin_context(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    let answer = shell.enquire(
+        mooring,
+        FOValue::Variant {
+            label: "context".to_string(),
+            payload: None,
+        },
+    )?;
+    context_receipt(answer)
+}
+
+fn builtin_context_drop(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    let payload = context_drop_payload(&args[0])?;
+    let answer = shell.enquire(
+        mooring,
+        FOValue::Variant {
+            label: "context-drop".to_string(),
+            payload: Some(Box::new(payload)),
+        },
+    )?;
+    edit_receipt(answer, "context-drop")
+}
+
+fn builtin_context_fold(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    let payload = context_fold_payload(&args[0])?;
+    let answer = shell.enquire(
+        mooring,
+        FOValue::Variant {
+            label: "context-fold".to_string(),
+            payload: Some(Box::new(payload)),
+        },
+    )?;
+    edit_receipt(answer, "context-fold")
+}
+
 /// `reply <value>` — `FOValue::try_from` runs before any enquiry crosses,
 /// so a non-first-order value fails this call alone and leaves the session
 /// running; the refusal for a non-returning agent is the desk's.
@@ -749,9 +881,61 @@ fn scheme_pin_list(_u: &mut Unifier) -> Scheme {
     scheme(&[], &[], &[], thunk(pure(Ty::List(Box::new(Ty::String)))))
 }
 
+fn context_span_ty() -> Ty {
+    closed_record(&[
+        ("exchange", Ty::Int),
+        ("kind", Ty::String),
+        ("prompt", Ty::String),
+        ("bytes", Ty::Int),
+        ("steps", Ty::Int),
+        ("live", Ty::Bool),
+    ])
+}
+
+fn context_receipt_ty() -> Ty {
+    closed_record(&[
+        ("spans", Ty::List(Box::new(context_span_ty()))),
+        ("total-bytes", Ty::Int),
+        ("total-steps", Ty::Int),
+        ("cache", Ty::String),
+    ])
+}
+
+fn edit_receipt_ty() -> Ty {
+    closed_record(&[("bytes-delta", Ty::Int)])
+}
+
+/// `context :: F [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int, steps: Int, live: Bool]], total-bytes: Int, total-steps: Int, cache: Str]`
+fn scheme_context(_u: &mut Unifier) -> Scheme {
+    scheme(&[], &[], &[], thunk(pure(context_receipt_ty())))
+}
+
+/// `context-drop :: [Int] → F [bytes-delta: Int]`
+fn scheme_context_drop(_u: &mut Unifier) -> Scheme {
+    scheme(
+        &[],
+        &[],
+        &[],
+        thunk(fun(Ty::List(Box::new(Ty::Int)), pure(edit_receipt_ty()))),
+    )
+}
+
+/// `context-fold :: [through: Int, digest: Str] → F [bytes-delta: Int]`
+fn scheme_context_fold(_u: &mut Unifier) -> Scheme {
+    scheme(
+        &[],
+        &[],
+        &[],
+        thunk(fun(
+            closed_record(&[("through", Ty::Int), ("digest", Ty::String)]),
+            pure(edit_receipt_ty()),
+        )),
+    )
+}
+
 // A named array, not a promoted temporary: rustc refuses promotion once an
 // entry carries `BuiltinEntry`'s interior-mutable arity cache.
-static HARNESS_BUILTINS_ARR: [BuiltinEntry; 10] = [
+static HARNESS_BUILTINS_ARR: [BuiltinEntry; 13] = [
     BuiltinEntry::new(
         Cow::Borrowed("agent"),
         BuiltinTypeRule::Scheme(scheme_agent),
@@ -811,6 +995,24 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 10] = [
         BuiltinTypeRule::Scheme(scheme_pin_list),
         "pin-list  — the keys currently occupied on your pin register, as [String]. Read one back with pin-read. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_pin_list),
+    ),
+    BuiltinEntry::new(
+        Cow::Borrowed("context"),
+        BuiltinTypeRule::Scheme(scheme_context),
+        "context  — survey the finite, addressable model context. Returns [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int, steps: Int, live: Bool]], total-bytes: Int, total-steps: Int, cache: Str]. Each span is an exchange or import, and a digest is represented by its reach in `exchange`; `prompt` is its opening line, `bytes` its serialized weight, `steps` its provider-step count, and `live` marks the exchange currently in progress. The cache sentence explains that editing before the cache watermark re-reads the prefix on the next request. This is a survey: it does not edit context.",
+        BuiltinBody::Static(builtin_context),
+    ),
+    BuiltinEntry::new(
+        Cow::Borrowed("context-drop"),
+        BuiltinTypeRule::Scheme(scheme_context_drop),
+        "context-drop <exchanges>  — shed whole closed exchanges from the model context, where <exchanges> is a list of non-negative exchange numbers from `context`. The live exchange cannot be named, unknown or already-folded exchanges are refused with an explanation, and an empty list is not an edit. The model is always mid-exchange when it speaks, so a rewind-shaped request for a suffix of closed exchanges is this verb with a range; there is no context-rewind. Returns [bytes-delta: Int], the serialized model-view bytes before minus after (a negative value is honest when a digest is larger than what it replaces). Applied immediately at the desk; the edit is recorded as a model context event.",
+        BuiltinBody::Static(builtin_context_drop),
+    ),
+    BuiltinEntry::new(
+        Cow::Borrowed("context-fold"),
+        BuiltinTypeRule::Scheme(scheme_context_fold),
+        "context-fold [through: <Int>, digest: <Str>]  — replace the visible prefix through a closed exchange with the digest text you supply. `through` may extend the current digest by its reach, but cannot cross the live exchange; name the digest reach itself to fold further. Returns [bytes-delta: Int], the serialized model-view bytes before minus after, and records one model context event immediately. A digest is curation, not a promise of compression, so a negative delta is possible and meaningful.",
+        BuiltinBody::Static(builtin_context_fold),
     ),
 ];
 pub static HARNESS_BUILTINS: &[BuiltinEntry] = &HARNESS_BUILTINS_ARR;

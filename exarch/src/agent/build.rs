@@ -218,7 +218,7 @@ impl Agent {
             reply: None,
             agents,
             schedules: crate::fleet::schedule::ScheduleRegistry::new(),
-            last_input: 0,
+            last_input: (0, 0),
             pins: Arc::default(),
             ral_epoch: 0,
             disk_warn_bytes,
@@ -478,7 +478,7 @@ impl Agent {
         // its registered workers — `/clear` outranks every lease.
         self.seat.clear(&self.log.lock());
         // The rebuilt context is empty: the next step's usage sets this afresh.
-        self.last_input = 0;
+        self.last_input = (0, 0);
         // A fresh context carries no pressure of its own to warn about.
         self.context_warn_latched = false;
         // Retire the subtree — this agent itself stays registered — then

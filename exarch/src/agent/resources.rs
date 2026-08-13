@@ -420,7 +420,7 @@ impl Agent {
             Some("counts the events still owned by the model view".to_string()),
         ));
         rows.extend(pressure_rows(
-            self.last_input,
+            self.last_input.0,
             self.log.lock().history_bytes() as u64,
             self.current_provider().context_window(),
         ));

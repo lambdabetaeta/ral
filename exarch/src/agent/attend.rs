@@ -6,7 +6,7 @@
 //! mailbox by the spawn site rather than by this loop.
 
 use crate::agent::cancel;
-use crate::agent::digest::{PRESSURE_THRESHOLD_FALLBACK, pressure_due};
+use crate::agent::digest::PRESSURE_THRESHOLD_FALLBACK;
 use crate::agent::event::QuiesceReason;
 use crate::agent::nudge;
 use crate::agent::{Agent, deliberate, panic_msg, render_reply};
@@ -394,21 +394,21 @@ impl Agent {
     /// `None` while the excursion is already latched or the line has not been
     /// reached.  Mirrors [`Self::compact`]'s own two-armed match, one reserve
     /// earlier: a known window weighs `last_input` against it, an unknown one
-    /// falls back to the byte heuristic.  Never touches the latch itself —
-    /// that is `take_up`'s call, once it knows the warning actually rode a
-    /// nudge out.
-    fn context_pressure(&self, provider: &Provider) -> Option<String> {
-        if self.context_warn_latched {
-            return None;
-        }
-        match provider.context_window() {
-            Some(w) if w > 0 => pressure_due(self.last_input, w)
-                .then(|| format!("{} of {w} tokens", self.last_input)),
+    /// falls back to the byte heuristic.  A clean reading re-arms the next
+    /// pressure crossing.
+    fn context_pressure(&mut self, provider: &Provider) -> Option<String> {
+        let pressure = match provider.context_window() {
+            Some(w) if w > 0 => self.token_pressure(w),
             _ => {
                 let bytes = self.log.lock().history_bytes();
                 (bytes >= PRESSURE_THRESHOLD_FALLBACK).then(|| format!("{} KB", bytes / 1024))
             }
+        };
+        if pressure.is_none() {
+            self.context_warn_latched = false;
+            return None;
         }
+        (!self.context_warn_latched).then_some(pressure).flatten()
     }
 
     /// Warn once per excursion above the operator's disk-warn ceiling, as an

@@ -330,6 +330,48 @@ pub struct EditReceipt {
     pub bytes_delta: i64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextSpanKind {
+    Exchange,
+    Import,
+    Digest,
+}
+
+impl ContextSpanKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Exchange => "exchange",
+            Self::Import => "import",
+            Self::Digest => "digest",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextSurveyItem {
+    pub exchange: u64,
+    pub kind: ContextSpanKind,
+    pub opening: String,
+    pub bytes: usize,
+    pub steps: usize,
+    pub live: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContextSurvey {
+    pub items: Vec<ContextSurveyItem>,
+    pub total_bytes: usize,
+    pub total_steps: usize,
+}
+
+impl ContextSurvey {
+    fn add(&mut self, item: ContextSurveyItem) {
+        self.total_bytes = self.total_bytes.saturating_add(item.bytes);
+        self.total_steps = self.total_steps.saturating_add(item.steps);
+        self.items.push(item);
+    }
+}
+
 /// One session's log: a stable-index event vector, its `events.jsonl` writer,
 /// and the projection folded from that vector.
 pub struct AgentLog {
@@ -362,6 +404,25 @@ pub(crate) struct ClearRecord {
 
 fn summary_prompt(summary: &str) -> String {
     format!("Summary of prior work in this session:\n\n{summary}")
+}
+
+fn opening_line(text: &str) -> String {
+    text.lines().next().unwrap_or_default().to_string()
+}
+
+fn opening_line_for_events(events: &[SessionEvent]) -> String {
+    for event in events {
+        match event {
+            SessionEvent::UserPrompt { text, .. } => return opening_line(text),
+            SessionEvent::ContextMessage { message, .. } if message.role == ChatRole::User => {
+                if let Some(text) = message.content.first_text() {
+                    return opening_line(text);
+                }
+            }
+            _ => {}
+        }
+    }
+    String::new()
 }
 
 impl AgentLog {
@@ -591,6 +652,43 @@ impl AgentLog {
 
     pub fn view(&self) -> &View {
         &self.projection.view
+    }
+
+    pub fn context_survey(&self) -> ContextSurvey {
+        let mut survey = ContextSurvey::default();
+        if let Some(digest) = &self.projection.view.digest {
+            let item = ContextSurveyItem {
+                exchange: digest.through_exchange,
+                kind: ContextSpanKind::Digest,
+                opening: opening_line(&digest.text),
+                bytes: serde_json::to_string(&ChatMessage::user(summary_prompt(&digest.text)))
+                    .map_or(0, |text| text.len()),
+                steps: 0,
+                live: false,
+            };
+            survey.add(item);
+        }
+        for span in &self.projection.view.spans {
+            let events = &self.log[span.events.clone()];
+            let kind = match events.first() {
+                Some(SessionEvent::ContextMessage { .. }) => ContextSpanKind::Import,
+                _ => ContextSpanKind::Exchange,
+            };
+            let live = self.is_live_exchange(span.id);
+            let item = ContextSurveyItem {
+                exchange: span.id,
+                kind,
+                opening: opening_line_for_events(events),
+                bytes: self.span_message_bytes_with_repair(span, !live),
+                steps: events
+                    .iter()
+                    .filter(|event| matches!(event, SessionEvent::StepStarted { .. }))
+                    .count(),
+                live,
+            };
+            survey.add(item);
+        }
+        survey
     }
 
     /// Approximate context size in serialised model-view bytes.  The fallback
@@ -1250,12 +1348,26 @@ impl AgentLog {
         (self.projection.max_exchange != 0).then_some(self.projection.max_exchange)
     }
 
+    pub fn log_len(&self) -> usize {
+        self.log.len()
+    }
+
+    pub fn token_measure_is_stale(&self, measured_at: usize) -> bool {
+        self.projection
+            .newest_edit
+            .is_some_and(|index| index >= measured_at)
+    }
+
     fn is_live_exchange(&self, id: u64) -> bool {
         !self.is_ready() && self.projection.max_exchange == id
     }
 
     fn span_message_bytes(&self, span: &Span) -> usize {
-        self.span_messages(span, false, true)
+        self.span_message_bytes_with_repair(span, true)
+    }
+
+    fn span_message_bytes_with_repair(&self, span: &Span, repair_end: bool) -> usize {
+        self.span_messages(span, false, repair_end)
             .iter()
             .map(|message| serde_json::to_string(message).map_or(0, |s| s.len()))
             .sum()
