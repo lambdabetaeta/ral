@@ -40,6 +40,10 @@ struct LedgerFile {
     file: std::fs::File,
     #[cfg(unix)]
     rotation_lock: std::fs::File,
+    /// The directory this ledger has to itself, when a test double made it:
+    /// dropped with the log, taking the ledger and its rotation lock along.
+    /// A real ledger lives under XDG state and owns no directory.
+    _scratch: Option<tempfile::TempDir>,
 }
 
 /// Held across the whole check-size/rotate/write sequence, between processes
@@ -91,6 +95,10 @@ fn rotate(path: &std::path::Path) -> std::io::Result<std::fs::File> {
 
 impl AuditLog {
     fn at(path: &std::path::Path) -> std::io::Result<Self> {
+        Self::at_in(path, None)
+    }
+
+    fn at_in(path: &std::path::Path, scratch: Option<tempfile::TempDir>) -> std::io::Result<Self> {
         let file = open_audit_file(path)?;
         #[cfg(unix)]
         let rotation_lock = open_audit_file(&path.with_extension("jsonl.lock"))?;
@@ -99,6 +107,7 @@ impl AuditLog {
             file,
             #[cfg(unix)]
             rotation_lock,
+            _scratch: scratch,
         }))))
     }
 
@@ -113,13 +122,29 @@ impl AuditLog {
         Self::at(&path)
     }
 
-    /// A ledger at a caller-chosen path, for tests.
+    /// A ledger at a caller-chosen path, for a test that reads it back.  The
+    /// caller owns the directory, and so decides when the ledger goes.
     ///
     /// # Panics
     /// Panics if the file cannot be created.
     #[must_use]
     pub fn for_test(path: &std::path::Path) -> Self {
         Self::at(path).expect("test audit ledger")
+    }
+
+    /// A ledger in a directory of its own, for a test double with no reason to
+    /// name a path.  Both the ledger and its rotation lock go when the log does.
+    ///
+    /// # Panics
+    /// Panics if the directory or the file cannot be created.
+    #[must_use]
+    pub fn in_scratch() -> Self {
+        let scratch = tempfile::Builder::new()
+            .prefix("exarch-egress-test-")
+            .tempdir()
+            .expect("test ledger scratch");
+        let path = scratch.path().join("net-audit.jsonl");
+        Self::at_in(&path, Some(scratch)).expect("test audit ledger")
     }
 
     /// Append one record. `Err` means the gate must close: an unauditable
@@ -215,14 +240,9 @@ impl Egress {
             .collect(),
             search: true,
         };
-        let path = std::env::temp_dir().join(format!(
-            "exarch-egress-test-{}-{}.jsonl",
-            std::process::id(),
-            crate::agent::fresh_id()
-        ));
         Self {
             policy: Arc::new(policy),
-            audit: AuditLog::for_test(&path),
+            audit: AuditLog::in_scratch(),
         }
     }
 }
@@ -231,17 +251,21 @@ impl Egress {
 mod tests {
     use super::*;
 
-    fn tmp_path(tag: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "exarch-egress-test-{}-{tag}.jsonl",
-            std::process::id()
-        ))
+    /// A ledger path in a directory of this test's own.  The guard comes back
+    /// with it and must be held: dropping it deletes the directory, and the
+    /// ledger, the rotation lock and any rotated `.jsonl.1` with it.
+    fn tmp_path(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("exarch-egress-test-{tag}-"))
+            .tempdir()
+            .expect("test ledger scratch");
+        let path = dir.path().join("net-audit.jsonl");
+        (dir, path)
     }
 
     #[test]
     fn audit_log_records_two_independently_parseable_lines() {
-        let path = tmp_path("audit-two-lines");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = tmp_path("audit-two-lines");
         let log = AuditLog::for_test(&path);
         log.record(Record::Tunnel {
             host: "a.example",
@@ -274,10 +298,8 @@ mod tests {
 
     #[test]
     fn a_ledger_that_exceeds_its_cap_rotates_and_keeps_appending() {
-        let path = tmp_path("audit-rotate");
+        let (_dir, path) = tmp_path("audit-rotate");
         let rotated = path.with_extension("jsonl.1");
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(&rotated);
         // Through a write handle, before the ledger opens: an append-mode
         // handle carries no write access on Windows, which refuses `set_len`.
         std::fs::File::create(&path)
@@ -308,12 +330,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rotation_under_cross_process_contention_loses_no_record() {
-        let path = tmp_path("audit-race");
+        let (_dir, path) = tmp_path("audit-race");
         let rotated = path.with_extension("jsonl.1");
-        let lock = path.with_extension("jsonl.lock");
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(&rotated);
-        let _ = std::fs::remove_file(&lock);
 
         let log_a = AuditLog::at(&path).expect("test ledger a");
         let log_b = AuditLog::at(&path).expect("test ledger b");
@@ -363,8 +381,7 @@ mod tests {
 
     #[test]
     fn a_record_that_cannot_be_written_reports_err() {
-        let path = tmp_path("audit-poisoned");
-        let _ = std::fs::remove_file(&path);
+        let (_dir, path) = tmp_path("audit-poisoned");
         let log = AuditLog::at(&path).expect("test ledger");
         let guard = log.clone();
         let _ = std::thread::spawn(move || {
