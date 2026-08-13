@@ -334,8 +334,9 @@ fn payload_exchange(v: FOValue, class: &str, field: &str) -> Result<u64, Error> 
     })
 }
 
-fn payload_exchanges(v: FOValue, class: &str) -> Result<Vec<u64>, Error> {
-    let FOValue::List { items } = v else {
+/// The exchange list *is* the payload, not an argument wrapping one.
+fn payload_exchanges(payload: Option<Box<FOValue>>, class: &str) -> Result<Vec<u64>, Error> {
+    let Some(FOValue::List { items }) = payload.map(|payload| *payload) else {
         return Err(Error::new(
             format!("`{class}`: `exchanges` must be a list of non-negative Ints"),
             1,
@@ -1278,8 +1279,7 @@ impl ExarchDesk {
     }
 
     fn context_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        let [exchanges] = payload_list(payload, "context-read", "[exchanges]")?;
-        let exchanges = payload_exchanges(exchanges, "context-read")?;
+        let exchanges = payload_exchanges(payload, "context-read")?;
         let subject = format!(
             "exchanges [{}]",
             exchanges
@@ -1301,8 +1301,7 @@ impl ExarchDesk {
     }
 
     fn context_drop(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        let [exchanges] = payload_list(payload, "context-drop", "[exchanges]")?;
-        let exchanges = payload_exchanges(exchanges, "context-drop")?;
+        let exchanges = payload_exchanges(payload, "context-drop")?;
         let subject = format!(
             "exchanges [{}]",
             exchanges
