@@ -524,20 +524,6 @@ impl Elaborator {
                 )
             }
 
-            Ast::Background(value) => self.with_span(value.span, |this| {
-                // `cmd &` is sugar for `spawn { cmd }`, lowered to a call on
-                // the name-dispatched builtin rather than a dedicated IR node,
-                // so the launch takes the audited command path and needs no
-                // parallel typecheck/eval/walk arms.
-                let body = this.elab_branch(&value.item);
-                let arg = Spanned::with_span(value.span, ValListElem::Single(Val::Thunk(body)));
-                this.exec(
-                    CommandName::Bare("spawn".into()),
-                    vec![arg],
-                    Vec::new(),
-                    false,
-                )
-            }),
 
             Ast::List(elems) => comp!(
                 self,

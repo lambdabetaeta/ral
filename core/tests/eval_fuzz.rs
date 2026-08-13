@@ -1862,32 +1862,31 @@ fn await_cached() {
 }
 
 #[test]
-fn background_let_binds_handle() {
-    // `cmd &` suspends the pipeline as a thunk and binds the spawn handle;
-    // `await` recovers the pipeline's return value through the record's
-    // `value` field.
+fn spawn_let_binds_handle() {
+    // `spawn` suspends the pipeline as a thunk and binds the handle; `await`
+    // recovers the pipeline's return value through the record's `value` field.
     assert_eq!(
-        must_succeed("let h = echo hi | from-line &\nlet r = await $h\nreturn $r[value]"),
+        must_succeed("let h = spawn { echo hi | from-line }\nlet r = await $h\nreturn $r[value]"),
         Value::String("hi".into())
     );
 }
 
 #[test]
-fn background_statement_runs_detached() {
-    // A bare `cmd &` statement spawns the thunk and the sequence continues
-    // without awaiting it.
+fn spawn_statement_runs_detached() {
+    // A bare `spawn` statement discards the handle and the sequence continues
+    // without awaiting the worker.
     assert_eq!(
-        must_succeed("echo detached &\nreturn done"),
+        must_succeed("spawn { echo detached }\nreturn done"),
         Value::String("done".into())
     );
 }
 
 #[test]
-fn background_value_pipeline() {
+fn spawn_value_pipeline() {
     // The suspended body is a value pipeline, not an external command: the
     // handle's payload is the computed value.
     assert_eq!(
-        must_succeed("let h = return 42 &\nlet r = await $h\nreturn $r[value]"),
+        must_succeed("let h = spawn { return 42 }\nlet r = await $h\nreturn $r[value]"),
         Value::Int(42)
     );
 }

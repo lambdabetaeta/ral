@@ -4,9 +4,8 @@
 //! id: the live REPL path registers a job only when a foreground pipeline
 //! is stopped by SIGTSTP (`Escape::Stopped`).  `Running` is a transient
 //! state a group passes through while `bg`/`fg` resumes a stopped job; a
-//! job leaves the table when its group terminates.  A `&`-backgrounded
-//! pipeline is an in-process `spawn` handle (`CompKind::Background`), not
-//! a pgid job, and is not tracked here.
+//! job leaves the table when its group terminates.  A `spawn`ed pipeline is
+//! an in-process handle, not a pgid job, and is not tracked here.
 //!
 //! A single-process job places its child in its own pgid (set in the
 //! `pre_exec` hook of every pipeline stage on Unix; via

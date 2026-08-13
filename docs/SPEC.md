@@ -387,8 +387,9 @@ Some characters depend on their position:
   it can be part of a word, as in `--features=a,b`.
 - `:` is punctuation before whitespace, a newline, `]`, or the end of input.
   It remains part of forms such as `localhost:5432`.
-- `?` and `&` are operators where a new word can start. They can occur inside
-  a longer bare word.
+- `?` and `&` are punctuation where a new word can start. They can occur
+  inside a longer bare word. `?` is the failure chain; a lone `&` is always
+  refused (§11.1).
 - `...` is the spread marker where a new word can start. It can occur inside
   a longer word.
 
@@ -429,11 +430,6 @@ let result = produce | consume
 produce | let result = consume   # error
 produce ? let result = fallback  # error
 ```
-
-A trailing `&` belongs to the pipeline before it. Its concurrency behavior is
-defined in *Concurrent work*. On a `let` right-hand side, one final `&`
-applies to the complete failure chain. Individual branches of that chain
-cannot carry their own `&`.
 
 The complete formal grammar is in §17.
 
@@ -2092,7 +2088,7 @@ configuration, hooks, and startup behavior likewise belong to that session.
 ral distinguishes concurrent work by who still owns it:
 
 - an ordinary command belongs to the current run;
-- `spawn`, trailing `&`, and `watch` create a worker owned by the session;
+- `spawn` and `watch` create a worker owned by the session;
 - `service` creates a session-owned worker exempt from ordinary worker leases;
 - `detach` gives an operating-system process away, so the session no longer
   owns or controls it.
@@ -2115,16 +2111,17 @@ let result = await $build
 echo $result[value]
 ```
 
-Trailing `&` is syntax for the same operation:
+A pipeline is spawned by naming it in the block:
 
 ```ral
-let build = cargo build &
-let filtered = cat large.log | grep error &
+let filtered = spawn { cat large.log | grep error }
 ```
 
-More precisely, `command &` lowers to `spawn { command }`. It therefore
-returns the same `Handle` and follows the same output, cancellation, registry,
-and lifetime rules. It does not create a REPL process-group job.
+ral has no backgrounding operator. A trailing `&` is a parse error naming
+`spawn`, because the two are not the same operation: a POSIX `&` makes a
+process-group job that `fg`, `bg`, and `disown` address, while `spawn` makes a
+session-owned worker addressed by its `Handle`. Borrowing the spelling would
+promise the former and deliver the latter.
 
 The worker receives the lexical environment captured by its block. Values are
 immutable, so concurrent workers do not share mutable lexical bindings. Each
@@ -2267,7 +2264,7 @@ failure.
 
 ### 11.4. Registry, leases, and shutdown
 
-Every `spawn`, trailing `&`, `watch`, and `service` birth is registered at once
+Every `spawn`, `watch`, and `service` birth is registered at once
 in the owning shell. A registry entry has a stable `wN` identity, description,
 start time, lifetime class, state, and the live handle. Nested workers share
 the owning shell's registry.
@@ -2430,7 +2427,7 @@ designators are decimal integers. There is no `%1`, `%+`, or `%-` syntax.
 
 `jobs` folds two kinds of residents into one listing. Process groups use `[N]`
 and report `running` or `stopped`, their pgid, and original command. Workers
-created by `spawn`, `watch`, or trailing `&` use `[wN]` and report `running
+created by `spawn` or `watch` use `[wN]` and report `running
 (worker)` or `done (worker)`. Listing renews no worker lease and removes
 nothing.
 
@@ -2461,7 +2458,7 @@ so a live Windows REPL cannot acquire stopped jobs through Ctrl-Z.
 
 | Facility | Core / portable | `ral` interactive | `ral` batch | exarch agent host |
 |---|---:|---:|---:|---:|
-| `spawn`, trailing `&`, `await`, `poll`, `race`, `cancel` | yes | yes | yes | yes |
+| `spawn`, `await`, `poll`, `race`, `cancel` | yes | yes | yes | yes |
 | `par`, `is-done` from the standard prelude | when that prelude is installed | yes | yes | yes |
 | `watch` | optional | yes | yes | no |
 | `service` | optional | no | no | yes |
@@ -3979,10 +3976,8 @@ The following EBNF omits lexical escape details and source-span bookkeeping.
 program       ::= sep* (statement sep+)* statement? sep*
 statement     ::= binding | chain
 
-binding       ::= "let" pattern "=" rhs-chain "&"?
-rhs-chain     ::= pipeline (NL? "?" pipeline)*
-chain         ::= bg-pipeline (NL? "?" bg-pipeline)*
-bg-pipeline   ::= pipeline "&"?
+binding       ::= "let" pattern "=" chain
+chain         ::= pipeline (NL? "?" pipeline)*
 pipeline      ::= stage ((NL* "|" NL*) stage)*
 
 stage         ::= return
@@ -4082,9 +4077,7 @@ than once. A list rest pattern is terminal. A map-pattern default is evaluated
 only when its field is absent.
 
 The `?` continuation admits at most one newline before `?` and none after it.
-`|` admits newlines on either side. On a `let` right-hand side, a single final
-`&` backgrounds the entire fallback chain; individual arms cannot be
-backgrounded there.
+`|` admits newlines on either side.
 
 Inside `$[...]`, expressions have the following precedence, from low to high:
 

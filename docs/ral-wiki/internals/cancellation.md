@@ -86,7 +86,7 @@ of the session's durable root* — is spelled in the type system, not left to
 discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
 
 - **`DurableRoot`** (`shell.session.root`) is minted once per `Shell`. Detached
-  workers — `spawn`, `&`, `watch` — parent under it, so a *foreground* cancel
+  workers — `spawn`, `watch` — parent under it, so a *foreground* cancel
   never reaches them ([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]).
 - **`ForegroundScope`** (`Mooring::cancel`) is the run's work scope. It can be
   minted *only* from a `DurableRoot` (or by nesting another foreground), so an

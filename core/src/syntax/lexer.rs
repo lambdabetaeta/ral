@@ -1324,9 +1324,9 @@ impl Lexer {
 }
 
 /// Fuse byte-adjacent `&`/`|` pairs into the logical `&&`/`||`, taking the
-/// first member's span.  A space between them (`& &`) leaves two pipeline
-/// backgrounders, and outside `$[…]` the single-char meaning stands — hence
-/// only [`Lexer::scan_expr_block`] calls this.
+/// first member's span.  A space between them (`& &`) leaves two single-char
+/// tokens, and outside `$[…]` the single-char meaning stands — hence only
+/// [`Lexer::scan_expr_block`] calls this.
 fn fuse_paired_pipeline_ops(tokens: Vec<(Token, Span)>) -> Vec<(Token, Span)> {
     let mut out: Vec<(Token, Span)> = Vec::with_capacity(tokens.len());
     let mut iter = tokens.into_iter().peekable();

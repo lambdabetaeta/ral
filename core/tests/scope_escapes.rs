@@ -391,33 +391,22 @@ fn deep_tail_recursion_trampolines_through_every_eliminator() {
     );
 }
 
-// ── (5) `cmd &` must not destroy the parent's lent state (finding E2; rec. A3) ──
+// ── (5) `spawn` must not destroy the parent's lent state ──
 //
-// Pre-fix, `eval_background` built a `Shell::child_of(&captured, shell)`
-// and never paired it with `return_to`. `child_of` *moves* the parent's
-// read-once local state — pipe stdin, audit trail, REPL scratch — into
-// the child, which then died with the fork, taking the lent state with
-// it. The whole foreground subtree of any `audit { … }` / `try { … }`
-// containing a `&` was lost: even commands recorded *before* the fork
-// vanished, because the audit trail itself had been moved out.
-//
-// The fix is a deletion: `eval_background` hands the thunk straight to
-// `builtin_spawn`, which extracts `(body, captured)` and runs the body
-// on a worker thread that *clones* the parent's `Context` via
-// `spawn_thread` — never touching the parent's read-once local state.
+// `builtin_spawn` extracts `(body, captured)` and runs the body on a worker
+// thread that *clones* the parent's `Context` via `spawn_thread`, so the
+// parent's read-once local state — pipe stdin, audit trail, REPL scratch —
+// is never moved into a fork that dies with it.
 
-/// E2 — an `audit { … }` block containing a background `&` must still
-/// record the foreground commands.  Pre-fix the background fork moved
-/// the audit trail out of the parent and dropped it, so the whole
-/// subtree — including `echo one`, recorded before the `&` — was lost
-/// and `children` came back empty.
+/// An `audit { … }` block containing a `spawn` must still record the
+/// foreground commands around it, including the one recorded before the fork.
 #[test]
-fn audit_survives_background_amp() {
+fn audit_survives_a_spawn() {
     let mut shell = fresh_shell();
-    let tree = match top_level(&mut shell, "audit { echo one; sleep 0.02 &; echo two }") {
+    let tree = match top_level(&mut shell, "audit { echo one; spawn { sleep 0.02 }; echo two }") {
         Ok(v) => v,
         Err(e) => panic!(
-            "`audit {{ echo one; sleep 0.02 &; echo two }}` must succeed; \
+            "`audit {{ echo one; spawn {{ sleep 0.02 }}; echo two }}` must succeed; \
              got error: {e:?}"
         ),
     };
@@ -431,11 +420,10 @@ fn audit_survives_background_amp() {
     let echo_count = children.iter().filter(|c| is_command(c, "echo")).count();
     assert_eq!(
         echo_count, 2,
-        "expected both foreground `echo` commands to be recorded around \
-         the background `&`.  Pre-fix `eval_background` moved the audit \
-         trail into the fork via an unpaired `child_of` and dropped it, \
-         losing the whole subtree — even `echo one`, recorded before the \
-         fork.  children = {children:?}"
+        "expected both foreground `echo` commands to be recorded around the \
+         `spawn`; a fork that moves the audit trail out of the parent instead \
+         of cloning it loses the whole subtree, `echo one` included.  \
+         children = {children:?}"
     );
 }
 

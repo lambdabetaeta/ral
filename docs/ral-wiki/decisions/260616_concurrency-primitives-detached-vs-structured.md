@@ -12,7 +12,10 @@ status: active
 > reaper all stand. [[decisions/260705_session-ledger|session-ledger]] further
 > restates the `&`/job-table separation at the listing layer: REPL `jobs`
 > folds over stopped groups and detached handles alike, while `fg`/`bg` stay
-> pgid-typed and the mechanisms remain distinct.
+> pgid-typed and the mechanisms remain distinct. The trailing `&` is since
+> deleted outright, so the "`&` is `spawn`" section below keeps its second
+> clause — the `JobTable` is no management layer over `spawn` — and loses its
+> first: there is no `&` left to identify with `spawn`.
 
 **Given a turn evaluator with a durable *root* cancel scope distinct from the
 swappable *foreground* scope, a worker's parent follows the primitive that

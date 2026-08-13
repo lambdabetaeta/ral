@@ -55,7 +55,7 @@ claimed.
 |---|---|---|---|---|
 | 0 | foreground | the run in progress | evaluation | completion, the wall, interrupt |
 | 1 | stopped | pgid groups | kernel SIGTSTP | `fg`, `bg`, exit sweep |
-| 2 | background | pgid groups (`bg`) · detached handles (`spawn`/`&`) | `bg` · birth | completion, `cancel`, lease reap, exit |
+| 2 | background | pgid groups (`bg`) · detached handles (`spawn`) | `bg` · birth | completion, `cancel`, lease reap, exit |
 | 3 | durable | `service` workers | birth | completion, `cancel`, `/clear`, process exit |
 | 4 | survives exit | disowned groups · future Regime 2 processes | `disown` · birth | outside the session's story |
 
@@ -124,7 +124,7 @@ terminal versus thread plus result channel, a kernel-driven state machine
 that can re-stop versus a monotone running-to-settled, tty inheritance
 versus bounded capture. The deep version of this — Ctrl-Z minting a
 `Value::Handle`, `fg` becoming a handle's `await` — is refused for the same
-reason `jobs`/`&` were kept apart in the first place
+reason `jobs` and `spawn` were kept apart in the first place
 ([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]):
 `fg` needs the [[decisions/260619_terminal-lease|terminal-lease]], a host
 affordance no eliminator should grow, and fusion would put a `Stopped` arm

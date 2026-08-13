@@ -517,16 +517,18 @@ JSON.
 `spawn` runs a block on another thread and returns a handle:
 
     let tests = spawn { cargo test -q }
-    let lint  = cargo clippy -q &
+    let lint  = spawn { cargo clippy -q }
 
     # do other work
 
     let test-result = await $tests
     let lint-result = await $lint
 
-`&` is the pipeline form of `spawn`. `await` returns a record with `value`,
-`stdout: Bytes`, and `stderr: Bytes` fields. A worker's failure is re-raised at
-`await`, so put the `await` inside `try` to recover.
+There is no trailing `&`: a POSIX `&` makes a job for `fg`/`bg`, while `spawn`
+makes a worker you `await`, so ral asks you to say which you meant. `await`
+returns a record with `value`, `stdout: Bytes`, and `stderr: Bytes` fields. A
+worker's failure is re-raised at `await`, so put the `await` inside `try` to
+recover.
 
 `defer` is the prelude form for long work whose failure should be data. It
 spawns `audit { … }`, so the awaited `value` is an audit report:

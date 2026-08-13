@@ -345,30 +345,16 @@ impl Parser {
         }
     }
 
-    /// chain = bg-pipeline (NL? '?' bg-pipeline)*
+    /// chain = pipeline (NL? '?' pipeline)*
     ///
-    /// The statement-level chain, whose arms may each carry a trailing `&`.
-    fn parse_chain(&mut self) -> Result<Ast, ParseError> {
-        self.parse_chain_of(Self::parse_bg_pipeline)
-    }
-
-    /// The `let`-RHS chain: bare pipeline arms, so a per-arm `&` is rejected —
-    /// see [`Self::parse_binding_opt`].
-    fn parse_chain_no_bg(&mut self) -> Result<Ast, ParseError> {
-        self.parse_chain_of(Self::parse_pipeline)
-    }
-
     /// A singleton chain collapses to its bare arm, so `Ast::Chain` always
     /// means two or more branches and downstream passes need no length guard.
-    fn parse_chain_of(
-        &mut self,
-        parse_arm: fn(&mut Self) -> Result<Ast, ParseError>,
-    ) -> Result<Ast, ParseError> {
-        let (sp0, arm0) = self.capture_span(parse_arm)?;
+    fn parse_chain(&mut self) -> Result<Ast, ParseError> {
+        let (sp0, arm0) = self.capture_span(Self::parse_pipeline)?;
         let mut arms = vec![Spanned::new(sp0, arm0)];
         while self.eat_chain_question() {
             self.require_continuation("a chain branch")?;
-            let (sp, arm) = self.capture_span(parse_arm)?;
+            let (sp, arm) = self.capture_span(Self::parse_pipeline)?;
             arms.push(Spanned::new(sp, arm));
         }
         Ok(if arms.len() == 1 {
@@ -428,18 +414,6 @@ impl Parser {
         }
     }
 
-    /// bg-pipeline = pipeline '&'?
-    fn parse_bg_pipeline(&mut self) -> Result<Ast, ParseError> {
-        // Span captured before the `&` is seen, so a `Background` underlines
-        // the pipeline and not the operator.
-        let (inner_span, node) = self.capture_span(Self::parse_pipeline)?;
-        if self.peek() == &Token::Ampersand {
-            self.advance();
-            return Ok(Ast::Background(Spanned::boxed(inner_span, node)));
-        }
-        Ok(node)
-    }
-
     /// stage = return-stage | if-stage | case-stage | control-op | command
     ///
     /// The dispatch below is also the list of words reserved in stage position.
@@ -469,6 +443,14 @@ impl Parser {
             },
             None => self.parse_command(),
         }?;
+        // `&` is a stage terminator (see `at_stmt_end`) purely so the refusal
+        // below can name the replacement instead of a stray-token error.
+        if self.peek() == &Token::Ampersand {
+            return Err(self.error(
+                "`&` does not background a command in ral — wrap it in \
+                 `spawn { … }`, which returns a handle you `await`",
+            ));
+        }
         if self.at_cmd_end() {
             return Ok(stage);
         }
@@ -726,12 +708,10 @@ impl Parser {
         Ok(Ast::Return(Some(Spanned::boxed(val_span, val))))
     }
 
-    /// binding = 'let' pattern '=' pipeline (NL? '?' pipeline)* '&'?
+    /// binding = 'let' pattern '=' chain
     ///
     /// `None` when the next token is not `let`, so the caller falls through to
-    /// the chain statement.  This RHS is narrower than [`Self::parse_chain`]:
-    /// a per-arm `&` is rejected and a single trailing one backgrounds the
-    /// whole RHS, so `let x = a ? b &` cannot background `b` alone.
+    /// the chain statement.
     fn parse_binding_opt(&mut self) -> Result<Option<Ast>, ParseError> {
         if self.peek().as_plain_word() != Some("let") {
             return Ok(None);
@@ -752,15 +732,7 @@ impl Parser {
                 "expected the right-hand side of the `let` binding",
             ));
         }
-        // Two spans, deliberately: `inner_span` stops before the `&` so a
-        // `Background` underlines only the chain, while `value_span` reaches
-        // past it so `Let.value` covers the whole RHS.
-        let (inner_span, mut value) = self.capture_span(Self::parse_chain_no_bg)?;
-        if self.peek() == &Token::Ampersand {
-            self.advance();
-            value = Ast::Background(Spanned::boxed(inner_span, value));
-        }
-        let value_span = inner_span.join(self.prev_byte_span());
+        let (value_span, value) = self.capture_span(Self::parse_chain)?;
         Ok(Some(Ast::Let {
             pattern: Spanned::new(pattern_span, pattern),
             value: Spanned::boxed(value_span, value),
@@ -1821,9 +1793,6 @@ mod tests {
                     })
                     .collect(),
             ),
-            Ast::Background(value) => {
-                Ast::Background(Spanned::synthetic_boxed(strip_one(*value.item)))
-            }
             Ast::Force(value) => Ast::Force(Spanned::synthetic_boxed(strip_one(*value.item))),
             Ast::Let { pattern, value } => Ast::Let {
                 pattern: Spanned::synthetic(pattern.item),
@@ -2006,39 +1975,25 @@ mod tests {
         );
     }
 
+    /// The bash-backgrounding reflex earns an error naming `spawn`, in every
+    /// position the old sugar reached: statement, chain arm, pipeline tail,
+    /// `let` RHS.
     #[test]
-    fn parse_let_rhs_trailing_amp_backgrounds_whole_chain() {
-        // The `&` wraps the whole chain, never just the last arm.
-        let ast = unwrap_stmts(parse("let x = a ? b &").unwrap());
-        assert_eq!(
-            ast,
-            vec![Ast::Let {
-                pattern: Spanned::synthetic(Pattern::Name("x".into())),
-                value: Spanned::synthetic_boxed(Ast::Background(Spanned::synthetic_boxed(
-                    Ast::Chain(vec![sp(plain("a")), sp(plain("b")),])
-                ),)),
-            }]
-        );
-    }
-
-    #[test]
-    fn parse_let_rhs_per_arm_amp_rejected() {
-        // A per-arm `&` belongs to statement chains only, so the RHS ends at
-        // `a &` and the `?` is left stray.
-        assert!(parse("let x = a & ? b").is_err());
-    }
-
-    #[test]
-    fn parse_chain_arms_may_background_at_stmt_level() {
-        // Where, at statement level, it is exactly what is allowed.
-        let ast = unwrap_stmts(parse("a & ? b &").unwrap());
-        assert_eq!(
-            ast,
-            vec![Ast::Chain(vec![
-                sp(Ast::Background(Spanned::synthetic_boxed(plain("a")))),
-                sp(Ast::Background(Spanned::synthetic_boxed(plain("b")))),
-            ])]
-        );
+    fn trailing_amp_is_rejected_for_spawn() {
+        for src in [
+            "sleep 10 &",
+            "a ? b &",
+            "cat log | grep error &",
+            "let x = cargo build &",
+            "{ sleep 10 & }",
+        ] {
+            let err = parse(src).expect_err("`&` must not parse");
+            assert!(
+                err.message.contains("does not background") && err.message.contains("spawn"),
+                "expected the spawn correspondence for {src:?}, got: {}",
+                err.message
+            );
+        }
     }
 
     #[test]

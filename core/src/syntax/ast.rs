@@ -68,8 +68,6 @@ pub enum Ast {
     Pipeline(Vec<Stmt>),
     /// `cmd1 ? cmd2 ? cmd3`
     Chain(Vec<Spanned<Self>>),
-    /// `command &`
-    Background(Spanned<Box<Self>>),
     /// `{ … }`
     Block(Vec<Stmt>),
     /// `{ |param| … }` — always exactly one parameter; the parser curries the

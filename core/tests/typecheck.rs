@@ -541,10 +541,10 @@ fn service_is_external_on_a_bare_core_table() {
 }
 
 #[test]
-fn background_pipeline_types_as_handle() {
-    // `cmd &` suspends the pipeline; the binding is a Handle whose payload
-    // is the pipeline's return type, recovered through `await`.
-    ok("let h = echo hi &\nlet r = await $h\nreturn $r[value]");
+fn spawned_pipeline_types_as_handle() {
+    // `spawn` suspends the pipeline; the binding is a Handle whose payload is
+    // the pipeline's return type, recovered through `await`.
+    ok("let h = spawn { echo hi }\nlet r = await $h\nreturn $r[value]");
 }
 
 #[test]

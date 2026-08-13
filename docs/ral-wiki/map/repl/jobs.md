@@ -48,8 +48,8 @@ and `reap` keep the leader's exit status instead of draining past it.
 
 `Escape::Stopped` is Unix-only: a foreground job stopped by SIGTSTP escapes the
 [[map/core/evaluator|evaluator]] and `exec.rs` records it as a `Stopped` job.
-That arm is the table's only live populator — `&` registers workers (below) on
-every platform — so on Windows, which has no SIGTSTP analogue, the table is
+That arm is the table's only live populator — `spawn` registers workers (below)
+on every platform — so on Windows, which has no SIGTSTP analogue, the table is
 empty in a live session. It still compiles and operates cfg-free: `fg` blocks
 on the leader's process handle (no console handoff, `stopped_by` always
 `None`), `bg` has no SIGCONT to send, and a reaped-away group's stragglers die
@@ -66,10 +66,10 @@ snapshot only on that borrow. Without a lease — a non-interactive resume — t
 is no tty dance to do, so `fg` still SIGCONTs the whole `-pgid` and waits but
 skips the handoff.
 
-## The wart heals at the listing layer
+## Two populations, one listing
 
-`sleep 10 &` desugars to `spawn` — an in-process handle, invisible to `jobs`
-until now. `host_handlers.rs::render_jobs` folds *both* populations into one
+`spawn { sleep 10 }` yields an in-process handle, invisible to `jobs` until
+this fold. `host_handlers.rs::render_jobs` folds *both* populations into one
 listing: `JobTable`'s pgid groups exactly as above, then the `shell.workers()`
 snapshot it is handed, marked `[wN]` — a designator namespace of its own so it
 can never collide with a pgid's `[n]`. A worker reads `running (worker)`
