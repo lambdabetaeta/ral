@@ -23,7 +23,7 @@ use std::fs;
 use std::io::Write;
 
 mod fff_index;
-mod harness;
+pub(crate) mod harness;
 
 const AGENT_SOURCE: &str = include_str!("../../data/agent.ral");
 

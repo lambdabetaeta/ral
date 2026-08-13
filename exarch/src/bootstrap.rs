@@ -33,6 +33,9 @@ impl RunLock {
             .open(run_dir.join("run.lock"))?;
         let mut lock = fd_lock::RwLock::new(file);
         let guard = lock.try_write()?;
+        // The flock is tied to the fd, which `lock`'s own `File` keeps open for
+        // the process's lifetime; forgetting `guard` only skips fd-lock's
+        // unlock-on-drop, not the OS lock itself.
         std::mem::forget(guard);
         Ok(Self { _lock: lock })
     }
@@ -297,21 +300,24 @@ fn resume_candidates_in(project: &Path) -> io::Result<Vec<PathBuf>> {
         .filter(|(_, has_events)| *has_events)
         .filter_map(|(path, _)| {
             let name = path.file_name()?.to_str()?;
-            let (stamp, pid) = name.rsplit_once('-')?;
+            let (stamp, _pid) = name.rsplit_once('-')?;
             let timestamp = jiff::civil::DateTime::strptime("%Y-%m-%d-%H%M%S", stamp).ok()?;
-            let modified = fs::metadata(&path).ok()?.modified().ok()?;
-            Some((timestamp, modified, pid.to_string(), path))
+            let modified = fs::metadata(&path)
+                .ok()
+                .and_then(|meta| meta.modified().ok());
+            Some((timestamp, modified, path))
         })
         .collect::<Vec<_>>();
     candidates.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal))
-            .then_with(|| a.2.cmp(&b.2))
+        a.0.cmp(&b.0).then_with(|| match (a.1, b.1) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            _ => Ordering::Equal,
+        })
     });
     Ok(candidates
         .into_iter()
         .rev()
-        .map(|(_, _, _, path)| path)
+        .map(|(_, _, path)| path)
         .collect())
 }
 
@@ -448,11 +454,7 @@ mod tests {
             fs::create_dir_all(run.join("sessions/0")).unwrap();
         }
         fs::write(older.join("sessions/0/events.jsonl"), b"durable").unwrap();
-        fs::write(
-            newer.join("sessions/0/events.jsonl"),
-            b"durable",
-        )
-        .unwrap();
+        fs::write(newer.join("sessions/0/events.jsonl"), b"durable").unwrap();
 
         let candidates = resume_candidates_in(&project).expect("candidates");
         assert_eq!(candidates, vec![newer, older]);

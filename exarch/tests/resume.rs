@@ -25,13 +25,7 @@ fn drive(session: &mut Agent, provider: &Arc<Provider>, prompt: &str) {
     let (tx, _rx) = channel();
     let emit = Emitter::new(tx, session.id);
     let token = exarch::agent::cancel::Token::new();
-    let outcome = session.deliberate(
-        provider,
-        Some(prompt.to_string()),
-        None,
-        &token,
-        &emit,
-    );
+    let outcome = session.deliberate(provider, Some(prompt.to_string()), None, &token, &emit);
     assert!(matches!(outcome, Ok(deliberate::Outcome::Complete(_))));
 }
 
@@ -77,9 +71,7 @@ fn scripted_run_kill_resume_and_continue() {
 
     let events = child_dir.join("sessions/0/events.jsonl");
     let ready = (0..200).any(|_| {
-        if std::fs::read_to_string(&events)
-            .is_ok_and(|text| text.contains("crash prompt"))
-        {
+        if std::fs::read_to_string(&events).is_ok_and(|text| text.contains("crash prompt")) {
             true
         } else {
             std::thread::sleep(Duration::from_millis(10));
@@ -97,20 +89,36 @@ fn scripted_run_kill_resume_and_continue() {
     let mut resumed = Agent::root(
         root_config(&child_dir, true),
         identity_seat("resume-parent"),
-        scripted("test-model", Script::new().then(Reply::text("after resume"))),
+        scripted("test-model", Script::new()),
     )
     .expect("resume child ledger");
     assert!(resumed.is_ready());
+    assert!(
+        resumed
+            .rendered_messages()
+            .iter()
+            .any(|message| message.content.first_text() == Some("before kill")),
+        "the pre-kill exchange must survive the resume, not be thrown away"
+    );
     drive(
         &mut resumed,
         &scripted("test-model", Script::new().then(Reply::text("continued"))),
         "continue after the crash",
     );
     assert!(resumed.is_ready());
-    assert!(resumed
-        .rendered_messages()
-        .iter()
-        .any(|message| message.content.first_text() == Some("continued")));
+    assert!(
+        resumed
+            .rendered_messages()
+            .iter()
+            .any(|message| message.content.first_text() == Some("continued"))
+    );
+    assert!(
+        resumed
+            .rendered_messages()
+            .iter()
+            .any(|message| message.content.first_text() == Some("before kill")),
+        "the pre-kill exchange must still be present after driving the resumed session further"
+    );
 }
 
 #[test]

@@ -764,10 +764,7 @@ mod tests {
         session
             .log
             .lock()
-            .apply_edit(
-                ContextOp::Drop { exchanges: vec![1] },
-                EditAuthority::Model,
-            )
+            .apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::Model)
             .unwrap();
 
         assert!(

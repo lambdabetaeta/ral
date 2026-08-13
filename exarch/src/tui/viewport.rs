@@ -19,7 +19,7 @@ use crate::provider::Usage;
 use ratatui::text::Line;
 use std::fs;
 use std::io;
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -76,6 +76,10 @@ pub(super) struct Viewport {
     /// so the rendered transcript survives an abnormal exit.
     log: io::BufWriter<Box<dyn io::Write + Send>>,
     log_path: PathBuf,
+    /// Byte length of `user.log` to preserve on [`Self::rewrite_log`] — the
+    /// resumed history when this view was opened in append mode, `0`
+    /// otherwise, so a rewrite never wipes what a resume carried forward.
+    preserved: u64,
     /// Whether the last logged line was blank, so blanks collapse on disk as
     /// they do on screen.
     log_prev_blank: bool,
@@ -198,6 +202,29 @@ fn open_log(path: &Path, append: bool) -> io::BufWriter<Box<dyn io::Write + Send
     io::BufWriter::new(sink)
 }
 
+/// Reopen the viewport's log for [`Viewport::rewrite_log`], truncating back to
+/// `preserved` bytes rather than to zero — the resumed history a view opened
+/// in append mode carries forward, which a full truncate would wipe. Falls
+/// back to a discarding sink, matching [`open_log`].
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:viewport-log] reopens the viewport's rendered-text log for a rewrite; render dump infra, not turn-time data I/O"
+)]
+fn reopen_log_at(path: &Path, preserved: u64) -> io::BufWriter<Box<dyn io::Write + Send>> {
+    let sink: Box<dyn io::Write + Send> = match std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|mut f| {
+            f.set_len(preserved)?;
+            f.seek(io::SeekFrom::Start(preserved))?;
+            Ok(f)
+        }) {
+        Ok(f) => Box::new(f),
+        Err(_) => Box::new(io::sink()),
+    };
+    io::BufWriter::new(sink)
+}
+
 /// Copy a flushed `user.log` to `dest` for `/export` — the caller resolves
 /// `dest`, refuses to overwrite, and flushes.  Beside [`open_log`], so all
 /// `user.log` I/O lives in one place.
@@ -211,6 +238,11 @@ pub(super) fn export_log(src: &Path, dest: &Path) -> io::Result<u64> {
 
 impl Viewport {
     pub(super) fn new(log_path: PathBuf, agent: AgentSlot, append: bool) -> Self {
+        let preserved = if append {
+            fs::metadata(&log_path).map_or(0, |m| m.len())
+        } else {
+            0
+        };
         Self {
             blocks: Vec::new(),
             tombstone: None,
@@ -222,6 +254,7 @@ impl Viewport {
             flat: Flat::default(),
             log: open_log(&log_path, append),
             log_path,
+            preserved,
             log_prev_blank: true,
             state: StateSpan::new(AgentState::Ready),
             pins: Vec::new(),
@@ -617,7 +650,7 @@ impl Viewport {
         for (entry, lines) in self.blocks.iter_mut().zip(&rendered) {
             entry.rows = lines.len();
         }
-        self.log = open_log(&self.log_path, false);
+        self.log = reopen_log_at(&self.log_path, self.preserved);
         self.log_prev_blank = true;
         for lines in rendered {
             self.write_log_lines(lines);

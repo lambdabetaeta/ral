@@ -198,7 +198,7 @@ Two `Sink` implementations:
  stay on the REPL command path (`tui/commands.rs`, parsed uniformly on every
  tab). View commands (`/help`, `/legend`, `/copy`,
  `/export`, `/model`, `/login`, `/resources`) run on the UI thread; session commands
- (`/clear`, `/compact`, `/branch`, `/quit`) enter the focused
+ (`/clear`, `/compact`, `/branch`, `/context`, `/rewind`, `/quit`) enter the focused
  agent's inbox as `Command` items and run in `ReplControl`. `/branch`
  forks a *conversing* tab from the focused context — a peer conversation
  under [[decisions/260705_branch-minimal|branch-minimal]] — and `/close`,

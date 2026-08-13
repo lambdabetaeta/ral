@@ -220,8 +220,7 @@ mod tests {
         let bare = Cli::try_parse_from(["exarch", "--resume"]).expect("bare resume");
         assert_eq!(bare.resume, Some(None));
 
-        let named = Cli::try_parse_from(["exarch", "--resume", "/tmp/run"])
-            .expect("named resume");
+        let named = Cli::try_parse_from(["exarch", "--resume", "/tmp/run"]).expect("named resume");
         assert_eq!(
             named.resume,
             Some(Some(std::path::PathBuf::from("/tmp/run")))

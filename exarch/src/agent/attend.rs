@@ -258,12 +258,9 @@ impl Agent {
             Some(nudges) => nudges.react(&outcome, &ctx, emit, &mut self.log.lock()),
             None => None,
         };
-        if let Some(msg) = &nudge_msg {
-            let exchange = self
-                .log
-                .lock()
-                .current_exchange()
-                .expect("a nudge follows an exchange in the session log");
+        if let Some(msg) = &nudge_msg
+            && let Some(exchange) = self.log.lock().current_exchange()
+        {
             self.inbox
                 .push(Post::Nudge {
                     exchange,
@@ -395,20 +392,32 @@ impl Agent {
     /// reached.  Mirrors [`Self::compact`]'s own two-armed match, one reserve
     /// earlier: a known window weighs `last_input` against it, an unknown one
     /// falls back to the byte heuristic.  A clean reading re-arms the next
-    /// pressure crossing.
+    /// pressure crossing — but only once the measure is known: a stale
+    /// measure relieves nothing, so it must not unlatch a warning still owed.
     fn context_pressure(&mut self, provider: &Provider) -> Option<String> {
         let pressure = match provider.context_window() {
-            Some(w) if w > 0 => self.token_pressure(w),
+            Some(w) if w > 0 => {
+                let pressure = self.token_pressure(w);
+                if pressure.is_none() && self.measured_input().is_some() {
+                    self.context_warn_latched = false;
+                }
+                pressure
+            }
             _ => {
                 let bytes = self.log.lock().history_bytes();
-                (bytes >= PRESSURE_THRESHOLD_FALLBACK).then(|| format!("{} KB", bytes / 1024))
+                let pressure =
+                    (bytes >= PRESSURE_THRESHOLD_FALLBACK).then(|| format!("{} KB", bytes / 1024));
+                if pressure.is_none() {
+                    self.context_warn_latched = false;
+                }
+                pressure
             }
         };
-        if pressure.is_none() {
-            self.context_warn_latched = false;
-            return None;
+        if self.context_warn_latched {
+            None
+        } else {
+            pressure
         }
-        (!self.context_warn_latched).then_some(pressure).flatten()
     }
 
     /// Warn once per excursion above the operator's disk-warn ceiling, as an

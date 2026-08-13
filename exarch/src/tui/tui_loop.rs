@@ -95,7 +95,9 @@ impl Control for ReplControl {
                         anchor
                     } else {
                         session.note_error(
-                            format!("/rewind expects one non-negative exchange number, got `{text}`"),
+                            format!(
+                                "/rewind expects one non-negative exchange number, got `{text}`"
+                            ),
                             emit,
                         );
                         return Verdict::Continue;
@@ -199,7 +201,10 @@ pub fn run(
     let ui_emit = fleet.bus.emitter(session.id, session.transcript());
     if let Some((exchanges, bytes)) = session.resume_summary() {
         Agent::note(
-            format!("resumed: {exchanges} exchanges, {} KB", bytes.div_ceil(1024)),
+            format!(
+                "resumed: {exchanges} exchanges, {} KB",
+                bytes.div_ceil(1024)
+            ),
             &ui_emit,
         );
     }

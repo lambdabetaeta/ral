@@ -59,10 +59,7 @@ impl Transcript {
     /// Returns an error if the trace cannot be opened or the marker cannot be
     /// written.
     pub fn open_append(path: &Path, at_unix_ms: u64) -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
         let transcript = Self(Some(Arc::new(Inner {
             file: Mutex::new(Some(BufWriter::new(file))),
             started: Instant::now(),
@@ -74,16 +71,6 @@ impl Transcript {
     /// A trace that records nothing — tests, and any emitter with no log dir.
     pub fn none() -> Self {
         Self(None)
-    }
-
-    /// Rotate the shared trace to its first free numbered sibling.
-    ///
-    /// # Errors
-    /// Returns an error if the old trace cannot be sealed, renamed, or
-    /// replaced.
-    pub fn rotate(&self, path: &Path) -> io::Result<()> {
-        let n = first_free_rotation(path)?;
-        self.rotate_at(path, n, crate::bootstrap::now_unix_ms())
     }
 
     pub(crate) fn rotate_at(&self, path: &Path, n: u64, at_unix_ms: u64) -> io::Result<()> {
@@ -166,29 +153,18 @@ fn write_marker_to(file: &mut BufWriter<File>, kind: &str, at_unix_ms: u64) -> i
     file.write_all(b"\n")
 }
 
-fn first_free_rotation(path: &Path) -> io::Result<u64> {
-    let mut n = 0;
-    loop {
-        if !rotation_path(path, n).exists() {
-            return Ok(n);
-        }
-        n = n
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("no free transcript rotation number remains"))?;
-    }
-}
-
 fn rotation_path(path: &Path, n: u64) -> std::path::PathBuf {
-    let name = path
-        .file_name()
-        .map_or_else(|| "record".into(), |name| name.to_string_lossy().into_owned());
+    let name = path.file_name().map_or_else(
+        || "record".into(),
+        |name| name.to_string_lossy().into_owned(),
+    );
     path.with_file_name(format!("{name}.{n}"))
 }
 
 pub(crate) fn emit_context_edited(emit: &Emitter, receipt: &EditReceipt) {
     emit.emit(Kind::ContextEdited {
         op: receipt.op.clone(),
-        by: receipt.by.clone(),
+        by: receipt.by,
     });
 }
 
@@ -337,6 +313,7 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
 mod tests {
     use super::*;
     use crate::agent::event::{ContextOp, EditAuthority};
+    use serde_json::json;
 
     #[test]
     fn context_edit_transcript_records_each_authority() {
@@ -346,14 +323,16 @@ mod tests {
             EditAuthority::Harness,
         ] {
             let op = ContextOp::Drop { exchanges: vec![7] };
-            let kind = Kind::ContextEdited {
-                op: op.clone(),
-                by: by.clone(),
-            };
+            let kind = Kind::ContextEdited { op: op.clone(), by };
             let record = event_record(0, 42, &kind).expect("context edits are operational");
             assert_eq!(record["kind"], "context_edited");
-            assert_eq!(record["by"], serde_json::to_value(&by).unwrap());
-            assert_eq!(record["op"], serde_json::to_value(op).unwrap());
+            let expected_by = match by {
+                EditAuthority::Model => "model",
+                EditAuthority::User => "user",
+                EditAuthority::Harness => "harness",
+            };
+            assert_eq!(record["by"], json!(expected_by));
+            assert_eq!(record["op"]["Drop"]["exchanges"], json!([7]));
         }
     }
 }

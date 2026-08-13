@@ -73,8 +73,9 @@ being assembled, is untouchable until quiescence. `ContextEdited` records
 `Fold` or `Drop` and its authority, then the fold changes the projection. There
 is no model-facing rewind operation: model rewind is `context-drop`, a range of
 closed exchanges. The user's `/rewind` command validates the ready-boundary
-anchor and desugars to the same `Drop`, sheds queued steering, and resets the
-edit budget. The shell does not resume with the model: `--resume` replays the
+anchor and desugars to the same `Drop`, sheds queued self-nudges (a user post,
+a command, or a worker result already queued survives), and resets the nudge
+budget. The shell does not resume with the model: `--resume` replays the
 event ledger while booting a fresh shell and imports a note describing the
 shell state that was not durable.
 

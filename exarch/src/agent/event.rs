@@ -1,8 +1,9 @@
 //! Per-session canonical event log: one session's stable ledger and the
 //! `events.jsonl` it is appended to.
 //!
-//! This is the model view; `tui::viewport` writes the rendered `user.log`
-//! beside it, `agent::transcript` the operational `transcript.jsonl`.
+//! This is the log whose fold is the model view; `tui::viewport` writes the
+//! rendered `user.log` beside it, `agent::transcript` the operational
+//! `transcript.jsonl`.
 //!
 //! `events.jsonl` is one compact JSON value per line, so standard line tools
 //! can inspect it while `serde_json::Deserializer` still reads it back.
@@ -11,7 +12,7 @@ use crate::bus::AgentId;
 use crate::provider::{ProviderError, Tuning, Usage};
 use genai::chat::{ChatMessage, ChatRole, ToolResponse};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
@@ -89,7 +90,7 @@ pub enum ProviderErrorRecord {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EditAuthority {
     Model,
@@ -303,148 +304,41 @@ pub struct View {
     pub spans: Vec<Span>,
 }
 
-enum SpanStore {
-    Resident(Vec<SessionEvent>),
-    /// Ranges into events.jsonl: one from freeing a resident span, plus one
-    /// for each straggler later committed into a removed tail span.
-    Spilled {
-        bytes: Vec<Range<u64>>,
-    },
-}
-
-struct LedgerSegment {
-    id: Option<u64>,
-    events: Range<usize>,
-    store: SpanStore,
-    offsets: Vec<Option<Range<u64>>>,
-}
-
+/// The append-only event sequence, with stable indices.  The disk log is the
+/// identity; a resident event is a cache the edit step discards the moment no
+/// view span needs it.  Resident memory is therefore O(view): a freed event
+/// keeps only the byte range of its line in `events.jsonl`, coalesced with
+/// its neighbours into [`FreedRun`]s, and a lossy event that never reached
+/// the disk keeps nothing.
 struct Ledger {
-    segments: Vec<LedgerSegment>,
     len: usize,
-    tail: Option<usize>,
-    opened_span: bool,
-    durable: bool,
+    resident: BTreeMap<usize, (SessionEvent, Option<Range<u64>>)>,
+    freed: Vec<FreedRun>,
     events_path: Option<PathBuf>,
 }
 
+/// A maximal run of adjacent freed lines: `bytes` in `events.jsonl`, `events`
+/// in the stable ledger index space.  Only the from-scratch fold reads one.
+struct FreedRun {
+    bytes: Range<u64>,
+    events: Range<usize>,
+}
+
 impl Ledger {
-    fn new(durable: bool, events_path: Option<PathBuf>) -> Self {
+    fn new(events_path: Option<PathBuf>) -> Self {
         Self {
-            segments: Vec::new(),
             len: 0,
-            tail: None,
-            opened_span: false,
-            durable,
+            resident: BTreeMap::new(),
+            freed: Vec::new(),
             events_path,
         }
     }
 
-    fn append(
-        &mut self,
-        event: SessionEvent,
-        offset: Option<Range<u64>>,
-        projection: &Projection,
-    ) -> (usize, Option<SessionEvent>) {
+    fn append(&mut self, event: SessionEvent, offset: Option<Range<u64>>) -> usize {
         let index = self.len;
         self.len += 1;
-
-        match event_exchange(&event) {
-            Some(id) if id > projection.max_exchange => {
-                self.opened_span = true;
-                let segment = LedgerSegment {
-                    id: Some(id),
-                    events: index..index + 1,
-                    store: SpanStore::Resident(vec![event]),
-                    offsets: vec![offset],
-                };
-                self.segments.push(segment);
-                self.tail = Some(self.segments.len() - 1);
-                (index, None)
-            }
-            Some(id) if self.tail_id() == Some(id) => {
-                let detached =
-                    self.append_to_segment(self.tail.expect("tail id exists"), event, offset);
-                (index, detached)
-            }
-            Some(_) => self.append_free(index, event, offset),
-            None => match self.tail {
-                Some(tail) => {
-                    let detached = self.append_to_segment(tail, event, offset);
-                    (index, detached)
-                }
-                None => self.append_free(index, event, offset),
-            },
-        }
-    }
-
-    fn append_free(
-        &mut self,
-        index: usize,
-        event: SessionEvent,
-        offset: Option<Range<u64>>,
-    ) -> (usize, Option<SessionEvent>) {
-        if self.opened_span {
-            if self.durable
-                && let Some(offset) = offset
-            {
-                self.segments.push(LedgerSegment {
-                    id: None,
-                    events: index..index + 1,
-                    store: SpanStore::Spilled {
-                        bytes: vec![offset.clone()],
-                    },
-                    offsets: vec![Some(offset)],
-                });
-            }
-            return (index, Some(event));
-        }
-
-        let append_to_head = self
-            .segments
-            .last()
-            .is_some_and(|segment| segment.id.is_none() && segment.events.end == index);
-        if append_to_head {
-            let detached = self.append_to_segment(self.segments.len() - 1, event, offset);
-            (index, detached)
-        } else {
-            self.segments.push(LedgerSegment {
-                id: None,
-                events: index..index + 1,
-                store: SpanStore::Resident(vec![event]),
-                offsets: vec![offset],
-            });
-            (index, None)
-        }
-    }
-
-    fn append_to_segment(
-        &mut self,
-        segment: usize,
-        event: SessionEvent,
-        offset: Option<Range<u64>>,
-    ) -> Option<SessionEvent> {
-        let target = &mut self.segments[segment];
-        target.events.end += 1;
-        target.offsets.push(offset.clone());
-        match &mut target.store {
-            SpanStore::Resident(events) => {
-                events.push(event);
-                None
-            }
-            SpanStore::Spilled { bytes } => {
-                if let Some(offset) = offset {
-                    bytes.push(offset);
-                }
-                Some(event)
-            }
-        }
-    }
-
-    fn tail_id(&self) -> Option<u64> {
-        self.tail
-            .and_then(|index| self.segments.get(index))
-            .and_then(|segment| segment.id)
+        self.resident.insert(index, (event, offset));
+        index
     }
 
     fn len(&self) -> usize {
@@ -452,188 +346,75 @@ impl Ledger {
     }
 
     fn event(&self, index: usize) -> Option<&SessionEvent> {
-        self.segments.iter().find_map(|segment| {
-            if !segment.events.contains(&index) {
-                return None;
-            }
-            match &segment.store {
-                SpanStore::Resident(events) => events.get(index - segment.events.start),
-                SpanStore::Spilled { .. } => None,
-            }
-        })
+        self.resident.get(&index).map(|(event, _)| event)
     }
 
     fn last(&self) -> Option<&SessionEvent> {
         self.len.checked_sub(1).and_then(|index| self.event(index))
     }
 
-    fn resident_events(&self, range: Range<usize>) -> Option<&[SessionEvent]> {
-        self.segments
-            .iter()
-            .find(|segment| segment.events == range)
-            .and_then(|segment| match &segment.store {
-                SpanStore::Resident(events) => Some(events.as_slice()),
-                SpanStore::Spilled { .. } => None,
-            })
+    fn resident_events(&self, range: Range<usize>) -> Option<Vec<&SessionEvent>> {
+        let events: Vec<&SessionEvent> = self
+            .resident
+            .range(range.clone())
+            .map(|(_, (event, _))| event)
+            .collect();
+        (events.len() == range.len()).then_some(events)
+    }
+
+    fn free(&mut self, index: usize) {
+        if let Some((_, offset)) = self.resident.remove(&index)
+            && let Some(bytes) = offset
+        {
+            self.insert_freed(FreedRun {
+                bytes,
+                events: index..index + 1,
+            });
+        }
     }
 
     fn evict(&mut self, ranges: &[Range<usize>]) {
-        let mut indexes = self
-            .segments
-            .iter()
-            .enumerate()
-            .filter_map(|(index, segment)| {
-                (segment.id.is_some() && ranges.contains(&segment.events)).then_some(index)
-            })
-            .collect::<Vec<_>>();
-        if self.durable {
-            for index in indexes {
-                self.spill(index);
-            }
-            self.merge_free_segments();
-        } else {
-            indexes.sort_unstable_by(|left, right| right.cmp(left));
-            for index in indexes {
-                self.remove_segment(index);
-            }
+        for index in ranges.iter().cloned().flatten() {
+            self.free(index);
         }
     }
 
-    fn spill(&mut self, index: usize) {
-        let segment = &mut self.segments[index];
-        segment.id = None;
-        let store = std::mem::replace(&mut segment.store, SpanStore::Spilled { bytes: Vec::new() });
-        segment.store = match store {
-            SpanStore::Resident(_) => SpanStore::Spilled {
-                bytes: coalesce_offsets(&segment.offsets),
-            },
-            SpanStore::Spilled { bytes } => SpanStore::Spilled { bytes },
-        };
-    }
-
-    fn merge_free_segments(&mut self) {
-        let mut index = 0;
-        while index + 1 < self.segments.len() {
-            let merge = self.segments[index].id.is_none()
-                && self.segments[index + 1].id.is_none()
-                && self.segments[index].events.end == self.segments[index + 1].events.start
-                && matches!(self.segments[index].store, SpanStore::Spilled { .. })
-                && matches!(self.segments[index + 1].store, SpanStore::Spilled { .. });
-            if !merge {
-                index += 1;
-                continue;
-            }
-
-            let right = self.segments.remove(index + 1);
-            let right_tail = self.tail == Some(index + 1);
-            let right_end = right.events.end;
-            self.segments[index].events.end = right_end;
-            self.segments[index].offsets.extend(right.offsets);
-            let left_store = std::mem::replace(
-                &mut self.segments[index].store,
-                SpanStore::Spilled { bytes: Vec::new() },
-            );
-            self.segments[index].store = merge_spilled(left_store, right.store);
-
-            self.tail = match self.tail {
-                Some(_) if right_tail => Some(index),
-                Some(tail) if tail > index + 1 => Some(tail - 1),
-                Some(tail) => Some(tail),
-                None => None,
-            };
+    fn insert_freed(&mut self, run: FreedRun) {
+        let at = self
+            .freed
+            .partition_point(|existing| existing.events.end <= run.events.start);
+        self.freed.insert(at, run);
+        if at + 1 < self.freed.len() && runs_adjacent(&self.freed[at], &self.freed[at + 1]) {
+            let right = self.freed.remove(at + 1);
+            self.freed[at].events.end = right.events.end;
+            self.freed[at].bytes.end = right.bytes.end;
         }
-    }
-
-    fn remove_segment(&mut self, index: usize) {
-        self.segments.remove(index);
-        self.tail = match self.tail {
-            Some(tail) if tail == index => None,
-            Some(tail) if tail > index => Some(tail - 1),
-            other => other,
-        };
+        if at > 0 && runs_adjacent(&self.freed[at - 1], &self.freed[at]) {
+            let right = self.freed.remove(at);
+            self.freed[at - 1].events.end = right.events.end;
+            self.freed[at - 1].bytes.end = right.bytes.end;
+        }
     }
 
     fn fold_events(&self) -> io::Result<Vec<(usize, SessionEvent)>> {
-        let mut events = Vec::with_capacity(self.len);
-        let mut file = None;
-        for segment in &self.segments {
-            match &segment.store {
-                SpanStore::Resident(segment_events) => {
-                    if segment_events.len() != segment.events.len() {
-                        return Err(io::Error::other(
-                            "the in-memory event ledger has a broken stable-index range",
-                        ));
-                    }
-                    events.extend(
-                        segment_events
-                            .iter()
-                            .cloned()
-                            .enumerate()
-                            .map(|(offset, event)| (segment.events.start + offset, event)),
-                    );
-                }
-                SpanStore::Spilled { bytes } => {
-                    if file.is_none() {
-                        let Some(path) = self.events_path.as_ref() else {
-                            return Err(io::Error::other(
-                                "the spilled event ledger has no readable events.jsonl",
-                            ));
-                        };
-                        file = Some(File::open(path)?);
-                    }
-                    let reader = file.as_mut().expect("the fold opened events.jsonl");
-                    Self::read_spilled(segment, bytes, reader, &mut events)?;
-                }
+        let mut events: Vec<(usize, SessionEvent)> = self
+            .resident
+            .iter()
+            .map(|(index, (event, _))| (*index, event.clone()))
+            .collect();
+        if !self.freed.is_empty() {
+            let Some(path) = self.events_path.as_ref() else {
+                return Err(io::Error::other(
+                    "the freed event ledger has no readable events.jsonl",
+                ));
+            };
+            let mut file = File::open(path)?;
+            for run in &self.freed {
+                read_freed_run(&mut file, run, &mut events)?;
             }
+            events.sort_unstable_by_key(|(index, _)| *index);
         }
         Ok(events)
-    }
-
-    fn read_spilled(
-        segment: &LedgerSegment,
-        ranges: &[Range<u64>],
-        reader: &mut File,
-        output: &mut Vec<(usize, SessionEvent)>,
-    ) -> io::Result<()> {
-        for range in ranges {
-            let length = usize::try_from(range.end.saturating_sub(range.start))
-                .map_err(|_| io::Error::other("a spilled event range is too large to read"))?;
-            reader.seek(SeekFrom::Start(range.start))?;
-            let mut bytes = vec![0; length];
-            reader.read_exact(&mut bytes)?;
-            let mut position = range.start;
-            for fragment in bytes.split_inclusive(|byte| *byte == b'\n') {
-                if fragment.last() != Some(&b'\n') {
-                    return Err(io::Error::other(
-                        "a spilled event range does not end on a complete JSONL record",
-                    ));
-                }
-                let line_start = position;
-                position += u64::try_from(fragment.len())
-                    .map_err(|_| io::Error::other("a spilled event line is too large"))?;
-                let event = serde_json::from_slice(&fragment[..fragment.len() - 1])
-                    .map_err(io::Error::other)?;
-                let Some((slot, _)) = segment.offsets.iter().enumerate().find(|(_, offset)| {
-                    offset
-                        .as_ref()
-                        .is_some_and(|offset| offset.start == line_start)
-                }) else {
-                    return Err(io::Error::other(
-                        "a spilled event range has no stable ledger index",
-                    ));
-                };
-                output.push((segment.events.start + slot, event));
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn store_covering(&self, range: Range<usize>) -> Option<&SpanStore> {
-        self.segments
-            .iter()
-            .find(|segment| segment.events.start <= range.start && segment.events.end >= range.end)
-            .map(|segment| &segment.store)
     }
 
     #[cfg(test)]
@@ -642,51 +423,48 @@ impl Ledger {
     }
 
     #[cfg(test)]
-    fn spilled_ranges(&self) -> Vec<Range<u64>> {
-        self.segments
-            .iter()
-            .filter_map(|segment| match &segment.store {
-                SpanStore::Resident(_) => None,
-                SpanStore::Spilled { bytes } => Some(bytes),
-            })
-            .flatten()
-            .cloned()
-            .collect()
+    fn freed_ranges(&self) -> Vec<Range<u64>> {
+        self.freed.iter().map(|run| run.bytes.clone()).collect()
     }
 }
 
-fn coalesce_offsets(offsets: &[Option<Range<u64>>]) -> Vec<Range<u64>> {
-    let mut ranges: Vec<Range<u64>> = Vec::new();
-    for offset in offsets.iter().flatten() {
-        if let Some(previous) = ranges.last_mut()
-            && previous.end == offset.start
-        {
-            previous.end = offset.end;
-        } else {
-            ranges.push(offset.clone());
-        }
-    }
-    ranges
+fn runs_adjacent(left: &FreedRun, right: &FreedRun) -> bool {
+    left.events.end == right.events.start && left.bytes.end == right.bytes.start
 }
 
-fn merge_spilled(left: SpanStore, right: SpanStore) -> SpanStore {
-    let (SpanStore::Spilled { mut bytes }, SpanStore::Spilled { bytes: right_bytes }) =
-        (left, right)
-    else {
-        unreachable!("only spilled segments are merged")
-    };
-    bytes.extend(right_bytes);
-    let mut merged: Vec<Range<u64>> = Vec::new();
-    for range in bytes {
-        if let Some(previous) = merged.last_mut()
-            && previous.end == range.start
-        {
-            previous.end = range.end;
-        } else {
-            merged.push(range);
+/// Read one freed run's lines back off `events.jsonl`, one event per line.
+fn read_freed_run(
+    reader: &mut File,
+    run: &FreedRun,
+    output: &mut Vec<(usize, SessionEvent)>,
+) -> io::Result<()> {
+    let length = usize::try_from(run.bytes.end.saturating_sub(run.bytes.start))
+        .map_err(|_| io::Error::other("a freed event range is too large to read"))?;
+    reader.seek(SeekFrom::Start(run.bytes.start))?;
+    let mut bytes = vec![0; length];
+    reader.read_exact(&mut bytes)?;
+    let mut index = run.events.start;
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if line.last() != Some(&b'\n') {
+            return Err(io::Error::other(
+                "a freed event range does not end on a complete JSONL record",
+            ));
         }
+        if index == run.events.end {
+            return Err(io::Error::other(
+                "a freed event range holds more lines than ledger indices",
+            ));
+        }
+        let event = serde_json::from_slice(&line[..line.len() - 1]).map_err(io::Error::other)?;
+        output.push((index, event));
+        index += 1;
     }
-    SpanStore::Spilled { bytes: merged }
+    if index != run.events.end {
+        return Err(io::Error::other(
+            "a freed event range holds fewer lines than ledger indices",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -799,7 +577,7 @@ fn opening_line(text: &str) -> String {
     text.lines().next().unwrap_or_default().to_string()
 }
 
-fn opening_line_for_events(events: &[SessionEvent]) -> String {
+fn opening_line_for_events(events: &[&SessionEvent]) -> String {
     for event in events {
         match event {
             SessionEvent::UserPrompt { text, .. } => return opening_line(text),
@@ -961,7 +739,7 @@ impl AgentLog {
             id: session_id,
             dir,
             events_file: Some(events_file),
-            log: Ledger::new(true, Some(events_path.clone())),
+            log: Ledger::new(Some(events_path.clone())),
             projection: Projection::default(),
             durable: true,
             events_offset: read.complete_len,
@@ -1090,7 +868,7 @@ impl AgentLog {
             let item = ContextSurveyItem {
                 exchange: span.id,
                 kind,
-                opening: opening_line_for_events(events),
+                opening: opening_line_for_events(&events),
                 bytes: self.span_message_bytes_with_repair(span, !live),
                 steps: events
                     .iter()
@@ -1112,46 +890,11 @@ impl AgentLog {
         if exchanges.is_empty() {
             return Err("context-read must name at least one exchange".into());
         }
-        let mut named = HashSet::with_capacity(exchanges.len());
-        for exchange in exchanges {
-            if !named.insert(*exchange) {
-                return Err(format!(
-                    "context-read cannot name exchange {exchange} more than once"
-                ));
-            }
-            if let Some(reach) = self
-                .projection
-                .view
-                .digest
-                .as_ref()
-                .map(|digest| digest.through_exchange)
-                && *exchange < reach
-            {
-                return Err(folded_exchange_refusal(*exchange, reach));
-            }
-            let is_digest = self
-                .projection
-                .view
-                .digest
-                .as_ref()
-                .is_some_and(|digest| digest.through_exchange == *exchange);
-            let is_span = self
-                .projection
-                .view
-                .spans
-                .iter()
-                .any(|span| span.id == *exchange);
-            if !is_digest && !is_span {
-                return Err(unknown_exchange_refusal(*exchange));
-            }
-            if is_span && self.is_live_exchange(*exchange) {
-                return Err(live_exchange_refusal(*exchange));
-            }
-        }
+        self.validate_named_exchanges(exchanges)?;
         Ok(render_context_transcript(
             &self.log,
             &self.projection.view,
-            &named,
+            &exchanges.iter().copied().collect(),
         ))
     }
 
@@ -1327,50 +1070,14 @@ impl AgentLog {
     /// mirror anyway ([`Self::record_lossy`]), since the caller has no fallback
     /// state to quiesce *to*.
     pub fn quiesce(&mut self, reason: QuiesceReason) {
-        let already_ready = self.is_ready();
-        let (tool_stub, assistant_stub, stop_label) = match reason {
-            QuiesceReason::Cancelled => (
-                "cancelled before tool execution",
-                "(cancelled by user)",
-                "cancelled",
-            ),
-            QuiesceReason::Aborted => (
-                "no result: exchange aborted before tool execution",
-                "(no reply: exchange aborted)",
-                "aborted",
-            ),
-            QuiesceReason::Replied => (
-                "no result: exchange ended on reply",
-                "(exchange ended: replied to parent)",
-                "replied",
-            ),
-        };
-        loop {
-            match self.state().clone() {
-                State::ReadyForUser => break,
-                State::AwaitingToolResults { pending_ids } => {
-                    let results = pending_ids
-                        .iter()
-                        .map(|id| ToolResult {
-                            id: id.clone(),
-                            content: tool_stub.into(),
-                        })
-                        .collect();
-                    self.record_lossy(SessionEvent::ToolResults { results });
-                }
-                State::AwaitingAssistantAfterUser | State::AwaitingAssistantAfterToolResults => {
-                    let message = ChatMessage::assistant(assistant_stub);
-                    self.record_lossy(SessionEvent::AssistantMessage {
-                        message,
-                        pending_tool_ids: vec![],
-                        stop_reason: Some(stop_label.into()),
-                    });
-                }
-            }
+        let stubs = stubs_to_ready(self.state(), reason);
+        let quiesced = !stubs.is_empty();
+        for stub in stubs {
+            self.record_lossy(stub);
         }
         // Only a cancellation earns its own breadcrumb; an abort's marker is
         // the `ProviderError` already on disk.
-        if !already_ready && matches!(reason, QuiesceReason::Cancelled) {
+        if quiesced && matches!(reason, QuiesceReason::Cancelled) {
             let _ = self.record(SessionEvent::Cancelled);
         }
     }
@@ -1434,10 +1141,7 @@ impl AgentLog {
     pub fn apply_edit(&mut self, op: ContextOp, by: EditAuthority) -> Result<EditReceipt, String> {
         self.validate_edit(&op)?;
         let before = self.history_bytes();
-        self.record_or_string_err(SessionEvent::ContextEdited {
-            op: op.clone(),
-            by: by.clone(),
-        })?;
+        self.record_or_string_err(SessionEvent::ContextEdited { op: op.clone(), by })?;
         let after = self.history_bytes();
         let before = i64::try_from(before).unwrap_or(i64::MAX);
         let after = i64::try_from(after).unwrap_or(i64::MAX);
@@ -1454,13 +1158,7 @@ impl AgentLog {
     /// # Errors
     /// Refuses an absent anchor or one strictly inside the current digest.
     pub fn rewind_exchanges(&self, anchor: u64) -> Result<Vec<u64>, String> {
-        if let Some(reach) = self
-            .projection
-            .view
-            .digest
-            .as_ref()
-            .map(|digest| digest.through_exchange)
-        {
+        if let Some(reach) = self.digest_reach() {
             if anchor < reach {
                 return Err(folded_exchange_refusal(anchor, reach));
             }
@@ -1503,81 +1201,61 @@ impl AgentLog {
         match op {
             ContextOp::Fold {
                 through_exchange, ..
-            } => {
-                if let Some(reach) = self
-                    .projection
-                    .view
-                    .digest
-                    .as_ref()
-                    .map(|d| d.through_exchange)
-                {
-                    if *through_exchange < reach {
-                        return Err(folded_exchange_refusal(*through_exchange, reach));
-                    }
-                    if *through_exchange == reach {
-                        return Ok(());
-                    }
-                }
-                if !self
-                    .projection
-                    .view
-                    .spans
-                    .iter()
-                    .any(|span| span.id == *through_exchange)
-                {
-                    return Err(unknown_exchange_refusal(*through_exchange));
-                }
-                if self.is_live_exchange(*through_exchange) {
-                    return Err(live_exchange_refusal(*through_exchange));
-                }
-            }
+            } => self.validate_closed_present(*through_exchange),
             ContextOp::Drop { exchanges } => {
                 if exchanges.is_empty() {
                     return Err("a context edit must name at least one exchange".into());
                 }
-                let mut named = HashSet::with_capacity(exchanges.len());
-                for exchange in exchanges {
-                    if !named.insert(*exchange) {
-                        return Err(format!("exchange {exchange} was named more than once"));
-                    }
-                    if self
-                        .projection
-                        .view
-                        .digest
-                        .as_ref()
-                        .is_some_and(|digest| *exchange < digest.through_exchange)
-                    {
-                        let reach = self
-                            .projection
-                            .view
-                            .digest
-                            .as_ref()
-                            .unwrap()
-                            .through_exchange;
-                        return Err(folded_exchange_refusal(*exchange, reach));
-                    }
-                    let is_digest = self
-                        .projection
-                        .view
-                        .digest
-                        .as_ref()
-                        .is_some_and(|digest| digest.through_exchange == *exchange);
-                    let is_span = self
-                        .projection
-                        .view
-                        .spans
-                        .iter()
-                        .any(|span| span.id == *exchange);
-                    if !is_digest && !is_span {
-                        return Err(unknown_exchange_refusal(*exchange));
-                    }
-                    if self.is_live_exchange(*exchange) {
-                        return Err(live_exchange_refusal(*exchange));
-                    }
-                }
+                self.validate_named_exchanges(exchanges)
             }
         }
+    }
+
+    /// Each named exchange must be addressable and closed, and named once.
+    fn validate_named_exchanges(&self, exchanges: &[u64]) -> Result<(), String> {
+        let mut named = HashSet::with_capacity(exchanges.len());
+        for &exchange in exchanges {
+            if !named.insert(exchange) {
+                return Err(format!("exchange {exchange} was named more than once"));
+            }
+            self.validate_closed_present(exchange)?;
+        }
         Ok(())
+    }
+
+    /// An exchange is addressable iff it survives in the view — as a span, or
+    /// as the digest named by its reach — and closed iff it is not the live
+    /// one.
+    fn validate_closed_present(&self, exchange: u64) -> Result<(), String> {
+        if let Some(reach) = self.digest_reach() {
+            if exchange < reach {
+                return Err(folded_exchange_refusal(exchange, reach));
+            }
+            if exchange == reach {
+                return Ok(());
+            }
+        }
+        if !self
+            .projection
+            .view
+            .spans
+            .iter()
+            .any(|span| span.id == exchange)
+        {
+            return Err(unknown_exchange_refusal(exchange));
+        }
+        if self.is_live_exchange(exchange) {
+            return Err(live_exchange_refusal(exchange));
+        }
+        Ok(())
+    }
+
+    fn digest_reach(&self) -> Option<u64> {
+        self.projection
+            .view
+            .digest
+            .as_ref()
+            .map(|digest| digest.through_exchange)
     }
 
     /// `/clear`: wipe the events in memory and on disk, then restart with a
@@ -1594,7 +1272,7 @@ impl AgentLog {
         transcript_path: &Path,
     ) -> io::Result<ClearRecord> {
         if !self.durable {
-            self.log = Ledger::new(false, None);
+            self.log = Ledger::new(None);
             self.projection = Projection::default();
             self.record_started_lossy(None, system_prompt_bytes, at_unix_ms);
             return Ok(ClearRecord {
@@ -1626,9 +1304,8 @@ impl AgentLog {
             return Err(self.refuse_clear(&error));
         }
 
-        self.log = Ledger::new(true, Some(events_path));
+        self.log = Ledger::new(Some(events_path));
         self.projection = Projection::default();
-        self.events_file = None;
         self.events_offset = 0;
         let started = self.started_event(None, system_prompt_bytes, at_unix_ms);
         let events_error = self.establish_head(started);
@@ -1709,7 +1386,7 @@ impl AgentLog {
             id: session_id,
             dir,
             events_file,
-            log: Ledger::new(durable, events_path),
+            log: Ledger::new(events_path),
             projection: Projection::default(),
             durable,
             events_offset: 0,
@@ -1852,24 +1529,18 @@ impl AgentLog {
         self.record(ev).map_err(|e| e.to_string())
     }
 
-    /// [`Self::record`] with the disk write made best-effort.  Only
-    /// [`Self::quiesce`] may use it: the protocol must reach
-    /// [`State::ReadyForUser`] even when `events.jsonl` cannot be written.
+    /// [`Self::record`] with the disk write made best-effort.  Its remit is
+    /// exactly the harness-synthesized events where refusing would wedge the
+    /// session: [`Self::quiesce`]'s stubs, which must reach
+    /// [`State::ReadyForUser`] even when `events.jsonl` cannot be written,
+    /// and the `SessionStarted` bookends of a mirror-only session.
     fn record_lossy(&mut self, ev: SessionEvent) {
         let offset = self.write_event(&ev).ok().flatten();
         self.append_mirror(ev, offset);
     }
 
     fn append_mirror(&mut self, event: SessionEvent, offset: Option<Range<u64>>) {
-        let (index, detached) = self.log.append(event, offset, &self.projection);
-        let removed = {
-            let event = detached
-                .as_ref()
-                .or_else(|| self.log.event(index))
-                .expect("the appended event is resident or retained for the fold");
-            advance_projection(&mut self.projection, event, index)
-        };
-        self.log.evict(&removed);
+        step(&mut self.log, &mut self.projection, event, offset);
     }
 
     fn state(&self) -> &State {
@@ -1962,7 +1633,7 @@ impl AgentLog {
             .expect("view spans are resident in the ledger");
         if matches!(events.first(), Some(SessionEvent::ContextMessage { .. })) {
             return events
-                .iter()
+                .into_iter()
                 .cloned()
                 .flat_map(SessionEvent::into_chat_messages)
                 .collect();
@@ -1975,7 +1646,7 @@ impl AgentLog {
                 append_aborted_stubs(&mut state, &mut messages);
             }
             messages.extend(event.clone().into_chat_messages());
-            state = advance(state, event);
+            state = advance(&state, event);
         }
         if repair_end && !matches!(state, State::ReadyForUser) {
             append_aborted_stubs(&mut state, &mut messages);
@@ -1988,7 +1659,7 @@ impl AgentLog {
     }
 }
 
-fn advance(state: State, event: &SessionEvent) -> State {
+fn advance(state: &State, event: &SessionEvent) -> State {
     match event {
         SessionEvent::UserPrompt { .. } => State::AwaitingAssistantAfterUser,
         SessionEvent::AssistantMessage {
@@ -1998,7 +1669,34 @@ fn advance(state: State, event: &SessionEvent) -> State {
         },
         SessionEvent::AssistantMessage { .. } => State::ReadyForUser,
         SessionEvent::ToolResults { .. } => State::AwaitingAssistantAfterToolResults,
-        _ => state,
+        _ => state.clone(),
+    }
+}
+
+/// One step of the fold: append to the ledger, advance the projection, and
+/// free whatever the view no longer needs — the spans an edit removed, and
+/// any event committed past a removed tail span, which belongs to no
+/// surviving span and would otherwise stay resident forever.  `record` takes
+/// this step live; replay takes the same steps from the first line.
+fn step(
+    log: &mut Ledger,
+    projection: &mut Projection,
+    event: SessionEvent,
+    offset: Option<Range<u64>>,
+) {
+    let index = log.append(event, offset);
+    let removed = {
+        let event = log.event(index).expect("a fresh ledger slot is resident");
+        advance_projection(projection, event, index)
+    };
+    log.evict(&removed);
+    let in_view = projection
+        .view
+        .spans
+        .iter()
+        .any(|span| span.events.contains(&index));
+    if projection.max_exchange > 0 && !in_view {
+        log.free(index);
     }
 }
 
@@ -2007,8 +1705,7 @@ fn advance_projection(
     event: &SessionEvent,
     index: usize,
 ) -> Vec<Range<usize>> {
-    let state = std::mem::replace(&mut projection.state, State::ReadyForUser);
-    projection.state = advance(state, event);
+    projection.state = advance(&projection.state, event);
     record_event_span(projection, event, index);
     if let SessionEvent::ContextEdited { op, .. } = event {
         let removed = removed_event_ranges(&projection.view, op);
@@ -2039,6 +1736,12 @@ fn removed_event_ranges(view: &View, op: &ContextOp) -> Vec<Range<usize>> {
     }
 }
 
+/// The partition half of the step: an id-bearing event extends the span with
+/// its id at the tail or opens a new one past the running maximum; every
+/// other event extends whichever span last grew.  An id that can do neither
+/// joins nothing — no live door records one, and the resume door refuses such
+/// a line as foreign — so the step stays total without a dead event ever
+/// arising.
 fn record_event_span(projection: &mut Projection, event: &SessionEvent, index: usize) {
     if let Some(id) = event_exchange(event) {
         let extended = projection
@@ -2141,27 +1844,56 @@ fn stub_repairable(event: &SessionEvent) -> bool {
     )
 }
 
-fn append_aborted_stubs(state: &mut State, messages: &mut Vec<ChatMessage>) {
-    if let State::AwaitingToolResults { pending_ids } = state.clone() {
+/// The stub events role alternation needs to drive `state` back to
+/// [`State::ReadyForUser`]: the one remedy.  `quiesce` records these live;
+/// seam repair and resume validation interpose the same events on replay, so
+/// a repaired history is one a live quiesce could have written.
+fn stubs_to_ready(state: &State, reason: QuiesceReason) -> Vec<SessionEvent> {
+    let (tool_stub, assistant_stub, stop_label) = match reason {
+        QuiesceReason::Cancelled => (
+            "cancelled before tool execution",
+            "(cancelled by user)",
+            "cancelled",
+        ),
+        QuiesceReason::Aborted => (
+            "no result: exchange aborted before tool execution",
+            "(no reply: exchange aborted)",
+            "aborted",
+        ),
+        QuiesceReason::Replied => (
+            "no result: exchange ended on reply",
+            "(exchange ended: replied to parent)",
+            "replied",
+        ),
+    };
+    let mut stubs = Vec::new();
+    let mut state = state.clone();
+    if let State::AwaitingToolResults { pending_ids } = &state {
         let results = pending_ids
-            .into_iter()
+            .iter()
             .map(|id| ToolResult {
-                id,
-                content: "no result: exchange aborted before tool execution".into(),
+                id: id.clone(),
+                content: tool_stub.into(),
             })
             .collect();
-        let event = SessionEvent::ToolResults { results };
-        messages.extend(event.clone().into_chat_messages());
-        *state = advance(std::mem::replace(state, State::ReadyForUser), &event);
+        let stub = SessionEvent::ToolResults { results };
+        state = advance(&state, &stub);
+        stubs.push(stub);
     }
     if !matches!(state, State::ReadyForUser) {
-        let event = SessionEvent::AssistantMessage {
-            message: ChatMessage::assistant("(no reply: exchange aborted)"),
+        stubs.push(SessionEvent::AssistantMessage {
+            message: ChatMessage::assistant(assistant_stub),
             pending_tool_ids: Vec::new(),
-            stop_reason: Some("aborted".into()),
-        };
-        messages.extend(event.clone().into_chat_messages());
-        *state = advance(std::mem::replace(state, State::ReadyForUser), &event);
+            stop_reason: Some(stop_label.into()),
+        });
+    }
+    stubs
+}
+
+fn append_aborted_stubs(state: &mut State, messages: &mut Vec<ChatMessage>) {
+    for stub in stubs_to_ready(state, QuiesceReason::Aborted) {
+        *state = advance(state, &stub);
+        messages.extend(stub.into_chat_messages());
     }
 }
 
@@ -2253,6 +1985,11 @@ fn render_role(output: &mut String, role: &str, text: &str) {
     }
 }
 
+/// The survey's standing caution to the model, beside the refusal sentences
+/// so every model-facing context sentence is minted here.
+pub const CACHE_SENTENCE: &str =
+    "editing before the cache watermark re-reads the prefix on the next request";
+
 fn live_exchange_refusal(id: u64) -> String {
     format!("exchange {id} is the one you are in — a context edit may only name closed exchanges")
 }
@@ -2336,8 +2073,14 @@ fn read_events(path: &Path) -> io::Result<ReadEvents> {
     })
 }
 
+/// Replay the doors' own predicates over a file before admitting it: protocol
+/// admissibility (interposing the stubs a live quiesce would have recorded)
+/// and the exchange-id discipline (an id opens past the running maximum or
+/// extends the tail span).  A line that fails either is foreign data — no
+/// live door records one — and the projection would silently misplace it.
 fn validate_resume_events(events: &[LoggedEvent], path: &Path) -> io::Result<()> {
     let mut state = State::ReadyForUser;
+    let mut projection = Projection::default();
     for (index, recorded) in events.iter().enumerate() {
         let event = &recorded.event;
         if !admissible_event(&state, event) {
@@ -2348,37 +2091,27 @@ fn validate_resume_events(events: &[LoggedEvent], path: &Path) -> io::Result<()>
                     index + 1
                 )));
             }
-            repair_state(&mut state);
+            append_aborted_stubs(&mut state, &mut Vec::new());
         }
-        state = advance(state, event);
+        state = advance(&state, event);
+        if let Some(id) = event_exchange(event) {
+            let joins = id > projection.max_exchange
+                || projection
+                    .view
+                    .spans
+                    .iter()
+                    .any(|span| span.id == id && span.events.end == index);
+            if !joins {
+                return Err(io::Error::other(format!(
+                    "cannot resume {}: line {} names exchange {id}, which the log had already moved past; no live session records a stale exchange id — was the file hand-edited?",
+                    path.display(),
+                    index + 1
+                )));
+            }
+        }
+        advance_projection(&mut projection, event, index);
     }
     Ok(())
-}
-
-fn repair_state(state: &mut State) {
-    if let State::AwaitingToolResults { pending_ids } = state.clone() {
-        let results = pending_ids
-            .into_iter()
-            .map(|id| ToolResult {
-                id,
-                content: String::new(),
-            })
-            .collect();
-        *state = advance(
-            std::mem::replace(state, State::ReadyForUser),
-            &SessionEvent::ToolResults { results },
-        );
-    }
-    if !matches!(state, State::ReadyForUser) {
-        *state = advance(
-            std::mem::replace(state, State::ReadyForUser),
-            &SessionEvent::AssistantMessage {
-                message: ChatMessage::assistant("(no reply: exchange aborted)"),
-                pending_tool_ids: Vec::new(),
-                stop_reason: Some("aborted".into()),
-            },
-        );
-    }
 }
 
 fn quarantine_tail(path: &Path, tail: &CrashTail) -> io::Result<()> {
@@ -2523,37 +2256,90 @@ mod tests {
     }
 
     fn replay_resident(events: Vec<SessionEvent>) -> (Ledger, Projection) {
-        let mut log = Ledger::new(true, None);
+        let mut log = Ledger::new(None);
         let mut projection = Projection::default();
         for event in events {
-            let (index, detached) = log.append(event, None, &projection);
-            let removed = {
-                let event = detached
-                    .as_ref()
-                    .or_else(|| log.event(index))
-                    .expect("the replay event is resident");
-                advance_projection(&mut projection, event, index)
-            };
-            log.evict(&removed);
+            step(&mut log, &mut projection, event, None);
         }
         (log, projection)
     }
 
     fn replay_without_eviction(events: Vec<SessionEvent>) -> (Ledger, Projection) {
-        let mut log = Ledger::new(true, None);
+        let mut log = Ledger::new(None);
         let mut projection = Projection::default();
         for event in events {
-            let (index, detached) = log.append(event, None, &projection);
-            let event = detached
-                .as_ref()
-                .or_else(|| log.event(index))
-                .expect("the replay event is resident");
+            let index = log.append(event, None);
+            let event = log.event(index).expect("the replay event is resident");
             advance_projection(&mut projection, event, index);
         }
         (log, projection)
     }
 
-    fn independent_advance(state: State, event: &SessionEvent) -> State {
+    /// The step's oracle: the two-pass batch construction the design demoted
+    /// from spec to test.  Pass one partitions the whole history into spans
+    /// with no edit interleaved; pass two replays the edits over the finished
+    /// partition.  Deliberately not the step: a shared single pass would
+    /// reproduce its own defects.
+    fn independent_batch_reference(log: &[SessionEvent]) -> Projection {
+        // Pass one: partition, running maximum, protocol state, newest edit.
+        let mut spans: Vec<Span> = Vec::new();
+        let mut projection = Projection::default();
+        for (index, event) in log.iter().enumerate() {
+            projection.state = independent_advance(&projection.state, event);
+            match event_exchange(event) {
+                Some(id) if spans.last().is_none_or(|span| span.id != id) => {
+                    spans.push(Span {
+                        id,
+                        events: index..index + 1,
+                    });
+                }
+                _ => {
+                    if let Some(span) = spans.last_mut() {
+                        span.events.end = index + 1;
+                    }
+                }
+            }
+            if let Some(id) = event_exchange(event) {
+                projection.max_exchange = projection.max_exchange.max(id);
+            }
+            if matches!(event, SessionEvent::ContextEdited { .. }) {
+                projection.newest_edit = Some(index);
+            }
+        }
+
+        // Pass two: the edits, in log order, over the whole partition.
+        let mut digest = None;
+        for event in log {
+            let SessionEvent::ContextEdited { op, .. } = event else {
+                continue;
+            };
+            match op {
+                ContextOp::Fold {
+                    through_exchange,
+                    digest: text,
+                } => {
+                    digest = Some(Digest {
+                        through_exchange: *through_exchange,
+                        text: text.clone(),
+                    });
+                    spans.retain(|span| span.id > *through_exchange);
+                }
+                ContextOp::Drop { exchanges } => {
+                    if digest
+                        .as_ref()
+                        .is_some_and(|digest| exchanges.contains(&digest.through_exchange))
+                    {
+                        digest = None;
+                    }
+                    spans.retain(|span| !exchanges.contains(&span.id));
+                }
+            }
+        }
+        projection.view = View { digest, spans };
+        projection
+    }
+
+    fn independent_advance(state: &State, event: &SessionEvent) -> State {
         match event {
             SessionEvent::UserPrompt { .. } => State::AwaitingAssistantAfterUser,
             SessionEvent::AssistantMessage {
@@ -2568,85 +2354,8 @@ mod tests {
                 }
             }
             SessionEvent::ToolResults { .. } => State::AwaitingAssistantAfterToolResults,
-            _ => state,
+            _ => state.clone(),
         }
-    }
-
-    fn independent_batch_reference(log: &[SessionEvent]) -> Projection {
-        let mut projection = Projection::default();
-        let mut tail_id = None;
-
-        for (index, event) in log.iter().enumerate() {
-            projection.state = independent_advance(projection.state.clone(), event);
-
-            let exchange = match event {
-                SessionEvent::UserPrompt { exchange, .. }
-                | SessionEvent::ContextMessage { exchange, .. } => Some(*exchange),
-                _ => None,
-            };
-            if let Some(exchange) = exchange {
-                if tail_id == Some(exchange) {
-                    if let Some(span) = projection
-                        .view
-                        .spans
-                        .iter_mut()
-                        .find(|span| span.id == exchange && span.events.end == index)
-                    {
-                        span.events.end = index + 1;
-                    }
-                } else if exchange > projection.max_exchange {
-                    projection.view.spans.push(Span {
-                        id: exchange,
-                        events: index..index + 1,
-                    });
-                    tail_id = Some(exchange);
-                }
-                projection.max_exchange = projection.max_exchange.max(exchange);
-            } else if let Some(tail_id) = tail_id
-                && let Some(span) = projection
-                    .view
-                    .spans
-                    .iter_mut()
-                    .find(|span| span.id == tail_id && span.events.end == index)
-            {
-                span.events.end = index + 1;
-            }
-
-            if let SessionEvent::ContextEdited { op, .. } = event {
-                match op {
-                    ContextOp::Fold {
-                        through_exchange,
-                        digest,
-                    } => {
-                        projection.view.digest = Some(Digest {
-                            through_exchange: *through_exchange,
-                            text: digest.clone(),
-                        });
-                        projection
-                            .view
-                            .spans
-                            .retain(|span| span.id > *through_exchange);
-                    }
-                    ContextOp::Drop { exchanges } => {
-                        let remove_digest = projection
-                            .view
-                            .digest
-                            .as_ref()
-                            .is_some_and(|digest| exchanges.contains(&digest.through_exchange));
-                        if remove_digest {
-                            projection.view.digest = None;
-                        }
-                        projection
-                            .view
-                            .spans
-                            .retain(|span| !exchanges.contains(&span.id));
-                    }
-                }
-                projection.newest_edit = Some(index);
-            }
-        }
-
-        projection
     }
 
     fn independent_messages(log: &[SessionEvent], projection: &Projection) -> Vec<ChatMessage> {
@@ -2694,7 +2403,7 @@ mod tests {
             s.log
                 .resident_events(s.view().spans[2].events.clone())
                 .expect("view span is resident")
-                .iter()
+                .into_iter()
                 .filter_map(event_exchange)
                 .collect::<Vec<_>>(),
             vec![3, 3]
@@ -2978,37 +2687,40 @@ mod tests {
         complete_exchange(&mut dropped, "one", "one");
         complete_exchange(&mut dropped, "two", "two");
         complete_exchange(&mut dropped, "three", "three");
-        let removed = dropped.view().spans[1].events.clone();
+        let mut removed = dropped.view().spans[1].events.clone();
         dropped
             .apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
             .unwrap();
-        assert!(!dropped.log.is_resident(removed.start));
-        assert!(matches!(
-            dropped.log.store_covering(removed),
-            Some(SpanStore::Spilled { bytes }) if !bytes.is_empty()
-        ));
+        assert!(removed.all(|index| !dropped.log.is_resident(index)));
+        assert_eq!(
+            dropped.log.freed_ranges().len(),
+            1,
+            "one contiguous span frees to one coalesced byte range"
+        );
         assert_wiring(&dropped);
 
         let mut tail = fresh_root("residency-tail-edit");
         complete_exchange(&mut tail, "one", "one");
         complete_exchange(&mut tail, "two", "two");
-        let removed_tail = tail.view().spans[1].events.clone();
+        let mut removed_tail = tail.view().spans[1].events.clone();
         tail.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
             .unwrap();
         let edit_index = tail.log_len() - 1;
         assert!(!tail.log.is_resident(edit_index));
-        assert!(matches!(
-            tail.log.store_covering(removed_tail),
-            Some(SpanStore::Spilled { bytes }) if !bytes.is_empty()
-        ));
+        assert!(removed_tail.all(|index| !tail.log.is_resident(index)));
+        assert_eq!(
+            tail.log.freed_ranges().len(),
+            1,
+            "the edit's own line coalesces with the span it removed"
+        );
         assert_wiring(&tail);
 
         let mut folded = fresh_root("residency-fold");
         complete_exchange(&mut folded, "one", "one");
         complete_exchange(&mut folded, "two", "two");
         complete_exchange(&mut folded, "three", "three");
-        let first = folded.view().spans[0].events.clone();
-        let second = folded.view().spans[1].events.clone();
+        let mut first = folded.view().spans[0].events.clone();
+        let mut second = folded.view().spans[1].events.clone();
         folded
             .apply_edit(
                 ContextOp::Fold {
@@ -3018,17 +2730,18 @@ mod tests {
                 EditAuthority::Harness,
             )
             .unwrap();
-        assert!(!folded.log.is_resident(first.start));
-        assert!(!folded.log.is_resident(second.start));
-        assert!(matches!(
-            folded.log.store_covering(first),
-            Some(SpanStore::Spilled { bytes }) if !bytes.is_empty()
-        ));
+        assert!(first.all(|index| !folded.log.is_resident(index)));
+        assert!(second.all(|index| !folded.log.is_resident(index)));
+        assert_eq!(
+            folded.log.freed_ranges().len(),
+            1,
+            "adjacent folded spans free to one coalesced byte range"
+        );
         assert_wiring(&folded);
     }
 
     #[test]
-    fn spilled_projection_and_resume_match_the_logical_history() {
+    fn freed_projection_and_resume_match_the_logical_history() {
         let sessions = sessions_root("residency-resume");
         let mut live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
         complete_exchange(&mut live, "one", "one");
@@ -3038,13 +2751,13 @@ mod tests {
             .unwrap();
 
         let events = logical_events(&live.log);
-        assert!(!live.log.spilled_ranges().is_empty());
-        let (never_spilled_log, never_spilled_projection) = replay_without_eviction(events.clone());
-        let mut never_spilled =
+        assert!(!live.log.freed_ranges().is_empty());
+        let (never_freed_log, never_freed_projection) = replay_without_eviction(events.clone());
+        let mut never_freed =
             AgentLog::root_without_logs(&sessions, 1, "model", "provider", 0).unwrap();
-        never_spilled.log = never_spilled_log;
-        never_spilled.projection = never_spilled_projection;
-        let expected = serde_json::to_vec(&never_spilled.model_messages()).unwrap();
+        never_freed.log = never_freed_log;
+        never_freed.projection = never_freed_projection;
+        let expected = serde_json::to_vec(&never_freed.model_messages()).unwrap();
         assert_eq!(
             serde_json::to_vec(&live.model_messages()).unwrap(),
             expected
@@ -3073,27 +2786,27 @@ mod tests {
         complete_exchange(&mut s, "two", "two");
         s.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
             .unwrap();
-        assert!(!s.log.spilled_ranges().is_empty());
+        assert!(!s.log.freed_ranges().is_empty());
 
         let events = s.dir().join("events.jsonl");
         let transcript = s.dir().join("transcript.jsonl");
         let result = s.clear(0, 2, &transcript).expect("clear");
         assert_eq!(result.rotation, Some(0));
         assert!(events.with_extension("jsonl.0").exists());
-        assert!(s.log.spilled_ranges().is_empty());
+        assert!(s.log.freed_ranges().is_empty());
         assert_eq!(s.log_len(), 1);
         assert!(s.view().spans.is_empty());
         assert!(s.log.is_resident(0));
     }
 
     #[test]
-    fn transient_eviction_discards_without_spilling() {
+    fn transient_eviction_keeps_no_byte_ranges() {
         let sessions = sessions_root("residency-no-logs");
         let mut s = AgentLog::root_without_logs(&sessions, 0, "model", "provider", 0).unwrap();
         complete_exchange(&mut s, "one", "one");
         s.apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::User)
             .unwrap();
-        assert!(s.log.spilled_ranges().is_empty());
+        assert!(s.log.freed_ranges().is_empty());
         assert_eq!(s.event_count(), 0);
     }
 
@@ -3365,6 +3078,33 @@ mod tests {
     }
 
     #[test]
+    fn resume_refuses_a_stale_exchange_id_as_foreign_data() {
+        let sessions = sessions_root("resume-stale-id");
+        let mut live = AgentLog::root(&sessions, 0, "model", "provider", 0).unwrap();
+        complete_exchange(&mut live, "one", "one");
+        complete_exchange(&mut live, "two", "two");
+        let path = sessions.join("0/events.jsonl");
+        drop(live);
+        let stale = SessionEvent::UserPrompt {
+            exchange: 1,
+            text: "stale".into(),
+        };
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        serde_json::to_writer(&mut file, &stale).unwrap();
+        file.write_all(b"\n").unwrap();
+        file.flush().unwrap();
+        let before = fs::read(&path).unwrap();
+
+        let error = AgentLog::resume(&sessions, 0)
+            .err()
+            .expect("a stale exchange id is foreign data");
+        let text = error.to_string();
+        assert!(text.contains("names exchange 1"), "{text}");
+        assert!(text.contains("moved past"), "{text}");
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
     fn resume_refuses_nonzero_session_ids_as_transient_children() {
         let sessions = sessions_root("resume-child");
         let child = AgentLog::root(&sessions, 1, "model", "provider", 0).unwrap();
@@ -3486,6 +3226,12 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
+            let events = logical_events(&live.log);
+            assert_eq!(
+                independent_batch_reference(&events),
+                live.projection,
+                "pattern {pattern}"
+            );
             let expected = serde_json::to_vec(&live.model_messages()).unwrap();
             drop(live);
             let resumed = AgentLog::resume(&sessions, 0).expect("resume edit sequence");

@@ -17,6 +17,7 @@ use super::surface::SurfaceBuffer;
 use super::tabs::Tabs;
 use super::terminal::Term;
 use super::viewport::Viewport;
+use crate::agent::event::{ContextOp, EditAuthority};
 use crate::agent::resources::{BusFigures, ViewFigures, ViewportFigures};
 use crate::bus::card::{RailPlace, rail_place};
 use crate::bus::{AgentId, AgentState, BusReceiver, Event, Inbox, Kind};
@@ -256,7 +257,10 @@ impl App {
         // The clear acknowledgement is the boundary: everything before it is
         // cancelled-exchange residue, and everything after it is new context.
         if id == self.tabs.root() && self.root_clear_drain {
-            if matches!(kind, Kind::Cleared) {
+            // `Cleared` is the expected ack, but it can be lost (mailbox
+            // failure, a control path with no `/clear` arm); any later prompt
+            // echo still proves a fresh exchange is rendering, so it disarms too.
+            if matches!(kind, Kind::Cleared | Kind::UserPromptEcho(_)) {
                 self.root_clear_drain = false;
             } else {
                 return;
@@ -365,11 +369,29 @@ impl App {
             }
             Kind::Error(msg) => self.push_chrome(id, RailShape::Error, line::error(&msg)),
             Kind::SystemNote(text) => self.push_chrome(id, RailShape::Plain, line::note(&text)),
-            Kind::ContextEdited { op, by } => self.push_chrome(
-                id,
-                RailShape::Plain,
-                line::note(&format!("[context edited: {op:?} by {by:?}]")),
-            ),
+            Kind::ContextEdited { op, by } => {
+                let authority = match by {
+                    EditAuthority::Model => "model",
+                    EditAuthority::User => "user",
+                    EditAuthority::Harness => "harness",
+                };
+                let text = match op {
+                    ContextOp::Fold {
+                        through_exchange, ..
+                    } => format!(
+                        "[context folded through exchange {through_exchange} ({authority})]"
+                    ),
+                    ContextOp::Drop { exchanges } => {
+                        let list = exchanges
+                            .iter()
+                            .map(u64::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("[context dropped exchange(s) {list} ({authority})]")
+                    }
+                };
+                self.push_chrome(id, RailShape::Plain, line::note(&text));
+            }
             // Quiet on the rail, recorded in the trace at the emit seam. A desk
             // result is always one line, so a size bar would be constant ink.
             Kind::Cleared | Kind::Nudge { .. } | Kind::HarnessResult(_) => {}

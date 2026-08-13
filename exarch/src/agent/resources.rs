@@ -305,13 +305,16 @@ pub fn dir_size(root: &Path) -> u64 {
 /// The compaction-pressure rows, mirroring `Agent::compact`'s own trigger so
 /// the pressure shown is the pressure that fires: a known window compacts on
 /// tokens against that window, and only the unknown-window fallback still
-/// runs on serialised bytes.
-fn pressure_rows(last_input: u64, history_bytes: u64, window: Option<u64>) -> Vec<ProbeRow> {
-    match window {
-        Some(w) if w > 0 => vec![
+/// runs on serialised bytes. `measured` is `None` when the token count is
+/// stale ([`Agent::measured_input`]) — a stale read must report unknown,
+/// never a number that could sit at or over the trigger, so the
+/// `context.tokens` row is omitted rather than shown with a fabricated figure.
+fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>) -> Vec<ProbeRow> {
+    match (window, measured) {
+        (Some(w), Some(tokens)) if w > 0 => vec![
             ProbeRow::new(
                 "context.tokens",
-                last_input,
+                tokens,
                 Some(compaction_trigger(w)),
                 "evict",
                 Some(format!("auto-compaction trigger; window {w} tokens")),
@@ -327,6 +330,15 @@ fn pressure_rows(last_input: u64, history_bytes: u64, window: Option<u64>) -> Ve
                 ),
             ),
         ],
+        (Some(w), None) if w > 0 => vec![ProbeRow::new(
+            "log.bytes",
+            history_bytes,
+            Some(COMPACT_THRESHOLD as u64),
+            "evict",
+            Some(format!(
+                "auto-compaction threshold; token measure stale (window {w} tokens)"
+            )),
+        )],
         _ => vec![ProbeRow::new(
             "log.bytes",
             history_bytes,
@@ -447,7 +459,7 @@ impl Agent {
             Some("counts the events still owned by the model view".to_string()),
         ));
         rows.extend(pressure_rows(
-            self.last_input.0,
+            self.measured_input(),
             self.log.lock().history_bytes() as u64,
             self.current_provider().context_window(),
         ));
@@ -860,7 +872,7 @@ mod tests {
     /// fallback gauge rather than faking a second, unenforced ceiling.
     #[test]
     fn known_window_reports_context_tokens_not_bytes() {
-        let rows = pressure_rows(12_345, 4_096, Some(200_000));
+        let rows = pressure_rows(Some(12_345), 4_096, Some(200_000));
         let tokens = row(&rows, "context.tokens");
         assert_eq!(tokens.current, 12_345, "the live input-token numerator");
         assert_eq!(
@@ -884,6 +896,26 @@ mod tests {
             rows.iter().filter(|r| r.name == "log.bytes").count(),
             1,
             "log.bytes still rides along as an uncapped gauge, exactly once"
+        );
+    }
+
+    /// A stale measure must read as unknown, never as a number that could sit
+    /// at or over the trigger: right after a context edit the token count is
+    /// stale, so `context.tokens` drops out entirely rather than showing a
+    /// figure the design forbids ("stale reads unknown, never high").
+    #[test]
+    fn stale_measure_omits_context_tokens() {
+        let rows = pressure_rows(None, 4_096, Some(200_000));
+        assert!(
+            !rows.iter().any(|r| r.name == "context.tokens"),
+            "a stale token measure must not surface as a number"
+        );
+        let bytes = row(&rows, "log.bytes");
+        assert_eq!(bytes.current, 4_096);
+        assert_eq!(
+            bytes.cap,
+            Some(COMPACT_THRESHOLD as u64),
+            "falls back to the same byte threshold as an unknown window"
         );
     }
 }

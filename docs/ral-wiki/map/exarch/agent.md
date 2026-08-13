@@ -421,6 +421,17 @@ view and evicts their resident events, retaining only their byte ranges in
 There is no `Compacted` state or archival cut to infer. A failed attempt records
 nothing and sheds nothing. The durable log is appended to, never rewritten.
 
+Auto-compaction is one authority over the same `Fold`/`Drop` edit
+([[decisions/260812_context-is-a-projection|context-is-a-projection]]). The
+model reaches the other two: `context-read` and `context-drop` let it survey
+and shed closed exchanges of its own choosing, each recording `ContextEdited`
+with `EditAuthority::Model` rather than `Harness`. The user's own hand is
+`/rewind <exchange>`, which desugars to the same `Drop` at
+`EditAuthority::User`, sheds queued self-nudges, and resets the nudge budget;
+`/context` surveys the transcript without editing it, the read-only sibling
+`ReplControl::command` serves alongside `/clear`, `/compact`, `/branch`, and
+`/quit`.
+
 `Agent::check_disk_warn` is the disk half of the same ADR ("Disk: report
 and warn only") — report-and-warn only, never rotation or deletion.
 Unconfigured (`config::disk_warn_bytes` absent, the default) it is a no-op

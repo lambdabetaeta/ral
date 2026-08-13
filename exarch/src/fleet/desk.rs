@@ -7,7 +7,7 @@
 //! [`DeskBinding`] wraps the seam for the identity transport, where a
 //! handler's chrome would otherwise outrun the run's earlier surface output.
 
-use crate::agent::event::{ContextOp, EditAuthority};
+use crate::agent::event::{CACHE_SENTENCE, ContextOp, EditAuthority};
 use crate::agent::transcript::emit_context_edited;
 use crate::agent::{Agent, Build, LogCell, ProviderHandle, ReplyCell};
 use crate::bus::{AgentId, Emitter, Kind, Mailbox};
@@ -347,6 +347,19 @@ fn payload_exchanges(payload: Option<Box<FOValue>>, class: &str) -> Result<Vec<u
         .enumerate()
         .map(|(index, item)| payload_exchange(item, class, &format!("exchanges[{index}]")))
         .collect()
+}
+
+/// The rail subject `` `context-read ``/`` `context-drop `` both mint from an
+/// exchange list: `"exchanges [1, 2, 3]"`.
+fn exchanges_subject(exchanges: &[u64]) -> String {
+    format!(
+        "exchanges [{}]",
+        exchanges
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn usize_to_i64(value: usize) -> i64 {
@@ -1211,6 +1224,9 @@ impl ExarchDesk {
         }
     }
 
+    /// `` `context `` — a survey of this agent's own transcript: one span per
+    /// digest/import/exchange, plus the running byte and step totals. Silent,
+    /// like `` `agent-list ``: the answer is the survey.
     fn context(&self) -> FOValue {
         let survey = self.services.log.lock().context_survey();
         let spans = survey
@@ -1270,24 +1286,19 @@ impl ExarchDesk {
                 (
                     "cache".to_string(),
                     FOValue::String {
-                        value: "editing before the cache watermark re-reads the prefix on the next request"
-                            .to_string(),
+                        value: CACHE_SENTENCE.to_string(),
                     },
                 ),
             ],
         }
     }
 
+    /// `` `context-read `` — the rendered transcript of the named exchanges,
+    /// probing rather than acting: a read commits no act, so the verb string
+    /// below is a second mint outside [`DeskAct::verb`] on purpose.
     fn context_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let exchanges = payload_exchanges(payload, "context-read")?;
-        let subject = format!(
-            "exchanges [{}]",
-            exchanges
-                .iter()
-                .map(u64::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        let subject = exchanges_subject(&exchanges);
         let result = self.services.log.lock().read_context(&exchanges);
         self.services.emit.emit(Kind::HarnessCall {
             verb: "context-read",
@@ -1300,16 +1311,11 @@ impl ExarchDesk {
             .map_err(|error| Error::new(error, 1))
     }
 
+    /// `` `context-drop `` — shed the named exchanges from the view, receipted
+    /// by [`Self::context_edit`] with the resulting byte delta.
     fn context_drop(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let exchanges = payload_exchanges(payload, "context-drop")?;
-        let subject = format!(
-            "exchanges [{}]",
-            exchanges
-                .iter()
-                .map(u64::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        let subject = exchanges_subject(&exchanges);
         self.context_edit(
             DeskAct::ContextDrop,
             Some(&subject),
@@ -1318,6 +1324,9 @@ impl ExarchDesk {
         )
     }
 
+    /// `` `context-fold `` — collapse every exchange through `through` into
+    /// one digest, receipted by [`Self::context_edit`] with the resulting byte
+    /// delta.
     fn context_fold(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let [through, digest] = payload_list(payload, "context-fold", "[through, digest]")?;
         let through = payload_exchange(through, "context-fold", "through")?;
@@ -1335,6 +1344,9 @@ impl ExarchDesk {
         )
     }
 
+    /// The `` `context-drop ``/`` `context-fold `` tail both share: apply the
+    /// edit, commit the act under `refused` on either outcome, and mirror the
+    /// receipt or the refusal onto the trace before answering.
     fn context_edit(
         &self,
         act: DeskAct,
@@ -1486,6 +1498,7 @@ mod tests {
         Provider, ProviderKind,
         scripted::{Reply, Script},
     };
+    use crate::shell_eval::builtins::harness;
     use ral_core::transport::{DispatchId, IdentityTransport, Program, Run, Transport};
     use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 
@@ -1568,41 +1581,57 @@ mod tests {
         .expect("answer");
     }
 
+    /// Every context-verb test request below goes through the same encoders
+    /// [`harness::builtin_context_drop`] and its siblings call, so a change to
+    /// an encoder breaks these tests instead of leaving them to hand-build a
+    /// payload that has quietly drifted from what the builtin actually sends.
+    fn exchanges_value(exchanges: &[i64]) -> RalValue {
+        RalValue::list(
+            exchanges
+                .iter()
+                .map(|value| RalValue::Int(*value))
+                .collect(),
+        )
+    }
+
     fn context_drop_request(exchanges: &[i64]) -> FOValue {
+        let payload =
+            harness::context_exchanges_payload(&exchanges_value(exchanges), "context-drop")
+                .expect("valid exchange list");
         FOValue::Variant {
             label: "context-drop".to_string(),
-            payload: Some(Box::new(FOValue::List {
-                items: exchanges
-                    .iter()
-                    .map(|value| FOValue::Int { value: *value })
-                    .collect(),
-            })),
+            payload: Some(Box::new(payload)),
         }
     }
 
     fn context_fold_request(through: i64, digest: &str) -> FOValue {
+        let spec = RalValue::map(vec![
+            ("through".to_string(), RalValue::Int(through)),
+            ("digest".to_string(), RalValue::String(digest.to_string())),
+        ]);
+        let payload = harness::context_fold_payload(&spec).expect("valid fold spec");
         FOValue::Variant {
             label: "context-fold".to_string(),
-            payload: Some(Box::new(FOValue::List {
-                items: vec![
-                    FOValue::Int { value: through },
-                    FOValue::String {
-                        value: digest.to_string(),
-                    },
-                ],
-            })),
+            payload: Some(Box::new(payload)),
+        }
+    }
+
+    /// The `` `context `` survey call, shaped exactly as `builtin_context`
+    /// sends it: no payload to encode, since the answer is the whole survey.
+    fn context_survey_request() -> FOValue {
+        FOValue::Variant {
+            label: "context".to_string(),
+            payload: None,
         }
     }
 
     fn context_read_request(exchanges: &[i64]) -> FOValue {
+        let payload =
+            harness::context_exchanges_payload(&exchanges_value(exchanges), "context-read")
+                .expect("valid exchange list");
         FOValue::Variant {
             label: "context-read".to_string(),
-            payload: Some(Box::new(FOValue::List {
-                items: exchanges
-                    .iter()
-                    .map(|value| FOValue::Int { value: *value })
-                    .collect(),
-            })),
+            payload: Some(Box::new(payload)),
         }
     }
 
@@ -1750,10 +1779,7 @@ mod tests {
         let expected_bytes = desk.services.log.lock().history_bytes();
 
         let FOValue::Map { entries } = desk
-            .handle(FOValue::Variant {
-                label: "context".into(),
-                payload: None,
-            })
+            .handle(context_survey_request())
             .expect("context survey")
         else {
             panic!("context must answer a record")
@@ -1897,7 +1923,10 @@ mod tests {
         let err = folded_desk
             .handle(context_drop_request(&[]))
             .expect_err("an empty drop is not an edit");
-        assert_eq!(err.message, "a context edit must name at least one exchange");
+        assert_eq!(
+            err.message,
+            "a context edit must name at least one exchange"
+        );
     }
 
     #[test]
@@ -1915,8 +1944,43 @@ mod tests {
             "bytes-delta",
         );
         let after = desk.services.log.lock().history_bytes();
-        assert_eq!(delta, i64::try_from(before).unwrap() - i64::try_from(after).unwrap());
+        assert_eq!(
+            delta,
+            i64::try_from(before).unwrap() - i64::try_from(after).unwrap()
+        );
         assert!(delta > 0, "dropping a visible exchange should shed bytes");
+    }
+
+    /// The fold counterpart to [`context_drop_receipt_reports_the_view_byte_delta`]:
+    /// a fold receipts its byte delta and commits [`DeskAct::ContextFold`], not
+    /// [`DeskAct::ContextDrop`] — the audit sentence names the act it actually
+    /// took, which nothing else in this suite pins.
+    #[test]
+    fn context_fold_receipt_commits_the_fold_act() {
+        let desk = desk();
+        {
+            let mut log = desk.services.log.lock();
+            complete_exchange(&mut log, "one", "a longer answer");
+            complete_exchange(&mut log, "two", "another answer");
+        }
+        let delta = int_field(
+            desk.handle(context_fold_request(2, "kept summary"))
+                .expect("context fold"),
+            "bytes-delta",
+        );
+        assert_ne!(
+            delta, 0,
+            "folding two exchanges into a digest should change the byte count"
+        );
+        let audit = desk
+            .services
+            .acts
+            .audit()
+            .expect("a landed fold leaves an act");
+        assert!(
+            audit.contains("folded context"),
+            "the audit sentence must name the fold, got: {audit}"
+        );
     }
 
     /// `enquire` is called bare, off the dispatching thread: the adapter's drain

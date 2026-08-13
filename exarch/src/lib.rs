@@ -128,18 +128,6 @@ pub fn run() -> Result<(), String> {
     if c.output_format == headless::OutputFormat::Json && !c.headless {
         return Err("--output-format is only meaningful with --headless".into());
     }
-    if c.resume.is_some() && c.chat {
-        return Err(
-            "--resume cannot be combined with --chat — chat sessions have no resumable harness history"
-                .into(),
-        );
-    }
-    if c.resume.is_some() && c.no_logs {
-        return Err(
-            "--resume cannot be combined with --no-logs — a transient session writes nothing to reopen"
-                .into(),
-        );
-    }
     let seed = cli::load_seed(c.prompt, c.file, c.trailing_prompt)?;
 
     let custom = config::load()?;
@@ -226,8 +214,7 @@ pub fn run() -> Result<(), String> {
     let scratch = Arc::new(
         bootstrap::Scratch::new(bootstrap::EXARCH).map_err(|e| format!("scratch dir: {e}"))?,
     );
-    let (run_dir, run_lock, resume) =
-        resolve_run(&cwd, c.resume.clone(), c.no_logs)?;
+    let (run_dir, run_lock, resume) = resolve_run(&cwd, c.resume, c.no_logs)?;
     let config_dir = bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Config);
     let cwd_path = std::path::PathBuf::from(&cwd);
     // Whether the double fork exists on this host at all; whether a given call
@@ -325,7 +312,10 @@ pub fn run() -> Result<(), String> {
 
 /// Resolve a fresh or resumable run directory, retaining the lock for the
 /// process that owns it.
-#[allow(clippy::option_option, reason = "the CLI distinguishes absent, bare, and named resume")]
+#[allow(
+    clippy::option_option,
+    reason = "the CLI distinguishes absent, bare, and named resume"
+)]
 fn resolve_run(
     cwd: &str,
     resume: Option<Option<std::path::PathBuf>>,
@@ -341,9 +331,7 @@ fn resolve_run(
     if let Some(target) = resume {
         let explicit = target.is_some();
         let candidates = match target {
-            Some(target) => vec![
-                bootstrap::normalize_resume_target(&target)?,
-            ],
+            Some(target) => vec![bootstrap::normalize_resume_target(&target)?],
             None => bootstrap::EXARCH
                 .resume_candidates(cwd)
                 .map_err(|error| format!("could not inspect resumable runs: {error}"))?,

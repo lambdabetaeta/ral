@@ -30,10 +30,7 @@ fn seed_id_counter(sessions_root: &std::path::Path) -> io::Result<()> {
         Ok(entries) => entries
             .filter_map(Result::ok)
             .filter_map(|entry| {
-                entry
-                    .file_type()
-                    .ok()
-                    .filter(std::fs::FileType::is_dir)?;
+                entry.file_type().ok().filter(std::fs::FileType::is_dir)?;
                 entry.file_name().to_str()?.parse::<AgentId>().ok()
             })
             .max()
@@ -347,47 +344,44 @@ impl Agent {
                 },
             )
         };
-        let sessions_root = resume
-            .as_deref()
-            .unwrap_or(&run_dir)
-            .join("sessions");
+        let root_dir = resume.as_deref().unwrap_or(&run_dir);
+        let sessions_root = root_dir.join("sessions");
         let run_lock = if no_logs {
             None
         } else {
             match run_lock {
                 Some(lock) => Some(lock),
-                None => Some(crate::bootstrap::RunLock::try_acquire(&run_dir)?),
+                None => Some(crate::bootstrap::RunLock::try_acquire(root_dir)?),
             }
         };
-        let (log, resume_summary, resumed_at_unix_ms) =
-            if resume.is_some() {
-                seed_id_counter(&sessions_root)?;
-                let mut log = AgentLog::resume(&sessions_root, 0)?;
-                let summary = log.resumed_summary();
-                let at_unix_ms = crate::bootstrap::now_unix_ms();
-                log.record_resumed(&model, &provider_label, system_prompt.len(), at_unix_ms)?;
-                (log, Some(summary), Some(at_unix_ms))
+        let (log, resume_summary, resumed_at_unix_ms) = if resume.is_some() {
+            seed_id_counter(&sessions_root)?;
+            let mut log = AgentLog::resume(&sessions_root, 0)?;
+            let summary = log.resumed_summary();
+            let at_unix_ms = crate::bootstrap::now_unix_ms();
+            log.record_resumed(&model, &provider_label, system_prompt.len(), at_unix_ms)?;
+            (log, Some(summary), Some(at_unix_ms))
+        } else {
+            let id = fresh_id();
+            let log = if no_logs {
+                AgentLog::root_without_logs(
+                    &sessions_root,
+                    id,
+                    &model,
+                    &provider_label,
+                    system_prompt.len(),
+                )?
             } else {
-                let id = fresh_id();
-                let log = if no_logs {
-                    AgentLog::root_without_logs(
-                        &sessions_root,
-                        id,
-                        &model,
-                        &provider_label,
-                        system_prompt.len(),
-                    )?
-                } else {
-                    AgentLog::root(
-                        &sessions_root,
-                        id,
-                        &model,
-                        &provider_label,
-                        system_prompt.len(),
-                    )?
-                };
-                (log, None, None)
+                AgentLog::root(
+                    &sessions_root,
+                    id,
+                    &model,
+                    &provider_label,
+                    system_prompt.len(),
+                )?
             };
+            (log, None, None)
+        };
         let seat = match root_seat {
             RootSeat::Identity {
                 scratch,
@@ -459,18 +453,19 @@ impl Agent {
                 self.transcript
                     .rotate_at(&transcript_path, rotation, at_unix_ms)
         {
-            let events_path = transcript_path.with_file_name("events.jsonl");
-            let rotated_events = events_path.with_file_name(format!("events.jsonl.{rotation}"));
+            let rotated_events = transcript_path.with_file_name(format!("events.jsonl.{rotation}"));
+            let rotated_transcript =
+                transcript_path.with_file_name(format!("transcript.jsonl.{rotation}"));
             error = Some(match error {
                 Some(events_error) => io::Error::other(format!(
                     "clear committed, but paired files {} and {} could not both be rotated: {events_error}; {transcript_error}",
                     rotated_events.display(),
-                    transcript_path.display(),
+                    rotated_transcript.display(),
                 )),
                 None => io::Error::other(format!(
                     "clear committed, but paired files {} and {} could not both be rotated: the event log was moved, but the transcript failed: {transcript_error}",
                     rotated_events.display(),
-                    transcript_path.display(),
+                    rotated_transcript.display(),
                 )),
             });
         }
@@ -700,8 +695,8 @@ impl Drop for Agent {
 )]
 mod tests {
     use super::*;
-    use crate::agent::testkit::*;
     use crate::agent::event::SessionEvent;
+    use crate::agent::testkit::*;
     use crate::bus::{Emitter, Item, Kind, Post};
     use crate::provider::scripted::Script;
     use genai::chat::ChatMessage;
@@ -1223,8 +1218,8 @@ mod tests {
         let before = log.history_messages();
         drop(log);
 
-        let scratch = Scratch::for_test(crate::bootstrap::EXARCH, "resume-agent")
-            .expect("scratch dir");
+        let scratch =
+            Scratch::for_test(crate::bootstrap::EXARCH, "resume-agent").expect("scratch dir");
         let agent = Agent::root(
             RootConfig {
                 system: "system".into(),
@@ -1304,11 +1299,7 @@ mod tests {
         let events = session.log_dir().join("events.jsonl");
         let transcript = session.log_dir().join("transcript.jsonl");
         fs::write(events.with_file_name("events.jsonl.0"), b"reserved").unwrap();
-        fs::write(
-            transcript.with_file_name("transcript.jsonl.0"),
-            b"reserved",
-        )
-        .unwrap();
+        fs::write(transcript.with_file_name("transcript.jsonl.0"), b"reserved").unwrap();
 
         let bus = crate::bus::FleetBus::session(&session.inbox());
         let first = bus.emitter(session.id, session.transcript());
@@ -1321,26 +1312,26 @@ mod tests {
         assert!(rotated_transcript.is_file());
         assert!(events.is_file());
         assert!(transcript.is_file());
-        assert!(fs::read(events.with_file_name("events.jsonl.0"))
-            .unwrap()
-            .starts_with(b"reserved"));
+        assert!(
+            fs::read(events.with_file_name("events.jsonl.0"))
+                .unwrap()
+                .starts_with(b"reserved")
+        );
 
-        let current_events: Vec<SessionEvent> = serde_json::Deserializer::from_reader(
-            File::open(&events).unwrap(),
-        )
-        .into_iter()
-        .collect::<Result<_, _>>()
-        .unwrap();
+        let current_events: Vec<SessionEvent> =
+            serde_json::Deserializer::from_reader(File::open(&events).unwrap())
+                .into_iter()
+                .collect::<Result<_, _>>()
+                .unwrap();
         let stamp = match current_events.first().expect("new session head") {
             SessionEvent::SessionStarted { at_unix_ms, .. } => *at_unix_ms,
             other => panic!("new event segment must start with SessionStarted, got {other:?}"),
         };
-        let trace: Vec<serde_json::Value> = serde_json::Deserializer::from_reader(
-            File::open(&transcript).unwrap(),
-        )
-        .into_iter()
-        .collect::<Result<_, _>>()
-        .unwrap();
+        let trace: Vec<serde_json::Value> =
+            serde_json::Deserializer::from_reader(File::open(&transcript).unwrap())
+                .into_iter()
+                .collect::<Result<_, _>>()
+                .unwrap();
         assert_eq!(trace[0]["kind"], "cleared");
         assert_eq!(trace[0]["at_unix_ms"], stamp);
 
@@ -1357,8 +1348,8 @@ mod tests {
     #[test]
     fn no_logs_is_process_wide_and_never_mints_durable_files() {
         let dir = tmp("no-logs-agent");
-        let scratch = Scratch::for_test(crate::bootstrap::EXARCH, "no-logs-agent")
-            .expect("scratch dir");
+        let scratch =
+            Scratch::for_test(crate::bootstrap::EXARCH, "no-logs-agent").expect("scratch dir");
         let agent = Agent::root(
             RootConfig {
                 system: "system".into(),
@@ -1408,8 +1399,8 @@ mod tests {
         fs::write(sessions.join("1/sentinel"), b"keep").unwrap();
         drop(log);
 
-        let scratch = Scratch::for_test(crate::bootstrap::EXARCH, "resume-id-seed")
-            .expect("scratch dir");
+        let scratch =
+            Scratch::for_test(crate::bootstrap::EXARCH, "resume-id-seed").expect("scratch dir");
         let root = Agent::root(
             RootConfig {
                 system: "system".into(),

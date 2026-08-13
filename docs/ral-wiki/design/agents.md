@@ -136,10 +136,20 @@ binding to an `` `amnemon `` child:
 let ctx = context-read [4, 7]
 let handoff = slice ctx 0 12000
 context-drop [4, 7]
-agent [prompt: handoff, name: 'researcher', type: `amnemon, grant: `read-only, search: false]
+agent [
+  prompt: "read `handoff` for the material to work from; report your findings",
+  name: 'researcher',
+  type: `amnemon,
+  grant: `read-only,
+  search: false,
+]
 ```
 
-The child receives `handoff` through the ordinary serialisable value snapshot;
+`handoff` crosses in the child's forked scope, not in `prompt`'s text: `prompt`
+stays a short instruction naming the binding, so the 12000 characters travel
+once, as data, rather than twice — once as a binding and once spliced into the
+first model-visible message. The child receives `handoff` through the ordinary
+serialisable value snapshot;
 the same idiom can recur down the delegation tree. The token cost is paid at
 the leaf for the slice that is actually handed over. Small, certainly needed
 material may still be spliced into a prompt; a large binding should remain a

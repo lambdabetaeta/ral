@@ -567,20 +567,35 @@ fn builtin_pin_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     Ok(Value::list(items.into_iter().map(Value::from).collect()))
 }
 
+/// The `` `context `` scheme (`context_receipt_ty`) is a closed four-field
+/// record, so a survey missing any of them is host-side drift, not a call
+/// error — name what is missing rather than shrugging at the whole shape.
 fn context_receipt(answer: FOValue) -> Settled<Value> {
-    let FOValue::Map { .. } = answer else {
+    const FIELDS: [&str; 4] = ["spans", "total-bytes", "total-steps", "cache"];
+    let FOValue::Map { entries } = &answer else {
         return Err(sig(
             "context: host answered an unexpected shape for the survey",
         ));
     };
+    if let Some(missing) = FIELDS
+        .iter()
+        .find(|field| !entries.iter().any(|(key, _)| key == *field))
+    {
+        return Err(sig(format!(
+            "context: host answered a survey missing the `{missing}` field"
+        )));
+    }
     Ok(Value::from(answer))
 }
 
 fn edit_receipt(answer: FOValue, verb: &str) -> Settled<Value> {
-    let FOValue::Map { entries } = &answer else {
-        return Err(sig(format!(
+    let shape_error = || {
+        sig(format!(
             "{verb}: host answered an unexpected shape for the receipt"
-        )));
+        ))
+    };
+    let FOValue::Map { entries } = &answer else {
+        return Err(shape_error());
     };
     if entries
         .iter()
@@ -588,13 +603,11 @@ fn edit_receipt(answer: FOValue, verb: &str) -> Settled<Value> {
     {
         Ok(Value::from(answer))
     } else {
-        Err(sig(format!(
-            "{verb}: host answered an unexpected shape for the receipt"
-        )))
+        Err(shape_error())
     }
 }
 
-fn context_exchanges_payload(value: &Value, verb: &str) -> Settled<FOValue> {
+pub(crate) fn context_exchanges_payload(value: &Value, verb: &str) -> Settled<FOValue> {
     let Value::List(items) = value else {
         return Err(sig(format!(
             "{verb}: expected a List of non-negative exchange Ints, got {}",
@@ -619,15 +632,7 @@ fn context_exchanges_payload(value: &Value, verb: &str) -> Settled<FOValue> {
     Ok(FOValue::List { items: exchanges })
 }
 
-fn context_drop_payload(value: &Value) -> Settled<FOValue> {
-    context_exchanges_payload(value, "context-drop")
-}
-
-fn context_read_payload(value: &Value) -> Settled<FOValue> {
-    context_exchanges_payload(value, "context-read")
-}
-
-fn context_fold_payload(value: &Value) -> Settled<FOValue> {
+pub(crate) fn context_fold_payload(value: &Value) -> Settled<FOValue> {
     let Value::Map(spec) = value else {
         return Err(sig(format!(
             "context-fold: expected [through: Int, digest: Str], got {}",
@@ -671,6 +676,8 @@ fn context_fold_payload(value: &Value) -> Settled<FOValue> {
     })
 }
 
+/// `context` — enquires `` `context ``; the answer is a survey of this
+/// agent's own transcript, so the call takes no argument.
 fn builtin_context(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let answer = shell.enquire(
         mooring,
@@ -682,8 +689,10 @@ fn builtin_context(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Set
     context_receipt(answer)
 }
 
+/// `context-read` — enquires `` `context-read ``; the answer is the rendered
+/// transcript of the named exchanges, one Str.
 fn builtin_context_read(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let payload = context_read_payload(&args[0])?;
+    let payload = context_exchanges_payload(&args[0], "context-read")?;
     let answer = shell.enquire(
         mooring,
         FOValue::Variant {
@@ -699,8 +708,10 @@ fn builtin_context_read(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
     Ok(Value::String(value))
 }
 
+/// `context-drop` — enquires `` `context-drop ``; the answer is the byte-delta
+/// receipt of the edit.
 fn builtin_context_drop(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let payload = context_drop_payload(&args[0])?;
+    let payload = context_exchanges_payload(&args[0], "context-drop")?;
     let answer = shell.enquire(
         mooring,
         FOValue::Variant {
@@ -711,6 +722,8 @@ fn builtin_context_drop(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
     edit_receipt(answer, "context-drop")
 }
 
+/// `context-fold` — enquires `` `context-fold ``; the answer is the byte-delta
+/// receipt of the edit.
 fn builtin_context_fold(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let payload = context_fold_payload(&args[0])?;
     let answer = shell.enquire(

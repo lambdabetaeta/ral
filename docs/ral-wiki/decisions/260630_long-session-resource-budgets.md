@@ -39,10 +39,12 @@ The current pressure points are distinct:
 - **The inbox is model-facing delivery.** Per-agent inboxes are unbounded
   `VecDeque`s drained only at tool or turn boundaries. They cannot be treated
   like presentation: silent loss changes what the model sees.
-- **Compaction is not reclamation.** Auto-compaction shrinks the model view, but
-  the event log's in-memory mirror and append-only files can still retain the
-  historical prefix. `events.jsonl`, `transcript.jsonl`, and `user.log` are
-  durable records, not memory budgets.
+- **Compaction is not reclamation.** *(Superseded for the event mirror,
+  260812: the edit step now frees a span's events the moment it leaves the
+  view — [[decisions/260812_context-is-a-projection|context-is-a-projection]] —
+  so the mirror is O(view). The files still retain everything.)*
+  `events.jsonl`, `transcript.jsonl`, and `user.log` are durable records, not
+  memory budgets.
 - **The lexical env is cheap to clone, not cheap to fill.** `Env` is persistent
   copy-on-write, so a big env is not a clone bomb. The resident cost is the
   `Value`: large strings, bytes, lists, maps, closures that captured old scopes,
@@ -77,11 +79,11 @@ allowed to become unbounded.
   viewports are flushed, then evicted after linger into a tombstone carrying id,
   status, and the log path. `/clear` stays the explicit whole-subtree reset.
 
-- **Make compaction physically drop the model prefix in memory.** After a
-  successful compaction, the in-memory `AgentLog.events` should match the live
-  model view: summary plus suffix, not summary plus a pointer into an
-  ever-growing vector. The append-only `events.jsonl` remains the forensic record;
-  reclamation is for heap, not history.
+- **Make compaction physically drop the model prefix in memory.** *(Delivered
+  260812, generalized to every context edit — drops reclaim too:
+  [[decisions/260812_context-is-a-projection|context-is-a-projection]].)* The
+  in-memory ledger keeps exactly the view; the append-only `events.jsonl`
+  remains the forensic record. Reclamation is for heap, not history.
 
 - **Bound inboxes without silent loss.** The inbox carries model-facing facts, so
   it needs quotas and source policies rather than blind dropping. Idempotent

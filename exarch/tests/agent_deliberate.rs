@@ -365,13 +365,16 @@ fn compaction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
         )),
         "compaction must not touch the durable event log"
     );
-    assert!(events.iter().any(|event| matches!(
-        event,
-        SessionEvent::ContextEdited {
-            op: ContextOp::Fold { .. },
-            by: EditAuthority::Harness,
-        }
-    )));
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SessionEvent::ContextEdited {
+                op: ContextOp::Fold { .. },
+                by: EditAuthority::Harness,
+            }
+        )),
+        "auto-compaction must record its fold as a harness-authored context edit"
+    );
 }
 
 /// X2: a tool call whose `fn_arguments` is not a JSON object is repaired to
