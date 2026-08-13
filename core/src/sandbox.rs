@@ -67,6 +67,15 @@ fn net_enforced() -> bool {
     }
 }
 
+/// The one refusal for "this host cannot establish the confinement the active
+/// grant asks for".  Whether we learn it before the spawn — an axis no backend
+/// here enforces — or from the spawn itself, when the envelope binary turns out
+/// to be missing, the user is owed the same answer: nothing ran, and the
+/// sandbox is why.  Never the command's fault, so never phrased as such.
+pub(crate) fn confinement_unavailable(reason: &str) -> crate::types::Error {
+    crate::types::Error::new(format!("sandbox confinement unavailable: {reason}"), 1)
+}
+
 /// `Err(reason)` when `projection` asks for a restriction this platform cannot
 /// enforce.  Offline is the only such axis: `net: false` must refuse rather
 /// than run somewhere the bit is silently ignored.

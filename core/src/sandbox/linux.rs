@@ -14,6 +14,10 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+/// The bubblewrap binary, resolved on `PATH`: every confined launch here execs
+/// it, so a host without it can enforce no projection at all.
+pub(super) const BWRAP: &str = "bwrap";
+
 /// Build the [`Command`] that runs `name` under `bwrap` for `policy`: binds
 /// derived from the policy prefixes, `deny_paths` overlaid last.
 ///
@@ -45,7 +49,7 @@ pub(crate) fn make_command_with_policy(
     ownership: super::launch::Ownership,
 ) -> Result<Command, String> {
     let rendered = policy.rendered()?;
-    let mut c = Command::new("bwrap");
+    let mut c = Command::new(BWRAP);
     // Empty when fs is `Unrestricted`: there the envelope binds `/` wholesale
     // below rather than per prefix.
     let rules = rendered.fs.rules().cloned().unwrap_or_default();
@@ -303,7 +307,7 @@ pub(super) fn respawn_under_bwrap(
         .stderr(Stdio::inherit());
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            "ral: failed to enter sandbox: bwrap not found".to_string()
+            format!("ral: failed to enter sandbox: {BWRAP} not found")
         } else {
             format!("ral: failed to enter sandbox: {e}")
         }

@@ -355,6 +355,9 @@ fn launch_external_stage_direct(
     // Nor a redirect, so `ext` carries none and there is no file to open.
     let plumbing = wire_stage_stdio(&mut cmd, route.stdin, route.stdout, group, shell)?;
 
+    // Read before the closure, which cannot borrow what `spawn_into_group` takes
+    // mutably.
+    let confinement = cmd.confinement();
     spawn_into_group(
         group,
         &mut cmd,
@@ -363,7 +366,7 @@ fn launch_external_stage_direct(
         mooring,
         shell,
         park_on_stop,
-        |e| command::spawn_error(&rc.shown, &e),
+        |e| command::spawn_error(confinement, &rc.shown, &e),
     )
 }
 

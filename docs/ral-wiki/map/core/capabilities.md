@@ -184,6 +184,9 @@ device for `net` to govern; the in-process gates apply unchanged
 - `projection_enforceable` (`sandbox.rs`) — rejects an offline (`net: false`)
   projection on a backend with no kernel network enforcement, so an unenforceable
   request fails closed rather than running ignored.
+- `confinement_unavailable` (`sandbox.rs`) — the one refusal for a confinement
+  this host cannot establish, whether `projection_enforceable` saw it coming or
+  the envelope binary turned out to be missing at the spawn.
 - `make_command` — wraps an external command in the active policy.
 - `launch.rs` (`sandboxed_command`) — the per-command launcher. `build_command`
   (`runtime/command/process.rs`) routes an external or bundled child through here

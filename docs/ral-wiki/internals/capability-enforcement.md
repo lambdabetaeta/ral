@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 11b9ebd
 verified_at_date: 2026-08-06
-anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant, policy_names, deny_names_from, longest_dir_match, deputy_prefixes]
+anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant, policy_names, deny_names_from, longest_dir_match, deputy_prefixes, confinement_unavailable, spawn_error, confined_by]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -187,6 +187,20 @@ an on-disk swap cannot subvert it. Because confinement is per-command, the gate
 fires only when a child is actually spawned: a `grant [net: false] { … }` with no
 external child does not fail closed, and an offline request on a backend without
 kernel network enforcement fails closed at the spawn (`projection_enforceable`).
+
+Confinement can also be unavailable for a reason no pre-flight can see. On Linux
+the envelope is `bwrap`, a host package rather than part of ral, and a host
+without it fails closed at the spawn with `ENOENT`. The subtlety is *whose*
+`ENOENT` it is: `vet` has already resolved the target on `PATH`, and an envelope
+execs its target itself, reporting a missing one as an exit status. So under an
+active projection a spawn-time `NotFound` can only be the envelope's, and
+`spawn_error` says so — reading it as the target's would accuse the one program
+known to exist, and make a host lacking bubblewrap look like a grant that denies
+everything. A launch therefore carries the envelope it execs
+(`Launch::confinement`), set by the one backend whose envelope is a separate
+binary, so blame is read off what the launcher did rather than re-derived from
+the shell's state. Both routes end in the same refusal,
+`sandbox::confinement_unavailable`: nothing ran, and the sandbox is why.
 
 The pipeline-stage helper re-exec is unchanged and unrelated: a process-staged
 ral stage still runs through `run_child_eval` over one request/response frame

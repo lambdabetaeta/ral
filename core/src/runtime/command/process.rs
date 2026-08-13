@@ -27,12 +27,8 @@ pub(crate) fn build_command(
     {
         // A `grant` body evaluates in this process unconfined; spawned children
         // are the only thing an OS sandbox reaches, and this is where it does.
-        crate::sandbox::projection_enforceable(&projection).map_err(|reason| {
-            Break::Error(Error::new(
-                format!("sandbox confinement unavailable: {reason}"),
-                1,
-            ))
-        })?;
+        crate::sandbox::projection_enforceable(&projection)
+            .map_err(|reason| Break::Error(crate::sandbox::confinement_unavailable(reason)))?;
         let target = match &plan.image {
             ExecImage::Host(program) => crate::sandbox::LaunchTarget::Host { program },
             ExecImage::BundledTool { tool } => crate::sandbox::LaunchTarget::BundledTool { tool },
@@ -102,8 +98,37 @@ pub(crate) fn spawn(
 /// Render a spawn `io::Error` for command `name` as a [`Break`].  `NotFound`
 /// reuses the one wording `vet`'s pre-spawn existence probe emits, so the two
 /// paths never disagree about a missing command.
-pub(crate) fn spawn_error(name: &str, e: &std::io::Error) -> Break {
+///
+/// With a `confinement` — the envelope binary exec'd in `name`'s place — the
+/// failure is the envelope's, not `name`'s: `vet` resolved `name` before we got
+/// here, and an envelope execs its own target, so a missing one comes back as an
+/// exit status rather than a spawn failure.  Blaming `name` would accuse the one
+/// program we know exists, and make a host lacking the envelope look like a
+/// grant that denies everything.
+pub(crate) fn spawn_error(
+    confinement: Option<&'static str>,
+    name: &str,
+    e: &std::io::Error,
+) -> Break {
     use crate::process::{CommandFailure, SpawnFailure};
+
+    if let Some(envelope) = confinement {
+        let (reason, hint) = match e.kind() {
+            std::io::ErrorKind::NotFound => (
+                format!("{envelope} not found on PATH"),
+                format!(
+                    "A grant confines every command it runs under {envelope}, so while one is active \
+                     nothing can start without it — {name} itself resolved fine. Is {envelope} installed \
+                     on this host, and on the PATH ral sees?"
+                ),
+            ),
+            _ => (
+                format!("cannot start {envelope}: {e}"),
+                format!("The envelope failed to launch, so {name} never ran."),
+            ),
+        };
+        return Break::Error(crate::sandbox::confinement_unavailable(&reason).with_hint(hint));
+    }
 
     let failure = match e.kind() {
         std::io::ErrorKind::NotFound => CommandFailure::Spawn(SpawnFailure::NotFound),
@@ -175,4 +200,34 @@ fn dyld_vars(shell: &Shell) -> Vec<std::ffi::OsString> {
         .filter(|(k, _)| k.starts_with(PREFIX))
         .map(|(k, _)| std::ffi::OsString::from(k));
     inherited.chain(overridden).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spawn_error;
+    use crate::types::Break;
+
+    fn message(b: &Break) -> &str {
+        let Break::Error(e) = b else {
+            panic!("spawn_error yields an Error break")
+        };
+        &e.message
+    }
+
+    /// One `ENOENT` means two different things depending on who the launcher
+    /// exec'd, and the wrong reading turns a host missing bubblewrap into a
+    /// grant that appears to deny every command.
+    #[test]
+    fn missing_envelope_is_not_reported_as_a_missing_command() {
+        let enoent = std::io::Error::from(std::io::ErrorKind::NotFound);
+
+        let unconfined = spawn_error(None, "pwd", &enoent);
+        assert_eq!(message(&unconfined), "pwd: command not found");
+
+        let confined = spawn_error(Some("bwrap"), "pwd", &enoent);
+        assert_eq!(
+            message(&confined),
+            "sandbox confinement unavailable: bwrap not found on PATH"
+        );
+    }
 }

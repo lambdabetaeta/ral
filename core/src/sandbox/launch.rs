@@ -64,8 +64,11 @@ pub(crate) fn sandboxed_command(
     let _ = cancel;
     #[cfg(target_os = "linux")]
     {
-        linux_sandboxed_command(projection, target, args, ownership, shell)
-            .map(crate::process::Launch::from_command)
+        let cmd = linux_sandboxed_command(projection, target, args, ownership, shell)?;
+        let mut launch = crate::process::Launch::from_command(cmd);
+        // A host package rather than part of ral, so it may simply be absent.
+        launch.confined_by(super::linux::BWRAP);
+        Ok(launch)
     }
     #[cfg(target_os = "macos")]
     {

@@ -19,6 +19,7 @@ pub(crate) use windows::RawChild;
 pub struct Launch {
     cmd: std::process::Command,
     jail: Option<crate::process::jail::JailCgroup>,
+    confined_by: Option<&'static str>,
 }
 
 #[cfg(windows)]
@@ -33,6 +34,7 @@ pub struct Launch {
     creation_flags: u32,
     admitted_handles: Vec<std::os::windows::io::RawHandle>,
     security_capabilities: Option<SecurityCapabilitiesAttr>,
+    confined_by: Option<&'static str>,
 }
 
 /// `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` payload, borrowing raw SID
@@ -157,6 +159,27 @@ impl StdioSpec {
     }
 }
 
+impl Launch {
+    /// Declare that this launch execs `program` — a confinement envelope —
+    /// and that the envelope execs the target in turn.  Only a backend whose
+    /// envelope is a *separate* binary marks itself: a failure to start such a
+    /// launch is the envelope's failure, not the target's, and the two are
+    /// otherwise indistinguishable at the spawn.  Today that is bubblewrap
+    /// alone, so only the Linux backend has anything to declare.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn confined_by(&mut self, program: &'static str) -> &mut Self {
+        self.confined_by = Some(program);
+        self
+    }
+
+    /// The envelope binary this launch execs in the target's place, if any.
+    /// `None` means the launch execs the target itself, so a spawn failure is
+    /// the target's to answer for.
+    pub(crate) fn confinement(&self) -> Option<&'static str> {
+        self.confined_by
+    }
+}
+
 #[cfg(not(windows))]
 impl Launch {
     pub fn new(program: impl AsRef<OsStr>) -> Self {
@@ -165,14 +188,22 @@ impl Launch {
             reason = "[io-door:surface:process-launch] Builds the external exec image at ral's owned launch boundary; `finish_command` builds the exec observation, wrapping the whole dispatch, with the resolved argv and status."
         )]
         let cmd = std::process::Command::new(program);
-        Self { cmd, jail: None }
+        Self {
+            cmd,
+            jail: None,
+            confined_by: None,
+        }
     }
 
     /// Adopt an existing `Command`.  Set stdio and redirections on the
     /// returned `Launch`, never on the incoming one: `std` exposes no stdio
     /// getters, so the Windows arm cannot carry them across.
     pub fn from_command(cmd: std::process::Command) -> Self {
-        Self { cmd, jail: None }
+        Self {
+            cmd,
+            jail: None,
+            confined_by: None,
+        }
     }
 
     pub fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
@@ -328,6 +359,7 @@ impl Launch {
             creation_flags: 0,
             admitted_handles: Vec::new(),
             security_capabilities: None,
+            confined_by: None,
         }
     }
 

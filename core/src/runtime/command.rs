@@ -115,12 +115,13 @@ pub(crate) fn run(
     // Anchor the denial-log window before the spawn, so a kernel deny the
     // child logs falls inside what `sandbox::augment_failure` reads back.
     let started = std::time::Instant::now();
+    let confinement = command.confinement();
     let (child, wait_pgid, jail) = match spawn(&mut command, fg.pgid_policy(), shell) {
         Ok(pair) => pair,
         // `finish_command` builds the `Command{External}` observation from
         // whatever error reaches it, so a spawn failure needs no emission of
         // its own here.
-        Err(e) => return Err(spawn_error(&cmd_name, &e).into()),
+        Err(e) => return Err(spawn_error(confinement, &cmd_name, &e).into()),
     };
 
     let child_pid = child.id();
