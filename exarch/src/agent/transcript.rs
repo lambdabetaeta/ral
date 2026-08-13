@@ -305,6 +305,7 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
         // The rows the TUI owns are appended at render time, so only the
         // agent's own accumulators appear here.
         Kind::Resources { rows, .. } => ("resources", json!({ "rows": rows })),
+        Kind::Context { rows, .. } => ("context", json!({ "rows": rows })),
         // Rendering, prose, and interactive chrome — plus the pin register,
         // which is state that *is*, not a thing that happened.
         Kind::Card(_)

@@ -83,6 +83,10 @@ impl Registry {
         self.exchanges_since_no_pins_reminder += 1;
     }
 
+    pub(crate) fn reset_budget(&mut self) {
+        self.used = 0;
+    }
+
     /// The one decider: walk [`RULES`] against `attempt` and return the synthetic
     /// prompt the attend loop self-posts as a `Post::Nudge`, or `None` to stop.
     pub fn react(
@@ -755,6 +759,29 @@ mod tests {
         assert!(reg.used >= 1);
         reg.reset();
         assert_eq!(reg.used, 0, "reset clears the budget");
+    }
+
+    #[test]
+    fn context_edit_budget_reset_does_not_advance_exchange_reminders() {
+        let mut reg = Registry::new();
+        let mut log = fresh_log("reset-budget");
+        let ctx = NudgeCtx {
+            must_reply: false,
+            is_headless_root: false,
+            pinned: None,
+            waiting_on_children: false,
+            pressure: None,
+        };
+        let _ = reg.react(&Ok(deliberate::Outcome::Empty), &ctx, &emit(), &mut log);
+        reg.reset();
+        let before = reg.exchanges_since_no_pins_reminder;
+        let _ = reg.react(&Ok(deliberate::Outcome::Empty), &ctx, &emit(), &mut log);
+        reg.reset_budget();
+        assert_eq!(reg.used, 0, "a rewind clears the retry budget");
+        assert_eq!(
+            reg.exchanges_since_no_pins_reminder, before,
+            "a context edit does not count as another exchange"
+        );
     }
 
     /// Exactly once per [`REMIND_EVERY`]-exchange window, not on every exchange

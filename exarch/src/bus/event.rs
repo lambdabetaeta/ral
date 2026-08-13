@@ -228,4 +228,10 @@ pub enum Kind {
         rows: Vec<crate::agent::resources::ProbeRow>,
         card: Card,
     },
+    /// The `/context` survey fold: the model-view rows beside the card that
+    /// renders them. Never model-facing.
+    Context {
+        rows: Vec<crate::agent::event::ContextSurveyItem>,
+        card: Card,
+    },
 }

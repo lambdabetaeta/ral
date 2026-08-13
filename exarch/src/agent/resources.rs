@@ -10,6 +10,7 @@
 
 use crate::agent::Agent;
 use crate::agent::digest::{COMPACT_THRESHOLD, compaction_trigger};
+use crate::agent::event::{ContextSurvey, ContextSurveyItem};
 use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span};
 use crate::bus::{Emitter, Kind};
 use crate::fleet::registry::{AGENT_DEMOTE_IDLE, AGENT_LEASE_IDLE};
@@ -106,6 +107,32 @@ pub fn section_mark(title: &str) -> Mark {
 /// time; the raw rows ride beside the card on the bus.
 pub fn resources_card(rows: &[ProbeRow]) -> Card {
     Card(vec![section_mark("resources"), rows_mark(rows)])
+}
+
+fn context_card(survey: &ContextSurvey) -> Card {
+    let rows = survey.items.iter().map(context_field).collect::<Vec<_>>();
+    Card(vec![section_mark("context"), Mark::Fields { rows }])
+}
+
+fn context_field(item: &ContextSurveyItem) -> Field {
+    let mut spans = vec![Span {
+        role: None,
+        text: item.opening.clone(),
+    }];
+    spans.push(Span {
+        role: Some(Role::Muted),
+        text: format!(
+            "  {} B · {} step{}{}",
+            item.bytes,
+            item.steps,
+            if item.steps == 1 { "" } else { "s" },
+            if item.live { " · live" } else { "" }
+        ),
+    });
+    Field {
+        label: format!("{} {}", item.kind.as_str(), item.exchange),
+        value: FieldVal::Inline(spans),
+    }
 }
 
 /// The probed agent's viewport window: figures beside the caps that bound
@@ -511,6 +538,15 @@ impl Agent {
         let rows = self.resource_rows();
         let card = resources_card(&rows);
         emit.emit(Kind::Resources { rows, card });
+    }
+
+    pub(crate) fn emit_context_survey(&self, emit: &Emitter) {
+        let survey = self.log.lock().context_survey();
+        let card = context_card(&survey);
+        emit.emit(Kind::Context {
+            rows: survey.items,
+            card,
+        });
     }
 }
 

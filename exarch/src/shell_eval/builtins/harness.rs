@@ -1,6 +1,6 @@
 //! The harness builtins — `agent`, `agents`, `message`, `agent-cancel`,
 //! `schedule`, `schedules`, `unschedule`, `reply`, `pin-read`, `pin-list`,
-//! `context`, `context-drop`, `context-fold` —
+//! `context`, `context-read`, `context-drop`, `context-fold` —
 //! with the type schemes that gate them.
 //!
 //! Each body validates at the door before it enquires, so a malformed call
@@ -594,10 +594,10 @@ fn edit_receipt(answer: FOValue, verb: &str) -> Settled<Value> {
     }
 }
 
-fn context_drop_payload(value: &Value) -> Settled<FOValue> {
+fn context_exchanges_payload(value: &Value, verb: &str) -> Settled<FOValue> {
     let Value::List(items) = value else {
         return Err(sig(format!(
-            "context-drop: expected a List of non-negative exchange Ints, got {}",
+            "{verb}: expected a List of non-negative exchange Ints, got {}",
             value.type_name()
         )));
     };
@@ -605,18 +605,26 @@ fn context_drop_payload(value: &Value) -> Settled<FOValue> {
     for (index, item) in items.iter().enumerate() {
         let Value::Int(exchange) = item else {
             return Err(sig(format!(
-                "context-drop: exchange at index {index} must be an Int, got {}",
+                "{verb}: exchange at index {index} must be an Int, got {}",
                 item.type_name()
             )));
         };
         if *exchange < 0 {
             return Err(sig(format!(
-                "context-drop: exchange at index {index} must be non-negative, got {exchange}"
+                "{verb}: exchange at index {index} must be non-negative, got {exchange}"
             )));
         }
         exchanges.push(FOValue::Int { value: *exchange });
     }
     Ok(FOValue::List { items: exchanges })
+}
+
+fn context_drop_payload(value: &Value) -> Settled<FOValue> {
+    context_exchanges_payload(value, "context-drop")
+}
+
+fn context_read_payload(value: &Value) -> Settled<FOValue> {
+    context_exchanges_payload(value, "context-read")
 }
 
 fn context_fold_payload(value: &Value) -> Settled<FOValue> {
@@ -672,6 +680,23 @@ fn builtin_context(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Set
         },
     )?;
     context_receipt(answer)
+}
+
+fn builtin_context_read(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    let payload = context_read_payload(&args[0])?;
+    let answer = shell.enquire(
+        mooring,
+        FOValue::Variant {
+            label: "context-read".to_string(),
+            payload: Some(Box::new(payload)),
+        },
+    )?;
+    let FOValue::String { value } = answer else {
+        return Err(sig(
+            "context-read: host answered an unexpected shape; expected a Str transcript",
+        ));
+    };
+    Ok(Value::String(value))
 }
 
 fn builtin_context_drop(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
@@ -910,6 +935,16 @@ fn scheme_context(_u: &mut Unifier) -> Scheme {
     scheme(&[], &[], &[], thunk(pure(context_receipt_ty())))
 }
 
+/// `context-read :: [Int] → F Str`
+fn scheme_context_read(_u: &mut Unifier) -> Scheme {
+    scheme(
+        &[],
+        &[],
+        &[],
+        thunk(fun(Ty::List(Box::new(Ty::Int)), pure(Ty::String))),
+    )
+}
+
 /// `context-drop :: [Int] → F [bytes-delta: Int]`
 fn scheme_context_drop(_u: &mut Unifier) -> Scheme {
     scheme(
@@ -935,11 +970,11 @@ fn scheme_context_fold(_u: &mut Unifier) -> Scheme {
 
 // A named array, not a promoted temporary: rustc refuses promotion once an
 // entry carries `BuiltinEntry`'s interior-mutable arity cache.
-static HARNESS_BUILTINS_ARR: [BuiltinEntry; 13] = [
+static HARNESS_BUILTINS_ARR: [BuiltinEntry; 14] = [
     BuiltinEntry::new(
         Cow::Borrowed("agent"),
         BuiltinTypeRule::Scheme(scheme_agent),
-        "agent [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>]  — launch a sub-agent. Launch-only and always asynchronous: returns immediately with a receipt [name: Str, log-dir: Str]; the child's reply is NOT this call's result — it arrives later, as its own marked item in your inbox. `type` selects the child's memory: `amnemon starts blank (no shared history, only a value-snapshot of your shell's bindings/cwd/env — the serializable fragment: a live job handle crosses as an opaque placeholder, never as itself); `mnemon inherits your current model-visible conversation and reuses your provider selection for cache locality, receiving `prompt` as its fresh final prompt. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `minimal (working tree + /tmp + network), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all six. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "agent [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>]  — launch a sub-agent. Launch-only and always asynchronous: returns immediately with a receipt [name: Str, log-dir: Str]; the child's reply is NOT this call's result — it arrives later, as its own marked item in your inbox. `type` selects the child's memory: `amnemon` starts blank (no shared history), while `mnemon` inherits your current model-visible conversation and reuses your provider selection for cache locality. Every child receives the value-snapshot of the parent's bindings, cwd, and env — `mnemon` too; the serializable fragment crosses, while a live job handle becomes an opaque placeholder. `prompt` is a computed string and becomes the child's fresh final prompt. Keep large material in a named binding rather than splicing it into prompt; small, certainly-needed material may still be spliced. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `minimal (working tree + /tmp + network), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all six. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_agent),
     ),
     BuiltinEntry::new(
@@ -1001,6 +1036,12 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 13] = [
         BuiltinTypeRule::Scheme(scheme_context),
         "context  — survey the finite, addressable model context. Returns [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int, steps: Int, live: Bool]], total-bytes: Int, total-steps: Int, cache: Str]. Each span is an exchange or import, and a digest is represented by its reach in `exchange`; `prompt` is its opening line, `bytes` its serialized weight, `steps` its provider-step count, and `live` marks the exchange currently in progress. The cache sentence explains that editing before the cache watermark re-reads the prefix on the next request. This is a survey: it does not edit context.",
         BuiltinBody::Static(builtin_context),
+    ),
+    BuiltinEntry::new(
+        Cow::Borrowed("context-read"),
+        BuiltinTypeRule::Scheme(scheme_context_read),
+        "context-read <exchanges>  — read named closed exchanges as one transcript Str, with roles marked and steps delimited. The list must be non-empty; name a digest by its reach, and do not name an exchange folded strictly inside that digest. Only stdout echoes into a turn's tool result; a `let`-bound value prints nothing. Binding is silent, but both stdout and a tool call's final VALUE enter model context; read large bindings in slices — never bare-print a whole binding merely to inspect it, because the transcript is material, not a survey.",
+        BuiltinBody::Static(builtin_context_read),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("context-drop"),

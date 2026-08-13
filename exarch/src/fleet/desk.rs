@@ -492,6 +492,7 @@ impl ExarchDesk {
             "pin-read" => self.pin_read(payload),
             "pin-list" => Ok(self.pin_list()),
             "context" => Ok(self.context()),
+            "context-read" => self.context_read(payload),
             "context-drop" => self.context_drop(payload),
             "context-fold" => self.context_fold(payload),
             other => Err(Error::new(
@@ -1276,6 +1277,29 @@ impl ExarchDesk {
         }
     }
 
+    fn context_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+        let [exchanges] = payload_list(payload, "context-read", "[exchanges]")?;
+        let exchanges = payload_exchanges(exchanges, "context-read")?;
+        let subject = format!(
+            "exchanges [{}]",
+            exchanges
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let result = self.services.log.lock().read_context(&exchanges);
+        self.services.emit.emit(Kind::HarnessCall {
+            verb: "context-read",
+            subject: Some(subject.clone()),
+            payload: subject,
+            failed: result.is_err(),
+        });
+        result
+            .map(|value| FOValue::String { value })
+            .map_err(|error| Error::new(error, 1))
+    }
+
     fn context_drop(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let [exchanges] = payload_list(payload, "context-drop", "[exchanges]")?;
         let exchanges = payload_exchanges(exchanges, "context-drop")?;
@@ -1571,6 +1595,18 @@ mod tests {
         }
     }
 
+    fn context_read_request(exchanges: &[i64]) -> FOValue {
+        FOValue::Variant {
+            label: "context-read".to_string(),
+            payload: Some(Box::new(FOValue::List {
+                items: exchanges
+                    .iter()
+                    .map(|value| FOValue::Int { value: *value })
+                    .collect(),
+            })),
+        }
+    }
+
     fn int_field(value: FOValue, key: &str) -> i64 {
         let FOValue::Map { entries } = value else {
             panic!("expected a record")
@@ -1764,6 +1800,56 @@ mod tests {
             live,
             FOValue::Map { entries }
                 if entries.iter().any(|(key, value)| key == "live" && matches!(value, FOValue::Bool { value: true }))
+        ));
+    }
+
+    #[test]
+    fn context_read_returns_one_transcript_without_committing_an_act() {
+        let mut desk = desk();
+        {
+            let mut log = desk.services.log.lock();
+            complete_exchange(&mut log, "first prompt", "first answer");
+        }
+        let (tx, rx) = channel();
+        desk.services.emit = Emitter::new(tx, 0);
+
+        let FOValue::String { value } = desk
+            .handle(context_read_request(&[1]))
+            .expect("context-read")
+        else {
+            panic!("context-read must answer one Str")
+        };
+        assert!(value.contains("[user]\nfirst prompt"));
+        assert!(value.contains("[assistant]\nfirst answer"));
+        assert!(desk.services.acts.audit().is_none(), "a read has no act");
+        let event = rx.try_recv().expect("the read must reach the trace");
+        assert!(matches!(
+            event.kind,
+            Kind::HarnessCall {
+                verb: "context-read",
+                subject: Some(subject),
+                payload,
+                failed: false,
+            } if subject == "exchanges [1]" && payload == "exchanges [1]"
+        ));
+
+        let error = desk
+            .handle(context_read_request(&[]))
+            .expect_err("an empty read is not meaningful");
+        assert_eq!(
+            error.message,
+            "context-read must name at least one exchange"
+        );
+        let event = rx
+            .try_recv()
+            .expect("a refused read still reaches the trace");
+        assert!(matches!(
+            event.kind,
+            Kind::HarnessCall {
+                verb: "context-read",
+                failed: true,
+                ..
+            }
         ));
     }
 

@@ -424,6 +424,9 @@ impl App {
             Kind::Done { card, .. } | Kind::Notice { card, .. } => {
                 self.with_viewport(id, |vp| vp.push_card(card));
             }
+            Kind::Context { card, .. } => {
+                self.with_viewport(id, |vp| vp.push_card(card));
+            }
             // The agent's card arrives with its own rows; the frontend appends
             // the accumulators it owns. Here, at the render seam, because only
             // this thread may read the tabs and viewports.

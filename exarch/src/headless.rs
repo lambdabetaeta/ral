@@ -292,6 +292,7 @@ impl Sink for Headless<'_> {
             | Kind::Io { card, .. }
             | Kind::Done { card, .. }
             | Kind::Notice { card, .. }
+            | Kind::Context { card, .. }
             | Kind::Resources { card, .. } => {
                 for line in card_stderr(&card) {
                     let _ = writeln!(self.err, "{line}");

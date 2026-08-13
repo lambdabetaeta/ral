@@ -12,6 +12,7 @@ use crate::provider::{ProviderError, Tuning, Usage};
 use genai::chat::{ChatMessage, ChatRole, ToolResponse};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::ops::Range;
@@ -330,7 +331,8 @@ pub struct EditReceipt {
     pub bytes_delta: i64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ContextSpanKind {
     Exchange,
     Import,
@@ -347,7 +349,7 @@ impl ContextSpanKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ContextSurveyItem {
     pub exchange: u64,
     pub kind: ContextSpanKind,
@@ -691,6 +693,58 @@ impl AgentLog {
         survey
     }
 
+    /// Read named, closed spans in their model-view order.
+    ///
+    /// # Errors
+    /// Refuses an empty list, a duplicate name, a missing or folded exchange,
+    /// or the exchange still in progress.
+    pub fn read_context(&self, exchanges: &[u64]) -> Result<String, String> {
+        if exchanges.is_empty() {
+            return Err("context-read must name at least one exchange".into());
+        }
+        let mut named = HashSet::with_capacity(exchanges.len());
+        for exchange in exchanges {
+            if !named.insert(*exchange) {
+                return Err(format!(
+                    "context-read cannot name exchange {exchange} more than once"
+                ));
+            }
+            if let Some(reach) = self
+                .projection
+                .view
+                .digest
+                .as_ref()
+                .map(|digest| digest.through_exchange)
+                && *exchange < reach
+            {
+                return Err(folded_exchange_refusal(*exchange, reach));
+            }
+            let is_digest = self
+                .projection
+                .view
+                .digest
+                .as_ref()
+                .is_some_and(|digest| digest.through_exchange == *exchange);
+            let is_span = self
+                .projection
+                .view
+                .spans
+                .iter()
+                .any(|span| span.id == *exchange);
+            if !is_digest && !is_span {
+                return Err(unknown_exchange_refusal(*exchange));
+            }
+            if is_span && self.is_live_exchange(*exchange) {
+                return Err(live_exchange_refusal(*exchange));
+            }
+        }
+        Ok(render_context_transcript(
+            &self.log,
+            &self.projection.view,
+            &named,
+        ))
+    }
+
     /// Approximate context size in serialised model-view bytes.  The fallback
     /// compaction trigger in [`crate::agent::Agent::compact`] when the model's
     /// context window is unknown; otherwise that tracks token pressure instead.
@@ -982,6 +1036,57 @@ impl AgentLog {
             by,
             bytes_delta: before.saturating_sub(after),
         })
+    }
+
+    /// Resolve a user rewind into the whole visible suffix beginning at its
+    /// anchor. The anchor is checked before the suffix is derived.
+    ///
+    /// # Errors
+    /// Refuses an absent anchor or one strictly inside the current digest.
+    pub fn rewind_exchanges(&self, anchor: u64) -> Result<Vec<u64>, String> {
+        if let Some(reach) = self
+            .projection
+            .view
+            .digest
+            .as_ref()
+            .map(|digest| digest.through_exchange)
+        {
+            if anchor < reach {
+                return Err(folded_exchange_refusal(anchor, reach));
+            }
+            if anchor == reach {
+                let mut exchanges = vec![anchor];
+                exchanges.extend(
+                    self.projection
+                        .view
+                        .spans
+                        .iter()
+                        .filter(|span| span.id >= anchor)
+                        .map(|span| span.id),
+                );
+                return Ok(exchanges);
+            }
+        }
+        if !self
+            .projection
+            .view
+            .spans
+            .iter()
+            .any(|span| span.id == anchor)
+        {
+            return Err(rewind_unknown_exchange_refusal(
+                anchor,
+                self.last_view_exchange(),
+            ));
+        }
+        Ok(self
+            .projection
+            .view
+            .spans
+            .iter()
+            .filter(|span| span.id >= anchor)
+            .map(|span| span.id)
+            .collect())
     }
 
     fn validate_edit(&self, op: &ContextOp) -> Result<(), String> {
@@ -1348,6 +1453,21 @@ impl AgentLog {
         (self.projection.max_exchange != 0).then_some(self.projection.max_exchange)
     }
 
+    fn last_view_exchange(&self) -> Option<u64> {
+        self.projection
+            .view
+            .spans
+            .last()
+            .map(|span| span.id)
+            .or_else(|| {
+                self.projection
+                    .view
+                    .digest
+                    .as_ref()
+                    .map(|digest| digest.through_exchange)
+            })
+    }
+
     pub fn log_len(&self) -> usize {
         self.log.len()
     }
@@ -1585,6 +1705,91 @@ fn append_aborted_stubs(state: &mut State, messages: &mut Vec<ChatMessage>) {
     }
 }
 
+fn render_context_transcript(events: &[SessionEvent], view: &View, named: &HashSet<u64>) -> String {
+    let mut transcript = String::new();
+    let mut first_section = true;
+    if let Some(digest) = &view.digest
+        && named.contains(&digest.through_exchange)
+    {
+        context_section(
+            &mut transcript,
+            &mut first_section,
+            &format!("digest through {}", digest.through_exchange),
+        );
+        render_role(&mut transcript, "user", &digest.text);
+    }
+    for span in &view.spans {
+        if !named.contains(&span.id) {
+            continue;
+        }
+        context_section(
+            &mut transcript,
+            &mut first_section,
+            &format!("exchange {}", span.id),
+        );
+        for event in &events[span.events.clone()] {
+            match event {
+                SessionEvent::UserPrompt { text, .. } => render_role(&mut transcript, "user", text),
+                SessionEvent::ContextMessage { message, .. }
+                | SessionEvent::AssistantMessage { message, .. } => {
+                    render_chat_message(&mut transcript, message);
+                }
+                SessionEvent::StepStarted { n, .. } => {
+                    let _ = writeln!(transcript, "--- step {n} ---");
+                }
+                SessionEvent::ToolResults { results } => {
+                    for result in results {
+                        render_role(
+                            &mut transcript,
+                            "tool",
+                            &format!("{}: {}", result.id, result.content),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    transcript
+}
+
+fn context_section(output: &mut String, first: &mut bool, title: &str) {
+    if !*first {
+        output.push('\n');
+    }
+    let _ = writeln!(output, "=== {title} ===");
+    *first = false;
+}
+
+fn render_chat_message(output: &mut String, message: &ChatMessage) {
+    let role = match message.role {
+        ChatRole::System => "system",
+        ChatRole::User => "user",
+        ChatRole::Assistant => "assistant",
+        ChatRole::Tool => "tool",
+    };
+    let mut rendered = false;
+    for part in &message.content {
+        let text = part.as_text().map_or_else(
+            || serde_json::to_string(part).unwrap_or_else(|_| "<unrenderable content>".into()),
+            str::to_string,
+        );
+        render_role(output, role, &text);
+        rendered = true;
+    }
+    if !rendered {
+        render_role(output, role, "");
+    }
+}
+
+fn render_role(output: &mut String, role: &str, text: &str) {
+    let _ = writeln!(output, "[{role}]");
+    output.push_str(text);
+    if !text.ends_with('\n') {
+        output.push('\n');
+    }
+}
+
 fn live_exchange_refusal(id: u64) -> String {
     format!("exchange {id} is the one you are in — a context edit may only name closed exchanges")
 }
@@ -1597,6 +1802,17 @@ fn folded_exchange_refusal(id: u64, reach: u64) -> String {
 
 fn unknown_exchange_refusal(id: u64) -> String {
     format!("exchange {id} is not present in the current view")
+}
+
+fn rewind_unknown_exchange_refusal(id: u64, last: Option<u64>) -> String {
+    match last {
+        Some(last) => format!(
+            "exchange {id} is not present in the current view — the last exchange is {last}"
+        ),
+        None => format!(
+            "exchange {id} is not present in the current view — there is no last exchange to rewind"
+        ),
+    }
 }
 
 struct CrashTail {
@@ -2067,6 +2283,48 @@ mod tests {
         assert_eq!(
             err,
             "exchange 0 is folded into the digest through 1 — name 1 to drop the digest whole, or fold further"
+        );
+    }
+
+    #[test]
+    fn context_read_marks_roles_delimits_steps_and_addresses_digest_by_reach() {
+        let mut s = fresh_root("context-read");
+        s.append_user("first prompt".into(), None).unwrap();
+        s.record_step(1, Tuning::default()).unwrap();
+        s.append_assistant(ChatMessage::assistant("first answer"), vec![], None)
+            .unwrap();
+        complete_exchange(&mut s, "second prompt", "second answer");
+
+        let transcript = s.read_context(&[1]).expect("closed exchange is readable");
+        assert!(transcript.contains("=== exchange 1 ==="));
+        assert!(transcript.contains("[user]\nfirst prompt"));
+        assert!(transcript.contains("--- step 1 ---"));
+        assert!(transcript.contains("[assistant]\nfirst answer"));
+
+        s.apply_edit(
+            ContextOp::Fold {
+                through_exchange: 2,
+                digest: "the old work is complete".into(),
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+        let digest = s
+            .read_context(&[2])
+            .expect("the digest reach is addressable");
+        assert!(digest.contains("the old work is complete"));
+        assert!(!digest.contains("first prompt"));
+        assert_eq!(
+            s.read_context(&[1]).unwrap_err(),
+            "exchange 1 is folded into the digest through 2 — name 2 to drop the digest whole, or fold further"
+        );
+
+        complete_exchange(&mut s, "third prompt", "third answer");
+        s.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
+            .unwrap();
+        assert_eq!(
+            s.rewind_exchanges(9).unwrap_err(),
+            "exchange 9 is not present in the current view — the last exchange is 3"
         );
     }
 

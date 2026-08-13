@@ -80,6 +80,33 @@ impl Control for ReplControl {
             }
             return Verdict::Continue;
         }
+        if head == "/rewind" {
+            let anchor = match rest {
+                "" => {
+                    session.note_error(
+                        "usage: /rewind <exchange> — name a closed exchange in the current context"
+                            .into(),
+                        emit,
+                    );
+                    return Verdict::Continue;
+                }
+                text => {
+                    if let Ok(anchor) = text.parse::<u64>() {
+                        anchor
+                    } else {
+                        session.note_error(
+                            format!("/rewind expects one non-negative exchange number, got `{text}`"),
+                            emit,
+                        );
+                        return Verdict::Continue;
+                    }
+                }
+            };
+            if let Err(error) = session.rewind(anchor, emit) {
+                session.note_error(error, emit);
+            }
+            return Verdict::Continue;
+        }
         match trimmed {
             "/clear" => {
                 let result = session.clear();
@@ -99,6 +126,10 @@ impl Control for ReplControl {
             // and emitted as one bus event — never a model turn.
             "/resources" => {
                 session.emit_resources(emit);
+                Verdict::Continue
+            }
+            "/context" => {
+                session.emit_context_survey(emit);
                 Verdict::Continue
             }
             "/quit" | "/exit" => Verdict::Quit,
@@ -500,5 +531,27 @@ mod tests {
             rx.try_recv().is_err(),
             "one /resources command, exactly one fold"
         );
+    }
+
+    #[test]
+    fn rewind_command_with_argument_reaches_attend_control() {
+        let dir = std::env::temp_dir().join(format!("exarch-rewind-route-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        session
+            .mailbox()
+            .push(Post::Command("/rewind 7".into()))
+            .unwrap();
+
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.mailbox());
+        let mut control = ReplControl;
+        let _ = session.attend(&mut control, &emit);
+
+        assert!(matches!(
+            rx.try_recv().map(|event| event.kind),
+            Ok(Kind::Error(message)) if message.contains("exchange 7")
+        ));
     }
 }

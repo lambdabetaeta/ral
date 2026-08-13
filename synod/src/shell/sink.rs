@@ -147,7 +147,7 @@ pub enum SynodEvent {
 /// provider's effort dial.  The card-carrying kinds split by intent:
 /// [`Kind::Card`] is a deliberate user-facing act and projects to `Card`,
 /// which the window stands in the transcript; `Io`/`Done`/`Notice`/
-/// `Resources` are raw-fact pairings whose card is a presentation of
+/// `Resources`/`Context` are raw-fact pairings whose card is a presentation of
 /// process, so they collapse to `ProcessCard` and stay inside the dial.
 /// Either way the raw structural fact still lands in `transcript.jsonl`;
 /// only the rendering reaches the window.
@@ -177,6 +177,7 @@ pub fn project(kind: Kind) -> Option<SynodEvent> {
         Kind::Io { card, .. }
         | Kind::Done { card, .. }
         | Kind::Notice { card, .. }
+        | Kind::Context { card, .. }
         | Kind::Resources { card, .. } => SynodEvent::ProcessCard {
             marks: marks_dto(card),
         },
@@ -294,6 +295,7 @@ fn project_helper(kind: Kind) -> Option<SynodEvent> {
         Kind::Io { card, .. }
         | Kind::Done { card, .. }
         | Kind::Notice { card, .. }
+        | Kind::Context { card, .. }
         | Kind::Resources { card, .. }
         | Kind::Card(card) => Some(SynodEvent::ProcessCard {
             marks: marks_dto(card),
@@ -401,7 +403,11 @@ mod tests {
             rows: Vec::new(),
             card: Card(vec![]),
         };
-        for kind in [io, done, notice, resources] {
+        let context = Kind::Context {
+            rows: Vec::new(),
+            card: Card(vec![]),
+        };
+        for kind in [io, done, notice, resources, context] {
             let Some(SynodEvent::ProcessCard { marks }) = project(kind) else {
                 panic!("expected a ProcessCard event");
             };

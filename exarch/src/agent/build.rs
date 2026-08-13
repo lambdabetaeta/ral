@@ -3,14 +3,14 @@
 //! and its [`Build`] bundle. `clear` rebuilds a node's context in place
 //! rather than ending it; `Drop` is the one exit every life takes.
 
-use crate::agent::event::AgentLog;
+use crate::agent::event::{AgentLog, ContextOp, EditAuthority};
 use crate::agent::hatchery::Hatchery;
 use crate::agent::seat::{self, Seat};
 use crate::agent::shell::LogCell;
-use crate::agent::transcript::Transcript;
+use crate::agent::transcript::{Transcript, emit_context_edited};
 use crate::agent::{Agent, ProviderHandle, SPAWN_FUEL, cancel, nudge};
 use crate::bootstrap::Scratch;
-use crate::bus::{AgentId, Inbox};
+use crate::bus::{AgentId, Emitter, Inbox};
 use crate::fleet::hatch::PendingHatches;
 use crate::fleet::registry::{AgentRegistry, Registration};
 use crate::prompt::Grants;
@@ -494,6 +494,20 @@ impl Agent {
         error.map_or(Ok(()), Err)
     }
 
+    pub(crate) fn rewind(&mut self, anchor: u64, emit: &Emitter) -> Result<(), String> {
+        let receipt = {
+            let mut log = self.log.lock();
+            let exchanges = log.rewind_exchanges(anchor)?;
+            log.apply_edit(ContextOp::Drop { exchanges }, EditAuthority::User)?
+        };
+        self.inbox.drop_nudges();
+        if let Some(nudges) = &mut self.nudges {
+            nudges.reset_budget();
+        }
+        emit_context_edited(emit, &receipt);
+        Ok(())
+    }
+
     /// A plain returning fork.  Tests only: a production spawn assembles its
     /// own `Build` through the desk's spawn spine (`ExarchDesk::launch`), and
     /// `/branch` calls `fork_with` directly.
@@ -688,7 +702,7 @@ mod tests {
     use super::*;
     use crate::agent::testkit::*;
     use crate::agent::event::SessionEvent;
-    use crate::bus::{Emitter, Item, Kind};
+    use crate::bus::{Emitter, Item, Kind, Post};
     use crate::provider::scripted::Script;
     use genai::chat::ChatMessage;
     use std::fs::{self, File};
@@ -1088,6 +1102,71 @@ mod tests {
             !scope_has(&mut session, "pre_clear_x"),
             "the pre-clear binding must not survive the rebuild"
         );
+    }
+
+    #[test]
+    fn rewind_validates_the_anchor_drops_the_digest_whole_and_sheds_nudges() {
+        let dir = tmp("rewind");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        {
+            let mut log = session.log.lock();
+            for (prompt, answer) in [
+                ("one", "answer one"),
+                ("two", "answer two"),
+                ("three", "answer three"),
+            ] {
+                log.append_user(prompt.into(), None).unwrap();
+                log.append_assistant(ChatMessage::assistant(answer), Vec::new(), None)
+                    .unwrap();
+            }
+        }
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::new(tx, session.id);
+
+        assert_eq!(
+            session.rewind(9, &emit).unwrap_err(),
+            "exchange 9 is not present in the current view — the last exchange is 3"
+        );
+
+        session
+            .log
+            .lock()
+            .apply_edit(
+                ContextOp::Fold {
+                    through_exchange: 2,
+                    digest: "the first two are complete".into(),
+                },
+                EditAuthority::Harness,
+            )
+            .unwrap();
+        assert_eq!(
+            session.rewind(1, &emit).unwrap_err(),
+            "exchange 1 is folded into the digest through 2 — name 2 to drop the digest whole, or fold further"
+        );
+
+        session
+            .inbox
+            .push(Post::Nudge {
+                exchange: 3,
+                text: "stale continuation".into(),
+            })
+            .unwrap();
+        session.rewind(2, &emit).expect("the digest reach is legal");
+        let view = session.log.lock().view().clone();
+        assert!(view.digest.is_none(), "the digest reach was dropped whole");
+        assert!(view.spans.is_empty(), "the rewind removes the whole suffix");
+        assert!(
+            !matches!(session.inbox.next_item(), Some(Item::Nudge { .. })),
+            "a queued nudge for a rewound exchange must not commit"
+        );
+        let event = rx.try_recv().expect("rewind must be durable on the trace");
+        assert!(matches!(
+            event.kind,
+            Kind::ContextEdited {
+                op: ContextOp::Drop { exchanges },
+                by: EditAuthority::User,
+            } if exchanges == vec![2, 3]
+        ));
     }
 
     /// `assemble` arms the child over the whole scope `fork_session`

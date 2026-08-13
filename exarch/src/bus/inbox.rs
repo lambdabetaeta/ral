@@ -434,6 +434,14 @@ impl Inbox {
         self.shared.epoch.fetch_add(1, Ordering::Release);
         drop(q);
     }
+
+    /// Drop queued self-nudges while preserving user, command, and worker
+    /// messages. A rewind makes a nudge for its removed exchange stale.
+    pub(crate) fn drop_nudges(&self) {
+        self.shared
+            .lock()
+            .retain(|msg| !matches!(msg, Post::Nudge { .. }));
+    }
 }
 
 /// Pop the next exchange-boundary item from a locked queue, tagged with its

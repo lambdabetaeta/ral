@@ -282,6 +282,51 @@ mod tests {
     )];
     static PANIC_BUILTINS: &[BuiltinEntry] = &PANIC_BUILTINS_ARR;
 
+    #[test]
+    fn let_bound_context_read_does_not_echo_the_transcript() {
+        let dir = tmp("context-read-no-echo");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        {
+            let mut log = session.log.lock();
+            log.append_user("material that must stay bound".into(), None)
+                .unwrap();
+            log.append_assistant(
+                genai::chat::ChatMessage::assistant("the answer stays in the binding"),
+                Vec::new(),
+                None,
+            )
+            .unwrap();
+        }
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::new(tx, session.id);
+
+        let result = session.run_shell(
+            "context-read-no-echo".into(),
+            "let ctx = context-read [1]",
+            5,
+            &emit,
+        );
+        assert!(
+            !result.content.contains("material that must stay bound")
+                && !result.content.contains("=== exchange 1 ==="),
+            "a let-bound read must not echo its value: {}",
+            result.content
+        );
+        assert!(
+            std::iter::from_fn(|| rx.try_recv().ok()).any(|event| {
+                matches!(
+                    event.kind,
+                    Kind::HarnessCall {
+                        verb: "context-read",
+                        failed: false,
+                        ..
+                    }
+                )
+            }),
+            "the probe still records its harness call"
+        );
+    }
+
     /// A panic mid-eval must preserve what completed calls bound and leave the
     /// dynamic context clean.  Driven through the real `attend` loop, so the
     /// recovery under test is the engine's own run door catching the unwind.

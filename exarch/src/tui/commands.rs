@@ -94,6 +94,18 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         help: "Summarize the conversation to reclaim context.",
     },
     SlashCommand {
+        name: "/context",
+        aliases: &[],
+        arg: None,
+        help: "Survey the model context without changing it.",
+    },
+    SlashCommand {
+        name: "/rewind",
+        aliases: &[],
+        arg: Some("<exchange>"),
+        help: "Drop context from an exchange; descendants and the shell are untouched.",
+    },
+    SlashCommand {
         name: "/resources",
         aliases: &[],
         arg: None,
@@ -371,6 +383,7 @@ mod tests {
         assert_eq!(dispatch("/copy this"), None);
         assert_eq!(dispatch("/exit"), Some(("/quit", String::new())));
         assert_eq!(dispatch("/resources"), Some(("/resources", String::new())));
+        assert_eq!(dispatch("/context"), Some(("/context", String::new())));
     }
 
     #[test]
@@ -383,6 +396,7 @@ mod tests {
             dispatch("/export   /tmp/a.txt  "),
             Some(("/export", "/tmp/a.txt".to_string()))
         );
+        assert_eq!(dispatch("/rewind 7"), Some(("/rewind", "7".to_string())));
         // A bare command matches; its handler turns the empty argument into the
         // usage hint.
         assert_eq!(dispatch("/export"), Some(("/export", String::new())));
