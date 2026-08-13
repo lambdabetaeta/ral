@@ -159,7 +159,7 @@ fn build_fg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
                         jt.stop(pgid);
                         eprintln!("[stopped]");
                     } else {
-                        jt.remove(id);
+                        jt.settle(id, wait.completed);
                     }
                 }
                 None => diagnostic::cmd_error("fg", NOT_A_PGID_JOB),
@@ -199,16 +199,16 @@ fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
         "disown <id>  — detach pgid job <id> from the shell. \
               pgid-only: a worker handle has no disown — `cancel` is its kill.",
         BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
-            let removed = {
+            let disowned = {
                 let mut jt = jobs.lock().unwrap();
-                jt.remove(job_id_arg(args))
+                jt.disown(job_id_arg(args))
             };
-            match removed {
+            match disowned {
                 // Windows keeps its pipeline groups in a side registry, so
                 // disowning must let go of that entry too.  Elsewhere,
                 // dropping the row *is* the disown.
                 #[cfg(windows)]
-                Some(job) => ral_core::process::disown_pipeline_group(job.pgid),
+                Some(pgid) => ral_core::process::disown_pipeline_group(pgid),
                 #[cfg(not(windows))]
                 Some(_) => {}
                 None => diagnostic::cmd_error("disown", NOT_A_PGID_JOB),
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn render_jobs_folds_pgid_and_worker_populations() {
         let mut jt = JobTable::new();
-        jt.add(1001, "vim".into(), JobState::Stopped);
+        jt.add(1001, "vim".into(), JobState::Stopped, Vec::new());
         let workers = vec![
             fake_worker(3, "spawn { long_task }", true),
             fake_worker(7, "watch { tail }", false),

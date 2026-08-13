@@ -186,12 +186,16 @@ pub(super) fn execute_input(
                 transport::Ending::Exited(code) => Some(crate::platform::exit_byte(code)),
                 #[cfg(unix)]
                 transport::Ending::Stopped {
-                    pgid, signal_name, ..
+                    pgid,
+                    signal_name,
+                    pending,
+                    ..
                 } => {
                     let id = job_table.lock().unwrap().add(
                         pgid,
                         trimmed.to_string(),
                         crate::jobs::JobState::Stopped,
+                        pending,
                     );
                     eprintln!("[{id}] stopped\t{trimmed} ({signal_name})");
                     None

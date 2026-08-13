@@ -16,13 +16,15 @@ use ral_core::types::{
 use super::diff::whole_file_hunks;
 use super::{Card, Mark, Role, Span};
 
-/// `committed`/`aborted`/`failed`, styled `Role::Ok`/`Role::Warn`/`Role::Bad`
-/// in [`write_spans`]. Exarch's own labels: core's `WriteOutcome` names its
-/// wire tag privately, and the two vocabularies need not agree.
+/// `committed`/`aborted`/`stopped`/`failed`, styled
+/// `Role::Ok`/`Role::Warn`/`Role::Warn`/`Role::Bad` in [`write_spans`].
+/// Exarch's own labels: core's `WriteOutcome` names its wire tag privately,
+/// and the two vocabularies need not agree.
 fn write_outcome_label(outcome: WriteOutcome) -> &'static str {
     match outcome {
         WriteOutcome::Committed => "committed",
         WriteOutcome::Aborted => "aborted",
+        WriteOutcome::Deferred => "stopped",
         WriteOutcome::Failed => "failed",
     }
 }
@@ -30,7 +32,7 @@ fn write_outcome_label(outcome: WriteOutcome) -> &'static str {
 fn write_outcome_role(outcome: WriteOutcome) -> Role {
     match outcome {
         WriteOutcome::Committed => Role::Ok,
-        WriteOutcome::Aborted => Role::Warn,
+        WriteOutcome::Aborted | WriteOutcome::Deferred => Role::Warn,
         WriteOutcome::Failed => Role::Bad,
     }
 }

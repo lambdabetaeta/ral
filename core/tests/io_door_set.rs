@@ -99,6 +99,10 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ),
     (
         "core/src/runtime/command/redirect.rs",
+        "io-door:silent:atomic-abandon",
+    ),
+    (
+        "core/src/runtime/command/redirect.rs",
         "io-door:surface:atomic-commit",
     ),
     (

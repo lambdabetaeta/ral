@@ -402,6 +402,9 @@ impl RunningChild {
                 pgid,
                 signal,
                 cmd: self.name.clone(),
+                // Empty at birth: the frames that staged writes hang them on
+                // the escape as it passes them on the way out.
+                pending: Vec::new(),
             }));
         }
         // Let the Job Object's whole-job completion drain any descendants before

@@ -26,10 +26,11 @@ pub(crate) use child::{ExternalPlumbing, GroupOwner, RunningChild};
 pub(crate) use detach::detach;
 pub(crate) use identity::CommandIdentity;
 pub(crate) use process::{build_command, spawn_error};
+pub use redirect::PendingWrite;
 pub(crate) use redirect::{
-    AtomicCommit, EvalRedirect, EvalRedirectV, RedirectGuard, StdinRedirectGuard, apply_redirects,
-    atomic_write, commit_atomics, install_stdin_redirect, open_file, restore_redirects,
-    stderr_mode,
+    EvalRedirect, EvalRedirectV, RedirectGuard, StdinRedirectGuard, abandon_all, apply_redirects,
+    atomic_write, commit_atomics, defer_to_stop, install_stdin_redirect, open_file,
+    restore_redirects, stderr_mode,
 };
 use stdio::classify_redirects;
 pub(crate) use stdio::{StdinRoute, TtyInputPermit};
@@ -153,7 +154,30 @@ pub(crate) fn run(
         jail,
     );
 
-    let waited: WaitedChild = running.wait()?;
+    let waited: WaitedChild = match running.wait() {
+        Ok(waited) => waited,
+        // A stop parks the child alive with the staged temp still open, so
+        // the uncommitted write leaves with the escape instead of dying here,
+        // and the card says `deferred` rather than claiming either end.
+        Err(brk) => {
+            if brk.is_stop()
+                && let Some((path, mode)) = plan.stdout_file.as_ref()
+            {
+                observe(
+                    shell,
+                    mooring,
+                    Observed::Write {
+                        path: path.clone(),
+                        mode: *mode,
+                        outcome: WriteOutcome::Deferred,
+                        new_bytes: None,
+                        old_bytes: None,
+                    },
+                );
+            }
+            return Err(defer_to_stop(brk, atomic_commit.take()).into());
+        }
+    };
     let outcome = waited.outcome;
 
     // Held rather than `?`-propagated: the bookkeeping below (drain, set
@@ -198,7 +222,7 @@ pub(crate) fn run(
                 }
             }
         } else {
-            // `commit` drops uncommitted here, discarding the staged temp.
+            commit.abandon();
             observe(
                 shell,
                 mooring,

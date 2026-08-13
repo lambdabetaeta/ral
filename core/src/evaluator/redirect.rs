@@ -61,12 +61,34 @@ where
     })
 }
 
+/// What the body's result means for the writes this frame staged.
+#[derive(Clone, Copy)]
+enum WriteFate {
+    /// The body settled: rename each temp onto its target.
+    Commit,
+    /// The body broke: leave every target exactly as it was.
+    Abort,
+    /// The body stopped: the writes are unfinished and belong to the job now,
+    /// so the frame surrenders them rather than deciding for it.
+    Defer,
+}
+
+impl WriteFate {
+    fn of<T>(result: &Raw<T>) -> Self {
+        match result {
+            Ok(_) => Self::Commit,
+            Err(Control::Break(brk)) if brk.is_stop() => Self::Defer,
+            Err(_) => Self::Abort,
+        }
+    }
+}
+
 /// An fd-1/2 file target opened in the frame, held until settle so its
 /// outcome can be surfaced. `commit` is `Some` only for an atomic `>`.
 struct WriteIntent {
     path: String,
     mode: RedirectMode,
-    commit: Option<command::AtomicCommit>,
+    commit: Option<command::PendingWrite>,
 }
 
 /// The installed redirect state, undone by `tear_down` — explicitly on
@@ -251,33 +273,48 @@ impl<'a> RedirectFrame<'a> {
 
     /// Fires each atomic commit once the body result is known and the
     /// sinks are back, surfaces one write observation per intent, and
-    /// returns the first commit failure. A failed body aborts every intent,
-    /// dropping its temp file unwritten.
-    fn settle_writes(&mut self, body_ok: bool) -> Settled<()> {
+    /// returns the first commit failure. A failed body abandons every
+    /// intent's temp; a stopped one hands the staged writes back for the
+    /// caller to put on the escape.
+    fn settle_writes(&mut self, fate: WriteFate) -> Settled<Vec<command::PendingWrite>> {
         let mut commit_err: Settled<()> = Ok(());
+        let mut unfinished = Vec::new();
         for intent in std::mem::take(&mut self.write_intents) {
             let outcome;
             let new_bytes;
             let mut old_bytes = None;
-            if !body_ok {
-                outcome = WriteOutcome::Aborted;
-                new_bytes = None;
-            } else if let Some(commit) = intent.commit {
-                old_bytes = commit.old_snapshot_for_diff();
-                new_bytes = commit.temp_preview();
-                match commit.commit() {
-                    Ok(()) => outcome = WriteOutcome::Committed,
-                    Err(e) => {
-                        if commit_err.is_ok() {
-                            commit_err =
-                                Err(Break::Error(Error::new(format!("atomic write: {e}"), 1)));
+            match fate {
+                WriteFate::Abort => {
+                    outcome = WriteOutcome::Aborted;
+                    new_bytes = None;
+                    command::abandon_all(intent.commit);
+                }
+                WriteFate::Defer => {
+                    outcome = WriteOutcome::Deferred;
+                    new_bytes = None;
+                    unfinished.extend(intent.commit);
+                }
+                WriteFate::Commit => {
+                    if let Some(commit) = intent.commit {
+                        old_bytes = commit.old_snapshot_for_diff();
+                        new_bytes = commit.temp_preview();
+                        match commit.commit() {
+                            Ok(()) => outcome = WriteOutcome::Committed,
+                            Err(e) => {
+                                if commit_err.is_ok() {
+                                    commit_err = Err(Break::Error(Error::new(
+                                        format!("atomic write: {e}"),
+                                        1,
+                                    )));
+                                }
+                                outcome = WriteOutcome::Failed;
+                            }
                         }
-                        outcome = WriteOutcome::Failed;
+                    } else {
+                        outcome = WriteOutcome::Committed;
+                        new_bytes = None;
                     }
                 }
-            } else {
-                outcome = WriteOutcome::Committed;
-                new_bytes = None;
             }
             observe(
                 self.shell,
@@ -291,13 +328,13 @@ impl<'a> RedirectFrame<'a> {
                 },
             );
         }
-        commit_err
+        commit_err.map(|()| unfinished)
     }
 
     /// Flushes, restores the sinks and stdin, and hands back the pending
     /// atomic commits; dropping `fd_guard` runs the kernel-level fd
     /// restore. Idempotent — `Drop` re-runs it over emptied slots.
-    fn tear_down(&mut self) -> Vec<command::AtomicCommit> {
+    fn tear_down(&mut self) -> Vec<command::PendingWrite> {
         use std::io::Write;
         // Flush before swapping the sinks back, or buffered bytes land at
         // the parent. The libc flushes catch the fd-level redirect arms.
@@ -360,13 +397,27 @@ where
     }
     let mut frame = RedirectFrame::enter(redirects, mooring, shell)?;
     let result = body(frame.shell);
+    let fate = WriteFate::of(&result);
     // Restore before either the commits fire or the error propagates, so
     // both paths get a clean shell to write through.
     let commits = frame.tear_down();
-    let write_result = frame.settle_writes(result.is_ok());
+    let settled = frame.settle_writes(fate);
     drop(frame);
-    let v = result?;
-    write_result?;
-    command::commit_atomics(commits)?;
-    Ok(v)
+    match result {
+        Ok(v) => {
+            settled?;
+            command::commit_atomics(commits)?;
+            Ok(v)
+        }
+        // A stop takes every staged write with it, fd-level and sink-level
+        // alike; any other break leaves them to the `Drop` that unlinks.
+        Err(Control::Break(brk)) => {
+            let unfinished = settled.unwrap_or_default();
+            Err(Control::Break(command::defer_to_stop(
+                brk,
+                commits.into_iter().chain(unfinished),
+            )))
+        }
+        Err(tail) => Err(tail),
+    }
 }

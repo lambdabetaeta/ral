@@ -200,6 +200,7 @@ mod tests {
             pgid: 1,
             signal: 20,
             signal_name: "SIGTSTP".into(),
+            pending: Vec::new(),
         }
     }
 

@@ -63,6 +63,7 @@ pub use run::{
     Captured, Ending, RequestedTerminalAccess, RunIo, RunLifecycle, RunReport, RunRequest,
     RunStdin, StaticDiagnostics,
 };
+pub use runtime::command::PendingWrite;
 pub use runtime::pipeline::helper::{try_run_bundled_tool, try_run_pipeline_stage_helper};
 pub use typecheck::{Scheme, SessionSchemes, TypeError, bake_prelude, typecheck};
 pub use types::{

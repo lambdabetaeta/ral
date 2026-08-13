@@ -186,7 +186,8 @@ stack of the five marks (`text`/`measure`/`fields`/`diff`/`raw`) with nominal ro
 
 - **read** (`<`): a `text` mark — a `muted` `<` glyph and a `path`-roled path.
 - **write** (`>` family): a `text` mark — a `>` glyph, a `path`-roled path, the mode,
-  and an outcome role (`ok` for committed, `bad` for failed, `warn` for aborted). The
+  and an outcome role (`ok` for committed, `bad` for failed, `warn` for aborted and for
+  the `stopped` write a job carries on unfinished). The
   old dormant `wrote-card` becomes a narrower write-card constructor; runtime redirects
   do not carry written bytes or previews.
 - **exec**: a `text` mark — the program as a `path`/`code` span, the args as `code`,
@@ -362,8 +363,9 @@ compiles and tests alone.
 - **Residual.** `source`/`use` produce no card (documented boundary).
 - **Totality.** Each surfacing door emits a terminal outcome on success and failure:
   atomic writes say committed only after commit, aborted when the body failed before
-  commit, and failed when open/commit/spawn fails; under the type-half, a `File` cannot
-  be obtained without the door.
+  commit, deferred when the body *stopped* before commit (the one non-terminal outcome:
+  the staged bytes are alive and a job owns them), and failed when open/commit/spawn
+  fails; under the type-half, a `File` cannot be obtained without the door.
 - **Closed door set.** The meta-test — the fs/process `#[allow(clippy::disallowed_methods)]`
   sites equal the reviewed allowlist, so a new unaccounted constructor call fails CI.
 

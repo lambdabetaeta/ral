@@ -37,6 +37,15 @@ On exit a job group is taken down in three steps:
 - given a five-second grace during which natural exits are reaped;
 - then forced — SIGKILL / `TerminateJobObject`.
 
+A job also owns whatever atomic writes its members staged but have not
+finished. `Escape::Stopped` carries them out of the evaluator as
+`PendingWrite`s — a `tmp` path and a `target` path, no open file — and
+`JobTable::settle` decides each one when the job ends: renamed onto the target
+if the group leader exited 0, unlinked on every other ending, `disown` and the
+exit sweep included. `settle` is the only way a row leaves the table, so a job
+cannot be dropped with its writes left stranded. This is why `wait_foreground`
+and `reap` keep the leader's exit status instead of draining past it.
+
 `Escape::Stopped` is Unix-only: a foreground job stopped by SIGTSTP escapes the
 [[map/core/evaluator|evaluator]] and `exec.rs` records it as a `Stopped` job.
 That arm is the table's only live populator — `&` registers workers (below) on

@@ -305,11 +305,14 @@ pub enum Ending {
         status: i32,
     },
     Exited(i32),
+    /// `pending` is the run's unfinished atomic writes, which the host parks
+    /// with the job: its end, not this frame's, decides each one.
     #[cfg(unix)]
     Stopped {
         pgid: i32,
         signal: i32,
         signal_name: String,
+        pending: Vec<crate::PendingWrite>,
     },
 }
 
@@ -364,10 +367,16 @@ fn render_ending(ending: crate::run::Ending, sources: &crate::source::SourceDb) 
         } => render_raise(&error, single_command, root, sources, true),
         Raw::Exited(code) => Ending::Exited(code.clamp(0, 255)),
         #[cfg(unix)]
-        Raw::Stopped { pgid, signal, .. } => Ending::Stopped {
+        Raw::Stopped {
+            pgid,
+            signal,
+            pending,
+            ..
+        } => Ending::Stopped {
             pgid: pgid.as_raw(),
             signal: signal.number(),
             signal_name: signal.name().unwrap_or("?").to_string(),
+            pending,
         },
     }
 }
@@ -504,6 +513,12 @@ mod ending_wire_round_trip_tests {
             pgid: 1234,
             signal: 20,
             signal_name: "SIGTSTP".into(),
+            // Non-empty on purpose: a stopped job's staged writes have to
+            // reach the host that will finish them.
+            pending: vec![crate::PendingWrite {
+                tmp: ".sigil.ral-write.tmp".into(),
+                target: "out.txt".into(),
+            }],
         }));
     }
 

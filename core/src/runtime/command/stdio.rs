@@ -9,7 +9,7 @@ use crate::types::{Break, Error, Mooring, Observed, Settled, Shell, WriteOutcome
 
 #[cfg(windows)]
 use super::process::pipe_err;
-use super::redirect::{AtomicCommit, EvalRedirect, EvalRedirectV, open_file, stderr_mode};
+use super::redirect::{EvalRedirect, EvalRedirectV, StagedWrite, open_file, stderr_mode};
 
 /// Capability witness that the parent's fd 0 is safe to inherit into a
 /// spawned child's stdin, mintable only through the issuers below.
@@ -172,12 +172,15 @@ pub(super) fn wire_stdout_file(
     plan: &RedirectPlan,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Settled<(Option<AtomicCommit>, Option<crate::process::StdioSpec>)> {
+) -> Settled<(StagedWrite, Option<crate::process::StdioSpec>)> {
     let Some((path, mode)) = &plan.stdout_file else {
-        return Ok((None, None));
+        return Ok((StagedWrite::new(None), None));
     };
     let (file, commit) = open_file(path, *mode, shell)?;
-    if commit.is_none() {
+    // Guarded from here: every remaining step can fail, and a staged write
+    // nobody downstream hears about must not outlive this call.
+    let commit = StagedWrite::new(commit);
+    if commit.is_streaming() {
         observe(
             shell,
             mooring,

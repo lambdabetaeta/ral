@@ -331,6 +331,7 @@ mod tests {
             pgid: Pgid::from_raw(pgid).expect("a child pid is positive"),
             signal: Signal::new(libc::SIGTSTP),
             cmd: "test-stage".into(),
+            pending: Vec::new(),
         }
     }
 

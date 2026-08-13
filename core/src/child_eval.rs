@@ -129,11 +129,15 @@ pub(crate) enum WireOutcome {
     Exit {
         code: i32,
     },
+    /// `pending` crosses as paths, not as open files: the staged temps live in
+    /// the filesystem both sides share, and the parent's job table is what
+    /// finishes them.
     #[cfg(unix)]
     Stopped {
         pgid: i32,
         signal: i32,
         cmd: String,
+        pending: Vec<crate::PendingWrite>,
     },
 }
 
@@ -349,10 +353,16 @@ fn break_to_outcome(b: Break) -> WireOutcome {
         }
         Break::Escape(Escape::Exit(code)) => WireOutcome::Exit { code },
         #[cfg(unix)]
-        Break::Escape(Escape::Stopped { pgid, signal, cmd }) => WireOutcome::Stopped {
+        Break::Escape(Escape::Stopped {
+            pgid,
+            signal,
+            cmd,
+            pending,
+        }) => WireOutcome::Stopped {
             pgid: pgid.as_raw(),
             signal: signal.number(),
             cmd,
+            pending,
         },
     }
 }
@@ -463,13 +473,19 @@ pub(crate) fn decode_response(
         }
         WireOutcome::Exit { code } => (None, Some(Break::Escape(Escape::Exit(code)))),
         #[cfg(unix)]
-        WireOutcome::Stopped { pgid, signal, cmd } => (
+        WireOutcome::Stopped {
+            pgid,
+            signal,
+            cmd,
+            pending,
+        } => (
             None,
             Some(Break::Escape(Escape::Stopped {
                 pgid: crate::process::Pgid::from_raw(pgid)
                     .expect("a stopped child's pgid is positive"),
                 signal: crate::process::Signal::new(signal),
                 cmd,
+                pending,
             })),
         ),
         WireOutcome::Error {

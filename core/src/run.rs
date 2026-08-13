@@ -160,11 +160,14 @@ pub enum Ending {
         root: FileId,
     },
     Exited(i32),
+    /// `pending` is the run's unfinished atomic writes, staged and now owned
+    /// by the stopped job — see [`Escape::Stopped`].
     #[cfg(unix)]
     Stopped {
         pgid: crate::process::Pgid,
         signal: crate::process::Signal,
         cmd: String,
+        pending: Vec<crate::PendingWrite>,
     },
 }
 
@@ -193,9 +196,17 @@ impl Ending {
             Self::Raised { error, .. } | Self::Walled { error, .. } => Err(Break::Error(error)),
             Self::Exited(code) => Err(Break::Escape(Escape::Exit(code))),
             #[cfg(unix)]
-            Self::Stopped { pgid, signal, cmd } => {
-                Err(Break::Escape(Escape::Stopped { pgid, signal, cmd }))
-            }
+            Self::Stopped {
+                pgid,
+                signal,
+                cmd,
+                pending,
+            } => Err(Break::Escape(Escape::Stopped {
+                pgid,
+                signal,
+                cmd,
+                pending,
+            })),
         }
     }
 }
@@ -500,9 +511,17 @@ fn classify_ending(
         },
         Err(Break::Escape(Escape::Exit(code))) => Ending::Exited(code),
         #[cfg(unix)]
-        Err(Break::Escape(Escape::Stopped { pgid, signal, cmd })) => {
-            Ending::Stopped { pgid, signal, cmd }
-        }
+        Err(Break::Escape(Escape::Stopped {
+            pgid,
+            signal,
+            cmd,
+            pending,
+        })) => Ending::Stopped {
+            pgid,
+            signal,
+            cmd,
+            pending,
+        },
     }
 }
 
