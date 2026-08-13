@@ -150,15 +150,21 @@ pub(super) fn complete_options(
 /// Shape the transcript for prompt caching. `OpenAIResp` carries the system
 /// prompt in the Responses API's bare `instructions` string, which admits no
 /// cache breakpoint, so it bypasses the message path; the rest get a
-/// cache-marked system message prepended. The last message is marked too, so
-/// consecutive turns share the largest possible cached prefix.
+/// cache-marked system message prepended.
+///
+/// The last two messages are marked, so consecutive turns share the largest
+/// possible cached prefix and every request leaves two anchors of different
+/// depths behind. Splitting one range across two breakpoints writes the same
+/// tokens, so the shallower anchor is free; it earns its keep whenever the
+/// next request's tail diverges rather than extends — a retry, a fork, a
+/// compaction — where the deeper anchor alone would force a full rewrite.
 pub(super) fn build_cached_request(
     adapter: AdapterKind,
     system: &str,
     mut messages: Vec<ChatMessage>,
 ) -> ChatRequest {
-    if let Some(last) = messages.last_mut() {
-        last.options = Some(MessageOptions::from(CacheControl::Ephemeral));
+    for message in messages.iter_mut().rev().take(2) {
+        message.options = Some(MessageOptions::from(CacheControl::Ephemeral));
     }
     if adapter == AdapterKind::OpenAIResp {
         return ChatRequest::new(messages).with_system(system);
