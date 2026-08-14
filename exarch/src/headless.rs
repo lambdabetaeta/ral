@@ -10,12 +10,18 @@
 //! [`crate::agent::event`].
 
 use crate::agent::Agent;
-use crate::bus::card::{Card, Mark, Row};
+use crate::bus::card::{
+    self, Card, Mark, Row, execs_card, greps_card, observation_card, observation_from_wire,
+    rail_place, reads_card,
+};
 use crate::bus::{AgentId, AgentOutcome, Event, FleetBus, Kind, Sink, pump};
 use crate::fleet::Fleet;
 use crate::provider::{Engine, Provider, Usage};
+use crate::record::{self, Blocks, Printer, Transient};
 use crate::shell_eval::user_json;
 use crate::tui::SessionInfo;
+use ral_core::serial::FOValue;
+use ral_core::types::{CommandOrigin, Observation, Observed, ReapCause};
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Instant;
@@ -61,6 +67,11 @@ pub struct Headless<'a> {
     /// report as a clean, empty success.
     panicked: bool,
     ended_with_newline: bool,
+    /// How many of [`record::Blocks::rows`] this printer has already turned
+    /// into stderr progress lines — see [`Printer`]'s impl below, additive to
+    /// the [`Sink`] impl above and not yet the live driver
+    /// (`dev/docs/plans/260814_one_seam_one_log.md`'s R1 owns that wiring).
+    synced_through: usize,
 }
 
 impl<'a> Headless<'a> {
@@ -82,6 +93,7 @@ impl<'a> Headless<'a> {
             reply: None,
             panicked: false,
             ended_with_newline: false,
+            synced_through: 0,
         }
     }
 
@@ -331,6 +343,262 @@ impl Sink for Headless<'_> {
             Kind::Pin { .. } | Kind::Unpin { .. } => {}
         }
     }
+}
+
+// ── `record::Printer`: the view fold's second consumer ─────────────────────
+//
+// Additive to the `Sink` impl above, which stays what `pump` actually drives
+// today — `dev/docs/plans/260814_one_seam_one_log.md`'s R1 owns rewiring
+// `pump`/`Fleet` onto the record seam, and that rewiring is what would let a
+// real session hand this a live `Blocks` value. Headless's own totals
+// (`steps`, `usage`, `reply`) stay printer-local state per the plan's own
+// module map, not folded into `Blocks`.
+impl Printer for Headless<'_> {
+    fn transient(&mut self, t: &Transient) {
+        match t {
+            Transient::Token(text) if self.projection == Projection::Conversation => {
+                let _ = self.out.write_all(text.as_bytes());
+                let _ = self.out.flush();
+                if let Some(last) = text.as_bytes().last() {
+                    self.ended_with_newline = *last == b'\n';
+                }
+            }
+            Transient::Token(_) => {}
+            // One boundary per step, mirroring `Kind::Step`'s old count —
+            // `record::Protocol::StepStarted` carries the authoritative index,
+            // but that class is the model fold's alone; the view side only
+            // ever had the boundary to count by.
+            Transient::Boundary => self.steps += 1,
+            Transient::StopReason(raw) => {
+                self.last_stop = Some(raw.clone());
+                let _ = writeln!(self.err, "[stop: {raw}]");
+            }
+            Transient::Thinking(_)
+            | Transient::State(_)
+            | Transient::Born { .. }
+            | Transient::Died
+            | Transient::Cleared
+            | Transient::Resources { .. } => {}
+        }
+    }
+
+    fn sync(&mut self, blocks: &Blocks) {
+        let rows = blocks.rows();
+        for row in &rows[self.synced_through..] {
+            self.print_row(row.kind());
+        }
+        self.synced_through = rows.len();
+    }
+}
+
+impl Headless<'_> {
+    /// One fold commit, projected onto stderr exactly as [`Sink::handle`]
+    /// projects its `Kind` twin — a rendering, chosen fresh each time from
+    /// whichever record vocabulary reached this printer.
+    fn print_row(&mut self, kind: &record::BlockKind) {
+        use record::BlockKind as K;
+        match kind {
+            K::ToolCall {
+                tool, cmd, summary, ..
+            } => {
+                let _ = writeln!(self.err, "[tool: {tool}]");
+                if let Some(s) = summary {
+                    for line in s.lines() {
+                        let _ = writeln!(self.err, "  {line}");
+                    }
+                }
+                for line in cmd.lines() {
+                    let _ = writeln!(self.err, "  {line}");
+                }
+            }
+            K::HarnessCall {
+                verb,
+                subject,
+                payload,
+                ..
+            } => {
+                let _ = writeln!(self.err, "[tool: {verb}]");
+                if let Some(s) = subject {
+                    let _ = writeln!(self.err, "  {s}");
+                }
+                for line in payload.lines() {
+                    let _ = writeln!(self.err, "  {line}");
+                }
+            }
+            K::Error { text } => {
+                if text.starts_with(crate::bus::WORKER_PANIC_PREFIX) {
+                    self.panicked = true;
+                }
+                let _ = writeln!(self.err, "error: {text}");
+            }
+            K::SystemNote { text } => {
+                let _ = writeln!(self.err, "{text}");
+            }
+            K::Nudge { used, max, cause } => {
+                let _ = writeln!(self.err, "[nudge {used}/{max}: {cause}]");
+            }
+            K::ProviderError { error } => {
+                let _ = writeln!(self.err, "provider error: {error:?}");
+            }
+            K::Stalled { error } => {
+                let _ = writeln!(self.err, "stream stalled, turn resumes: {error:?}");
+            }
+            K::Observation { value } => self.print_observation(value.clone()),
+            K::ObservationGroup { values } => self.print_observation_group(values),
+            K::Card { marks } => {
+                if let Ok(card) = serde_json::from_value::<Card>(marks.clone()) {
+                    self.print_card(&card);
+                }
+            }
+            K::Done { outcome } => self.print_card(&card::done_card(&to_card_done(outcome))),
+            K::Notice { notice } => self.print_card(&card::notice_card(&to_card_notice(notice))),
+            K::Context { rows } => self.print_card(&context_rows_card(rows)),
+            K::SubagentDone {
+                name,
+                text: _,
+                error,
+                elapsed_ms,
+            } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "elapsed-ms display precision; far below f64's mantissa"
+                )]
+                let secs = *elapsed_ms as f64 / 1000.0;
+                match error {
+                    Some(reason) => {
+                        let _ =
+                            writeln!(self.err, "[agent: {name} failed in {secs:.1}s — {reason}]");
+                    }
+                    None => {
+                        let _ = writeln!(self.err, "[agent: {name} done in {secs:.1}s]");
+                    }
+                }
+            }
+            // Interactive-only, or pure presentation — the same "nothing is
+            // lost" reasoning `Sink::handle` states for their `Kind` twins.
+            K::Thinking { .. }
+            | K::Prompt { .. }
+            | K::Answer { .. }
+            | K::Cancelled
+            | K::HarnessResult { .. }
+            | K::ModelChanged { .. } => {}
+        }
+    }
+
+    fn print_card(&mut self, card: &Card) {
+        for line in card_stderr(card) {
+            let _ = writeln!(self.err, "{line}");
+        }
+    }
+
+    fn print_observation(&mut self, value: FOValue) {
+        let Some(obs) = observation_from_wire(value) else {
+            return;
+        };
+        self.print_observed(&obs.what);
+    }
+
+    fn print_observed(&mut self, what: &Observed) {
+        if rail_place(what).is_none() {
+            return;
+        }
+        let card = observation_card(what);
+        self.print_card(&card);
+    }
+
+    /// Decode and re-bucket exactly as `record/commit.rs`'s buffer grouped
+    /// these at record time: reads, execs, and greps comma-joined, a write or
+    /// a standalone denial printed on its own.
+    fn print_observation_group(&mut self, values: &[FOValue]) {
+        let mut reads: Vec<String> = Vec::new();
+        let mut execs: Vec<Observed> = Vec::new();
+        let mut greps: Vec<Observed> = Vec::new();
+        for value in values {
+            let Some(Observation { what, .. }) = observation_from_wire(value.clone()) else {
+                continue;
+            };
+            match what {
+                Observed::Read { path } => reads.push(path),
+                Observed::Command {
+                    origin: CommandOrigin::External | CommandOrigin::Detached,
+                    ..
+                } => execs.push(what),
+                Observed::Grep { .. } => greps.push(what),
+                other => self.print_observed(&other),
+            }
+        }
+        if let Some(card) = reads_card(&reads) {
+            self.print_card(&card);
+        }
+        if let Some(card) = execs_card(&execs) {
+            self.print_card(&card);
+        }
+        if let Some(card) = greps_card(&greps) {
+            self.print_card(&card);
+        }
+    }
+}
+
+/// `record::DoneOutcome` → `bus::card::DoneOutcome`: identical shapes, kept as
+/// two types per `record.rs`'s own rule of carrying no rendering vocabulary in
+/// what it durably records.
+fn to_card_done(outcome: &record::DoneOutcome) -> card::DoneOutcome {
+    match outcome {
+        record::DoneOutcome::Ok => card::DoneOutcome::Ok,
+        record::DoneOutcome::Err { message, status } => card::DoneOutcome::Err {
+            message: message.clone(),
+            status: *status,
+        },
+        record::DoneOutcome::Panic { message } => card::DoneOutcome::Panic {
+            message: message.clone(),
+        },
+    }
+}
+
+/// `record::NoticeFact` → `bus::card::Notice`, parsing `cause` back into
+/// [`ReapCause`] the same three spellings `record.rs`'s doc names.
+fn to_card_notice(notice: &record::NoticeFact) -> card::Notice {
+    match notice {
+        record::NoticeFact::Reap { cmd, cause } => card::Notice::Reap {
+            cmd: cmd.clone(),
+            cause: match cause.as_str() {
+                "backstop" => ReapCause::Backstop,
+                "retention" => ReapCause::Retention,
+                _ => ReapCause::Idle,
+            },
+        },
+        record::NoticeFact::Prune { names, idle_calls } => card::Notice::Prune {
+            names: names.clone(),
+            idle_calls: idle_calls.clone(),
+        },
+    }
+}
+
+/// A `/context` survey's rows as one [`Mark::Fields`] matrix, minus the
+/// `Role`/dial richness the TUI's own copy in `tui::viewport` affords —
+/// stderr has no columns to align, just the label and the one line beneath it.
+fn context_rows_card(rows: &[record::ContextRow]) -> Card {
+    use card::{Field, FieldVal, Role, Span};
+    let fields = rows
+        .iter()
+        .map(|row| Field {
+            label: format!("{} {}", row.kind, row.exchange),
+            value: FieldVal::Inline(vec![
+                Span::plain(row.opening.clone()),
+                Span::new(
+                    Role::Muted,
+                    format!(
+                        "  {} B · {} step{}{}",
+                        row.bytes,
+                        row.steps,
+                        if row.steps == 1 { "" } else { "s" },
+                        if row.live { " · live" } else { "" }
+                    ),
+                ),
+            ]),
+        })
+        .collect();
+    Card(vec![Mark::Fields { rows: fields }])
 }
 
 /// Attend `session` to quiescence in a one-shot headless run from `seed`.

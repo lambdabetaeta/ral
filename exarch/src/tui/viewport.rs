@@ -1,34 +1,54 @@
 //! Per-session collapsible scrollback.
 //!
-//! A [`Viewport`] turns one session's content events into [`Block`]s, flattens
-//! those into the renderer's visual rows, and tees every committed line to the
-//! session's `user.log` — the durable counterpart to `events.jsonl`.  The whole
-//! alt-screen frame is redrawn each tick, so scrollback is ours, not the host
-//! terminal's, and every tab keeps its own scroll position.
+//! A [`Viewport`] turns one session's content into [`Block`]s, flattens those
+//! into the renderer's visual rows, and renders a session's `user.log` — the
+//! durable counterpart to the one record log.  The whole alt-screen frame is
+//! redrawn each tick, so scrollback is ours, not the host terminal's, and
+//! every tab keeps its own scroll position.
+//!
+//! Two producers feed it, matching `dev/docs/plans/260814_one_seam_one_log.md`:
+//! the live bus's `Kind` events (`push_*`, still what production drives today)
+//! and [`crate::record::Printer`] (`transient`/`sync`), which draws the one
+//! view fold's memo instead.  Both populate the same [`Self::blocks`], so
+//! nothing downstream — reflow, the flatten, the gestures — need know which
+//! producer is live.  The `push_*` half keeps its own light bookkeeping
+//! (`last_call`, `last_ral_cmd`) rather than the tail-walk and resident scan
+//! the fold's own commits retire by construction.
 
 use super::block::{AgentSlot, Block, RailShape, Reveal, append_visual_rows};
-use super::fidelity::{self, Fidelity};
 use super::group;
 use super::line::{is_blank, plain, size_bar};
 use super::palette::READ_W;
 use super::rail::{self, RailKind};
 use super::select::plain_slice;
-use crate::bus::card::{Card, Hunk, ObservationKind};
-use crate::bus::{AgentId, AgentState};
+use crate::bus::AgentId;
+use crate::bus::card::{
+    self, Card, Hunk, Mark, ObservationKind, RailPlace, execs_card, greps_card, observation_card,
+    observation_from_wire, rail_place, reads_card,
+};
 use crate::provider::Usage;
+use crate::record::{self, BlockId, Blocks, Printer, Transient};
+use ral_core::types::{Observation, Observed, ReapCause};
 use ratatui::text::Line;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::io::{Seek, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Scrollback blocks held in heap; past this they are evicted oldest-first,
-/// already durable in `user.log`/`events.jsonl`.
+/// already durable in the session's record log.
 pub(super) const VIEWPORT_MAX_BLOCKS: usize = 500;
 /// Rendered-row cap — a second eviction trigger, for the oversized block that
 /// blows the row budget long before the block count does.
 pub(super) const VIEWPORT_MAX_ROWS: usize = 20_000;
+/// The fold's memo never evicts (`crate::record::view::Blocks`'s own law), so
+/// [`Viewport::sync`] rebuilds only the most recent slice of it — generous
+/// enough that [`VIEWPORT_MAX_BLOCKS`] and [`VIEWPORT_MAX_ROWS`] always trim
+/// the tail they actually want, cheap enough that a session's whole history
+/// is never re-rendered on every arriving commit.
+const SYNC_WINDOW: usize = VIEWPORT_MAX_BLOCKS * 2;
 
 /// All that outlives a dead sub-agent view once [`super::LINGER`] elapses.
 /// Nothing is ever reloaded from the log; it stays readable outside the TUI.
@@ -61,28 +81,18 @@ pub(super) struct Viewport {
     /// This session's spend — the matrix's per-agent readout, where
     /// `App::total_usage` is the rule line's sum over all of them.
     usage: Usage,
-    /// Assistant text since the last fence-safe paragraph break.  It never
-    /// streams as prose: only its magnitude shows ([`Self::streaming_seat`])
-    /// until a break or the turn's end commits it as a [`Block::markdown`].
-    /// Reasoning has no such seat: each phase streams into its own live
-    /// `∴` block from the first delta ([`Self::push_thinking`]).
+    /// Assistant text since the last commit.  It never streams as prose: only
+    /// its magnitude shows ([`Self::streaming_seat`]) until the turn's end
+    /// commits it as a [`Block::markdown`].  Reasoning has no such seat: each
+    /// phase streams into its own live `∴` block from the first delta
+    /// ([`Self::push_thinking`]).
     open: String,
     /// Top visible visual row, per-viewport so each tab keeps its place.
     offset: usize,
     /// Follow the tail.  Cleared by a scroll either way, re-armed at the bottom.
     sticky: bool,
     flat: Flat,
-    /// Tee of every committed line to `user.log`, flushed as each block lands
-    /// so the rendered transcript survives an abnormal exit.
-    log: io::BufWriter<Box<dyn io::Write + Send>>,
     log_path: PathBuf,
-    /// Byte length of `user.log` to preserve on [`Self::rewrite_log`] — the
-    /// resumed history when this view was opened in append mode, `0`
-    /// otherwise, so a rewrite never wipes what a resume carried forward.
-    preserved: u64,
-    /// Whether the last logged line was blank, so blanks collapse on disk as
-    /// they do on screen.
-    log_prev_blank: bool,
     /// Total, never absent: the status line always has a state to name.
     state: StateSpan,
     /// Kit-authored *state*: a `key → Card` register drawn as the right-hand
@@ -90,6 +100,31 @@ pub(super) struct Viewport {
     /// generation-bounded like the scrollback.  A `Vec`, not a map, so render
     /// order is first-seen insertion order.
     pins: Vec<(String, Card)>,
+    /// Index of the most recently pushed call block — what a landing result
+    /// attaches its size to.  A card may land between a call and its result,
+    /// so this is an index, not "the last block."  `O(1)`, replacing the
+    /// tail-walk `set_result_size` used before the fold could address a
+    /// result at its call's own [`BlockId`].
+    last_call: Option<usize>,
+    /// The most recent `ral` script run, for [`Self::commit_fidelity`]'s echo
+    /// signal — an `O(1)` field, replacing a reverse scan of resident blocks.
+    last_ral_cmd: Option<String>,
+    /// Persisted dial state for blocks a [`Self::sync`] rebuilds fresh from
+    /// the fold's memo every call — [`Block`]'s own dial state does not
+    /// survive a rebuild, so a printer keeps it here, keyed by the commit
+    /// that produced the block.
+    reveal: HashMap<BlockId, Reveal>,
+    /// The model's context window, for the fidelity a synced [`Block::markdown`]
+    /// stamps — set by `App::update_live_model`, since the fold's own memo
+    /// carries usage but not the provider's cap.
+    context_window: Option<u64>,
+    /// How many of the fold's rows [`Self::sync`] has already drained `open`
+    /// against.  A commit is a prefix of the accumulated stream by
+    /// construction, so each new [`record::BlockKind::Answer`] this cursor
+    /// has not yet seen drains that many bytes off `open`'s front — the
+    /// printer-side half of "a printer's `open` is always exactly the
+    /// unconsumed suffix."
+    drained_through: usize,
 }
 
 /// The agent's state, when it was entered, and the model text that has arrived
@@ -98,7 +133,7 @@ pub(super) struct Viewport {
 /// the last event of any kind, which is what makes a silent stream legible.
 #[derive(Clone, Copy)]
 pub(super) struct StateSpan {
-    pub(super) state: AgentState,
+    pub(super) state: crate::bus::AgentState,
     since: Instant,
     /// Characters of model text arrived in this state.  A count that stops
     /// growing under a growing [`Self::elapsed`] is a stalled stream.
@@ -106,7 +141,7 @@ pub(super) struct StateSpan {
 }
 
 impl StateSpan {
-    pub(super) fn new(state: AgentState) -> Self {
+    pub(super) fn new(state: crate::bus::AgentState) -> Self {
         Self {
             state,
             since: Instant::now(),
@@ -129,10 +164,13 @@ pub(super) struct RenderWindow {
 }
 
 /// A scrollback block beside its `user.log` row count, captured where that
-/// count is already computed; summed, it is the [`VIEWPORT_MAX_ROWS`] trigger.
+/// count is already computed, and the [`BlockId`] a [`Viewport::sync`] built
+/// it from — `None` for a block the live `push_*` half authored, which has no
+/// commit of its own to be named by.
 struct Entry {
     block: Block,
     rows: usize,
+    id: Option<BlockId>,
 }
 
 /// Memoised whole-buffer flatten: block lines wrapped to `width`, with
@@ -145,80 +183,31 @@ struct Flat {
     dirty: bool,
 }
 
-/// The byte index just past the last `\n\n` at fence depth zero, so
-/// `open.drain(..idx)` peels off the committable prefix; `None` means every
-/// candidate sits inside an open fence.  `CommonMark` has no nested fences, so
-/// one bit of depth suffices.
-fn safe_paragraph_break(open: &str) -> Option<usize> {
-    let bytes = open.as_bytes();
-    let mut depth = 0u8;
-    let mut last_safe = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        let nl = match bytes[i..].iter().position(|&b| b == b'\n') {
-            Some(p) => i + p,
-            None => break,
-        };
-        let t = open[i..nl].trim_start();
-        if t.starts_with("```") || t.starts_with("~~~") {
-            depth ^= 1;
-        }
-        if nl + 1 < bytes.len() && bytes[nl + 1] == b'\n' && depth == 0 {
-            last_safe = Some(nl + 2);
-        }
-        i = nl + 1;
-    }
-    last_safe
-}
-
-/// Whether `block` opens its own rail run.  Streaming commits each fence-safe
-/// paragraph separately ([`Viewport::flush_complete_paragraphs`]), so a run of
-/// markdown blocks is one response and only its head wears the `·`.
+/// Whether `block` opens its own rail run.  A run of markdown blocks is one
+/// response and only its head wears the `·`.
 fn opens_rail_run(prev: Option<&Block>, block: &Block) -> bool {
     !(block.markdown_src().is_some() && prev.is_some_and(|p| p.markdown_src().is_some()))
 }
 
-/// Open the session's rendered-text log, appending when resuming and truncating
-/// otherwise. Falls back to a discarding sink, so a log-path failure never
-/// disables the viewport.
+/// Open the session's rendered-text log, always fresh: `user.log` is a
+/// regenerable render of the fold's commits, never a file patched in place,
+/// so there is no append mode left to preserve a resumed prefix into. Falls
+/// back to a discarding sink, so a log-path failure never disables the
+/// viewport.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:viewport-log] opens the viewport's rendered-text log; render dump infra, not turn-time data I/O"
 )]
-fn open_log(path: &Path, append: bool) -> io::BufWriter<Box<dyn io::Write + Send>> {
+fn open_log(path: &Path) -> io::BufWriter<Box<dyn io::Write + Send>> {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
     let sink: Box<dyn io::Write + Send> = match std::fs::OpenOptions::new()
         .write(true)
         .create(true)
-        .append(append)
-        .truncate(!append)
+        .truncate(true)
         .open(path)
     {
-        Ok(f) => Box::new(f),
-        Err(_) => Box::new(io::sink()),
-    };
-    io::BufWriter::new(sink)
-}
-
-/// Reopen the viewport's log for [`Viewport::rewrite_log`], truncating back to
-/// `preserved` bytes rather than to zero — the resumed history a view opened
-/// in append mode carries forward, which a full truncate would wipe. Falls
-/// back to a discarding sink, matching [`open_log`].
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:viewport-log] reopens the viewport's rendered-text log for a rewrite; render dump infra, not turn-time data I/O"
-)]
-fn reopen_log_at(path: &Path, preserved: u64) -> io::BufWriter<Box<dyn io::Write + Send>> {
-    let sink: Box<dyn io::Write + Send> = match std::fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .and_then(|mut f| {
-            f.set_len(preserved)?;
-            f.seek(io::SeekFrom::Start(preserved))?;
-            Ok(f)
-        }) {
         Ok(f) => Box::new(f),
         Err(_) => Box::new(io::sink()),
     };
@@ -237,12 +226,12 @@ pub(super) fn export_log(src: &Path, dest: &Path) -> io::Result<u64> {
 }
 
 impl Viewport {
-    pub(super) fn new(log_path: PathBuf, agent: AgentSlot, append: bool) -> Self {
-        let preserved = if append {
-            fs::metadata(&log_path).map_or(0, |m| m.len())
-        } else {
-            0
-        };
+    /// `append` is accepted for signature compatibility with `Tabs::new`'s
+    /// resume plumbing, but no longer changes how `user.log` opens: a
+    /// regenerated render has no "preserved prefix" to protect, and seeding a
+    /// resumed session's scrollback is `dev/docs/plans/260814_one_seam_one_log.md`'s
+    /// own step 7 (parcel P6), not yet wired.
+    pub(super) fn new(log_path: PathBuf, agent: AgentSlot, _append: bool) -> Self {
         Self {
             blocks: Vec::new(),
             tombstone: None,
@@ -252,12 +241,14 @@ impl Viewport {
             offset: 0,
             sticky: true,
             flat: Flat::default(),
-            log: open_log(&log_path, append),
             log_path,
-            preserved,
-            log_prev_blank: true,
-            state: StateSpan::new(AgentState::Ready),
+            state: StateSpan::new(crate::bus::AgentState::Ready),
             pins: Vec::new(),
+            last_call: None,
+            last_ral_cmd: None,
+            reveal: HashMap::new(),
+            context_window: None,
+            drained_through: 0,
         }
     }
 
@@ -272,6 +263,13 @@ impl Viewport {
 
     pub(super) fn usage(&self) -> Usage {
         self.usage
+    }
+
+    /// The model's context window, read by [`Self::sync`]'s fidelity
+    /// recomputation.  Set once per focus or model change, beside
+    /// `App::update_live_model`.
+    pub(super) fn set_context_window(&mut self, window: Option<u64>) {
+        self.context_window = window;
     }
 
     /// Per-step "had a tool call" flags, oldest first — one bool per
@@ -323,7 +321,7 @@ impl Viewport {
     /// Enter `state`, restarting the clock and the streamed count.  Re-entering
     /// the state already held is a no-op: a step that re-drives the same wait
     /// must not reset the clock measuring how long that wait has run.
-    pub(super) fn set_state(&mut self, state: AgentState) {
+    pub(super) fn set_state(&mut self, state: crate::bus::AgentState) {
         if self.state.state != state {
             self.state = StateSpan::new(state);
         }
@@ -342,7 +340,11 @@ impl Viewport {
     /// Wipe scrollback, scroll state, and streaming buffers, truncating
     /// `user.log` by reopening it.  `/clear` on the root.
     pub(super) fn reset(&mut self) {
-        *self = Self::new(self.log_path.clone(), self.agent, false);
+        let log_path = self.log_path.clone();
+        let agent = self.agent;
+        let context_window = self.context_window;
+        *self = Self::new(log_path, agent, false);
+        self.context_window = context_window;
     }
 
     /// Drop this view's heap state for a [`Tombstone`], reading the final status
@@ -361,20 +363,49 @@ impl Viewport {
         self.open = String::new();
         self.flat = Flat::default();
         self.pins = Vec::new();
-        self.log = io::BufWriter::new(Box::new(io::sink()));
     }
 
     pub(super) fn tombstone(&self) -> Option<&Tombstone> {
         self.tombstone.as_ref()
     }
 
-    /// Final flush at session end; the caller owns the I/O error policy.
+    /// Final flush at session end: regenerate `user.log` from the resident
+    /// blocks and flush it.  The caller owns the I/O error policy.
     pub(super) fn flush_log(&mut self) -> io::Result<&Path> {
-        self.log.flush()?;
+        self.regenerate_log()?;
         Ok(&self.log_path)
     }
 
-    // ── content ──────────────────────────────────────────────────────────
+    /// Rewrite `user.log` whole from the resident blocks — the regenerable
+    /// render `dev/docs/plans/260814_one_seam_one_log.md` asks for, never a
+    /// file patched incrementally.  This is also the bug fix step 6 names: the
+    /// old incremental tee truncated to a resumed prefix and then, past
+    /// eviction, silently deleted this session's own evicted transcript from
+    /// disk. A render of whatever is resident right now has no such tail to lose.
+    fn regenerate_log(&mut self) -> io::Result<()> {
+        let mut log = open_log(&self.log_path);
+        let mut prev_blank = true;
+        for (i, entry) in self.blocks.iter().enumerate() {
+            let lead = opens_rail_run(i.checked_sub(1).map(|j| &self.blocks[j].block), &entry.block);
+            for line in entry.block.log_lines(self.agent, lead) {
+                if is_blank(&line) {
+                    if prev_blank {
+                        continue;
+                    }
+                    prev_blank = true;
+                } else {
+                    prev_blank = false;
+                }
+                for s in &line.spans {
+                    log.write_all(s.content.as_bytes())?;
+                }
+                log.write_all(b"\n")?;
+            }
+        }
+        log.flush()
+    }
+
+    // ── content (the live `push_*` half; still what production drives) ─────
 
     /// Append a tool call as its own collapsible block.  `context` is the turn's
     /// degradation floor, so the intent line drains under context pressure.
@@ -385,7 +416,11 @@ impl Viewport {
         cmd: String,
         context: u8,
     ) {
+        if tool == "ral" {
+            self.last_ral_cmd = Some(cmd.clone());
+        }
         self.push_block(Block::tool_call(tool, summary, cmd, context));
+        self.last_call = Some(self.blocks.len() - 1);
     }
 
     /// Append a harness act — a barrier the coalescing projection never folds
@@ -407,7 +442,7 @@ impl Viewport {
         text: String,
         error: Option<String>,
         elapsed: Duration,
-        fidelity: Fidelity,
+        fidelity: super::fidelity::Fidelity,
     ) {
         self.push_block(Block::subagent(name, text, error, elapsed, fidelity));
     }
@@ -464,19 +499,19 @@ impl Viewport {
     /// `detail` is `None` for an invisible parse-failure boundary.
     pub(super) fn push_plain_call(&mut self, detail: Option<String>) {
         self.push_block(Block::plain_call(detail));
+        self.last_call = Some(self.blocks.len() - 1);
     }
 
-    /// Attach a tool result's line count to the nearest call behind the tail —
-    /// a card may land between a call and its result.  The walk halts at the
-    /// first [`Block::is_call`], plain or dialable, so a plain call's result
-    /// cannot reach past it to an earlier call's size bar.
+    /// Attach a tool result's line count to the most recently pushed call —
+    /// `O(1)` off [`Self::last_call`], a card may still land between a call and
+    /// its result without breaking the correlation.
     pub(super) fn set_result_size(&mut self, text: &str) {
         #[allow(
             clippy::cast_possible_truncation,
             reason = "content count; u32 headroom far exceeds any in-memory transcript"
         )]
         let n = text.lines().count() as u32;
-        if let Some(entry) = self.blocks.iter_mut().rev().find(|e| e.block.is_call())
+        if let Some(entry) = self.last_call.and_then(|i| self.blocks.get_mut(i))
             && entry.block.is_tool_call()
         {
             entry.block.set_result_size(n);
@@ -494,7 +529,6 @@ impl Viewport {
         }
         if let Some(idx) = self.live_thinking() {
             self.blocks[idx].block.commit_thinking(text, answer_chars);
-            self.rewrite_log();
             self.flat.dirty = true;
             return;
         }
@@ -505,9 +539,9 @@ impl Viewport {
                     Entry {
                         block: Block::thinking(text, answer_chars),
                         rows: 0,
+                        id: None,
                     },
                 );
-                self.rewrite_log();
                 self.flat.dirty = true;
             }
             None => self.push_block(Block::thinking(text, answer_chars)),
@@ -532,10 +566,12 @@ impl Viewport {
         self.blocks.iter().rposition(|e| e.block.is_live_thinking())
     }
 
-    /// Push streamed text, committing any fence-safe paragraph at `context_floor`.
-    pub(super) fn push_token(&mut self, text: &str, context_floor: u8) {
+    /// Buffer streamed text.  Chopping the delta stream into fence-safe
+    /// paragraphs is the commit producer's job now (`record::commit`'s
+    /// chopper); the live `push_*` half only ever sees the whole answer land
+    /// at once, on [`Self::close_boundary`], so `open` grows unchopped until then.
+    pub(super) fn push_token(&mut self, text: &str) {
         self.open.push_str(text);
-        self.flush_complete_paragraphs(context_floor);
     }
 
     /// End a streaming step: seal a still-live reasoning phase — its deltas
@@ -545,24 +581,9 @@ impl Viewport {
             if !self.blocks[idx].block.seal_thinking() {
                 self.blocks.remove(idx);
             }
-            self.rewrite_log();
             self.flat.dirty = true;
         }
         self.flush_open(context_floor);
-    }
-    /// Commit the longest fence-safe prefix of `open` as one markdown block.
-    /// Breaking elsewhere would split a code fence across two `render_md` calls,
-    /// so with no safe break the buffer grows until the fence or the turn closes.
-    pub(super) fn flush_complete_paragraphs(&mut self, context_floor: u8) {
-        let Some(idx) = safe_paragraph_break(&self.open) else {
-            return;
-        };
-        let chunk: String = self.open.drain(..idx).collect();
-        if chunk.trim().is_empty() {
-            return;
-        }
-        let fidelity = self.commit_fidelity(&chunk, context_floor);
-        self.push_block(Block::markdown(chunk, fidelity));
     }
 
     /// Commit what remains in `open`, at turn end or on `/clear`.
@@ -577,26 +598,35 @@ impl Viewport {
 
     /// The fidelity to stamp on a committing markdown block: `context_floor` is
     /// the turn-level floor every paragraph inherits, the echo delta its
-    /// per-paragraph modifier against the most recent `ral` script.
-    fn commit_fidelity(&self, text: &str, context_floor: u8) -> Fidelity {
+    /// modifier against the most recent `ral` script — an `O(1)` field, not a
+    /// scan of resident blocks.
+    fn commit_fidelity(&self, text: &str, context_floor: u8) -> super::fidelity::Fidelity {
         let echo = self
-            .blocks
-            .iter()
-            .rev()
-            .find(|e| e.block.is_tool_call())
-            .and_then(|e| e.block.ral_cmd())
-            .map_or(0, |cmd| fidelity::echo_delta(text, cmd));
-        Fidelity {
+            .last_ral_cmd
+            .as_deref()
+            .map_or(0, |cmd| super::fidelity::echo_delta(text, cmd));
+        super::fidelity::Fidelity {
             context: context_floor,
             echo,
         }
     }
 
     fn push_block(&mut self, block: Block) {
-        let rows = self.log_block(&block);
-        self.blocks.push(Entry { block, rows });
+        let rows = Self::estimate_rows(&block, self.agent);
+        self.blocks.push(Entry {
+            block,
+            rows,
+            id: None,
+        });
         self.flat.dirty = true;
         self.enforce_window_caps();
+    }
+
+    /// The row count [`Self::enforce_window_caps`] budgets against — a
+    /// fixed-width render, an estimate rather than the screen's own width, so
+    /// pushing a block never depends on the terminal's current size.
+    fn estimate_rows(block: &Block, agent: AgentSlot) -> usize {
+        block.log_lines(agent, true).len()
     }
 
     /// Evict oldest-first once either cap is crossed: one walk from the tail for
@@ -615,65 +645,9 @@ impl Viewport {
         let drop = self.blocks.len() - kept;
         if drop > 0 {
             self.blocks.drain(..drop);
+            self.last_call = self.last_call.and_then(|i| i.checked_sub(drop));
             self.flat.dirty = true;
         }
-    }
-
-    /// Tee a block to `user.log`, collapsing blanks exactly as the screen
-    /// flatten does, and return its line count — the row cap reuses that rather
-    /// than paying a second pass over the block.
-    fn log_block(&mut self, block: &Block) -> usize {
-        let lead = opens_rail_run(self.blocks.last().map(|e| &e.block), block);
-        let lines = block.log_lines(self.agent, lead);
-        let n = lines.len();
-        self.write_log_lines(lines);
-        n
-    }
-
-    /// Rebuild the whole log — a thinking block mutated in place or inserted
-    /// mid-vector cannot be appended.  Refreshes each entry's row count in the
-    /// same pass and re-enforces the caps, which an in-place append can breach
-    /// without changing the block count.
-    fn rewrite_log(&mut self) {
-        let rendered = self
-            .blocks
-            .iter()
-            .enumerate()
-            .map(|(i, entry)| {
-                let lead = opens_rail_run(
-                    i.checked_sub(1).map(|j| &self.blocks[j].block),
-                    &entry.block,
-                );
-                entry.block.log_lines(self.agent, lead)
-            })
-            .collect::<Vec<_>>();
-        for (entry, lines) in self.blocks.iter_mut().zip(&rendered) {
-            entry.rows = lines.len();
-        }
-        self.log = reopen_log_at(&self.log_path, self.preserved);
-        self.log_prev_blank = true;
-        for lines in rendered {
-            self.write_log_lines(lines);
-        }
-        self.enforce_window_caps();
-    }
-
-    fn write_log_lines(&mut self, lines: Vec<Line<'static>>) {
-        for line in lines {
-            if is_blank(&line) {
-                if self.log_prev_blank {
-                    continue;
-                }
-                self.log_prev_blank = true;
-            } else {
-                self.log_prev_blank = false;
-            }
-            for s in &line.spans {
-                let _ = self.log.write_all(s.content.as_bytes());
-            }
-            let _ = self.log.write_all(b"\n");
-        }
-        let _ = self.log.flush();
     }
 
     // ── interaction ──────────────────────────────────────────────────────
@@ -713,7 +687,8 @@ impl Viewport {
     }
 
     /// Apply `f` to the dialable block at `idx`, staling the flatten if the
-    /// level moved.
+    /// level moved, and — for a block a fold commit named — remembering the
+    /// new rung in [`Self::reveal`] so the next [`Self::sync`] restores it.
     fn mutate_block(&mut self, idx: usize, f: impl FnOnce(&mut Block)) -> bool {
         let Some(entry) = self.blocks.get_mut(idx) else {
             return false;
@@ -727,6 +702,9 @@ impl Viewport {
         let changed = block.level() != before;
         if changed {
             self.flat.dirty = true;
+            if let Some(id) = entry.id {
+                self.reveal.insert(id, block.level());
+            }
         }
         changed
     }
@@ -1011,6 +989,321 @@ impl Viewport {
     }
 }
 
+// ── `record::Printer`: the view fold's second consumer ─────────────────────
+//
+// `transient` and `sync` are additive to the `push_*` half above, not yet the
+// live path a running session drives — `dev/docs/plans/260814_one_seam_one_log.md`'s
+// R1 owns the seam wiring that would hand a real `Blocks` value to `sync`.
+// Both are exercised directly in this module's tests, per the parcel's own
+// suggested strategy: drive `record::View::step` over synthetic records and
+// assert on the rebuilt scrollback, no live producer required.
+
+impl Printer for Viewport {
+    /// A transient never authors scrollback: [`Transient::Token`] and
+    /// [`Transient::Thinking`] only grow the raw streams the seat and the
+    /// live `∴` block draw their *magnitude* from ([`Self::streaming_seat`],
+    /// [`Self::push_thinking`]).  The committed text those deltas become
+    /// arrives, chopped, through [`Self::sync`] instead — a printer never
+    /// mints a [`record::Block`] of its own — and [`Self::sync`] drains the
+    /// matching prefix back off `open` once it sees the commit land.
+    fn transient(&mut self, t: &Transient) {
+        match t {
+            Transient::Token(text) => {
+                self.note_streamed(text.chars().count());
+                self.open.push_str(text);
+            }
+            Transient::Thinking(text) => {
+                self.note_streamed(text.chars().count());
+                self.push_thinking(text);
+            }
+            Transient::State(state) => self.set_state(*state),
+            // The producer's own tail flush lands as a commit `sync` will
+            // see; nothing to do here but wait for it.
+            Transient::Boundary => {}
+            Transient::Born { .. } | Transient::Died | Transient::StopReason(_) => {}
+            Transient::Cleared => self.reset(),
+            Transient::Resources { .. } => {}
+        }
+    }
+
+    fn sync(&mut self, blocks: &Blocks) {
+        let rows = blocks.rows();
+        // `open` is always exactly the unconsumed suffix of the raw stream:
+        // drain it against every `Answer` commit not yet accounted for,
+        // whether or not that commit fell inside this call's render window.
+        for row in &rows[self.drained_through..] {
+            if let record::BlockKind::Answer { text } = row.kind() {
+                let n = text.len().min(self.open.len());
+                let _ = self.open.drain(..n);
+            }
+        }
+        self.drained_through = rows.len();
+
+        let start = rows.len().saturating_sub(SYNC_WINDOW);
+        let mut built: Vec<Entry> = Vec::with_capacity(rows.len() - start);
+        let mut last_ral_cmd: Option<&str> = None;
+        for row in &rows[start..] {
+            let id = row.id();
+            for mut block in self.render_block(row.kind(), blocks, &mut last_ral_cmd) {
+                if let Some(level) = self.reveal.get(&id) {
+                    block.set_reveal(*level);
+                }
+                let rows = Self::estimate_rows(&block, self.agent);
+                built.push(Entry {
+                    block,
+                    rows,
+                    id: Some(id),
+                });
+            }
+        }
+        self.blocks = built;
+        self.last_call = self.blocks.iter().rposition(|e| e.block.is_call());
+        self.flat.dirty = true;
+    }
+}
+
+impl Viewport {
+    /// One fold commit, rendered into zero, one, or several [`Block`]s — an
+    /// [`record::BlockKind::ObservationGroup`] explodes into one card per
+    /// bucket, everything else is exactly one block.  `last_ral_cmd` threads
+    /// through the caller's window scan, so an [`record::BlockKind::Answer`]'s
+    /// echo signal can see the most recent `ral` script without a second pass.
+    fn render_block<'a>(
+        &self,
+        kind: &'a record::BlockKind,
+        blocks: &Blocks,
+        last_ral_cmd: &mut Option<&'a str>,
+    ) -> Vec<Block> {
+        use record::BlockKind as K;
+        match kind {
+            K::Thinking { text, answer_chars } => {
+                vec![Block::thinking(text.clone(), *answer_chars)]
+            }
+            K::Prompt { text } => vec![Block::chrome(RailShape::Prompt, super::line::user_prompt(text))],
+            K::Answer { text } => {
+                let echo = last_ral_cmd.map_or(0, |cmd| super::fidelity::echo_delta(text, cmd));
+                let fidelity = super::fidelity::Fidelity {
+                    context: super::fidelity::context_floor(
+                        blocks.input_tokens(),
+                        self.context_window,
+                    ),
+                    echo,
+                };
+                vec![Block::markdown(text.clone(), fidelity)]
+            }
+            K::ToolCall {
+                tool,
+                cmd,
+                summary,
+                result_lines,
+            } => {
+                if tool == "ral" {
+                    *last_ral_cmd = Some(cmd.as_str());
+                }
+                let context =
+                    super::fidelity::context_floor(blocks.input_tokens(), self.context_window);
+                let mut block = match summary {
+                    Some(s) => Block::tool_call(tool.clone(), s.clone(), cmd.clone(), context),
+                    None => Block::plain_call(
+                        (cmd != crate::shell_eval::tools::ral::INVALID_INPUT).then(|| cmd.clone()),
+                    ),
+                };
+                if let Some(n) = result_lines {
+                    block.set_result_size(*n);
+                }
+                vec![block]
+            }
+            K::HarnessCall {
+                verb,
+                subject,
+                payload,
+                failed,
+            } => vec![Block::act(
+                verb.clone(),
+                subject.clone(),
+                payload.clone(),
+                *failed,
+            )],
+            K::SubagentDone {
+                name,
+                text,
+                error,
+                elapsed_ms,
+            } => {
+                let fidelity = super::fidelity::Fidelity {
+                    context: super::fidelity::context_floor(
+                        blocks.input_tokens(),
+                        self.context_window,
+                    ),
+                    echo: 0,
+                };
+                vec![Block::subagent(
+                    name.clone(),
+                    text.clone(),
+                    error.clone(),
+                    Duration::from_millis(*elapsed_ms),
+                    fidelity,
+                )]
+            }
+            K::Observation { value } => render_observation(value.clone()),
+            K::ObservationGroup { values } => render_observation_group(values),
+            K::Card { marks } => match serde_json::from_value::<Card>(marks.clone()) {
+                Ok(card) => vec![Block::card(card)],
+                Err(_) => Vec::new(),
+            },
+            K::Done { outcome } => vec![Block::card(card::done_card(&to_card_done(outcome)))],
+            K::Notice { notice } => vec![Block::card(card::notice_card(&to_card_notice(notice)))],
+            K::Context { rows } => vec![Block::card(context_rows_card(rows))],
+            K::Cancelled => vec![Block::chrome(RailShape::Plain, super::line::note("cancelled"))],
+            K::Error { text } => vec![Block::chrome(RailShape::Error, super::line::error(text))],
+            K::Nudge { used, max, cause } => vec![Block::chrome(
+                RailShape::Plain,
+                super::line::note(&format!("nudge {used}/{max}: {cause}")),
+            )],
+            K::ProviderError { error } => {
+                vec![Block::chrome(RailShape::Error, super::line::provider_error(error))]
+            }
+            K::Stalled { error } => vec![Block::chrome(RailShape::Error, super::line::stalled(error))],
+            K::SystemNote { text } => vec![Block::chrome(RailShape::Plain, super::line::note(text))],
+            K::HarnessResult { .. } => Vec::new(),
+            K::ModelChanged { model, provider } => vec![Block::chrome(
+                RailShape::Plain,
+                super::line::note(&format!("model changed: {provider}/{model}")),
+            )],
+        }
+    }
+}
+
+/// `record::DoneOutcome` → `bus::card::DoneOutcome`: identical shapes, kept as
+/// two types per `record.rs`'s own rule of carrying no rendering vocabulary in
+/// what it durably records.
+fn to_card_done(outcome: &record::DoneOutcome) -> card::DoneOutcome {
+    match outcome {
+        record::DoneOutcome::Ok => card::DoneOutcome::Ok,
+        record::DoneOutcome::Err { message, status } => card::DoneOutcome::Err {
+            message: message.clone(),
+            status: *status,
+        },
+        record::DoneOutcome::Panic { message } => card::DoneOutcome::Panic {
+            message: message.clone(),
+        },
+    }
+}
+
+/// `record::NoticeFact` → `bus::card::Notice`, parsing `cause` back into
+/// [`ReapCause`] the same three spellings `record.rs`'s doc names.
+fn to_card_notice(notice: &record::NoticeFact) -> card::Notice {
+    match notice {
+        record::NoticeFact::Reap { cmd, cause } => card::Notice::Reap {
+            cmd: cmd.clone(),
+            cause: match cause.as_str() {
+                "backstop" => ReapCause::Backstop,
+                "retention" => ReapCause::Retention,
+                _ => ReapCause::Idle,
+            },
+        },
+        record::NoticeFact::Prune { names, idle_calls } => card::Notice::Prune {
+            names: names.clone(),
+            idle_calls: idle_calls.clone(),
+        },
+    }
+}
+
+/// A `/context` survey's rows as one [`Mark::Fields`] matrix — the same shape
+/// `agent::resources::context_card` renders for the live probe, rebuilt here
+/// from the record's own [`record::ContextRow`] rather than that private
+/// helper's `ContextSurvey`.
+fn context_rows_card(rows: &[record::ContextRow]) -> Card {
+    let fields = rows
+        .iter()
+        .map(|row| card::Field {
+            label: format!("{} {}", row.kind, row.exchange),
+            value: card::FieldVal::Inline(vec![
+                card::Span::plain(row.opening.clone()),
+                card::Span::new(
+                    card::Role::Muted,
+                    format!(
+                        "  {} B · {} step{}{}",
+                        row.bytes,
+                        row.steps,
+                        if row.steps == 1 { "" } else { "s" },
+                        if row.live { " · live" } else { "" }
+                    ),
+                ),
+            ]),
+        })
+        .collect();
+    Card(vec![
+        Mark::Text {
+            spans: vec![card::Span::new(card::Role::Strong, "context")],
+        },
+        Mark::Fields { rows: fields },
+    ])
+}
+
+/// Rebuild one [`Display::Observation`](record::Display::Observation)'s card,
+/// through the same [`observation_card`]/[`rail_place`] the live rail draws
+/// from — a rendering, never recorded, rebuilt fresh at sync time.
+fn render_observation(value: ral_core::serial::FOValue) -> Vec<Block> {
+    let Some(obs) = observation_from_wire(value) else {
+        return Vec::new();
+    };
+    render_observed(&obs.what)
+}
+
+fn render_observed(what: &Observed) -> Vec<Block> {
+    let Some(place) = rail_place(what) else {
+        return Vec::new();
+    };
+    let card = observation_card(what);
+    match place {
+        RailPlace::Grouped(kind) => vec![Block::observation_card(card, kind, 1)],
+        RailPlace::Barrier => vec![Block::write_card(card)],
+        RailPlace::Standalone => vec![Block::card(card)],
+    }
+}
+
+/// Rebuild a [`Display::ObservationGroup`](record::Display::ObservationGroup)'s
+/// members, decoded and re-bucketed exactly as `record/commit.rs`'s buffer
+/// grouped them at record time — reads, execs, and greps comma-joined under
+/// [`reads_card`]/[`execs_card`]/[`greps_card`], each write its own barrier.
+fn render_observation_group(values: &[ral_core::serial::FOValue]) -> Vec<Block> {
+    let mut reads: Vec<String> = Vec::new();
+    let mut execs: Vec<Observed> = Vec::new();
+    let mut greps: Vec<Observed> = Vec::new();
+    let mut out: Vec<Block> = Vec::new();
+    for value in values {
+        let Some(Observation { what, .. }) = observation_from_wire(value.clone()) else {
+            continue;
+        };
+        match what {
+            Observed::Read { path } => reads.push(path),
+            Observed::Command {
+                origin: ral_core::types::CommandOrigin::External | ral_core::types::CommandOrigin::Detached,
+                ..
+            } => execs.push(what),
+            Observed::Grep { .. } => greps.push(what),
+            other => out.extend(render_observed(&other)),
+        }
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "one flush's observation count; u32 headroom far exceeds any real burst"
+    )]
+    {
+        if let Some(card) = reads_card(&reads) {
+            out.insert(0, Block::observation_card(card, ObservationKind::Read, reads.len() as u32));
+        }
+        if let Some(card) = execs_card(&execs) {
+            out.insert(0, Block::observation_card(card, ObservationKind::Exec, execs.len() as u32));
+        }
+        if let Some(card) = greps_card(&greps) {
+            out.insert(0, Block::observation_card(card, ObservationKind::Grep, greps.len() as u32));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1063,8 +1356,7 @@ mod tests {
     #[test]
     fn streaming_renders_a_magnitude_seat_not_text() {
         let mut vp = viewport();
-        // An unclosed fence has no fence-safe break, so nothing commits.
-        vp.push_token("```ral\nlet x = 1\nlet y = 2\n", 0);
+        vp.push_token("```ral\nlet x = 1\nlet y = 2\n");
         assert!(vp.open.contains("let x = 1"));
 
         let w = vp.render_window(READ_W, 24);
@@ -1100,29 +1392,28 @@ mod tests {
     fn live_thinking_streams_its_trace_before_the_answer() {
         let mut vp = viewport();
         vp.push_thinking("considering the shape\n");
-        vp.push_token("First paragraph.\n\nSecond paragraph still streaming", 0);
+        vp.push_token("First paragraph.\n\nSecond paragraph still streaming");
 
         let w = vp.render_window(READ_W, 24);
         let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
         assert!(
-            all.contains("First paragraph."),
-            "fence-safe markdown still commits while thinking is live: {all:?}"
-        );
-        assert!(
             all.contains("considering the shape"),
             "a live trace streams in the open: {all:?}"
         );
+        assert!(
+            !all.contains("First paragraph."),
+            "the answer stays buffered until the boundary commits it now: {all:?}"
+        );
 
         let thinking = rail_rows(&w.lines, "∴ ");
-        let markdown = rail_rows(&w.lines, "· ");
         assert!(!thinking.is_empty(), "live thinking has its own rail");
+
+        vp.close_boundary(0);
+        let w = vp.render_window(READ_W, 24);
+        let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
         assert!(
-            !markdown.is_empty(),
-            "committed markdown keeps its answer rail"
-        );
-        assert!(
-            thinking[0] < markdown[0],
-            "thinking renders before the answer rail: {all:?}"
+            all.contains("First paragraph.") && all.contains("Second paragraph"),
+            "the whole answer lands as one block at the boundary: {all:?}"
         );
     }
 
@@ -1156,53 +1447,6 @@ mod tests {
         assert_eq!(
             committed_text_len, live_text_len,
             "the live header and collapsed block occupy the same row budget"
-        );
-    }
-
-    #[test]
-    fn final_thinking_is_separate_from_the_answer_run() {
-        let mut vp = viewport();
-        vp.push_thinking("draft trace\n");
-        vp.push_token("First paragraph.\n\nSecond paragraph.", 0);
-        vp.commit_thinking("final trace\nline two".into(), 30);
-        vp.close_boundary(0);
-
-        assert_eq!(
-            vp.latest_reply_md(),
-            "First paragraph.\n\nSecond paragraph."
-        );
-
-        let w = vp.render_window(READ_W, 24);
-        let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
-        let thinking = rail_rows(&w.lines, "∴ ");
-        let markdown = rail_rows(&w.lines, "· ");
-        assert!(!thinking.is_empty(), "final thinking is a real rail block");
-        assert!(
-            !markdown.is_empty(),
-            "answer remains a separate markdown block"
-        );
-        assert!(
-            thinking[0] < markdown[0],
-            "thinking block stays before the answer block: {all:?}"
-        );
-
-        assert!(
-            all.contains("final trace"),
-            "a committed trace stays in the open: {all:?}"
-        );
-        let idx = vp
-            .block_at(w.offset + thinking[0])
-            .expect("thinking rail row maps to its block");
-        assert!(vp.cycle_block(idx), "thinking block is dialable");
-        let w = vp.render_window(READ_W, 24);
-        let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
-        assert!(
-            !all.contains("final trace"),
-            "one click shuts the trace to its header: {all:?}"
-        );
-        assert!(
-            !rail_rows(&w.lines, "∴ ").is_empty(),
-            "the header keeps its rail when shut: {all:?}"
         );
     }
 
@@ -1280,7 +1524,7 @@ mod tests {
             );
         }
         vp.push_thinking("considering the shape\n");
-        vp.push_token("First paragraph.\n\nSecond paragraph.", 0);
+        vp.push_token("First paragraph.\n\nSecond paragraph.");
         let live = vp.render_window(READ_W, 8);
         let live_text = live.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
         let live_thinking = rail_rows(&live.lines, "∴ ");
@@ -1467,9 +1711,9 @@ mod tests {
     }
 
     /// A write ends a run; it does not cut one in half.  Its call's effects
-    /// reach the projection ahead of it ([`super::surface`]), so the run folds
-    /// them whatever its rung — and at the census, where a run is only its
-    /// tally, the read is counted rather than silently dropped.
+    /// reach the projection ahead of it, so the run folds them whatever its
+    /// rung — and at the census, where a run is only its tally, the read is
+    /// counted rather than silently dropped.
     #[test]
     fn a_write_closes_a_run_and_the_census_counts_what_it_closed() {
         use crate::bus::card::{Mark, ObservationKind, Span, reads_card};
@@ -1550,6 +1794,78 @@ mod tests {
         assert!(
             !run.ends_with(crate::tui::line::spark_glyph(None)),
             "and it is not the resultless call's shortest bar: {run:?}"
+        );
+    }
+
+    // ── `record::Printer` ───────────────────────────────────────────────────
+
+    use crate::record::{Display, Fold, Record, Recorded, Refusal, Seq, Stamp, View};
+
+    fn step(memo: &mut Blocks, records: impl IntoIterator<Item = Record>) -> Result<(), Refusal> {
+        for (i, r) in records.into_iter().enumerate() {
+            #[allow(clippy::cast_possible_truncation, reason = "test record count")]
+            let stamp = Stamp::new(Seq::new(i as u64), 0..0);
+            View::step(memo, &Recorded::new(stamp, r))?;
+        }
+        Ok(())
+    }
+
+    /// The printer never mints a [`record::Block`] itself: [`Printer::sync`]
+    /// only ever rebuilds from what the fold already committed.
+    #[test]
+    fn sync_rebuilds_scrollback_from_the_fold_alone() {
+        let mut memo = Blocks::default();
+        step(
+            &mut memo,
+            [
+                Record::Display(Display::Prompt {
+                    text: "hello".into(),
+                }),
+                Record::Display(Display::Answer {
+                    text: "hi back".into(),
+                }),
+            ],
+        )
+        .expect("a display-only fold never refuses");
+
+        let mut vp = viewport();
+        vp.sync(&memo);
+        let all = vp
+            .render_window(READ_W, 40)
+            .lines
+            .iter()
+            .map(plain)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains("hello") && all.contains("hi back"), "{all:?}");
+    }
+
+    /// A dial applied after one `sync` survives the next — the whole point of
+    /// keeping reveal state in a side table keyed by `BlockId` rather than
+    /// inside the rebuilt `Block`.
+    #[test]
+    fn dial_state_survives_a_resync() {
+        let mut memo = Blocks::default();
+        step(
+            &mut memo,
+            [Record::Display(Display::ToolCall {
+                tool: "ral".into(),
+                cmd: "read 'x'".into(),
+                summary: Some("look at x".into()),
+            })],
+        )
+        .expect("a display-only fold never refuses");
+
+        let mut vp = viewport();
+        vp.sync(&memo);
+        assert!(vp.dial_block(0, 1), "a tool call dials open");
+        let opened = vp.blocks[0].block.level();
+
+        vp.sync(&memo);
+        assert_eq!(
+            vp.blocks[0].block.level(),
+            opened,
+            "the rebuilt block keeps the dial a prior sync set"
         );
     }
 }

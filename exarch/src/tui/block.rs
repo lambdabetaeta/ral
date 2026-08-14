@@ -71,9 +71,11 @@ pub(super) struct Thinking {
 /// width, and the block's rung.
 pub(super) enum BlockKind {
     /// `summary` is the collapsed label, `details` the ral source behind it.  A
-    /// summary-less call arrives as [`BlockKind::PlainTool`] instead.
+    /// summary-less call arrives as [`BlockKind::PlainTool`] instead.  `tool`
+    /// is owned, not `&'static str`: a resumed or replayed commit hands this
+    /// its tool name off the wire, with no static string to borrow.
     DiallableTool {
-        tool: &'static str,
+        tool: String,
         summary: String,
         details: String,
     },
@@ -85,7 +87,7 @@ pub(super) enum BlockKind {
     /// `unschedule`.  It changes the world outside the turn, so it is no
     /// observation: never coalesced into a `ral` run, and carrying no magnitude.
     Act {
-        verb: &'static str,
+        verb: String,
         subject: Option<String>,
         payload: String,
         failed: bool,
@@ -266,14 +268,14 @@ impl Block {
     /// `context` is the turn's degradation floor, so the coalesced intent line
     /// drains as committed prose does; echo cannot apply to a stated purpose.
     pub(super) fn tool_call(
-        tool: &'static str,
+        tool: impl Into<String>,
         summary: String,
         details: String,
         context: u8,
     ) -> Self {
         Self::new(
             BlockKind::DiallableTool {
-                tool,
+                tool: tool.into(),
                 summary,
                 details,
             },
@@ -281,14 +283,14 @@ impl Block {
         )
     }
     pub(super) fn act(
-        verb: &'static str,
+        verb: impl Into<String>,
         subject: Option<String>,
         payload: String,
         failed: bool,
     ) -> Self {
         Self::new(
             BlockKind::Act {
-                verb,
+                verb: verb.into(),
                 subject,
                 payload,
                 failed,
@@ -480,7 +482,7 @@ impl Block {
     /// only a real just-run script can register as an echo.
     pub(super) fn ral_cmd(&self) -> Option<&str> {
         match &self.kind {
-            BlockKind::DiallableTool { tool, details, .. } if *tool == "ral" => Some(details),
+            BlockKind::DiallableTool { tool, details, .. } if tool == "ral" => Some(details),
             _ => None,
         }
     }
@@ -639,6 +641,13 @@ impl Block {
             self.level = next;
             self.cache = None;
         }
+    }
+
+    /// Restore a rung a prior sync's side table remembered — a printer
+    /// rebuilds this block fresh from the fold's memo every sync, so its own
+    /// dial state cannot ride inside the block the way a live mutation would.
+    pub(super) fn set_reveal(&mut self, level: Reveal) {
+        self.set_level(level);
     }
 
     /// The block's lines at `width`, rebuilding the memo when it is cold or was
@@ -827,7 +836,7 @@ impl Block {
             BlockKind::PlainTool { .. } => Some(RailKind::ToolCall(false)),
             // The shape says when the act lands — `◷` on a clock, `↗` now —
             // and holds across every rung: an act is one thing disclosed.
-            BlockKind::Act { verb, .. } => Some(match *verb {
+            BlockKind::Act { verb, .. } => Some(match verb.as_str() {
                 "schedule" | "unschedule" => RailKind::TimeAct,
                 _ => RailKind::FleetAct,
             }),

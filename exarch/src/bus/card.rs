@@ -16,7 +16,7 @@
 //! cards from core's one observation vocabulary
 //! (`ral_core::types::Observed`), which core itself decodes.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 mod decode;
 mod diff;
@@ -49,7 +49,7 @@ pub(crate) use observation::{observation_from_wire, observation_wire};
 
 /// The closed nominal role set — the identity channel a [`Span`] may carry.
 /// An unrecognised tag degrades to plain ink rather than dropping the span.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Path,
@@ -78,9 +78,9 @@ impl Role {
 
 /// A run of text optionally carrying a nominal [`Role`] — never a magnitude,
 /// which is [`Measure`]'s and [`Mark::Diff`]'s work.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Span {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
     pub text: String,
 }
@@ -104,13 +104,13 @@ impl Span {
 /// The quantitative mark `[label, value, max?, unit?]`: a bounded magnitude
 /// (`max` present) renders as a proportional fill bar, an unbounded one as a
 /// `log2` size bar.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Measure {
     pub label: String,
     pub value: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
 }
 
@@ -129,7 +129,7 @@ impl Measure {
 
 /// A [`Mark::Fields`] row's value: inline spans or a nested [`Measure`] — the
 /// one place a mark nests inside another.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldVal {
     Inline(Vec<Span>),
@@ -148,7 +148,7 @@ impl FieldVal {
 }
 
 /// One `(label, value)` row of a [`Mark::Fields`] matrix.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Field {
     pub label: String,
     pub value: FieldVal,
@@ -160,7 +160,7 @@ pub struct Field {
 /// A kit may surface every variant but `Listing`, the host-composed
 /// gutter-numbered head of a freshly-written file; `Raw` is pre-formed bytes
 /// appended verbatim.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "mark", rename_all = "snake_case")]
 pub enum Mark {
     Text { spans: Vec<Span> },
@@ -173,7 +173,7 @@ pub enum Mark {
 
 /// An ordered stack of [`Mark`]s rendered top-to-bottom as one scrollback
 /// block — the document `surface` carries.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Card(pub Vec<Mark>);
 
 impl Card {

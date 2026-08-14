@@ -2,7 +2,7 @@
 //! run of [`Seg`]ments carrying the word-level emphasis `similar` picks out.
 //! [`whole_file_hunks`] is the one place a pair of texts becomes this shape.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Total changed lines across `hunks`, context counting for nothing — the
 /// magnitude `Card::magnitude` and `tui::line`'s size bar both read.
@@ -25,7 +25,7 @@ pub(crate) fn hunk_magnitude(hunks: &[Hunk]) -> u32 {
 /// `start` is the 1-indexed *original* line of the first row; `tui::line`
 /// numbers the gutter by walking from there, advancing an old- and a new-side
 /// counter separately.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hunk {
     pub start: u32,
     pub rows: Vec<Row>,
@@ -33,7 +33,7 @@ pub struct Hunk {
 
 /// One run of a row's text, `emph` when it is the part that changed against
 /// the row's paired line — `similar`'s intra-line word diff.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Seg {
     pub emph: bool,
     pub text: String,
@@ -51,7 +51,7 @@ impl Seg {
 
 /// One row of a [`Hunk`]'s unified list — context, a removed line, or an
 /// inserted line — carrying its text as a run of [`Seg`]ments.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "tag", content = "segs", rename_all = "snake_case")]
 pub enum Row {
     Context(Vec<Seg>),

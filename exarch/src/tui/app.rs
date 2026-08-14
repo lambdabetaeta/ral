@@ -13,7 +13,6 @@ use super::palette::{AGENT_HUES, BANNER_GOLD, BANNER_PINK};
 use super::picker::Picker;
 use super::prompt::PromptState;
 use super::render::draw;
-use super::surface::SurfaceBuffer;
 use super::tabs::Tabs;
 use super::terminal::Term;
 use super::viewport::Viewport;
@@ -69,7 +68,6 @@ pub(crate) struct App {
     /// Modal in behaviour — an early-return guard in [`Self::key`] — and in
     /// rendering: drawn last, over the dimmed session.
     pub(super) overlay: Option<Overlay>,
-    surface: SurfaceBuffer,
     pub(super) gesture: GestureState,
     /// A render-time projection over `tabs`, never a reshuffle of the model.
     pub(super) matrix_sort: MatrixSort,
@@ -103,7 +101,6 @@ impl App {
             inbox,
             agents,
             total_usage: Usage::default(),
-            surface: SurfaceBuffer::new(),
             last_input: 0,
             context_window: None,
             status_model: String::new(),
@@ -142,6 +139,11 @@ impl App {
             format!("{status_provider}/{} ({effort})", p.model())
         };
         self.context_window = crate::provider::pricing::caps_or_default(p.model()).context_window;
+        // Feeds `Viewport::sync`'s own fidelity recomputation once the live
+        // seam drives it as a `record::Printer`; harmless to set today.
+        for vp in self.tabs.viewports_mut().values_mut() {
+            vp.set_context_window(self.context_window);
+        }
     }
 
     /// Root and any sub-agent with a registered mailbox; a dead or lingering
@@ -237,7 +239,6 @@ impl App {
         }
         self.total_usage = Usage::default();
         self.last_input = 0;
-        self.surface.clear();
         self.gesture.clear_selection();
         // Queued prompts and undrained wakeups belong to the old context.
         self.inbox.clear();
@@ -304,10 +305,9 @@ impl App {
             // carries how much has come back — a frozen count under a growing
             // clock is what a stalled stream looks like.
             Kind::Token(text) => {
-                let floor = self.context_floor();
                 self.with_viewport(id, |vp| {
                     vp.note_streamed(text.chars().count());
-                    vp.push_token(&text, floor);
+                    vp.push_token(&text);
                 });
             }
             Kind::Thinking(text) => {
@@ -422,9 +422,12 @@ impl App {
                     vp.push_subagent(name, text, error, elapsed, fidelity);
                 });
             }
-            // A card a kit raised through the `surface` builtin. A single-`diff`
-            // card joins the patch-grouping buffer, so consecutive edits to one
-            // file merge; every other card is its own block.
+            // A card a kit raised through the `surface` builtin. Each lands as
+            // its own block: `record::commit`'s producer is the coalescer now
+            // (`dev/docs/plans/260814_one_seam_one_log.md`), so consecutive
+            // same-path diffs no longer merge on this, transitional, path —
+            // only once the live seam feeds `Viewport` through `Printer` does
+            // that grouping return.
             Kind::Card(card) => {
                 ral_core::dbg_trace!(
                     "tui",
@@ -433,13 +436,7 @@ impl App {
                     self.tabs.focused(),
                     card.single_diff().is_some()
                 );
-                match card.into_single_diff() {
-                    Ok((path, hunks)) => {
-                        self.surface
-                            .absorb_patch(self.tabs.viewports_mut(), id, path, hunks);
-                    }
-                    Err(card) => self.with_viewport(id, |vp| vp.push_card(card)),
-                }
+                self.with_viewport(id, |vp| vp.push_card(card));
             }
             // A detached worker's outcome, or core's ready-boundary housekeeping
             // notice. Always plain text, so never the diff path above.
@@ -489,15 +486,15 @@ impl App {
                     self.push_chrome(id, RailShape::Plain, tombstones);
                 }
             }
+            // A call's own effect. Each lands as its own block on this
+            // transitional path — see `Kind::Card`'s note above — rather than
+            // coalescing into one card per burst.
             Kind::Io { event, card } => match rail_place(&event.what) {
-                // A call's own effects. Each lands as its own event, so a burst
-                // reads as `Read…, $…, Read…, $…` clutter — the buffer collapses
-                // a run, even interleaved, into one block per kind, and holds a
-                // write back until the reads around it have landed. The `card` is
-                // dropped here: flush rebuilds it.
-                Some(RailPlace::Grouped(_) | RailPlace::Barrier) => {
-                    self.surface
-                        .absorb_observation(self.tabs.viewports_mut(), id, event.what);
+                Some(RailPlace::Grouped(kind)) => {
+                    self.with_viewport(id, |vp| vp.push_observation_card(card, kind, 1));
+                }
+                Some(RailPlace::Barrier) => {
+                    self.with_viewport(id, |vp| vp.push_write_card(card));
                 }
                 // A denial — the line a reader of the rail most needs to see,
                 // so it lands whole rather than dissolving into a tally.
@@ -523,11 +520,8 @@ impl App {
         }
     }
 
-    /// Commit any pending grouped surfaces, then hand the session's viewport to
-    /// `f`. A pending io group or `▎ diff` must land before the new block, or
-    /// the merged block would appear after whatever follows it on the rail.
+    /// Hand the session's viewport to `f`.
     fn with_viewport(&mut self, id: AgentId, f: impl FnOnce(&mut Viewport)) {
-        self.surface.flush_surfaces(self.tabs.viewports_mut());
         match self.tabs.viewport_mut(id) {
             Some(vp) => f(vp),
             None => {
