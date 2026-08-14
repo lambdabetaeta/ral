@@ -409,7 +409,7 @@ impl Headless<'_> {
                 // unwritable log is a fact about the plumbing, not one agent;
                 // everything else here rides root's own register.
                 if id == self.root_id || matches!(t, Transient::Fault { .. }) {
-                    self.transient(&t);
+                    Printer::transient(self, &t);
                 }
             }
         }
