@@ -174,6 +174,7 @@ fn apply_model_switch(
     let store = &*ctx.store;
     let info = ctx.info;
     let emit = ctx.emit;
+    let recorder = ctx.recorder;
     // Every failure below answers one gesture on this tab, so it lands here —
     // the persist too, whose file is project-wide but whose message is not.
     let focused = tui.app.tabs.focused();
@@ -217,6 +218,12 @@ fn apply_model_switch(
         "[Switched to {label} {model}{}]",
         tuning_suffix(tuning, route.map(String::as_str))
     )));
+    if let Err(error) = recorder.emit(crate::record::Forensic::ModelChanged {
+        model: model.to_string(),
+        provider: label.to_string(),
+    }) {
+        recorder.report_fault(&error);
+    }
 }
 
 /// The switch note's ` · effort high · temp 0.7 · via deepinfra` tail; empty

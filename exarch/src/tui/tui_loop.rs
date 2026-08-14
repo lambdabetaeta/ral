@@ -25,7 +25,7 @@ use crate::{
         credential::CredentialStore,
         models::{LiveSource, ModelCatalog},
     },
-    record::Printer,
+    record::{Emitter as Recorder, Printer},
 };
 
 use super::banner::SessionInfo;
@@ -196,6 +196,11 @@ pub fn run(
     // The UI thread's own emitter, so a UI-caused event (a `/model` switch) is
     // recorded and drawn like any worker note.
     let ui_emit = fleet.bus.emitter(session.id);
+    // The UI thread's own door onto the record seam — reachable here, before
+    // the worker spawns, where `LogCell`'s no-wait rule is trivially
+    // satisfied.  A cheap `Arc<Log>` clone, so a `/model` switch or a login
+    // records through the same seam the worker's own commits use.
+    let recorder = session.recorder();
     if let Some((exchanges, bytes)) = session.resume_summary() {
         // Fold the record log into the fold's memo *before* the note below,
         // so the note is the boundary the plan names: everything ahead of it
@@ -235,6 +240,7 @@ pub fn run(
         catalog,
         info,
         emit: &ui_emit,
+        recorder: &recorder,
         engine: &fleet.engine,
     };
     std::thread::scope(|scope| -> Result<(), String> {
@@ -289,6 +295,7 @@ pub struct CommandCtx<'a> {
     pub(super) catalog: &'a mut ModelCatalog<LiveSource>,
     pub(super) info: &'a SessionInfo<'a>,
     pub(super) emit: &'a Emitter,
+    pub(super) recorder: &'a Recorder,
     pub(super) engine: &'a Arc<provider::Engine>,
 }
 
