@@ -1,9 +1,11 @@
-//! One [`App`] owns the tabs, viewports, prompt, and gesture state, and routes
-//! the [`crate::bus::Event`] stream into scrollback blocks.
+//! One [`App`] owns the tabs, viewports, prompt, and gesture state, and folds
+//! the [`crate::bus::Signal`] stream — [`Signal::Fact`] through [`Self::fact`],
+//! [`Signal::Transient`] through [`Self::transient`], and whatever `Kind`
+//! classes still ride the legacy [`Signal::Event`] bridge through
+//! [`Self::handle`] — into scrollback blocks.
 
 use super::banner;
 use super::block::{AgentSlot, RailShape};
-use super::fidelity::{self, Fidelity};
 use super::gesture::GestureState;
 use super::line;
 use super::line::bold;
@@ -18,10 +20,10 @@ use super::terminal::Term;
 use super::viewport::Viewport;
 use crate::agent::event::{ContextOp, EditAuthority};
 use crate::agent::resources::{BusFigures, ViewFigures, ViewportFigures};
-use crate::bus::card::{RailPlace, rail_place};
 use crate::bus::{AgentId, AgentState, BusReceiver, Event, Inbox, Kind};
 use crate::fleet::registry::{AGENT_DEMOTE_IDLE, AgentRegistry};
 use crate::provider::{Provider, Usage};
+use crate::record::{Display, Forensic, Printer as _, Record, Recorded, Transient};
 
 use ratatui::{
     crossterm::event::{
@@ -115,13 +117,6 @@ impl App {
 
     pub fn total_usage(&self) -> Usage {
         self.total_usage
-    }
-
-    /// The turn-level context-pressure floor (`0..=3`), passed into each
-    /// markdown commit so a stressed turn's prose renders degraded. `0` when
-    /// no context window is known.
-    fn context_floor(&self) -> u8 {
-        fidelity::context_floor(self.last_input, self.context_window)
     }
 
     /// Set the status bar label and the ctx-gauge denominator from the focused
@@ -245,27 +240,53 @@ impl App {
         self.banner(term, info)
     }
 
-    /// Route one event to its viewport. `bus` is read only for
-    /// `Kind::Resources`'s depth/byte figures — it is the UI thread's own
-    /// receiver, so this never contends with a producer's push.
-    pub fn handle(&mut self, Event { id, kind }: Event, bus: &BusReceiver) {
-        // A tab in the linger window is frozen: it still renders its final frame
-        // and ages out, but no further event belongs in it, so a worker
-        // cancelled by `/clear` cannot paint into the rebuilt session.
+    /// The dying-tab guard and the `/clear` drain gate, shared by every
+    /// entry point a `Signal` reaches `App` through ([`Self::handle`],
+    /// [`Self::fact`], [`Self::transient`]).
+    ///
+    /// A tab in the linger window is frozen: it still renders its final frame
+    /// and ages out, but no further event belongs in it, so a worker
+    /// cancelled by `/clear` cannot paint into the rebuilt session. And past
+    /// a `/clear`, everything before the acknowledgement is cancelled-exchange
+    /// residue, everything after it is new context — `disarm` is whether this
+    /// particular occurrence is that acknowledgement (`Kind::Cleared` on the
+    /// legacy path, `Transient::Cleared` once it crosses, or a fresh prompt
+    /// arriving as a `Display::Prompt` fact when the ack itself was lost).
+    fn admits(&mut self, id: AgentId, disarm: bool) -> bool {
         if self.tabs.is_dying(id) {
-            return;
+            return false;
         }
-        // The clear acknowledgement is the boundary: everything before it is
-        // cancelled-exchange residue, and everything after it is new context.
         if id == self.tabs.root() && self.root_clear_drain {
-            // `Cleared` is the expected ack, but it can be lost (mailbox
-            // failure, a control path with no `/clear` arm); any later prompt
-            // echo still proves a fresh exchange is rendering, so it disarms too.
-            if matches!(kind, Kind::Cleared | Kind::UserPromptEcho(_)) {
+            if disarm {
                 self.root_clear_drain = false;
             } else {
-                return;
+                return false;
             }
+        }
+        true
+    }
+
+    /// Route one still-direct `Kind` event to its viewport — the legacy
+    /// bridge kept alive only for the classes no producer has crossed to the
+    /// record seam yet: `State` (`shell_eval::run_shell`'s `Evaluating`),
+    /// `ToolCall`/`ToolResult`/`HarnessCall`/`HarnessResult`, `Error`,
+    /// `SystemNote`, `Cleared`, `Nudge`/`ProviderError`/`Stalled`,
+    /// `Card`/`Io`/`Done`/`Notice`/`Context` (the shell's `Surface` decode,
+    /// `into_kind()`), `Pin`/`Unpin` (the model's own `` `pin ``/`` `unpin ``
+    /// surface), and `Resources`/`Context` (the probe folds).  Every class
+    /// this parcel crossed — `Born`/`Died`, `Token`/`Thinking`/`Boundary`,
+    /// `Reasoning`, `StopReason`, `SubagentDone`, and the derived-only
+    /// `Step`/`ContextEdited`/`Usage`/`UserPromptEcho` — has no live producer
+    /// left, so `bus`'s dispatch loop never routes a `Signal::Event` from
+    /// one; their arms below are unreachable in production, kept only
+    /// because `Kind` stays exhaustively matched until it retires whole.
+    ///
+    /// `bus` is read only for `Kind::Resources`'s depth/byte figures — it is
+    /// the UI thread's own receiver, so this never contends with a
+    /// producer's push.
+    pub fn handle(&mut self, Event { id, kind }: Event, bus: &BusReceiver) {
+        if !self.admits(id, matches!(kind, Kind::Cleared | Kind::UserPromptEcho(_))) {
+            return;
         }
         match kind {
             Kind::Born {
@@ -283,8 +304,6 @@ impl App {
                     .born(id, &log_dir, name, parent, branch, agent_slot);
             }
             Kind::Died => {
-                let floor = self.context_floor();
-                self.with_viewport(id, |vp| vp.flush_open(floor));
                 // Root never enters the linger window; it outlives the session.
                 self.tabs.died(id);
             }
@@ -301,66 +320,39 @@ impl App {
                     vp.add_usage(u);
                 }
             }
-            // Arriving text counts against the open state, so `awaiting model`
-            // carries how much has come back — a frozen count under a growing
-            // clock is what a stalled stream looks like.
-            Kind::Token(text) => {
-                self.with_viewport(id, |vp| {
-                    vp.note_streamed(text.chars().count());
-                    vp.push_token(&text);
-                });
-            }
-            Kind::Thinking(text) => {
-                self.with_viewport(id, |vp| {
-                    vp.note_streamed(text.chars().count());
-                    vp.push_thinking(&text);
-                });
-            }
-            Kind::Boundary => {
-                let floor = self.context_floor();
-                self.with_viewport(id, |vp| vp.close_boundary(floor));
-            }
-            // Its own block; the answer's markdown run stays a separate one.
-            Kind::Reasoning { text, answer_chars } => {
-                self.with_viewport(id, |vp| vp.commit_thinking(text, answer_chars));
-            }
-            Kind::Step { n, .. } => self.push_chrome(id, RailShape::Step, line::step(n as usize)),
+            // Every class below is either fully crossed — `Token`/`Thinking`/
+            // `Boundary`/`Reasoning`/`SubagentDone` have no producer left to
+            // emit a `Kind` at all — or derived-only
+            // (`Step`, from `Display::Step`) — or dual-writes a `Display`
+            // commit beside this direct emit already (`HarnessCall`/`ToolCall`/
+            // `ToolResult` at `fleet::desk`/`shell_eval::tools::ral`;
+            // `Card`/`Done`/`Notice`/`Context` at the shell's `Surface` decode
+            // or a probe fold; `Io` at the commit producer's
+            // `Observation`/`ObservationGroup`).  Either way the fact path
+            // already draws the identical row, so `handle` goes quiet rather
+            // than draw it twice or reach for a deleted `Viewport` method.
+            Kind::Token(_)
+            | Kind::Thinking(_)
+            | Kind::Boundary
+            | Kind::Reasoning { .. }
+            | Kind::Step { .. }
+            | Kind::HarnessCall { .. }
+            | Kind::ToolCall { .. }
+            | Kind::ToolResult(_)
+            | Kind::SubagentDone { .. }
+            | Kind::Card(_)
+            | Kind::Done { .. }
+            | Kind::Notice { .. }
+            | Kind::Context { .. }
+            | Kind::Io { .. }
+            // Quiet on the rail, recorded in the trace at the emit seam. A
+            // desk result is always one line, so a size bar would be
+            // constant ink — unrelated to the crossing above, but the same
+            // empty body.
+            | Kind::Cleared
+            | Kind::Nudge { .. }
+            | Kind::HarnessResult(_) => {}
             Kind::State(state) => self.with_viewport(id, |vp| vp.set_state(state)),
-            // A desk verb changed the world outside the turn, so it renders as
-            // an act — a barrier the coalescing projection never folds into a
-            // run of observations.
-            Kind::HarnessCall {
-                verb,
-                subject,
-                payload,
-                failed,
-            } => {
-                ral_core::dbg_trace!("tui", "HarnessCall verb={verb} payload={payload:?}");
-                self.with_viewport(id, |vp| vp.push_act(verb, subject, payload, failed));
-            }
-            Kind::ToolCall { tool, cmd, summary } => {
-                ral_core::dbg_trace!("tui", "ToolCall tool={tool} cmd={cmd:?}");
-                let floor = self.context_floor();
-                self.with_viewport(id, |vp| match summary {
-                    // A summary marks a call worth revealing: label shut, script
-                    // on a click.
-                    Some(s) => vp.push_tool_call(tool, s, cmd, floor),
-                    // The parse-failure sentinel makes an invisible boundary:
-                    // present only so the result attaches there, never reaching
-                    // back to clobber an earlier call's size bar.
-                    None => {
-                        vp.push_plain_call(
-                            (cmd != crate::shell_eval::tools::ral::INVALID_INPUT).then_some(cmd),
-                        );
-                    }
-                });
-            }
-            // The body is not rendered — the openable script is the whole of
-            // what a call surfaces, and the model gets the full result through
-            // history — but its line count is the most recent call's size bar.
-            Kind::ToolResult(text) => {
-                self.with_viewport(id, |vp| vp.set_result_size(&text));
-            }
             Kind::UserPromptEcho(text) => {
                 self.push_chrome(id, RailShape::Prompt, line::user_prompt(&text));
             }
@@ -392,118 +384,17 @@ impl App {
                 };
                 self.push_chrome(id, RailShape::Plain, line::note(&text));
             }
-            // Quiet on the rail, recorded in the trace at the emit seam. A desk
-            // result is always one line, so a size bar would be constant ink.
-            Kind::Cleared | Kind::Nudge { .. } | Kind::HarnessResult(_) => {}
             Kind::ProviderError(error) => {
                 self.push_chrome(id, RailShape::Error, line::provider_error(&error));
             }
             Kind::Stalled(error) => {
                 self.push_chrome(id, RailShape::Error, line::stalled(&error));
             }
-            Kind::SubagentDone {
-                name,
-                outcome,
-                text,
-                elapsed,
-            } => {
-                let (text, error) = outcome.breadcrumb(&text);
-                // The event carries no child session id, so the child's own
-                // fidelity is unreachable; the breadcrumb is root's reception
-                // of the result, and no preceding `ral` call means no echo.
-                let fidelity = Fidelity {
-                    context: self.context_floor(),
-                    echo: 0,
-                };
-                // Always root, whatever nesting level emitted — the trunk is
-                // the permanent record of delegated work.
-                let root = self.tabs.root();
-                self.with_viewport(root, |vp| {
-                    vp.push_subagent(name, text, error, elapsed, fidelity);
-                });
-            }
-            // A card a kit raised through the `surface` builtin. Each lands as
-            // its own block: `record::commit`'s producer is the coalescer now
-            // (`dev/docs/plans/260814_one_seam_one_log.md`), so consecutive
-            // same-path diffs no longer merge on this, transitional, path —
-            // only once the live seam feeds `Viewport` through `Printer` does
-            // that grouping return.
-            Kind::Card(card) => {
-                ral_core::dbg_trace!(
-                    "tui",
-                    "Card id={id} viewports={:?} focus={} diff={}",
-                    self.tabs.viewport_keys(),
-                    self.tabs.focused(),
-                    card.single_diff().is_some()
-                );
-                self.with_viewport(id, |vp| vp.push_card(card));
-            }
-            // A detached worker's outcome, or core's ready-boundary housekeeping
-            // notice. Always plain text, so never the diff path above.
-            Kind::Done { card, .. } | Kind::Notice { card, .. } => {
-                self.with_viewport(id, |vp| vp.push_card(card));
-            }
-            Kind::Context { card, .. } => {
-                self.with_viewport(id, |vp| vp.push_card(card));
-            }
-            // The agent's card arrives with its own rows; the frontend appends
-            // the accumulators it owns. Here, at the render seam, because only
-            // this thread may read the tabs and viewports.
-            Kind::Resources { mut card, .. } => {
-                let (blocks, rows, bytes) = self
-                    .tabs
-                    .viewport(id)
-                    .map_or((0, 0, 0), super::viewport::Viewport::probe_figures);
-                let lingering = self.tabs.dying_map().len() as u64;
-                let live_views = (self.tabs.len() as u64).saturating_sub(lingering);
-                let dead_views = (self.tabs.viewports().len() as u64).saturating_sub(live_views);
-                let frontend = crate::agent::resources::frontend_rows(
-                    ViewportFigures {
-                        blocks,
-                        rows,
-                        bytes,
-                        blocks_cap: super::viewport::VIEWPORT_MAX_BLOCKS as u64,
-                        rows_cap: super::viewport::VIEWPORT_MAX_ROWS as u64,
-                    },
-                    ViewFigures {
-                        live: live_views,
-                        dead: dead_views,
-                        agents: live_views,
-                    },
-                    BusFigures {
-                        depth: bus.depth() as u64,
-                        bytes: bus.bytes() as u64,
-                    },
-                );
-                card.0
-                    .push(crate::agent::resources::section_mark("frontend"));
-                card.0.push(crate::agent::resources::rows_mark(&frontend));
-                self.with_viewport(id, |vp| vp.push_card(card));
-                // The `views.dead` row is a count; this names each tombstoned
-                // view's id, status, and log path.
-                let tombstones = self.tabs.tombstone_lines();
-                if !tombstones.is_empty() {
-                    self.push_chrome(id, RailShape::Plain, tombstones);
-                }
-            }
-            // A call's own effect. Each lands as its own block on this
-            // transitional path — see `Kind::Card`'s note above — rather than
-            // coalescing into one card per burst.
-            Kind::Io { event, card } => match rail_place(&event.what) {
-                Some(RailPlace::Grouped(kind)) => {
-                    self.with_viewport(id, |vp| vp.push_observation_card(card, kind, 1));
-                }
-                Some(RailPlace::Barrier) => {
-                    self.with_viewport(id, |vp| vp.push_write_card(card));
-                }
-                // A denial — the line a reader of the rail most needs to see,
-                // so it lands whole rather than dissolving into a tally.
-                Some(RailPlace::Standalone) => {
-                    self.with_viewport(id, |vp| vp.push_card(card));
-                }
-                // `decode_surface` already dropped what the rail does not draw.
-                None => {}
-            },
+            // `/resources` is chrome, never recorded — no `Display` twin
+            // exists to draw instead, so it stays legacy-driven; the same
+            // fold lands `Transient::Resources` in `Self::transient`, once
+            // some producer publishes one.
+            Kind::Resources { card, .. } => self.frontend_resources(id, card, bus),
             // A pin is ambient state like `Kind::Usage`, never a scrollback
             // barrier, so it is routed directly rather than through
             // `with_viewport`, which would flush the grouping windows.
@@ -517,6 +408,109 @@ impl App {
                     vp.drop_pin(&key);
                 }
             }
+        }
+    }
+
+    /// Fold one witnessed record fact into the screen — the sole way a
+    /// `Display`/`Forensic` commit reaches it.  Steps the recording
+    /// viewport's own fold-memo and re-syncs from it
+    /// ([`Viewport::commit_fact`]); [`Display::SubagentDone`] always lands in
+    /// root's scrollback, whatever nesting depth drained the result, since
+    /// the trunk is the permanent record of delegated work.
+    pub fn fact(&mut self, id: AgentId, rec: &Recorded<Record>) {
+        if !self.admits(id, matches!(rec.value(), Record::Display(Display::Prompt { .. }))) {
+            return;
+        }
+        // Bookkeeping the view fold does not itself keep: the richer
+        // `Usage` (dollars, cache) `App`/`Viewport` track for the status
+        // line and the matrix, where `Blocks` only sums plain token counts.
+        if let Record::Forensic(Forensic::UsageDelta { usage }) = rec.value() {
+            let u = Usage::from(usage);
+            if id == self.tabs.root() {
+                self.last_input = u.input;
+            }
+            self.total_usage += u;
+            if let Some(vp) = self.tabs.viewport_mut(id) {
+                vp.add_usage(u);
+            }
+        }
+        let target = match rec.value() {
+            Record::Display(Display::SubagentDone { .. }) => self.tabs.root(),
+            _ => id,
+        };
+        self.with_viewport(target, |vp| vp.commit_fact(rec));
+    }
+
+    /// Draw one live-only transient directly, with no log-backed fold: the
+    /// mirror of [`Self::fact`] for [`crate::bus::Signal::Transient`].
+    /// [`Transient::Born`]/[`Died`]/[`Resources`] need the tabs a bare
+    /// `Viewport` cannot see, so they are answered here; everything else
+    /// forwards to [`record::Printer::transient`] on the recording viewport.
+    pub fn transient(&mut self, id: AgentId, t: Transient, bus: &BusReceiver) {
+        if !self.admits(id, matches!(t, Transient::Cleared)) {
+            return;
+        }
+        match t {
+            Transient::Born {
+                log_dir,
+                name,
+                parent,
+                branch,
+            } => {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "modulus by AGENT_HUES.len() yields 0..6, fits u8"
+                )]
+                let agent_slot = AgentSlot((self.tabs.len() % AGENT_HUES.len()) as u8);
+                self.tabs
+                    .born(id, &log_dir, name, parent, branch, agent_slot);
+            }
+            // Root never enters the linger window; it outlives the session.
+            Transient::Died => self.tabs.died(id),
+            Transient::Resources { card, .. } => self.frontend_resources(id, card, bus),
+            other => self.with_viewport(id, |vp| vp.transient(&other)),
+        }
+    }
+
+    /// The agent's `/resources` card arrives with its own rows; the frontend
+    /// appends the accumulators it owns.  Here, at the render seam, because
+    /// only this thread may read the tabs and viewports.  Chrome, never
+    /// recorded — no `Display` twin exists to draw it instead.
+    fn frontend_resources(&mut self, id: AgentId, mut card: crate::bus::card::Card, bus: &BusReceiver) {
+        let (blocks, rows, bytes) = self
+            .tabs
+            .viewport(id)
+            .map_or((0, 0, 0), super::viewport::Viewport::probe_figures);
+        let lingering = self.tabs.dying_map().len() as u64;
+        let live_views = (self.tabs.len() as u64).saturating_sub(lingering);
+        let dead_views = (self.tabs.viewports().len() as u64).saturating_sub(live_views);
+        let frontend = crate::agent::resources::frontend_rows(
+            ViewportFigures {
+                blocks,
+                rows,
+                bytes,
+                blocks_cap: super::viewport::VIEWPORT_MAX_BLOCKS as u64,
+                rows_cap: super::viewport::VIEWPORT_MAX_ROWS as u64,
+            },
+            ViewFigures {
+                live: live_views,
+                dead: dead_views,
+                agents: live_views,
+            },
+            BusFigures {
+                depth: bus.depth() as u64,
+                bytes: bus.bytes() as u64,
+            },
+        );
+        card.0
+            .push(crate::agent::resources::section_mark("frontend"));
+        card.0.push(crate::agent::resources::rows_mark(&frontend));
+        self.push_chrome(id, RailShape::Plain, line::render_card(&card, 3));
+        // The `views.dead` row is a count; this names each tombstoned
+        // view's id, status, and log path.
+        let tombstones = self.tabs.tombstone_lines();
+        if !tombstones.is_empty() {
+            self.push_chrome(id, RailShape::Plain, tombstones);
         }
     }
 
@@ -685,12 +679,6 @@ impl App {
     /// `user.log`. Returns the paths root first, then subagents in dispatch
     /// order, stable across runs.
     pub fn flush_logs(&mut self) -> io::Result<Vec<PathBuf>> {
-        // The open markdown buffer goes first, so a trailing streamed paragraph
-        // with no double-newline yet still reaches the file.
-        let floor = self.context_floor();
-        for vp in self.tabs.viewports_mut().values_mut() {
-            vp.flush_open(floor);
-        }
         let mut paths = Vec::with_capacity(self.tabs.dispatch_order().len());
         let order = self.tabs.dispatch_order().to_vec();
         for &id in &order {
@@ -711,15 +699,12 @@ impl App {
     }
 
     /// Flush the focused tab's `user.log` and return its path for `/export`.
-    /// Flushes the open markdown buffer first, as [`Self::flush_logs`] does.
     pub(in crate::tui) fn flush_focused_log(&mut self) -> io::Result<PathBuf> {
         let focused = self.tabs.focused();
-        let floor = self.context_floor();
         let vp = self
             .tabs
             .viewport_mut(focused)
             .expect("focused tab always has a viewport");
-        vp.flush_open(floor);
         Ok(vp.flush_log()?.to_path_buf())
     }
 
@@ -869,22 +854,30 @@ mod tests {
     /// from a worker whose cancel it outran must not paint into it.
     #[test]
     fn a_dying_tab_admits_no_straggler() {
+        use crate::record::{Display, Record, Recorded, Seq, Stamp};
+
         let (mut app, rx) = app();
-        app.handle(
-            Event {
-                id: 2,
-                kind: Kind::Born {
-                    log_dir: std::env::temp_dir(),
-                    name: "helper".into(),
-                    parent: 1,
-                    branch: false,
-                },
+        app.transient(
+            2,
+            Transient::Born {
+                log_dir: std::env::temp_dir(),
+                name: "helper".into(),
+                parent: 1,
+                branch: false,
             },
             &rx,
         );
-        for kind in [Kind::Token("alive".into()), Kind::Boundary, Kind::Died] {
-            app.handle(Event { id: 2, kind }, &rx);
-        }
+        let stamp = Stamp::new(Seq::new(1), 0..0);
+        app.fact(
+            2,
+            &Recorded::new(
+                stamp,
+                Record::Display(Display::Answer {
+                    text: "alive".into(),
+                }),
+            ),
+        );
+        app.transient(2, Transient::Died, &rx);
         let blocks = app
             .tabs
             .viewport(2)
@@ -892,9 +885,16 @@ mod tests {
             .probe_figures()
             .0;
 
-        for kind in [Kind::Token("straggler".into()), Kind::Boundary] {
-            app.handle(Event { id: 2, kind }, &rx);
-        }
+        let stamp = Stamp::new(Seq::new(2), 0..0);
+        app.fact(
+            2,
+            &Recorded::new(
+                stamp,
+                Record::Display(Display::Answer {
+                    text: "straggler".into(),
+                }),
+            ),
+        );
 
         let all = text(&mut app, 2);
         assert!(all.contains("alive"), "the final frame survives: {all:?}");

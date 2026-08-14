@@ -15,7 +15,8 @@ use crate::agent::digest::{
 use crate::agent::event::{
     ContextOp, EditAuthority, QuiesceReason, ToolResult as SessionToolResult,
 };
-use crate::bus::{AgentState, Emitter, Item, Kind};
+use crate::bus::{AgentState, Emitter, Item};
+use crate::record::Transient;
 use crate::provider::{CutShort, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use ral_core::serial::FOValue;
 use std::sync::Arc;
@@ -76,7 +77,7 @@ impl Agent {
         // Entry is `ReadyForUser`, before the prompt is committed: the only
         // place `can_compact()` is guaranteed to hold, and every exchange and
         // nudge alike crosses it.
-        self.compact(provider, emit, false, token, continues);
+        self.compact(provider, false, token, continues);
         let mut last_text = String::new();
         if let Some(p) = prompt {
             self.log
@@ -88,7 +89,7 @@ impl Agent {
         loop {
             n += 1;
             if n > MAX_STEPS {
-                return Ok(self.capped(emit));
+                return Ok(self.capped());
             }
             // The step's live row derives from the published record — the
             // retired `Kind::Step` twin — so this is the one authoring site.
@@ -114,15 +115,13 @@ impl Agent {
             let t_req = std::time::Instant::now();
             #[cfg(debug_assertions)]
             let mut first_token: Option<std::time::Duration> = None;
-            emit.emit(Kind::State(AgentState::AwaitingModel));
+            recorder.transient(Transient::State(AgentState::AwaitingModel));
             // One chopper per step, flushed at whichever boundary seals the
             // stream below; a failed answer commit is stashed here, since a
             // streaming closure has no error channel of its own.
             let mut chopper = crate::record::commit::Chopper::default();
             let mut chop_error: Option<std::io::Error> = None;
             let step_out = {
-                let token_emit = emit.clone();
-                let reasoning_emit = emit.clone();
                 let chopper = &mut chopper;
                 let chop_error = &mut chop_error;
                 provider.complete(
@@ -136,7 +135,7 @@ impl Agent {
                             first_token = Some(t_req.elapsed());
                         }
                         last_text.push_str(t);
-                        token_emit.emit(Kind::Token(t.to_string()));
+                        recorder.transient(Transient::Token(t.to_string()));
                         if chop_error.is_none()
                             && let Err(error) = chopper.push(&recorder, t)
                         {
@@ -144,7 +143,7 @@ impl Agent {
                         }
                     },
                     &mut |r: &str| {
-                        reasoning_emit.emit(Kind::Thinking(r.to_string()));
+                        recorder.transient(Transient::Thinking(r.to_string()));
                     },
                     token,
                 )
@@ -155,9 +154,9 @@ impl Agent {
                 t_req.elapsed()
             );
             if token.is_cancelled() {
-                emit.emit(Kind::Boundary);
+                recorder.transient(Transient::Boundary);
                 seal_chopper(&mut chopper, &recorder);
-                return Ok(self.cancelled(emit));
+                return Ok(self.cancelled());
             }
             let StepOut {
                 mut assistant_message,
@@ -169,18 +168,18 @@ impl Agent {
             } = match step_out {
                 Ok(s) => s,
                 Err(ProviderError::Cancelled(_)) => {
-                    emit.emit(Kind::Boundary);
+                    recorder.transient(Transient::Boundary);
                     seal_chopper(&mut chopper, &recorder);
-                    return Ok(self.cancelled(emit));
+                    return Ok(self.cancelled());
                 }
                 Err(e) => {
-                    emit.emit(Kind::Boundary);
+                    recorder.transient(Transient::Boundary);
                     seal_chopper(&mut chopper, &recorder);
                     return Err(e);
                 }
             };
             if let Some(error) = chop_error {
-                emit.emit(Kind::Boundary);
+                recorder.transient(Transient::Boundary);
                 return Err(ProviderError::Other(format!(
                     "an answer commit was not recorded in record.jsonl: {error}"
                 )));
@@ -209,7 +208,7 @@ impl Agent {
                         ))
                     })?;
             }
-            emit.emit(Kind::Boundary);
+            recorder.transient(Transient::Boundary);
             chopper.flush(&recorder).map_err(|e| {
                 ProviderError::Other(format!(
                     "the answer's tail commit was not recorded: {e}"
@@ -230,7 +229,7 @@ impl Agent {
                     StopReason::Completed(_)
                     | StopReason::ToolCall(_)
                     | StopReason::MaxTokens(_) => {}
-                    _ => emit.emit(Kind::StopReason(reason.raw().to_string())),
+                    _ => recorder.transient(Transient::StopReason(reason.raw().to_string())),
                 }
             }
             admit_assistant(&mut assistant_message);
@@ -315,7 +314,7 @@ impl Agent {
                     .map_err(ProviderError::Other)?;
             }
             if token.is_cancelled() {
-                return Ok(self.cancelled(emit));
+                return Ok(self.cancelled());
             }
             // A `reply` in the fully drained batch ends the run here, not at
             // another round-trip.
@@ -328,7 +327,6 @@ impl Agent {
     pub(crate) fn compact(
         &self,
         provider: &Arc<Provider>,
-        emit: &Emitter,
         requested: bool,
         token: &cancel::Token,
         continues: Option<u64>,
@@ -369,7 +367,8 @@ impl Agent {
             // No exchange old enough to summarise: a no-op, not an event.
             return;
         };
-        emit.emit(Kind::State(AgentState::Compacting));
+        self.recorder()
+            .transient(Transient::State(AgentState::Compacting));
         match provider.summarize(&self.system, plan.prefix_messages, summary_cap, token) {
             Ok(summary) => {
                 let recorded = self.log.lock().record_usage(summary.usage.into());
@@ -453,22 +452,23 @@ impl Agent {
         Outcome::Replied(payload)
     }
 
-    fn cancelled(&self, emit: &Emitter) -> Outcome {
+    /// The log already carries `Cancelled` through `quiesce`'s own
+    /// `Forensic::Cancelled` record; the view fold draws it, so there is no
+    /// separate user-facing companion left to emit.
+    fn cancelled(&self) -> Outcome {
         self.log.lock().quiesce(QuiesceReason::Cancelled);
-        // The log already carries `Cancelled` from `quiesce`; this is only its
-        // user-facing companion.
-        emit.emit(Kind::Error("cancelled".into()));
         Outcome::Cancelled
     }
 
     /// The step count would exceed [`MAX_STEPS`].  History is left mid-protocol
     /// for the attend loop's per-item quiesce to wind back; the [`StopReason`]
     /// reaches the headless JSON so a harness can tell a cap from a completion.
-    fn capped(&self, emit: &Emitter) -> Outcome {
+    fn capped(&self) -> Outcome {
         self.note_error(format!(
             "step cap reached ({MAX_STEPS} provider round-trips); ending the deliberation"
         ));
-        emit.emit(Kind::StopReason("step_cap".into()));
+        self.recorder()
+            .transient(Transient::StopReason("step_cap".into()));
         Outcome::Capped
     }
 }
@@ -530,6 +530,7 @@ fn admit_assistant(msg: &mut genai::chat::ChatMessage) {
 )]
 mod tests {
     use super::*;
+    use crate::bus::Kind;
     use crate::agent::testkit::*;
     use crate::agent::{NoControl, ProviderHandle, fresh_id};
     use crate::bus::{AgentOutcome, Inbox, Post};

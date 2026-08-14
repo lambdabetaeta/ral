@@ -6,14 +6,11 @@
 //! redrawn each tick, so scrollback is ours, not the host terminal's, and
 //! every tab keeps its own scroll position.
 //!
-//! Two producers feed it, matching `dev/docs/plans/260814_one_seam_one_log.md`:
-//! the live bus's `Kind` events (`push_*`, still what production drives today)
-//! and [`crate::record::Printer`] (`transient`/`sync`), which draws the one
-//! view fold's memo instead.  Both populate the same [`Self::blocks`], so
-//! nothing downstream — reflow, the flatten, the gestures — need know which
-//! producer is live.  The `push_*` half keeps its own light bookkeeping
-//! (`last_call`, `last_ral_cmd`) rather than the tail-walk and resident scan
-//! the fold's own commits retire by construction.
+//! [`crate::record::Printer`] is the sole producer: [`Self::commit_fact`]
+//! steps the fold beside the viewport and re-syncs [`Self::blocks`] wholesale
+//! from it, and [`Printer::transient`] draws whatever is live-only —
+//! [`Self::push_chrome`], the chrome lane's door, and [`Self::push_thinking`],
+//! the raw buffer a reasoning delta grows behind a magnitude seat.
 
 use super::block::{AgentSlot, Block, RailShape, Reveal, append_visual_rows};
 use super::group;
@@ -28,7 +25,7 @@ use crate::bus::card::{
     observation_from_wire, rail_place, reads_card,
 };
 use crate::provider::Usage;
-use crate::record::{self, BlockId, Blocks, Printer, Seq, Transient};
+use crate::record::{self, BlockId, Blocks, Fold as _, Printer, Seq, Transient};
 use ral_core::types::{Observation, Observed};
 use ratatui::text::Line;
 use std::collections::HashMap;
@@ -82,12 +79,18 @@ pub(super) struct Viewport {
     /// This session's spend — the matrix's per-agent readout, where
     /// `App::total_usage` is the rule line's sum over all of them.
     usage: Usage,
-    /// Assistant text since the last commit.  It never streams as prose: only
-    /// its magnitude shows ([`Self::streaming_seat`]) until the turn's end
-    /// commits it as a [`Block::markdown`].  Reasoning has no such seat: each
-    /// phase streams into its own live `∴` block from the first delta
-    /// ([`Self::push_thinking`]).
+    /// Assistant text since the last [`Display::Answer`](crate::record::Display::Answer)
+    /// commit [`Self::sync`] has drained.  It never streams as prose: only its
+    /// magnitude shows ([`Self::streaming_seat`]) until the commit lands.
     open: String,
+    /// Reasoning text since the last [`Display::Thinking`](crate::record::Display::Thinking)
+    /// commit [`Self::sync`] has drained — `open`'s analogue for the step's
+    /// own `∴` seat ([`Self::thinking_seat`]), grown by [`Self::push_thinking`].
+    thinking: String,
+    /// The fold's own memo, stepped by every [`Self::commit_fact`] and
+    /// re-synced from in the same call — the memo P5 moves to live beside the
+    /// viewport, fed only through [`crate::record::View::step`].
+    fold: Blocks,
     /// Top visible visual row, per-viewport so each tab keeps its place.
     offset: usize,
     /// Follow the tail.  Cleared by a scroll either way, re-armed at the bottom.
@@ -101,15 +104,6 @@ pub(super) struct Viewport {
     /// generation-bounded like the scrollback.  A `Vec`, not a map, so render
     /// order is first-seen insertion order.
     pins: Vec<(String, Card)>,
-    /// Index of the most recently pushed call block — what a landing result
-    /// attaches its size to.  A card may land between a call and its result,
-    /// so this is an index, not "the last block."  `O(1)`, replacing the
-    /// tail-walk `set_result_size` used before the fold could address a
-    /// result at its call's own [`BlockId`].
-    last_call: Option<usize>,
-    /// The most recent `ral` script run, for [`Self::commit_fidelity`]'s echo
-    /// signal — an `O(1)` field, replacing a reverse scan of resident blocks.
-    last_ral_cmd: Option<String>,
     /// Persisted dial state for blocks a [`Self::sync`] rebuilds fresh from
     /// the fold's memo every call — [`Block`]'s own dial state does not
     /// survive a rebuild, so a printer keeps it here, keyed by the commit
@@ -127,10 +121,11 @@ pub(super) struct Viewport {
     /// unconsumed suffix."  A cursor by identity rather than position, since
     /// a windowed memo makes an index wrong.
     drained_through: Seq,
+    /// [`Self::drained_through`]'s twin for [`Self::thinking`].
+    thinking_drained_through: Seq,
     /// Chrome rows [`Self::push_chrome`] has authored, named by the
     /// [`Anchor`] they were drawn at.  [`Self::sync`] stable-merges these
-    /// into the folded rows it rebuilds; nothing reads this lane yet, since
-    /// production still draws chrome straight into [`Self::blocks`].
+    /// into the folded rows it rebuilds.
     chrome: Vec<(Anchor, RailShape, Vec<Line<'static>>)>,
     /// The highest [`record::Seq`] [`Self::sync`] has last seen — the anchor
     /// a chrome row drawn right now would be named by.
@@ -248,20 +243,34 @@ impl Viewport {
             agent,
             usage: Usage::default(),
             open: String::new(),
+            thinking: String::new(),
+            fold: Blocks::default(),
             offset: 0,
             sticky: true,
             flat: Flat::default(),
             log_path,
             state: StateSpan::new(crate::bus::AgentState::Ready),
             pins: Vec::new(),
-            last_call: None,
-            last_ral_cmd: None,
             reveal: HashMap::new(),
             context_window: None,
             drained_through: Seq::new(0),
+            thinking_drained_through: Seq::new(0),
             chrome: Vec::new(),
             last_seq: None,
         }
+    }
+
+    /// Step [`Self::fold`] over one witnessed fact and re-render from it —
+    /// the sole way a live commit reaches the screen.  The memo lives beside
+    /// the viewport, fed only through [`record::View::step`].
+    pub(super) fn commit_fact(&mut self, rec: &record::Recorded<record::Record>) {
+        let mut fold = std::mem::take(&mut self.fold);
+        // `View::step` never actually refuses a live commit — no arm returns
+        // `Err` — so a refusal here would mean the fold learned a new failure
+        // mode this printer does not yet know to report.
+        record::View::step(&mut fold, rec).expect("the view fold never refuses a live commit");
+        self.sync(&fold);
+        self.fold = fold;
     }
 
     pub(super) fn agent(&self) -> AgentSlot {
@@ -418,54 +427,6 @@ impl Viewport {
         log.flush()
     }
 
-    // ── content (the live `push_*` half; still what production drives) ─────
-
-    /// Append a tool call as its own collapsible block.  `context` is the turn's
-    /// degradation floor, so the intent line drains under context pressure.
-    pub(super) fn push_tool_call(
-        &mut self,
-        tool: &'static str,
-        summary: String,
-        cmd: String,
-        context: u8,
-    ) {
-        if tool == "ral" {
-            self.last_ral_cmd = Some(cmd.clone());
-        }
-        self.push_block(Block::tool_call(tool, summary, cmd, context));
-        self.last_call = Some(self.blocks.len() - 1);
-    }
-
-    /// Append a harness act — a barrier the coalescing projection never folds
-    /// into a `ral` run, since an act changes the world rather than observing it.
-    pub(super) fn push_act(
-        &mut self,
-        verb: &'static str,
-        subject: Option<String>,
-        payload: String,
-        failed: bool,
-    ) {
-        self.push_block(Block::act(verb, subject, payload, failed));
-    }
-
-    /// Append an async subagent's landed result, collapsed to a one-line header.
-    pub(super) fn push_subagent(
-        &mut self,
-        name: String,
-        text: String,
-        error: Option<String>,
-        elapsed: Duration,
-        fidelity: super::fidelity::Fidelity,
-    ) {
-        self.push_block(Block::subagent(name, text, error, elapsed, fidelity));
-    }
-
-    /// Append a surfaced render document — the model's own communication, so
-    /// the coalescing projection never folds it.
-    pub(super) fn push_card(&mut self, card: Card) {
-        self.push_block(Block::card(card));
-    }
-
     // ── pinned state (the register) ────────────────────────────────────────
     // The in-place analogue of `push_card`: a pin writes a keyed slot, touching
     // neither flatten nor log — pinned state is ambient, not scrollback.
@@ -486,140 +447,21 @@ impl Viewport {
         &self.pins
     }
 
-    /// Append a foldable observation card — a read, grep or exec the projection
-    /// folds under its call, `count` being its weight in the run's census.
-    pub(super) fn push_observation_card(&mut self, card: Card, kind: ObservationKind, count: u32) {
-        self.push_block(Block::observation_card(card, kind, count));
-    }
-
-    /// Append a write card — a barrier ending the current ral run, like a diff.
-    pub(super) fn push_write_card(&mut self, card: Card) {
-        self.push_block(Block::write_card(card));
-    }
-
     /// Append pre-rendered chrome; `shape` lets the rail dispatch on the
     /// sub-kind.  Also records the row into the chrome lane, anchored at the
     /// last `Seq` [`Self::sync`] saw — the door [`Self::sync`]'s stable merge
-    /// draws from once the fold, not `push_*`, drives the live screen.
+    /// draws from on every rebuild.
     pub(super) fn push_chrome(&mut self, shape: RailShape, lines: Vec<Line<'static>>) {
         self.chrome.push((self.last_seq, shape, lines.clone()));
         self.push_block(Block::chrome(shape, lines));
     }
 
-    /// Append a summary-less tool call, shown standalone as a `▸` rail block.
-    /// `detail` is `None` for an invisible parse-failure boundary.
-    pub(super) fn push_plain_call(&mut self, detail: Option<String>) {
-        self.push_block(Block::plain_call(detail));
-        self.last_call = Some(self.blocks.len() - 1);
-    }
-
-    /// Attach a tool result's line count to the most recently pushed call —
-    /// `O(1)` off [`Self::last_call`], a card may still land between a call and
-    /// its result without breaking the correlation.
-    pub(super) fn set_result_size(&mut self, text: &str) {
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "content count; u32 headroom far exceeds any in-memory transcript"
-        )]
-        let n = text.lines().count() as u32;
-        if let Some(entry) = self.last_call.and_then(|i| self.blocks.get_mut(i))
-            && entry.block.is_tool_call()
-        {
-            entry.block.set_result_size(n);
-            self.flat.dirty = true;
-        }
-    }
-
-    /// Land a phase's authoritative reasoning: into its live `∴` block
-    /// ([`Self::live_thinking`]), superseding the streamed deltas, or — when
-    /// nothing streamed — into a fresh block before the trailing markdown run.
-    /// `answer_chars` is the say-side of the deliberation ratio.
-    pub(super) fn commit_thinking(&mut self, text: String, answer_chars: u32) {
-        if text.trim().is_empty() {
-            return;
-        }
-        if let Some(idx) = self.live_thinking() {
-            self.blocks[idx].block.commit_thinking(text, answer_chars);
-            self.flat.dirty = true;
-            return;
-        }
-        match self.trailing_markdown_start() {
-            Some(at) => {
-                self.blocks.insert(
-                    at,
-                    Entry {
-                        block: Block::thinking(text, answer_chars),
-                        rows: 0,
-                        id: None,
-                    },
-                );
-                self.flat.dirty = true;
-            }
-            None => self.push_block(Block::thinking(text, answer_chars)),
-        }
-    }
-
-    /// Stream a live reasoning delta into the phase's `∴` block, seating one at
-    /// the first delta.  The block arrives open, its trace growing as the
-    /// deltas land; a dial shuts it to its header.
+    /// Stream a live reasoning delta into [`Self::thinking`] — the raw buffer
+    /// [`Self::thinking_seat`] projects the magnitude of, and [`Self::sync`]
+    /// drains against the step's landing
+    /// [`Display::Thinking`](crate::record::Display::Thinking) commit.
     pub(super) fn push_thinking(&mut self, text: &str) {
-        if let Some(idx) = self.live_thinking() {
-            self.blocks[idx].block.push_provisional_thinking(text);
-            self.flat.dirty = true;
-        } else {
-            self.push_block(Block::thinking_live(text.to_string()));
-        }
-    }
-
-    /// The still-streaming phase's block.  Each phase seats its own, so this is
-    /// simply the newest with no authoritative text yet — at most one exists.
-    fn live_thinking(&self) -> Option<usize> {
-        self.blocks.iter().rposition(|e| e.block.is_live_thinking())
-    }
-
-    /// Buffer streamed text.  Chopping the delta stream into fence-safe
-    /// paragraphs is the commit producer's job now (`record::commit`'s
-    /// chopper); the live `push_*` half only ever sees the whole answer land
-    /// at once, on [`Self::close_boundary`], so `open` grows unchopped until then.
-    pub(super) fn push_token(&mut self, text: &str) {
-        self.open.push_str(text);
-    }
-
-    /// End a streaming step: seal a still-live reasoning phase — its deltas
-    /// stand as the text when no commit arrived — then commit `open`.
-    pub(super) fn close_boundary(&mut self, context_floor: u8) {
-        if let Some(idx) = self.live_thinking() {
-            if !self.blocks[idx].block.seal_thinking() {
-                self.blocks.remove(idx);
-            }
-            self.flat.dirty = true;
-        }
-        self.flush_open(context_floor);
-    }
-
-    /// Commit what remains in `open`, at turn end or on `/clear`.
-    pub(super) fn flush_open(&mut self, context_floor: u8) {
-        let leftover = std::mem::take(&mut self.open);
-        if leftover.trim().is_empty() {
-            return;
-        }
-        let fidelity = self.commit_fidelity(&leftover, context_floor);
-        self.push_block(Block::markdown(leftover, fidelity));
-    }
-
-    /// The fidelity to stamp on a committing markdown block: `context_floor` is
-    /// the turn-level floor every paragraph inherits, the echo delta its
-    /// modifier against the most recent `ral` script — an `O(1)` field, not a
-    /// scan of resident blocks.
-    fn commit_fidelity(&self, text: &str, context_floor: u8) -> super::fidelity::Fidelity {
-        let echo = self
-            .last_ral_cmd
-            .as_deref()
-            .map_or(0, |cmd| super::fidelity::echo_delta(text, cmd));
-        super::fidelity::Fidelity {
-            context: context_floor,
-            echo,
-        }
+        self.thinking.push_str(text);
     }
 
     fn push_block(&mut self, block: Block) {
@@ -656,7 +498,6 @@ impl Viewport {
         let drop = self.blocks.len() - kept;
         if drop > 0 {
             self.blocks.drain(..drop);
-            self.last_call = self.last_call.and_then(|i| i.checked_sub(drop));
             self.flat.dirty = true;
         }
     }
@@ -825,12 +666,35 @@ impl Viewport {
         ]))
     }
 
+    /// [`Self::streaming_seat`]'s twin for [`Self::thinking`] — the step's
+    /// reasoning trace grows into a magnitude mark exactly like the answer's,
+    /// never streamed as text, and precedes it: reasoning lands ahead of the
+    /// answer within a step.
+    fn thinking_seat(&self) -> Option<Line<'static>> {
+        if self.thinking.trim().is_empty() {
+            return None;
+        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "content count; u32 headroom far exceeds any in-memory transcript"
+        )]
+        let magnitude = self.thinking.lines().count() as u32;
+        Some(Line::from(vec![
+            rail::span(RailKind::Thinking, self.agent, Some(magnitude)),
+            size_bar(magnitude),
+        ]))
+    }
+
     /// The visible slice at `width` × `height`.  While `sticky`, `offset` is
     /// pinned to the tail; otherwise it is clamped to `max_off` and `sticky`
     /// re-arms once it reaches the bottom.
     pub(super) fn render_window(&mut self, width: u16, height: usize) -> RenderWindow {
         self.reflow(width);
-        let mut seat: Vec<Line<'static>> = self.streaming_seat().into_iter().collect();
+        let mut seat: Vec<Line<'static>> = self
+            .thinking_seat()
+            .into_iter()
+            .chain(self.streaming_seat())
+            .collect();
         let committed = self.flat.rows.len();
         // Following a non-markdown block, the streaming seat opens a fresh run,
         // so it wears the blank separator a committing lead paragraph would.
@@ -1000,14 +864,7 @@ impl Viewport {
     }
 }
 
-// ── `record::Printer`: the view fold's second consumer ─────────────────────
-//
-// `transient` and `sync` are additive to the `push_*` half above, not yet the
-// live path a running session drives — `dev/docs/plans/260814_one_seam_one_log.md`'s
-// R1 owns the seam wiring that would hand a real `Blocks` value to `sync`.
-// Both are exercised directly in this module's tests, per the parcel's own
-// suggested strategy: drive `record::View::step` over synthetic records and
-// assert on the rebuilt scrollback, no live producer required.
+// ── `record::Printer`: the sole live producer ───────────────────────────────
 
 impl Printer for Viewport {
     /// A transient never authors scrollback: [`Transient::Token`] and
@@ -1017,6 +874,10 @@ impl Printer for Viewport {
     /// arrives, chopped, through [`Self::sync`] instead — a printer never
     /// mints a [`record::Block`] of its own — and [`Self::sync`] drains the
     /// matching prefix back off `open` once it sees the commit land.
+    ///
+    /// [`Transient::Born`], [`Transient::Died`], and [`Transient::Resources`]
+    /// reach no-ops here: they need the tabs a bare `Viewport` cannot see, so
+    /// `App::transient` intercepts and answers them itself, ahead of this call.
     fn transient(&mut self, t: &Transient) {
         match t {
             Transient::Token(text) => {
@@ -1029,34 +890,41 @@ impl Printer for Viewport {
             }
             Transient::State(state) => self.set_state(*state),
             Transient::Cleared => self.reset(),
+            Transient::StopReason(raw) => {
+                self.push_chrome(RailShape::Plain, super::line::stop_reason(raw));
+            }
+            Transient::Pin { key, card } => self.set_pin(key.clone(), card.clone()),
+            Transient::Unpin { key } => self.drop_pin(key),
+            Transient::Fault { text } => {
+                self.push_chrome(RailShape::Error, super::line::error(text));
+            }
             // The producer's own tail flush lands as a commit `sync` will
             // see; nothing to do here but wait for it.
-            // The register and the chrome lane both gain a live producer in a
-            // later wave; for now these publish with nothing yet drawing them.
-            Transient::Boundary
-            | Transient::Born { .. }
-            | Transient::Died
-            | Transient::StopReason(_)
-            | Transient::Resources { .. }
-            | Transient::Pin { .. }
-            | Transient::Unpin { .. }
-            | Transient::Fault { .. } => {}
+            Transient::Boundary | Transient::Born { .. } | Transient::Died | Transient::Resources { .. } => {}
         }
     }
 
     fn sync(&mut self, blocks: &Blocks) {
         let rows = blocks.rows();
-        // `open` is always exactly the unconsumed suffix of the raw stream:
-        // drain it against every `Answer` commit not yet accounted for,
-        // named by `Seq` rather than position, since the memo is windowed.
+        // `open` and `thinking` are always exactly the unconsumed suffix of
+        // their raw streams: drain each against every commit of its own kind
+        // not yet accounted for, named by `Seq` rather than position, since
+        // the memo is windowed.
         for row in rows.iter().filter(|r| r.id().seq() > self.drained_through) {
             if let record::BlockKind::Answer { text } = row.kind() {
                 let n = text.len().min(self.open.len());
                 let _ = self.open.drain(..n);
             }
         }
+        for row in rows.iter().filter(|r| r.id().seq() > self.thinking_drained_through) {
+            if let record::BlockKind::Thinking { text, .. } = row.kind() {
+                let n = text.len().min(self.thinking.len());
+                let _ = self.thinking.drain(..n);
+            }
+        }
         if let Some(last) = rows.last() {
             self.drained_through = last.id().seq();
+            self.thinking_drained_through = last.id().seq();
         }
 
         let mut built: Vec<Entry> = Vec::with_capacity(rows.len());
@@ -1077,7 +945,7 @@ impl Printer for Viewport {
         }
         self.last_seq = rows.last().map(|r| r.id().seq());
         self.blocks = self.merge_chrome(built);
-        self.last_call = self.blocks.iter().rposition(|e| e.block.is_call());
+        self.enforce_window_caps();
         self.flat.dirty = true;
     }
 }
@@ -1382,10 +1250,16 @@ mod tests {
 
     /// A streaming response renders as one trailing magnitude row and never its
     /// text; the prose appears only when the boundary commits it.
+    /// The raw stream a [`Transient::Token`] grows never itself renders as
+    /// text — only its magnitude, until the landing [`Display::Answer`]
+    /// commit drains it and the fold renders the committed prose instead.
     #[test]
     fn streaming_renders_a_magnitude_seat_not_text() {
+        use crate::record::{Blocks, Display, Fold, Record, Recorded, Seq, Stamp, View};
+
+        let text = "```ral\nlet x = 1\nlet y = 2\n";
         let mut vp = viewport();
-        vp.push_token("```ral\nlet x = 1\nlet y = 2\n");
+        vp.transient(&Transient::Token(text.into()));
         assert!(vp.open.contains("let x = 1"));
 
         let w = vp.render_window(READ_W, 24);
@@ -1403,7 +1277,14 @@ mod tests {
             "seat withholds the streamed text: {seat:?}"
         );
 
-        vp.close_boundary(0);
+        let mut memo = Blocks::default();
+        let stamp = Stamp::new(Seq::new(1), 0..0);
+        View::step(
+            &mut memo,
+            &Recorded::new(stamp, Record::Display(Display::Answer { text: text.into() })),
+        )
+        .expect("a display-only fold never refuses");
+        vp.sync(&memo);
         assert!(vp.open.is_empty());
         let w = vp.render_window(READ_W, 24);
         let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
@@ -1417,65 +1298,57 @@ mod tests {
         );
     }
 
+    /// A live reasoning delta shows only its magnitude, ahead of the answer's
+    /// own seat; the landing [`Display::Thinking`] commit drains it and the
+    /// fold renders the committed trace as its own dialable block.
     #[test]
-    fn live_thinking_streams_its_trace_before_the_answer() {
+    fn live_thinking_streams_a_magnitude_seat_before_the_answer() {
+        use crate::record::{Blocks, Display, Fold, Record, Recorded, Seq, Stamp, View};
+
         let mut vp = viewport();
-        vp.push_thinking("considering the shape\n");
-        vp.push_token("First paragraph.\n\nSecond paragraph still streaming");
+        vp.transient(&Transient::Thinking("considering the shape\n".into()));
+        vp.transient(&Transient::Token(
+            "First paragraph.\n\nSecond paragraph still streaming".into(),
+        ));
 
         let w = vp.render_window(READ_W, 24);
         let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
         assert!(
-            all.contains("considering the shape"),
-            "a live trace streams in the open: {all:?}"
+            !all.contains("considering the shape") && !all.contains("First paragraph."),
+            "neither seat streams text, only magnitude: {all:?}"
         );
-        assert!(
-            !all.contains("First paragraph."),
-            "the answer stays buffered until the boundary commits it now: {all:?}"
-        );
-
         let thinking = rail_rows(&w.lines, "∴ ");
-        assert!(!thinking.is_empty(), "live thinking has its own rail");
+        let answer = rail_rows(&w.lines, "· ");
+        assert_eq!(thinking.len(), 1, "the reasoning wears its own live rail");
+        assert_eq!(answer.len(), 1, "the answer wears its own live rail");
+        assert!(thinking[0] < answer[0], "reasoning seats ahead of the answer");
 
-        vp.close_boundary(0);
+        let mut memo = Blocks::default();
+        for (seq, record) in [
+            Record::Display(Display::Thinking {
+                text: "considering the shape\n".into(),
+                answer_chars: 30,
+            }),
+            Record::Display(Display::Answer {
+                text: "First paragraph.\n\nSecond paragraph still streaming".into(),
+            }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let stamp = Stamp::new(Seq::new(seq as u64 + 1), 0..0);
+            View::step(&mut memo, &Recorded::new(stamp, record))
+                .expect("a display-only fold never refuses");
+        }
+        vp.sync(&memo);
+        assert!(vp.open.is_empty() && vp.thinking.is_empty());
         let w = vp.render_window(READ_W, 24);
         let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
         assert!(
-            all.contains("First paragraph.") && all.contains("Second paragraph"),
-            "the whole answer lands as one block at the boundary: {all:?}"
-        );
-    }
-
-    #[test]
-    fn live_thinking_header_keeps_height_when_committed() {
-        let mut vp = viewport();
-        for i in 0..8 {
-            vp.push_chrome(
-                RailShape::Plain,
-                vec![
-                    Line::from(format!("block {i} line a")),
-                    Line::from(format!("block {i} line b")),
-                ],
-            );
-        }
-        vp.push_thinking("hidden trace\nline two\n");
-
-        let height = 8;
-        let live = vp.render_window(READ_W, height);
-        let live_offset = live.offset;
-        let live_text_len = live.lines.iter().map(plain).count();
-
-        vp.commit_thinking("hidden trace\nline two\n".into(), 0);
-        let committed = vp.render_window(READ_W, height);
-        let committed_text_len = committed.lines.iter().map(plain).count();
-
-        assert_eq!(
-            committed.offset, live_offset,
-            "committing the hidden trace keeps the scrollback offset stable"
-        );
-        assert_eq!(
-            committed_text_len, live_text_len,
-            "the live header and collapsed block occupy the same row budget"
+            all.contains("considering the shape")
+                && all.contains("First paragraph.")
+                && all.contains("Second paragraph"),
+            "both commits render whole once the fold syncs: {all:?}"
         );
     }
 
@@ -1535,11 +1408,12 @@ mod tests {
         assert!(vp.sticky, "re-armed at the bottom after the clamp");
     }
 
-    /// The committed thinking block must land where the seat rendered, before
-    /// the trailing markdown run — not after the last prompt, where a sticky
-    /// viewport would scroll straight past it.
+    /// The committed thinking block renders in a sticky viewport too, once a
+    /// resync past a full window of chrome carries it in.
     #[test]
     fn committed_thinking_stays_visible_in_sticky_viewport() {
+        use crate::record::{Blocks, Display, Fold, Record, Recorded, Seq, Stamp, View};
+
         let mut vp = viewport();
         vp.push_chrome(RailShape::Prompt, vec![Line::from("hello cutie")]);
         // Fill enough chrome to overflow a small window.
@@ -1552,8 +1426,7 @@ mod tests {
                 ],
             );
         }
-        vp.push_thinking("considering the shape\n");
-        vp.push_token("First paragraph.\n\nSecond paragraph.");
+        vp.transient(&Transient::Thinking("considering the shape\n".into()));
         let live = vp.render_window(READ_W, 8);
         let live_text = live.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
         let live_thinking = rail_rows(&live.lines, "∴ ");
@@ -1561,8 +1434,21 @@ mod tests {
             !live_thinking.is_empty(),
             "live thinking has its rail: {live_text:?}"
         );
-        vp.commit_thinking("considering the shape\n".into(), 30);
-        vp.close_boundary(0);
+
+        let mut memo = Blocks::default();
+        let stamp = Stamp::new(Seq::new(1), 0..0);
+        View::step(
+            &mut memo,
+            &Recorded::new(
+                stamp,
+                Record::Display(Display::Thinking {
+                    text: "considering the shape\n".into(),
+                    answer_chars: 30,
+                }),
+            ),
+        )
+        .expect("a display-only fold never refuses");
+        vp.sync(&memo);
         let committed = vp.render_window(READ_W, 8);
         let committed_text = committed
             .lines
@@ -1703,21 +1589,37 @@ mod tests {
     /// burst of reads.
     #[test]
     fn an_act_breaks_a_run_of_observations() {
+        use crate::record::Display;
         let mut vp = viewport();
-        vp.push_tool_call(
-            "ral",
-            "read the renderer".into(),
-            "read 'line.rs'".into(),
-            0,
-        );
-        vp.push_tool_call("ral", "read the block".into(), "read 'block.rs'".into(), 0);
-        vp.push_act(
-            "message",
-            Some("hunter".into()),
-            "focus on the renderer first".into(),
-            false,
-        );
-        vp.push_tool_call("ral", "read the rail".into(), "read 'rail.rs'".into(), 0);
+        let mut memo = Blocks::default();
+        step(
+            &mut memo,
+            [
+                Record::Display(Display::ToolCall {
+                    tool: "ral".into(),
+                    cmd: "read 'line.rs'".into(),
+                    summary: Some("read the renderer".into()),
+                }),
+                Record::Display(Display::ToolCall {
+                    tool: "ral".into(),
+                    cmd: "read 'block.rs'".into(),
+                    summary: Some("read the block".into()),
+                }),
+                Record::Display(Display::HarnessCall {
+                    verb: "message".into(),
+                    subject: Some("hunter".into()),
+                    payload: "focus on the renderer first".into(),
+                    failed: false,
+                }),
+                Record::Display(Display::ToolCall {
+                    tool: "ral".into(),
+                    cmd: "read 'rail.rs'".into(),
+                    summary: Some("read the rail".into()),
+                }),
+            ],
+        )
+        .expect("a display-only fold never refuses");
+        vp.sync(&memo);
 
         let w = vp.render_window(READ_W, 40);
         let act = rail_rows(&w.lines, "↗ ");
@@ -1739,78 +1641,51 @@ mod tests {
         );
     }
 
-    /// A write ends a run; it does not cut one in half.  Its call's effects
-    /// reach the projection ahead of it, so the run folds them whatever its
-    /// rung — and at the census, where a run is only its tally, the read is
-    /// counted rather than silently dropped.
-    #[test]
-    fn a_write_closes_a_run_and_the_census_counts_what_it_closed() {
-        use crate::bus::card::{Mark, ObservationKind, Span, reads_card};
-        let mut vp = viewport();
-        vp.push_tool_call(
-            "ral",
-            "write and read back".into(),
-            "'hi' |> 'f'; read 'g'".into(),
-            0,
-        );
-        vp.push_observation_card(
-            reads_card(&["g".to_string()]).expect("a read card"),
-            ObservationKind::Read,
-            1,
-        );
-        vp.push_write_card(Card(vec![Mark::Text {
-            spans: vec![Span::plain("write f committed")],
-        }]));
-
-        let rows = |vp: &mut Viewport| -> Vec<String> {
-            vp.render_window(READ_W, 40)
-                .lines
-                .iter()
-                .map(plain)
-                .collect()
-        };
-        let all = rows(&mut vp).join("\n");
-        assert!(
-            all.contains("read g"),
-            "the call's read is folded under it, not orphaned: {all:?}"
-        );
-
-        let w = vp.render_window(READ_W, 40);
-        let run = rail_rows(&w.lines, "▸ ");
-        let barrier = rail_rows(&w.lines, "▎ ");
-        assert_eq!(run.len(), 1, "one run, opened by the one call");
-        assert_eq!(barrier.len(), 1, "the write wears its own `▎`");
-        assert!(
-            run[0] < barrier[0],
-            "and closes the run rather than splitting it"
-        );
-
-        // Dialled to its floor the run is one line — and that line must account
-        // for the read, which is the whole point of a tally.
-        assert!(vp.dial_block(0, -1), "a run dials down to its census");
-        let census = rows(&mut vp)
-            .into_iter()
-            .find(|r| r.contains("Ran "))
-            .expect("a census line");
-        assert!(
-            census.contains("Ran 1 script, read 1 file."),
-            "the census counts the read the write closed over: {census:?}"
-        );
-    }
-
     /// An act is not a call-bearing block, so a `ral` result landing after one
     /// walks past it to the call that actually earned the bar.
     #[test]
     fn an_acts_result_stamps_no_bar_and_shields_no_call() {
+        use crate::record::{BlockId, Display};
         let mut vp = viewport();
-        vp.push_tool_call(
-            "ral",
-            "read the renderer".into(),
-            "read 'line.rs'".into(),
-            0,
-        );
-        vp.push_act("cancel", Some("hunter".into()), String::new(), false);
-        vp.set_result_size(&"a line\n".repeat(40));
+        let mut memo = Blocks::default();
+        let call_stamp = Stamp::new(Seq::new(1), 0..0);
+        View::step(
+            &mut memo,
+            &Recorded::new(
+                call_stamp.clone(),
+                Record::Display(Display::ToolCall {
+                    tool: "ral".into(),
+                    cmd: "read 'line.rs'".into(),
+                    summary: Some("read the renderer".into()),
+                }),
+            ),
+        )
+        .expect("a display-only fold never refuses");
+        View::step(
+            &mut memo,
+            &Recorded::new(
+                Stamp::new(Seq::new(2), 0..0),
+                Record::Display(Display::HarnessCall {
+                    verb: "cancel".into(),
+                    subject: Some("hunter".into()),
+                    payload: String::new(),
+                    failed: false,
+                }),
+            ),
+        )
+        .expect("a display-only fold never refuses");
+        View::step(
+            &mut memo,
+            &Recorded::new(
+                Stamp::new(Seq::new(3), 0..0),
+                Record::Display(Display::Result {
+                    text: "a line\n".repeat(40),
+                    call: BlockId::new(call_stamp.seq()),
+                }),
+            ),
+        )
+        .expect("a display-only fold never refuses");
+        vp.sync(&memo);
 
         let w = vp.render_window(READ_W, 40);
         let act = rail_rows(&w.lines, "↗ ");

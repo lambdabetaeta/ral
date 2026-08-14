@@ -315,18 +315,6 @@ impl Block {
             Fidelity::default(),
         )
     }
-    /// Seat a reasoning phase from its first streamed delta; its answer mass is
-    /// unknown until [`Self::commit_thinking`] lands it.
-    pub(super) fn thinking_live(delta: String) -> Self {
-        Self::new(
-            BlockKind::Thinking(Thinking {
-                text: String::new(),
-                answer_chars: 0,
-                provisional: delta,
-            }),
-            Fidelity::default(),
-        )
-    }
     /// `fidelity` is root's, so the revealed markdown degrades as its prose does.
     pub(super) fn subagent(
         name: String,
@@ -415,16 +403,6 @@ impl Block {
         matches!(self.kind, BlockKind::DiallableTool { .. })
     }
 
-    pub(super) fn is_plain_call(&self) -> bool {
-        matches!(self.kind, BlockKind::PlainTool { .. })
-    }
-
-    /// A landing result walks back to the nearest of these, so a plain call
-    /// halts the search rather than being reached past.
-    pub(super) fn is_call(&self) -> bool {
-        self.is_tool_call() || self.is_plain_call()
-    }
-
     /// True for a block the coalescing projection folds into a ral block — a
     /// tool call, or a read / grep / exec effect.  Everything else is a
     /// *barrier* splitting one block from the next, save a step boundary
@@ -493,43 +471,6 @@ impl Block {
 
     pub(super) fn is_thinking(&self) -> bool {
         matches!(self.kind, BlockKind::Thinking(_))
-    }
-
-    /// A reasoning phase still streaming — no authoritative text has landed.
-    pub(super) fn is_live_thinking(&self) -> bool {
-        matches!(&self.kind, BlockKind::Thinking(t) if t.text.is_empty())
-    }
-
-    /// Land the phase's authoritative text, superseding the streamed deltas and
-    /// sealing the block; the next phase seats its own.
-    pub(super) fn commit_thinking(&mut self, text: String, answer_chars: u32) {
-        if let BlockKind::Thinking(t) = &mut self.kind {
-            t.text = text;
-            t.provisional.clear();
-            t.answer_chars = answer_chars;
-            self.cache = None;
-        }
-    }
-
-    /// End the phase without a commit — a stall, or reasoning that never
-    /// arrived whole: the streamed deltas become the text.  Returns whether the
-    /// sealed trace amounts to anything worth keeping.
-    pub(super) fn seal_thinking(&mut self) -> bool {
-        if let BlockKind::Thinking(t) = &mut self.kind {
-            t.text = std::mem::take(&mut t.provisional);
-            self.cache = None;
-            return !t.text.trim().is_empty();
-        }
-        true
-    }
-
-    /// Stream a live reasoning delta: the header's magnitude ticks in place,
-    /// and the text grows under it wherever the block is dialed open.
-    pub(super) fn push_provisional_thinking(&mut self, more: &str) {
-        if let BlockKind::Thinking(t) = &mut self.kind {
-            t.provisional.push_str(more);
-            self.cache = None;
-        }
     }
 
     /// True for a step boundary — what the matrix's per-agent step cells count.
@@ -1036,7 +977,7 @@ mod tests {
         );
         assert!(block.magnitude().is_none(), "an act ranks nothing");
         assert!(block.call_view().is_none(), "an act opens no group slot");
-        assert!(!block.is_tool_call() && !block.is_call());
+        assert!(!block.is_tool_call());
         for level in [Reveal::Summary, Reveal::Context, Reveal::Full] {
             let text: String = block.body(READ_W, level).iter().map(line::plain).collect();
             assert!(

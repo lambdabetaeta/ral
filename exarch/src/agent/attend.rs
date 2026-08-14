@@ -10,9 +10,7 @@ use crate::agent::digest::PRESSURE_THRESHOLD_FALLBACK;
 use crate::agent::event::QuiesceReason;
 use crate::agent::nudge;
 use crate::agent::{Agent, deliberate, panic_msg, render_reply};
-use crate::bus::{
-    AgentOutcome, AgentState, Emitter, Item, Kind, ParkMode, Post, WORKER_PANIC_PREFIX,
-};
+use crate::bus::{AgentOutcome, AgentState, Emitter, Item, ParkMode, Post, WORKER_PANIC_PREFIX};
 use crate::provider::{Provider, ProviderError};
 use crate::shell_eval;
 use ral_core::serial::FOValue;
@@ -96,14 +94,18 @@ impl Agent {
             // deliberately not drained here: core pushes its `` `notice `` on
             // the surface stream of the run that observes it, so a reap during
             // a long idle surfaces once an item next runs.
-            self.reconcile_service_pins(emit);
+            self.reconcile_service_pins();
             self.check_disk_warn(emit);
             // The state a frontend shows over the coming silence is this park's
             // own verdict.  Only on an empty queue: with an item already in
             // hand the agent is not idle for any observable moment, and the
             // deliberation's own transitions are the truth.
             if self.inbox.is_empty() {
-                emit.emit(Kind::State(idle_state(policy(self, self.park_mode()))));
+                self.recorder()
+                    .transient(crate::record::Transient::State(idle_state(policy(
+                        self,
+                        self.park_mode(),
+                    ))));
             }
             // `next_or_idle` recomputes the park verdict on every wake.  An
             // un-engaged idle returning agent breaks here, yet its outcome
@@ -151,7 +153,7 @@ impl Agent {
         let mut control = NoControl;
         let mut final_outcome = (AgentOutcome::Empty, None);
         loop {
-            self.reconcile_service_pins(emit);
+            self.reconcile_service_pins();
             self.check_disk_warn(emit);
             let Some(item) = self.inbox.next_item() else {
                 break;
@@ -356,7 +358,9 @@ impl Agent {
     /// Re-pin the host-owned `services` card against the shell's live worker
     /// registry, dropping it the moment no durable service remains.  The sole
     /// writer: `shell_eval::reject_protected_pin` refuses the key to the model.
-    fn reconcile_service_pins(&self, emit: &Emitter) {
+    fn reconcile_service_pins(&self) {
+        let recorder = self.recorder();
+        let key = || shell_eval::SERVICES_PIN_KEY.to_string();
         let live: Vec<crate::agent::ProbedWorker> = self
             .probe_workers()
             .into_iter()
@@ -371,9 +375,10 @@ impl Agent {
                 .remove(shell_eval::SERVICES_PIN_KEY)
                 .is_some();
             if had_one {
-                emit.emit(Kind::Unpin {
-                    key: shell_eval::SERVICES_PIN_KEY.to_string(),
-                });
+                if let Err(error) = recorder.emit(crate::record::Forensic::Unpin { key: key() }) {
+                    recorder.report_fault(&error);
+                }
+                recorder.transient(crate::record::Transient::Unpin { key: key() });
             }
             return;
         }
@@ -383,10 +388,10 @@ impl Agent {
             shell_eval::SERVICES_PIN_KEY.to_string(),
             shell_eval::PinDigest::new(card.clone()),
         );
-        emit.emit(Kind::Pin {
-            key: shell_eval::SERVICES_PIN_KEY.to_string(),
-            card,
-        });
+        if let Err(error) = recorder.emit(crate::record::Forensic::Pin { key: key() }) {
+            recorder.report_fault(&error);
+        }
+        recorder.transient(crate::record::Transient::Pin { key: key(), card });
     }
 
     /// The rendered pressure-gauge detail once the soft line ahead of
@@ -481,12 +486,6 @@ pub(super) fn announce(item: &Item, emit: &Emitter, recorder: &crate::record::Em
                     elapsed_ms: u64::try_from(r.elapsed.as_millis()).unwrap_or(u64::MAX),
                 },
             );
-            emit.emit(Kind::SubagentDone {
-                name: r.name.clone(),
-                outcome: r.outcome.clone(),
-                text: r.text.clone(),
-                elapsed: r.elapsed,
-            });
         }
         // A detached `spawn`'s deferred batch, decoded as the live foreground
         // decode would — its io and diff surfaces through the same commit
@@ -587,21 +586,20 @@ fn agent_outcome(
 mod tests {
     use super::*;
     use crate::agent::ProviderHandle;
-    use crate::record::{Forensic, Record};
     use crate::agent::testkit::*;
+    use crate::bus::Kind;
+    use crate::record::{Forensic, Record};
     use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
     use crate::provider::scripted::{Reply, Script};
     use ral_core::Value;
 
     /// Every item `announce` draws records its display commit through the
-    /// seam.  A prompt has crossed: its only signal is the `Display::Prompt`
-    /// fact, and the live row is `record_kind`'s derivation of it, never a
-    /// direct emit.  A subagent's breadcrumb has not — `AgentOutcome` cannot
-    /// be rebuilt from the reduced `error: Option<String>` a resumed
-    /// scrollback needs, so it still dual-writes the legacy `Kind` beside its
-    /// fact.
+    /// seam, with no direct legacy `Kind` twin of its own: a prompt's live
+    /// row is `record_kind`'s derivation of `Display::Prompt`, and a
+    /// subagent's breadcrumb is `Display::SubagentDone` alone — the TUI's
+    /// fact fold routes it to root without any `Kind::SubagentDone` bridge.
     #[test]
-    fn announce_records_display_twins_beside_its_kinds() {
+    fn announce_records_display_facts_with_no_legacy_kind_twin() {
         use crate::bus::{AgentResult, Signal};
         use crate::record::Display;
 
@@ -627,18 +625,11 @@ mod tests {
             &recorder,
         );
 
-        let mut kinds: Vec<&'static str> = Vec::new();
         let mut facts: Vec<&'static str> = Vec::new();
         let mut derived: Vec<&'static str> = Vec::new();
         while let Ok(sig) = rx.try_recv() {
             match sig {
-                Signal::Event(event) => match event.kind {
-                    Kind::SubagentDone { name, .. } => {
-                        assert_eq!(name, "helper");
-                        kinds.push("subagent");
-                    }
-                    _ => panic!("a prompt must no longer carry a direct legacy Kind"),
-                },
+                Signal::Event(_) => panic!("neither class carries a direct legacy Kind"),
                 Signal::Fact(id, fact) => {
                     match fact.value() {
                         Record::Display(Display::Prompt { text }) => {
@@ -675,7 +666,6 @@ mod tests {
                 Signal::Transient(..) => {}
             }
         }
-        assert_eq!(kinds, ["subagent"], "only the subagent still dual-writes a legacy Kind");
         assert_eq!(facts, ["prompt", "subagent"], "both commits reach the seam");
         assert_eq!(derived, ["prompt"], "the prompt's live row derives from its fact");
     }
@@ -807,19 +797,20 @@ mod tests {
         session.seed("but answer this one".into());
         let (outcome, _) = session.attend(&mut NoControl, &emit);
 
-        let kinds: Vec<Kind> = std::iter::from_fn(|| rx.try_next_event().ok())
-            .map(|e| e.kind)
-            .collect();
+        let signals: Vec<crate::bus::Signal> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(
-            kinds
-                .iter()
-                .any(|k| matches!(k, Kind::Error(msg) if msg.starts_with(WORKER_PANIC_PREFIX))),
+            signals.iter().any(|s| matches!(
+                s,
+                crate::bus::Signal::Fact(_, fact)
+                    if matches!(fact.value(), Record::Forensic(Forensic::Error { text }) if text.starts_with(WORKER_PANIC_PREFIX))
+            )),
             "the unwind must reach the user as an error too"
         );
         assert!(
-            kinds
-                .iter()
-                .any(|k| matches!(k, Kind::Token(t) if t == "recovered")),
+            signals.iter().any(|s| matches!(
+                s,
+                crate::bus::Signal::Transient(_, crate::record::Transient::Token(t)) if t == "recovered"
+            )),
             "the prompt after the panic must still deliberate"
         );
         assert!(
@@ -948,7 +939,7 @@ mod tests {
             &emit,
         );
 
-        session.reconcile_service_pins(&emit);
+        session.reconcile_service_pins();
         {
             let pin = session
                 .pins
@@ -964,13 +955,14 @@ mod tests {
             );
         }
         let mut saw_pin = false;
-        while let Ok(event) = rx.try_next_event() {
-            if let Kind::Pin { key, .. } = event.kind {
+        while let Ok(sig) = rx.try_recv() {
+            if let crate::bus::Signal::Transient(_, crate::record::Transient::Pin { key, .. }) = sig
+            {
                 assert_eq!(key, shell_eval::SERVICES_PIN_KEY);
                 saw_pin = true;
             }
         }
-        assert!(saw_pin, "the birth must emit a Pin event");
+        assert!(saw_pin, "the birth must publish a Transient::Pin");
 
         // Through the ordinary `cancel` builtin — the same edge a model reaches.
         let entry = session
@@ -994,7 +986,7 @@ mod tests {
             )
             .expect("cancel must succeed");
 
-        session.reconcile_service_pins(&emit);
+        session.reconcile_service_pins();
         assert!(
             session
                 .pins
@@ -1005,13 +997,13 @@ mod tests {
             "the services pin must be retired once no durable service remains"
         );
         let mut saw_unpin = false;
-        while let Ok(event) = rx.try_next_event() {
-            if let Kind::Unpin { key } = event.kind {
+        while let Ok(sig) = rx.try_recv() {
+            if let crate::bus::Signal::Transient(_, crate::record::Transient::Unpin { key }) = sig {
                 assert_eq!(key, shell_eval::SERVICES_PIN_KEY);
                 saw_unpin = true;
             }
         }
-        assert!(saw_unpin, "retirement must emit an Unpin event");
+        assert!(saw_unpin, "retirement must publish a Transient::Unpin");
     }
 
     /// A forged `unpin` is refused with a diagnostic and leaves the register
