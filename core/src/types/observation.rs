@@ -694,6 +694,65 @@ mod tests {
         assert_eq!(value, m.get("value").unwrap().clone());
     }
 
+    /// The record leg's full round trip, as `Display::Observation` retraces
+    /// it on resume: `to_wire` scrubs, `FOValue::try_from` encodes,
+    /// `serde_json` crosses the log, `FOValue`'s own `Deserialize` decodes,
+    /// and `from_value` rebuilds. Bytes and a variant survive intact; a
+    /// handle nested inside that same surviving variant still crosses as its
+    /// opaque placeholder, per `to_wire`'s totality.
+    #[test]
+    fn survives_to_wire_fovalue_json_and_back() {
+        use crate::serial::FOValue;
+
+        let obs = Observation::spanning(
+            site(),
+            10,
+            20,
+            "alex".into(),
+            Observed::Command {
+                argv: vec!["spawn".into()],
+                status: 0,
+                origin: CommandOrigin::Builtin,
+                io: AuditIo {
+                    stdout: b"out".to_vec(),
+                    stderr: b"err".to_vec(),
+                },
+                error: None,
+                value: Value::Variant {
+                    label: "ok".into(),
+                    payload: Some(Box::new(dummy_handle())),
+                },
+            },
+        );
+
+        let fo = FOValue::try_from(&obs.to_wire())
+            .expect("to_wire scrubs every leaf try_from rejects");
+        let json = serde_json::to_vec(&fo).expect("serialise FOValue");
+        let back_fo: FOValue = serde_json::from_slice(&json).expect("deserialise FOValue");
+        let back = Observation::from_value(&Value::from(back_fo)).expect("the wire form decodes");
+
+        let Observed::Command { io, value, .. } = &back.what else {
+            panic!("expected a command")
+        };
+        assert_eq!(io.stdout, b"out", "bytes survive the round trip");
+        assert_eq!(io.stderr, b"err", "bytes survive the round trip");
+        let Value::Variant { label, payload } = value else {
+            panic!("expected the outer variant to survive")
+        };
+        assert_eq!(label, "ok");
+        assert_eq!(
+            payload.as_deref(),
+            Some(&Value::Variant {
+                label: OPAQUE_TAG.to_string(),
+                payload: Some(Box::new(Value::map(vec![(
+                    "type".to_string(),
+                    Value::String("handle".to_string())
+                )])))
+            }),
+            "the handle crosses as its placeholder, nested inside the surviving variant"
+        );
+    }
+
     /// A genuine string equal to the placeholder's own tag is never mistaken
     /// for one: the placeholder is a tagged `Variant`, a string is a plain
     /// leaf, and `to_wire` leaves the string untouched.

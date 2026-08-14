@@ -7,6 +7,7 @@
 //! `transcript.jsonl`.
 
 use ral_core::Value as RalValue;
+use ral_core::serial::FOValue;
 use std::borrow::Cow;
 
 use ral_core::types::{
@@ -355,6 +356,34 @@ fn join_spans<T>(spans: &mut Vec<Span>, items: &[T], each: impl Fn(&mut Vec<Span
         }
         each(spans, item);
     }
+}
+
+/// The record leg: an observation's total wire form, the payload
+/// `Display::Observation` carries — the one display content the protocol
+/// records cannot supply, since a write's byte diff and a read's card never
+/// enter the model's result string.
+///
+/// Total, never `Result`: `Observation::to_wire` already scrubs every leaf
+/// `FOValue::try_from` rejects, so the conversion cannot fail in practice —
+/// only in the sense that a bug in that scrub would be a bug worth a panic.
+#[allow(
+    dead_code,
+    reason = "P4 of dev/docs/plans/260814_one_seam_one_log.md: the commit producer (P2) calls this at its Kind::Io emit site, landing concurrently"
+)]
+pub(crate) fn observation_wire(event: &Observation) -> FOValue {
+    FOValue::try_from(&event.to_wire())
+        .expect("Observation::to_wire scrubs every leaf FOValue::try_from rejects")
+}
+
+/// The decode leg, inverse of [`observation_wire`]: rebuilds the
+/// [`Observation`] a resumed `Display::Observation` record carried, for the
+/// view fold to hand to [`observation_card`].
+#[allow(
+    dead_code,
+    reason = "P4 of dev/docs/plans/260814_one_seam_one_log.md: the view fold (P3) calls this to rebuild a card from a resumed Display::Observation record, landing concurrently"
+)]
+pub(crate) fn observation_from_wire(value: FOValue) -> Option<Observation> {
+    Observation::from_value(&RalValue::from(value))
 }
 
 /// The keys a projection carries only for a card's own preview, never for the

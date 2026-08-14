@@ -41,6 +41,11 @@ pub(crate) use observation::{
     ObservationKind, RailPlace, execs_card, greps_card, observation_card, observation_json,
     rail_place, reads_card,
 };
+// The commit producer (P2) and the view fold (P3) of
+// dev/docs/plans/260814_one_seam_one_log.md land their call sites
+// concurrently with this parcel.
+#[allow(unused_imports, reason = "wired by P2 and P3, landing concurrently")]
+pub(crate) use observation::{observation_from_wire, observation_wire};
 
 /// The closed nominal role set — the identity channel a [`Span`] may carry.
 /// An unrecognised tag degrades to plain ink rather than dropping the span.
