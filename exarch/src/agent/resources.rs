@@ -555,6 +555,25 @@ impl Agent {
     pub(crate) fn emit_context_survey(&self, emit: &Emitter) {
         let survey = self.log.lock().context_survey();
         let card = context_card(&survey);
+        // The data half records beside the live row; the card is a rendering
+        // the view fold rebuilds, never what the log carries.
+        let rows = survey
+            .items
+            .iter()
+            .map(|item| crate::record::ContextRow {
+                exchange: item.exchange,
+                kind: item.kind.as_str().to_string(),
+                opening: item.opening.clone(),
+                bytes: item.bytes,
+                steps: item.steps,
+                live: item.live,
+            })
+            .collect();
+        if let Err(error) = self.recorder().emit(crate::record::Display::Context { rows }) {
+            emit.emit(Kind::Error(format!(
+                "a display commit was not recorded in record.jsonl: {error}"
+            )));
+        }
         emit.emit(Kind::Context {
             rows: survey.items,
             card,
@@ -690,6 +709,51 @@ mod tests {
         rows.iter()
             .find(|r| r.name == name)
             .unwrap_or_else(|| panic!("the fold must emit a `{name}` row"))
+    }
+
+    /// `/context`'s survey pairs its live `Kind::Context` row with a
+    /// `Display::Context` record on the seam, carrying the same data half —
+    /// what lets a resumed scrollback rebuild the survey card the user saw.
+    #[test]
+    fn context_survey_records_a_display_twin_beside_its_kind() {
+        use crate::bus::Signal;
+        use crate::record::{Display, Record};
+
+        let session = Agent::for_test("system").unwrap();
+        {
+            let mut log = session.log.lock();
+            log.append_user("one".into(), None).unwrap();
+            log.append_assistant(genai::chat::ChatMessage::assistant("answer"), vec![], None)
+                .unwrap();
+        }
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        session.couple(&emit);
+        session.emit_context_survey(&emit);
+
+        let mut fact_rows = None;
+        let mut kind_rows = None;
+        while let Ok(sig) = rx.try_recv() {
+            match sig {
+                Signal::Fact(_, fact) => {
+                    if let Record::Display(Display::Context { rows }) = fact.value() {
+                        fact_rows = Some(rows.clone());
+                    }
+                }
+                Signal::Event(event) => {
+                    if let Kind::Context { rows, .. } = event.kind {
+                        kind_rows = Some(rows);
+                    }
+                }
+                Signal::Transient(..) => {}
+            }
+        }
+        let fact = fact_rows.expect("the survey records a Display::Context commit");
+        let kind = kind_rows.expect("the survey still emits its legacy Kind::Context");
+        assert_eq!(fact.len(), kind.len(), "one record row per live row");
+        assert_eq!(fact[0].exchange, 1);
+        assert_eq!(fact[0].kind, "exchange");
+        assert_eq!(fact[0].opening, kind[0].opening);
     }
 
     /// The agent half surveys what this thread owns: the worker registry's

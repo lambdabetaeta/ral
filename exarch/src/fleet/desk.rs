@@ -1502,14 +1502,17 @@ impl SurfaceApplier {
 }
 
 /// Feed one decoded surface [`Kind`] to the commit producer — an io
-/// observation into its bucket, a lone diff card into the patch buffer —
-/// shared by [`SurfaceApplier::live`] and the deferred-batch path in
+/// observation into its bucket, a lone diff card into the patch buffer, and
+/// every other surface class as its own commit — shared by
+/// [`SurfaceApplier::live`] and the deferred-batch path in
 /// `agent::attend::announce`, so the two cannot drift on what records.
 ///
 /// Only the bucketed kinds — read, exec, grep, write — enter the buffer; a
 /// worker birth or capability check joins no group and records at once as
 /// its own commit, exactly the line the buffer's own `unreachable!` arms
-/// draw.
+/// draw.  A done, notice, or generic card flushes the buffer first: those
+/// close or interrupt the run around them, so the record keeps the order the
+/// user saw.
 pub(crate) fn absorb_kind(
     buf: &mut SurfaceBuffer,
     recorder: &crate::record::Emitter,
@@ -1530,11 +1533,79 @@ pub(crate) fn absorb_kind(
         },
         Kind::Card(card) => match card.clone().into_single_diff() {
             Ok((path, hunks)) => buf.absorb_patch(recorder, id, path, hunks),
-            // A richer card is a rendering of state, not an effect; it stays
-            // off the record until the remaining display commits land.
-            Err(_) => Ok(()),
+            // A richer card is the kit's own communication: the mark tree is
+            // the fact, so it records whole and opaquely.  The buffers flush
+            // first, keeping the record in the order the user saw — a card
+            // never joins a group, so nothing coalesced is torn by the flush.
+            Err(card) => {
+                buf.flush_surfaces(recorder)?;
+                let marks =
+                    serde_json::to_value(&card).expect("Card's derived Serialize cannot fail");
+                let _recorded = recorder.emit(crate::record::Display::Card { marks })?;
+                Ok(())
+            }
         },
+        Kind::Done { outcome, .. } => {
+            buf.flush_surfaces(recorder)?;
+            let _recorded = recorder.emit(crate::record::Display::Done {
+                outcome: done_fact(outcome),
+            })?;
+            Ok(())
+        }
+        Kind::Notice { notice, .. } => {
+            buf.flush_surfaces(recorder)?;
+            let _recorded = recorder.emit(crate::record::Display::Notice {
+                notice: notice_fact(notice),
+            })?;
+            Ok(())
+        }
+        // Register state, not scrollback: the history informs the resume note,
+        // and the buffer is left unflushed on purpose — a pin joins no group
+        // and must not split the one it is never offered to.
+        Kind::Pin { key, .. } => {
+            let _recorded = recorder.emit(crate::record::Forensic::Pin { key: key.clone() })?;
+            Ok(())
+        }
+        Kind::Unpin { key } => {
+            let _recorded = recorder.emit(crate::record::Forensic::Unpin { key: key.clone() })?;
+            Ok(())
+        }
         _ => Ok(()),
+    }
+}
+
+/// The data half of a settled worker's `` `done `` card, in the record's own
+/// spelling of the same three outcomes.
+fn done_fact(outcome: &crate::bus::card::DoneOutcome) -> crate::record::DoneOutcome {
+    match outcome {
+        crate::bus::card::DoneOutcome::Ok => crate::record::DoneOutcome::Ok,
+        crate::bus::card::DoneOutcome::Err { message, status } => crate::record::DoneOutcome::Err {
+            message: message.clone(),
+            status: *status,
+        },
+        crate::bus::card::DoneOutcome::Panic { message } => crate::record::DoneOutcome::Panic {
+            message: message.clone(),
+        },
+    }
+}
+
+/// The data half of a `` `notice `` card, the reap cause carried as the three
+/// spellings the record's serde surface names.
+fn notice_fact(notice: &crate::bus::card::Notice) -> crate::record::NoticeFact {
+    match notice {
+        crate::bus::card::Notice::Reap { cmd, cause } => crate::record::NoticeFact::Reap {
+            cmd: cmd.clone(),
+            cause: match cause {
+                ral_core::types::ReapCause::Idle => "idle",
+                ral_core::types::ReapCause::Backstop => "backstop",
+                ral_core::types::ReapCause::Retention => "retention",
+            }
+            .to_string(),
+        },
+        crate::bus::card::Notice::Prune { names, idle_calls } => crate::record::NoticeFact::Prune {
+            names: names.clone(),
+            idle_calls: idle_calls.clone(),
+        },
     }
 }
 
@@ -2339,6 +2410,117 @@ mod tests {
 
         applier.live(unpin_value("b"));
         assert_eq!(keys(&d), vec!["a"], "a clear drops its key from the list");
+    }
+
+    /// Every surface class the live applier renders also records through the
+    /// seam — the legacy `Kind` beside a `Display` (or, for the pin register,
+    /// `Forensic`) record, never one without the other — and a generic card
+    /// records *behind* the io group buffered before it, keeping the record
+    /// in the order the user saw.
+    #[test]
+    fn live_surfaces_record_their_seam_twins_beside_the_kinds() {
+        use crate::bus::Signal;
+        use crate::record::{Display, Forensic, Record};
+
+        let (tx, rx) = channel();
+        let emit = crate::bus::Emitter::new(tx.clone(), 0);
+        let recorder = crate::record::Emitter::none();
+        recorder.attach(crate::record::FleetSink {
+            id: 0,
+            tx: tx.downgrade(),
+            meter: crate::bus::UsageMeter::default(),
+        });
+        let applier = SurfaceApplier {
+            emit,
+            pins: None,
+            id: 0,
+            recorder,
+            surface: Mutex::new(SurfaceBuffer::new()),
+        };
+
+        let read = ral_core::types::Observation::instant(
+            ral_core::types::CallSite::default(),
+            String::new(),
+            ral_core::types::Observed::Read { path: "a.rs".into() },
+        );
+        applier.live(crate::bus::card::observation_wire(&read));
+        applier.live(FOValue::Variant {
+            label: "card".into(),
+            payload: Some(Box::new(FOValue::List { items: vec![] })),
+        });
+        applier.live(FOValue::Variant {
+            label: "done".into(),
+            payload: Some(Box::new(FOValue::Map {
+                entries: vec![
+                    ("cmd".into(), FOValue::String { value: "<block>".into() }),
+                    (
+                        "outcome".into(),
+                        FOValue::Variant {
+                            label: "ok".into(),
+                            payload: Some(Box::new(FOValue::Unit)),
+                        },
+                    ),
+                ],
+            })),
+        });
+        applier.live(FOValue::Variant {
+            label: "notice".into(),
+            payload: Some(Box::new(FOValue::Map {
+                entries: vec![
+                    (
+                        "kind".into(),
+                        FOValue::Variant {
+                            label: "reap".into(),
+                            payload: None,
+                        },
+                    ),
+                    ("cmd".into(), FOValue::String { value: "sleep 10".into() }),
+                    ("cause".into(), FOValue::String { value: "idle".into() }),
+                ],
+            })),
+        });
+        applier.live(pin_value("tasks", "hi"));
+        applier.live(unpin_value("tasks"));
+
+        let mut kinds: Vec<&'static str> = Vec::new();
+        let mut facts: Vec<&'static str> = Vec::new();
+        while let Ok(sig) = rx.try_recv() {
+            match sig {
+                Signal::Event(event) => kinds.push(match event.kind {
+                    Kind::Io { .. } => "io",
+                    Kind::Card(_) => "card",
+                    Kind::Done { .. } => "done",
+                    Kind::Notice { .. } => "notice",
+                    Kind::Pin { .. } => "pin",
+                    Kind::Unpin { .. } => "unpin",
+                    _ => continue,
+                }),
+                Signal::Fact(_, fact) => facts.push(match fact.value() {
+                    Record::Display(Display::Observation { .. }) => "io",
+                    Record::Display(Display::Card { .. }) => "card",
+                    Record::Display(Display::Done {
+                        outcome: crate::record::DoneOutcome::Ok,
+                    }) => "done",
+                    Record::Display(Display::Notice {
+                        notice: crate::record::NoticeFact::Reap { cause, .. },
+                    }) if cause == "idle" => "notice",
+                    Record::Forensic(Forensic::Pin { key }) if key == "tasks" => "pin",
+                    Record::Forensic(Forensic::Unpin { key }) if key == "tasks" => "unpin",
+                    _ => continue,
+                }),
+                Signal::Transient(..) => {}
+            }
+        }
+        assert_eq!(
+            kinds,
+            ["io", "card", "done", "notice", "pin", "unpin"],
+            "every legacy kind still emits, in arrival order"
+        );
+        assert_eq!(
+            facts,
+            ["io", "card", "done", "notice", "pin", "unpin"],
+            "every class records its twin, the buffered read flushed ahead of the card"
+        );
     }
 
     /// The protected-`services` guard blocks a model's `` `pin `` write,

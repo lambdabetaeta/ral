@@ -464,14 +464,34 @@ impl Agent {
 pub(super) fn announce(item: &Item, emit: &Emitter, recorder: &crate::record::Emitter) {
     match item {
         Item::Human(_) | Item::Wakeup(_) | Item::Message(_) => {
+            record_commit(
+                recorder,
+                emit,
+                crate::record::Display::Prompt { text: item.text() },
+            );
             emit.emit(Kind::UserPromptEcho(item.text()));
         }
-        Item::Agent(r) => emit.emit(Kind::SubagentDone {
-            name: r.name.clone(),
-            outcome: r.outcome.clone(),
-            text: r.text.clone(),
-            elapsed: r.elapsed,
-        }),
+        Item::Agent(r) => {
+            // The record carries the breadcrumb-reduced pair the scrollback
+            // block is built from, not the raw outcome enum.
+            let (text, error) = r.outcome.breadcrumb(&r.text);
+            record_commit(
+                recorder,
+                emit,
+                crate::record::Display::SubagentDone {
+                    name: r.name.clone(),
+                    text,
+                    error,
+                    elapsed_ms: u64::try_from(r.elapsed.as_millis()).unwrap_or(u64::MAX),
+                },
+            );
+            emit.emit(Kind::SubagentDone {
+                name: r.name.clone(),
+                outcome: r.outcome.clone(),
+                text: r.text.clone(),
+                elapsed: r.elapsed,
+            });
+        }
         // A detached `spawn`'s deferred batch, decoded as the live foreground
         // decode would — its io and diff surfaces through the same commit
         // producer, one buffer per batch.  It was stamped with and posted to
@@ -497,6 +517,16 @@ pub(super) fn announce(item: &Item, emit: &Emitter, recorder: &crate::record::Em
             }
         }
         Item::Nudge { .. } | Item::Command(_) => {}
+    }
+}
+
+/// Record one display commit beside its legacy `Kind` emission, surfacing a
+/// failed append as an error row exactly as the surface path does.
+fn record_commit(recorder: &crate::record::Emitter, emit: &Emitter, commit: crate::record::Display) {
+    if let Err(error) = recorder.emit(commit) {
+        emit.emit(Kind::Error(format!(
+            "a display commit was not recorded in record.jsonl: {error}"
+        )));
     }
 }
 
@@ -571,6 +601,77 @@ mod tests {
     use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
     use crate::provider::scripted::{Reply, Script};
     use ral_core::Value;
+
+    /// Every item `announce` draws also records its display commit through
+    /// the seam, beside — never instead of — the legacy `Kind`, so a resumed
+    /// scrollback rebuilds the prompt echo and the subagent breadcrumb the
+    /// user saw live.
+    #[test]
+    fn announce_records_display_twins_beside_its_kinds() {
+        use crate::bus::{AgentResult, Signal};
+        use crate::record::Display;
+
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::new(tx.clone(), 0);
+        let recorder = crate::record::Emitter::none();
+        recorder.attach(crate::record::FleetSink {
+            id: 0,
+            tx: tx.downgrade(),
+            meter: crate::bus::UsageMeter::default(),
+        });
+
+        announce(&Item::Human("hello".into()), &emit, &recorder);
+        announce(
+            &Item::Agent(AgentResult {
+                name: "helper".into(),
+                outcome: AgentOutcome::Failed("boom".into()),
+                text: String::new(),
+                elapsed: std::time::Duration::from_millis(1500),
+                generation: 0,
+            }),
+            &emit,
+            &recorder,
+        );
+
+        let mut kinds: Vec<&'static str> = Vec::new();
+        let mut facts: Vec<&'static str> = Vec::new();
+        while let Ok(sig) = rx.try_recv() {
+            match sig {
+                Signal::Event(event) => match event.kind {
+                    Kind::UserPromptEcho(text) => {
+                        assert_eq!(text, "hello");
+                        kinds.push("prompt");
+                    }
+                    Kind::SubagentDone { name, .. } => {
+                        assert_eq!(name, "helper");
+                        kinds.push("subagent");
+                    }
+                    _ => {}
+                },
+                Signal::Fact(_, fact) => match fact.value() {
+                    Record::Display(Display::Prompt { text }) => {
+                        assert_eq!(text, "hello");
+                        facts.push("prompt");
+                    }
+                    Record::Display(Display::SubagentDone {
+                        name,
+                        error,
+                        elapsed_ms,
+                        ..
+                    }) => {
+                        assert_eq!(name, "helper");
+                        assert_eq!(error.as_deref(), Some("boom"));
+                        assert_eq!(*elapsed_ms, 1500);
+                        facts.push("subagent");
+                    }
+                    _ => {}
+                },
+                Signal::Transient(..) => {}
+            }
+        }
+        assert_eq!(kinds, ["prompt", "subagent"], "both legacy kinds still emit");
+        assert_eq!(facts, ["prompt", "subagent"], "both commits reach the seam");
+    }
 
     /// The park verdict reads engagement from the registry, never from the
     /// TUI's focus cursor.
