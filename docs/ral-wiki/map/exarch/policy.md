@@ -25,7 +25,11 @@ widens the ceiling, then any number of commuting meets attenuate from it**:
 - adds each restrict file's path to `fs.deny_paths` (below);
 - lints the composed ceiling for confused-deputy prefixes
   (`lint_deputy_prefixes` over `ral_core::capability::deputy_prefixes`) — a
-  warning, never a denial, judged after every join and meet has run.
+  warning, never a denial, judged after every join and meet has run. It fires
+  on every bake-in: `reasonable` alone flags `cwd:`, `/tmp`, and `tempdir:`,
+  all three deliberate, since in-projection overlap escalates nothing
+  ([[design/grant|grant]] §Concessions). The predicate is thus not the one that
+  matters, and the lint's standing is open.
 
 Every profile is *frozen* as it loads — resolving each `~` / `xdg:` / `cwd:` /
 `tempdir:` / `gitdir:` / `system:` sigil against the session's home, working

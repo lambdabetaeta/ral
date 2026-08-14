@@ -111,9 +111,9 @@ impl CommandIdentity {
     ///
     /// A *copy* of `bash` under another name is beyond any of this: it is a
     /// different file, and no resolution recovers the name that was denied.
-    /// A name veto narrows the allow set; it is not a containment boundary,
-    /// and the one that holds there is keeping an exec-admitted directory
-    /// unwritable — the property `crate::capability::deputy` reports on.
+    /// A name veto narrows the allow set; it is not a containment boundary.
+    /// The one that holds there is the projection the copy inherits — spawned
+    /// under its author's confinement, it reaches nothing new.
     ///
     /// It takes the narrow set rather than rebuilding it because both callers,
     /// `capability::admits_head` and `super::vet`, need both, and the PATH
@@ -471,9 +471,9 @@ mod tests {
 
     /// Where the scheme stops, pinned rather than left to be rediscovered: a
     /// *copy* is a different file, holding no trace of the name that was
-    /// denied, and an allow dir admits it.  No resolution can close this — the
-    /// boundary that does is keeping an exec-admitted directory unwritable,
-    /// the property `crate::capability::deputy` reports.
+    /// denied, and an allow dir admits it.  No resolution can close this, and
+    /// nothing needs to: the copy runs under the projection that admitted the
+    /// write, so it reaches nothing its author could not.
     #[test]
     fn a_copy_under_a_new_name_is_a_different_file_and_is_admitted() {
         use crate::path::NormalizedPrefix;

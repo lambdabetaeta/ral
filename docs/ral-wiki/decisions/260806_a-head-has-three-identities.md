@@ -4,6 +4,18 @@ status: active
 
 # A head has three identities, and a veto reads all three
 
+> **Amended 2026-08-14.** "The limit, stated plainly" names the wrong boundary.
+> The boundary that holds against a copied binary is the **projection**, not
+> the confused-deputy property: the copy is spawned under the same confinement
+> as the process that made it, so it reaches nothing new. An exec-admitted
+> directory need not be unwritable, and in every shipped bake-in it is not —
+> `reasonable` flags `cwd:`, `/tmp`, and `tempdir:` — because `cargo build &&
+> ./target/debug/app` is that shape and the product requires it. The predicate
+> that does bite is authority which outlives or exceeds the projection; see
+> [[design/grant|grant]] §Concessions, which also names the class neither
+> dimension reaches — writes an unconfined host process later interprets as
+> code.
+
 **A command head is two spellings and a file: `shown`, `resolved`, and the
 path they canonicalise to. Admission reads the spellings alone; every veto —
 literal `deny`, `deny_dirs` — reads all three.** So a symlink cannot wear an

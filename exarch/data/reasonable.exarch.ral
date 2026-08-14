@@ -51,9 +51,12 @@ return [
   # data files, and binaries — but only `xdg:cache` is writable.
   # Two reasons for the asymmetry:
   #
-  #   * `xdg:bin/` in `exec` admits any resolved path under it. Write
-  #     access there would let a sandboxed process drop a binary the
-  #     next call auto-admits — a sandbox escape via filesystem.
+  #   * `xdg:bin` is on the human's `$PATH`. A program dropped there
+  #     outlives the session and is run tomorrow by the user, with the
+  #     user's authority — not this projection's. (That the `exec`
+  #     `xdg:bin/` entry would also admit it next call is beside the
+  #     point: in-projection overlap escalates nothing, which is why
+  #     `cwd:`, `/tmp`, and `tempdir:` are freely both.)
   #
   #   * `xdg:config` holds credentials for many tools (gh, op,
   #     gcloud OAuth tokens, …).  Read is accepted as a
@@ -118,12 +121,17 @@ return [
     # at session entry by exarch's runtime, so `cargo build` and friends
     # work without the agent having to know any redirection protocol.
     #
-    # `xdg:config`, `xdg:data`, `xdg:state`, `xdg:bin` stay non-writable:
-    # tool configs (gitconfig, npmrc) shouldn't be silently rewritten;
-    # persistent state (browser data, history) shouldn't be corrupted;
-    # and write-to-`xdg:bin` would let an agent drop a binary the next
-    # call auto-admits via the `exec` `xdg:bin/` subpath — sandbox
-    # escape via filesystem.
+    # `xdg:config`, `xdg:data`, `xdg:state`, `xdg:bin` stay non-writable
+    # for one reason in three dresses: each is read later by something
+    # this projection does not confine.  A program under `xdg:bin` is run
+    # tomorrow by the user off their own `$PATH`; a rewritten gitconfig or
+    # npmrc is obeyed by the user's own git and npm (`core.pager` is a
+    # command); persistent state is trusted by whatever wrote it.
+    #
+    # The writable set below is not free of that hazard — `cwd:` and
+    # `gitdir:` hold hooks, `.envrc`, `package.json` scripts, Makefiles,
+    # all of which the user's unconfined tooling executes on sight.  No
+    # capability names that class today; see the wiki's `design/grant`.
     write: [
       'cwd:',
       '/tmp',

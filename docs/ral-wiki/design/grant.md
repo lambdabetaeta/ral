@@ -88,9 +88,46 @@ run evaluates under a profile's capabilities pushed onto this same stack.
 - **TOCTOU on path resolution.** The resolver-form and bind-form checks share one
   source, so the OS profile and the in-process check cannot disagree, but symlink
   races inside the admitted set are a known surface, not a closed one.
-- **Confused deputy at the name layer.** A prefix that is both `exec`-admitted and
-  `fs`-writable is an escape hatch — drop a binary, the next call admits it — so the
-  invariant *no prefix is both* is a candidate load-time check.
+- **Exec admission is not containment; the projection is.** A prefix that is
+  both `exec`-admitted and `fs`-writable reads like an escape hatch — drop a
+  binary, the next call admits it — but inside one projection it escalates
+  nothing: whatever the confined process writes and then runs is spawned under
+  the very projection that admitted the write, so it can do only what its
+  author could already do. Copying a denied binary under a fresh name defeats
+  the name veto for the same reason and to the same small effect. The overlap
+  is therefore not merely tolerable but *required* — `cargo build &&
+  ./target/debug/app` is exactly this shape, and every bake-in profile makes
+  `cwd:`, `/tmp`, and `tempdir:` both writable and exec-admitted on purpose.
+  `capability::deputy_prefixes` accordingly reports and never denies, and *no
+  prefix is both* is not an invariant this design wants.
+
+  What does bite is **authority that outlives or exceeds the projection**: a
+  write escalates when whoever later treats those bytes as code is not confined
+  by the projection that admitted the write — running after the session ends
+  (*outlives*) or beside it with more authority (*exceeds*). `xdg:bin` is the
+  case the base profiles decide correctly for the wrong stated reason. It must
+  stay unwritable not because `exec` also names it, but because a program left
+  on the human's `$PATH` is run tomorrow by the human, unconfined.
+
+**An open class: the unconfined reader.** Every dimension `grant` gates names
+what the *confined* process may do. One family of escalations has no such
+shape: a write into a region that some process the host runs later —
+unconfined — treats as code. A hook under `gitdir:`, a `core.pager` or an alias
+in `.git/config`, an `.envrc`, a `package.json` script, a `Makefile`. None is a
+binary, none is exec-admitted, and each runs with the user's full authority the
+moment the user reaches for the ordinary tool that reads it. The `exec`
+dimension cannot see this: a file that is never executed, only interpreted, is
+invisible to a gate on execution. The default profiles make `cwd:` and
+`gitdir:` writable, so the class is live rather than hypothetical.
+
+Nothing in this vocabulary expresses it, because the question is not what the
+confined process may do but what an unconfined one does afterwards with what
+the confined one wrote. Perimeter sandboxes do not answer it either: `nono` and
+its kin draw the boundary at the confined process, which puts the later reader
+outside by construction. The only lever available today is an `fs` deny on the
+particular files, a defence at the name layer with the name layer's limits.
+Naming the class as open is worth more than pretending the `exec` dimension
+covers it.
 
 See also [[design/syscalls-are-effects|syscalls-are-effects]] (a capability is permission over the effect set),
 [[design/scoping|scoping]], [[design/control-operators|control-operators]],

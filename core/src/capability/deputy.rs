@@ -1,10 +1,13 @@
-//! The confused-deputy verdict: a prefix that is both `exec`-admitted
-//! and `fs`-writable is an escape hatch — drop a binary there and the
-//! next call admits it.
+//! The confused-deputy verdict: the prefixes a grant makes both
+//! `exec`-admitted and `fs`-writable, where a binary dropped now is
+//! admitted on the next call.
 //!
-//! It reports; it does not deny — `cargo build && ./target/debug/app`
-//! *is* this shape, so a finding names a property worth surfacing, not
-//! a policy to reject.  Callers must fold first: an exec-granting base
+//! Within one projection that is no escalation — the dropped binary is
+//! spawned under the same confinement as the process that wrote it — and
+//! `cargo build && ./target/debug/app` requires the shape, so this
+//! reports and never denies.  What a finding locates is where a write
+//! becomes runnable; only a runner outside the projection turns that into
+//! an escape.  Callers must fold first: an exec-granting base
 //! and a write-granting overlay are each innocent alone, and only their
 //! meet is a deputy.
 

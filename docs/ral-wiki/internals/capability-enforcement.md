@@ -65,10 +65,13 @@ containment boundary.** A *copy* of a denied binary under another name is a
 different file, carrying no trace of the name refused, and an allow dir admits
 it — on the gate and, since Seatbelt's `(deny process-exec (regex #"/bash$"))`
 also sees only the new name, in the macOS profile too. What holds there is the
-confused-deputy property: an exec-admitted directory must not be writable
-(`capability/deputy.rs`), which is reported only when a grant restricts *both*
-dimensions, since an unrestricted `fs` is not "everything writable"
-([[decisions/260806_a-head-has-three-identities|a-head-has-three-identities]]).
+projection, not the name: the copy is spawned under the same confinement as its
+author, so it reaches nothing new. `capability/deputy.rs` reports the writable
+exec-admitted prefixes that make such a copy runnable — only where a grant
+restricts *both* dimensions, since an unrestricted `fs` is not "everything
+writable" — but it reports rather than denies, and the overlap is not itself an
+escalation ([[design/grant|grant]] §Concessions,
+[[decisions/260806_a-head-has-three-identities|a-head-has-three-identities]]).
 
 **The in-process gate covers what ral dispatches; the OS sandbox covers what a
 spawned process does on its own.**
