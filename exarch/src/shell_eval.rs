@@ -12,7 +12,6 @@ pub(crate) mod report;
 pub mod skill;
 pub mod tools;
 
-use crate::agent::transcript::Transcript;
 use crate::bus::card::{
     done_card, observation_card, rail_place, value_to_card, value_to_done, value_to_pin,
 };
@@ -242,10 +241,11 @@ struct InboxDeferred {
     generation: u64,
     /// `deliver` runs on the worker's own completion, with no caller to return
     /// a `Result` to, so recording here is how a dropped batch stays visible.
-    /// A `Transcript` and not an `Emitter`: this sink outlives the run, and an
-    /// `Emitter`'s live bus sender held that long is the daemon-task-hang shape
-    /// `drain_pass` guards against.
-    transcript: Transcript,
+    /// A record-seam handle rather than a bus `Emitter`: this sink outlives
+    /// the run, and an `Emitter`'s live bus sender held that long is the
+    /// daemon-task-hang shape `drain_pass` guards against; the seam's own
+    /// handle is a cheap, long-lived `Arc` with no channel to leak.
+    recorder: crate::record::Emitter,
 }
 
 impl DeferredSink for InboxDeferred {
@@ -258,12 +258,9 @@ impl DeferredSink for InboxDeferred {
             values,
             generation: self.generation,
         }) {
-            self.transcript.record(
-                self.root,
-                &Kind::Error(format!(
-                    "a spawn worker's surfaced batch was dropped: {reject}"
-                )),
-            );
+            self.recorder.transient(crate::record::Transient::Fault {
+                text: format!("a spawn worker's surfaced batch was dropped: {reject}"),
+            });
         }
     }
 }
@@ -275,12 +272,13 @@ pub fn deferred_sink(
     emit: &Emitter,
     root: AgentId,
     registry: &AgentRegistry,
+    recorder: crate::record::Emitter,
 ) -> Arc<dyn DeferredSink> {
     Arc::new(InboxDeferred {
         mailbox: emit.mailbox(),
         root,
         generation: registry.generation(),
-        transcript: emit.transcript(),
+        recorder,
     })
 }
 
@@ -1273,7 +1271,7 @@ keep-bottom
         let inbox = Inbox::new();
         let (tx, _rx) = channel();
         let emit = Emitter::with_mailbox(tx, 7, inbox.mailbox());
-        let deferred = deferred_sink(&emit, 7, &registry);
+        let deferred = deferred_sink(&emit, 7, &registry, crate::record::Emitter::none());
         let born = registry.generation();
 
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
@@ -2218,45 +2216,6 @@ return !{{length $hits}}"
             observations(&use_kinds).is_empty(),
             "use is code loading too — no io card, got {:?}",
             observations(&use_kinds)
-        );
-    }
-
-    /// `transcript::event_record` is the *operational* view: it keeps the raw
-    /// structural fact the rendered card erases, and drops the card itself,
-    /// which is a presentation and belongs to the TUI's `user.log`.
-    #[test]
-    fn observation_record_carries_structural_event_not_card() {
-        use ral_core::syntax::ast::RedirectMode;
-        use ral_core::types::WriteOutcome;
-        let obs = Observation::instant(
-            CallSite {
-                script: "t.ral".into(),
-                line: 1,
-                col: 1,
-            },
-            "alex".into(),
-            Observed::Write {
-                path: "b.rs".into(),
-                mode: RedirectMode::Append,
-                outcome: WriteOutcome::Committed,
-                new_bytes: None,
-                old_bytes: None,
-            },
-        );
-        let card = observation_card(&obs.what);
-        let kind = Kind::Io { event: obs, card };
-        let rec =
-            crate::agent::transcript::event_record(7, 3, &kind).expect("an observation records");
-
-        assert_eq!(rec["kind"], "io", "the record is tagged io");
-        // The mode/outcome enums cross as snake_case strings.
-        assert_eq!(rec["event"]["kind"], "write");
-        assert_eq!(rec["event"]["path"], "b.rs");
-        assert_eq!(rec["event"]["mode"], "append");
-        assert_eq!(rec["event"]["outcome"], "committed");
-        assert!(
-            rec.get("card").is_none(),
-            "the operational trace drops the rendered card, got {rec:?}"
         );
     }
 

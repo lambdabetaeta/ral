@@ -215,12 +215,13 @@ source, the event ledger's logical length and history bytes, log-dir and scratch
 disk walked at invocation, and the sub-agent idle lease as two rows (nearest
 time-to-reap, and the demote threshold) — and
 `emit_resources` posts one `Kind::Resources`
-carrying the raw rows beside their rendered card — the `Kind::Io` pairing,
-so `transcript.jsonl` records the figures. The frontend appends the rows
-for the accumulators *it* owns (viewports, views, the bus) at render time;
-neither half reaches across a thread. Probing never mutates and never
-renews a lease — enumeration is not observation — and the fold is never
-model-facing.
+carrying the raw rows beside their rendered card — the `Kind::Io` pairing.
+A probe fold is an interactive diagnostic, read when it is run: no session
+keeps a pressure history, so the figures live only in this emission, never
+in `record.jsonl`. The frontend appends the rows for the accumulators *it*
+owns (viewports, views, the bus) at render time; neither half reaches
+across a thread. Probing never mutates and never renews a lease —
+enumeration is not observation — and the fold is never model-facing.
 
 The inbox's per-source depth is a real quota now, not just a probe figure.
 `Mailbox`/`Inbox::push` return
@@ -238,8 +239,8 @@ producer surfaces the rejection to its own caller: `AgentRegistry::message`
 returns `MessageError::RecipientInboxFull` (the `message` builtin reports it),
 a rejected slash command reports through the UI's error line, and a
 rejected `spawn` completion or surfaced batch — which has no synchronous
-caller left to return to — records straight to the durable
-`transcript.jsonl` instead of the live bus, so holding the rejection report
+caller left to return to — records straight through the record seam as a
+`Transient::Fault` instead of the live bus, so holding the rejection report
 never extends a bus sender's lifetime past the run that queued it.
 
 The headless-completion gate is gone with `expect_action`: the one role flag
@@ -377,10 +378,9 @@ fresh shell from `boot_root_shell` (`agent/seat.rs`, the cwd- and
 scratch-seeding wrapper over `bootstrap::boot_shell`) onto the *same*
 interrupt target; a wire session instead clears by killing its engine
 process and booting a fresh one from the same recipe, so no caller routes
-`/clear` to that seat. The identity seat rotates `record.jsonl` and
-`transcript.jsonl` together to the same first-free `.n`, with one wall-clock
-stamp as their join key, then starts a fresh record ledger; it never truncates
-the old record. The record rename is the rotation commit point. Clear also
+`/clear` to that seat. The identity seat rotates `record.jsonl` to the
+first-free `.n`, then starts a fresh record ledger; it never truncates the
+old record. The record rename is the rotation commit point. Clear also
 clears the schedule registry and cascades cancel to its subtree. Replacing the
 transport drops the outgoing shell, whose `LocalState` teardown cancels
 every worker still registered on it — explicit destruction outranks every

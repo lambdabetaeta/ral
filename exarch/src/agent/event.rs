@@ -4,8 +4,7 @@
 //!
 //! Every query below reads `model_memo`; nothing here keeps a second copy.
 //! `tui::viewport` folds the same log's `Display`/`Forensic` classes into the
-//! rendered `user.log`; `agent::transcript` still keeps its own operational
-//! trace, fed at the bus emit seam rather than this one.
+//! rendered `user.log`.
 
 use crate::bus::AgentId;
 use crate::provider::{ProviderError, Tuning, Usage};
@@ -272,7 +271,6 @@ pub struct CompactionPlan {
 }
 
 pub(crate) struct ClearRecord {
-    pub(crate) rotation: Option<u64>,
     pub(crate) rotation_error: Option<io::Error>,
 }
 
@@ -739,20 +737,16 @@ impl AgentLog {
         &mut self,
         system_prompt_bytes: usize,
         at_unix_ms: u64,
-        transcript_path: &Path,
     ) -> io::Result<ClearRecord> {
         if !self.durable {
             self.model_memo = Memo::default();
             self.seam = crate::record::Emitter::none();
             self.record_started_lossy(None, system_prompt_bytes, at_unix_ms);
-            return Ok(ClearRecord {
-                rotation: None,
-                rotation_error: None,
-            });
+            return Ok(ClearRecord { rotation_error: None });
         }
 
         let record_path = self.dir.join("record.jsonl");
-        let rotation = match first_free_rotation(&record_path, transcript_path) {
+        let rotation = match first_free_rotation(&record_path) {
             Ok(n) => n,
             Err(error) => {
                 return Err(io::Error::other(format!(
@@ -766,7 +760,6 @@ impl AgentLog {
         let started = self.started_event(None, system_prompt_bytes, at_unix_ms);
         let seam_error = self.record_protocol(started).err();
         Ok(ClearRecord {
-            rotation: Some(rotation),
             rotation_error: join_errors([rotation_error, seam_error]),
         })
     }
@@ -999,17 +992,11 @@ fn join_errors<const N: usize>(errors: [Option<io::Error>; N]) -> Option<io::Err
     ))
 }
 
-/// The next rotation number free for both `record.jsonl` and
-/// `transcript.jsonl`'s own `.N` sidecar — kept paired since both files
-/// rotate together on every `/clear`, even though `transcript.jsonl`'s own
-/// writer lives in `agent::transcript`, fed at the bus emit seam.
-fn first_free_rotation(record: &Path, transcript: &Path) -> io::Result<u64> {
+/// The next rotation number free for `record.jsonl`'s own `.N` sidecar.
+fn first_free_rotation(record: &Path) -> io::Result<u64> {
     let mut n = 0;
     loop {
-        let free = [record, transcript]
-            .iter()
-            .all(|path| !rotation_path(path, n).exists());
-        if free {
+        if !rotation_path(record, n).exists() {
             return Ok(n);
         }
         n = n
@@ -1439,9 +1426,7 @@ mod tests {
             .unwrap();
 
         let record = s.dir().join("record.jsonl");
-        let transcript = s.dir().join("transcript.jsonl");
-        let result = s.clear(0, 2, &transcript).expect("clear");
-        assert_eq!(result.rotation, Some(0));
+        s.clear(0, 2).expect("clear");
         assert!(record.with_extension("jsonl.0").exists());
         assert!(s.view().spans.is_empty());
         assert!(s.is_ready());
@@ -1761,6 +1746,5 @@ mod tests {
         let log = AgentLog::root_without_logs(sessions.path(), 0, "model", "provider", 0).unwrap();
         assert!(!log.is_durable());
         assert!(!log.dir().join("record.jsonl").exists());
-        assert!(!log.dir().join("transcript.jsonl").exists());
     }
 }

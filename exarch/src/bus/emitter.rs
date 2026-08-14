@@ -5,15 +5,14 @@ use super::AgentId;
 use super::channel::{BusReceiver, BusSender, channel};
 use super::event::{Event, Kind};
 use super::inbox::{Inbox, Mailbox};
-use crate::agent::transcript::Transcript;
 use crate::provider::Usage;
 use crate::sync::LockExt;
 use std::sync::{Arc, Mutex};
 
 /// A usage accumulator shared by every emitter of one run — where a
-/// [`Transcript`] is per-session, this is per-run.  Usage tees here at the emit
-/// seam, so a display-muted child whose events reach no sink still counts
-/// toward the total.
+/// session's record log is per-session, this is per-run.  Usage tees here at
+/// the emit seam, so a display-muted child whose events reach no sink still
+/// counts toward the total.
 #[derive(Clone, Default)]
 pub(crate) struct UsageMeter(Arc<Mutex<Usage>>);
 
@@ -29,7 +28,7 @@ impl UsageMeter {
 
 /// Whether a detached async `agent` child cloning this emitter gets a live
 /// tab or streams nowhere.  Display only: a [`Children::Muted`] child still
-/// records through its own [`Transcript`] and still meters.
+/// records through its own record seam and still meters.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Children {
     Muted,
@@ -44,65 +43,58 @@ pub struct Emitter {
     /// own for a child.  Never another agent's.
     mailbox: Mailbox,
     children: Children,
-    transcript: Transcript,
     meter: UsageMeter,
 }
 
 impl Emitter {
-    /// An emitter with an orphan mailbox and no transcript — for tests, whose
-    /// events land nowhere durable.
+    /// An emitter with an orphan mailbox — for tests, whose events land
+    /// nowhere durable.
     pub fn new(tx: BusSender, id: AgentId) -> Self {
         Self::with_mailbox(tx, id, Inbox::new().mailbox())
     }
 
-    /// [`Self::new`] over a caller-supplied mailbox; still transcript-less.
+    /// [`Self::new`] over a caller-supplied mailbox.
     pub(crate) fn with_mailbox(tx: BusSender, id: AgentId, mailbox: Mailbox) -> Self {
         Self {
             tx,
             id,
             mailbox,
             children: Children::Muted,
-            transcript: Transcript::none(),
             meter: UsageMeter::default(),
         }
     }
 
     /// A child emitter onto a channel whose receiver is already dropped, so it
-    /// streams nowhere, but carrying a live [`Transcript`] and the parent run's
-    /// meter.  What an async `agent` child takes off a bus whose children are
-    /// [`Children::Muted`].
-    pub(crate) fn muted_child(&self, id: AgentId, transcript: Transcript) -> Self {
+    /// streams nowhere, but carrying the parent run's meter.  What an async
+    /// `agent` child takes off a bus whose children are [`Children::Muted`].
+    pub(crate) fn muted_child(&self, id: AgentId) -> Self {
         let (tx, _rx) = channel();
         Self {
             tx,
             id,
             mailbox: Inbox::new().mailbox(),
             children: Children::Muted,
-            transcript,
             meter: self.meter.clone(),
         }
     }
 
     /// A sibling emitter on the same channel for a child session: the child's
-    /// own mailbox and trace, never the parent's, but the shared run meter.
-    pub(crate) fn child(&self, id: AgentId, mailbox: Mailbox, transcript: Transcript) -> Self {
+    /// own mailbox, never the parent's, but the shared run meter.
+    pub(crate) fn child(&self, id: AgentId, mailbox: Mailbox) -> Self {
         Self {
             tx: self.tx.clone(),
             id,
             mailbox,
             children: self.children,
-            transcript,
             meter: self.meter.clone(),
         }
     }
 
-    /// Record, *then* send — in that order, so the trace never depends on a
-    /// live receiver ([`Self::muted_child`]'s point).  Usage no longer meters
-    /// here: it rides the record seam ([`Self::fleet_sink`] hands the meter
-    /// to the session's log), so accounting follows the fact whether or not
-    /// any legacy `Kind` is ever derived from it.
+    /// Usage no longer meters here: it rides the record seam
+    /// ([`Self::fleet_sink`] hands the meter to the session's log), so
+    /// accounting follows the fact whether or not any legacy `Kind` is ever
+    /// derived from it.
     pub(crate) fn emit(&self, kind: Kind) {
-        self.transcript.record(self.id, &kind);
         let _ = self.tx.send(Event { id: self.id, kind });
     }
 
@@ -129,13 +121,6 @@ impl Emitter {
     /// [`Self::child`] and [`Self::muted_child`].
     pub(crate) fn spawns_live_children(&self) -> bool {
         self.children == Children::Live
-    }
-
-    /// The owning session's trace, likewise for `shell_eval::deferred_sink`: a
-    /// deferred batch lands after the exchange, so it records through a durable
-    /// file handle rather than a bus channel end.
-    pub(crate) fn transcript(&self) -> Transcript {
-        self.transcript.clone()
     }
 }
 
@@ -188,13 +173,12 @@ impl FleetBus {
 
     /// The root emitter for this bus; children derive from it with
     /// [`Emitter::child`] / [`Emitter::muted_child`] and inherit the meter.
-    pub(crate) fn emitter(&self, id: AgentId, transcript: Transcript) -> Emitter {
+    pub(crate) fn emitter(&self, id: AgentId) -> Emitter {
         Emitter {
             tx: self.tx.clone(),
             id,
             mailbox: self.mailbox.clone(),
             children: self.children,
-            transcript,
             meter: self.meter.clone(),
         }
     }
@@ -213,7 +197,7 @@ pub(crate) fn dummy_emitter() -> (Emitter, BusReceiver) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FleetBus, Inbox, Transcript};
+    use super::{FleetBus, Inbox};
 
     /// Accounting follows the fact through the record seam, not its emitter:
     /// no sink ever sees the muted child's usage, yet the run total includes
@@ -238,8 +222,8 @@ mod tests {
         };
 
         let bus = FleetBus::per_exchange(&Inbox::new());
-        let root = bus.emitter(0, Transcript::none());
-        let child = root.muted_child(1, Transcript::none());
+        let root = bus.emitter(0);
+        let child = root.muted_child(1);
 
         let root_seam = Recorder::none();
         root_seam.attach(root.fleet_sink());

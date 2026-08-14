@@ -28,7 +28,6 @@ pub(crate) mod seat;
 mod shell;
 #[cfg(test)]
 pub(crate) mod testkit;
-pub mod transcript;
 
 pub(crate) use attend::quiesce_when_childless;
 pub use attend::{Control, NoControl, Verdict};
@@ -40,7 +39,6 @@ pub(crate) use shell::{LogCell, ReplyCell};
 
 use crate::agent::digest::{AGENT_REPLY_CAP, clip};
 use crate::agent::seat::Seat;
-use crate::agent::transcript::Transcript;
 use crate::bus::{AgentId, Inbox, Mailbox};
 use crate::fleet::hatch::PendingHatches;
 use crate::fleet::registry::AgentRegistry;
@@ -69,9 +67,6 @@ pub struct Agent {
     /// [`LogCell::lock`] panics on contention rather than blocking — the desk
     /// runs only while the attend thread is parked in `run_shell`.
     log: LogCell,
-    /// The operational trace (`transcript.jsonl`): what the agent did, where
-    /// [`Self::log`] is what the model saw.
-    transcript: Transcript,
     _run_lock: Option<crate::bootstrap::RunLock>,
     resume_summary: Option<(u64, u64)>,
     /// Every engine-side reach goes through this seat's methods.
@@ -246,11 +241,6 @@ impl Agent {
     /// siblings sit directly inside.
     pub fn log_dir(&self) -> std::path::PathBuf {
         self.log.lock().dir().to_path_buf()
-    }
-
-    /// For the frontend's emitter, and for a forked child's own trace.
-    pub(crate) fn transcript(&self) -> Transcript {
-        self.transcript.clone()
     }
 
     pub(crate) fn is_resumed(&self) -> bool {

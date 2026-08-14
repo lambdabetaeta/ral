@@ -7,7 +7,6 @@
 //! and the TUI's `ui_loop` in `tui/tui_loop.rs` drive it, so they cannot drift.
 
 use super::{AgentId, BusReceiver, Emitter, Event, FleetBus, Kind, WORKER_PANIC_PREFIX};
-use crate::agent::transcript::Transcript;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
@@ -115,7 +114,6 @@ pub(crate) fn pump<S, R>(
     sink: &mut S,
     bus: &FleetBus,
     root_id: AgentId,
-    transcript: Transcript,
     work: impl Send + FnOnce(&Emitter) -> R,
 ) -> io::Result<Option<R>>
 where
@@ -126,7 +124,7 @@ where
     // outlives the spawned thread's `'env`.
     let done = AtomicBool::new(false);
     let done_ref = &done;
-    let emit = bus.emitter(root_id, transcript);
+    let emit = bus.emitter(root_id);
     std::thread::scope(|s| -> io::Result<Option<R>> {
         let h = s.spawn(move || {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&emit)));
@@ -147,7 +145,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::{Pass, Sink, drain_pass, pump};
-    use crate::agent::transcript::Transcript;
     use crate::bus::{Emitter, Event, FleetBus, Inbox, Kind, channel};
     use crate::provider::Tuning;
     use std::sync::Mutex;
@@ -282,7 +279,7 @@ mod tests {
         let holder: Mutex<Option<Emitter>> = Mutex::new(None);
 
         let t0 = Instant::now();
-        let r = pump(&mut sink, &bus, 0, Transcript::none(), |emit| {
+        let r = pump(&mut sink, &bus, 0, |emit| {
             *holder.lock().unwrap() = Some(emit.clone());
             emit.emit(Kind::Step {
                 n: 1,

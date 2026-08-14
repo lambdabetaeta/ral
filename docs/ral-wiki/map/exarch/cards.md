@@ -11,8 +11,8 @@ stack of Bertin *marks* a kit composes entirely in ral. exarch decodes it once
 into a closed Rust model and draws it through one generic interpreter. The *set
 of cards* is open (compose marks, zero Rust per card — a surfaced file write, a
 build summary, a test matrix, anything); the *set of marks* stays closed and
-small, so the renderer is total and width-reflow, click-to-disclose, patch
-aggregation, and the structured `transcript.jsonl` log all keep working. This is
+small, so the renderer is total and width-reflow, click-to-disclose, and patch
+aggregation all keep working. This is
 the [[decisions/260618_tui-transcript-as-graphic|transcript-as-graphic]]
 discipline extended from the frontend's own chrome to the kit's *content*: the
 kit declares **data and its level of measurement**, never appearance; exarch
@@ -99,8 +99,8 @@ the host-authored protected `services` pin ([[map/exarch/agent|agent]]).
 
 A notice's raw facts ride beside its rendered card on the bus's
 `Kind::Notice`, the same pairing `Kind::Io` uses for a structural I/O event:
-the raw fact reaches `transcript.jsonl`, the card is a rendering and does not
-([[map/exarch/agent|agent]]).
+the raw fact reaches the record log as a `Display`/`Forensic` commit, the
+card is a rendering and does not ([[map/exarch/agent|agent]]).
 
 ## Render — one interpreter, one binding table
 
@@ -145,10 +145,12 @@ via `push_observation_card`, a write card via `push_write_card`.
 
 ## Machine log
 
-`agent/transcript.rs` (the session-owned recorder, fed at the emit seam) serialises a
-card to a structured mark tree in `transcript.jsonl` (one `card` arm, the whole
-tree via serde); only a `raw` mark is opaque, and honestly so. The headless
-stderr condenser (`card_stderr`, `headless.rs`) walks marks generically.
+There is no independent operational trace any more: `record.jsonl`, written
+through `record::Emitter` at the seam, is the one durable log, and its
+`Display`/`Forensic` commits carry the structured facts a card renders from
+— never the rendered card itself, which the view fold rebuilds on resume. The
+headless stderr condenser (`card_stderr`, `headless.rs`) walks marks
+generically off the live bus.
 
 ## Kit side
 

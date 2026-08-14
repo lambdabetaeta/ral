@@ -192,10 +192,10 @@ pub fn run(
     // The worker crosses the thread boundary with an emitter, not the bus:
     // `FleetBus` holds a single-consumer `Receiver` and so is not `Sync`, while
     // an `Emitter` is `Send` and is all the worker needs.
-    let worker_emit = fleet.bus.emitter(session.id, session.transcript());
-    // The UI thread's own emitter, carrying the same transcript, so a UI-caused
-    // event (a `/model` switch) is recorded and drawn like any worker note.
-    let ui_emit = fleet.bus.emitter(session.id, session.transcript());
+    let worker_emit = fleet.bus.emitter(session.id);
+    // The UI thread's own emitter, so a UI-caused event (a `/model` switch) is
+    // recorded and drawn like any worker note.
+    let ui_emit = fleet.bus.emitter(session.id);
     if let Some((exchanges, bytes)) = session.resume_summary() {
         // Fold the record log into the fold's memo *before* the note below,
         // so the note is the boundary the plan names: everything ahead of it
@@ -530,10 +530,6 @@ mod tests {
                     "the registry chapter is surveyed"
                 );
                 assert_eq!(card.marks().len(), 2, "a heading and one matrix");
-                let rec = crate::agent::transcript::event_record(0, session.id, &event.kind)
-                    .expect("a resources event must reach the transcript");
-                assert_eq!(rec["kind"], "resources");
-                assert!(rec["rows"].is_array());
             }
             _ => panic!("expected Kind::Resources"),
         }

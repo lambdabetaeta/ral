@@ -4,6 +4,13 @@ status: accepted
 
 # Recording follows the event, not its emitter
 
+**Amended by `dev/docs/plans/260814_kind_dissolves.md`**: `transcript.jsonl`,
+the second record this page mints, is deleted outright rather than folded —
+its one genuinely unique field, a per-line clock, becomes `record.jsonl`'s
+own `Entry.at_unix_ms`. The "recording follows the event, not its emitter"
+law itself survives unchanged; only the two-record mechanism below is
+superseded, by `record::Emitter::emit` alone.
+
 **What lands in a durable log must be decided by *what an event is*, not by *which
 thread happened to emit it*.** A session owns two records — `events.jsonl`, the
 append-only log whose fold is the model view, and `transcript.jsonl`, the

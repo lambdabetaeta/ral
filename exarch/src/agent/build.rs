@@ -7,7 +7,6 @@ use crate::agent::event::{AgentLog, ContextOp, EditAuthority};
 use crate::agent::hatchery::Hatchery;
 use crate::agent::seat::{self, Seat};
 use crate::agent::shell::LogCell;
-use crate::agent::transcript::Transcript;
 use crate::agent::{Agent, ProviderHandle, SPAWN_FUEL, cancel, nudge};
 use crate::bootstrap::Scratch;
 use crate::bus::{AgentId, Emitter, Inbox};
@@ -73,7 +72,6 @@ pub(crate) struct Build {
     pub(crate) log: AgentLog,
     pub(crate) run_lock: Option<crate::bootstrap::RunLock>,
     pub(crate) resume_summary: Option<(u64, u64)>,
-    pub(crate) resumed_at_unix_ms: Option<u64>,
     pub(crate) parent: Option<AgentId>,
     pub(crate) fuel: u32,
     pub(crate) provider: ProviderHandle,
@@ -157,7 +155,7 @@ pub enum RootSeat {
 }
 
 impl Agent {
-    pub(crate) fn assemble(b: Build) -> io::Result<Self> {
+    pub(crate) fn assemble(b: Build) -> Self {
         let Build {
             system,
             system_prompt,
@@ -176,27 +174,17 @@ impl Agent {
             agents,
             run_lock,
             resume_summary,
-            resumed_at_unix_ms,
             disk_warn_bytes,
             egress,
             hatchery,
             pending_hatches,
         } = b;
-        let transcript_path = log.dir().join("transcript.jsonl");
-        let transcript = if let Some(at_unix_ms) = resumed_at_unix_ms {
-            Transcript::open_append(&transcript_path, at_unix_ms)?
-        } else if log.is_durable() {
-            Transcript::create(&transcript_path)?
-        } else {
-            Transcript::none()
-        };
-        Ok(Self {
+        Self {
             id: log.id(),
             system: system_prompt,
             system_base: system,
             index,
             log: LogCell::new(log),
-            transcript,
             _run_lock: run_lock,
             resume_summary,
             seat,
@@ -225,7 +213,7 @@ impl Agent {
             egress,
             hatchery,
             pending_hatches,
-        })
+        }
     }
 
     /// Register this agent under its `parent` (`None` for the trunk).  Only a
@@ -354,13 +342,13 @@ impl Agent {
                 None => Some(crate::bootstrap::RunLock::try_acquire(root_dir)?),
             }
         };
-        let (log, resume_summary, resumed_at_unix_ms) = if resume.is_some() {
+        let (log, resume_summary) = if resume.is_some() {
             seed_id_counter(&sessions_root)?;
             let mut log = AgentLog::resume(&sessions_root, 0)?;
             let summary = log.resumed_summary();
             let at_unix_ms = crate::bootstrap::now_unix_ms();
             log.record_resumed(&model, &provider_label, system_prompt.len(), at_unix_ms)?;
-            (log, Some(summary), Some(at_unix_ms))
+            (log, Some(summary))
         } else {
             let id = fresh_id();
             let log = if no_logs {
@@ -380,7 +368,7 @@ impl Agent {
                     system_prompt.len(),
                 )?
             };
-            (log, None, None)
+            (log, None)
         };
         let seat = match root_seat {
             RootSeat::Identity {
@@ -419,12 +407,11 @@ impl Agent {
             agents: AgentRegistry::new(),
             run_lock,
             resume_summary,
-            resumed_at_unix_ms,
             disk_warn_bytes,
             egress,
             hatchery,
             pending_hatches: PendingHatches::new(),
-        })?;
+        });
         if resume.is_some() {
             agent
                 .log
@@ -440,35 +427,8 @@ impl Agent {
 
     pub(crate) fn clear(&mut self) -> io::Result<()> {
         let at_unix_ms = crate::bootstrap::now_unix_ms();
-        let (transcript_path, record) = {
-            let mut log = self.log.lock();
-            let transcript_path = log.dir().join("transcript.jsonl");
-            let record = log.clear(self.system.len(), at_unix_ms, &transcript_path)?;
-            drop(log);
-            (transcript_path, record)
-        };
-        let mut error = record.rotation_error;
-        if let Some(rotation) = record.rotation
-            && let Err(transcript_error) =
-                self.transcript
-                    .rotate_at(&transcript_path, rotation, at_unix_ms)
-        {
-            let rotated_record = transcript_path.with_file_name(format!("record.jsonl.{rotation}"));
-            let rotated_transcript =
-                transcript_path.with_file_name(format!("transcript.jsonl.{rotation}"));
-            error = Some(match error {
-                Some(record_error) => io::Error::other(format!(
-                    "clear committed, but paired files {} and {} could not both be rotated: {record_error}; {transcript_error}",
-                    rotated_record.display(),
-                    rotated_transcript.display(),
-                )),
-                None => io::Error::other(format!(
-                    "clear committed, but paired files {} and {} could not both be rotated: the record log was moved, but the transcript failed: {transcript_error}",
-                    rotated_record.display(),
-                    rotated_transcript.display(),
-                )),
-            });
-        }
+        let record = self.log.lock().clear(self.system.len(), at_unix_ms)?;
+        let error = record.rotation_error;
         // Rebooting the seat drops the outgoing shell, whose teardown cancels
         // its registered workers — `/clear` outranks every lease.
         self.seat.clear(&self.log.lock());
@@ -545,7 +505,7 @@ impl Agent {
                 unreachable!("shell_mut already panicked above for a wire seat")
             }
         };
-        Self::assemble(Build {
+        Ok(Self::assemble(Build {
             system: self.system_base.clone(),
             system_prompt,
             index: self.index.clone(),
@@ -569,12 +529,11 @@ impl Agent {
             agents: self.agents.clone(),
             run_lock: None,
             resume_summary: None,
-            resumed_at_unix_ms: None,
             disk_warn_bytes: self.disk_warn_bytes,
             egress: self.egress.clone(),
             hatchery: self.hatchery.clone(),
             pending_hatches: self.pending_hatches.clone(),
-        })
+        }))
     }
 
     /// Fork a conversing child: the creator's context and capabilities
@@ -671,13 +630,12 @@ impl Agent {
             agents: AgentRegistry::new(),
             run_lock: None,
             resume_summary: None,
-            resumed_at_unix_ms: None,
             // A test exercising the disk-warn check sets this directly.
             disk_warn_bytes: None,
             egress: crate::egress::Egress::for_test(),
             hatchery: None,
             pending_hatches: PendingHatches::new(),
-        })?;
+        });
         agent.register_self();
         Ok(agent)
     }
@@ -710,7 +668,7 @@ mod tests {
     use crate::bus::{Emitter, Item, Kind, Post};
     use crate::provider::scripted::Script;
     use genai::chat::ChatMessage;
-    use std::fs::{self, File};
+    use std::fs;
 
     /// A forked child inherits the parent's installed builtin surface, not
     /// just the core set a bare `Shell::new` seeds.
@@ -1274,45 +1232,26 @@ mod tests {
         }
         let records =
             crate::record::read_records(&dir.path().join("sessions/0/record.jsonl")).unwrap();
-        let resumed_at = records
-            .iter()
-            .find_map(|record| match record {
-                crate::record::Record::Protocol(crate::record::Protocol::SessionResumed {
-                    at_unix_ms,
-                    ..
-                }) => Some(*at_unix_ms),
-                _ => None,
-            })
-            .expect("SessionResumed breadcrumb");
-        let trace: Vec<serde_json::Value> = serde_json::Deserializer::from_reader(
-            File::open(dir.path().join("sessions/0/transcript.jsonl")).unwrap(),
-        )
-        .into_iter()
-        .collect::<Result<_, _>>()
-        .unwrap();
-        assert_eq!(trace[0]["kind"], "resumed");
-        assert_eq!(trace[0]["at_unix_ms"], resumed_at);
+        assert!(records.iter().any(|record| matches!(
+            record,
+            crate::record::Record::Protocol(crate::record::Protocol::SessionResumed { .. })
+        )));
     }
 
     #[test]
-    fn clear_rotates_both_records_and_shared_emitters_follow_the_new_trace() {
+    fn clear_rotates_record_jsonl_and_shared_emitters_follow_the_new_segment() {
         let mut session = Agent::for_test("system").unwrap();
         let record = session.log_dir().join("record.jsonl");
-        let transcript = session.log_dir().join("transcript.jsonl");
         fs::write(record.with_file_name("record.jsonl.0"), b"reserved").unwrap();
-        fs::write(transcript.with_file_name("transcript.jsonl.0"), b"reserved").unwrap();
 
         let bus = crate::bus::FleetBus::session(&session.inbox());
-        let first = bus.emitter(session.id, session.transcript());
+        let first = bus.emitter(session.id);
         let second = first.clone();
         session.clear().expect("clear rotation");
 
         let rotated_record = record.with_file_name("record.jsonl.1");
-        let rotated_transcript = transcript.with_file_name("transcript.jsonl.1");
         assert!(rotated_record.is_file());
-        assert!(rotated_transcript.is_file());
         assert!(record.is_file());
-        assert!(transcript.is_file());
         assert!(
             fs::read(record.with_file_name("record.jsonl.0"))
                 .unwrap()
@@ -1320,29 +1259,13 @@ mod tests {
         );
 
         let current_records = crate::record::read_records(&record).unwrap();
-        let stamp = match current_records.first().expect("new session head") {
-            crate::record::Record::Protocol(crate::record::Protocol::SessionStarted {
-                at_unix_ms,
-                ..
-            }) => *at_unix_ms,
-            other => panic!("new record segment must start with SessionStarted, got {other:?}"),
-        };
-        let trace: Vec<serde_json::Value> =
-            serde_json::Deserializer::from_reader(File::open(&transcript).unwrap())
-                .into_iter()
-                .collect::<Result<_, _>>()
-                .unwrap();
-        assert_eq!(trace[0]["kind"], "cleared");
-        assert_eq!(trace[0]["at_unix_ms"], stamp);
+        assert!(matches!(
+            current_records.first().expect("new session head"),
+            crate::record::Record::Protocol(crate::record::Protocol::SessionStarted { .. })
+        ));
 
         first.emit(Kind::SystemNote("from first emitter".into()));
         second.emit(Kind::SystemNote("from second emitter".into()));
-        let current = fs::read_to_string(&transcript).unwrap();
-        let rotated = fs::read_to_string(&rotated_transcript).unwrap();
-        assert!(current.contains("from first emitter"));
-        assert!(current.contains("from second emitter"));
-        assert!(!rotated.contains("from first emitter"));
-        assert!(!rotated.contains("from second emitter"));
     }
 
     #[test]
@@ -1383,7 +1306,6 @@ mod tests {
         let child_log = child.log_dir();
         for log_dir in [&root_log, &child_log] {
             assert!(!log_dir.join("record.jsonl").exists());
-            assert!(!log_dir.join("transcript.jsonl").exists());
         }
         assert!(!dir.path().join("run.lock").exists());
         drop(child);

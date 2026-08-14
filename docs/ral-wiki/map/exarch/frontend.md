@@ -270,9 +270,8 @@ Two `Sink` implementations:
   to a non-CLI host (synod's GUI) one exchange at a time on a parked interactive
   trunk.
   Takes the default `Sink::drive` and a per-exchange bus, so its async children stay
-  muted. It is a display only — the durable `transcript.jsonl` / `record.jsonl`
-  are written by each session's own `agent/transcript.rs` / `agent/event.rs`
-  seams, in headless exactly as in the TUI.
+  muted. It is a display only — the durable `record.jsonl` is written by each
+  session's own `agent/event.rs` seam, in headless exactly as in the TUI.
 
 `agent/cancel.rs` is the per-agent exchange cancellation layered on ral's interrupt
 handling. Every agent holds one **sticky** `Token` (an `Arc<AtomicU8>`) for its

@@ -21,10 +21,12 @@ silence.
 It has two halves, split by who may legally read what: the agent assembles
 its own rows on its attend thread (the shell's worker registry and bindings,
 its inbox, event log, and disk) and emits them as one `Kind::Resources` —
-raw rows beside the rendered card, so `transcript.jsonl` keeps the figures —
-and the frontend appends the rows for the accumulators *it* owns (viewports,
-views, the bus) at render time. Neither half reaches across a thread for the
-other's figures, and the fold is never model-facing.
+raw rows beside the rendered card — and the frontend appends the rows for the
+accumulators *it* owns (viewports, views, the bus) at render time. Neither
+half reaches across a thread for the other's figures, and the fold is never
+model-facing. A probe fold is an interactive diagnostic, read when it is
+run: no session keeps a pressure history, so the figures live only in the
+fold's own emission and never in `record.jsonl`.
 
 Two laws bound what a probe may do:
 

@@ -64,7 +64,7 @@ What it does not do: it never frees memory by itself (it removes the future
 name, not the bytes), it never touches a closure, and it never tells the
 model anything at prune time — the only model-visible consequence is an
 ordinary `undefined variable` if the model names the binding again, with the
-paper trail waiting in `transcript.jsonl`.
+paper trail waiting in `record.jsonl`'s `Notice::Prune` commit.
 
 ## The capture scenario, worked
 

@@ -45,7 +45,7 @@ impl Emitter {
     }
 
     /// A seam with no file — `--no-logs` — that still stamps facts and
-    /// publishes them to an attached bus, matching `Transcript::none`.
+    /// publishes them to an attached bus.
     pub fn none() -> Self {
         Self {
             log: Arc::new(Log::none()),

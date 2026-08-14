@@ -42,7 +42,7 @@ pub(crate) struct Log {
 
 struct Inner {
     /// `None` for a `--no-logs` session: facts still stamp and publish, they
-    /// just have no durable form — the same trade `Transcript::none` makes.
+    /// just have no durable form.
     writer: Option<BufWriter<File>>,
     sink: Option<FleetSink>,
     seq: u64,

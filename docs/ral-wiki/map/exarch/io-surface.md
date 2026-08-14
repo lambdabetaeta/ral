@@ -1,7 +1,7 @@
 ---
 generated_at_commit: 7d9410f0
 generated_at_date: 2026-08-13
-covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/event.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/headless.rs, exarch/src/agent/transcript.rs, exarch/src/tui/surface.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
+covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/event.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/headless.rs, exarch/src/tui/surface.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
 ---
 
 # Map: exarch / io surface
@@ -225,16 +225,10 @@ turn-time data I/O — and surface nothing by design.
 
 ## Machine log
 
-`agent/transcript.rs::event_record` serialises `Kind::Io` as `("io", {event})`
-in the session-owned `transcript.jsonl`, via `observation_json`
-(`bus/card/observation.rs`): `Observation::to_value`'s own projection, minus
-the byte fields (`stdout`, `stderr`, `new_bytes`, `old_bytes`) — a write or
-command's shape belongs in the log, its content does not. The kept fields
-include `script`/`line`/`col`/`start`/`end`/`principal` alongside each kind's
-own; the rendered card is a rendering and lives only in the TUI's `user.log`.
-The record log ([[map/exarch/frontend|frontend]]) carries an observation's
-total wire form as a display commit so a resumed scrollback can rebuild its
-card, but never the rendered mark tree itself — a rendering is not a fact.
+There is no independent operational trace: the record log
+([[map/exarch/frontend|frontend]]) carries an observation's total wire form
+as a display commit so a resumed scrollback can rebuild its card, but never
+the rendered mark tree itself — a rendering is not a fact.
 
 ## Enforcement — every door is accounted for
 

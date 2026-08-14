@@ -5,9 +5,8 @@
 //! summary go to `err`. A conversational host takes a different projection
 //! through [`converse_on`], which streams assistant tokens, or drives
 //! [`converse_sink`] with its own [`Sink`] for `Kind` events unflattened.
-//! Recording is not this module's concern: every session writes its own trace
-//! at the emit seam, through [`crate::agent::transcript`] and
-//! [`crate::agent::event`].
+//! Recording is not this module's concern: every session writes its own
+//! record at the seam, through [`crate::agent::event`].
 
 use crate::agent::Agent;
 use crate::agent::event::{ContextOp, EditAuthority};
@@ -616,8 +615,6 @@ pub fn run(
         OutputFormat::Json => Projection::HeadlessJson,
     };
     let mut headless = Headless::new(projection, session.id, &mut stdout, &mut stderr);
-    // Bound before `session` is borrowed into the worker closure.
-    let root_transcript = session.transcript();
     // A per-exchange bus over the trunk's *own* inbox, so the attend worker and
     // any in-exchange producer share one queue.  It closes when the worker
     // finishes, muting async children on the display — never in the trace.
@@ -633,13 +630,9 @@ pub fn run(
     // `&mut` borrow outlives the closure `pump` runs on its scoped thread.
     let mut control = crate::agent::NoControl;
     let root_id = session.id;
-    let outcome = pump(
-        &mut headless,
-        &fleet.bus,
-        root_id,
-        root_transcript,
-        |emit| session.attend(&mut control, emit),
-    );
+    let outcome = pump(&mut headless, &fleet.bus, root_id, |emit| {
+        session.attend(&mut control, emit)
+    });
     // The attend digest: an outcome driving `is_error`/`error`, and the root's
     // `reply`.  A panic arrives as `Ok(None)`, already latched by the sink.
     let r: Result<(), String> = match outcome {
@@ -739,7 +732,6 @@ pub fn converse_sink<S: Sink>(
     engine: Arc<Engine>,
     sink: &mut S,
 ) -> Result<(), String> {
-    let root_transcript = session.transcript();
     // Per-exchange: this call's channel closes when the exchange parks, so
     // draining can never block on a message the caller has not sent yet.
     let fleet = Fleet {
@@ -749,9 +741,7 @@ pub fn converse_sink<S: Sink>(
     };
     session.seed(message);
     let root_id = session.id;
-    let outcome = pump(sink, &fleet.bus, root_id, root_transcript, |emit| {
-        session.attend_backlog(emit)
-    });
+    let outcome = pump(sink, &fleet.bus, root_id, |emit| session.attend_backlog(emit));
     match outcome {
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err("worker panicked".to_string()),
@@ -795,7 +785,6 @@ pub fn converse_settled<S: Sink>(
                 .to_string(),
         );
     }
-    let root_transcript = session.transcript();
     let fleet = Fleet {
         agents: session.agents.clone(),
         bus: FleetBus::per_exchange_live(&session.inbox()),
@@ -803,7 +792,7 @@ pub fn converse_settled<S: Sink>(
     };
     session.seed(message);
     let root_id = session.id;
-    let outcome = pump(sink, &fleet.bus, root_id, root_transcript, |emit| {
+    let outcome = pump(sink, &fleet.bus, root_id, |emit| {
         session.attend_with(
             &mut crate::agent::NoControl,
             emit,

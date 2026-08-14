@@ -3,8 +3,7 @@
 //! redirect read opened, a grep ran, a capability check was denied. Decoding
 //! the surfaced `Value` back into an [`Observation`] is core's own
 //! `Observation::from_value`, called at `shell_eval.rs`'s `decode_surface`;
-//! this module only renders what core already decoded, and projects it for
-//! `transcript.jsonl`.
+//! this module only renders what core already decoded.
 
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
@@ -320,7 +319,7 @@ pub(crate) fn reads_card(reads: &[String]) -> Option<Card> {
 /// Drops the ` → status` tail a lone [`observation_card`] exec row carries: a
 /// joined run reads as the *set of commands run*, where per-command statuses
 /// would be noise. Nothing is lost — each status still rides its own bus
-/// event into `transcript.jsonl`; only this presentation omits it.
+/// event; only this presentation omits it.
 pub(crate) fn execs_card(execs: &[Observed]) -> Option<Card> {
     if execs.is_empty() {
         return None;
@@ -384,25 +383,6 @@ pub(crate) fn observation_wire(event: &Observation) -> FOValue {
 )]
 pub(crate) fn observation_from_wire(value: FOValue) -> Option<Observation> {
     Observation::from_value(&RalValue::from(value))
-}
-
-/// The keys a projection carries only for a card's own preview, never for the
-/// operational trace: a write's shape belongs in `transcript.jsonl`, its
-/// content does not; a command's teed `stdout`/`stderr` are the same cut.
-const BYTE_FIELDS: [&str; 4] = ["stdout", "stderr", "new_bytes", "old_bytes"];
-
-/// The shape `transcript.jsonl` records: the observation's own projection,
-/// minus the byte fields — a write's shape, not its content.
-pub(crate) fn observation_json(obs: &Observation) -> serde_json::Value {
-    let RalValue::Map(m) = obs.to_value() else {
-        unreachable!("Observation::to_value always projects as a map")
-    };
-    let filtered: Map = m
-        .iter()
-        .filter(|(k, _)| !BYTE_FIELDS.contains(&k.as_str()))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    ral_core::builtins::value_to_json_lossy_bytes(&RalValue::Map(filtered))
 }
 
 #[cfg(test)]

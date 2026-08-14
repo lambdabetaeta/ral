@@ -199,7 +199,7 @@ impl Agent {
                 seam: seam.clone(),
                 // Stamped with the registry generation read now, so a batch
                 // from a worker that settles after a `/clear` is dropped.
-                deferred: shell_eval::deferred_sink(emit, self.id, &self.agents),
+                deferred: shell_eval::deferred_sink(emit, self.id, &self.agents, self.recorder()),
                 nursery,
             });
             shell_eval::run_shell(

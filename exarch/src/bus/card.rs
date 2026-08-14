@@ -38,8 +38,7 @@ pub(crate) use done::{done_card, value_to_done};
 pub(crate) use encode::encode_card;
 pub(crate) use notice::{notice_card, services_pin_card, value_to_notice};
 pub(crate) use observation::{
-    ObservationKind, RailPlace, execs_card, greps_card, observation_card, observation_json,
-    rail_place, reads_card,
+    ObservationKind, RailPlace, execs_card, greps_card, observation_card, rail_place, reads_card,
 };
 // The commit producer (P2) and the view fold (P3) of
 // dev/docs/plans/260814_one_seam_one_log.md land their call sites

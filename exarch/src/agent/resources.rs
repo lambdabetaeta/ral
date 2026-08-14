@@ -20,8 +20,9 @@ use serde::Serialize;
 use std::path::Path;
 use std::time::Duration;
 
-/// One probed accumulator, one row per figure: what the fold renders and
-/// `transcript.jsonl` records.
+/// One probed accumulator, one row per figure: what the fold renders. A probe
+/// fold is an interactive diagnostic, read when it is run; no session keeps a
+/// pressure history.
 ///
 /// `policy` comes from a closed vocabulary — `"coalesce"`, `"reject"`,
 /// `"evict"`, `"reap"`, `"warn"`, `"none (unbounded)"` — and is stated even

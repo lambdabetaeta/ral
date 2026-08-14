@@ -126,9 +126,11 @@ file could not replay into the post-compaction view. `ContextEdited` applies the
 correct rule to the new vocabulary: its operation and authority are recorded,
 and the fold can reconstruct the edit.
 
-`transcript.jsonl` remains the operational projection for a user-facing trace.
-It is not a second model state. The unification debt and the rent of keeping
-the two records are named in the amended recording ADR.
+`transcript.jsonl` remained the operational projection for a user-facing
+trace, and was not a second model state — until
+`dev/docs/plans/260814_kind_dissolves.md` deleted it outright, paying the
+unification debt in full rather than keeping the two records. The amended
+recording ADR names the rent this page had assumed would persist.
 
 ## Superseding note: the log generalises, the law survives
 

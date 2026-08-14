@@ -149,12 +149,12 @@ pub(crate) fn spawn_async(
     let worker_registry = AgentRegistry::clone(registry);
     // Off a bus whose children are muted (headless's per-exchange default)
     // the child's receiver is already dropped, so it streams nowhere; either
-    // way it carries its own `Transcript`, and its trace is recorded whether
-    // or not anyone watches.
+    // way its own record seam is recorded through whether or not anyone
+    // watches.
     let child_emit = if emit.spawns_live_children() {
-        emit.child(agent_id, child.mailbox(), child.transcript())
+        emit.child(agent_id, child.mailbox())
     } else {
-        emit.muted_child(agent_id, child.transcript())
+        emit.muted_child(agent_id)
     };
     let started = Instant::now();
     let born_name = name.clone();

@@ -134,6 +134,16 @@ bus emit seam outside these parcels' boundary, and says so in its own
 header. The 260623 debt is therefore paid for the durable log and for
 resume, and open for live display and the transcript.
 
+**Superseded**: `dev/docs/plans/260814_kind_dissolves.md` deletes
+`transcript.jsonl` outright rather than folding it — its three genuinely
+unique facts move elsewhere (`Entry.at_unix_ms` per record, a child's own
+`SessionStarted`/`SessionEnded` for `born`/`died`, `stop_reason` already on
+`Protocol::AssistantMessage`), and the fourth, `/resources`' figures, is
+named a loss rather than answered: no session keeps a pressure history, so
+`invariants/probe-convention.md`'s "so `transcript.jsonl` keeps the figures"
+clause is amended, not carried forward. `record.jsonl` is now the one durable
+log with no independent sibling.
+
 ## Accepted losses
 
 - Committed text is stored more than once: assistant markdown verbatim in

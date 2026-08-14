@@ -43,8 +43,10 @@ The current pressure points are distinct:
   260812: the edit step now frees a span's events the moment it leaves the
   view — [[decisions/260812_context-is-a-projection|context-is-a-projection]] —
   so the mirror is O(view). The files still retain everything.)*
-  `events.jsonl`, `transcript.jsonl`, and `user.log` are durable records, not
-  memory budgets.
+  `events.jsonl` (since unified into `record.jsonl`) and `user.log` are
+  durable records, not memory budgets; `transcript.jsonl` was a third such
+  record and is since deleted outright
+  (`dev/docs/plans/260814_kind_dissolves.md`), not folded into a budget.
 - **The lexical env is cheap to clone, not cheap to fill.** `Env` is persistent
   copy-on-write, so a big env is not a clone bomb. The resident cost is the
   `Value`: large strings, bytes, lists, maps, closures that captured old scopes,

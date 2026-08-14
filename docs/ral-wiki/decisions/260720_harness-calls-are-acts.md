@@ -151,9 +151,11 @@ Two consequences, both load-bearing:
   reaches the rail. Rewriting the summary or dropping `HarnessResult` is
   therefore *provably* model-invisible. The raises stay exactly as they are — the
   long-form sentence is for the model, and it is the model's only copy.
-- **`HarnessResult` is not deleted from the bus.** `agent/transcript.rs` records
-  it into `transcript.jsonl`; the forensic trace keeps it. Only the TUI's
-  consumption of it — the fake line count — goes away.
+- **`HarnessResult` is not deleted from the bus.** It still rides `Kind` to the
+  live display; `agent/transcript.rs` (since deleted,
+  `dev/docs/plans/260814_kind_dissolves.md`) is no longer the forensic trace
+  that kept it — `record.jsonl`'s own `Display`/`Forensic` commits are. Only
+  the TUI's consumption of it — the fake line count — goes away.
 
 The one genuine act that both emits `Kind::Error` and re-raises the same string
 is an **OS thread-spawn failure** on `agent-start`. That is a resource failure,

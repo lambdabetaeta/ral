@@ -483,7 +483,12 @@ mod tests {
                     surface: std::sync::Mutex::new(crate::record::commit::SurfaceBuffer::new()),
                 },
             }),
-            deferred: crate::shell_eval::deferred_sink(&emit, root_id, &registry),
+            deferred: crate::shell_eval::deferred_sink(
+                &emit,
+                root_id,
+                &registry,
+                crate::record::Emitter::none(),
+            ),
             nursery: Nursery::default(),
         };
         let _guard = seat.install_run(install);

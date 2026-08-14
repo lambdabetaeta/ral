@@ -641,13 +641,11 @@ impl ExarchDesk {
             agents: s.registry.clone(),
             run_lock: None,
             resume_summary: None,
-            resumed_at_unix_ms: None,
             disk_warn_bytes: s.disk_warn_bytes,
             egress: s.egress.clone(),
             hatchery: s.hatchery.clone(),
             pending_hatches: s.pending_hatches.clone(),
-        })
-        .map_err(|e| Error::new(format!("could not assemble child session: {e}"), 1))?;
+        });
 
         self.spawn_and_receipt(child, spec.name, spec.prompt)
     }
@@ -829,13 +827,11 @@ impl ExarchDesk {
             agents: s.registry.clone(),
             run_lock: None,
             resume_summary: None,
-            resumed_at_unix_ms: None,
             disk_warn_bytes: s.disk_warn_bytes,
             egress: s.egress.clone(),
             hatchery: Some(hatchery),
             pending_hatches: s.pending_hatches.clone(),
-        })
-        .map_err(|e| Error::new(format!("could not assemble child session: {e}"), 1))?;
+        });
 
         self.spawn_and_receipt(child, pending.name, pending.prompt)
     }
