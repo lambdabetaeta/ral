@@ -1,0 +1,442 @@
+//! The one seam, one log: every fact a session records crosses here, once,
+//! as a [`Record`] — never a `Kind`, never a `SessionEvent`.
+//!
+//! A `Record` is one of three classes: [`Protocol`] (verbatim payloads the
+//! model fold folds), [`Display`] (commits the view fold folds), [`Forensic`]
+//! (breadcrumbs neither fold projects but which are worth keeping).  Nothing
+//! outside this module tree may mint a fourth class, invent a variant absent
+//! from the disposition, or read the log back except through [`replay`].
+//!
+//! [`Transient`] is the disjoint, unrecorded half of the channel: deltas, the
+//! provisional thinking seat, and chrome that dies with the process.
+#![allow(
+    dead_code,
+    reason = "parcel 0 of the one-seam-one-log record module: no consumer exists until wave 1 wires record::model / record::view / record::commit against this frozen surface"
+)]
+#![deny(unused_results)]
+#![deny(clippy::let_underscore_must_use)]
+#![deny(clippy::wildcard_enum_match_arm)]
+
+mod log;
+mod replay;
+mod seam;
+
+pub use replay::{Refusal, replay};
+pub use seam::Emitter;
+
+use crate::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord, ToolResult, UsageDelta};
+use crate::bus::card::Card;
+use crate::bus::{AgentId, AgentState};
+use crate::provider::Tuning;
+use genai::chat::ChatMessage;
+use ral_core::serial::FOValue;
+use serde::{Deserialize, Serialize};
+use std::ops::Range;
+use std::path::PathBuf;
+
+/// One fact a session recorded, in one of three classes.
+///
+/// The outer shape is deliberately not `#[serde(tag = …)]`: each class
+/// already tags its own variant, and folding a second tag over it would
+/// collide the two keys.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Record {
+    Protocol(Protocol),
+    Display(Display),
+    Forensic(Forensic),
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// The three record classes a [`Recorded`] may carry, sealed so a fourth
+/// cannot be minted outside this module.
+///
+/// [`emit`](Emitter::emit) is generic over `C: Class`, and folds demand
+/// `&Protocol` / `&Display` / `&Forensic` in their own signatures rather
+/// than matching `Record` themselves.
+pub trait Class: sealed::Sealed + Clone + Into<Record> {}
+
+impl sealed::Sealed for Protocol {}
+impl sealed::Sealed for Display {}
+impl sealed::Sealed for Forensic {}
+impl Class for Protocol {}
+impl Class for Display {}
+impl Class for Forensic {}
+
+impl From<Protocol> for Record {
+    fn from(p: Protocol) -> Self {
+        Self::Protocol(p)
+    }
+}
+impl From<Display> for Record {
+    fn from(d: Display) -> Self {
+        Self::Display(d)
+    }
+}
+impl From<Forensic> for Record {
+    fn from(f: Forensic) -> Self {
+        Self::Forensic(f)
+    }
+}
+
+/// Verbatim payloads the model fold needs — the provider's exact
+/// `ChatMessage`, tool-call ids, and the session bookends.  Unchanged in
+/// shape from the `SessionEvent` they retire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Protocol {
+    /// Head bookend, carrying enough metadata that the file reads on its own.
+    SessionStarted {
+        session_id: AgentId,
+        parent: Option<AgentId>,
+        model: String,
+        provider: String,
+        system_prompt_bytes: usize,
+        log_dir: PathBuf,
+        at_unix_ms: u64,
+    },
+    SessionResumed {
+        model: String,
+        provider: String,
+        system_prompt_bytes: usize,
+        at_unix_ms: u64,
+    },
+    /// Tail bookend.
+    SessionEnded,
+    UserPrompt {
+        exchange: u64,
+        text: String,
+    },
+    /// A message a `mnemon` child inherits from its parent's context.
+    ContextMessage {
+        exchange: u64,
+        message: ChatMessage,
+    },
+    StepStarted {
+        n: u32,
+        tuning: Tuning,
+    },
+    AssistantMessage {
+        message: ChatMessage,
+        pending_tool_ids: Vec<String>,
+        stop_reason: Option<String>,
+    },
+    ToolResults {
+        results: Vec<ToolResult>,
+    },
+    ContextEdited {
+        op: ContextOp,
+        by: EditAuthority,
+    },
+}
+
+/// The commits the view fold needs — chopped, coalesced, and reduced
+/// *before* they reach the seam, so a resumed scrollback matches what the
+/// user actually saw.
+///
+/// Field shapes here are this parcel's own choice: they carry each source
+/// `Kind`'s "data half" in a form the log can round-trip, never the mark
+/// tree a `card` field renders (recomputed by the view fold), with two
+/// exceptions this parcel decided on the same rule — `Observation` and
+/// `Card` carry the whole fact because there is no other durable trace of it
+/// once the mark tree is drawn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Display {
+    /// The step's final model reasoning, superseding the streamed deltas.
+    Thinking {
+        text: String,
+        answer_chars: u32,
+    },
+    /// Any item entering context — prompt, wakeup, or peer message.
+    Prompt {
+        text: String,
+    },
+    ToolCall {
+        tool: String,
+        cmd: String,
+        summary: Option<String>,
+    },
+    HarnessCall {
+        verb: String,
+        subject: Option<String>,
+        payload: String,
+        failed: bool,
+    },
+    /// The byte-identical third copy of a result: emitted, drawn, and
+    /// recorded from the one clipped string the model saw.
+    Result {
+        text: String,
+    },
+    SubagentDone {
+        name: String,
+        text: String,
+        error: Option<String>,
+        elapsed_ms: u64,
+    },
+    /// A fact core observed at a door, carried as its total wire form — the
+    /// one display content the protocol records cannot supply.
+    Observation {
+        value: FOValue,
+    },
+    /// A render document a ral kit composed for the `surface` builtin: the
+    /// mark tree *is* the fact here, so unlike the other three commits in
+    /// this list it is what gets recorded, opaquely, for the view fold to
+    /// decode.
+    Card {
+        marks: serde_json::Value,
+    },
+    Done {
+        outcome: DoneOutcome,
+    },
+    Notice {
+        notice: NoticeFact,
+    },
+    Context {
+        rows: Vec<ContextRow>,
+    },
+}
+
+/// A detached worker's `` `done `` completion, minus the one-line card the
+/// view fold rebuilds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DoneOutcome {
+    Ok,
+    Err { message: String, status: i64 },
+    Panic { message: String },
+}
+
+/// A `` `notice `` housekeeping fact, minus its rendered card.
+///
+/// `cause` mirrors `ReapCause::as_str`'s three spellings rather than
+/// importing the live enum, keeping this parcel's serde surface
+/// self-contained.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "notice", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NoticeFact {
+    Reap {
+        cmd: String,
+        cause: String,
+    },
+    Prune {
+        names: Vec<String>,
+        idle_calls: Vec<u64>,
+    },
+}
+
+/// One row of a `/context` survey, minus its rendered card.  `kind` mirrors
+/// `ContextSpanKind::as_str`'s three spellings for the same reason.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextRow {
+    pub exchange: u64,
+    pub kind: String,
+    pub opening: String,
+    pub bytes: usize,
+    pub steps: usize,
+    pub live: bool,
+}
+
+/// Breadcrumbs that determine no model projection but are worth keeping.
+///
+/// `Error`, `Nudge`, `ProviderError`, and `Stalled` fold what were, before
+/// this plan, two separate dual-written facts — one from `SessionEvent`, one
+/// from `Kind` — into the one record their existing dual-write sites already
+/// treat as a single fact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Forensic {
+    UsageDelta {
+        usage: UsageDelta,
+    },
+    /// Ctrl-C or Esc mid-exchange.
+    Cancelled,
+    /// A diagnostic for the user alone — never reaches the model.
+    Error {
+        text: String,
+    },
+    Nudge {
+        used: u32,
+        max: u32,
+        cause: String,
+    },
+    ProviderError {
+        error: ProviderErrorRecord,
+    },
+    Stalled {
+        error: ProviderErrorRecord,
+    },
+    /// An operational note the attend loop issued — the model never saw it.
+    SystemNote {
+        text: String,
+    },
+    /// The paired result for a `HarnessCall` — forensic only, since the act
+    /// row on screen already says everything.
+    HarnessResult {
+        text: String,
+    },
+    /// The history informs the resume note; the live register follows the
+    /// shell boundary and is not restored.
+    Pin {
+        key: String,
+    },
+    Unpin {
+        key: String,
+    },
+    /// A mid-session model switch — the context-floor denominator, absent
+    /// from `SessionStarted` once the run outlives its first selection.
+    ModelChanged {
+        model: String,
+        provider: String,
+    },
+}
+
+/// The channel's other passenger: content that dies with the channel and
+/// never reaches the log.
+///
+/// Disjoint from [`Recorded`] by construction, so journaling a delta or
+/// publishing an unrecorded fact are both type errors.
+#[derive(Debug, Clone)]
+pub enum Transient {
+    Token(String),
+    /// A live reasoning token, superseded by [`Display::Thinking`] once the
+    /// step lands its authoritative text.
+    Thinking(String),
+    State(AgentState),
+    /// The producer's flush signal ending a streaming step.
+    Boundary,
+    Born {
+        log_dir: PathBuf,
+        name: String,
+        parent: AgentId,
+        branch: bool,
+    },
+    Died,
+    /// The durable copy already rides [`Protocol::AssistantMessage`].
+    StopReason(String),
+    /// The durable fact is the new segment's bookend.
+    Cleared,
+    /// Drawn, not recorded.
+    Resources {
+        rows: Vec<crate::agent::resources::ProbeRow>,
+        card: Card,
+    },
+}
+
+/// A record's position in the log — the line it was assigned at append.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Seq(u64);
+
+impl Seq {
+    pub(crate) fn new(n: u64) -> Self {
+        Self(n)
+    }
+
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Where one record lives: its [`Seq`] and the byte range `append` wrote it
+/// to.
+///
+/// The model fold's ledger stores one of these per protocol record, so a
+/// freed run reads back through them one record at a time rather than by
+/// contiguous span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
+pub struct Stamp {
+    seq: Seq,
+    bytes: Range<u64>,
+}
+
+impl Stamp {
+    pub(crate) fn new(seq: Seq, bytes: Range<u64>) -> Self {
+        Self { seq, bytes }
+    }
+
+    pub fn seq(&self) -> Seq {
+        self.seq
+    }
+
+    pub fn bytes(&self) -> Range<u64> {
+        self.bytes.clone()
+    }
+}
+
+/// A record witnessed by the seam: its [`Stamp`] beside the value `emit` was
+/// given.
+///
+/// Built only at append time (by [`Emitter::emit`]) and at replay time
+/// (reconstructing history from the file) — nowhere else, since nothing but
+/// those two moments has a `Stamp` to attach.
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct Recorded<R>(Stamp, R);
+
+impl<R> Recorded<R> {
+    pub(crate) fn new(stamp: Stamp, value: R) -> Self {
+        Self(stamp, value)
+    }
+
+    pub fn stamp(&self) -> &Stamp {
+        &self.0
+    }
+
+    pub fn value(&self) -> &R {
+        &self.1
+    }
+
+    pub fn into_value(self) -> R {
+        self.1
+    }
+}
+
+/// A named commit in the view fold's memo — a block is named by its own
+/// commit's [`Seq`].
+///
+/// A `result_size` patch can carry its call's `BlockId`, and the fold can
+/// tolerate a patch whose target it has already evicted.
+pub struct BlockId(Seq);
+
+impl BlockId {
+    pub(crate) fn new(seq: Seq) -> Self {
+        Self(seq)
+    }
+}
+
+/// Stand-in for `record::view::Blocks`, the view fold's memo — not built
+/// until wave 1's view fold lands.
+///
+/// Kept here, empty, only so [`Printer`]'s signature can compile against
+/// something before its real definition exists; `record::view` replaces it,
+/// unchanged in name.
+pub struct Blocks;
+
+/// One fold over the log, replayed identically whether it is driven live
+/// (from the channel) or from disk (from [`replay`]) — the same `step`
+/// function, two drivers.
+///
+/// An impl's `step` is one outer-class match over `Record` delegating to
+/// class-typed functions (the model fold's takes `&Protocol`; the view
+/// fold's take `&Display` / `&Forensic`); no arm is a wildcard, and a
+/// [`Refusal`] during replay refuses the whole session.
+pub trait Fold {
+    type Memo: Default;
+
+    /// # Errors
+    /// Returns [`Refusal`] when this fold does not recognise the record —
+    /// during replay that refuses the session rather than skip it silently.
+    fn step(memo: &mut Self::Memo, record: &Recorded<Record>) -> Result<(), Refusal>;
+}
+
+/// A frontend that draws one fold's output — `tui` and `headless` alike —
+/// and is never handed a `Record`, so it cannot match on the vocabulary and
+/// a third hand-rolled projection cannot compile.
+pub trait Printer {
+    fn transient(&mut self, t: &Transient);
+    fn sync(&mut self, blocks: &Blocks);
+}

@@ -20,6 +20,7 @@ pub mod net_policy;
 pub mod policy;
 pub mod prompt;
 pub mod provider;
+pub mod record;
 pub mod shell_eval;
 pub(crate) mod sync;
 pub mod tui;
