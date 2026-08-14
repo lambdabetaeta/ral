@@ -17,12 +17,16 @@
 #![deny(clippy::let_underscore_must_use)]
 #![deny(clippy::wildcard_enum_match_arm)]
 
+pub(crate) mod commit;
 mod log;
+pub(crate) mod model;
 mod replay;
 mod seam;
+mod view;
 
 pub use replay::{Refusal, replay};
 pub use seam::Emitter;
+pub use view::{Block, BlockKind, View};
 
 use crate::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord, ToolResult, UsageDelta};
 use crate::bus::card::Card;
@@ -152,6 +156,13 @@ pub enum Display {
     },
     /// Any item entering context — prompt, wakeup, or peer message.
     Prompt {
+        text: String,
+    },
+    /// One chopper-committed block of the assistant's own prose, cut at a
+    /// fence-safe paragraph break — so one `AssistantMessage` yields several
+    /// of these where the live view streamed many `Token`s. A prefix of the
+    /// accumulated delta stream, never the whole answer at once.
+    Answer {
         text: String,
     },
     ToolCall {
@@ -327,7 +338,7 @@ pub enum Transient {
 }
 
 /// A record's position in the log — the line it was assigned at append.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Seq(u64);
 
 impl Seq {
@@ -400,21 +411,20 @@ impl<R> Recorded<R> {
 ///
 /// A `result_size` patch can carry its call's `BlockId`, and the fold can
 /// tolerate a patch whose target it has already evicted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockId(Seq);
 
 impl BlockId {
     pub(crate) fn new(seq: Seq) -> Self {
         Self(seq)
     }
+
+    pub fn seq(self) -> Seq {
+        self.0
+    }
 }
 
-/// Stand-in for `record::view::Blocks`, the view fold's memo — not built
-/// until wave 1's view fold lands.
-///
-/// Kept here, empty, only so [`Printer`]'s signature can compile against
-/// something before its real definition exists; `record::view` replaces it,
-/// unchanged in name.
-pub struct Blocks;
+pub use view::Blocks;
 
 /// One fold over the log, replayed identically whether it is driven live
 /// (from the channel) or from disk (from [`replay`]) — the same `step`

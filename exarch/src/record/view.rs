@@ -29,6 +29,9 @@ pub enum BlockKind {
     Prompt {
         text: String,
     },
+    Answer {
+        text: String,
+    },
     ToolCall {
         tool: String,
         cmd: String,
@@ -170,9 +173,7 @@ impl Blocks {
 
     /// A rendering of every committed block, content only — never styling —
     /// the regenerable text a printer's `user.log` is a render of, never a
-    /// patch of.  Prose paragraphs are not among the [`Display`] commits
-    /// this fold can fold (see the module's own note), so this render omits
-    /// them until that commit exists.
+    /// patch of.
     pub fn render_log(&self) -> String {
         let mut out = String::new();
         for block in &self.rows {
@@ -219,6 +220,7 @@ fn render_block_text(out: &mut String, kind: &BlockKind) {
     let line = match kind {
         BlockKind::Thinking { text, .. } => format!("∴ {text}"),
         BlockKind::Prompt { text } => format!("> {text}"),
+        BlockKind::Answer { text } => text.clone(),
         BlockKind::ToolCall {
             tool,
             cmd,
@@ -302,6 +304,7 @@ fn step_display(memo: &mut Blocks, seq: Seq, d: Display) {
             memo.push(seq, BlockKind::Thinking { text, answer_chars });
         }
         Display::Prompt { text } => memo.push(seq, BlockKind::Prompt { text }),
+        Display::Answer { text } => memo.push(seq, BlockKind::Answer { text }),
         Display::ToolCall { tool, cmd, summary } => memo.push(
             seq,
             BlockKind::ToolCall {
