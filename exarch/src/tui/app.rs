@@ -767,17 +767,6 @@ mod tests {
         (app, rx)
     }
 
-    fn read(path: &str) -> Kind {
-        Kind::Io {
-            event: Observation::instant(
-                CallSite::default(),
-                String::new(),
-                Observed::Read { path: path.into() },
-            ),
-            card: Card(vec![]),
-        }
-    }
-
     fn text(app: &mut App, id: AgentId) -> String {
         let w = app
             .tabs
@@ -787,30 +776,73 @@ mod tests {
         w.lines.iter().map(plain).collect::<Vec<_>>().join("\n")
     }
 
-    /// A pin is ambient state, not a scrollback barrier: arriving mid-burst it
-    /// must leave the observation run whole, and land in the keyed register
-    /// rather than on the rail.
+    /// A pin is ambient register state, and the coalescing that used to be
+    /// `App::handle`'s own grouping window is now `SurfaceBuffer`'s, entirely
+    /// worker-side (`dev/docs/plans/260814_one_seam_one_log.md`'s commit
+    /// producer): a pin never reaches that buffer at all, so it cannot split
+    /// a run it is never offered to.  This drives the real production
+    /// pipeline — `SurfaceBuffer` grouping into a `Display::ObservationGroup`
+    /// commit, folded by `record::View`, drawn by `Viewport::sync` — rather
+    /// than the retired raw-`Kind` path `App::handle` no longer coalesces on
+    /// its own.
     #[test]
     fn a_pin_never_splits_a_coalesced_observation_run() {
-        let (mut app, rx) = app();
-        for kind in [
-            Kind::ToolCall {
-                tool: "ral",
+        use crate::record::commit::SurfaceBuffer;
+        use crate::record::{Blocks, Emitter as RecordEmitter, FleetSink, Fold, Printer, View};
+
+        let (mut app, _rx) = app();
+        let path = std::env::temp_dir().join(format!(
+            "exarch-pin-coalesce-test-{}-{:?}.jsonl",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let recorder = RecordEmitter::create(&path).expect("temp record log");
+        let (tx, brx) = crate::bus::channel();
+        recorder.attach(FleetSink {
+            id: 1,
+            tx: tx.downgrade(),
+            meter: crate::bus::UsageMeter::default(),
+        });
+        let _recorded = recorder
+            .emit(crate::record::Display::ToolCall {
+                tool: "ral".into(),
                 cmd: "read 'a.rs'".into(),
                 summary: Some("look around".into()),
-            },
-            read("a.rs"),
-            Kind::Pin {
-                key: "tasks".into(),
-                card: Card(vec![Mark::Raw {
+            })
+            .unwrap();
+
+        let read_at = |path: &str| {
+            Observation::instant(
+                CallSite::default(),
+                String::new(),
+                Observed::Read { path: path.into() },
+            )
+        };
+        let mut buf = SurfaceBuffer::new();
+        buf.absorb_observation(&recorder, 1, read_at("a.rs")).unwrap();
+        // The pin lands directly in the viewport's own register — it is
+        // ambient state like usage, never routed through the buffer that
+        // groups reads — so it cannot stand between the two below.
+        app.tabs
+            .viewport_mut(1)
+            .expect("root has a viewport")
+            .set_pin(
+                "tasks".into(),
+                Card(vec![Mark::Raw {
                     bytes: b"one left".to_vec(),
                 }]),
-            },
-            read("b.rs"),
-            Kind::Boundary,
-        ] {
-            app.handle(Event { id: 1, kind }, &rx);
+            );
+        buf.absorb_observation(&recorder, 1, read_at("b.rs")).unwrap();
+        buf.flush_surfaces(&recorder).unwrap();
+
+        let mut blocks = Blocks::default();
+        while let Ok(sig) = brx.try_recv() {
+            if let crate::bus::Signal::Fact(_, rec) = sig {
+                View::step(&mut blocks, &rec).expect("every commit here is a Display record");
+            }
         }
+        let vp = app.tabs.viewport_mut(1).expect("root has a viewport");
+        vp.sync(&blocks);
 
         let vp = app.tabs.viewport(1).expect("root has a viewport");
         assert_eq!(

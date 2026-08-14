@@ -25,6 +25,7 @@ use crate::{
         credential::CredentialStore,
         models::{LiveSource, ModelCatalog},
     },
+    record::Printer,
 };
 
 use super::banner::SessionInfo;
@@ -196,6 +197,27 @@ pub fn run(
     // event (a `/model` switch) is recorded and drawn like any worker note.
     let ui_emit = fleet.bus.emitter(session.id, session.transcript());
     if let Some((exchanges, bytes)) = session.resume_summary() {
+        // Fold the record log into the fold's memo *before* the note below,
+        // so the note is the boundary the plan names: everything ahead of it
+        // is replayed history, everything after is the live session — the
+        // one call `Viewport::sync` makes with a producer other than the
+        // live `push_*` half, seeding a fresh viewport that no `push_*` has
+        // touched yet (`dev/docs/plans/260814_one_seam_one_log.md`, step 7).
+        let record_path = session.log_dir().join("record.jsonl");
+        let blocks =
+            crate::record::replay::<crate::record::View>(&record_path).map_err(|e| {
+                format!("record.jsonl did not replay cleanly: {e}")
+            })?;
+        // The fold's usage rows are cumulative, matching `total_usage`'s own
+        // running sum; it carries no cache/dollar breakdown and no *last*
+        // turn's prompt size, so `last_input` — the ctx gauge's numerator —
+        // stays at zero until the next live turn reports one, same as a
+        // fresh session's opening frame.
+        tui.app.total_usage.input = blocks.input_tokens();
+        tui.app.total_usage.output = blocks.output_tokens();
+        if let Some(vp) = tui.app.tabs.viewport_mut(session.id) {
+            vp.sync(&blocks);
+        }
         Agent::note(
             format!(
                 "resumed: {exchanges} exchanges, {} KB",

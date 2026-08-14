@@ -3,12 +3,12 @@
 //! Process-boundary resume coverage: a scripted child leaves a mid-exchange
 //! ledger, the parent terminates it, and a fresh root continues the session.
 
-use exarch::agent::event::SessionEvent;
 use exarch::agent::{Agent, RootConfig, RootSeat, deliberate};
 use exarch::bootstrap::{EXARCH, Scratch};
 use exarch::bus::{Emitter, channel};
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Provider, ProviderKind};
+use exarch::record::{self, Refusal, View};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -69,9 +69,9 @@ fn scripted_run_kill_resume_and_continue() {
         .spawn()
         .expect("spawn scripted child");
 
-    let events = child_dir.join("sessions/0/events.jsonl");
+    let record_log = child_dir.join("sessions/0/record.jsonl");
     let ready = (0..200).any(|_| {
-        if std::fs::read_to_string(&events).is_ok_and(|text| text.contains("crash prompt")) {
+        if std::fs::read_to_string(&record_log).is_ok_and(|text| text.contains("crash prompt")) {
             true
         } else {
             std::thread::sleep(Duration::from_millis(10));
@@ -100,6 +100,17 @@ fn scripted_run_kill_resume_and_continue() {
             .any(|message| message.content.first_text() == Some("before kill")),
         "the pre-kill exchange must survive the resume, not be thrown away"
     );
+    // The bug this whole plan exists for: not the model's memory (asserted
+    // above) but the *user's* — the view fold `record.jsonl` folds into,
+    // which a resumed TUI seeds its scrollback from (`tui_loop::run`).
+    let record_path = resumed.log_dir().join("record.jsonl");
+    let blocks = record::replay::<View>(&record_path)
+        .expect("the resumed session's record log replays cleanly");
+    assert!(
+        blocks.render_log().contains("before kill"),
+        "the view fold must carry the pre-kill exchange across the crash and resume too"
+    );
+
     drive(
         &mut resumed,
         &scripted("test-model", Script::new().then(Reply::text("continued"))),
@@ -119,6 +130,91 @@ fn scripted_run_kill_resume_and_continue() {
             .any(|message| message.content.first_text() == Some("before kill")),
         "the pre-kill exchange must still be present after driving the resumed session further"
     );
+
+    let blocks = record::replay::<View>(&record_path)
+        .expect("the record log still replays cleanly after driving the resumed session");
+    let rendered = blocks.render_log();
+    assert!(
+        rendered.contains("continued"),
+        "the resumed session's own turn joins the view fold: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("before kill"),
+        "and driving the resumed session further does not disturb the pre-kill turn: {rendered:?}"
+    );
+}
+
+/// `render_log` is a pure rendering of whatever the fold admitted, so folding
+/// the same file twice — the regenerability law step 6 exists for — must
+/// agree byte for byte, whether or not a viewport in between ever flushed
+/// `user.log` from a resident window rather than the whole history.
+#[test]
+fn the_view_folds_render_is_a_pure_function_of_the_log() {
+    let root = tempfile::tempdir().expect("scratch dir");
+    let path = root.path().join("record.jsonl");
+    let emit = record::Emitter::create(&path).expect("fresh record log");
+    let _ = emit
+        .emit(record::Display::Prompt {
+            text: "hello".into(),
+        })
+        .expect("a display commit records");
+    let _ = emit
+        .emit(record::Display::Answer {
+            text: "hi back".into(),
+        })
+        .expect("a display commit records");
+    let _ = emit
+        .emit(record::Forensic::SystemNote {
+            text: "a note".into(),
+        })
+        .expect("a forensic record records");
+
+    let first = record::replay::<View>(&path)
+        .expect("a fresh log replays cleanly")
+        .render_log();
+    let second = record::replay::<View>(&path)
+        .expect("replaying the same log twice must agree")
+        .render_log();
+    assert_eq!(
+        first, second,
+        "the render is a pure function of the log, never an accumulator with its own state"
+    );
+    assert!(first.contains("hello") && first.contains("hi back") && first.contains("a note"));
+}
+
+/// A record the fold does not recognise refuses the whole session rather
+/// than silently dropping the line or panicking — the versioned display
+/// vocabulary's own law (`admissible_event`'s old `_ => true` catch-all dies
+/// with this move).
+#[test]
+fn replay_refuses_a_ledger_line_it_does_not_recognise() {
+    let root = tempfile::tempdir().expect("scratch dir");
+    let path = root.path().join("record.jsonl");
+    {
+        let emit = record::Emitter::create(&path).expect("fresh record log");
+        let _ = emit
+            .emit(record::Forensic::SystemNote {
+                text: "a genuine record".into(),
+            })
+            .expect("a forensic record records");
+    }
+    // Appended by hand: no `Record` variant is named `FutureClass`, and
+    // `Record`'s derive carries no `#[serde(other)]` fallback, so this line
+    // must refuse to parse rather than silently vanish.
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("record log");
+    writeln!(file, r#"{{"FutureClass":{{"anything":1}}}}"#).expect("append a foreign line");
+    file.flush().expect("flush the foreign line");
+
+    match record::replay::<View>(&path) {
+        Err(Refusal::Unreadable(_)) => {}
+        Err(other) => panic!("expected an Unreadable refusal, not: {other}"),
+        Ok(_) => panic!(
+            "a record the fold cannot parse must refuse the whole replay, not silently succeed"
+        ),
+    }
 }
 
 #[test]
@@ -140,16 +236,16 @@ fn resume_child() {
     let provider = scripted("test-model", Script::new().then(Reply::text("before kill")));
     drive(&mut session, &provider, "before the kill");
 
-    let event = SessionEvent::UserPrompt {
+    let record = exarch::record::Record::Protocol(exarch::record::Protocol::UserPrompt {
         exchange: 2,
         text: "crash prompt".into(),
-    };
-    let path = dir.join("sessions/0/events.jsonl");
+    });
+    let path = dir.join("sessions/0/record.jsonl");
     let mut file = OpenOptions::new()
         .append(true)
         .open(&path)
-        .expect("event ledger");
-    serde_json::to_writer(&mut file, &event).expect("write crash prompt");
+        .expect("record log");
+    serde_json::to_writer(&mut file, &record).expect("write crash prompt");
     file.write_all(b"\n").expect("terminate crash prompt line");
     file.flush().expect("flush crash prompt");
     loop {
