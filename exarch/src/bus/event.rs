@@ -53,7 +53,12 @@ impl Signal {
 /// the records whose dual-write emit sites the seam collapsed, and nothing
 /// else: every other class keeps a live legacy emit beside its record, so
 /// deriving a `Kind` here too would draw it twice.
-fn record_kind(record: &Record) -> Option<Kind> {
+///
+/// `pub(crate)`, not private: [`super::Sink::fact`]'s default draws on this
+/// from the sibling `sink` module, so a printer that still folds over `Kind`
+/// keeps working unchanged while one that folds over `Record` directly
+/// (synod) overrides `fact` and never calls it.
+pub(crate) fn record_kind(record: &Record) -> Option<Kind> {
     use crate::record::{Display, Forensic, Protocol};
     match record {
         Record::Protocol(Protocol::StepStarted { n, tuning }) => Some(Kind::Step {

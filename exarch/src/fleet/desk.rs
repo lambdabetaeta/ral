@@ -1411,7 +1411,10 @@ impl ExarchDesk {
             // to emit here.
             Ok(receipt) => {
                 self.services.commit_act(act, subject, payload, false);
-                let text = format!("context changed by {:+} serialized bytes", receipt.bytes_delta);
+                let text = format!(
+                    "context changed by {:+} serialized bytes",
+                    receipt.bytes_delta
+                );
                 self.services
                     .record_forensic(crate::record::Forensic::HarnessResult { text: text.clone() });
                 self.services.emit.emit(Kind::HarnessResult(text));
@@ -1426,9 +1429,10 @@ impl ExarchDesk {
             }
             Err(error) => {
                 self.services.commit_act(act, subject, payload, true);
-                self.services.record_forensic(crate::record::Forensic::HarnessResult {
-                    text: error.clone(),
-                });
+                self.services
+                    .record_forensic(crate::record::Forensic::HarnessResult {
+                        text: error.clone(),
+                    });
                 self.services.emit.emit(Kind::HarnessResult(error.clone()));
                 Err(Error::new(error, 1))
             }
@@ -2445,7 +2449,9 @@ mod tests {
         let read = ral_core::types::Observation::instant(
             ral_core::types::CallSite::default(),
             String::new(),
-            ral_core::types::Observed::Read { path: "a.rs".into() },
+            ral_core::types::Observed::Read {
+                path: "a.rs".into(),
+            },
         );
         applier.live(crate::bus::card::observation_wire(&read));
         applier.live(FOValue::Variant {
@@ -2456,7 +2462,12 @@ mod tests {
             label: "done".into(),
             payload: Some(Box::new(FOValue::Map {
                 entries: vec![
-                    ("cmd".into(), FOValue::String { value: "<block>".into() }),
+                    (
+                        "cmd".into(),
+                        FOValue::String {
+                            value: "<block>".into(),
+                        },
+                    ),
                     (
                         "outcome".into(),
                         FOValue::Variant {
@@ -2478,8 +2489,18 @@ mod tests {
                             payload: None,
                         },
                     ),
-                    ("cmd".into(), FOValue::String { value: "sleep 10".into() }),
-                    ("cause".into(), FOValue::String { value: "idle".into() }),
+                    (
+                        "cmd".into(),
+                        FOValue::String {
+                            value: "sleep 10".into(),
+                        },
+                    ),
+                    (
+                        "cause".into(),
+                        FOValue::String {
+                            value: "idle".into(),
+                        },
+                    ),
                 ],
             })),
         });

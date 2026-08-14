@@ -1,17 +1,28 @@
-//! The window's own [`exarch::bus::Sink`]: projects the bus's [`Kind`] into
-//! a JSON-ready [`SynodEvent`] and emits each as a `synod-event` to the
-//! frontend, in place of the developer-flavoured stderr lines headless
-//! writes.
+//! The window's own [`exarch::bus::Sink`]: folds the bus's [`Record`] and
+//! [`Transient`] into a JSON-ready [`SynodEvent`] and emits each as a
+//! `synod-event` to the frontend, in place of the developer-flavoured
+//! stderr lines headless writes.
 //!
-//! [`project`] and [`project_helper`] are the pure heart of this module —
-//! total functions from a bus [`Kind`] to `Option<SynodEvent>` — so their
-//! mapping is unit-testable without a running window, as is the id-and-
-//! counter routing between them ([`Router`]); [`TauriSink`] is the thin,
-//! untested shim that hands each routed event to `app.emit`.
+//! [`project`], [`project_helper`], [`transient`] and [`transient_helper`]
+//! are the pure heart of this module — total functions from the seam's own
+//! vocabulary to `Option<SynodEvent>` — so their mapping is unit-testable
+//! without a running window, as is the id-and-counter routing between them
+//! ([`Router`]); [`TauriSink`] is the thin, untested shim that hands each
+//! routed event to `app.emit`.
+//!
+//! `#![deny(clippy::wildcard_enum_match_arm)]` at the top of this module is
+//! the guarantee's crate-boundary half: `record::Record` and `record::Transient`
+//! carry no `Kind` here, only their own three-and-one classes, so a new
+//! variant on either is a compile error in this fold, not a silent drop.
+#![deny(clippy::wildcard_enum_match_arm)]
 
 use exarch::agent::event::ProviderErrorRecord;
-use exarch::bus::card::{Card, Field, Hunk, Mark, Measure, Span};
-use exarch::bus::{AgentId, AgentOutcome, Event, Kind, Sink};
+use exarch::bus::card::{
+    Card, Field, Hunk, Mark, Measure, Span, context_rows_card, done_card, notice_card,
+    observation_display_card, observation_group_card, to_card_done, to_card_notice,
+};
+use exarch::bus::{AgentId, Event, Sink};
+use exarch::record::{Display, Forensic, Protocol, Record, Transient};
 use serde::Serialize;
 
 /// A shadow of [`Mark`] whose byte-carrying variants (`Listing`, `Raw`) hold
@@ -51,6 +62,25 @@ fn marks_dto(card: Card) -> Vec<MarkDto> {
         .collect()
 }
 
+/// `Some(card)` as a wire [`SynodEvent::ProcessCard`], `None` drawing nothing
+/// — the shared tail of every arm below that draws process, not output.
+#[allow(
+    clippy::single_option_map,
+    reason = "shared by every process-card arm in both folds; inlining it back to each caller is the duplication this exists to avoid"
+)]
+fn process_card(card: Option<Card>) -> Option<SynodEvent> {
+    card.map(|card| SynodEvent::ProcessCard {
+        marks: marks_dto(card),
+    })
+}
+
+/// Decode a recorded `Display::Card`'s opaque wire form back into a [`Card`]
+/// — the mark tree a deliberate `surface` act recorded whole, since it is
+/// its own fact rather than a rendering of one.
+fn decode_card(marks: &serde_json::Value) -> Option<Card> {
+    serde_json::from_value(marks.clone()).ok()
+}
+
 /// The wire shape of one exchange's worth of narration, as the window's own
 /// `synod-event` listener sees it — [`project`]'s codomain, plus
 /// [`Self::Failure`], which never comes from the bus.
@@ -75,12 +105,12 @@ pub enum SynodEvent {
         pending: bool,
     },
     ToolCall {
-        tool: &'static str,
+        tool: String,
         cmd: String,
         summary: Option<String>,
     },
     HarnessCall {
-        verb: &'static str,
+        verb: String,
         subject: Option<String>,
         payload: String,
         failed: bool,
@@ -94,15 +124,15 @@ pub enum SynodEvent {
     ProcessCard {
         marks: Vec<MarkDto>,
     },
-    /// The live helper count, folded from every `Born`/`Died` on the bus
-    /// into one running number — the dial's fixed station for "how many
-    /// are working", emitted only when the count actually changes.
+    /// The live helper count, folded from every `Transient::Born`/`Died` on
+    /// the bus into one running number — the dial's fixed station for "how
+    /// many are working", emitted only when the count actually changes.
     Helpers {
         live: u32,
     },
-    /// A helper's settling, folded from `Kind::SubagentDone` — one process
-    /// line in the dial's deepest rung, in the helper's own words rather
-    /// than the conversation's.
+    /// A helper's settling, folded from `Display::SubagentDone` — one
+    /// process line in the dial's deepest rung, in the helper's own words
+    /// rather than the conversation's.
     HelperDone {
         name: String,
         ok: bool,
@@ -131,7 +161,7 @@ pub enum SynodEvent {
         record: ProviderErrorRecord,
     },
     /// A conversation failure, emitted directly by `commands.rs` — never by
-    /// [`project`], since no [`Kind`] carries this fact.  A
+    /// [`project`], since no [`Record`] carries this fact.  A
     /// `Conversation::begin` refusal is terminal, and `synod-ended` follows;
     /// a `Conversation::exchange` `Err` leaves the conversation open for the
     /// next message.
@@ -140,91 +170,236 @@ pub enum SynodEvent {
     },
 }
 
-/// Project one bus [`Kind`] into the event the window renders, or `None`
-/// for a `Kind` the window has no use for.
+/// `Protocol` is the model fold's own verbatim payload — a `ChatMessage`, a
+/// tool-call id, a session bookend — round-tripped to the provider, never
+/// drawn.  Every arm is named so a ninth class arriving here is a compile
+/// error, not a silent drop.
+fn project_protocol(protocol: &Protocol) -> Option<SynodEvent> {
+    match protocol {
+        Protocol::SessionStarted { .. }
+        | Protocol::SessionResumed { .. }
+        | Protocol::SessionEnded
+        | Protocol::UserPrompt { .. }
+        | Protocol::ContextMessage { .. }
+        | Protocol::StepStarted { .. }
+        | Protocol::AssistantMessage { .. }
+        | Protocol::ToolResults { .. }
+        | Protocol::ContextEdited { .. } => None,
+    }
+}
+
+/// The trunk's own fold over [`Display`] — the view fold's commits.
 ///
-/// `Step`'s `tuning` is dropped: the window narrates exchanges, not the
-/// provider's effort dial.  The card-carrying kinds split by intent:
-/// [`Kind::Card`] is a deliberate user-facing act and projects to `Card`,
-/// which the window stands in the transcript; `Io`/`Done`/`Notice`/
-/// `Resources`/`Context` are raw-fact pairings whose card is a presentation of
-/// process, so they collapse to `ProcessCard` and stay inside the dial.
-/// Either way the raw structural fact still lands in `transcript.jsonl`;
-/// only the rendering reaches the window.
-pub fn project(kind: Kind) -> Option<SynodEvent> {
-    Some(match kind {
-        Kind::Token(text) => SynodEvent::Token { text },
-        Kind::Step { n, .. } => SynodEvent::Step { n },
-        Kind::State(state) => SynodEvent::State {
+/// The card-carrying arms split by intent, exactly as the retired `Kind`
+/// match once did: [`Display::Card`] is a deliberate user-facing act and
+/// projects to [`SynodEvent::Card`], which the window stands in the
+/// transcript; the grouped and single observations, a done, a notice, and a
+/// context survey are raw-fact pairings whose card is a presentation of
+/// process, so they collapse to [`SynodEvent::ProcessCard`] and stay inside
+/// the dial. The card itself is built here, at fold time — `Display` keeps
+/// only the fact, never a mark tree it would otherwise throw away.
+#[allow(clippy::match_same_arms)]
+fn project_display(display: &Display) -> Option<SynodEvent> {
+    match display {
+        Display::ToolCall { tool, cmd, summary } => Some(SynodEvent::ToolCall {
+            tool: tool.clone(),
+            cmd: cmd.clone(),
+            summary: summary.clone(),
+        }),
+        Display::HarnessCall {
+            verb,
+            subject,
+            payload,
+            failed,
+        } => Some(SynodEvent::HarnessCall {
+            verb: verb.clone(),
+            subject: subject.clone(),
+            payload: payload.clone(),
+            failed: *failed,
+        }),
+        Display::ObservationGroup { values } => process_card(observation_group_card(values)),
+        Display::Observation { value } => process_card(observation_display_card(value)),
+        Display::Card { marks } => decode_card(marks).map(|card| SynodEvent::Card {
+            marks: marks_dto(card),
+        }),
+        Display::Done { outcome } => process_card(Some(done_card(&to_card_done(outcome)))),
+        Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
+        Display::Context { rows } => process_card(Some(context_rows_card(rows))),
+        Display::Step { n } => Some(SynodEvent::Step { n: *n }),
+        // The trunk's committed reasoning, its prose chopped for the
+        // durable scrollback, a tool result already said on its call row,
+        // and a display twin of a protocol fact the screen never actually
+        // drew live: none of these are narrated to the window, which draws
+        // only from the live deltas and the acts above.
+        Display::Thinking { .. }
+        | Display::Prompt { .. }
+        | Display::Answer { .. }
+        | Display::Result { .. }
+        | Display::ContextEdited { .. } => None,
+        // Intercepted by `Router::route_fact` before this fold ever runs.
+        Display::SubagentDone { .. } => None,
+    }
+}
+
+/// A helper's own fold over [`Display`]: its prose, calls, and turn state are
+/// its own business, never the conversation's — only its process facts fold
+/// into the dial exactly as the trunk's do, and even its own deliberate
+/// [`Display::Card`] collapses to [`SynodEvent::ProcessCard`] rather than
+/// standing in the transcript.
+#[allow(clippy::match_same_arms)]
+fn project_display_helper(display: &Display) -> Option<SynodEvent> {
+    match display {
+        Display::ObservationGroup { values } => process_card(observation_group_card(values)),
+        Display::Observation { value } => process_card(observation_display_card(value)),
+        Display::Card { marks } => process_card(decode_card(marks)),
+        Display::Done { outcome } => process_card(Some(done_card(&to_card_done(outcome)))),
+        Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
+        Display::Context { rows } => process_card(Some(context_rows_card(rows))),
+        Display::Thinking { .. }
+        | Display::Prompt { .. }
+        | Display::Answer { .. }
+        | Display::ToolCall { .. }
+        | Display::HarnessCall { .. }
+        | Display::Result { .. }
+        | Display::Step { .. }
+        | Display::ContextEdited { .. } => None,
+        Display::SubagentDone { .. } => None,
+    }
+}
+
+/// The trunk's own fold over [`Forensic`] — breadcrumbs the model fold never
+/// sees.
+fn project_forensic(forensic: &Forensic) -> Option<SynodEvent> {
+    match forensic {
+        Forensic::UsageDelta { usage } => Some(SynodEvent::Usage {
+            input: usage.input,
+            output: usage.output,
+            dollars: usage.dollars,
+            unmetered: usage.unmetered,
+        }),
+        Forensic::Error { text } => Some(SynodEvent::Error {
+            message: text.clone(),
+        }),
+        Forensic::ProviderError { error } => Some(SynodEvent::ProviderError {
+            record: error.clone(),
+        }),
+        Forensic::Stalled { error } => Some(SynodEvent::Stalled {
+            record: error.clone(),
+        }),
+        // The harness minding itself, a forensic pairing whose act row
+        // already said everything, a cancellation with no prior `Kind`
+        // twin, and a register slot the window does not have: kept for
+        // post-mortem alone.
+        Forensic::Cancelled
+        | Forensic::Nudge { .. }
+        | Forensic::SystemNote { .. }
+        | Forensic::HarnessResult { .. }
+        | Forensic::Pin { .. }
+        | Forensic::Unpin { .. }
+        | Forensic::ModelChanged { .. } => None,
+    }
+}
+
+/// A helper's own fold over [`Forensic`]: its usage still counts toward the
+/// one bill; every other breadcrumb is its own business.
+fn project_forensic_helper(forensic: &Forensic) -> Option<SynodEvent> {
+    match forensic {
+        Forensic::UsageDelta { usage } => Some(SynodEvent::Usage {
+            input: usage.input,
+            output: usage.output,
+            dollars: usage.dollars,
+            unmetered: usage.unmetered,
+        }),
+        Forensic::Cancelled
+        | Forensic::Error { .. }
+        | Forensic::Nudge { .. }
+        | Forensic::ProviderError { .. }
+        | Forensic::Stalled { .. }
+        | Forensic::SystemNote { .. }
+        | Forensic::HarnessResult { .. }
+        | Forensic::Pin { .. }
+        | Forensic::Unpin { .. }
+        | Forensic::ModelChanged { .. } => None,
+    }
+}
+
+/// Fold one durable [`Record`] the trunk itself produced into the event the
+/// window renders, or `None` for a record the window has no use for.
+///
+/// `Step`'s protocol twin's `tuning` is dropped, exactly as the `Display`
+/// class that carries it already drops it: the window narrates exchanges,
+/// not the provider's effort dial.
+pub fn project(record: &Record) -> Option<SynodEvent> {
+    match record {
+        Record::Protocol(protocol) => project_protocol(protocol),
+        Record::Display(display) => project_display(display),
+        Record::Forensic(forensic) => project_forensic(forensic),
+    }
+}
+
+/// [`project`]'s narrower twin for a record a spawned helper produced.
+pub fn project_helper(record: &Record) -> Option<SynodEvent> {
+    match record {
+        Record::Protocol(_) => None,
+        Record::Display(display) => project_display_helper(display),
+        Record::Forensic(forensic) => project_forensic_helper(forensic),
+    }
+}
+
+/// The trunk's own fold over a live [`Transient`] delta.
+#[allow(clippy::match_same_arms)]
+fn project_transient(t: &Transient) -> Option<SynodEvent> {
+    match t {
+        Transient::Token(text) => Some(SynodEvent::Token { text: text.clone() }),
+        Transient::State(state) => Some(SynodEvent::State {
             label: state.label(),
             pending: state.pending(),
-        },
-        Kind::ToolCall { tool, cmd, summary } => SynodEvent::ToolCall { tool, cmd, summary },
-        Kind::HarnessCall {
-            verb,
-            subject,
-            payload,
-            failed,
-        } => SynodEvent::HarnessCall {
-            verb,
-            subject,
-            payload,
-            failed,
-        },
-        Kind::Card(card) => SynodEvent::Card {
-            marks: marks_dto(card),
-        },
-        Kind::Io { card, .. }
-        | Kind::Done { card, .. }
-        | Kind::Notice { card, .. }
-        | Kind::Context { card, .. }
-        | Kind::Resources { card, .. } => SynodEvent::ProcessCard {
-            marks: marks_dto(card),
-        },
-        Kind::Usage(u) => SynodEvent::Usage {
-            input: u.input,
-            output: u.output,
-            dollars: u.dollars,
-            unmetered: u.unmetered,
-        },
-        Kind::StopReason(reason) => SynodEvent::StopReason { reason },
-        Kind::Error(message) => SynodEvent::Error { message },
-        Kind::ProviderError(record) => SynodEvent::ProviderError { record },
-        Kind::Stalled(record) => SynodEvent::Stalled { record },
-        // `Born`/`Died` are a helper's own lifecycle and `SubagentDone` its
-        // settling; `Router::route` reads all three before this projection
-        // ever runs, turning them into `Helpers`/`HelperDone`, so they never
-        // actually reach this arm — it is listed only so this match stays
-        // exhaustive over `Kind`.  `Boundary`, `Reasoning`, and
-        // `UserPromptEcho` are TUI presentation blocks — the content they
-        // carry already round-trips to the model on the assistant message,
-        // so there is nothing here for the window to add.  A live `Thinking`
-        // chunk has no block of its own here and the status bar already
-        // names the wait, so only the committed reasoning matters, and that
-        // reaches the transcript.  `ToolResult`/`HarnessResult` are forensic
-        // pairings for their call, kept in the transcript for post-mortem,
-        // never shown live.  `Pin`/`Unpin` write a TUI register slot synod
-        // does not have.  `Nudge` and `SystemNote` are the harness minding
-        // itself — an empty-turn correction, a truncation recovery, a
-        // context-edit and compaction state — named in the operator's terms, so the
-        // window is not told; the state a compaction announces is its whole
-        // user-facing surface.
-        Kind::Born { .. }
-        | Kind::Died
-        | Kind::Boundary
-        | Kind::Thinking(_)
-        | Kind::Nudge { .. }
-        | Kind::SystemNote(_)
-        | Kind::ContextEdited { .. }
-        | Kind::Reasoning { .. }
-        | Kind::UserPromptEcho(_)
-        | Kind::ToolResult(_)
-        | Kind::HarnessResult(_)
-        | Kind::SubagentDone { .. }
-        | Kind::Pin { .. }
-        | Kind::Unpin { .. }
-        | Kind::Cleared => return None,
-    })
+        }),
+        Transient::StopReason(reason) => Some(SynodEvent::StopReason {
+            reason: reason.clone(),
+        }),
+        Transient::Resources { card, .. } => process_card(Some(card.clone())),
+        // A seam append failure or a channel elision marker: the plumbing's
+        // own diagnostic, with nowhere durable to go, so the window is the
+        // one place left to lose it.
+        Transient::Fault { text } => Some(SynodEvent::Error {
+            message: text.clone(),
+        }),
+        // A live reasoning chunk has no block of its own here, the streaming
+        // flush boundary and a cleared segment draw nothing on their own,
+        // and the live pin register is a slot the window does not have.
+        Transient::Thinking(_)
+        | Transient::Boundary
+        | Transient::Cleared
+        | Transient::Pin { .. }
+        | Transient::Unpin { .. } => None,
+        // Intercepted by `Router::route_transient` before this fold ever
+        // runs — a helper's own lifecycle, folded into `Helpers` instead.
+        Transient::Born { .. } | Transient::Died => None,
+    }
+}
+
+/// A helper's own fold over a live [`Transient`] delta: its prose and turn
+/// state are its own business, never the conversation's — only its process
+/// facts and its own plumbing faults fold into the dial exactly as the
+/// trunk's do.
+#[allow(clippy::match_same_arms)]
+fn project_transient_helper(t: &Transient) -> Option<SynodEvent> {
+    match t {
+        Transient::Resources { card, .. } => process_card(Some(card.clone())),
+        Transient::Fault { text } => Some(SynodEvent::Error {
+            message: text.clone(),
+        }),
+        Transient::Token(_)
+        | Transient::Thinking(_)
+        | Transient::State(_)
+        | Transient::Boundary
+        | Transient::StopReason(_)
+        | Transient::Cleared
+        | Transient::Pin { .. }
+        | Transient::Unpin { .. } => None,
+        Transient::Born { .. } | Transient::Died => None,
+    }
 }
 
 /// The id-and-counter half of [`TauriSink`]'s routing, split out so it is
@@ -232,10 +407,10 @@ pub fn project(kind: Kind) -> Option<SynodEvent> {
 /// running Tauri app to build at all.
 #[derive(Default)]
 struct Router {
-    /// The trunk's own id, learned from the very first event this router
-    /// ever sees.  A fresh conversation's trunk always turns at least
-    /// once — a state transition, a step — before the first `agent` call
-    /// could even reach the model, so the first event a router sees is
+    /// The trunk's own id, learned from the very first fact or transient
+    /// this router ever sees.  A fresh conversation's trunk always turns at
+    /// least once — a state transition, a step — before the first `agent`
+    /// call could even reach the model, so the first signal a router sees is
     /// always the trunk's; nothing needs to be told which id that is.
     root: Option<AgentId>,
     /// The live helper count, re-emitted as [`SynodEvent::Helpers`] only
@@ -244,27 +419,63 @@ struct Router {
 }
 
 impl Router {
-    /// Route one event: the trunk's own project unchanged, a helper's
-    /// through [`project_helper`] — except `Born`/`Died`/`SubagentDone`,
-    /// which cut across that split (a helper's own lifecycle, a result that
-    /// always drains in the trunk's own loop) and are read here first.
-    fn route(&mut self, e: Event) -> Option<SynodEvent> {
-        let root = *self.root.get_or_insert(e.id);
-        match e.kind {
-            Kind::Born { .. } => Some(self.bump_helpers(1)),
-            Kind::Died => Some(self.bump_helpers(-1)),
-            Kind::SubagentDone {
+    /// Route one durable fact: [`Display::SubagentDone`] cuts across the
+    /// trunk/helper split — a result that always drains in the trunk's own
+    /// loop — and is read here first, whoever produced it; everything else
+    /// follows the id.
+    fn route_fact(&mut self, id: AgentId, fact: &Record) -> Option<SynodEvent> {
+        match fact {
+            Record::Display(Display::SubagentDone {
                 name,
-                outcome,
-                elapsed,
+                error,
+                elapsed_ms,
                 ..
-            } => Some(SynodEvent::HelperDone {
-                name,
-                ok: matches!(outcome, AgentOutcome::Complete | AgentOutcome::Empty),
-                elapsed_secs: elapsed.as_secs_f64(),
-            }),
-            kind if e.id == root => project(kind),
-            kind => project_helper(kind),
+            }) => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "elapsed-ms display precision; far below f64's mantissa"
+                )]
+                let elapsed_secs = *elapsed_ms as f64 / 1000.0;
+                return Some(SynodEvent::HelperDone {
+                    name: name.clone(),
+                    ok: error.is_none(),
+                    elapsed_secs,
+                });
+            }
+            Record::Protocol(_) | Record::Display(_) | Record::Forensic(_) => {}
+        }
+        let root = *self.root.get_or_insert(id);
+        if id == root {
+            project(fact)
+        } else {
+            project_helper(fact)
+        }
+    }
+
+    /// Route one live delta: a helper's own [`Transient::Born`]/[`Died`] cut
+    /// across the split the same way — a helper's own lifecycle, folded into
+    /// the one running [`SynodEvent::Helpers`] count rather than either
+    /// per-agent fold.
+    fn route_transient(&mut self, id: AgentId, t: &Transient) -> Option<SynodEvent> {
+        match t {
+            Transient::Born { .. } => return Some(self.bump_helpers(1)),
+            Transient::Died => return Some(self.bump_helpers(-1)),
+            Transient::Token(_)
+            | Transient::Thinking(_)
+            | Transient::State(_)
+            | Transient::Boundary
+            | Transient::StopReason(_)
+            | Transient::Cleared
+            | Transient::Resources { .. }
+            | Transient::Pin { .. }
+            | Transient::Unpin { .. }
+            | Transient::Fault { .. } => {}
+        }
+        let root = *self.root.get_or_insert(id);
+        if id == root {
+            project_transient(t)
+        } else {
+            project_transient_helper(t)
         }
     }
 
@@ -280,34 +491,14 @@ impl Router {
     }
 }
 
-/// A helper's own projection: its prose, tool calls, and state are its own
-/// business, never the conversation's — only its process facts fold into
-/// the dial exactly as the trunk's do, and its usage still counts toward
-/// the one bill.
-fn project_helper(kind: Kind) -> Option<SynodEvent> {
-    match kind {
-        Kind::Usage(u) => Some(SynodEvent::Usage {
-            input: u.input,
-            output: u.output,
-            dollars: u.dollars,
-            unmetered: u.unmetered,
-        }),
-        Kind::Io { card, .. }
-        | Kind::Done { card, .. }
-        | Kind::Notice { card, .. }
-        | Kind::Context { card, .. }
-        | Kind::Resources { card, .. }
-        | Kind::Card(card) => Some(SynodEvent::ProcessCard {
-            marks: marks_dto(card),
-        }),
-        _ => None,
-    }
-}
-
-/// The window's [`Sink`]: routes every bus event by whether it came from the
-/// conversation's own trunk or from a helper it spawned, and emits what
-/// survives as `synod-event` through the worker's own gated
+/// The window's [`Sink`]: routes every seam fact and transient by whether it
+/// came from the conversation's own trunk or from a helper it spawned, and
+/// emits what survives as `synod-event` through the worker's own gated
 /// [`Emitter`](super::commands::Emitter).
+///
+/// [`Sink::handle`] is left empty: the window no longer draws from the
+/// legacy `Kind` bridge at all, only from [`Sink::fact`]/[`Sink::transient`]
+/// below, which this impl overrides.
 pub struct TauriSink {
     emitter: super::commands::Emitter,
     router: Router,
@@ -320,13 +511,25 @@ impl TauriSink {
             router: Router::default(),
         }
     }
+
+    fn send(&self, dto: Option<SynodEvent>) {
+        if let Some(dto) = dto {
+            self.emitter.emit("synod-event", dto);
+        }
+    }
 }
 
 impl Sink for TauriSink {
-    fn handle(&mut self, e: Event) {
-        if let Some(dto) = self.router.route(e) {
-            self.emitter.emit("synod-event", dto);
-        }
+    fn handle(&mut self, _e: Event) {}
+
+    fn fact(&mut self, id: AgentId, fact: &Record) {
+        let dto = self.router.route_fact(id, fact);
+        self.send(dto);
+    }
+
+    fn transient(&mut self, id: AgentId, t: &Transient) {
+        let dto = self.router.route_transient(id, t);
+        self.send(dto);
     }
 }
 
@@ -334,89 +537,33 @@ impl Sink for TauriSink {
 mod tests {
     use super::*;
     use exarch::bus::AgentState;
-    use exarch::bus::card::{DoneOutcome, Notice, Row, Seg};
+    use exarch::bus::card::{Row, Seg};
+    use exarch::record::{DoneOutcome, NoticeFact};
     use ral_core::types::{CallSite, Observation, Observed};
     use std::path::PathBuf;
-    use std::time::Duration;
+
+    /// The wire form a `Display::ObservationGroup`/`Observation` carries —
+    /// the round trip `observation_wire` and `observation_from_wire` take in
+    /// the seam itself, rebuilt here without pulling the private conversion
+    /// into this crate.
+    fn observation_wire(what: Observed) -> ral_core::serial::FOValue {
+        let observation = Observation::instant(CallSite::default(), String::new(), what);
+        ral_core::serial::FOValue::try_from(&observation.to_wire())
+            .expect("a test observation always scrubs to a valid FOValue")
+    }
 
     #[test]
-    fn token_projects_verbatim() {
-        let Some(SynodEvent::Token { text }) = project(Kind::Token("hello".to_string())) else {
+    fn a_transient_token_projects_verbatim() {
+        let Some(SynodEvent::Token { text }) =
+            project_transient(&Transient::Token("hello".to_string()))
+        else {
             panic!("expected a Token event");
         };
         assert_eq!(text, "hello");
     }
 
     #[test]
-    fn listing_with_invalid_utf8_projects_to_lossy_text() {
-        let bytes = vec![0xff, 0xfe];
-        let expected = String::from_utf8_lossy(&bytes).into_owned();
-        let card = Card(vec![Mark::Listing { bytes, more: false }]);
-        let Some(SynodEvent::Card { marks }) = project(Kind::Card(card)) else {
-            panic!("expected a Card event");
-        };
-        let [MarkDto::Listing { text, more }] = marks.as_slice() else {
-            panic!("expected exactly one Listing mark");
-        };
-        assert_eq!(*text, expected);
-        assert!(!more);
-    }
-
-    #[test]
-    fn raw_with_invalid_utf8_projects_to_lossy_text() {
-        let bytes = vec![0xff, 0xfe];
-        let expected = String::from_utf8_lossy(&bytes).into_owned();
-        let card = Card(vec![Mark::Raw { bytes }]);
-        let Some(SynodEvent::Card { marks }) = project(Kind::Card(card)) else {
-            panic!("expected a Card event");
-        };
-        let [MarkDto::Raw { text }] = marks.as_slice() else {
-            panic!("expected exactly one Raw mark");
-        };
-        assert_eq!(*text, expected);
-    }
-
-    #[test]
-    fn io_done_notice_resources_all_collapse_to_process_card() {
-        let io = Kind::Io {
-            event: Observation::instant(
-                CallSite::default(),
-                String::new(),
-                Observed::Read {
-                    path: "f.rs".to_string(),
-                },
-            ),
-            card: Card(vec![]),
-        };
-        let done = Kind::Done {
-            outcome: DoneOutcome::Ok,
-            card: Card(vec![]),
-        };
-        let notice = Kind::Notice {
-            notice: Notice::Prune {
-                names: vec!["x".to_string()],
-                idle_calls: vec![0],
-            },
-            card: Card(vec![]),
-        };
-        let resources = Kind::Resources {
-            rows: Vec::new(),
-            card: Card(vec![]),
-        };
-        let context = Kind::Context {
-            rows: Vec::new(),
-            card: Card(vec![]),
-        };
-        for kind in [io, done, notice, resources, context] {
-            let Some(SynodEvent::ProcessCard { marks }) = project(kind) else {
-                panic!("expected a ProcessCard event");
-            };
-            assert!(marks.is_empty());
-        }
-    }
-
-    #[test]
-    fn wire_format_pins_diff_card_and_camel_case_tool_call() {
+    fn a_deliberate_card_projects_to_the_transcript() {
         let card = Card(vec![Mark::Diff {
             path: "f.rs".to_string(),
             hunks: vec![Hunk {
@@ -424,7 +571,9 @@ mod tests {
                 rows: vec![Row::Del(vec![Seg::plain("x")])],
             }],
         }]);
-        let event = project(Kind::Card(card)).expect("card projects");
+        let marks = serde_json::to_value(&card).expect("Card's derived Serialize cannot fail");
+        let record = Record::Display(Display::Card { marks });
+        let event = project(&record).expect("card projects");
         let value = serde_json::to_value(&event).expect("card serialises");
         assert_eq!(
             value,
@@ -443,23 +592,100 @@ mod tests {
                 }],
             })
         );
+    }
 
-        let io = project(Kind::Io {
-            event: Observation::instant(
-                CallSite::default(),
-                String::new(),
-                Observed::Read {
-                    path: "f.rs".to_string(),
-                },
-            ),
-            card: Card(vec![]),
-        })
-        .expect("io projects");
-        let io_value = serde_json::to_value(&io).expect("io serialises");
-        assert_eq!(io_value["type"], "process_card");
+    #[test]
+    fn a_helpers_own_card_collapses_to_process_card() {
+        let card = Card(vec![]);
+        let marks = serde_json::to_value(&card).expect("Card's derived Serialize cannot fail");
+        let record = Record::Display(Display::Card { marks });
+        let Some(SynodEvent::ProcessCard { marks }) = project_helper(&record) else {
+            panic!("a helper's own deliberate card still stays inside the dial");
+        };
+        assert!(marks.is_empty());
+    }
 
+    #[test]
+    fn listing_with_invalid_utf8_projects_to_lossy_text() {
+        let bytes = vec![0xff, 0xfe];
+        let expected = String::from_utf8_lossy(&bytes).into_owned();
+        let card = Card(vec![Mark::Listing { bytes, more: false }]);
+        let marks = serde_json::to_value(&card).expect("Card's derived Serialize cannot fail");
+        let Some(SynodEvent::Card { marks }) = project(&Record::Display(Display::Card { marks }))
+        else {
+            panic!("expected a Card event");
+        };
+        let [MarkDto::Listing { text, more }] = marks.as_slice() else {
+            panic!("expected exactly one Listing mark");
+        };
+        assert_eq!(*text, expected);
+        assert!(!more);
+    }
+
+    #[test]
+    fn raw_with_invalid_utf8_projects_to_lossy_text() {
+        let bytes = vec![0xff, 0xfe];
+        let expected = String::from_utf8_lossy(&bytes).into_owned();
+        let card = Card(vec![Mark::Raw { bytes }]);
+        let marks = serde_json::to_value(&card).expect("Card's derived Serialize cannot fail");
+        let Some(SynodEvent::Card { marks }) = project(&Record::Display(Display::Card { marks }))
+        else {
+            panic!("expected a Card event");
+        };
+        let [MarkDto::Raw { text }] = marks.as_slice() else {
+            panic!("expected exactly one Raw mark");
+        };
+        assert_eq!(*text, expected);
+    }
+
+    #[test]
+    fn done_notice_context_and_a_lone_observation_all_collapse_to_process_card() {
+        let done = Record::Display(Display::Done {
+            outcome: DoneOutcome::Ok,
+        });
+        let notice = Record::Display(Display::Notice {
+            notice: NoticeFact::Prune {
+                names: vec!["x".to_string()],
+                idle_calls: vec![0],
+            },
+        });
+        let context = Record::Display(Display::Context { rows: Vec::new() });
+        let observation = Record::Display(Display::Observation {
+            value: observation_wire(Observed::Worker {
+                id: ral_core::types::WorkerId(1),
+                cmd: "watch build".to_string(),
+                class: ral_core::types::LeaseClass::Worker,
+            }),
+        });
+        for record in [done, notice, context, observation] {
+            let Some(SynodEvent::ProcessCard { marks }) = project(&record) else {
+                panic!("expected a ProcessCard event for {record:?}");
+            };
+            assert!(!marks.is_empty(), "every one of these renders some ink");
+        }
+    }
+
+    #[test]
+    fn a_grouped_run_of_reads_collapses_to_one_process_card() {
+        let values = vec![
+            observation_wire(Observed::Read {
+                path: "a.rs".to_string(),
+            }),
+            observation_wire(Observed::Read {
+                path: "b.rs".to_string(),
+            }),
+        ];
+        let record = Record::Display(Display::ObservationGroup { values });
+        let Some(SynodEvent::ProcessCard { marks }) = project(&record) else {
+            panic!("expected a ProcessCard event");
+        };
+        assert!(!marks.is_empty());
+    }
+
+    #[test]
+    fn wire_format_pins_camel_case_tool_call() {
         let call = SynodEvent::ToolCall {
-            tool: "ral",
+            tool: "ral".to_string(),
             cmd: "ls".to_string(),
             summary: Some("list files".to_string()),
         };
@@ -469,16 +695,13 @@ mod tests {
         assert_eq!(call_value["summary"], "list files");
     }
 
-    fn event(id: AgentId, kind: Kind) -> Event {
-        Event { id, kind }
-    }
-
     #[test]
-    fn the_first_event_seen_names_the_root_whatever_its_id() {
+    fn the_first_signal_seen_names_the_root_whatever_its_id() {
         let mut router = Router::default();
-        let Some(SynodEvent::Token { text }) = router.route(event(7, Kind::Token("hi".into())))
+        let Some(SynodEvent::Token { text }) =
+            router.route_transient(7, &Transient::Token("hi".into()))
         else {
-            panic!("the first event, from whatever id, is the root's own");
+            panic!("the first signal, from whatever id, is the root's own");
         };
         assert_eq!(text, "hi");
     }
@@ -486,40 +709,38 @@ mod tests {
     #[test]
     fn a_helpers_token_and_state_are_dropped_but_its_process_card_folds_in() {
         let mut router = Router::default();
-        router.route(event(0, Kind::Token("root warms up".into())));
+        router.route_transient(0, &Transient::Token("root warms up".into()));
 
         assert!(
             router
-                .route(event(1, Kind::Token("a helper's prose".into())))
+                .route_transient(1, &Transient::Token("a helper's prose".into()))
                 .is_none()
         );
 
-        let done = event(
-            1,
-            Kind::Done {
-                outcome: DoneOutcome::Ok,
-                card: Card(vec![]),
-            },
-        );
-        let Some(SynodEvent::ProcessCard { marks }) = router.route(done) else {
+        let done = Record::Display(Display::Done {
+            outcome: DoneOutcome::Ok,
+        });
+        let Some(SynodEvent::ProcessCard { marks }) = router.route_fact(1, &done) else {
             panic!("a helper's structural facts still fold into the dial");
         };
-        assert!(marks.is_empty());
+        assert!(!marks.is_empty(), "a done outcome always renders some ink");
     }
 
     #[test]
     fn a_helpers_usage_still_counts_toward_the_one_bill() {
         let mut router = Router::default();
-        router.route(event(0, Kind::State(AgentState::Ready)));
+        router.route_transient(0, &Transient::State(AgentState::Ready));
 
-        let usage = exarch::provider::Usage {
+        let usage = exarch::agent::event::UsageDelta {
             input: 7,
             output: 3,
+            cache_creation: None,
+            cache_read: None,
             dollars: 0.125,
-            ..Default::default()
+            unmetered: false,
         };
-        let Some(SynodEvent::Usage { input, .. }) = router.route(event(1, Kind::Usage(usage)))
-        else {
+        let fact = Record::Forensic(Forensic::UsageDelta { usage });
+        let Some(SynodEvent::Usage { input, .. }) = router.route_fact(1, &fact) else {
             panic!("a helper's usage must still reach the window");
         };
         assert_eq!(input, 7);
@@ -528,23 +749,23 @@ mod tests {
     #[test]
     fn born_and_died_accumulate_into_one_live_helper_count() {
         let mut router = Router::default();
-        router.route(event(0, Kind::State(AgentState::Ready)));
+        router.route_transient(0, &Transient::State(AgentState::Ready));
 
-        let born = |id: AgentId| Kind::Born {
+        let born = |id: AgentId| Transient::Born {
             log_dir: PathBuf::new(),
             name: format!("helper-{id}"),
             parent: 0,
             branch: false,
         };
-        let Some(SynodEvent::Helpers { live }) = router.route(event(1, born(1))) else {
+        let Some(SynodEvent::Helpers { live }) = router.route_transient(1, &born(1)) else {
             panic!("a Born must announce the live count");
         };
         assert_eq!(live, 1);
-        let Some(SynodEvent::Helpers { live }) = router.route(event(2, born(2))) else {
+        let Some(SynodEvent::Helpers { live }) = router.route_transient(2, &born(2)) else {
             panic!("a second Born must announce the live count");
         };
         assert_eq!(live, 2);
-        let Some(SynodEvent::Helpers { live }) = router.route(event(1, Kind::Died)) else {
+        let Some(SynodEvent::Helpers { live }) = router.route_transient(1, &Transient::Died) else {
             panic!("a Died must announce the live count");
         };
         assert_eq!(live, 1);
@@ -553,19 +774,21 @@ mod tests {
     #[test]
     fn subagent_done_becomes_a_named_helper_done_whatever_its_outcome() {
         let mut router = Router::default();
-        router.route(event(0, Kind::State(AgentState::Ready)));
+        router.route_transient(0, &Transient::State(AgentState::Ready));
 
-        let done = |outcome: AgentOutcome| Kind::SubagentDone {
-            name: "letters".to_string(),
-            outcome,
-            text: String::new(),
-            elapsed: Duration::from_secs(2),
+        let done = |error: Option<String>| {
+            Record::Display(Display::SubagentDone {
+                name: "letters".to_string(),
+                text: String::new(),
+                error,
+                elapsed_ms: 2_000,
+            })
         };
         let Some(SynodEvent::HelperDone {
             name,
             ok,
             elapsed_secs,
-        }) = router.route(event(0, done(AgentOutcome::Complete)))
+        }) = router.route_fact(0, &done(None))
         else {
             panic!("expected a HelperDone event");
         };
@@ -574,10 +797,26 @@ mod tests {
         assert!((elapsed_secs - 2.0).abs() < f64::EPSILON);
 
         let Some(SynodEvent::HelperDone { ok, .. }) =
-            router.route(event(0, done(AgentOutcome::Failed("boom".into()))))
+            router.route_fact(0, &done(Some("boom".to_string())))
         else {
             panic!("expected a HelperDone event");
         };
         assert!(!ok);
+    }
+
+    #[test]
+    fn a_seam_fault_reaches_the_window_as_an_error() {
+        let mut router = Router::default();
+        router.route_transient(0, &Transient::State(AgentState::Ready));
+
+        let Some(SynodEvent::Error { message }) = router.route_transient(
+            0,
+            &Transient::Fault {
+                text: "record.jsonl: permission denied".to_string(),
+            },
+        ) else {
+            panic!("a plumbing fault must still reach the window");
+        };
+        assert_eq!(message, "record.jsonl: permission denied");
     }
 }

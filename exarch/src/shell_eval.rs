@@ -155,7 +155,10 @@ impl Surface {
         match self {
             Self::Observation(event) => {
                 let card = observation_card(&event.what);
-                Kind::Io { event: *event, card }
+                Kind::Io {
+                    event: *event,
+                    card,
+                }
             }
             Self::Card(card) => Kind::Card(card),
             Self::Notice(notice) => {
@@ -961,7 +964,8 @@ keep-bottom
                  edit-hash '{path}' [[hash: $rows[1][hash], line: 'FIRST'], [hash: $rows[2][hash], line: 'SECOND']]"
             ),
         );
-        let after = std::fs::read_to_string(dir.path().join("f.txt")).expect("read after clean batch");
+        let after =
+            std::fs::read_to_string(dir.path().join("f.txt")).expect("read after clean batch");
         assert_eq!(
             ok.exit,
             0,
@@ -1784,11 +1788,15 @@ return !{{length $hits}}"
         use std::os::unix::fs::PermissionsExt;
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("edit-replace-mode", "run.sh", "#!/bin/sh\necho old\n");
-        std::fs::set_permissions(dir.path().join("run.sh"), std::fs::Permissions::from_mode(0o755))
-            .expect("chmod the fixture executable");
+        std::fs::set_permissions(
+            dir.path().join("run.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("chmod the fixture executable");
 
         let r = run_once(&mut shell, &format!("edit-replace '{path}' 'old' 'new'"));
-        let mode = std::fs::metadata(dir.path().join("run.sh")).map(|m| m.permissions().mode() & 0o777);
+        let mode =
+            std::fs::metadata(dir.path().join("run.sh")).map(|m| m.permissions().mode() & 0o777);
 
         assert_eq!(
             r.exit,
@@ -1818,7 +1826,8 @@ return !{{length $hits}}"
         )
         .expect("write skill fixture");
         // A sibling of the skills root, reachable by `..` and nothing else.
-        std::fs::create_dir_all(tmp.path().join(".exarch").join("secret")).expect("create secret dir");
+        std::fs::create_dir_all(tmp.path().join(".exarch").join("secret"))
+            .expect("create secret dir");
         std::fs::write(
             tmp.path().join(".exarch").join("secret").join("SKILL.md"),
             "TOPSECRET\n",

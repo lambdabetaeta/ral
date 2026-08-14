@@ -211,9 +211,7 @@ impl Agent {
             }
             emit.emit(Kind::Boundary);
             chopper.flush(&recorder).map_err(|e| {
-                ProviderError::Other(format!(
-                    "the answer's tail commit was not recorded: {e}"
-                ))
+                ProviderError::Other(format!("the answer's tail commit was not recorded: {e}"))
             })?;
             // The live numerator the next `compact` weighs against the window.
             let input_tokens = usage.input;

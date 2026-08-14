@@ -406,7 +406,10 @@ impl AgentLog {
         }
         let (model_memo, model, provider) =
             crate::record::model::resume(&record_path).map_err(|error| {
-                io::Error::new(error.kind(), format!("cannot resume {}: {error}", record_path.display()))
+                io::Error::new(
+                    error.kind(),
+                    format!("cannot resume {}: {error}", record_path.display()),
+                )
             })?;
         let seam = crate::record::Emitter::append_to(&record_path)?;
         let mut resumed = Self {
@@ -593,7 +596,13 @@ impl AgentLog {
         let max_exchange = self.model_memo.current_exchange().unwrap_or(0);
         let exchange = continues
             .filter(|id| *id == max_exchange)
-            .filter(|id| self.model_memo.view().spans.iter().any(|span| span.id == *id))
+            .filter(|id| {
+                self.model_memo
+                    .view()
+                    .spans
+                    .iter()
+                    .any(|span| span.id == *id)
+            })
             .unwrap_or_else(|| self.next_exchange());
         self.record_protocol(Protocol::UserPrompt { exchange, text })
             .map_err(|e| e.to_string())
@@ -742,7 +751,9 @@ impl AgentLog {
             self.model_memo = Memo::default();
             self.seam = crate::record::Emitter::none();
             self.record_started_lossy(None, system_prompt_bytes, at_unix_ms);
-            return Ok(ClearRecord { rotation_error: None });
+            return Ok(ClearRecord {
+                rotation_error: None,
+            });
         }
 
         let record_path = self.dir.join("record.jsonl");
@@ -961,7 +972,10 @@ impl AgentLog {
     }
 
     fn next_exchange(&self) -> u64 {
-        self.model_memo.current_exchange().unwrap_or(0).saturating_add(1)
+        self.model_memo
+            .current_exchange()
+            .unwrap_or(0)
+            .saturating_add(1)
     }
 
     pub fn current_exchange(&self) -> Option<u64> {
@@ -1435,7 +1449,8 @@ mod tests {
     #[test]
     fn transient_eviction_keeps_no_resident_state() {
         let sessions = sessions_root("residency-no-logs");
-        let mut s = AgentLog::root_without_logs(sessions.path(), 0, "model", "provider", 0).unwrap();
+        let mut s =
+            AgentLog::root_without_logs(sessions.path(), 0, "model", "provider", 0).unwrap();
         complete_exchange(&mut s, "one", "one");
         s.apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::User)
             .unwrap();
@@ -1481,10 +1496,11 @@ mod tests {
         let mut resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
         assert!(resumed.is_ready());
         let recorded = records(&resumed);
-        assert!(recorded.iter().any(|record| matches!(
-            record,
-            Record::Protocol(Protocol::ToolResults { .. })
-        )));
+        assert!(
+            recorded
+                .iter()
+                .any(|record| matches!(record, Record::Protocol(Protocol::ToolResults { .. })))
+        );
         assert!(recorded.iter().any(|record| matches!(
             record,
             Record::Protocol(Protocol::AssistantMessage {
@@ -1551,7 +1567,8 @@ mod tests {
             stop_reason: None,
         });
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        file.write_all(&crate::record::envelope_line(&foreign)).unwrap();
+        file.write_all(&crate::record::envelope_line(&foreign))
+            .unwrap();
         file.write_all(b"\n").unwrap();
         file.flush().unwrap();
         let before = fs::read(&path).unwrap();
@@ -1577,7 +1594,8 @@ mod tests {
             text: "stale".into(),
         });
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        file.write_all(&crate::record::envelope_line(&stale)).unwrap();
+        file.write_all(&crate::record::envelope_line(&stale))
+            .unwrap();
         file.write_all(b"\n").unwrap();
         file.flush().unwrap();
         let before = fs::read(&path).unwrap();
@@ -1634,8 +1652,7 @@ mod tests {
         let data = fs::read(&path).unwrap();
         let mut repaired = Vec::with_capacity(data.len());
         for fragment in data.split_inclusive(|byte| *byte == b'\n') {
-            let record =
-                crate::record::record_from_line(&fragment[..fragment.len() - 1]).unwrap();
+            let record = crate::record::record_from_line(&fragment[..fragment.len() - 1]).unwrap();
             if matches!(
                 record,
                 Record::Protocol(Protocol::AssistantMessage {

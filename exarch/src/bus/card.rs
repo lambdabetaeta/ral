@@ -16,6 +16,7 @@
 //! cards from core's one observation vocabulary
 //! (`ral_core::types::Observed`), which core itself decodes.
 
+use ral_core::serial::FOValue;
 use serde::{Deserialize, Serialize};
 
 mod decode;
@@ -34,17 +35,21 @@ pub use notice::Notice;
 
 pub(crate) use decode::{value_to_card, value_to_pin};
 pub(crate) use diff::hunk_magnitude;
-pub(crate) use done::{done_card, value_to_done};
+pub(crate) use done::value_to_done;
 pub(crate) use encode::encode_card;
-pub(crate) use notice::{notice_card, services_pin_card, value_to_notice};
-pub(crate) use observation::{
-    ObservationKind, RailPlace, execs_card, greps_card, observation_card, rail_place, reads_card,
+pub(crate) use notice::{services_pin_card, value_to_notice};
+pub(crate) use observation::observation_wire;
+pub(crate) use observation::{ObservationKind, RailPlace, rail_place};
+
+/// `done` and `notice` each decode one class of event core surfaces into a
+/// [`Card`]; `pub` alongside [`to_card_done`] and [`to_card_notice`], the two
+/// record-type converters that hand them their argument, so synod's fold
+/// draws the same card a scrollback would rather than a copy of it.
+pub use done::done_card;
+pub use notice::notice_card;
+pub use observation::{
+    execs_card, greps_card, observation_card, observation_from_wire, reads_card,
 };
-// The commit producer (P2) and the view fold (P3) of
-// dev/docs/plans/260814_one_seam_one_log.md land their call sites
-// concurrently with this parcel.
-#[allow(unused_imports, reason = "wired by P2 and P3, landing concurrently")]
-pub(crate) use observation::{observation_from_wire, observation_wire};
 
 /// The closed nominal role set — the identity channel a [`Span`] may carry.
 /// An unrecognised tag degrades to plain ink rather than dropping the span.
@@ -301,6 +306,52 @@ pub fn context_rows_card(rows: &[crate::record::ContextRow]) -> Card {
         },
         Mark::Fields { rows: fields },
     ])
+}
+
+/// The one observation a producer didn't group.
+///
+/// A worker birth, a capability denial, a desk-fed act — rendered the same
+/// way a live `Kind::Io` once carried its card ready-made. `pub` for
+/// synod's fold: `record::Display` keeps only the wire value, so the card is
+/// built here, at render time, exactly as `record/view.rs` will for a
+/// resumed scrollback.
+pub fn observation_display_card(value: &FOValue) -> Option<Card> {
+    let observation = observation_from_wire(value.clone())?;
+    Some(observation_card(&observation.what))
+}
+
+/// A producer-grouped run of reads, execs, or greps.
+///
+/// `Display::ObservationGroup`'s payload, rendered as the one card its
+/// shared kind draws. The group is homogeneous by construction (the
+/// commit-time buffer never mixes kinds in one run), so the first value
+/// alone names which card fits; an empty or unrecognised group draws
+/// nothing rather than guessing. `pub` for synod, alongside
+/// [`observation_display_card`].
+pub fn observation_group_card(values: &[FOValue]) -> Option<Card> {
+    let observations: Vec<ral_core::types::Observed> = values
+        .iter()
+        .filter_map(|v| observation_from_wire(v.clone()))
+        .map(|o| o.what)
+        .collect();
+    match observations.first()? {
+        ral_core::types::Observed::Read { .. } => {
+            let paths: Vec<String> = observations
+                .into_iter()
+                .filter_map(|o| match o {
+                    ral_core::types::Observed::Read { path } => Some(path),
+                    _ => None,
+                })
+                .collect();
+            reads_card(&paths)
+        }
+        ral_core::types::Observed::Command { .. } => execs_card(&observations),
+        ral_core::types::Observed::Grep { .. } => greps_card(&observations),
+        ral_core::types::Observed::Write { .. }
+        | ral_core::types::Observed::Capability { .. }
+        | ral_core::types::Observed::Worker { .. }
+        | ral_core::types::Observed::Act { .. } => None,
+    }
 }
 
 /// A [`Card`] as one line — the digest the periodic nudge shows the model of

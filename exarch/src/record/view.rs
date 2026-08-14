@@ -8,9 +8,7 @@
 //! carries no model-context state, so it has nothing to fold a protocol
 //! record into.
 
-use super::{
-    ContextRow, Display, Fold, Forensic, Recorded, Refusal, Seq,
-};
+use super::{ContextRow, Display, Fold, Forensic, Recorded, Refusal, Seq};
 use crate::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord};
 use ral_core::serial::FOValue;
 
@@ -226,7 +224,10 @@ impl Blocks {
     /// never lost to eviction.
     fn evict(&mut self) {
         while self.rows.len() > BLOCKS_WINDOW
-            && self.rows.first().is_some_and(|b| b.seq <= self.rendered_through)
+            && self
+                .rows
+                .first()
+                .is_some_and(|b| b.seq <= self.rendered_through)
         {
             let _ = self.rows.remove(0);
         }
@@ -477,11 +478,7 @@ mod tests {
     use super::*;
 
     fn push(memo: &mut Blocks, seq: u64, text: &str) {
-        step_display(
-            memo,
-            Seq::new(seq),
-            Display::Answer { text: text.into() },
-        );
+        step_display(memo, Seq::new(seq), Display::Answer { text: text.into() });
     }
 
     #[test]

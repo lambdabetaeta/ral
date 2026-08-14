@@ -466,7 +466,10 @@ pub(super) fn announce(item: &Item, emit: &Emitter, recorder: &crate::record::Em
         Item::Human(_) | Item::Wakeup(_) | Item::Message(_) => {
             // The live row derives from the published record — the retired
             // `Kind::UserPromptEcho` twin — so this is the one authoring site.
-            record_commit(recorder, crate::record::Display::Prompt { text: item.text() });
+            record_commit(
+                recorder,
+                crate::record::Display::Prompt { text: item.text() },
+            );
         }
         Item::Agent(r) => {
             // The record carries the breadcrumb-reduced pair the scrollback
@@ -587,10 +590,10 @@ fn agent_outcome(
 mod tests {
     use super::*;
     use crate::agent::ProviderHandle;
-    use crate::record::{Forensic, Record};
     use crate::agent::testkit::*;
     use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
     use crate::provider::scripted::{Reply, Script};
+    use crate::record::{Forensic, Record};
     use ral_core::Value;
 
     /// Every item `announce` draws records its display commit through the
@@ -675,9 +678,17 @@ mod tests {
                 Signal::Transient(..) => {}
             }
         }
-        assert_eq!(kinds, ["subagent"], "only the subagent still dual-writes a legacy Kind");
+        assert_eq!(
+            kinds,
+            ["subagent"],
+            "only the subagent still dual-writes a legacy Kind"
+        );
         assert_eq!(facts, ["prompt", "subagent"], "both commits reach the seam");
-        assert_eq!(derived, ["prompt"], "the prompt's live row derives from its fact");
+        assert_eq!(
+            derived,
+            ["prompt"],
+            "the prompt's live row derives from its fact"
+        );
     }
 
     /// The park verdict reads engagement from the registry, never from the

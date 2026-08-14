@@ -63,7 +63,7 @@ pub(crate) fn value_to_done(v: &RalValue) -> Option<DoneOutcome> {
 
 /// Word a settled outcome as a one-line [`Card`] for the human — the same fact
 /// `surface_notice` in `bus/post.rs` words for the model.
-pub(crate) fn done_card(outcome: &DoneOutcome) -> Card {
+pub fn done_card(outcome: &DoneOutcome) -> Card {
     let mut spans = Vec::new();
     match outcome {
         DoneOutcome::Ok => {

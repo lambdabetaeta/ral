@@ -89,7 +89,7 @@ pub(crate) fn value_to_notice(v: &RalValue) -> Option<Notice> {
 }
 
 /// Compose a decoded [`Notice`] into its one-line [`Card`].
-pub(crate) fn notice_card(notice: &Notice) -> Card {
+pub fn notice_card(notice: &Notice) -> Card {
     match notice {
         Notice::Reap { cmd, cause } => reap_card(cmd, *cause),
         Notice::Prune { names, idle_calls } => bindings_pruned_card(names, idle_calls),

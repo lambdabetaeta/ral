@@ -209,10 +209,8 @@ pub fn run(
         // live `push_*` half, seeding a fresh viewport that no `push_*` has
         // touched yet (`dev/docs/plans/260814_one_seam_one_log.md`, step 7).
         let record_path = session.log_dir().join("record.jsonl");
-        let blocks =
-            crate::record::replay::<crate::record::View>(&record_path).map_err(|e| {
-                format!("record.jsonl did not replay cleanly: {e}")
-            })?;
+        let blocks = crate::record::replay::<crate::record::View>(&record_path)
+            .map_err(|e| format!("record.jsonl did not replay cleanly: {e}"))?;
         // The fold's usage rows are cumulative, matching `total_usage`'s own
         // running sum; it carries no cache/dollar breakdown and no *last*
         // turn's prompt size, so `last_input` — the ctx gauge's numerator —

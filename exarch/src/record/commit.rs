@@ -208,9 +208,10 @@ impl SurfaceBuffer {
                 }
             }
             Observed::Command { argv, .. } => {
-                let dup = buf.execs.iter().any(
-                    |o| matches!(&o.what, Observed::Command { argv: a, .. } if a == argv),
-                );
+                let dup = buf
+                    .execs
+                    .iter()
+                    .any(|o| matches!(&o.what, Observed::Command { argv: a, .. } if a == argv));
                 if !dup {
                     buf.execs.push(event);
                 }
@@ -373,9 +374,7 @@ mod tests {
         buf.flush_surfaces(&emit).unwrap();
 
         let commits: Vec<Display> = drain_display(&rx);
-        let holds = |d: &Display, needle: &str| {
-            matches!(d, Display::Observation { value } if format!("{value:?}").contains(needle))
-        };
+        let holds = |d: &Display, needle: &str| matches!(d, Display::Observation { value } if format!("{value:?}").contains(needle));
         let at = |needle: &str| {
             commits
                 .iter()
