@@ -241,21 +241,15 @@ impl Sink for Headless<'_> {
                 }
                 let _ = writeln!(self.err, "[stop: {raw}]");
             }
+            // `bus::sink::pump`'s last-resort panic-catch is the one producer
+            // left, out of a recorder's reach; every other class's error has
+            // crossed to `Forensic::Error`, drawn by `print_row` below.
             Kind::Error(msg) => {
                 if msg.starts_with(crate::bus::WORKER_PANIC_PREFIX) {
                     self.panicked = true;
                 }
                 let _ = writeln!(self.err, "error: {msg}");
             }
-            Kind::SystemNote(text) => {
-                let _ = writeln!(self.err, "{text}");
-            }
-            Kind::Nudge {
-                used, max, cause, ..
-            } if id == self.root_id => {
-                let _ = writeln!(self.err, "[nudge {used}/{max}: {cause}]");
-            }
-            Kind::Nudge { .. } => {}
             // `/resources` and `/context` still ride a direct `Kind` — the one
             // fold neither survey has a `Transient`/`Display` producer for.
             Kind::Resources { card, .. } | Kind::Context { card, .. } => {
@@ -284,6 +278,8 @@ impl Sink for Headless<'_> {
             | Kind::Reasoning { .. }
             | Kind::UserPromptEcho(_)
             | Kind::Usage(_)
+            | Kind::SystemNote(_)
+            | Kind::Nudge { .. }
             | Kind::ProviderError(_)
             | Kind::Stalled(_)
             | Kind::ToolCall { .. }

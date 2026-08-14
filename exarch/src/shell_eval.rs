@@ -15,7 +15,7 @@ pub mod tools;
 use crate::bus::card::{
     done_card, observation_card, rail_place, value_to_card, value_to_done, value_to_pin,
 };
-use crate::bus::{AgentId, AgentState, Emitter, Kind, Mailbox, Post};
+use crate::bus::{AgentId, Emitter, Kind, Mailbox, Post};
 use crate::fleet::registry::AgentRegistry;
 use base64::Engine;
 use ral_core::Value as RalValue;
@@ -209,20 +209,25 @@ pub fn decode_surface(ev: &RalValue) -> Option<Surface> {
 
 /// Decode one surfaced value and apply the protected-pin guard.  Shared by the
 /// live and deferred-batch surface sinks.
-pub(crate) fn accepted_surface(val: &RalValue, emit: &Emitter) -> Option<Surface> {
+pub(crate) fn accepted_surface(
+    val: &RalValue,
+    recorder: &crate::record::Emitter,
+) -> Option<Surface> {
     let surface = decode_surface(val)?;
-    (!reject_protected_pin(&surface, emit)).then_some(surface)
+    (!reject_protected_pin(&surface, recorder)).then_some(surface)
 }
 
-fn reject_protected_pin(surface: &Surface, emit: &Emitter) -> bool {
+fn reject_protected_pin(surface: &Surface, recorder: &crate::record::Emitter) -> bool {
     let key = match surface {
         Surface::Pin { key, .. } | Surface::Unpin { key } if is_service_pin(key) => key,
         _ => return false,
     };
-    let msg = format!(
+    let text = format!(
         "`{key}` is a protected service-ledger pin; ordinary `surface` calls cannot write or clear it — it is maintained by the host as services are born and settle"
     );
-    emit.emit(Kind::Error(msg));
+    if let Err(error) = recorder.emit(crate::record::Forensic::Error { text }) {
+        recorder.report_fault(&error);
+    }
     true
 }
 
@@ -300,8 +305,6 @@ pub(crate) fn run_shell(
     seam: Option<&crate::fleet::desk::HostSeam>,
 ) -> Outcome {
     let name = "<tool>";
-
-    emit.emit(Kind::State(AgentState::Evaluating));
 
     // Trace-only timing.
     #[cfg(debug_assertions)]
@@ -1246,23 +1249,32 @@ keep-bottom
 
     #[test]
     fn model_surface_cannot_write_service_pins() {
-        let (emit, rx) = crate::bus::dummy_emitter();
+        let (tx, rx) = channel();
+        let recorder = crate::record::Emitter::none();
+        recorder.attach(crate::record::FleetSink {
+            id: 0,
+            tx: tx.downgrade(),
+            meter: crate::bus::UsageMeter::default(),
+        });
         let protected = Surface::Pin {
             key: SERVICES_PIN_KEY.to_string(),
             card: crate::bus::card::Card(Vec::new()),
         };
-        assert!(reject_protected_pin(&protected, &emit));
-        let event = rx.try_next_event().expect("rejection should emit an error");
+        assert!(reject_protected_pin(&protected, &recorder));
+        let fact = crate::bus::drain_records(&rx)
+            .into_iter()
+            .next()
+            .expect("rejection should record an error");
         assert!(
-            matches!(event.kind, Kind::Error(msg) if msg.contains("protected service-ledger pin")),
+            matches!(fact, crate::record::Record::Forensic(crate::record::Forensic::Error { text }) if text.contains("protected service-ledger pin")),
             "expected protected-pin diagnostic"
         );
 
-        let (emit, _rx) = crate::bus::dummy_emitter();
+        let recorder = crate::record::Emitter::none();
         let ordinary = Surface::Unpin {
             key: "tasks".into(),
         };
-        assert!(!reject_protected_pin(&ordinary, &emit));
+        assert!(!reject_protected_pin(&ordinary, &recorder));
     }
 
     /// The sink always posts, stamped with the root id and its birth

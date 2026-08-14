@@ -95,7 +95,7 @@ impl Agent {
             // the surface stream of the run that observes it, so a reap during
             // a long idle surfaces once an item next runs.
             self.reconcile_service_pins();
-            self.check_disk_warn(emit);
+            self.check_disk_warn();
             // The state a frontend shows over the coming silence is this park's
             // own verdict.  Only on an empty queue: with an item already in
             // hand the agent is not idle for any observable moment, and the
@@ -154,7 +154,7 @@ impl Agent {
         let mut final_outcome = (AgentOutcome::Empty, None);
         loop {
             self.reconcile_service_pins();
-            self.check_disk_warn(emit);
+            self.check_disk_warn();
             let Some(item) = self.inbox.next_item() else {
                 break;
             };
@@ -429,10 +429,11 @@ impl Agent {
     }
 
     /// Warn once per excursion above the operator's disk-warn ceiling, as an
-    /// operational note ([`Kind::SystemNote`]) — nothing is ever rotated or
-    /// deleted.  Unconfigured it walks nothing at all; otherwise it walks on
-    /// the [`Self::ral_epoch`] cadence of [`DISK_WARN_CHECK_INTERVAL`].
-    fn check_disk_warn(&mut self, emit: &Emitter) {
+    /// operational note ([`Forensic::SystemNote`](crate::record::Forensic::SystemNote))
+    /// — nothing is ever rotated or deleted.  Unconfigured it walks nothing at
+    /// all; otherwise it walks on the [`Self::ral_epoch`] cadence of
+    /// [`DISK_WARN_CHECK_INTERVAL`].
+    fn check_disk_warn(&mut self) {
         let Some(ceiling) = self.disk_warn_bytes else {
             return;
         };
@@ -455,7 +456,7 @@ impl Agent {
                         total / 1024,
                         ceiling / 1024
                     ),
-                    emit,
+                    self,
                 );
             }
         } else {
@@ -498,7 +499,7 @@ pub(super) fn announce(item: &Item, emit: &Emitter, recorder: &crate::record::Em
         Item::Surface { id, values, .. } => {
             let mut buf = crate::record::commit::SurfaceBuffer::new();
             for v in values {
-                if let Some(surface) = shell_eval::accepted_surface(v, emit) {
+                if let Some(surface) = shell_eval::accepted_surface(v, recorder) {
                     if let Err(error) =
                         crate::fleet::desk::absorb_surface(&mut buf, recorder, *id, &surface)
                     {
@@ -1177,14 +1178,21 @@ mod tests {
         assert!(session.disk_warn_bytes.is_none());
 
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
-        session.check_disk_warn(&emit);
+        session.recorder().attach(crate::record::FleetSink {
+            id: session.id,
+            tx: tx.downgrade(),
+            meter: crate::bus::UsageMeter::default(),
+        });
+        session.check_disk_warn();
 
         assert_eq!(
             session.disk_check_epoch, 0,
             "the early return never advances the check epoch"
         );
-        assert!(rx.try_recv().is_err(), "unconfigured: never emits, ever");
+        assert!(
+            crate::bus::drain_records(&rx).is_empty(),
+            "unconfigured: never emits, ever"
+        );
     }
 
     /// The latch suppresses a repeat until the figure falls back under.
@@ -1196,15 +1204,22 @@ mod tests {
         session.disk_warn_bytes = Some(baseline + 100);
 
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
-        session.check_disk_warn(&emit);
-        assert!(rx.try_recv().is_ok(), "the first crossing warns");
+        session.recorder().attach(crate::record::FleetSink {
+            id: session.id,
+            tx: tx.downgrade(),
+            meter: crate::bus::UsageMeter::default(),
+        });
+        session.check_disk_warn();
+        assert!(
+            !crate::bus::drain_records(&rx).is_empty(),
+            "the first crossing warns"
+        );
 
         // Force the amortization window open without driving real ral calls.
         session.disk_check_epoch = session.ral_epoch;
-        session.check_disk_warn(&emit);
+        session.check_disk_warn();
         assert!(
-            rx.try_recv().is_err(),
+            crate::bus::drain_records(&rx).is_empty(),
             "still above the ceiling: the latch suppresses a repeat"
         );
     }
@@ -1213,36 +1228,46 @@ mod tests {
     #[test]
     fn check_disk_warn_falling_below_rearms_the_latch() {
         let mut session = Agent::for_test("system").unwrap();
-        // The ceiling sits just above the session's own baseline, so the big
-        // file alone decides whether it is crossed.
+        // The ceiling sits comfortably above the session's own baseline plus
+        // one durable warning note's own footprint, so the big file alone —
+        // not the warning's own record — decides whether it is crossed.
         let baseline = crate::agent::resources::dir_size(&session.log_dir());
         let big = session.log_dir().join("big.txt");
         std::fs::write(&big, vec![0u8; 4096]).unwrap();
-        session.disk_warn_bytes = Some(baseline + 100);
+        session.disk_warn_bytes = Some(baseline + 2000);
 
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
-        session.check_disk_warn(&emit);
-        let event = rx.try_next_event().expect("the first crossing warns");
-        match event.kind {
-            Kind::SystemNote(text) => assert!(text.contains("disk"), "{text}"),
-            _ => panic!("expected Kind::SystemNote"),
+        session.recorder().attach(crate::record::FleetSink {
+            id: session.id,
+            tx: tx.downgrade(),
+            meter: crate::bus::UsageMeter::default(),
+        });
+        session.check_disk_warn();
+        let fact = crate::bus::drain_records(&rx)
+            .into_iter()
+            .next()
+            .expect("the first crossing warns");
+        match fact {
+            Record::Forensic(Forensic::SystemNote { text }) => {
+                assert!(text.contains("disk"), "{text}");
+            }
+            other => panic!("expected Forensic::SystemNote, got {other:?}"),
         }
 
         std::fs::remove_file(&big).unwrap();
         session.disk_check_epoch = session.ral_epoch;
-        session.check_disk_warn(&emit);
+        session.check_disk_warn();
         assert!(
-            rx.try_recv().is_err(),
+            crate::bus::drain_records(&rx).is_empty(),
             "back under the ceiling: no warning, just the latch clearing"
         );
         assert!(!session.disk_warn_latched, "the latch is cleared");
 
         std::fs::write(&big, vec![0u8; 4096]).unwrap();
         session.disk_check_epoch = session.ral_epoch;
-        session.check_disk_warn(&emit);
+        session.check_disk_warn();
         assert!(
-            rx.try_recv().is_ok(),
+            !crate::bus::drain_records(&rx).is_empty(),
             "re-crossing after falling below warns again"
         );
     }

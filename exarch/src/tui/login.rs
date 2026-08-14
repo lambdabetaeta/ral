@@ -12,7 +12,6 @@ use super::palette::{BANNER_GOLD, CYAN, OVERLAY_BG, RED, SLATE};
 use super::picker::{PAD_X, PAD_Y, centered, overlay_frame};
 use super::terminal::osc52_copy;
 use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
-use crate::bus::Kind;
 use crate::provider::ProviderId;
 use crate::provider::oauth::{self, LoginMethod, LoginPhase, OAuthToken};
 use ratatui::Frame;
@@ -434,7 +433,6 @@ fn apply_login(tui: &Tui, ctx: &mut CommandCtx<'_>, token: &OAuthToken, replaced
         " — run /model to use it"
     };
     let text = format!("[{action} ChatGPT account {}{next}]", token.label());
-    ctx.emit.emit(Kind::SystemNote(text.clone()));
     if let Err(error) = ctx
         .recorder
         .emit(crate::record::Forensic::SystemNote { text })

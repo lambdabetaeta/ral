@@ -4,7 +4,7 @@
 //! the parent's inbox later, at quiescence.
 
 use crate::agent::Agent;
-use crate::bus::{AgentId, AgentOutcome, AgentResult, Emitter, Kind, Mailbox, Post};
+use crate::bus::{AgentId, AgentOutcome, AgentResult, Emitter, Mailbox, Post};
 use crate::record::Transient;
 use crate::fleet::registry::{AGENT_LEASE_IDLE, AgentRegistry, RegisterError, Registration};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -152,6 +152,9 @@ pub(crate) fn spawn_async(
     // The dispatch's own row is authored at each caller with session access —
     // `spawn_branch`'s `Display::ToolCall` beside this call, a harness spawn's
     // at the desk's own commitment arm — so this spine mints no row of its own.
+    // Taken before the move below, so a spawn that never runs can still
+    // report through it.
+    let spawn_recorder = child.recorder();
     let worker = thread::Builder::new()
         .name(format!("exarch-agent-{agent_id}"))
         .stack_size(8 * 1024 * 1024)
@@ -172,7 +175,11 @@ pub(crate) fn spawn_async(
                 child.attend(&mut crate::agent::NoControl, &child_emit)
             }))
             .unwrap_or_else(|_| {
-                child_emit.emit(Kind::Error("sub-agent panicked".into()));
+                if let Err(error) = recorder.emit(crate::record::Forensic::Error {
+                    text: "sub-agent panicked".into(),
+                }) {
+                    recorder.report_fault(&error);
+                }
                 (AgentOutcome::Failed("sub-agent panicked".into()), None)
             });
             child.recorder().transient(Transient::Died);
@@ -204,9 +211,10 @@ pub(crate) fn spawn_async(
                 // The spawn's tool result already returned a "started" receipt,
                 // so there is no synchronous caller left to hand this to.
                 if let Err(reject) = rejected {
-                    child_emit.emit(Kind::Error(format!(
-                        "the parent's inbox rejected this result: {reject}"
-                    )));
+                    let text = format!("the parent's inbox rejected this result: {reject}");
+                    if let Err(error) = recorder.emit(crate::record::Forensic::Error { text }) {
+                        recorder.report_fault(&error);
+                    }
                 }
                 worker_registry.settle(agent_id, generation);
             }
@@ -224,7 +232,11 @@ pub(crate) fn spawn_async(
             // with no worker to ever `settle`, this is the one place that can.
             registry.settle(agent_id, generation);
             let msg = format!("could not spawn a worker thread for agent {agent_id}: {e}");
-            emit.emit(Kind::Error(msg.clone()));
+            if let Err(error) = spawn_recorder.emit(crate::record::Forensic::Error {
+                text: msg.clone(),
+            }) {
+                spawn_recorder.report_fault(&error);
+            }
             Err(msg)
         }
     }

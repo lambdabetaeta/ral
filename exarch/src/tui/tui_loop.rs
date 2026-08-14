@@ -30,8 +30,9 @@ use crate::{
 use std::sync::mpsc::TryRecvError;
 
 use super::banner::SessionInfo;
+use super::block::RailShape;
 use super::{
-    App, banner, commands,
+    App, banner, commands, line,
     render::draw,
     terminal::{self, TerminalGuard},
 };
@@ -76,7 +77,7 @@ impl Control for ReplControl {
             match crate::shell_eval::tools::spawn_branch(session, prompt, emit) {
                 Ok(child) => Agent::note(
                     format!("branch {} started (agent {})", child.name, child.id),
-                    emit,
+                    session,
                 ),
                 Err(e) => session.note_error(format!("could not start branch: {e}")),
             }
@@ -194,9 +195,6 @@ pub fn run(
     // `FleetBus` holds a single-consumer `Receiver` and so is not `Sync`, while
     // an `Emitter` is `Send` and is all the worker needs.
     let worker_emit = fleet.bus.emitter(session.id);
-    // The UI thread's own emitter, so a UI-caused event (a `/model` switch) is
-    // recorded and drawn like any worker note.
-    let ui_emit = fleet.bus.emitter(session.id);
     // The UI thread's own door onto the record seam — reachable here, before
     // the worker spawns, where `LogCell`'s no-wait rule is trivially
     // satisfied.  A cheap `Arc<Log>` clone, so a `/model` switch or a login
@@ -222,12 +220,15 @@ pub fn run(
         if let Some(vp) = tui.app.tabs.viewport_mut(session.id) {
             vp.sync(&blocks);
         }
-        Agent::note(
-            format!(
+        // The boundary itself is chrome, never recorded: a second resume must
+        // not replay a prior resume's note as if it were history.
+        tui.app.push_chrome(
+            session.id,
+            RailShape::Plain,
+            line::note(&format!(
                 "resumed: {exchanges} exchanges, {} KB",
                 bytes.div_ceil(1024)
-            ),
-            &ui_emit,
+            )),
         );
     }
     // Without a way to wake the parked worker with a `/quit`, the `join` below
@@ -238,7 +239,6 @@ pub fn run(
         store,
         catalog,
         info,
-        emit: &ui_emit,
         recorder: &recorder,
         engine: &fleet.engine,
     };
@@ -293,7 +293,6 @@ pub struct CommandCtx<'a> {
     pub(super) store: &'a mut CredentialStore,
     pub(super) catalog: &'a mut ModelCatalog<LiveSource>,
     pub(super) info: &'a SessionInfo<'a>,
-    pub(super) emit: &'a Emitter,
     pub(super) recorder: &'a Recorder,
     pub(super) engine: &'a Arc<provider::Engine>,
 }

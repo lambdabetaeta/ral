@@ -10,7 +10,7 @@ use crate::agent::Agent;
 use crate::agent::digest::{OPAQUE_CAP, clip, render};
 use crate::agent::event::{AgentLog, ToolResult as SessionToolResult};
 use crate::agent::seat::{RunInstall, Seat};
-use crate::bus::{Emitter, Kind};
+use crate::bus::{AgentState, Emitter};
 use crate::fleet::desk;
 use crate::shell_eval;
 use ral_core::serial::FOValue;
@@ -103,10 +103,13 @@ impl Agent {
         }
     }
 
-    /// An operational note: it reaches the transcript and the display, but has
-    /// no model-view `record.jsonl` twin, since the model never saw it.
-    pub(crate) fn note(text: String, emit: &Emitter) {
-        emit.emit(Kind::SystemNote(text));
+    /// An operational note: recorded through the seam as a [`Forensic::SystemNote`],
+    /// but with no model-view twin, since the model never saw it.
+    pub(crate) fn note(text: String, session: &Self) {
+        let recorder = session.recorder();
+        if let Err(error) = recorder.emit(crate::record::Forensic::SystemNote { text }) {
+            recorder.report_fault(&error);
+        }
     }
 
     /// Everything a desk handler may read off `&Agent`, since the reentrancy
@@ -202,6 +205,8 @@ impl Agent {
                 deferred: shell_eval::deferred_sink(emit, self.id, &self.agents, self.recorder()),
                 nursery,
             });
+            self.recorder()
+                .transient(crate::record::Transient::State(AgentState::Evaluating));
             shell_eval::run_shell(
                 self.seat.transport(),
                 &self.caps,
@@ -249,7 +254,6 @@ impl Agent {
         if let Some(payload) = reply_cell.take() {
             self.reply = Some(payload);
         }
-        emit.emit(Kind::ToolResult(content.clone()));
         SessionToolResult { id, content }
     }
 
@@ -285,6 +289,7 @@ mod tests {
     use crate::agent::cancel;
     use crate::agent::testkit::*;
     use crate::agent::{NoControl, ProviderHandle, deliberate};
+    use crate::bus::Kind;
     use crate::provider::scripted::{Reply, Script};
     use ral_core::Shell;
     use ral_core::Value;

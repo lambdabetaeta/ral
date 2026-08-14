@@ -288,7 +288,7 @@ impl Agent {
                 });
             }
             if truncated {
-                Self::note("[Truncated mid-tool-call; continuing]".into(), emit);
+                Self::note("[Truncated mid-tool-call; continuing]".into(), self);
             }
             let (results, injected) = self.run_batch(tool_calls, token, emit);
             self.log

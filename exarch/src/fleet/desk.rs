@@ -1436,7 +1436,7 @@ pub(crate) struct SurfaceApplier {
 impl SurfaceApplier {
     /// Apply one live [`Event::Surface`] value.
     pub(crate) fn live(&self, val: FOValue) {
-        if let Some(surface) = shell_eval::accepted_surface(&RalValue::from(val), &self.emit) {
+        if let Some(surface) = shell_eval::accepted_surface(&RalValue::from(val), &self.recorder) {
             if let Some(pins) = &self.pins {
                 // Fatal, never skipped: dropping a disposition here would
                 // desync the mirror from the stream with no signal at all.

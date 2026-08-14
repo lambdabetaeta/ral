@@ -267,19 +267,22 @@ impl App {
     }
 
     /// Route one still-direct `Kind` event to its viewport — the legacy
-    /// bridge kept alive only for the classes no producer has crossed to the
-    /// record seam yet: `State` (`shell_eval::run_shell`'s `Evaluating`),
-    /// `ToolCall`/`ToolResult`/`HarnessCall`/`HarnessResult`, `Error`,
-    /// `SystemNote`, `Cleared`, `Nudge`/`ProviderError`/`Stalled`,
-    /// `Card`/`Io`/`Done`/`Notice`/`Context` (the shell's `Surface` decode,
-    /// `into_kind()`), `Pin`/`Unpin` (the model's own `` `pin ``/`` `unpin ``
-    /// surface), and `Resources`/`Context` (the probe folds).  Every class
-    /// this parcel crossed — `Born`/`Died`, `Token`/`Thinking`/`Boundary`,
-    /// `Reasoning`, `StopReason`, `SubagentDone`, and the derived-only
-    /// `Step`/`ContextEdited`/`Usage`/`UserPromptEcho` — has no live producer
-    /// left, so `bus`'s dispatch loop never routes a `Signal::Event` from
-    /// one; their arms below are unreachable in production, kept only
-    /// because `Kind` stays exhaustively matched until it retires whole.
+    /// bridge kept alive only for the classes a producer has not yet crossed
+    /// to the record seam: `Cleared` (`/clear`'s own command), `Error`'s one
+    /// remaining producer (`bus::sink::pump`'s last-resort panic-catch, out
+    /// of a recorder's reach), `Resources`/`Context` (the probe folds, whose
+    /// card the decoder still builds), and `Card`/`Notice`/`Done`/`Pin`/`Unpin`
+    /// (the shell's `Surface` decode, `into_kind()` — headless has not yet
+    /// crossed these, so the bridge stays live for its sake even though the
+    /// fact path already draws them here). Every other class has either
+    /// crossed outright (`Born`/`Died`, `Token`/`Thinking`/`Boundary`,
+    /// `Reasoning`, `StopReason`, `SubagentDone`, `ToolCall`/`HarnessCall`/
+    /// `ToolResult`/`HarnessResult`, `SystemNote`, `State`) or was always
+    /// derived-only (`Step`/`ContextEdited`/`Usage`/`UserPromptEcho`/`Nudge`/
+    /// `ProviderError`/`Stalled`) — either way `bus`'s dispatch loop never
+    /// routes a `Signal::Event` carrying one, so their arms are gone rather
+    /// than kept as unreachable ballast; `Kind` still matches them
+    /// exhaustively until it retires whole.
     ///
     /// `bus` is read only for `Kind::Resources`'s depth/byte figures — it is
     /// the UI thread's own receiver, so this never contends with a
@@ -345,6 +348,9 @@ impl App {
             | Kind::Notice { .. }
             | Kind::Context { .. }
             | Kind::Io { .. }
+            | Kind::SystemNote(_)
+            | Kind::ProviderError(_)
+            | Kind::Stalled(_)
             // Quiet on the rail, recorded in the trace at the emit seam. A
             // desk result is always one line, so a size bar would be
             // constant ink — unrelated to the crossing above, but the same
@@ -359,8 +365,11 @@ impl App {
             Kind::StopReason(raw) => {
                 self.push_chrome(id, RailShape::Plain, line::stop_reason(&raw));
             }
+            // The seam's own last-resort panic-catch (`bus::sink::pump`) is
+            // the one producer left: unreachable in scope for a recorder, so
+            // it stays a direct `Kind::Error`. Every other class's error
+            // already crossed to `Forensic::Error`, drawn by the fact path.
             Kind::Error(msg) => self.push_chrome(id, RailShape::Error, line::error(&msg)),
-            Kind::SystemNote(text) => self.push_chrome(id, RailShape::Plain, line::note(&text)),
             Kind::ContextEdited { op, by } => {
                 let authority = match by {
                     EditAuthority::Model => "model",
@@ -383,12 +392,6 @@ impl App {
                     }
                 };
                 self.push_chrome(id, RailShape::Plain, line::note(&text));
-            }
-            Kind::ProviderError(error) => {
-                self.push_chrome(id, RailShape::Error, line::provider_error(&error));
-            }
-            Kind::Stalled(error) => {
-                self.push_chrome(id, RailShape::Error, line::stalled(&error));
             }
             // `/resources` is chrome, never recorded — no `Display` twin
             // exists to draw instead, so it stays legacy-driven; the same
