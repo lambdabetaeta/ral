@@ -9,7 +9,7 @@
 use crate::bus::AgentId;
 use crate::provider::{ProviderError, Tuning, Usage};
 use crate::record::model::{Memo, View};
-use crate::record::{Fold as _, Forensic, Protocol, Record, Recorded, widen};
+use crate::record::{Display, Fold as _, Forensic, Protocol, Record, Recorded, widen};
 use genai::chat::{ChatMessage, ChatRole};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -716,6 +716,10 @@ impl AgentLog {
         let before = self.model_memo.history_bytes();
         self.record_protocol(Protocol::ContextEdited { op: op.clone(), by })
             .map_err(|e| e.to_string())?;
+        // The display twin: the screen never derives from the protocol
+        // record it duplicates a field of.
+        self.record_display(Display::ContextEdited { op: op.clone(), by })
+            .map_err(|e| e.to_string())?;
         let after = self.model_memo.history_bytes();
         let before = i64::try_from(before).unwrap_or(i64::MAX);
         let after = i64::try_from(after).unwrap_or(i64::MAX);
@@ -820,7 +824,10 @@ impl AgentLog {
     /// # Errors
     /// See the meta-records note above.
     pub fn record_step(&mut self, n: u32, tuning: Tuning) -> io::Result<()> {
-        self.record_protocol(Protocol::StepStarted { n, tuning })
+        self.record_protocol(Protocol::StepStarted { n, tuning })?;
+        // The display twin: `tuning` never showed on screen, so only `n`
+        // duplicates across the pair.
+        self.record_display(Display::Step { n })
     }
 
     /// # Errors
@@ -951,6 +958,16 @@ impl AgentLog {
     fn record_forensic(&mut self, f: Forensic) -> io::Result<()> {
         let recorded = widen(self.seam.emit(f)?);
         self.advance(&recorded);
+        Ok(())
+    }
+
+    /// [`Self::record_protocol`] for the [`Display`] class — no model fold to
+    /// advance, since a display commit is the view fold's alone.
+    ///
+    /// # Errors
+    /// See [`Self::record_protocol`].
+    fn record_display(&self, d: Display) -> io::Result<()> {
+        let _recorded = self.seam.emit(d)?;
         Ok(())
     }
 

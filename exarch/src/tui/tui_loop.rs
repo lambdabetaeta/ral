@@ -18,7 +18,7 @@ use crossterm::event::{
 
 use crate::{
     agent::{Agent, Control, Verdict, cancel},
-    bus::{AgentId, Emitter, FleetBus, Inbox, Pass, Post, drain_pass},
+    bus::{AgentId, BusReceiver, Emitter, FleetBus, Inbox, Pass, Post, Signal},
     fleet::{Fleet, registry::AgentRegistry},
     provider::{
         self, Provider,
@@ -27,6 +27,7 @@ use crate::{
     },
     record::{Emitter as Recorder, Printer},
 };
+use std::sync::mpsc::TryRecvError;
 
 use super::banner::SessionInfo;
 use super::{
@@ -118,7 +119,7 @@ impl Control for ReplControl {
             "/compact" => {
                 let p = session.current_provider();
                 let token = session.cancel_token().clone();
-                session.compact(&p, emit, true, &token, None);
+                session.compact(&p, true, &token, None);
                 Verdict::Continue
             }
             // Surveyed on the thread that owns the shell the rows describe,
@@ -297,6 +298,47 @@ pub struct CommandCtx<'a> {
     pub(super) engine: &'a Arc<provider::Engine>,
 }
 
+/// Route one `Signal` to its `App` entry point: `Fact`/`Transient` reach
+/// [`App::fact`]/[`App::transient`] directly, and `Event` — the classes no
+/// producer has crossed to the seam yet — still reaches [`App::handle`].
+fn dispatch(tui: &mut Tui, rx: &BusReceiver, sig: Signal) {
+    match sig {
+        Signal::Event(ev) => tui.app.handle(ev, rx),
+        Signal::Fact(id, fact) => tui.app.fact(id, &fact),
+        Signal::Transient(id, t) => tui.app.transient(id, t, rx),
+    }
+}
+
+/// [`crate::bus::sink::drain_pass`]'s contract — the worker's explicit `done`
+/// flag ends a pass, never the channel merely emptying — reimplemented over
+/// the raw `Signal` rather than its legacy `Event` projection.  The TUI's own
+/// dispatch loop, so a `Signal::Fact`/`Transient` reaches `App` without first
+/// being resolved (and narrowed) by `Signal::into_event`.
+fn drain_signals(
+    rx: &BusReceiver,
+    done: &AtomicBool,
+    max: Option<usize>,
+    mut handle: impl FnMut(Signal),
+) -> Pass {
+    let finished = done.load(Ordering::Acquire);
+    let mut n = 0usize;
+    loop {
+        if max.is_some_and(|m| n >= m) {
+            return if finished { Pass::Stop } else { Pass::More };
+        }
+        match rx.try_recv() {
+            Ok(sig) => {
+                handle(sig);
+                n += 1;
+            }
+            Err(TryRecvError::Empty) => {
+                return if finished { Pass::Stop } else { Pass::Idle };
+            }
+            Err(TryRecvError::Disconnected) => return Pass::Stop,
+        }
+    }
+}
+
 /// The merged render + input loop, on the UI thread beside the worker's
 /// [`Agent::attend`].  Returns once the worker is done, after one last frame
 /// that includes everything it emitted.
@@ -326,15 +368,15 @@ fn ui_loop(
         // so a detached background agent flooding the bus cannot end the loop
         // early.  The cap bounds how long that flood starves the input poll.
         let mut handled_any = false;
-        let more = match drain_pass(rx, done, Some(BATCH), |ev| {
+        let more = match drain_signals(rx, done, Some(BATCH), |sig| {
             handled_any = true;
-            tui.app.handle(ev, rx);
+            dispatch(tui, rx, sig);
         }) {
             Pass::Stop => {
                 // The cap binds even a `done` drain, so `Stop` can arrive with
                 // events still buffered; nothing drains after this returns, so
                 // empty the channel uncapped before the final frame.
-                drain_pass(rx, done, None, |ev| tui.app.handle(ev, rx));
+                drain_signals(rx, done, None, |sig| dispatch(tui, rx, sig));
                 tui.app.mark_ready();
                 draw(&mut tui.app, tui.guard.term())?;
                 return Ok(());
@@ -540,10 +582,14 @@ mod tests {
         }
         // The park the loop settles into announces itself, and nothing else
         // follows: a command is not a turn, so no state ran before the fold.
+        // The idle state is `Transient::State` now, not a legacy `Kind`.
         assert!(
             matches!(
-                rx.try_next_event().map(|e| e.kind),
-                Ok(Kind::State(crate::bus::AgentState::Ready))
+                rx.try_recv(),
+                Ok(crate::bus::Signal::Transient(
+                    _,
+                    crate::record::Transient::State(crate::bus::AgentState::Ready)
+                ))
             ),
             "the fold is followed by the ready-boundary state alone"
         );

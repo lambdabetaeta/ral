@@ -18,7 +18,7 @@ use exarch::agent::{Agent, deliberate};
 use exarch::bus::{AgentId, AgentState, Emitter, Kind, channel};
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Provider, ProviderError, ProviderKind};
-use exarch::record::{Protocol, Record};
+use exarch::record::{Protocol, Record, Transient};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
 use std::sync::Arc;
 
@@ -49,8 +49,13 @@ fn drive_deliberate(
     drop(emit);
     let kinds = rx
         .into_iter()
-        .filter_map(exarch::bus::Signal::into_event)
-        .map(|e| e.kind)
+        .filter_map(|sig| match sig {
+            // `AgentState` has crossed to the seam alone — no legacy `Kind`
+            // twin exists to derive, so this test's own observer bridges it
+            // back, exactly as `Signal::into_event` once did for every class.
+            exarch::bus::Signal::Transient(_, Transient::State(s)) => Some(Kind::State(s)),
+            other => other.into_event().map(|e| e.kind),
+        })
         .collect();
     (outcome, kinds)
 }

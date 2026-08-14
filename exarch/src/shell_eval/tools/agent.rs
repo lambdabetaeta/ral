@@ -5,6 +5,7 @@
 
 use crate::agent::Agent;
 use crate::bus::{AgentId, AgentOutcome, AgentResult, Emitter, Kind, Mailbox, Post};
+use crate::record::Transient;
 use crate::fleet::registry::{AGENT_LEASE_IDLE, AgentRegistry, RegisterError, Registration};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -180,8 +181,12 @@ pub(crate) fn spawn_async(
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
             // Opens the child's tab before its first token, and the stamped id
-            // routes every later event to it; a no-op on a muted emitter.
-            child_emit.emit(Kind::Born {
+            // routes every later event to it; a no-op on a muted emitter. The
+            // child's own recorder, coupled to this bus ahead of `attend`'s
+            // own coupling, so the birth is on air before the first token.
+            let recorder = child.recorder();
+            child.couple(&child_emit);
+            recorder.transient(Transient::Born {
                 log_dir: log_dir.clone(),
                 name: born_name,
                 parent: born_parent,
@@ -194,7 +199,7 @@ pub(crate) fn spawn_async(
                 child_emit.emit(Kind::Error("sub-agent panicked".into()));
                 (AgentOutcome::Failed("sub-agent panicked".into()), None)
             });
-            child_emit.emit(Kind::Died);
+            child.recorder().transient(Transient::Died);
             // A branch pushes nothing and leaves its entry to outlive this
             // worker, for `/clear` or `/close` to drop.
             if delivers {

@@ -25,7 +25,7 @@ pub(crate) use emitter::{FleetBus, UsageMeter};
 pub(crate) use event::WORKER_PANIC_PREFIX;
 pub(crate) use inbox::{INBOX_SOURCE_CAP, INBOX_TOTAL_CAP, Inbox, ParkMode};
 pub(crate) use post::{AgentMessage, AgentResult, Item, Post};
-pub(crate) use sink::{Pass, drain_pass, pump};
+pub(crate) use sink::{Pass, pump};
 
 #[cfg(test)]
 pub(crate) use emitter::dummy_emitter;

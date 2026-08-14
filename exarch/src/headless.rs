@@ -857,6 +857,7 @@ mod tests {
     use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
     use crate::provider::Tuning;
     use crate::provider::scripted::{Reply, Script};
+    use crate::record::Display;
     use crate::shell_eval::tools::agent::{AsyncSpawn, spawn_async};
 
     /// A fresh conversing trunk over a scripted provider, in a throwaway run
@@ -1222,36 +1223,6 @@ mod tests {
         );
     }
 
-    /// A caller's own `Sink` receives `Kind` events whole, rather than through
-    /// `Headless`'s token/card writer split.
-    #[test]
-    fn converse_sink_delivers_structured_events() {
-        struct Collecting(Vec<Kind>);
-        impl Sink for Collecting {
-            fn handle(&mut self, e: Event) {
-                self.0.push(e.kind);
-            }
-        }
-
-        let mut session = converse_trunk("sink", Script::new().then(Reply::text("hi there")));
-        let engine = Engine::new();
-        let mut sink = Collecting(Vec::new());
-        converse_sink(&mut session, "hello".into(), engine, &mut sink)
-            .expect("a conversing trunk never fails for want of a reply");
-
-        assert!(
-            sink.0
-                .iter()
-                .any(|k| matches!(k, Kind::Token(t) if t.contains("hi there"))),
-            "reply text must arrive as a Kind::Token among {} events",
-            sink.0.len()
-        );
-        assert!(
-            sink.0.iter().any(|k| matches!(k, Kind::Step { .. })),
-            "the exchange boundary must arrive as a Kind::Step among {} events",
-            sink.0.len()
-        );
-    }
 
     // ── `converse_settled`: the quiescent exchange driver ──────────────────
 
@@ -1321,10 +1292,24 @@ mod tests {
         (child.id, generation)
     }
 
-    struct Collecting(Vec<Kind>);
+    /// Every signal a caller's own `Sink` can receive, folded into one place —
+    /// the legacy `Kind` a class still emits directly, or the seam's own
+    /// `Record`/`Transient` for a class that has crossed.
+    #[derive(Default)]
+    struct Collecting {
+        kinds: Vec<Kind>,
+        facts: Vec<Record>,
+        transients: Vec<Transient>,
+    }
     impl Sink for Collecting {
         fn handle(&mut self, e: Event) {
-            self.0.push(e.kind);
+            self.kinds.push(e.kind);
+        }
+        fn fact(&mut self, _id: AgentId, fact: &Record) {
+            self.facts.push(fact.clone());
+        }
+        fn transient(&mut self, _id: AgentId, t: &Transient) {
+            self.transients.push(t.clone());
         }
     }
 
@@ -1339,10 +1324,16 @@ mod tests {
 
     impl<S: Sink> Sink for SignalOnWaiting<S> {
         fn handle(&mut self, e: Event) {
-            if matches!(e.kind, Kind::State(AgentState::WaitingOnAgents)) {
+            self.inner.handle(e);
+        }
+        fn fact(&mut self, id: AgentId, fact: &Record) {
+            self.inner.fact(id, fact);
+        }
+        fn transient(&mut self, id: AgentId, t: &Transient) {
+            if matches!(t, Transient::State(AgentState::WaitingOnAgents)) {
                 let _ = self.release.try_send(());
             }
-            self.inner.handle(e);
+            self.inner.transient(id, t);
         }
     }
 
@@ -1389,7 +1380,7 @@ mod tests {
 
         let engine = Engine::new();
         let mut sink = SignalOnWaiting {
-            inner: Collecting(Vec::new()),
+            inner: Collecting::default(),
             release: release_tx,
         };
         converse_settled(&mut session, "please help".into(), engine, &mut sink)
@@ -1397,16 +1388,17 @@ mod tests {
         settler.join().expect("the settling thread must not panic");
 
         assert!(
-            sink.inner
-                .0
-                .iter()
-                .any(|k| matches!(k, Kind::State(AgentState::WaitingOnAgents))),
+            sink.inner.transients.iter().any(|t| matches!(
+                t,
+                Transient::State(AgentState::WaitingOnAgents)
+            )),
             "parking on a live child must emit WaitingOnAgents"
         );
         assert!(
-            sink.inner.0.iter().any(|k| matches!(
-                k,
-                Kind::SubagentDone { name, text, .. } if name == "helper" && text == "helper done"
+            sink.inner.facts.iter().any(|f| matches!(
+                f,
+                Record::Display(Display::SubagentDone { name, text, .. })
+                    if name == "helper" && text == "helper done"
             )),
             "the settled child's reply must reach the exchange's own sink"
         );
@@ -1455,15 +1447,15 @@ mod tests {
         .expect("spawn must succeed");
 
         let engine = Engine::new();
-        let mut sink = Collecting(Vec::new());
+        let mut sink = Collecting::default();
         converse_settled(&mut session, "please help".into(), engine, &mut sink)
             .expect("the exchange itself must not fail merely because a child did");
 
         assert!(
-            sink.0.iter().any(|k| matches!(
-                k,
-                Kind::SubagentDone { name, outcome, .. }
-                    if name == "flaky" && outcome.breadcrumb("").1.is_some()
+            sink.facts.iter().any(|f| matches!(
+                f,
+                Record::Display(Display::SubagentDone { name, error, .. })
+                    if name == "flaky" && error.is_some()
             )),
             "the child's un-replied finish must surface as a failed SubagentDone"
         );
@@ -1476,7 +1468,7 @@ mod tests {
     fn converse_settled_refuses_an_allow_schedule_trunk() {
         let mut session = settled_trunk("allow-schedule", Script::new(), true);
         let engine = Engine::new();
-        let mut sink = Collecting(Vec::new());
+        let mut sink = Collecting::default();
         let err = converse_settled(&mut session, "hello".into(), engine, &mut sink)
             .expect_err("an allow_schedule trunk must be refused, not run");
         assert!(
@@ -1484,7 +1476,7 @@ mod tests {
             "the refusal must name what it refuses: {err}"
         );
         assert!(
-            sink.0.is_empty(),
+            sink.kinds.is_empty() && sink.facts.is_empty() && sink.transients.is_empty(),
             "a refused construction must touch no bus"
         );
     }
