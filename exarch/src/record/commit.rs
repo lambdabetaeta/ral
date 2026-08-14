@@ -296,7 +296,7 @@ fn flush_bucket(emitter: &Emitter, bucket: &[Observation]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::{BusReceiver, Signal, UsageMeter, channel};
+    use crate::bus::{BusReceiver, UsageMeter, channel};
     use crate::record::{FleetSink, Record};
     use ral_core::syntax::ast::RedirectMode;
     use ral_core::types::{CallSite, WriteOutcome};
@@ -350,13 +350,11 @@ mod tests {
     }
 
     fn drain_display(rx: &BusReceiver) -> Vec<Display> {
-        std::iter::from_fn(|| rx.try_recv().ok())
-            .filter_map(|sig| match sig {
-                Signal::Fact(_, rec) => match rec.into_value() {
-                    Record::Display(d) => Some(d),
-                    Record::Protocol(_) | Record::Forensic(_) => None,
-                },
-                Signal::Event(_) | Signal::Transient(..) => None,
+        crate::bus::drain_records(rx)
+            .into_iter()
+            .filter_map(|rec| match rec {
+                Record::Display(d) => Some(d),
+                Record::Protocol(_) | Record::Forensic(_) => None,
             })
             .collect()
     }

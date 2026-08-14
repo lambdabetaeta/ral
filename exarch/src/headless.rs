@@ -235,36 +235,6 @@ impl Sink for Headless<'_> {
                 }
             }
             Kind::Token(_) => {}
-            Kind::ToolCall {
-                tool, cmd, summary, ..
-            } if id == self.root_id => {
-                let _ = writeln!(self.err, "[tool: {tool}]");
-                if let Some(s) = &summary {
-                    for line in s.lines() {
-                        let _ = writeln!(self.err, "  {line}");
-                    }
-                }
-                for line in cmd.lines() {
-                    let _ = writeln!(self.err, "  {line}");
-                }
-            }
-            // A stderr line has no rail hue and no column budget, so an act
-            // wears the same `[tool: …]` shape a call does.
-            Kind::HarnessCall {
-                verb,
-                subject,
-                payload,
-                ..
-            } if id == self.root_id => {
-                let _ = writeln!(self.err, "[tool: {verb}]");
-                if let Some(s) = &subject {
-                    let _ = writeln!(self.err, "  {s}");
-                }
-                for line in payload.lines() {
-                    let _ = writeln!(self.err, "  {line}");
-                }
-            }
-            Kind::ToolCall { .. } | Kind::HarnessCall { .. } => {}
             Kind::StopReason(raw) => {
                 if id == self.root_id {
                     self.last_stop = Some(raw.clone());
@@ -286,25 +256,6 @@ impl Sink for Headless<'_> {
                 let _ = writeln!(self.err, "[nudge {used}/{max}: {cause}]");
             }
             Kind::Nudge { .. } => {}
-            // Sub-agent tokens never reach `out`, so this breadcrumb is the
-            // only live sign of a child; its own log dir holds the rest.
-            Kind::SubagentDone {
-                name,
-                outcome,
-                text,
-                elapsed,
-            } => {
-                let secs = elapsed.as_secs_f64();
-                match outcome.breadcrumb(&text).1 {
-                    Some(reason) => {
-                        let _ =
-                            writeln!(self.err, "[agent: {name} failed in {secs:.1}s — {reason}]");
-                    }
-                    None => {
-                        let _ = writeln!(self.err, "[agent: {name} done in {secs:.1}s]");
-                    }
-                }
-            }
             // `/resources` and `/context` still ride a direct `Kind` — the one
             // fold neither survey has a `Transient`/`Display` producer for.
             Kind::Resources { card, .. } | Kind::Context { card, .. } => {
@@ -323,17 +274,20 @@ impl Sink for Headless<'_> {
             }
             Kind::Step { .. } => {}
             // Every other class has crossed to the record seam: its live row
-            // now rides a `Signal::Fact`, folded by `record::View` and drawn
-            // by `Printer` below — never a raw `Kind` here. `ContextEdited`
-            // is the one further exception, for the same reason as `Step`
-            // above, but drawn no differently here than it always was — a
-            // context edit is chrome, never shown to headless.
+            // now rides a `Signal::Fact`/`Signal::Transient`, folded by
+            // `record::View` and drawn by `Printer` below — never a raw
+            // `Kind` here. `ContextEdited` is the one further exception, for
+            // the same reason as `Step` above, but drawn no differently here
+            // than it always was — a context edit is chrome, never shown to
+            // headless.
             Kind::ContextEdited { .. }
             | Kind::Reasoning { .. }
             | Kind::UserPromptEcho(_)
             | Kind::Usage(_)
             | Kind::ProviderError(_)
             | Kind::Stalled(_)
+            | Kind::ToolCall { .. }
+            | Kind::HarnessCall { .. }
             | Kind::ToolResult(_)
             | Kind::HarnessResult(_)
             | Kind::Cleared
@@ -345,7 +299,8 @@ impl Sink for Headless<'_> {
             | Kind::Card(_)
             | Kind::Io { .. }
             | Kind::Done { .. }
-            | Kind::Notice { .. } => {}
+            | Kind::Notice { .. }
+            | Kind::SubagentDone { .. } => {}
         }
     }
 
@@ -479,11 +434,59 @@ impl Headless<'_> {
     fn print_row(&mut self, id: AgentId, kind: &record::BlockKind) {
         use record::BlockKind as K;
         match kind {
-            // Still dual-emitted directly as a `Kind` from `shell_eval`'s
-            // tools, `fleet::desk`, and `agent::attend` — drawn from that
-            // legacy path in `Sink::handle` until each site's own cut retires
-            // the direct emit, per this class's one-producer invariant.
-            K::ToolCall { .. } | K::HarnessCall { .. } | K::SubagentDone { .. } => {}
+            K::ToolCall {
+                tool, cmd, summary, ..
+            } if id == self.root_id => {
+                let _ = writeln!(self.err, "[tool: {tool}]");
+                if let Some(s) = summary {
+                    for line in s.lines() {
+                        let _ = writeln!(self.err, "  {line}");
+                    }
+                }
+                for line in cmd.lines() {
+                    let _ = writeln!(self.err, "  {line}");
+                }
+            }
+            // A stderr line has no rail hue and no column budget, so an act
+            // wears the same `[tool: …]` shape a call does.
+            K::HarnessCall {
+                verb,
+                subject,
+                payload,
+                ..
+            } if id == self.root_id => {
+                let _ = writeln!(self.err, "[tool: {verb}]");
+                if let Some(s) = subject {
+                    let _ = writeln!(self.err, "  {s}");
+                }
+                for line in payload.lines() {
+                    let _ = writeln!(self.err, "  {line}");
+                }
+            }
+            K::ToolCall { .. } | K::HarnessCall { .. } => {}
+            // Sub-agent tokens never reach `out`, so this breadcrumb is the
+            // only live sign of a child; its own log dir holds the rest.
+            K::SubagentDone {
+                name,
+                error,
+                elapsed_ms,
+                ..
+            } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "elapsed-ms display precision; far below f64's mantissa"
+                )]
+                let secs = *elapsed_ms as f64 / 1000.0;
+                match error {
+                    Some(reason) => {
+                        let _ =
+                            writeln!(self.err, "[agent: {name} failed in {secs:.1}s — {reason}]");
+                    }
+                    None => {
+                        let _ = writeln!(self.err, "[agent: {name} done in {secs:.1}s]");
+                    }
+                }
+            }
             K::Error { text } => {
                 if text.starts_with(crate::bus::WORKER_PANIC_PREFIX) {
                     self.panicked = true;
@@ -1437,10 +1440,8 @@ mod tests {
             session.mailbox(),
             child,
             AsyncSpawn {
-                verb: "agent",
                 name: "flaky".into(),
                 prompt: None,
-                harness: true,
             },
             &spawn_emit,
         )

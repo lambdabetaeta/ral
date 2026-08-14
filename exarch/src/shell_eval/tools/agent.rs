@@ -33,15 +33,11 @@ pub(crate) fn spawn_branch(
         cmd: prompt.unwrap_or("(waiting for you)").to_string(),
         summary: Some(format!("Agent {name} spawned (/branch).")),
     }) {
-        emit.emit(Kind::Error(format!(
-            "a spawn row was not recorded in record.jsonl: {error}"
-        )));
+        session.recorder().report_fault(&error);
     }
     let spec = AsyncSpawn {
-        verb: "/branch",
         name,
         prompt: prompt.map(str::to_string),
-        harness: false,
     };
     spawn_async(
         &session.agents,
@@ -57,16 +53,9 @@ pub(crate) fn spawn_branch(
 /// (`amnemon`/`mnemon`) and `/branch`; [`spawn_async`] holds the half they
 /// share.
 pub(crate) struct AsyncSpawn {
-    /// The acting name on the rail: `spawn` on the harness path, the slash
-    /// command on `/branch`.
-    pub verb: &'static str,
     pub name: String,
     /// `None` parks for the human rather than seeding a first exchange.
     pub prompt: Option<String>,
-    /// A desk harness verb rather than `/branch`.  A harness verb never crossed
-    /// the provider boundary, so the rail dresses it as [`Kind::HarnessCall`];
-    /// `/branch` gets an ordinary [`Kind::ToolCall`].
-    pub harness: bool,
 }
 
 /// A start receipt, built only for a child genuinely running: a refused
@@ -99,12 +88,7 @@ pub(crate) fn spawn_async(
     spec: AsyncSpawn,
     emit: &Emitter,
 ) -> Result<SpawnedChild, String> {
-    let AsyncSpawn {
-        verb,
-        name,
-        prompt,
-        harness,
-    } = spec;
+    let AsyncSpawn { name, prompt } = spec;
     // Everything below is taken off `child` before it moves into the worker.
     let agent_id = child.id;
     let log_dir = child.log_dir();
@@ -165,17 +149,9 @@ pub(crate) fn spawn_async(
     if let Some(p) = &prompt {
         child.seed(p.clone());
     }
-    // The dispatch reaches the rail before the spawn, so the user can see every
-    // line the child was asked to act on. A harness spawn's own row is
-    // desk-authored at the commitment arm, where the outcome is known.
-    let cmd = prompt.unwrap_or_else(|| "(waiting for you)".to_string());
-    if !harness {
-        emit.emit(Kind::ToolCall {
-            tool: verb,
-            cmd,
-            summary: Some(format!("Agent {name} spawned ({verb}).")),
-        });
-    }
+    // The dispatch's own row is authored at each caller with session access —
+    // `spawn_branch`'s `Display::ToolCall` beside this call, a harness spawn's
+    // at the desk's own commitment arm — so this spine mints no row of its own.
     let worker = thread::Builder::new()
         .name(format!("exarch-agent-{agent_id}"))
         .stack_size(8 * 1024 * 1024)

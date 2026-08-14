@@ -9,7 +9,7 @@
 
 use crate::agent::event::{CACHE_SENTENCE, ContextOp, EditAuthority};
 use crate::agent::{Agent, Build, LogCell, ProviderHandle, ReplyCell};
-use crate::bus::{AgentId, Emitter, Kind, Mailbox};
+use crate::bus::{AgentId, Emitter, Mailbox};
 use crate::egress;
 use crate::fleet::registry::{AgentRegistry, MessageError, NotADescendant};
 use crate::fleet::schedule::{CronSchedule, ScheduleRegistry, Trigger, parse_duration};
@@ -262,12 +262,6 @@ impl HostServices {
         self.record_display(crate::record::Display::HarnessCall {
             verb: act.verb().to_string(),
             subject: subject.map(str::to_string),
-            payload: payload.clone(),
-            failed: refused,
-        });
-        self.emit.emit(Kind::HarnessCall {
-            verb: act.verb(),
-            subject: subject.map(str::to_string),
             payload,
             failed: refused,
         });
@@ -283,9 +277,7 @@ impl HostServices {
     fn record_display(&self, commit: crate::record::Display) {
         let recorder = self.log.lock().record_emitter();
         if let Err(error) = recorder.emit(commit) {
-            self.emit.emit(Kind::Error(format!(
-                "a display commit was not recorded in record.jsonl: {error}"
-            )));
+            recorder.report_fault(&error);
         }
     }
 
@@ -294,9 +286,7 @@ impl HostServices {
     fn record_forensic(&self, fact: crate::record::Forensic) {
         let recorder = self.log.lock().record_emitter();
         if let Err(error) = recorder.emit(fact) {
-            self.emit.emit(Kind::Error(format!(
-                "a forensic record was not appended to record.jsonl: {error}"
-            )));
+            recorder.report_fault(&error);
         }
     }
 }
@@ -866,10 +856,8 @@ impl ExarchDesk {
             s.mailbox.clone(),
             child,
             crate::shell_eval::tools::agent::AsyncSpawn {
-                verb: DeskAct::Spawn.verb(),
                 name,
                 prompt: Some(prompt),
-                harness: true,
             },
             &s.emit,
         );
@@ -1003,7 +991,6 @@ impl ExarchDesk {
         s.record_forensic(crate::record::Forensic::HarnessResult {
             text: content.clone(),
         });
-        s.emit.emit(Kind::HarnessResult(content.clone()));
         // Only a scope violation raises; the raise is the model's only copy
         // of it. A real cancel and a miss both answer — the tag names which.
         answer.map_err(|()| Error::new(content, 1))
@@ -1055,7 +1042,6 @@ impl ExarchDesk {
         s.record_forensic(crate::record::Forensic::HarnessResult {
             text: content.clone(),
         });
-        s.emit.emit(Kind::HarnessResult(content.clone()));
         // Success is its own confirmation; a refusal raises, and the raise is
         // the model's only copy of it.
         if ok {
@@ -1114,7 +1100,6 @@ impl ExarchDesk {
         s.record_forensic(crate::record::Forensic::HarnessResult {
             text: content.clone(),
         });
-        s.emit.emit(Kind::HarnessResult(content.clone()));
         match result {
             Ok(receipt) => Ok(FOValue::Map {
                 entries: vec![
@@ -1196,10 +1181,7 @@ impl ExarchDesk {
             )
         };
         s.commit_act(DeskAct::Unschedule, Some(&label), payload, !removed);
-        s.record_forensic(crate::record::Forensic::HarnessResult {
-            text: content.clone(),
-        });
-        s.emit.emit(Kind::HarnessResult(content));
+        s.record_forensic(crate::record::Forensic::HarnessResult { text: content });
         Ok(answer)
     }
 
@@ -1343,15 +1325,9 @@ impl ExarchDesk {
             .record_display(crate::record::Display::HarnessCall {
                 verb: "context-read".to_string(),
                 subject: Some(subject.clone()),
-                payload: subject.clone(),
+                payload: subject,
                 failed: result.is_err(),
             });
-        self.services.emit.emit(Kind::HarnessCall {
-            verb: "context-read",
-            subject: Some(subject.clone()),
-            payload: subject,
-            failed: result.is_err(),
-        });
         result
             .map(|value| FOValue::String { value })
             .map_err(|error| Error::new(error, 1))
@@ -1416,8 +1392,7 @@ impl ExarchDesk {
                     receipt.bytes_delta
                 );
                 self.services
-                    .record_forensic(crate::record::Forensic::HarnessResult { text: text.clone() });
-                self.services.emit.emit(Kind::HarnessResult(text));
+                    .record_forensic(crate::record::Forensic::HarnessResult { text });
                 Ok(FOValue::Map {
                     entries: vec![(
                         "bytes-delta".to_string(),
@@ -1433,7 +1408,6 @@ impl ExarchDesk {
                     .record_forensic(crate::record::Forensic::HarnessResult {
                         text: error.clone(),
                     });
-                self.services.emit.emit(Kind::HarnessResult(error.clone()));
                 Err(Error::new(error, 1))
             }
         }
@@ -1688,7 +1662,8 @@ mod tests {
     use super::*;
     use crate::agent::event::AgentLog;
     use crate::agent::testkit::ral_call;
-    use crate::bus::{Inbox, channel};
+    use crate::bus::{Inbox, Kind, Signal, channel};
+    use crate::record::{Display, FleetSink, Record, Transient};
     use crate::egress::Egress;
     use crate::fleet::registry::{AGENT_LEASE_IDLE, EvalReach, InterruptTarget, Registration};
     use crate::provider::{
@@ -2027,6 +2002,11 @@ mod tests {
             complete_exchange(&mut log, "first prompt", "first answer");
         }
         let (tx, rx) = channel();
+        desk.services.log.lock().record_emitter().attach(FleetSink {
+            id: 0,
+            tx: tx.downgrade(),
+            meter: crate::bus::UsageMeter::default(),
+        });
         desk.services.emit = Emitter::new(tx, 0);
 
         let FOValue::String { value } = desk
@@ -2038,15 +2018,18 @@ mod tests {
         assert!(value.contains("[user]\nfirst prompt"));
         assert!(value.contains("[assistant]\nfirst answer"));
         assert!(desk.services.acts.audit().is_none(), "a read has no act");
-        let event = rx.try_next_event().expect("the read must reach the trace");
+        let record = crate::bus::drain_records(&rx)
+            .into_iter()
+            .next()
+            .expect("the read must reach the trace");
         assert!(matches!(
-            event.kind,
-            Kind::HarnessCall {
-                verb: "context-read",
+            record,
+            Record::Display(Display::HarnessCall {
+                verb,
                 subject: Some(subject),
                 payload,
                 failed: false,
-            } if subject == "exchanges [1]" && payload == "exchanges [1]"
+            }) if verb == "context-read" && subject == "exchanges [1]" && payload == "exchanges [1]"
         ));
 
         let error = desk
@@ -2056,16 +2039,17 @@ mod tests {
             error.message,
             "context-read must name at least one exchange"
         );
-        let event = rx
-            .try_next_event()
+        let record = crate::bus::drain_records(&rx)
+            .into_iter()
+            .next()
             .expect("a refused read still reaches the trace");
         assert!(matches!(
-            event.kind,
-            Kind::HarnessCall {
-                verb: "context-read",
+            record,
+            Record::Display(Display::HarnessCall {
+                verb,
                 failed: true,
                 ..
-            }
+            }) if verb == "context-read"
         ));
     }
 
@@ -3239,17 +3223,21 @@ mod tests {
 
         let mut saw_unpin = false;
         let mut saw_spawn = false;
-        for event in rx.filter_map(crate::bus::Signal::into_event) {
-            match event.kind {
-                Kind::Unpin { .. } => saw_unpin = true,
-                Kind::HarnessCall { verb: "spawn", .. } => {
-                    assert!(
-                        saw_unpin,
-                        "the surfaced unpin must be observed before the spawn's HarnessCall line"
-                    );
-                    saw_spawn = true;
+        while let Ok(sig) = rx.try_recv() {
+            match sig {
+                Signal::Transient(_, Transient::Unpin { .. }) => saw_unpin = true,
+                Signal::Fact(_, fact) => {
+                    if let Record::Display(Display::HarnessCall { verb, .. }) = fact.value()
+                        && verb == "spawn"
+                    {
+                        assert!(
+                            saw_unpin,
+                            "the surfaced unpin must be observed before the spawn's HarnessCall line"
+                        );
+                        saw_spawn = true;
+                    }
                 }
-                _ => {}
+                Signal::Event(_) | Signal::Transient(..) => {}
             }
         }
         assert!(
@@ -3489,9 +3477,14 @@ mod tests {
     /// landed.
     #[test]
     fn a_refused_schedule_tiers_its_act_row() {
-        let (emit, rx) = crate::bus::dummy_emitter();
+        let (tx, rx) = channel();
         let mut desk = granted_desk();
-        desk.services.emit = emit;
+        desk.services.log.lock().record_emitter().attach(FleetSink {
+            id: 0,
+            tx: tx.downgrade(),
+            meter: crate::bus::UsageMeter::default(),
+        });
+        desk.services.emit = Emitter::new(tx, 0);
         let spec = || FOValue::List {
             items: vec![
                 FOValue::Variant {
@@ -3517,19 +3510,21 @@ mod tests {
         })
         .expect_err("a duplicate label must be refused");
 
-        let mut acts = Vec::new();
-        while let Ok(event) = rx.try_next_event() {
-            if let Kind::HarnessCall {
-                verb: "schedule",
-                subject,
-                payload,
-                failed,
-            } = event.kind
-            {
-                assert_eq!(subject.as_deref(), Some("nightly"));
-                acts.push((payload, failed));
-            }
-        }
+        let acts: Vec<(String, bool)> = crate::bus::drain_records(&rx)
+            .into_iter()
+            .filter_map(|rec| match rec {
+                Record::Display(Display::HarnessCall {
+                    verb,
+                    subject,
+                    payload,
+                    failed,
+                }) if verb == "schedule" => {
+                    assert_eq!(subject.as_deref(), Some("nightly"));
+                    Some((payload, failed))
+                }
+                _ => None,
+            })
+            .collect();
         assert_eq!(acts.len(), 2, "both attempts draw a row: {acts:?}");
         assert!(!acts[0].1, "the schedule that landed is not tiered");
         assert_eq!(acts[0].0, "after 1s", "a landed row carries its trigger");
@@ -3573,9 +3568,14 @@ mod tests {
     /// Each call also puts a subject-less act on the rail, carrying its value.
     #[test]
     fn reply_stages_the_payload_last_write_wins() {
-        let (emit, rx) = crate::bus::dummy_emitter();
+        let (tx, rx) = channel();
         let mut d = desk();
-        d.services.emit = emit;
+        d.services.log.lock().record_emitter().attach(FleetSink {
+            id: 0,
+            tx: tx.downgrade(),
+            meter: crate::bus::UsageMeter::default(),
+        });
+        d.services.emit = Emitter::new(tx, 0);
 
         for text in ["first", "second"] {
             d.handle(FOValue::Variant {
@@ -3595,20 +3595,22 @@ mod tests {
             "the last staged reply wins"
         );
 
-        let mut acts = Vec::new();
-        while let Ok(event) = rx.try_next_event() {
-            if let Kind::HarnessCall {
-                verb: "reply",
-                subject,
-                payload,
-                failed,
-            } = event.kind
-            {
-                assert_eq!(subject, None, "`reply` addresses no named subject");
-                assert!(!failed, "a staged reply is not a refusal");
-                acts.push(payload);
-            }
-        }
+        let acts: Vec<String> = crate::bus::drain_records(&rx)
+            .into_iter()
+            .filter_map(|rec| match rec {
+                Record::Display(Display::HarnessCall {
+                    verb,
+                    subject,
+                    payload,
+                    failed,
+                }) if verb == "reply" => {
+                    assert_eq!(subject, None, "`reply` addresses no named subject");
+                    assert!(!failed, "a staged reply is not a refusal");
+                    Some(payload)
+                }
+                _ => None,
+            })
+            .collect();
         assert_eq!(
             acts,
             ["first", "second"],
@@ -3695,9 +3697,14 @@ mod tests {
     /// reaches the fragment.
     #[test]
     fn rail_draws_every_attempt_the_fragment_holds_only_what_landed() {
-        let (emit, rx) = crate::bus::dummy_emitter();
+        let (tx, rx) = channel();
         let mut desk = granted_desk();
-        desk.services.emit = emit;
+        desk.services.log.lock().record_emitter().attach(FleetSink {
+            id: 0,
+            tx: tx.downgrade(),
+            meter: crate::bus::UsageMeter::default(),
+        });
+        desk.services.emit = Emitter::new(tx, 0);
 
         desk.handle(FOValue::Variant {
             label: "schedule".into(),
@@ -3730,14 +3737,17 @@ mod tests {
         })
         .expect_err("a message to an unknown name must be refused");
 
-        let mut rows = Vec::new();
-        while let Ok(event) = rx.try_next_event() {
-            if let Kind::HarnessCall { verb, failed, .. } = event.kind {
-                rows.push((verb, failed));
-            }
-        }
+        let rows: Vec<(String, bool)> = crate::bus::drain_records(&rx)
+            .into_iter()
+            .filter_map(|rec| match rec {
+                Record::Display(Display::HarnessCall { verb, failed, .. }) => {
+                    Some((verb, failed))
+                }
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            rows,
+            rows.iter().map(|(v, f)| (v.as_str(), *f)).collect::<Vec<_>>(),
             vec![("schedule", false), ("message", true)],
             "the rail draws one row per attempt, landed or refused"
         );

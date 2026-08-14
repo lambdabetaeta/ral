@@ -195,6 +195,30 @@ where
     })
 }
 
+/// Every [`Record`] a test's own channel has buffered — the seam's own
+/// vocabulary, not `Kind`'s retired-twin projection, so a test asserts what a
+/// producer actually recorded rather than what a legacy bridge could derive.
+#[cfg(test)]
+pub(crate) fn drain_records(rx: &BusReceiver) -> Vec<Record> {
+    std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|sig| match sig {
+            Signal::Fact(_, rec) => Some(rec.into_value()),
+            Signal::Event(_) | Signal::Transient(..) => None,
+        })
+        .collect()
+}
+
+/// [`drain_records`]'s twin for the live-only half of the seam.
+#[cfg(test)]
+pub(crate) fn drain_transients(rx: &BusReceiver) -> Vec<Transient> {
+    std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|sig| match sig {
+            Signal::Transient(_, t) => Some(t),
+            Signal::Event(_) | Signal::Fact(..) => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Pass, Sink, drain_pass, pump};

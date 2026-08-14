@@ -4,7 +4,7 @@
 
 use crate::agent::Agent;
 use crate::agent::event::ToolResult as SessionToolResult;
-use crate::bus::{Emitter, Kind};
+use crate::bus::Emitter;
 use crate::record::{BlockId, Display};
 use serde_json::{Value, json};
 use std::sync::OnceLock;
@@ -120,16 +120,10 @@ pub(crate) fn wire_tool() -> genai::chat::Tool {
 pub(crate) const INVALID_INPUT: &str = "<invalid input>";
 
 /// Rail header and error block for a malformed call, and the result to commit.
-fn invalid_input(id: String, reason: &str, session: &Agent, emit: &Emitter) -> SessionToolResult {
-    let call = record_call(session, INVALID_INPUT.to_string(), None, emit);
-    emit.emit(Kind::ToolCall {
-        tool: NAME,
-        cmd: INVALID_INPUT.to_string(),
-        summary: None,
-    });
+fn invalid_input(id: String, reason: &str, session: &Agent) -> SessionToolResult {
+    let call = record_call(session, INVALID_INPUT.to_string(), None);
     let msg = format!("tool input error: {reason}\nexpected an object matching the tool's schema");
-    record_result(session, &msg, call, emit);
-    emit.emit(Kind::ToolResult(msg.clone()));
+    record_result(session, &msg, call);
     SessionToolResult { id, content: msg }
 }
 
@@ -137,12 +131,7 @@ fn invalid_input(id: String, reason: &str, session: &Agent, emit: &Emitter) -> S
 /// [`BlockId`] so the paired result can address it directly — the mechanism
 /// that retires the view's tail-walk.  A failed append surfaces as an error
 /// row; the paired result is then simply not recorded, having no target.
-fn record_call(
-    session: &Agent,
-    cmd: String,
-    summary: Option<String>,
-    emit: &Emitter,
-) -> Option<BlockId> {
+fn record_call(session: &Agent, cmd: String, summary: Option<String>) -> Option<BlockId> {
     match session.recorder().emit(Display::ToolCall {
         tool: NAME.to_string(),
         cmd,
@@ -150,9 +139,7 @@ fn record_call(
     }) {
         Ok(recorded) => Some(BlockId::new(recorded.stamp().seq())),
         Err(error) => {
-            emit.emit(Kind::Error(format!(
-                "a tool-call commit was not recorded in record.jsonl: {error}"
-            )));
+            session.recorder().report_fault(&error);
             None
         }
     }
@@ -160,15 +147,13 @@ fn record_call(
 
 /// The paired half: the byte-identical result string, addressed at the call
 /// commit it answers.
-fn record_result(session: &Agent, content: &str, call: Option<BlockId>, emit: &Emitter) {
+fn record_result(session: &Agent, content: &str, call: Option<BlockId>) {
     let Some(call) = call else { return };
     if let Err(error) = session.recorder().emit(Display::Result {
         text: content.to_string(),
         call,
     }) {
-        emit.emit(Kind::Error(format!(
-            "a tool-result commit was not recorded in record.jsonl: {error}"
-        )));
+        session.recorder().report_fault(&error);
     }
 }
 
@@ -182,21 +167,11 @@ pub(crate) fn dispatch(
 ) -> SessionToolResult {
     let args = match parse_args(input) {
         Ok(a) => a,
-        Err(reason) => return invalid_input(id, &reason, session, emit),
+        Err(reason) => return invalid_input(id, &reason, session),
     };
-    let call = record_call(
-        session,
-        args.cmd.clone(),
-        Some(args.description.clone()),
-        emit,
-    );
-    emit.emit(Kind::ToolCall {
-        tool: NAME,
-        cmd: args.cmd.clone(),
-        summary: Some(args.description.clone()),
-    });
+    let call = record_call(session, args.cmd.clone(), Some(args.description.clone()));
     let result = session.run_shell(id, &args.cmd, args.timeout_secs, emit);
-    record_result(session, &result.content, call, emit);
+    record_result(session, &result.content, call);
     result
 }
 

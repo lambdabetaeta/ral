@@ -344,16 +344,14 @@ mod tests {
             result.content
         );
         assert!(
-            std::iter::from_fn(|| rx.try_next_event().ok()).any(|event| {
-                matches!(
-                    event.kind,
-                    Kind::HarnessCall {
-                        verb: "context-read",
-                        failed: false,
-                        ..
-                    }
-                )
-            }),
+            crate::bus::drain_records(&rx).into_iter().any(|rec| matches!(
+                rec,
+                crate::record::Record::Display(crate::record::Display::HarnessCall {
+                    verb,
+                    failed: false,
+                    ..
+                }) if verb == "context-read"
+            )),
             "the probe still records its harness call"
         );
     }

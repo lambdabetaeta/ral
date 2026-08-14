@@ -18,7 +18,7 @@ use exarch::agent::{Agent, deliberate};
 use exarch::bus::{AgentId, AgentState, Emitter, Kind, channel};
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Provider, ProviderError, ProviderKind};
-use exarch::record::{Protocol, Record, Transient};
+use exarch::record::{Display, Protocol, Record, Transient};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
 use std::sync::Arc;
 
@@ -35,29 +35,39 @@ fn scripted(model: &str, script: Script) -> Arc<Provider> {
 exarch::pre_main_ctor!();
 
 /// Run one `deliberate` against a fresh `Emitter`/collector pair, returning
-/// the outcome plus every event the worker emitted.
+/// the outcome, every legacy event the worker emitted, and every fact it
+/// recorded through the seam — a class that has crossed lives only in the
+/// second list.
 fn drive_deliberate(
     session: &mut Agent,
     provider: &Arc<Provider>,
     prompt: Option<&str>,
-) -> (Result<deliberate::Outcome, ProviderError>, Vec<Kind>) {
+) -> (Result<deliberate::Outcome, ProviderError>, Vec<Kind>, Vec<Record>) {
     let id: AgentId = session.id;
     let (tx, rx) = channel();
     let emit = Emitter::new(tx, id);
     let token = exarch::agent::cancel::Token::new();
     let outcome = session.deliberate(provider, prompt.map(str::to_string), None, &token, &emit);
     drop(emit);
-    let kinds = rx
-        .into_iter()
-        .filter_map(|sig| match sig {
+    let mut kinds = Vec::new();
+    let mut facts = Vec::new();
+    for sig in rx {
+        if let exarch::bus::Signal::Fact(_, ref fact) = sig {
+            facts.push(fact.value().clone());
+        }
+        match sig {
             // `AgentState` has crossed to the seam alone — no legacy `Kind`
             // twin exists to derive, so this test's own observer bridges it
             // back, exactly as `Signal::into_event` once did for every class.
-            exarch::bus::Signal::Transient(_, Transient::State(s)) => Some(Kind::State(s)),
-            other => other.into_event().map(|e| e.kind),
-        })
-        .collect();
-    (outcome, kinds)
+            exarch::bus::Signal::Transient(_, Transient::State(s)) => kinds.push(Kind::State(s)),
+            other => {
+                if let Some(event) = other.into_event() {
+                    kinds.push(event.kind);
+                }
+            }
+        }
+    }
+    (outcome, kinds, facts)
 }
 
 /// A `ral` tool call invoking `cmd`.
@@ -93,7 +103,7 @@ fn plain_text_reaches_quiescence() {
     let mut session = Agent::for_test("system").unwrap();
     let provider = scripted("test-model", Script::new().then(Reply::text("hello")));
 
-    let (outcome, _kinds) = drive_deliberate(&mut session, &provider, Some("hi"));
+    let (outcome, _kinds, _facts) = drive_deliberate(&mut session, &provider, Some("hi"));
 
     match outcome {
         Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "hello"),
@@ -113,16 +123,16 @@ fn tool_call_then_completion() {
             .then(Reply::text("done")),
     );
 
-    let (outcome, kinds) = drive_deliberate(&mut session, &provider, Some("set x then report"));
+    let (outcome, _kinds, facts) = drive_deliberate(&mut session, &provider, Some("set x then report"));
 
     match outcome {
         Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "done"),
         other => panic!("expected Complete, got {other:?}"),
     }
     assert!(
-        kinds
-            .iter()
-            .any(|k| matches!(k, Kind::ToolCall { tool: "ral", .. })),
+        facts.iter().any(
+            |f| matches!(f, Record::Display(Display::ToolCall { tool, .. }) if tool == "ral")
+        ),
         "ral tool call should reach the bus"
     );
     assert!(session.is_ready());
@@ -142,7 +152,7 @@ fn bindings_persist_across_tool_calls() {
             .then(Reply::text("done")),
     );
 
-    let (outcome, _kinds) = drive_deliberate(&mut session, &provider, Some("compute"));
+    let (outcome, _kinds, _facts) = drive_deliberate(&mut session, &provider, Some("compute"));
     assert!(matches!(outcome, Ok(deliberate::Outcome::Complete(_))));
 
     // The second tool result must show 42 — the binding survived.
@@ -185,16 +195,16 @@ fn truncated_with_tool_calls_runs_and_continues() {
             .then(Reply::text("resumed after truncation")),
     );
 
-    let (outcome, kinds) =
+    let (outcome, _kinds, facts) =
         drive_deliberate(&mut session, &provider, Some("do work then get cut off"));
     match outcome {
         Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "resumed after truncation"),
         other => panic!("truncated-with-tools must run and complete, got {other:?}"),
     }
     assert!(
-        kinds
-            .iter()
-            .any(|k| matches!(k, Kind::ToolCall { tool: "ral", .. })),
+        facts.iter().any(
+            |f| matches!(f, Record::Display(Display::ToolCall { tool, .. }) if tool == "ral")
+        ),
         "the captured tool call must be run, not dropped"
     );
     assert!(session.is_ready());
@@ -216,7 +226,7 @@ fn stalled_stream_commits_partial_and_truncates() {
         Script::new().then(Reply::stalled("partial answer before the stall")),
     );
 
-    let (outcome, kinds) = drive_deliberate(&mut session, &provider, Some("answer at length"));
+    let (outcome, kinds, _facts) = drive_deliberate(&mut session, &provider, Some("answer at length"));
     match outcome {
         Err(ProviderError::Truncated { reason }) => {
             assert_eq!(reason, "Failed to parse stream data for model 'test-model'");
@@ -265,7 +275,7 @@ fn empty_reply_commits_a_stub_not_empty_content() {
     let mut session = Agent::for_test("system").unwrap();
     let provider = scripted("test-model", Script::new().then(Reply::empty()));
 
-    let (outcome, _kinds) = drive_deliberate(&mut session, &provider, Some("say nothing"));
+    let (outcome, _kinds, _facts) = drive_deliberate(&mut session, &provider, Some("say nothing"));
     assert!(
         matches!(outcome, Ok(deliberate::Outcome::Empty)),
         "an empty reply still surfaces as Empty for the nudge"
@@ -304,10 +314,10 @@ fn compaction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
     let first = format!("EXCHANGE1 {}", "x".repeat(450_000));
     let second = format!("EXCHANGE2 {}", "y".repeat(150_000));
     for prompt in [&first, &second] {
-        let (acked, _) = drive_deliberate(&mut session, &provider, Some(prompt));
+        let (acked, _, _) = drive_deliberate(&mut session, &provider, Some(prompt));
         assert!(matches!(acked, Ok(deliberate::Outcome::Complete(_))));
     }
-    let (outcome, kinds) = drive_deliberate(&mut session, &provider, Some("after"));
+    let (outcome, kinds, _facts) = drive_deliberate(&mut session, &provider, Some("after"));
 
     match outcome {
         Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "done"),
@@ -388,7 +398,7 @@ fn malformed_tool_arguments_are_normalised_to_object() {
             .then(Reply::text("recovered")),
     );
 
-    let (outcome, _kinds) = drive_deliberate(&mut session, &provider, Some("emit a bad call"));
+    let (outcome, _kinds, _facts) = drive_deliberate(&mut session, &provider, Some("emit a bad call"));
     assert!(matches!(outcome, Ok(deliberate::Outcome::Complete(_))));
 
     // Every committed tool call's arguments must be a JSON object.
