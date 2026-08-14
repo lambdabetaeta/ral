@@ -48,6 +48,28 @@ shared writer indirection, duplicate edit emission, and two durable readers
 whose ordering must still be related. The next design should price those costs
 against deleting a record, not add a third trace by habit.
 
+## Superseding note: the two-record debt is half paid
+
+[[decisions/260814_one-seam-one-log|one-seam-one-log]] pays the debt for the
+durable log: `events.jsonl` is deleted, absorbed into `record.jsonl`, whose
+fold is both the model view and the resumed scrollback. The named blocker —
+"the bus: emitters are cloned across threads, while `AgentLog` appends under
+one mutex" — resolved exactly the way this page's mechanism predicted, by a
+multi-thread single appender at the emit seam, with the channel sender inside
+the log's mutex so publish order is log order by construction. The maxim
+above is met head-on: display commits are a designed, validated protocol
+recorded at the seam by worker-side producers — the screen still authors
+nothing, and the worker still never narrates the screen.
+
+Two halves stay open, both named in the superseding page: **live display**
+still rides the `Kind` stream (the printers fold the log only on resume), and
+`transcript.jsonl` remains an independently written trace, not the filtered
+projection the dissolving mechanism predicted. One promise of this page is
+also still seam-incomplete: the UI-thread recording emitter built here feeds
+the transcript, but the one log's own vocabulary for UI-authored facts
+(`Forensic::SystemNote`, `ModelChanged`) has no production emit site yet — a
+model switch records in the trace, not in the log.
+
 ## The diagnosis
 
 The bus began life as a *display* stream with exactly one consumer — the frontend

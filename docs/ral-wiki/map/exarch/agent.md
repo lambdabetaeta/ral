@@ -377,10 +377,10 @@ fresh shell from `boot_root_shell` (`agent/seat.rs`, the cwd- and
 scratch-seeding wrapper over `bootstrap::boot_shell`) onto the *same*
 interrupt target; a wire session instead clears by killing its engine
 process and booting a fresh one from the same recipe, so no caller routes
-`/clear` to that seat. The identity seat rotates `events.jsonl` and
+`/clear` to that seat. The identity seat rotates `record.jsonl` and
 `transcript.jsonl` together to the same first-free `.n`, with one wall-clock
-stamp as their join key, then starts a fresh event ledger; it never truncates
-the old record. The event rename is the rotation commit point. Clear also
+stamp as their join key, then starts a fresh record ledger; it never truncates
+the old record. The record rename is the rotation commit point. Clear also
 clears the schedule registry and cascades cancel to its subtree. Replacing the
 transport drops the outgoing shell, whose `LocalState` teardown cancels
 every worker still registered on it — explicit destruction outranks every
@@ -393,7 +393,7 @@ drops that flush too, so no pre-clear worker output survives into the rebuilt
 context. It is the focused agent's, not a fleet-wide reset.
 
 `--resume` is a trunk-only lifecycle: it validates and replays session 0's
-`events.jsonl`, quarantining only an unterminated crash fragment, then reopens
+`record.jsonl`, quarantining only an unterminated crash fragment, then reopens
 the file for append. The live model and provider are selected again, while the
 shell is fresh and receives a note describing the bindings, workers, cwd,
 scratch, pins, and schedules that were not durable. Wire seats and child logs
@@ -417,7 +417,7 @@ request ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-inte
 A successful compaction records `ContextEdited { op: Fold, by: Harness }` with
 the digest and cut. The same fold step removes the prefix spans from the model
 view and evicts their resident events, retaining only their byte ranges in
-`events.jsonl`; this is residency following the view, not a second drain rule.
+`record.jsonl`; this is residency following the view, not a second drain rule.
 There is no `Compacted` state or archival cut to infer. A failed attempt records
 nothing and sheds nothing. The durable log is appended to, never rewritten.
 

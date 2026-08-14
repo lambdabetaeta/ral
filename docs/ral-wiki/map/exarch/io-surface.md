@@ -229,8 +229,9 @@ the byte fields (`stdout`, `stderr`, `new_bytes`, `old_bytes`) — a write or
 command's shape belongs in the log, its content does not. The kept fields
 include `script`/`line`/`col`/`start`/`end`/`principal` alongside each kind's
 own; the rendered card is a rendering and lives only in the TUI's `user.log`.
-The model-protocol `events.jsonl` ([[map/exarch/frontend|frontend]]) carries no
-cards and is unchanged.
+The record log ([[map/exarch/frontend|frontend]]) carries an observation's
+total wire form as a display commit so a resumed scrollback can rebuild its
+card, but never the rendered mark tree itself — a rendering is not a fact.
 
 ## Enforcement — every door is accounted for
 

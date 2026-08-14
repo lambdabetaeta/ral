@@ -130,6 +130,25 @@ and the fold can reconstruct the edit.
 It is not a second model state. The unification debt and the rent of keeping
 the two records are named in the amended recording ADR.
 
+## Superseding note: the log generalises, the law survives
+
+[[decisions/260814_one-seam-one-log|one-seam-one-log]] promotes this page's
+principle from the model view to the log as a whole. `events.jsonl` is
+retired into `record.jsonl`, one log carrying three record classes, and
+*every* durable artifact is now a fold of it — the model context over the
+protocol class, the scrollback over the display and forensic classes, the
+rendered `user.log` a regenerable render of the latter. The law migrates
+intact: no recorded fact is ever removed, `/clear` rotates, resume
+quarantines the torn tail, and `fold == memo` is carried once by a generic
+replay driver rather than once per consumer — the fold-as-spec discipline
+this page established, now stated for two folds instead of one.
+
+One precision the superseding page insists on: the *view* fold exists and
+obeys the same law, but it drives only resume — the live frame remains an
+accumulator over the bus stream, for the reasons enumerated there. The
+projection principle governs everything durable; it does not yet govern the
+live screen.
+
 ## Accepted losses
 
 The design accepts the following costs and boundaries rather than smuggling

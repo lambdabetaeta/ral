@@ -77,8 +77,11 @@ already safe:
   it collapses to a one-row **pin band** beside the matrix. The frame reads
   symmetrically: the **rail owns the left edge** (what happened), the **register
   the right** (what is).
-- **Headless.** There is no register to overwrite, so a pin neither prints nor
-  logs — `events.jsonl` records only events. Pinned state is ambient, like the
+- **Headless.** There is no register to overwrite, so a pin renders nothing.
+  The record log retains `Pin`/`Unpin` as forensic breadcrumbs
+  ([[decisions/260814_one-seam-one-log|one-seam-one-log]]) that no fold
+  draws — the live register follows the shell boundary and is not restored
+  on resume. Pinned state is ambient, like the
   matrix. `pin-read`/`pin-list` still answer headless, since they read the
   mirror, not the drawn column.
 

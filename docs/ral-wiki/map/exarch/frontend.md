@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 7d9410f0
-generated_at_date: 2026-08-13
-covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/event.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
+generated_at_commit: 99bcdf39
+generated_at_date: 2026-08-14
+covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/event.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
 # Map: exarch / frontend
@@ -48,6 +48,29 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   and one `Kind::SystemNote` overflow marker rides the next drain, naming the
   class and the elided count. `/resources` reads `BusReceiver::depth`/`bytes`
   for its `bus.depth`/`bus.bytes` rows.
+- what the channel carries is `Signal` (`bus/event.rs`): the legacy `Kind`
+  envelope, a seam-witnessed fact (`Recorded<Record>`), or an unrecorded
+  `Transient`. `Signal::into_event` is the transitional bridge that projects
+  a fact back to a `Kind` for exactly the retired-twin classes whose
+  dual-write emit sites the record seam collapsed (`Step`, `ContextEdited`,
+  `Usage`, `Error`, `Nudge`, `ProviderError`, `Stalled`); every other class
+  keeps a live legacy emit beside its record, so the live frame is still
+  drawn from `Kind`s while the log carries the facts
+  ([[decisions/260814_one-seam-one-log|one-seam-one-log]]).
+
+`record.rs` + `record/` is the one-seam-one-log module tree: the sealed
+`Record { Protocol, Display, Forensic }` vocabulary and the disjoint
+`Transient`; `record/seam.rs` (`Emitter::emit`, the only publisher —
+append-then-publish under the log's own mutex, so channel order is log
+order); `record/log.rs` (the `record.jsonl` io-door, with the attachable
+`FleetSink` inside the writer's mutex); `record/replay.rs` (the generic
+`fold == memo` driver and `Refusal`); `record/commit.rs` (the worker-side
+commit producer: the `Chopper` and `SurfaceBuffer`, moved whole from
+`tui/surface.rs`); `record/model.rs` (the model fold, `Protocol` alone);
+`record/view.rs` (the view fold into `Blocks`; `Block`'s constructor is
+private). `Viewport` and `Headless` both implement `record::Printer`
+(`transient`/`sync`), exercised by tests and by resume seeding — the live
+per-event path does not drive them yet.
 
 The TUI mints one **session-lived** bus, so a detached async agent clones its
 sender and streams a live tab through the same id-routed draw path a sync child
@@ -57,29 +80,42 @@ finishes, keeping async children muted to their own log.
 
 `agent/event.rs` is the canonical per-session record. `AgentLog` owns two things:
 
-- the projection memo and resident part of the event ledger — renders the next
-  provider request, drives
+- the model fold's `Memo` (`record/model.rs`) — its only session state:
+  renders the next provider request and drives
   the protocol state machine (`is_ready` gates a fresh prompt and `quiesce` winds
   any in-flight exchange back to it, so an exchange never strands a prompt mid-protocol;
   [[invariants/turn-ends-ready|exchange-ends-ready]]);
-- a compact JSONL `events.jsonl`, appended as each event lands — the durable log
-  whose fold is the model view, with projection-neutral breadcrumbs retained.
+- the record seam (`record::Emitter`) onto `sessions/<n>/record.jsonl` — the
+  one durable log every fact this session authors crosses, whose protocol
+  fold is the model view, with display commits and forensic breadcrumbs
+  beside it ([[decisions/260814_one-seam-one-log|one-seam-one-log]]).
   Oversize tool-result sections are elided head+tail at the [[map/exarch/agent|digest]]
-  caps before they ever enter the log.
+  caps before they ever enter the log. A directory with no `record.jsonl`
+  refuses to resume, with a named error.
 
-The TUI writes a sibling `user.log` from the same stream — the "user view" —
-flushed as each block lands so it survives an abnormal exit. Both files live
+The TUI renders a sibling `user.log` — the "user view" — as a regenerable
+render of the viewport's resident blocks, rewritten whole at flush points
+(session end, `/export`) and never patched in place; crash durability lives
+in `record.jsonl`, which is flushed per record. Both files live
 under the durable per-run log directory (`bootstrap::log_run_dir`,
 `$XDG_STATE_HOME/exarch/<project>/<run>/sessions/<id>/`). Every touch of that
-file lives in one place: `tui/viewport.rs` keeps both the tee writer
+file lives in one place: `tui/viewport.rs` keeps both the render writer
 (`open_log`) and the `/export` copy (`export_log`) beside each other, the
 single `user.log` I/O door, so the `/export` handler (`tui/commands.rs`,
 `resolve_export_path`) resolves and guards the destination but never reaches
 the filesystem itself.
 
+On resume, a viewport is a fold's memo: `tui_loop::run` replays
+`record.jsonl` into `record::Blocks` before the worker spawns, seeds the
+root viewport with one `Printer::sync` call, and restores cumulative usage
+from the replayed deltas — the "resumed" note is the boundary between
+replayed history and the live session. For the running session the viewport
+stays its own live accumulator over the `Kind` stream (`App::handle`); the
+live path does not drive `sync`.
+
 Two `Sink` implementations:
 
- `tui.rs` (+ `tui/{app,banner,block,commands,fidelity,gesture,group,highlight,line,login,matrix,md,model_picker,palette,picker,prompt,rail,render,select,status,surface,tabs,terminal,tui_loop,viewport}.rs`) — the full-screen
+ `tui.rs` (+ `tui/{app,banner,block,commands,fidelity,gesture,group,highlight,line,login,matrix,md,model_picker,palette,picker,prompt,rail,render,select,status,tabs,terminal,tui_loop,viewport}.rs`) — the full-screen
  TUI. It owns the alternate screen and its own scrollback: each session is a
  `Vec<Block>` (`tui/block.rs`), and the whole frame is redrawn each tick from
  a memoised flatten of those blocks into wrapped visual rows. A tool call is
@@ -182,7 +218,7 @@ Two `Sink` implementations:
  dropped; no reload-from-`user.log` machinery is built. Every live viewport
  also caps its own retained window — `VIEWPORT_MAX_BLOCKS` blocks and
  `VIEWPORT_MAX_ROWS` rendered rows, oldest evicted first — since older
- blocks are already durable in `user.log`/`events.jsonl`.
+ blocks are already durable in the session's `record.jsonl`.
  `/clear` also cancels the in-flight exchange: `route_submit` raises
  `cancel::raise_interrupt` and cascades `agents.cancel_descendants(root)` *before* blanking
  the viewport, so the streaming `select!` in `provider::complete` unwinds within
@@ -233,7 +269,7 @@ Two `Sink` implementations:
   to a non-CLI host (synod's GUI) one exchange at a time on a parked interactive
   trunk.
   Takes the default `Sink::drive` and a per-exchange bus, so its async children stay
-  muted. It is a display only — the durable `transcript.jsonl` / `events.jsonl`
+  muted. It is a display only — the durable `transcript.jsonl` / `record.jsonl`
   are written by each session's own `agent/transcript.rs` / `agent/event.rs`
   seams, in headless exactly as in the TUI.
 
@@ -280,7 +316,7 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch, `compose_in_editor`
         - `tui/tabs.rs` — session/view lifecycle: `Tabs`, viewports, dispatch order, tabs, titles, dying linger, parent chain, focus management, `tick`'s tombstone eviction past `LINGER`
         - `tui/viewport.rs` — per-session scrollback: `Viewport`, block push/flatten/render, the `VIEWPORT_MAX_BLOCKS`/`VIEWPORT_MAX_ROWS` window caps (oldest evicted first), `Tombstone`
-        - `tui/surface.rs` — event coalescing: `SurfaceBuffer`, `PatchBuf`, `ObservationBuf`, absorb/flush operations
+        - `record/commit.rs` — event coalescing, worker-side: `Chopper`, `SurfaceBuffer`, `PatchBuf`, `ObservationBuf`, absorb/flush into `Display` commits
         - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input
         - `tui/gesture.rs` — mouse/selection: `GestureState`, `Press`, frame geometry, selection, copy toast, hover, scroll
         - `tui/render.rs` — frame layout: `draw`, `FrameGeom`, `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`

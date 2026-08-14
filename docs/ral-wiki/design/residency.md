@@ -44,6 +44,14 @@ id; an accumulator can only be measured and bounded. Both are probed — the
 cancelled, and leased. A viewport has no capability, and pretending it does
 to buy uniformity would buy it at the price of a lie.
 
+The accumulator's contents have a second characterisation, exact in scope:
+**on resume a viewport is a fold's memo** — seeded once from the session's
+record log before the worker spawns
+([[decisions/260814_one-seam-one-log|one-seam-one-log]]) — **while for the
+running session it remains its own live accumulator** over the event stream.
+Neither posture grants it a capability; the split only says where its state
+comes from, never who may reach it.
+
 ## The residency order
 
 Residency states are graded by independence from the session — a *graded

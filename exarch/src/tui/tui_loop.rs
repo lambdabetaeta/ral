@@ -268,7 +268,7 @@ pub fn run(
     if let Ok(paths) = &logs {
         for p in paths {
             match p.parent() {
-                Some(dir) => println!("Agent logs: {} (user.log + events.jsonl)", dir.display()),
+                Some(dir) => println!("Agent logs: {} (user.log + record.jsonl)", dir.display()),
                 None => println!("Agent log: {}", p.display()),
             }
         }

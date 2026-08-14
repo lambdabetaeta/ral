@@ -193,14 +193,14 @@ pub fn frontend_rows(
             viewport.blocks,
             Some(viewport.blocks_cap),
             "evict",
-            Some("oldest evicted first; already durable in user.log".to_string()),
+            Some("oldest evicted first; already durable in record.jsonl".to_string()),
         ),
         ProbeRow::new(
             "viewport.rows",
             viewport.rows,
             Some(viewport.rows_cap),
             "evict",
-            Some("oldest evicted first; already durable in user.log".to_string()),
+            Some("oldest evicted first; already durable in record.jsonl".to_string()),
         ),
         ProbeRow::new(
             "viewport.bytes",
