@@ -250,13 +250,6 @@ impl Sink for Headless<'_> {
                 }
                 let _ = writeln!(self.err, "error: {msg}");
             }
-            // `/resources` and `/context` still ride a direct `Kind` — the one
-            // fold neither survey has a `Transient`/`Display` producer for.
-            Kind::Resources { card, .. } | Kind::Context { card, .. } => {
-                for line in card_stderr(&card) {
-                    let _ = writeln!(self.err, "{line}");
-                }
-            }
             // A pin overwrites a TUI register; headless has none.
             Kind::Pin { .. } | Kind::Unpin { .. } => {}
             // `Step` rides `Protocol` alone, with no `Display` twin of its
@@ -286,6 +279,8 @@ impl Sink for Headless<'_> {
             | Kind::HarnessCall { .. }
             | Kind::ToolResult(_)
             | Kind::HarnessResult(_)
+            | Kind::Resources { .. }
+            | Kind::Context { .. }
             | Kind::Cleared
             | Kind::Boundary
             | Kind::Born { .. }
@@ -403,6 +398,11 @@ impl Printer for Headless<'_> {
             Transient::Fault { text } => {
                 let _ = writeln!(self.err, "{text}");
             }
+            Transient::Resources { card, .. } => {
+                for line in card_stderr(card) {
+                    let _ = writeln!(self.err, "{line}");
+                }
+            }
             // A pin overwrites a TUI register; headless has none.
             Transient::Token(_)
             | Transient::Thinking(_)
@@ -410,7 +410,6 @@ impl Printer for Headless<'_> {
             | Transient::Born { .. }
             | Transient::Died
             | Transient::Cleared
-            | Transient::Resources { .. }
             | Transient::Pin { .. }
             | Transient::Unpin { .. } => {}
         }
@@ -516,10 +515,9 @@ impl Headless<'_> {
             K::Notice { notice } => {
                 self.print_card(&card::notice_card(&card::to_card_notice(notice)));
             }
-            // Still dual-emitted directly as `Kind::Context` from
-            // `agent::resources` — drawn from that legacy path for the same
-            // reason as `ToolCall` above.
-            K::Context { .. } => {}
+            K::Context { rows } => {
+                self.print_card(&card::context_rows_card(rows));
+            }
             K::Step { n } => {
                 if id == self.root_id {
                     self.steps += 1;

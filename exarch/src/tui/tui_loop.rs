@@ -126,11 +126,11 @@ impl Control for ReplControl {
             // Surveyed on the thread that owns the shell the rows describe,
             // and emitted as one bus event — never a model turn.
             "/resources" => {
-                session.emit_resources(emit);
+                session.emit_resources(&session.recorder());
                 Verdict::Continue
             }
             "/context" => {
-                session.emit_context_survey(emit);
+                session.emit_context_survey();
                 Verdict::Continue
             }
             "/quit" | "/exit" => Verdict::Quit,
@@ -565,11 +565,11 @@ mod tests {
         let mut control = ReplControl;
         let _ = session.attend(&mut control, &emit);
 
-        let event = rx
-            .try_next_event()
-            .expect("the /resources command must emit its fold");
-        match &event.kind {
-            Kind::Resources { rows, card } => {
+        let sig = rx
+            .try_recv()
+            .expect("the /resources command must publish its fold");
+        match sig {
+            crate::bus::Signal::Transient(_, crate::record::Transient::Resources { rows, card }) => {
                 assert!(!rows.is_empty(), "the agent half of the fold has rows");
                 assert!(
                     rows.iter().any(|r| r.name == "workers.running"),
@@ -577,7 +577,7 @@ mod tests {
                 );
                 assert_eq!(card.marks().len(), 2, "a heading and one matrix");
             }
-            _ => panic!("expected Kind::Resources"),
+            _ => panic!("expected Transient::Resources"),
         }
         // The park the loop settles into announces itself, and nothing else
         // follows: a command is not a turn, so no state ran before the fold.

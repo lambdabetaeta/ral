@@ -10,9 +10,7 @@
 
 use crate::agent::Agent;
 use crate::agent::digest::{COMPACT_THRESHOLD, compaction_trigger};
-use crate::agent::event::{ContextSurvey, ContextSurveyItem};
 use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span};
-use crate::bus::{Emitter, Kind};
 use crate::fleet::registry::{AGENT_DEMOTE_IDLE, AGENT_LEASE_IDLE};
 use crate::shell_eval;
 use ral_core::serial::FOValue;
@@ -108,32 +106,6 @@ pub fn section_mark(title: &str) -> Mark {
 /// time; the raw rows ride beside the card on the bus.
 pub fn resources_card(rows: &[ProbeRow]) -> Card {
     Card(vec![section_mark("resources"), rows_mark(rows)])
-}
-
-fn context_card(survey: &ContextSurvey) -> Card {
-    let rows = survey.items.iter().map(context_field).collect::<Vec<_>>();
-    Card(vec![section_mark("context"), Mark::Fields { rows }])
-}
-
-fn context_field(item: &ContextSurveyItem) -> Field {
-    let mut spans = vec![Span {
-        role: None,
-        text: item.opening.clone(),
-    }];
-    spans.push(Span {
-        role: Some(Role::Muted),
-        text: format!(
-            "  {} B · {} step{}{}",
-            item.bytes,
-            item.steps,
-            if item.steps == 1 { "" } else { "s" },
-            if item.live { " · live" } else { "" }
-        ),
-    });
-    Field {
-        label: format!("{} {}", item.kind.as_str(), item.exchange),
-        value: FieldVal::Inline(spans),
-    }
 }
 
 /// The probed agent's viewport window: figures beside the caps that bound
@@ -543,21 +515,21 @@ impl Agent {
         rows
     }
 
-    /// Emit the fold as one [`Kind::Resources`] event: the agent rows beside
-    /// the card rendering them.  Called from `ReplControl` in
-    /// `tui/tui_loop.rs`, at the exchange boundary where `/clear` runs;
-    /// transcript and TUI only, never model-facing.
-    pub(crate) fn emit_resources(&self, emit: &Emitter) {
+    /// Publish the fold as one [`Transient::Resources`]: the agent rows
+    /// beside the card rendering them, drawn live and never recorded — a
+    /// probe fold is an interactive diagnostic, not a session fact. Called
+    /// from `ReplControl` in `tui/tui_loop.rs`, at the exchange boundary
+    /// where `/clear` runs; transcript and TUI only, never model-facing.
+    pub(crate) fn emit_resources(&self, recorder: &crate::record::Emitter) {
         let rows = self.resource_rows();
         let card = resources_card(&rows);
-        emit.emit(Kind::Resources { rows, card });
+        recorder.transient(crate::record::Transient::Resources { rows, card });
     }
 
-    pub(crate) fn emit_context_survey(&self, emit: &Emitter) {
+    pub(crate) fn emit_context_survey(&self) {
         let survey = self.log.lock().context_survey();
-        let card = context_card(&survey);
-        // The data half records beside the live row; the card is a rendering
-        // the view fold rebuilds, never what the log carries.
+        // The card is a rendering the view fold rebuilds at draw time, never
+        // what the log carries.
         let rows = survey
             .items
             .iter()
@@ -574,10 +546,6 @@ impl Agent {
         if let Err(error) = recorder.emit(crate::record::Display::Context { rows }) {
             recorder.report_fault(&error);
         }
-        emit.emit(Kind::Context {
-            rows: survey.items,
-            card,
-        });
     }
 }
 
@@ -589,7 +557,7 @@ impl Agent {
 mod tests {
     use super::*;
     use crate::agent::testkit::*;
-    use crate::bus::Post;
+    use crate::bus::{Emitter, Post};
 
     /// Every frontend row wears its policy, but only the viewport window's
     /// two enforced caps become real `cap`s; the rest stay `None` rather
@@ -711,12 +679,11 @@ mod tests {
             .unwrap_or_else(|| panic!("the fold must emit a `{name}` row"))
     }
 
-    /// `/context`'s survey pairs its live `Kind::Context` row with a
-    /// `Display::Context` record on the seam, carrying the same data half —
-    /// what lets a resumed scrollback rebuild the survey card the user saw.
+    /// `/context`'s survey records a `Display::Context` commit through the
+    /// seam — what lets a resumed scrollback rebuild the survey card the
+    /// user saw.
     #[test]
-    fn context_survey_records_a_display_twin_beside_its_kind() {
-        use crate::bus::Signal;
+    fn context_survey_records_a_display_commit() {
         use crate::record::{Display, Record};
 
         let session = Agent::for_test("system").unwrap();
@@ -727,33 +694,22 @@ mod tests {
                 .unwrap();
         }
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
-        session.couple(&emit);
-        session.emit_context_survey(&emit);
+        session.recorder().attach(crate::record::FleetSink {
+            id: session.id,
+            tx: tx.downgrade(),
+            meter: crate::bus::UsageMeter::default(),
+        });
+        session.emit_context_survey();
 
-        let mut fact_rows = None;
-        let mut kind_rows = None;
-        while let Ok(sig) = rx.try_recv() {
-            match sig {
-                Signal::Fact(_, fact) => {
-                    if let Record::Display(Display::Context { rows }) = fact.value() {
-                        fact_rows = Some(rows.clone());
-                    }
-                }
-                Signal::Event(event) => {
-                    if let Kind::Context { rows, .. } = event.kind {
-                        kind_rows = Some(rows);
-                    }
-                }
-                Signal::Transient(..) => {}
-            }
-        }
-        let fact = fact_rows.expect("the survey records a Display::Context commit");
-        let kind = kind_rows.expect("the survey still emits its legacy Kind::Context");
-        assert_eq!(fact.len(), kind.len(), "one record row per live row");
+        let fact = crate::bus::drain_records(&rx)
+            .into_iter()
+            .find_map(|rec| match rec {
+                Record::Display(Display::Context { rows }) => Some(rows),
+                _ => None,
+            })
+            .expect("the survey records a Display::Context commit");
         assert_eq!(fact[0].exchange, 1);
         assert_eq!(fact[0].kind, "exchange");
-        assert_eq!(fact[0].opening, kind[0].opening);
     }
 
     /// The agent half surveys what this thread owns: the worker registry's
