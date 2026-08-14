@@ -760,7 +760,7 @@ mod tests {
         );
         assert!(
             row(&rows, "disk.log_dir").current > 0,
-            "a session dir with a written events.jsonl probes nonzero"
+            "a session dir with a written record.jsonl probes nonzero"
         );
 
         assert_eq!(

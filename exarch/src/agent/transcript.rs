@@ -3,11 +3,16 @@
 //!
 //! What the agent *did* — every tool call and result, step, usage delta,
 //! structural I/O effect, stop reason, error, sub-agent boundary — sibling to
-//! the model-view `events.jsonl` that `AgentLog` keeps. A rendering is not an
+//! the model-view `record.jsonl` that `AgentLog` keeps. A rendering is not an
 //! effect, so composed cards and progress labels stay out; they are the TUI's
-//! `user.log`. The writer is fed at the emit seam (`Emitter::emit`), not by
-//! whoever drains the live bus, so a child muted off the display still records
-//! its full trace.
+//! `user.log`. The writer is fed at the bus emit seam (`bus::Emitter::emit`),
+//! not by whoever drains the live bus, so a child muted off the display
+//! still records its full trace.
+//!
+//! This is still an independently written trace, not a fold of
+//! `record.jsonl` — `dev/docs/plans/260814_one_seam_one_log.md`'s step 8
+//! wants it retired to a projection, but its write site lives at the bus
+//! emit seam (`bus/emitter.rs`), outside this parcel's boundary.
 
 use crate::bus::card::observation_json;
 use crate::bus::{AgentId, Kind};

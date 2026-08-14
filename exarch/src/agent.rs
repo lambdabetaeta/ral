@@ -242,7 +242,7 @@ impl Agent {
         self.provider.current()
     }
 
-    /// Where this agent's own session log is written — `events.jsonl` and its
+    /// Where this agent's own session log is written — `record.jsonl` and its
     /// siblings sit directly inside.
     pub fn log_dir(&self) -> std::path::PathBuf {
         self.log.lock().dir().to_path_buf()

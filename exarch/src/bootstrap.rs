@@ -384,7 +384,7 @@ impl App {
 
     /// The per-run log directory, `<project>/<YYYY-MM-DD-HHMMSS>-<pid>/` — the
     /// pid keeps two runs launched in the same second and project apart.  Holds
-    /// `stderr.log` and `sessions/<id>/{events.jsonl,transcript.jsonl,user.log}`,
+    /// `stderr.log` and `sessions/<id>/{record.jsonl,transcript.jsonl,user.log}`,
     /// durably, unlike the disposable [`Scratch`].
     ///
     /// # Errors
@@ -420,10 +420,10 @@ fn resume_candidates_in(project: &Path) -> io::Result<Vec<PathBuf>> {
         .filter_map(|entry| {
             let path = entry.path();
             let is_dir = entry.file_type().ok()?.is_dir();
-            let events = path.join("sessions/0/events.jsonl");
-            is_dir.then_some((path, events.is_file()))
+            let record = path.join("sessions/0/record.jsonl");
+            is_dir.then_some((path, record.is_file()))
         })
-        .filter(|(_, has_events)| *has_events)
+        .filter(|(_, has_record)| *has_record)
         .filter_map(|(path, _)| {
             let name = path.file_name()?.to_str()?;
             let (stamp, _pid) = name.rsplit_once('-')?;
@@ -633,8 +633,8 @@ mod tests {
         for run in [&transient, &older, &newer] {
             fs::create_dir_all(run.join("sessions/0")).unwrap();
         }
-        fs::write(older.join("sessions/0/events.jsonl"), b"durable").unwrap();
-        fs::write(newer.join("sessions/0/events.jsonl"), b"durable").unwrap();
+        fs::write(older.join("sessions/0/record.jsonl"), b"durable").unwrap();
+        fs::write(newer.join("sessions/0/record.jsonl"), b"durable").unwrap();
 
         let candidates = resume_candidates_in(&project).expect("candidates");
         assert_eq!(candidates, vec![newer, older]);

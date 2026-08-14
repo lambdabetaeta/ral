@@ -447,24 +447,24 @@ impl Agent {
             drop(log);
             (transcript_path, record)
         };
-        let mut error = record.events_error;
+        let mut error = record.rotation_error;
         if let Some(rotation) = record.rotation
             && let Err(transcript_error) =
                 self.transcript
                     .rotate_at(&transcript_path, rotation, at_unix_ms)
         {
-            let rotated_events = transcript_path.with_file_name(format!("events.jsonl.{rotation}"));
+            let rotated_record = transcript_path.with_file_name(format!("record.jsonl.{rotation}"));
             let rotated_transcript =
                 transcript_path.with_file_name(format!("transcript.jsonl.{rotation}"));
             error = Some(match error {
-                Some(events_error) => io::Error::other(format!(
-                    "clear committed, but paired files {} and {} could not both be rotated: {events_error}; {transcript_error}",
-                    rotated_events.display(),
+                Some(record_error) => io::Error::other(format!(
+                    "clear committed, but paired files {} and {} could not both be rotated: {record_error}; {transcript_error}",
+                    rotated_record.display(),
                     rotated_transcript.display(),
                 )),
                 None => io::Error::other(format!(
-                    "clear committed, but paired files {} and {} could not both be rotated: the event log was moved, but the transcript failed: {transcript_error}",
-                    rotated_events.display(),
+                    "clear committed, but paired files {} and {} could not both be rotated: the record log was moved, but the transcript failed: {transcript_error}",
+                    rotated_record.display(),
                     rotated_transcript.display(),
                 )),
             });
@@ -706,7 +706,6 @@ impl Drop for Agent {
 )]
 mod tests {
     use super::*;
-    use crate::agent::event::SessionEvent;
     use crate::agent::testkit::*;
     use crate::bus::{Emitter, Item, Kind, Post};
     use crate::provider::scripted::Script;
@@ -847,20 +846,20 @@ mod tests {
     }
 
     /// Read `system_prompt_bytes` off a session's `SessionStarted` bookend,
-    /// the first event in its `events.jsonl`.
+    /// the first record in its `record.jsonl`.
     fn recorded_system_prompt_bytes(log_dir: &std::path::Path) -> usize {
-        let body = std::fs::read_to_string(log_dir.join("events.jsonl")).expect("events.jsonl");
-        let first: crate::agent::event::SessionEvent = serde_json::Deserializer::from_str(&body)
+        let body = std::fs::read_to_string(log_dir.join("record.jsonl")).expect("record.jsonl");
+        let first: crate::record::Record = serde_json::Deserializer::from_str(&body)
             .into_iter()
             .next()
-            .expect("events.jsonl must have at least one event")
-            .expect("first event must parse");
+            .expect("record.jsonl must have at least one record")
+            .expect("first record must parse");
         match first {
-            crate::agent::event::SessionEvent::SessionStarted {
+            crate::record::Record::Protocol(crate::record::Protocol::SessionStarted {
                 system_prompt_bytes,
                 ..
-            } => system_prompt_bytes,
-            other => panic!("first event must be SessionStarted, got {other:?}"),
+            }) => system_prompt_bytes,
+            other => panic!("first record must be SessionStarted, got {other:?}"),
         }
     }
 
@@ -1274,16 +1273,19 @@ mod tests {
         ] {
             assert!(text.contains(loss), "resume note must name {loss}: {text}");
         }
-        let events: Vec<SessionEvent> = serde_json::Deserializer::from_reader(
-            File::open(dir.path().join("sessions/0/events.jsonl")).unwrap(),
+        let records: Vec<crate::record::Record> = serde_json::Deserializer::from_reader(
+            File::open(dir.path().join("sessions/0/record.jsonl")).unwrap(),
         )
         .into_iter()
         .collect::<Result<_, _>>()
         .unwrap();
-        let resumed_at = events
+        let resumed_at = records
             .iter()
-            .find_map(|event| match event {
-                SessionEvent::SessionResumed { at_unix_ms, .. } => Some(*at_unix_ms),
+            .find_map(|record| match record {
+                crate::record::Record::Protocol(crate::record::Protocol::SessionResumed {
+                    at_unix_ms,
+                    ..
+                }) => Some(*at_unix_ms),
                 _ => None,
             })
             .expect("SessionResumed breadcrumb");
@@ -1300,9 +1302,9 @@ mod tests {
     #[test]
     fn clear_rotates_both_records_and_shared_emitters_follow_the_new_trace() {
         let mut session = Agent::for_test("system").unwrap();
-        let events = session.log_dir().join("events.jsonl");
+        let record = session.log_dir().join("record.jsonl");
         let transcript = session.log_dir().join("transcript.jsonl");
-        fs::write(events.with_file_name("events.jsonl.0"), b"reserved").unwrap();
+        fs::write(record.with_file_name("record.jsonl.0"), b"reserved").unwrap();
         fs::write(transcript.with_file_name("transcript.jsonl.0"), b"reserved").unwrap();
 
         let bus = crate::bus::FleetBus::session(&session.inbox());
@@ -1310,26 +1312,29 @@ mod tests {
         let second = first.clone();
         session.clear().expect("clear rotation");
 
-        let rotated_events = events.with_file_name("events.jsonl.1");
+        let rotated_record = record.with_file_name("record.jsonl.1");
         let rotated_transcript = transcript.with_file_name("transcript.jsonl.1");
-        assert!(rotated_events.is_file());
+        assert!(rotated_record.is_file());
         assert!(rotated_transcript.is_file());
-        assert!(events.is_file());
+        assert!(record.is_file());
         assert!(transcript.is_file());
         assert!(
-            fs::read(events.with_file_name("events.jsonl.0"))
+            fs::read(record.with_file_name("record.jsonl.0"))
                 .unwrap()
                 .starts_with(b"reserved")
         );
 
-        let current_events: Vec<SessionEvent> =
-            serde_json::Deserializer::from_reader(File::open(&events).unwrap())
+        let current_records: Vec<crate::record::Record> =
+            serde_json::Deserializer::from_reader(File::open(&record).unwrap())
                 .into_iter()
                 .collect::<Result<_, _>>()
                 .unwrap();
-        let stamp = match current_events.first().expect("new session head") {
-            SessionEvent::SessionStarted { at_unix_ms, .. } => *at_unix_ms,
-            other => panic!("new event segment must start with SessionStarted, got {other:?}"),
+        let stamp = match current_records.first().expect("new session head") {
+            crate::record::Record::Protocol(crate::record::Protocol::SessionStarted {
+                at_unix_ms,
+                ..
+            }) => *at_unix_ms,
+            other => panic!("new record segment must start with SessionStarted, got {other:?}"),
         };
         let trace: Vec<serde_json::Value> =
             serde_json::Deserializer::from_reader(File::open(&transcript).unwrap())
@@ -1386,7 +1391,7 @@ mod tests {
             .expect("mirror-only child");
         let child_log = child.log_dir();
         for log_dir in [&root_log, &child_log] {
-            assert!(!log_dir.join("events.jsonl").exists());
+            assert!(!log_dir.join("record.jsonl").exists());
             assert!(!log_dir.join("transcript.jsonl").exists());
         }
         assert!(!dir.path().join("run.lock").exists());

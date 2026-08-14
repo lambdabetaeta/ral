@@ -18,10 +18,12 @@
 use super::log::Log;
 use super::{Fold, Protocol, Record, Recorded, Refusal, Stamp};
 use crate::agent::event::{
-    ContextOp, QuiesceReason, ToolResult, summary_prompt, validate_result_ids,
+    CompactionPlan, ContextOp, ContextSpanKind, ContextSurvey, ContextSurveyItem, QuiesceReason,
+    ToolResult, summary_prompt, validate_result_ids,
 };
 use genai::chat::{ChatMessage, ChatRole, ToolResponse};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
@@ -56,22 +58,29 @@ enum State {
     AwaitingAssistantAfterToolResults,
 }
 
+/// A closed prefix of exchanges, folded into one summary the model reads in
+/// place of the spans it replaced.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Digest {
-    through_exchange: u64,
-    text: String,
+pub struct Digest {
+    pub through_exchange: u64,
+    pub text: String,
 }
 
+/// One exchange's (or imported context's) contiguous run of protocol records,
+/// named by its exchange id.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Span {
-    id: u64,
-    events: Range<usize>,
+pub struct Span {
+    pub id: u64,
+    pub events: Range<usize>,
 }
 
+/// The model's addressable window onto the protocol subsequence: an optional
+/// digest standing in for everything it folded, plus the closed and live
+/// spans still readable by exchange id.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct View {
-    digest: Option<Digest>,
-    spans: Vec<Span>,
+pub struct View {
+    pub digest: Option<Digest>,
+    pub spans: Vec<Span>,
 }
 
 /// One resident protocol record, or the [`Stamp`] to read it back by once a
@@ -220,6 +229,57 @@ impl Memo {
         !self.is_ready() && self.max_exchange == id
     }
 
+    pub(crate) fn is_awaiting_assistant(&self) -> bool {
+        matches!(
+            self.state,
+            State::AwaitingAssistantAfterUser | State::AwaitingAssistantAfterToolResults
+        )
+    }
+
+    pub(crate) fn is_awaiting_steering(&self) -> bool {
+        matches!(self.state, State::AwaitingAssistantAfterToolResults)
+    }
+
+    pub(crate) fn pending_tool_results(&self) -> Option<Vec<String>> {
+        match &self.state {
+            State::AwaitingToolResults { pending_ids } => Some(pending_ids.clone()),
+            State::ReadyForUser
+            | State::AwaitingAssistantAfterUser
+            | State::AwaitingAssistantAfterToolResults => None,
+        }
+    }
+
+    /// A human-readable stand-in for `{:?}` on the private [`State`] — used
+    /// only in refusal messages, never matched on.
+    pub(crate) fn state_description(&self) -> String {
+        match &self.state {
+            State::ReadyForUser => "ReadyForUser".to_string(),
+            State::AwaitingAssistantAfterUser => "AwaitingAssistantAfterUser".to_string(),
+            State::AwaitingToolResults { pending_ids } => {
+                format!("AwaitingToolResults {{ pending_ids: {pending_ids:?} }}")
+            }
+            State::AwaitingAssistantAfterToolResults => {
+                "AwaitingAssistantAfterToolResults".to_string()
+            }
+        }
+    }
+
+    /// The stub records a [`QuiesceReason`] quiesce needs to drive the state
+    /// back to ready, for the caller to record through the seam itself —
+    /// this fold only knows how to compute them, never to author them.
+    pub(crate) fn quiesce_stubs(&self, reason: QuiesceReason) -> Vec<Protocol> {
+        stubs_to_ready(&self.state, reason)
+    }
+
+    /// The parent context a `mnemon` child inherits. A spawn from inside a
+    /// tool batch leaves the parent waiting on the very call that made the
+    /// child, so that unfinished assistant frame is dropped: the child
+    /// starts from the request context, not a dangling tool protocol.
+    pub(crate) fn inherited_context_messages(&self) -> Vec<ChatMessage> {
+        let omit_tail_assistant = matches!(self.state, State::AwaitingToolResults { .. });
+        self.project_view(omit_tail_assistant)
+    }
+
     /// The provider-facing message list — recomputed from the protocol
     /// subsequence on every call, never accumulator state: `span_messages`'s
     /// `omit`/`repair_end` flags depend on which span is currently last, so
@@ -275,6 +335,395 @@ impl Memo {
             append_aborted_stubs(&mut state, &mut messages);
         }
         messages
+    }
+
+    fn span_message_bytes(&self, span: &Span) -> usize {
+        self.span_message_bytes_with_repair(span, true)
+    }
+
+    fn span_message_bytes_with_repair(&self, span: &Span, repair_end: bool) -> usize {
+        self.span_messages(span, false, repair_end)
+            .iter()
+            .map(|message| serde_json::to_string(message).map_or(0, |s| s.len()))
+            .sum()
+    }
+
+    fn messages_for_spans(&self, spans: &[Span]) -> Vec<ChatMessage> {
+        let mut messages = Vec::new();
+        if let Some(digest) = &self.view.digest {
+            messages.push(ChatMessage::user(summary_prompt(&digest.text)));
+        }
+        for span in spans {
+            messages.extend(self.span_messages(span, false, true));
+        }
+        messages
+    }
+
+    /// The window every read query of the model view answers over — private
+    /// to the fold; `AgentLog` reads the shape it needs through the queries
+    /// below, never this reference directly.
+    pub fn view(&self) -> &View {
+        &self.view
+    }
+
+    fn digest_reach(&self) -> Option<u64> {
+        self.view
+            .digest
+            .as_ref()
+            .map(|digest| digest.through_exchange)
+    }
+
+    /// Slots still owned by the model view: the append-only ledger retains
+    /// what an edit removes, so this is the host's resource probe's own
+    /// count, not [`Self::log_len`].
+    pub(crate) fn event_count(&self) -> usize {
+        let events = self
+            .view
+            .spans
+            .iter()
+            .map(|span| span.events.len())
+            .sum::<usize>();
+        events + usize::from(self.view.digest.is_some())
+    }
+
+    /// Approximate context size in serialised model-view bytes — the
+    /// fallback compaction trigger when the model's context window is
+    /// unknown.
+    pub(crate) fn history_bytes(&self) -> usize {
+        self.model_messages()
+            .iter()
+            .map(|m| serde_json::to_string(m).map_or(0, |s| s.len()))
+            .sum()
+    }
+
+    /// # Panics
+    /// Panics if a view span is not resident in the ledger.
+    pub(crate) fn context_survey(&self) -> ContextSurvey {
+        let mut survey = ContextSurvey::default();
+        if let Some(digest) = &self.view.digest {
+            let item = ContextSurveyItem {
+                exchange: digest.through_exchange,
+                kind: ContextSpanKind::Digest,
+                opening: opening_line(&digest.text),
+                bytes: serde_json::to_string(&ChatMessage::user(summary_prompt(&digest.text)))
+                    .map_or(0, |text| text.len()),
+                steps: 0,
+                live: false,
+            };
+            survey.add(item);
+        }
+        for span in &self.view.spans {
+            let events = self
+                .ledger
+                .resident_events(span.events.clone())
+                .expect("view spans are resident in the ledger");
+            let kind = match events.first() {
+                Some(Protocol::ContextMessage { .. }) => ContextSpanKind::Import,
+                _ => ContextSpanKind::Exchange,
+            };
+            let live = self.is_live_exchange(span.id);
+            let item = ContextSurveyItem {
+                exchange: span.id,
+                kind,
+                opening: opening_line_for_events(&events),
+                bytes: self.span_message_bytes_with_repair(span, !live),
+                steps: events
+                    .iter()
+                    .filter(|event| matches!(event, Protocol::StepStarted { .. }))
+                    .count(),
+                live,
+            };
+            survey.add(item);
+        }
+        survey
+    }
+
+    /// Read named, closed spans in their model-view order.
+    ///
+    /// # Errors
+    /// Refuses an empty list, a duplicate name, a missing or folded exchange,
+    /// or the exchange still in progress.
+    pub(crate) fn read_context(&self, exchanges: &[u64]) -> Result<String, String> {
+        if exchanges.is_empty() {
+            return Err("context-read must name at least one exchange".into());
+        }
+        self.validate_named_exchanges(exchanges)?;
+        Ok(render_context_transcript(
+            &self.ledger,
+            &self.view,
+            &exchanges.iter().copied().collect(),
+        ))
+    }
+
+    /// Resolve a user rewind into the whole visible suffix beginning at its
+    /// anchor. The anchor is checked before the suffix is derived.
+    ///
+    /// # Errors
+    /// Refuses an absent anchor or one strictly inside the current digest.
+    pub(crate) fn rewind_exchanges(&self, anchor: u64) -> Result<Vec<u64>, String> {
+        if let Some(reach) = self.digest_reach() {
+            if anchor < reach {
+                return Err(folded_exchange_refusal(anchor, reach));
+            }
+            if anchor == reach {
+                let mut exchanges = vec![anchor];
+                exchanges.extend(
+                    self.view
+                        .spans
+                        .iter()
+                        .filter(|span| span.id >= anchor)
+                        .map(|span| span.id),
+                );
+                return Ok(exchanges);
+            }
+        }
+        if !self.view.spans.iter().any(|span| span.id == anchor) {
+            return Err(rewind_unknown_exchange_refusal(
+                anchor,
+                self.last_view_exchange(),
+            ));
+        }
+        Ok(self
+            .view
+            .spans
+            .iter()
+            .filter(|span| span.id >= anchor)
+            .map(|span| span.id)
+            .collect())
+    }
+
+    /// # Errors
+    /// Refuses an unnamed edit, an unaddressable target, or a live exchange.
+    pub(crate) fn validate_edit(&self, op: &ContextOp) -> Result<(), String> {
+        match op {
+            ContextOp::Fold {
+                through_exchange, ..
+            } => self.validate_closed_present(*through_exchange),
+            ContextOp::Drop { exchanges } => {
+                if exchanges.is_empty() {
+                    return Err("a context edit must name at least one exchange".into());
+                }
+                self.validate_named_exchanges(exchanges)
+            }
+        }
+    }
+
+    /// Each named exchange must be addressable and closed, and named once.
+    fn validate_named_exchanges(&self, exchanges: &[u64]) -> Result<(), String> {
+        let mut named = HashSet::with_capacity(exchanges.len());
+        for &exchange in exchanges {
+            if !named.insert(exchange) {
+                return Err(format!("exchange {exchange} was named more than once"));
+            }
+            self.validate_closed_present(exchange)?;
+        }
+        Ok(())
+    }
+
+    /// An exchange is addressable iff it survives in the view — as a span, or
+    /// as the digest named by its reach — and closed iff it is not the live
+    /// one.
+    fn validate_closed_present(&self, exchange: u64) -> Result<(), String> {
+        if let Some(reach) = self.digest_reach() {
+            if exchange < reach {
+                return Err(folded_exchange_refusal(exchange, reach));
+            }
+            if exchange == reach {
+                return Ok(());
+            }
+        }
+        if !self.view.spans.iter().any(|span| span.id == exchange) {
+            return Err(unknown_exchange_refusal(exchange));
+        }
+        if self.is_live_exchange(exchange) {
+            return Err(live_exchange_refusal(exchange));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn plan_compaction(
+        &self,
+        keep_budget_bytes: usize,
+        before_exchange: Option<u64>,
+    ) -> Option<CompactionPlan> {
+        let spans = &self.view.spans;
+        let cap = before_exchange.map(|id| {
+            spans
+                .iter()
+                .position(|span| span.id >= id)
+                .unwrap_or(spans.len())
+        });
+        let mut suffix_start = cap.unwrap_or(spans.len());
+        if suffix_start == 0 {
+            return None;
+        }
+
+        let mut suffix_bytes = spans[suffix_start..]
+            .iter()
+            .map(|span| self.span_message_bytes(span))
+            .sum::<usize>();
+        for index in (0..suffix_start).rev() {
+            let bytes = self.span_message_bytes(&spans[index]);
+            let Some(total) = suffix_bytes.checked_add(bytes) else {
+                break;
+            };
+            if total > keep_budget_bytes {
+                break;
+            }
+            suffix_bytes = total;
+            suffix_start = index;
+        }
+        if suffix_start == 0 {
+            return None;
+        }
+
+        Some(CompactionPlan {
+            through_exchange: spans[suffix_start - 1].id,
+            prefix_messages: self.messages_for_spans(&spans[..suffix_start]),
+        })
+    }
+}
+
+fn opening_line(text: &str) -> String {
+    text.lines().next().unwrap_or_default().to_string()
+}
+
+fn opening_line_for_events(events: &[&Protocol]) -> String {
+    for event in events {
+        match event {
+            Protocol::UserPrompt { text, .. } => return opening_line(text),
+            Protocol::ContextMessage { message, .. } if message.role == ChatRole::User => {
+                if let Some(text) = message.content.first_text() {
+                    return opening_line(text);
+                }
+            }
+            Protocol::ContextMessage { .. }
+            | Protocol::SessionStarted { .. }
+            | Protocol::SessionResumed { .. }
+            | Protocol::SessionEnded
+            | Protocol::StepStarted { .. }
+            | Protocol::AssistantMessage { .. }
+            | Protocol::ToolResults { .. }
+            | Protocol::ContextEdited { .. } => {}
+        }
+    }
+    String::new()
+}
+
+fn render_context_transcript(ledger: &Ledger, view: &View, named: &HashSet<u64>) -> String {
+    let mut transcript = String::new();
+    let mut first_section = true;
+    if let Some(digest) = &view.digest
+        && named.contains(&digest.through_exchange)
+    {
+        context_section(
+            &mut transcript,
+            &mut first_section,
+            &format!("digest through {}", digest.through_exchange),
+        );
+        render_role(&mut transcript, "user", &digest.text);
+    }
+    for span in &view.spans {
+        if !named.contains(&span.id) {
+            continue;
+        }
+        context_section(
+            &mut transcript,
+            &mut first_section,
+            &format!("exchange {}", span.id),
+        );
+        let events = ledger
+            .resident_events(span.events.clone())
+            .expect("view spans are resident in the ledger");
+        for event in events {
+            match event {
+                Protocol::UserPrompt { text, .. } => render_role(&mut transcript, "user", text),
+                Protocol::ContextMessage { message, .. }
+                | Protocol::AssistantMessage { message, .. } => {
+                    render_chat_message(&mut transcript, message);
+                }
+                Protocol::StepStarted { n, .. } => {
+                    writeln!(transcript, "--- step {n} ---")
+                        .expect("writing to a String never fails");
+                }
+                Protocol::ToolResults { results } => {
+                    for result in results {
+                        render_role(
+                            &mut transcript,
+                            "tool",
+                            &format!("{}: {}", result.id, result.content),
+                        );
+                    }
+                }
+                Protocol::SessionStarted { .. }
+                | Protocol::SessionResumed { .. }
+                | Protocol::SessionEnded
+                | Protocol::ContextEdited { .. } => {}
+            }
+        }
+    }
+    transcript
+}
+
+fn context_section(output: &mut String, first: &mut bool, title: &str) {
+    if !*first {
+        output.push('\n');
+    }
+    writeln!(output, "=== {title} ===").expect("writing to a String never fails");
+    *first = false;
+}
+
+fn render_chat_message(output: &mut String, message: &ChatMessage) {
+    let role = match message.role {
+        ChatRole::System => "system",
+        ChatRole::User => "user",
+        ChatRole::Assistant => "assistant",
+        ChatRole::Tool => "tool",
+    };
+    let mut rendered = false;
+    for part in &message.content {
+        let text = part.as_text().map_or_else(
+            || serde_json::to_string(part).unwrap_or_else(|_| "<unrenderable content>".into()),
+            str::to_string,
+        );
+        render_role(output, role, &text);
+        rendered = true;
+    }
+    if !rendered {
+        render_role(output, role, "");
+    }
+}
+
+fn render_role(output: &mut String, role: &str, text: &str) {
+    writeln!(output, "[{role}]").expect("writing to a String never fails");
+    output.push_str(text);
+    if !text.ends_with('\n') {
+        output.push('\n');
+    }
+}
+
+fn live_exchange_refusal(id: u64) -> String {
+    format!("exchange {id} is the one you are in — a context edit may only name closed exchanges")
+}
+
+fn folded_exchange_refusal(id: u64, reach: u64) -> String {
+    format!(
+        "exchange {id} is folded into the digest through {reach} — name {reach} to drop the digest whole, or fold further"
+    )
+}
+
+fn unknown_exchange_refusal(id: u64) -> String {
+    format!("exchange {id} is not present in the current view")
+}
+
+fn rewind_unknown_exchange_refusal(id: u64, last: Option<u64>) -> String {
+    match last {
+        Some(last) => format!(
+            "exchange {id} is not present in the current view — the last exchange is {last}"
+        ),
+        None => format!(
+            "exchange {id} is not present in the current view — there is no last exchange to rewind"
+        ),
     }
 }
 
@@ -649,10 +1098,16 @@ fn quarantine_tail(path: &Path, tail: &CrashTail) -> io::Result<()> {
 /// fold against an independent from-scratch refold of the ledger it built —
 /// the `fold == memo` law, migrated whole from `AgentLog::resume`.
 ///
+/// Returns the folded memo alongside the `(model, provider)` pair the head
+/// record identifies the session by — `AgentLog::resume` reads its own
+/// identity from here rather than re-deriving it, since a session's identity
+/// is a fact about its first record, not a second thing to keep in step.
+///
 /// # Errors
-/// Returns an error if the file cannot be read, quarantined, or refolds to a
-/// projection that disagrees with the one built incrementally.
-pub fn resume(path: &Path) -> io::Result<Memo> {
+/// Returns an error if the file cannot be read, quarantined, has no
+/// `SessionStarted { session_id: 0, parent: None }` head record, or refolds
+/// to a projection that disagrees with the one built incrementally.
+pub fn resume(path: &Path) -> io::Result<(Memo, String, String)> {
     if let Some(tail) = find_crash_tail(path)? {
         quarantine_tail(path, &tail)?;
     }
@@ -664,11 +1119,50 @@ pub fn resume(path: &Path) -> io::Result<Memo> {
             protocol_records.push(Recorded::new(record.stamp().clone(), p.clone()));
         }
     }
+    let Some(first) = protocol_records.first() else {
+        return Err(io::Error::other(format!(
+            "cannot resume {}: no complete session records were found; is the file truncated?",
+            path.display()
+        )));
+    };
+    let (model, provider) = match first.value() {
+        Protocol::SessionStarted {
+            session_id: 0,
+            parent: None,
+            model,
+            provider,
+            ..
+        } => (model.clone(), provider.clone()),
+        Protocol::SessionStarted {
+            session_id,
+            parent,
+            ..
+        } => {
+            return Err(io::Error::other(format!(
+                "cannot resume {}: the first record starts session {session_id:?} with parent {parent:?}; expected SessionStarted {{ session_id: 0, parent: None }} — is this a child log?",
+                path.display()
+            )));
+        }
+        other @ (Protocol::SessionResumed { .. }
+        | Protocol::SessionEnded
+        | Protocol::UserPrompt { .. }
+        | Protocol::ContextMessage { .. }
+        | Protocol::StepStarted { .. }
+        | Protocol::AssistantMessage { .. }
+        | Protocol::ToolResults { .. }
+        | Protocol::ContextEdited { .. }) => {
+            return Err(io::Error::other(format!(
+                "cannot resume {}: the first record is {other:?}; expected SessionStarted {{ session_id: 0, parent: None }} — is this a copied child log?",
+                path.display()
+            )));
+        }
+    };
+
     validate_resume(&protocol_records).map_err(|refusal| io::Error::other(refusal.to_string()))?;
 
     let mut memo = Memo::default();
     memo.attach_source(path.to_path_buf());
-    for recorded in protocol_records {
+    for recorded in &protocol_records {
         step_protocol(&mut memo, recorded.stamp().clone(), recorded.value());
     }
 
@@ -678,5 +1172,5 @@ pub fn resume(path: &Path) -> io::Result<Memo> {
             "record.jsonl's from-scratch refold disagreed with the ledger's incremental projection",
         ));
     }
-    Ok(memo)
+    Ok((memo, model, provider))
 }

@@ -338,13 +338,13 @@ fn resolve_run(
                 .map_err(|error| format!("could not inspect resumable runs: {error}"))?,
         };
         for run_dir in candidates {
-            let events = run_dir.join("sessions/0/events.jsonl");
-            if !events.is_file() {
+            let record = run_dir.join("sessions/0/record.jsonl");
+            if !record.is_file() {
                 if explicit {
                     return Err(format!(
-                        "--resume target {} has no {}; pass a run directory containing sessions/0/events.jsonl",
+                        "--resume target {} has no {}; pass a run directory containing sessions/0/record.jsonl",
                         run_dir.display(),
-                        events.display()
+                        record.display()
                     ));
                 }
                 continue;
@@ -369,7 +369,7 @@ fn resolve_run(
             }
         }
         return Err(format!(
-            "--resume found no unlocked run with sessions/0/events.jsonl under {}",
+            "--resume found no unlocked run with sessions/0/record.jsonl under {}",
             bootstrap::EXARCH.project_dir(cwd).display()
         ));
     }

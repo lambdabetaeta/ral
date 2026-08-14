@@ -566,7 +566,7 @@ fn agent_outcome(
 mod tests {
     use super::*;
     use crate::agent::ProviderHandle;
-    use crate::agent::event::SessionEvent;
+    use crate::record::{Forensic, Record};
     use crate::agent::testkit::*;
     use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
     use crate::provider::scripted::{Reply, Script};
@@ -720,16 +720,17 @@ mod tests {
         );
         assert!(session.is_ready());
 
-        let events = std::fs::read_to_string(session.log_dir().join("events.jsonl")).unwrap();
-        let parsed: Vec<SessionEvent> = serde_json::Deserializer::from_str(&events)
+        let records = std::fs::read_to_string(session.log_dir().join("record.jsonl")).unwrap();
+        let parsed: Vec<Record> = serde_json::Deserializer::from_str(&records)
             .into_iter()
             .collect::<Result<_, _>>()
             .expect("the panicked exchange must leave a parseable log");
         assert!(
-            parsed.iter().any(
-                |e| matches!(e, SessionEvent::Error { text } if text.starts_with(WORKER_PANIC_PREFIX))
-            ),
-            "the panic is recorded in the model-view event log too"
+            parsed.iter().any(|r| matches!(
+                r,
+                Record::Forensic(Forensic::Error { text }) if text.starts_with(WORKER_PANIC_PREFIX)
+            )),
+            "the panic is recorded in the one seam's log too"
         );
     }
 
@@ -1143,7 +1144,7 @@ mod tests {
     }
 
     /// A binding prune is transcript/TUI-only: it must never grow the
-    /// model-view `events.jsonl`.
+    /// model-view `record.jsonl`.
     #[test]
     fn prune_does_not_add_model_events() {
         let mut session = Agent::for_test("system").unwrap();
@@ -1180,7 +1181,7 @@ mod tests {
         assert_eq!(
             after_prune_call - after_bind,
             after_plain_call - after_prune_call,
-            "a binding prune must never write a model-view events.jsonl entry"
+            "a binding prune must never write a model-view record.jsonl entry"
         );
     }
 }

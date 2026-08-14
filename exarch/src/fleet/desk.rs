@@ -2507,20 +2507,20 @@ mod tests {
     }
 
     /// Read `system_prompt_bytes` off a session's opening bookend — the first
-    /// event in its `events.jsonl`.
+    /// record in its `record.jsonl`.
     fn recorded_system_prompt_bytes(log_dir: &std::path::Path) -> usize {
-        let body = std::fs::read_to_string(log_dir.join("events.jsonl")).expect("events.jsonl");
-        let first: crate::agent::event::SessionEvent = serde_json::Deserializer::from_str(&body)
+        let body = std::fs::read_to_string(log_dir.join("record.jsonl")).expect("record.jsonl");
+        let first: crate::record::Record = serde_json::Deserializer::from_str(&body)
             .into_iter()
             .next()
-            .expect("events.jsonl must have at least one event")
-            .expect("first event must parse");
+            .expect("record.jsonl must have at least one record")
+            .expect("first record must parse");
         match first {
-            crate::agent::event::SessionEvent::SessionStarted {
+            crate::record::Record::Protocol(crate::record::Protocol::SessionStarted {
                 system_prompt_bytes,
                 ..
-            } => system_prompt_bytes,
-            other => panic!("first event must be SessionStarted, got {other:?}"),
+            }) => system_prompt_bytes,
+            other => panic!("first record must be SessionStarted, got {other:?}"),
         }
     }
 
@@ -3615,7 +3615,7 @@ mod tests {
     }
 
     /// Poll `path` until it contains `needle` or `timeout` elapses. A child's
-    /// `events.jsonl` records every turn, and it is the only channel into a
+    /// `record.jsonl` records every turn, and it is the only channel into a
     /// thread the test does not otherwise touch mid-flight.
     fn eventually_logged(path: &std::path::Path, needle: &str, timeout: Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
@@ -3667,7 +3667,7 @@ mod tests {
         );
         assert!(
             eventually_logged(
-                &log_dir.join("events.jsonl"),
+                &log_dir.join("record.jsonl"),
                 "first response, no reply yet",
                 Duration::from_secs(5),
             ),

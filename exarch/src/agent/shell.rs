@@ -104,7 +104,7 @@ impl Agent {
     }
 
     /// An operational note: it reaches the transcript and the display, but has
-    /// no model-view `events.jsonl` twin, since the model never saw it.
+    /// no model-view `record.jsonl` twin, since the model never saw it.
     pub(crate) fn note(text: String, emit: &Emitter) {
         emit.emit(Kind::SystemNote(text));
     }

@@ -13,7 +13,8 @@
 //! round-tripping the committed messages through the same genai
 //! `ChatMessage` serialisation the live request uses.
 
-use exarch::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord, SessionEvent};
+use exarch::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord};
+use exarch::record::{Protocol, Record};
 use exarch::agent::{Agent, deliberate};
 use exarch::bus::{AgentId, AgentState, Emitter, Kind, channel};
 use exarch::provider::scripted::{Reply, Script};
@@ -327,27 +328,27 @@ fn compaction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
     );
     assert!(session.is_ready());
 
-    // Reclamation is heap-only: the forensic record keeps every byte.
-    let events = serde_json::Deserializer::from_reader(std::io::BufReader::new(
-        std::fs::File::open(session.log_dir().join("events.jsonl")).unwrap(),
+    // Reclamation is heap-only: the one seam's log keeps every byte.
+    let records = serde_json::Deserializer::from_reader(std::io::BufReader::new(
+        std::fs::File::open(session.log_dir().join("record.jsonl")).unwrap(),
     ))
-    .into_iter::<SessionEvent>()
+    .into_iter::<Record>()
     .collect::<Result<Vec<_>, _>>()
     .unwrap();
     assert!(
-        events.iter().any(|event| matches!(
-            event,
-            SessionEvent::UserPrompt { text, .. } if text.contains("EXCHANGE1")
+        records.iter().any(|record| matches!(
+            record,
+            Record::Protocol(Protocol::UserPrompt { text, .. }) if text.contains("EXCHANGE1")
         )),
-        "compaction must not touch the durable event log"
+        "compaction must not touch the durable record log"
     );
     assert!(
-        events.iter().any(|event| matches!(
-            event,
-            SessionEvent::ContextEdited {
+        records.iter().any(|record| matches!(
+            record,
+            Record::Protocol(Protocol::ContextEdited {
                 op: ContextOp::Fold { .. },
                 by: EditAuthority::Harness,
-            }
+            })
         )),
         "auto-compaction must record its fold as a harness-authored context edit"
     );
