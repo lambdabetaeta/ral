@@ -72,11 +72,12 @@ impl LogCell {
 }
 
 impl Agent {
-    /// Dual-write, best effort: a failed log write must not swallow the line
-    /// the user is owed.
-    pub(crate) fn note_error(&self, msg: String, emit: &Emitter) {
-        let _ = self.log.lock().record_error(msg.clone());
-        emit.emit(Kind::Error(msg));
+    /// Best effort: a failed log write must not swallow the line the user is
+    /// owed.  `record_error` is the one call through the seam — durable and
+    /// published in the same breath — so there is no second write to keep in
+    /// step with it.
+    pub(crate) fn note_error(&self, msg: String) {
+        let _ = self.log.lock().record_error(msg);
     }
 
     /// An operational note: it reaches the transcript and the display, but has

@@ -188,7 +188,6 @@ impl Agent {
                 log.log_len()
             };
             self.last_input = (input_tokens, measured_at);
-            emit.emit(Kind::Usage(usage));
             // Routine boundaries and `MaxTokens` (handled below) stay silent.
             if let Some(reason) = &stop_reason {
                 match reason {
@@ -220,14 +219,11 @@ impl Agent {
                         let reason = stop_reason
                             .as_ref()
                             .map_or_else(|| "max_tokens".into(), |r| r.raw().to_string());
-                        self.note_error(
-                            format!(
-                                "turn truncated (stop_reason={reason}): output cap reached. \
-                                 re-run with `--max-tokens N` for a larger ceiling, \
-                                 or ask the agent to split the work into smaller turns.",
-                            ),
-                            emit,
-                        );
+                        self.note_error(format!(
+                            "turn truncated (stop_reason={reason}): output cap reached. \
+                             re-run with `--max-tokens N` for a larger ceiling, \
+                             or ask the agent to split the work into smaller turns.",
+                        ));
                         reason
                     }
                     CutShort::Stalled(cause) => {
@@ -237,7 +233,6 @@ impl Agent {
                         // read in full.  Its own kind, not `ProviderError`: that one
                         // ends an exchange, and this one is survived.
                         let _ = self.log.lock().record_stall(cause);
-                        emit.emit(Kind::Stalled(cause.into()));
                         // The block above carries the detail; what rides on as the
                         // truncation reason is the one-line spelling.
                         cause.summary()
@@ -301,7 +296,7 @@ impl Agent {
     ) {
         if !self.log.lock().can_compact() {
             if requested {
-                self.note_error("cannot compact while tool results are pending".into(), emit);
+                self.note_error("cannot compact while tool results are pending".into());
             }
             return;
         }
@@ -340,10 +335,9 @@ impl Agent {
             Ok(summary) => {
                 let recorded = self.log.lock().record_usage(summary.usage.into());
                 if let Err(e) = recorded {
-                    self.note_error(format!("compact failed: {e}"), emit);
+                    self.note_error(format!("compact failed: {e}"));
                     return;
                 }
-                emit.emit(Kind::Usage(summary.usage));
                 let edited = self.log.lock().apply_edit(
                     ContextOp::Fold {
                         through_exchange: plan.through_exchange,
@@ -354,13 +348,13 @@ impl Agent {
                 let receipt = match edited {
                     Ok(receipt) => receipt,
                     Err(e) => {
-                        self.note_error(format!("compact failed: {e}"), emit);
+                        self.note_error(format!("compact failed: {e}"));
                         return;
                     }
                 };
                 emit_context_edited(emit, &receipt);
             }
-            Err(e) => self.note_error(format!("compact failed: {e}"), emit),
+            Err(e) => self.note_error(format!("compact failed: {e}")),
         }
     }
 
@@ -404,7 +398,7 @@ impl Agent {
             crate::shell_eval::tools::ral::dispatch(call.call_id, &call.fn_arguments, self, emit)
         } else {
             let msg = format!("unknown tool `{}`", call.fn_name);
-            self.note_error(msg.clone(), emit);
+            self.note_error(msg.clone());
             SessionToolResult {
                 id: call.call_id,
                 content: msg,
@@ -434,10 +428,9 @@ impl Agent {
     /// for the attend loop's per-item quiesce to wind back; the [`StopReason`]
     /// reaches the headless JSON so a harness can tell a cap from a completion.
     fn capped(&self, emit: &Emitter) -> Outcome {
-        self.note_error(
-            format!("step cap reached ({MAX_STEPS} provider round-trips); ending the deliberation"),
-            emit,
-        );
+        self.note_error(format!(
+            "step cap reached ({MAX_STEPS} provider round-trips); ending the deliberation"
+        ));
         emit.emit(Kind::StopReason("step_cap".into()));
         Outcome::Capped
     }

@@ -27,7 +27,6 @@ mod rail;
 mod render;
 mod select;
 mod status;
-mod surface;
 mod tabs;
 mod terminal;
 mod tui_loop;

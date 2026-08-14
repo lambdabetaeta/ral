@@ -76,7 +76,7 @@ impl Control for ReplControl {
                     format!("branch {} started (agent {})", child.name, child.id),
                     emit,
                 ),
-                Err(e) => session.note_error(format!("could not start branch: {e}"), emit),
+                Err(e) => session.note_error(format!("could not start branch: {e}")),
             }
             return Verdict::Continue;
         }
@@ -86,7 +86,6 @@ impl Control for ReplControl {
                     session.note_error(
                         "usage: /rewind <exchange> — name a closed exchange in the current context"
                             .into(),
-                        emit,
                     );
                     return Verdict::Continue;
                 }
@@ -94,18 +93,15 @@ impl Control for ReplControl {
                     if let Ok(anchor) = text.parse::<u64>() {
                         anchor
                     } else {
-                        session.note_error(
-                            format!(
-                                "/rewind expects one non-negative exchange number, got `{text}`"
-                            ),
-                            emit,
-                        );
+                        session.note_error(format!(
+                            "/rewind expects one non-negative exchange number, got `{text}`"
+                        ));
                         return Verdict::Continue;
                     }
                 }
             };
             if let Err(error) = session.rewind(anchor, emit) {
-                session.note_error(error, emit);
+                session.note_error(error);
             }
             return Verdict::Continue;
         }
@@ -114,7 +110,7 @@ impl Control for ReplControl {
                 let result = session.clear();
                 emit.emit(crate::bus::Kind::Cleared);
                 if let Err(error) = result {
-                    session.note_error(format!("clear failed: {error}"), emit);
+                    session.note_error(format!("clear failed: {error}"));
                 }
                 Verdict::Continue
             }

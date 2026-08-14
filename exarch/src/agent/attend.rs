@@ -215,7 +215,7 @@ impl Agent {
                 // dynamic state back, so it never unwinds this far.  Recording
                 // and continuing keeps one crash from sinking the agent.
                 let msg = panic_msg(&p);
-                self.note_error(format!("{WORKER_PANIC_PREFIX}{msg}"), emit);
+                self.note_error(format!("{WORKER_PANIC_PREFIX}{msg}"));
                 *final_outcome = (
                     AgentOutcome::Failed(format!("{WORKER_PANIC_PREFIX}{msg}")),
                     None,
@@ -237,7 +237,6 @@ impl Agent {
         // trunk keeps no registry, and its failures must still reach the human.
         if let Err(e) = &outcome {
             let _ = self.log.lock().record_provider_error(e);
-            emit.emit(Kind::ProviderError(e.into()));
         }
         let waiting_on_children = self.has_live_children();
         // `last_input` is fresh off `deliberate`, so the gauge reads this
@@ -255,7 +254,7 @@ impl Agent {
         };
         let replied = matches!(outcome, Ok(deliberate::Outcome::Replied(_)));
         let nudge_msg = match &mut self.nudges {
-            Some(nudges) => nudges.react(&outcome, &ctx, emit, &mut self.log.lock()),
+            Some(nudges) => nudges.react(&outcome, &ctx, &mut self.log.lock()),
             None => None,
         };
         if let Some(msg) = &nudge_msg

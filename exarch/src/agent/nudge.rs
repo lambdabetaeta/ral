@@ -11,7 +11,6 @@
 
 use crate::agent::deliberate;
 use crate::agent::event::AgentLog;
-use crate::bus::{Emitter, Kind};
 use crate::provider::ProviderError;
 
 /// Outer-attempt budget per user exchange, distinct from the provider's own
@@ -93,7 +92,6 @@ impl Registry {
         &mut self,
         attempt: &Result<deliberate::Outcome, ProviderError>,
         ctx: &NudgeCtx,
-        emit: &Emitter,
         log: &mut AgentLog,
     ) -> Option<String> {
         // A headless root's first `reply` is turned back before the rules see it,
@@ -102,7 +100,7 @@ impl Registry {
         if matches!(attempt, Ok(deliberate::Outcome::Replied(_))) {
             if ctx.is_headless_root && !self.reply_verified {
                 self.reply_verified = true;
-                record_nudge(emit, log, self.used, "reply verification".into());
+                record_nudge(log, self.used, "reply verification".into());
                 return Some(wrap_reminder(VERIFY_REPLY_MESSAGE));
             }
             return None;
@@ -121,12 +119,7 @@ impl Registry {
             if ctx.must_reply {
                 if self.used < BUDGET {
                     self.used += 1;
-                    record_nudge(
-                        emit,
-                        log,
-                        self.used,
-                        "no-reply finish (returning agent)".into(),
-                    );
+                    record_nudge(log, self.used, "no-reply finish (returning agent)".into());
                     parts.push(REPLY_MESSAGE.to_string());
                 } else {
                     // An agent that cannot call `reply` even after the full budget
@@ -134,8 +127,7 @@ impl Registry {
                     let msg = "agent finished without calling `reply` after the nudge budget; \
                                returning a failure"
                         .to_string();
-                    let _ = log.record_error(msg.clone());
-                    emit.emit(Kind::Error(msg));
+                    let _ = log.record_error(msg);
                     return None;
                 }
             }
@@ -143,11 +135,11 @@ impl Registry {
             // budget-free; an empty register gets a throttled suggestion instead.
             if !ctx.waiting_on_children {
                 if let Some(pinned) = ctx.pinned.as_deref() {
-                    record_nudge(emit, log, self.used, "pinned-state reminder".into());
+                    record_nudge(log, self.used, "pinned-state reminder".into());
                     parts.push(format!("There is pinned state: {pinned}"));
                 } else if self.exchanges_since_no_pins_reminder >= REMIND_EVERY {
                     self.exchanges_since_no_pins_reminder = 0;
-                    record_nudge(emit, log, self.used, "no-pins reminder".into());
+                    record_nudge(log, self.used, "no-pins reminder".into());
                     parts.push(
                         "Nothing is pinned — consider calling `set-goal` to remember what you are \
                          working on, or tracking some tasks with `add-task`."
@@ -160,7 +152,7 @@ impl Registry {
             // unlike the pin reminders above, it is never gated on
             // `waiting_on_children`.
             if let Some(detail) = &ctx.pressure {
-                record_nudge(emit, log, self.used, "context pressure".into());
+                record_nudge(log, self.used, "context pressure".into());
                 parts.push(format!("Context pressure: {detail}. {PRESSURE_MESSAGE}"));
             }
             if parts.is_empty() {
@@ -170,25 +162,20 @@ impl Registry {
         };
         if self.used >= BUDGET {
             let msg = format!("nudge budget exhausted ({BUDGET} attempts; last cause: {cause})");
-            let _ = log.record_error(msg.clone());
-            emit.emit(Kind::Error(msg));
+            let _ = log.record_error(msg);
             return None;
         }
         self.used += 1;
-        record_nudge(emit, log, self.used, cause);
+        record_nudge(log, self.used, cause);
         Some(wrap_reminder(message))
     }
 }
 
-/// Record to both views: the `events.jsonl` forensic breadcrumb and the
-/// operational trace ([`Kind::Nudge`]), which the display surfaces as it sees fit.
-fn record_nudge(emit: &Emitter, log: &mut AgentLog, used: u32, cause: String) {
-    let _ = log.record_nudge(used, BUDGET, cause.clone());
-    emit.emit(Kind::Nudge {
-        used,
-        max: BUDGET,
-        cause,
-    });
+/// The one call through the seam: `record_nudge` is durable and published in
+/// the same breath, so there is no separate display-side emit left to keep in
+/// step with it.
+fn record_nudge(log: &mut AgentLog, used: u32, cause: String) {
+    let _ = log.record_nudge(used, BUDGET, cause);
 }
 
 /// The headless root's one-shot reply-verification nudge.
@@ -253,15 +240,7 @@ fn on_truncated(r: &Result<deliberate::Outcome, ProviderError>) -> Option<(Strin
 )]
 mod tests {
     use super::*;
-    use crate::bus::channel;
     use ral_core::serial::FOValue;
-
-    /// An emitter onto a dropped receiver: these tests assert on `react`'s return
-    /// and the budget counter, so the events may go nowhere.
-    fn emit() -> Emitter {
-        let (tx, _rx) = channel();
-        Emitter::new(tx, 0)
-    }
 
     fn fresh_log() -> AgentLog {
         AgentLog::for_test(0, "test", "test").expect("session log")
@@ -288,7 +267,7 @@ mod tests {
             pressure: None,
         };
         assert!(
-            reg.react(&attempt(), &ctx(), &emit(), &mut log).is_none(),
+            reg.react(&attempt(), &ctx(), &mut log).is_none(),
             "transient provider failures are surfaced directly"
         );
         assert_eq!(reg.used, 0);
@@ -316,7 +295,7 @@ mod tests {
         };
         for _ in 0..=BUDGET {
             assert!(
-                reg.react(&attempt(), &ctx(), &emit(), &mut log).is_none(),
+                reg.react(&attempt(), &ctx(), &mut log).is_none(),
                 "provider failure should stop, not nudge"
             );
         }
@@ -336,7 +315,6 @@ mod tests {
                 waiting_on_children: false,
                 pressure: None,
             },
-            &emit(),
             &mut log,
         ) {
             Some(msg) => assert!(msg.contains("no text and no tool calls")),
@@ -360,7 +338,6 @@ mod tests {
                         waiting_on_children: false,
                         pressure: None,
                     },
-                    &emit(),
                     &mut log,
                 )
                 .is_some()
@@ -376,7 +353,6 @@ mod tests {
                     waiting_on_children: false,
                     pressure: None,
                 },
-                &emit(),
                 &mut log,
             )
             .is_none()
@@ -401,7 +377,6 @@ mod tests {
             match reg.react(
                 &Ok(deliberate::Outcome::Complete("prose, no reply".into())),
                 &ctx(),
-                &emit(),
                 &mut log,
             ) {
                 Some(msg) => assert!(msg.contains("`reply`")),
@@ -420,7 +395,6 @@ mod tests {
             reg.react(
                 &Ok(deliberate::Outcome::Complete("still no reply".into())),
                 &ctx(),
-                &emit(),
                 &mut log,
             )
             .is_none(),
@@ -443,7 +417,6 @@ mod tests {
                     waiting_on_children: false,
                     pressure: None,
                 },
-                &emit(),
                 &mut log,
             )
             .is_none()
@@ -468,7 +441,6 @@ mod tests {
                     value: "done".into(),
                 })),
                 &ctx(),
-                &emit(),
                 &mut log,
             )
             .expect("a headless root's first reply must be turned back");
@@ -495,7 +467,6 @@ mod tests {
                     value: "first".into()
                 })),
                 &ctx(),
-                &emit(),
                 &mut log,
             )
             .is_some(),
@@ -507,7 +478,6 @@ mod tests {
                     value: "second, verified".into(),
                 })),
                 &ctx(),
-                &emit(),
                 &mut log,
             )
             .is_none(),
@@ -533,7 +503,6 @@ mod tests {
                     waiting_on_children: false,
                     pressure: None,
                 },
-                &emit(),
                 &mut log,
             )
             .is_none(),
@@ -559,7 +528,6 @@ mod tests {
                 .react(
                     &Ok(deliberate::Outcome::Complete("done".into())),
                     &ctx(),
-                    &emit(),
                     &mut log,
                 )
                 .expect("pinned state should nudge");
@@ -586,7 +554,6 @@ mod tests {
                     waiting_on_children: true,
                     pressure: None,
                 },
-                &emit(),
                 &mut log,
             )
             .is_none(),
@@ -612,7 +579,6 @@ mod tests {
             .react(
                 &Ok(deliberate::Outcome::Complete("prose, no reply".into())),
                 &ctx(),
-                &emit(),
                 &mut log,
             )
             .expect("a returning agent with pinned state should nudge");
@@ -644,7 +610,6 @@ mod tests {
             .react(
                 &Ok(deliberate::Outcome::Complete("done".into())),
                 &ctx,
-                &emit(),
                 &mut log,
             )
             .expect("pressure due should nudge");
@@ -675,7 +640,6 @@ mod tests {
             .react(
                 &Ok(deliberate::Outcome::Complete("prose, no reply".into())),
                 &ctx,
-                &emit(),
                 &mut log,
             )
             .expect("all three obligations should nudge");
@@ -704,7 +668,6 @@ mod tests {
                     "waiting on a descendant".into(),
                 )),
                 &ctx,
-                &emit(),
                 &mut log,
             )
             .expect("pressure must nudge even while children are live");
@@ -734,7 +697,6 @@ mod tests {
                     value: "done".into(),
                 })),
                 &ctx,
-                &emit(),
                 &mut log,
             )
             .is_none(),
@@ -753,7 +715,7 @@ mod tests {
             waiting_on_children: false,
             pressure: None,
         };
-        let _ = reg.react(&Ok(deliberate::Outcome::Empty), &ctx(), &emit(), &mut log);
+        let _ = reg.react(&Ok(deliberate::Outcome::Empty), &ctx(), &mut log);
         assert!(reg.used >= 1);
         reg.reset();
         assert_eq!(reg.used, 0, "reset clears the budget");
@@ -770,10 +732,10 @@ mod tests {
             waiting_on_children: false,
             pressure: None,
         };
-        let _ = reg.react(&Ok(deliberate::Outcome::Empty), &ctx, &emit(), &mut log);
+        let _ = reg.react(&Ok(deliberate::Outcome::Empty), &ctx, &mut log);
         reg.reset();
         let before = reg.exchanges_since_no_pins_reminder;
-        let _ = reg.react(&Ok(deliberate::Outcome::Empty), &ctx, &emit(), &mut log);
+        let _ = reg.react(&Ok(deliberate::Outcome::Empty), &ctx, &mut log);
         reg.reset_budget();
         assert_eq!(reg.used, 0, "a rewind clears the retry budget");
         assert_eq!(
@@ -801,7 +763,6 @@ mod tests {
             if let Some(msg) = reg.react(
                 &Ok(deliberate::Outcome::Complete("x".into())),
                 &ctx(),
-                &emit(),
                 &mut log,
             ) {
                 assert_eq!(
