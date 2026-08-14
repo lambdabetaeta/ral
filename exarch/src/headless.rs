@@ -363,7 +363,6 @@ impl Printer for Headless<'_> {
                     self.ended_with_newline = *last == b'\n';
                 }
             }
-            Transient::Token(_) => {}
             // One boundary per step, mirroring `Kind::Step`'s old count —
             // `record::Protocol::StepStarted` carries the authoritative index,
             // but that class is the model fold's alone; the view side only
@@ -373,7 +372,8 @@ impl Printer for Headless<'_> {
                 self.last_stop = Some(raw.clone());
                 let _ = writeln!(self.err, "[stop: {raw}]");
             }
-            Transient::Thinking(_)
+            Transient::Token(_)
+            | Transient::Thinking(_)
             | Transient::State(_)
             | Transient::Born { .. }
             | Transient::Died

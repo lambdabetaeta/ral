@@ -23,7 +23,7 @@ use super::rail::{self, RailKind};
 use super::select::plain_slice;
 use crate::bus::AgentId;
 use crate::bus::card::{
-    self, Card, Hunk, Mark, ObservationKind, RailPlace, execs_card, greps_card, observation_card,
+    self, Card, Mark, ObservationKind, RailPlace, execs_card, greps_card, observation_card,
     observation_from_wire, rail_place, reads_card,
 };
 use crate::provider::Usage;
@@ -371,7 +371,7 @@ impl Viewport {
 
     /// Final flush at session end: regenerate `user.log` from the resident
     /// blocks and flush it.  The caller owns the I/O error policy.
-    pub(super) fn flush_log(&mut self) -> io::Result<&Path> {
+    pub(super) fn flush_log(&self) -> io::Result<&Path> {
         self.regenerate_log()?;
         Ok(&self.log_path)
     }
@@ -382,7 +382,7 @@ impl Viewport {
     /// old incremental tee truncated to a resumed prefix and then, past
     /// eviction, silently deleted this session's own evicted transcript from
     /// disk. A render of whatever is resident right now has no such tail to lose.
-    fn regenerate_log(&mut self) -> io::Result<()> {
+    fn regenerate_log(&self) -> io::Result<()> {
         let mut log = open_log(&self.log_path);
         let mut prev_blank = true;
         for (i, entry) in self.blocks.iter().enumerate() {
@@ -445,12 +445,6 @@ impl Viewport {
         fidelity: super::fidelity::Fidelity,
     ) {
         self.push_block(Block::subagent(name, text, error, elapsed, fidelity));
-    }
-
-    /// Append a single-file diff; it re-renders from its hunks at every width
-    /// and disclosure level.
-    pub(super) fn push_patch(&mut self, path: String, hunks: Vec<Hunk>) {
-        self.push_block(Block::patch(path, hunks));
     }
 
     /// Append a surfaced render document — the model's own communication, so
@@ -1017,12 +1011,14 @@ impl Printer for Viewport {
                 self.push_thinking(text);
             }
             Transient::State(state) => self.set_state(*state),
+            Transient::Cleared => self.reset(),
             // The producer's own tail flush lands as a commit `sync` will
             // see; nothing to do here but wait for it.
-            Transient::Boundary => {}
-            Transient::Born { .. } | Transient::Died | Transient::StopReason(_) => {}
-            Transient::Cleared => self.reset(),
-            Transient::Resources { .. } => {}
+            Transient::Boundary
+            | Transient::Born { .. }
+            | Transient::Died
+            | Transient::StopReason(_)
+            | Transient::Resources { .. } => {}
         }
     }
 

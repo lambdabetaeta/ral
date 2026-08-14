@@ -13,7 +13,7 @@ use super::line::{self, is_blank};
 use super::md::{self, MD_INDENT};
 use super::palette::{QUEUED_PROMPT_BG, RAIL_W, READ_W, SLATE};
 use super::rail::{self, RailKind};
-use crate::bus::card::{Card, Hunk, Mark, ObservationKind};
+use crate::bus::card::{Card, ObservationKind};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::time::Duration;
@@ -75,6 +75,10 @@ pub(super) enum BlockKind {
     /// is owned, not `&'static str`: a resumed or replayed commit hands this
     /// its tool name off the wire, with no static string to borrow.
     DiallableTool {
+        #[allow(
+            dead_code,
+            reason = "kept for the resumed/replayed reader P6 wires up; today's live path already knows a call is `ral` before this block exists, off the record-side ToolCall, so nothing reads it back here yet"
+        )]
         tool: String,
         summary: String,
         details: String,
@@ -353,9 +357,6 @@ impl Block {
     fn card_with(card: Card, origin: CardOrigin) -> Self {
         Self::new(BlockKind::Card { card, origin }, Fidelity::default())
     }
-    pub(super) fn patch(path: String, hunks: Vec<Hunk>) -> Self {
-        Self::card(Card(vec![Mark::Diff { path, hunks }]))
-    }
     pub(super) fn chrome(shape: RailShape, lines: Vec<Line<'static>>) -> Self {
         Self::new(BlockKind::Chrome { shape, lines }, Fidelity::default())
     }
@@ -474,16 +475,6 @@ impl Block {
                 origin: CardOrigin::Observation { .. },
             } => line::render_card(card, 3),
             _ => Vec::new(),
-        }
-    }
-
-    /// The `ral` script this block ran — what [`Fidelity`]'s echo signal
-    /// compares committing prose against.  A non-`ral` call yields `None`, so
-    /// only a real just-run script can register as an echo.
-    pub(super) fn ral_cmd(&self) -> Option<&str> {
-        match &self.kind {
-            BlockKind::DiallableTool { tool, details, .. } if tool == "ral" => Some(details),
-            _ => None,
         }
     }
 
@@ -919,7 +910,7 @@ fn shrink_leading_ws(line: &mut Line<'static>, n: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::card::{Row, Seg};
+    use crate::bus::card::{Hunk, Mark, Row, Seg};
 
     fn diff_block() -> Block {
         let hunks = vec![Hunk {
@@ -929,7 +920,10 @@ mod tests {
                 Row::Add(vec![Seg::plain("another")]),
             ],
         }];
-        Block::patch("src/lib.rs".into(), hunks)
+        Block::card(Card(vec![Mark::Diff {
+            path: "src/lib.rs".into(),
+            hunks,
+        }]))
     }
 
     fn subagent_block() -> Block {
