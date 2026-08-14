@@ -10,6 +10,7 @@
 
 use crate::bus::AgentId;
 use crate::provider::{ProviderError, Tuning, Usage};
+use crate::record::Fold as _;
 use genai::chat::{ChatMessage, ChatRole, ToolResponse};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -559,6 +560,13 @@ pub struct AgentLog {
     /// the log.  A real session's log lives under the session's scratch and
     /// owns no directory of its own.
     _scratch: Option<tempfile::TempDir>,
+    /// The model fold's own projection, over `record.jsonl` — parcel P1 of
+    /// `dev/docs/plans/260814_one_seam_one_log.md`.  Advanced in parallel with
+    /// the ledger above, through [`Self::advance`]; nothing reads from it yet,
+    /// since every method above still answers from the ledger it has always
+    /// used.  `events.jsonl`'s retirement (wave 2) is what turns this from a
+    /// shadow projection into the one this type answers from.
+    model_memo: crate::record::model::Memo,
 }
 
 /// A planned cut: the visible prefix through `through_exchange` becomes the
@@ -573,7 +581,7 @@ pub(crate) struct ClearRecord {
     pub(crate) events_error: Option<io::Error>,
 }
 
-fn summary_prompt(summary: &str) -> String {
+pub(crate) fn summary_prompt(summary: &str) -> String {
     format!("Summary of prior work in this session:\n\n{summary}")
 }
 
@@ -770,7 +778,9 @@ impl AgentLog {
             provider,
             sessions_root: sessions_root.to_path_buf(),
             _scratch: None,
+            model_memo: crate::record::model::Memo::default(),
         };
+        resumed.seed_model_memo();
         for recorded in read.events {
             resumed.append_mirror(recorded.event, Some(recorded.bytes));
         }
@@ -825,6 +835,43 @@ impl AgentLog {
             system_prompt_bytes,
             at_unix_ms,
         })
+    }
+
+    /// Advance the model fold's `record.jsonl` projection for one witnessed
+    /// record — the entry point a caller on the attend thread calls
+    /// immediately after `Emitter::emit` returns, per the one-seam-one-log
+    /// law (`dev/docs/plans/260814_one_seam_one_log.md`).  A no-op for
+    /// `Display`/`Forensic` records: this fold admits `Protocol` alone.
+    ///
+    /// Nothing in this type reads from the projection this advances yet —
+    /// every query below still answers from the ledger `events.jsonl` has
+    /// always fed — so this is safe to call from nowhere today and everywhere
+    /// once a wave-2 cutover repoints the queries at it.
+    pub fn advance(&mut self, record: &crate::record::Recorded<crate::record::Record>) {
+        if let Err(refusal) = crate::record::model::Model::step(&mut self.model_memo, record) {
+            // Live authorship is typestate-correct by construction (see
+            // record::model's own doc on why its Refusal never fires here),
+            // so reaching this arm means a caller handed `advance` a foreign
+            // Recorded<Record> — a caller bug, not a runtime condition.
+            debug_assert!(false, "model fold refused a live record: {refusal}");
+        }
+    }
+
+    /// Seed the model fold's projection from `record.jsonl`, if a session
+    /// producing one has run here yet — `events.jsonl` remains the log this
+    /// type answers from until events.jsonl retires.
+    fn seed_model_memo(&mut self) {
+        let record_path = self.dir.join("record.jsonl");
+        if !record_path.exists() {
+            return;
+        }
+        match crate::record::model::resume(&record_path) {
+            Ok(memo) => self.model_memo = memo,
+            Err(error) => eprintln!(
+                "exarch: could not fold {} into the model view yet ({error}); the shadow projection starts empty",
+                record_path.display()
+            ),
+        }
     }
 
     pub fn id(&self) -> AgentId {
@@ -1298,6 +1345,7 @@ impl AgentLog {
         if !self.durable {
             self.log = Ledger::new(None);
             self.projection = Projection::default();
+            self.model_memo = crate::record::model::Memo::default();
             self.record_started_lossy(None, system_prompt_bytes, at_unix_ms);
             return Ok(ClearRecord {
                 rotation: None,
@@ -1330,6 +1378,7 @@ impl AgentLog {
 
         self.log = Ledger::new(Some(events_path));
         self.projection = Projection::default();
+        self.model_memo = crate::record::model::Memo::default();
         self.events_offset = 0;
         let started = self.started_event(None, system_prompt_bytes, at_unix_ms);
         let events_error = self.establish_head(started);
@@ -1418,6 +1467,7 @@ impl AgentLog {
             provider,
             sessions_root,
             _scratch: None,
+            model_memo: crate::record::model::Memo::default(),
         })
     }
 
@@ -2207,7 +2257,10 @@ fn open_events_append(dir: &Path) -> io::Result<BufWriter<File>> {
     Ok(BufWriter::new(f))
 }
 
-fn validate_result_ids(pending_ids: &[String], results: &[ToolResult]) -> Result<(), String> {
+pub(crate) fn validate_result_ids(
+    pending_ids: &[String],
+    results: &[ToolResult],
+) -> Result<(), String> {
     if pending_ids.len() != results.len() {
         return Err(format!(
             "tool result count mismatch: expected {}, got {}",
