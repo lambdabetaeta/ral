@@ -5,26 +5,45 @@
 //! `record/` and nowhere past it; the narrower promise is a matter of review,
 //! not the type system, exactly as the module map's own risk note admits.
 //!
-//! The channel `Sender` lives inside the same mutex as the writer
-//! ([`Inner`]), so a record can only be published while its append is held:
-//! no code path reaches the sender without the writer, and channel order is
-//! log order by construction.
+//! The fleet publisher lives inside the same mutex as the writer ([`Inner`]),
+//! so a record can only be published while its append is held: no code path
+//! reaches the sender without the writer, and channel order is log order by
+//! construction.  The publisher is *attachable* rather than fixed at
+//! construction because the log outlives any one bus — a session's log is
+//! built before the first frontend and survives every per-exchange bus a
+//! headless run mints — and an unattached (or dead-channel) publish is a
+//! no-op on purpose: the record is already durable, and a consumer that was
+//! not listening catches up from the file, never from the channel.
 
-use super::seam::Published;
-use super::{Record, Recorded, Seq, Stamp};
-use std::fs::File;
+use super::{Record, Recorded, Seq, Stamp, Transient};
+use crate::bus::{AgentId, Signal, UsageMeter, WeakSender};
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::mpsc::{self, Receiver, Sender};
+
+/// Where a witnessed record goes beside the file: the fleet-wide channel a
+/// frontend drains, tagged with the owning session's id, and the run's usage
+/// meter — accounting follows the fact through the seam, so a display-muted
+/// child on a dead channel still counts toward the run total.
+pub(crate) struct FleetSink {
+    pub(crate) id: AgentId,
+    /// Weak on purpose: the log outlives any one bus and its facts are
+    /// durable without one, so this handle must never hold a channel open or
+    /// stall a drain's disconnect on a session object's lifetime.
+    pub(crate) tx: WeakSender,
+    pub(crate) meter: UsageMeter,
+}
 
 pub(crate) struct Log {
     inner: Mutex<Inner>,
 }
 
 struct Inner {
-    writer: BufWriter<File>,
-    tx: Sender<Published>,
+    /// `None` for a `--no-logs` session: facts still stamp and publish, they
+    /// just have no durable form — the same trade `Transcript::none` makes.
+    writer: Option<BufWriter<File>>,
+    sink: Option<FleetSink>,
     seq: u64,
     /// This process's own append cursor, tracked rather than re-derived from
     /// `Seek`, so a flush never has to double as a position query.
@@ -32,8 +51,7 @@ struct Inner {
 }
 
 impl Log {
-    /// Open `path` for this session's record log, truncating any prior file,
-    /// and return the receiver its channel feeds.
+    /// Open `path` for a fresh record log, truncating any prior file.
     ///
     /// # Errors
     /// Returns `Err` if the file cannot be created.
@@ -41,24 +59,66 @@ impl Log {
         clippy::disallowed_methods,
         reason = "[io-door:silent:record-file] creates the session's record.jsonl; output infra, not turn-time data I/O"
     )]
-    pub(crate) fn create(path: &Path) -> io::Result<(Self, Receiver<Published>)> {
+    pub(crate) fn create(path: &Path) -> io::Result<Self> {
         let file = File::create(path)?;
-        let (tx, rx) = mpsc::channel();
-        let log = Self {
-            inner: Mutex::new(Inner {
-                writer: BufWriter::new(file),
-                tx,
-                seq: 0,
-                pos: 0,
-            }),
-        };
-        Ok((log, rx))
+        Ok(Self::over(Some(BufWriter::new(file)), 0, 0))
     }
 
-    /// Append `record`, then publish it on the channel before releasing the
-    /// lock — the whole reason the sender lives in here rather than beside
-    /// it.  Flushed per record (never `fsync`): process-crash durable, which
-    /// is what lets a killed session resume, but not power-loss durable.
+    /// Reopen `path` for append — resume — seeding the sequence and cursor
+    /// from the complete lines already on disk, so a resumed session's stamps
+    /// continue the file's own numbering.  Creates the file when a pre-plan
+    /// session has none.  The caller quarantines any torn tail first.
+    ///
+    /// # Errors
+    /// Returns `Err` if the file cannot be read or reopened.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:record-file] reopens the session's record.jsonl for append on resume; output infra, not turn-time data I/O"
+    )]
+    pub(crate) fn append_to(path: &Path) -> io::Result<Self> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        let seq = bytes.split(|&b| b == b'\n').filter(|l| !l.is_empty()).count() as u64;
+        let pos = bytes.len() as u64;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self::over(Some(BufWriter::new(file)), seq, pos))
+    }
+
+    /// A log with no file — `--no-logs` — that still stamps and publishes.
+    pub(crate) fn none() -> Self {
+        Self::over(None, 0, 0)
+    }
+
+    fn over(writer: Option<BufWriter<File>>, seq: u64, pos: u64) -> Self {
+        Self {
+            inner: Mutex::new(Inner {
+                writer,
+                sink: None,
+                seq,
+                pos,
+            }),
+        }
+    }
+
+    /// Point this log's publisher at a live fleet channel.  Called wherever a
+    /// session's seam meets a run's bus (attend, deliberate, a direct
+    /// `run_shell`); re-attaching over a dead per-exchange channel is the
+    /// ordinary way a headless session's next exchange comes back on air.
+    pub(super) fn attach(&self, sink: FleetSink) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        inner.sink = Some(sink);
+    }
+
+    /// Append `record`, then publish it on the attached channel before
+    /// releasing the lock — the whole reason the sink lives in here rather
+    /// than beside it.  Flushed per record (never `fsync`): process-crash
+    /// durable, which is what lets a killed session resume, but not
+    /// power-loss durable.
     pub(super) fn append(&self, record: Record) -> io::Result<Stamp> {
         let mut inner = self
             .inner
@@ -67,17 +127,24 @@ impl Log {
         let mut line = serde_json::to_vec(&record).map_err(io::Error::other)?;
         line.push(b'\n');
         let start = inner.pos;
-        inner.writer.write_all(&line)?;
-        inner.writer.flush()?;
+        if let Some(writer) = inner.writer.as_mut() {
+            writer.write_all(&line)?;
+            writer.flush()?;
+        }
         let end = start + line.len() as u64;
         inner.pos = end;
         inner.seq += 1;
         let stamp = Stamp::new(Seq::new(inner.seq), start..end);
-        let recorded = Recorded::new(stamp.clone(), record);
-        if inner.tx.send(Published::Fact(recorded)).is_err() {
-            // No live receiver — the record is already durable on disk,
-            // which is the whole point: a pressured or absent consumer
-            // catches up from the file, never from the channel.
+        if let Some(sink) = &inner.sink {
+            if let Record::Forensic(super::Forensic::UsageDelta { usage }) = &record {
+                sink.meter.add(usage.into());
+            }
+            let recorded = Recorded::new(stamp.clone(), record);
+            if sink.tx.send_signal(Signal::Fact(sink.id, recorded)).is_err() {
+                // No live receiver — the record is already durable on disk,
+                // which is the whole point: a pressured or absent consumer
+                // catches up from the file, never from the channel.
+            }
         }
         drop(inner);
         Ok(stamp)
@@ -85,11 +152,13 @@ impl Log {
 
     /// Publish a transient that never touches the file, through the same
     /// mutex as [`Self::append`] so it interleaves with facts in one order.
-    pub(super) fn publish_transient(&self, t: super::Transient) {
+    pub(super) fn publish_transient(&self, t: Transient) {
         let Ok(inner) = self.inner.lock() else {
             return;
         };
-        if inner.tx.send(Published::Transient(t)).is_err() {
+        if let Some(sink) = &inner.sink
+            && sink.tx.send_signal(Signal::Transient(sink.id, t)).is_err()
+        {
             // No live receiver; a transient has no durable form to catch up
             // from, so there is nothing else to do.
         }

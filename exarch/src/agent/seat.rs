@@ -478,6 +478,9 @@ mod tests {
                 apply: crate::fleet::desk::SurfaceApplier {
                     emit: emit.clone(),
                     pins: None,
+                    id: root_id,
+                    recorder: crate::record::Emitter::none(),
+                    surface: std::sync::Mutex::new(crate::record::commit::SurfaceBuffer::new()),
                 },
             }),
             deferred: crate::shell_eval::deferred_sink(&emit, root_id, &registry),

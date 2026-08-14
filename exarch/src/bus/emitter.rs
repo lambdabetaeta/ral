@@ -96,14 +96,25 @@ impl Emitter {
         }
     }
 
-    /// Record, meter, *then* send — in that order, so neither the trace nor the
-    /// run total depends on a live receiver ([`Self::muted_child`]'s point).
+    /// Record, *then* send — in that order, so the trace never depends on a
+    /// live receiver ([`Self::muted_child`]'s point).  Usage no longer meters
+    /// here: it rides the record seam ([`Self::fleet_sink`] hands the meter
+    /// to the session's log), so accounting follows the fact whether or not
+    /// any legacy `Kind` is ever derived from it.
     pub(crate) fn emit(&self, kind: Kind) {
         self.transcript.record(self.id, &kind);
-        if let Kind::Usage(u) = &kind {
-            self.meter.add(*u);
-        }
         let _ = self.tx.send(Event { id: self.id, kind });
+    }
+
+    /// Where a session's record log publishes: this emitter's channel and run
+    /// meter, tagged with its agent id — what `Agent::couple` attaches to the
+    /// seam at every point a session meets a live bus.
+    pub(crate) fn fleet_sink(&self) -> crate::record::FleetSink {
+        crate::record::FleetSink {
+            id: self.id,
+            tx: self.tx.downgrade(),
+            meter: self.meter.clone(),
+        }
     }
 
     /// The owning session's mailbox, for `shell_eval::deferred_sink`, which
@@ -202,13 +213,16 @@ pub(crate) fn dummy_emitter() -> (Emitter, BusReceiver) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FleetBus, Inbox, Kind, Transcript};
+    use super::{FleetBus, Inbox, Transcript};
 
-    /// Accounting follows the event, not its emitter: no sink ever sees the
-    /// muted child's `Usage`, yet the run total includes it.
+    /// Accounting follows the fact through the record seam, not its emitter:
+    /// no sink ever sees the muted child's usage, yet the run total includes
+    /// it, because a coupled log meters through the sink whatever the state
+    /// of the channel it publishes on.
     #[test]
     fn usage_meter_counts_a_muted_child_on_a_dead_channel() {
         use crate::provider::Usage;
+        use crate::record::{Emitter as Recorder, Forensic};
 
         let root_usage = Usage {
             input: 100,
@@ -227,8 +241,21 @@ mod tests {
         let root = bus.emitter(0, Transcript::none());
         let child = root.muted_child(1, Transcript::none());
 
-        root.emit(Kind::Usage(root_usage));
-        child.emit(Kind::Usage(child_usage));
+        let root_seam = Recorder::none();
+        root_seam.attach(root.fleet_sink());
+        let child_seam = Recorder::none();
+        child_seam.attach(child.fleet_sink());
+
+        let _recorded = root_seam
+            .emit(Forensic::UsageDelta {
+                usage: root_usage.into(),
+            })
+            .expect("a fileless seam still stamps");
+        let _recorded = child_seam
+            .emit(Forensic::UsageDelta {
+                usage: child_usage.into(),
+            })
+            .expect("a fileless seam still stamps");
 
         let total = bus.usage_total();
         assert_eq!(total.input, 107, "the muted child's input is counted");

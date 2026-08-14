@@ -11,7 +11,7 @@
 //! provisional thinking seat, and chrome that dies with the process.
 #![allow(
     dead_code,
-    reason = "parcel 0 of the one-seam-one-log record module: no consumer exists until wave 1 wires record::model / record::view / record::commit against this frozen surface"
+    reason = "the producers author through this surface, but the printers do not draw it yet: record::view's Blocks and the replay driver stay unconsumed until tui/headless are reborn as printers (P3/P6)"
 )]
 #![deny(unused_results)]
 #![deny(clippy::let_underscore_must_use)]
@@ -27,6 +27,8 @@ mod view;
 pub use replay::{Refusal, replay};
 pub use seam::Emitter;
 pub use view::{Block, BlockKind, View};
+
+pub(crate) use log::FleetSink;
 
 use crate::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord, ToolResult, UsageDelta};
 use crate::bus::card::Card;
@@ -419,6 +421,16 @@ impl<R> Recorded<R> {
     pub fn into_value(self) -> R {
         self.1
     }
+}
+
+/// Widen a witnessed class-typed record into the [`Record`] enum
+/// [`Fold::step`] expects.
+///
+/// The bridge from `Emitter::emit`'s typed return to the class-blind
+/// dispatcher, for the attend thread's inline advance.
+pub fn widen<C: Class>(recorded: Recorded<C>) -> Recorded<Record> {
+    let stamp = recorded.stamp().clone();
+    Recorded::new(stamp, recorded.into_value().into())
 }
 
 /// A named commit in the view fold's memo — a block is named by its own

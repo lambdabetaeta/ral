@@ -7,7 +7,7 @@ use crate::agent::event::{AgentLog, ContextOp, EditAuthority};
 use crate::agent::hatchery::Hatchery;
 use crate::agent::seat::{self, Seat};
 use crate::agent::shell::LogCell;
-use crate::agent::transcript::{Transcript, emit_context_edited};
+use crate::agent::transcript::Transcript;
 use crate::agent::{Agent, ProviderHandle, SPAWN_FUEL, cancel, nudge};
 use crate::bootstrap::Scratch;
 use crate::bus::{AgentId, Emitter, Inbox};
@@ -490,16 +490,18 @@ impl Agent {
     }
 
     pub(crate) fn rewind(&mut self, anchor: u64, emit: &Emitter) -> Result<(), String> {
-        let receipt = {
+        // Coupled first, so the edit's record — the one notification there is,
+        // now that `apply_edit` authors it through the seam — publishes live.
+        self.couple(emit);
+        {
             let mut log = self.log.lock();
             let exchanges = log.rewind_exchanges(anchor)?;
-            log.apply_edit(ContextOp::Drop { exchanges }, EditAuthority::User)?
-        };
+            let _receipt = log.apply_edit(ContextOp::Drop { exchanges }, EditAuthority::User)?;
+        }
         self.inbox.drop_nudges();
         if let Some(nudges) = &mut self.nudges {
             nudges.reset_budget();
         }
-        emit_context_edited(emit, &receipt);
         Ok(())
     }
 
@@ -690,7 +692,10 @@ impl Drop for Agent {
     /// `/clear` never reaches this — it rebuilds in place, clearing its own.
     fn drop(&mut self) {
         self.schedules.clear();
-        let _ = self.log.lock().record_session_ended();
+        let recorded = self.log.lock().record_session_ended();
+        if let Err(error) = recorded {
+            eprintln!("exarch: the session's tail bookend was not recorded: {error}");
+        }
     }
 }
 
@@ -1150,14 +1155,19 @@ mod tests {
             !matches!(session.inbox.next_item(), Some(Item::Nudge { .. })),
             "a queued nudge for a rewound exchange must not commit"
         );
-        let event = rx.try_recv().expect("rewind must be durable on the trace");
-        assert!(matches!(
-            event.kind,
-            Kind::ContextEdited {
-                op: ContextOp::Drop { exchanges },
-                by: EditAuthority::User,
-            } if exchanges == vec![2, 3]
-        ));
+        // The fold applied above published its own edit record once the first
+        // rewind attempt coupled the seam, so the drop is asserted anywhere on
+        // the channel rather than at a fixed position.
+        assert!(
+            std::iter::from_fn(|| rx.try_next_event().ok()).any(|event| matches!(
+                event.kind,
+                Kind::ContextEdited {
+                    op: ContextOp::Drop { exchanges },
+                    by: EditAuthority::User,
+                } if exchanges == vec![2, 3]
+            )),
+            "rewind must be durable on the trace"
+        );
     }
 
     /// `assemble` arms the child over the whole scope `fork_session`

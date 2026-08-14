@@ -5,6 +5,7 @@
 use crate::agent::Agent;
 use crate::agent::event::ToolResult as SessionToolResult;
 use crate::bus::{Emitter, Kind};
+use crate::record::{BlockId, Display};
 use serde_json::{Value, json};
 use std::sync::OnceLock;
 
@@ -119,15 +120,56 @@ pub(crate) fn wire_tool() -> genai::chat::Tool {
 pub(crate) const INVALID_INPUT: &str = "<invalid input>";
 
 /// Rail header and error block for a malformed call, and the result to commit.
-fn invalid_input(id: String, reason: &str, emit: &Emitter) -> SessionToolResult {
+fn invalid_input(id: String, reason: &str, session: &Agent, emit: &Emitter) -> SessionToolResult {
+    let call = record_call(session, INVALID_INPUT.to_string(), None, emit);
     emit.emit(Kind::ToolCall {
         tool: NAME,
         cmd: INVALID_INPUT.to_string(),
         summary: None,
     });
     let msg = format!("tool input error: {reason}\nexpected an object matching the tool's schema");
+    record_result(session, &msg, call, emit);
     emit.emit(Kind::ToolResult(msg.clone()));
     SessionToolResult { id, content: msg }
+}
+
+/// Record the call's display commit through the seam, keeping the witnessed
+/// [`BlockId`] so the paired result can address it directly — the mechanism
+/// that retires the view's tail-walk.  A failed append surfaces as an error
+/// row; the paired result is then simply not recorded, having no target.
+fn record_call(
+    session: &Agent,
+    cmd: String,
+    summary: Option<String>,
+    emit: &Emitter,
+) -> Option<BlockId> {
+    match session.recorder().emit(Display::ToolCall {
+        tool: NAME.to_string(),
+        cmd,
+        summary,
+    }) {
+        Ok(recorded) => Some(BlockId::new(recorded.stamp().seq())),
+        Err(error) => {
+            emit.emit(Kind::Error(format!(
+                "a tool-call commit was not recorded in record.jsonl: {error}"
+            )));
+            None
+        }
+    }
+}
+
+/// The paired half: the byte-identical result string, addressed at the call
+/// commit it answers.
+fn record_result(session: &Agent, content: &str, call: Option<BlockId>, emit: &Emitter) {
+    let Some(call) = call else { return };
+    if let Err(error) = session.recorder().emit(Display::Result {
+        text: content.to_string(),
+        call,
+    }) {
+        emit.emit(Kind::Error(format!(
+            "a tool-result commit was not recorded in record.jsonl: {error}"
+        )));
+    }
 }
 
 /// Parse, announce on the rail, run.  Always yields a result: the provider
@@ -140,14 +182,17 @@ pub(crate) fn dispatch(
 ) -> SessionToolResult {
     let args = match parse_args(input) {
         Ok(a) => a,
-        Err(reason) => return invalid_input(id, &reason, emit),
+        Err(reason) => return invalid_input(id, &reason, session, emit),
     };
+    let call = record_call(session, args.cmd.clone(), Some(args.description.clone()), emit);
     emit.emit(Kind::ToolCall {
         tool: NAME,
         cmd: args.cmd.clone(),
         summary: Some(args.description.clone()),
     });
-    session.run_shell(id, &args.cmd, args.timeout_secs, emit)
+    let result = session.run_shell(id, &args.cmd, args.timeout_secs, emit);
+    record_result(session, &result.content, call, emit);
+    result
 }
 
 #[cfg(test)]

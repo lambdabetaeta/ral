@@ -1,42 +1,29 @@
-//! The commit producer's grouping half, moved here whole from `tui/surface.rs`
-//! by `git mv` and re-pointed at the seam: [`PatchBuf`] coalesces consecutive
-//! same-`(id, path)` diff hunks into one `▎ diff` [`Display::Card`], and
-//! [`ObservationBuf`] dedupes read/exec/grep events by kind before recording
-//! each as its own [`Display::Observation`].  Both are session-keyed, so a
-//! session change flushes and reopens rather than merging two sessions into
-//! one commit.
+//! The commit producer: the worker-side coalescers that decide what the
+//! display half of the log records, upstream of the seam — so what is
+//! recorded is what the user saw, and a resumed scrollback rebuilds it.
 //!
-//! Grouping survives the move as a record-time *dedup and ordering* decision
-//! — a repeated read within one run is still one fact, and a write still
-//! flushes behind the reads it arrived among — but no longer as a single
-//! combined card: the frozen [`Display`] vocabulary has no variant for a
-//! *grouped* read/exec/grep card, and the wiki text assigns that
-//! reconstruction to a printer reading consecutive [`Display::Observation`]
-//! commits, not to the producer.  `observation_wire` (`bus/card.rs`, P4's
-//! parcel) is what makes the individual commit possible: it carries the
-//! observation's total wire form, not the mark tree a live rail drew from it.
+//! Three producers live here.  [`Chopper`] accumulates the assistant's token
+//! deltas and commits a [`Display::Answer`] at each fence-safe paragraph
+//! break, flushing the tail at the step boundary — every commit a prefix of
+//! the accumulated stream, so a printer's open tail is always exactly the
+//! unconsumed suffix.  [`SurfaceBuffer`] (moved here whole from
+//! `tui/surface.rs` by `git mv` and re-pointed at the seam) coalesces
+//! consecutive same-`(id, path)` diff hunks into one `▎ diff`
+//! [`Display::Card`], and dedupes read/exec/grep observations by kind —
+//! a deduped bucket of several records as one [`Display::ObservationGroup`],
+//! a singleton as its own [`Display::Observation`], each carried as its total
+//! wire form (`observation_wire`), never the mark tree a live rail drew.
+//! Both buffers are session-keyed, so a session change flushes and reopens
+//! rather than merging two sessions into one commit.
 //!
-//! **Not wired to a live call site.**  Nothing yet hands this a
-//! [`crate::record::Emitter`] or an [`Observation`]: `tui::app`'s three call
-//! sites still address the old, viewport-mutating shape this module no
-//! longer has, and per the plan the worker side — not `app.rs` — is meant to
-//! own the coalescing going forward.  Rewiring `tui::app` is the view fold's
-//! and the resume path's business (parcels P3/P6), not this one's.
-//!
-//! The chopper the commit producer is also meant to own — accumulating the
-//! assistant delta stream and committing markdown at each fence-safe break —
-//! is not implemented here for the same reason [`crate::record::view`]
-//! reports: the frozen `Display` vocabulary has no variant for streamed
-//! assistant prose (`Display::Thinking` is reasoning only, keyed to
-//! `answer_chars`, not the answer itself), so there is nothing yet to commit
-//! a chopped chunk *as*.  See this parcel's report for the exact gap.
-//!
-//! A write rides the observation buffer too, though it joins no group.  It is a
-//! barrier — it ends the ral run before it — but it is still an effect of the
-//! call that issued it, and a redirect writes at the seam, mid-call.  Landed
-//! eagerly it would split a call from the reads it had yet to make; buffered, it
-//! flushes *behind* them, so a call's effects stay contiguous and the coalescing
-//! projection never has to reunite a call with effects stranded past a barrier.
+//! A write rides the observation buffer too, though it joins no group and is
+//! never deduped — two writes to one path are two facts.  It is a barrier —
+//! it ends the ral run before it — but it is still an effect of the call that
+//! issued it, and a redirect writes at the seam, mid-call.  Landed eagerly it
+//! would split a call from the reads it had yet to make; buffered, it flushes
+//! *behind* them, so a call's effects stay contiguous and the coalescing
+//! projection never has to reunite a call with effects stranded past a
+//! barrier.
 
 use std::io;
 
@@ -44,6 +31,74 @@ use crate::bus::AgentId;
 use crate::bus::card::{Card, Hunk, Mark, observation_wire};
 use crate::record::{Display, Emitter};
 use ral_core::types::{Observation, Observed};
+
+/// The byte index just past the last `\n\n` at fence depth zero, so
+/// `open.drain(..idx)` peels off the committable prefix; `None` means every
+/// candidate sits inside an open fence.  `CommonMark` has no nested fences,
+/// so one bit of depth suffices.
+fn safe_paragraph_break(open: &str) -> Option<usize> {
+    let bytes = open.as_bytes();
+    let mut depth = 0u8;
+    let mut last_safe = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let nl = match bytes[i..].iter().position(|&b| b == b'\n') {
+            Some(p) => i + p,
+            None => break,
+        };
+        let t = open[i..nl].trim_start();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            depth ^= 1;
+        }
+        if nl + 1 < bytes.len() && bytes[nl + 1] == b'\n' && depth == 0 {
+            last_safe = Some(nl + 2);
+        }
+        i = nl + 1;
+    }
+    last_safe
+}
+
+/// The assistant-prose chopper: one exists, on the worker side, so the live
+/// view and the folded view are the same blocks by construction and there is
+/// nothing to prove confluent.
+#[derive(Default)]
+pub(crate) struct Chopper {
+    open: String,
+}
+
+impl Chopper {
+    /// Accumulate one streamed delta, committing the fence-safe prefix it
+    /// completes, if any.
+    ///
+    /// # Errors
+    /// Propagates a failed commit of a completed paragraph.
+    pub(crate) fn push(&mut self, emitter: &Emitter, delta: &str) -> io::Result<()> {
+        self.open.push_str(delta);
+        let Some(cut) = safe_paragraph_break(&self.open) else {
+            return Ok(());
+        };
+        let chunk: String = self.open.drain(..cut).collect();
+        if chunk.trim().is_empty() {
+            return Ok(());
+        }
+        let _recorded = emitter.emit(Display::Answer { text: chunk })?;
+        Ok(())
+    }
+
+    /// Commit whatever tail remains — the step's boundary, where the stream
+    /// is sealed whether it completed, stalled, or was cancelled.
+    ///
+    /// # Errors
+    /// Propagates a failed commit of the tail.
+    pub(crate) fn flush(&mut self, emitter: &Emitter) -> io::Result<()> {
+        let leftover = std::mem::take(&mut self.open);
+        if leftover.trim().is_empty() {
+            return Ok(());
+        }
+        let _recorded = emitter.emit(Display::Answer { text: leftover })?;
+        Ok(())
+    }
+}
 
 pub(crate) struct SurfaceBuffer {
     patch_buf: Option<PatchBuf>,
@@ -118,7 +173,7 @@ impl SurfaceBuffer {
             hunks: buf.hunks,
         }]);
         let marks = serde_json::to_value(&card).expect("Card's derived Serialize cannot fail");
-        emitter.emit(Display::Card { marks })?;
+        let _recorded = emitter.emit(Display::Card { marks })?;
         Ok(())
     }
 
@@ -180,10 +235,12 @@ impl SurfaceBuffer {
         Ok(())
     }
 
-    /// Record each buffered observation as its own [`Display::Observation`],
-    /// in the barrier order the module doc names: reads, execs, and greps —
-    /// deduped, order-independent among themselves — then every write, last
-    /// and undeduped.
+    /// Record the buffered observations in the barrier order the module doc
+    /// names — reads, execs, greps, then every write, last and undeduped.  A
+    /// deduped bucket of several records as one [`Display::ObservationGroup`],
+    /// rebuilt by the view fold into exactly the one grouped card the user
+    /// saw; a singleton as its own [`Display::Observation`]; each write as its
+    /// own commit, two writes being two facts.
     ///
     /// # Errors
     /// Propagates the first failed emit; later observations in the same
@@ -192,15 +249,12 @@ impl SurfaceBuffer {
         let Some(buf) = self.observation_buf.take() else {
             return Ok(());
         };
-        for observed in buf
-            .reads
-            .into_iter()
-            .chain(buf.execs)
-            .chain(buf.greps)
-            .chain(buf.writes)
-        {
-            let value = observation_wire(&observed);
-            emitter.emit(Display::Observation { value })?;
+        for bucket in [&buf.reads, &buf.execs, &buf.greps] {
+            flush_bucket(emitter, bucket)?;
+        }
+        for write in buf.writes {
+            let value = observation_wire(&write);
+            let _recorded = emitter.emit(Display::Observation { value })?;
         }
         Ok(())
     }
@@ -223,21 +277,43 @@ impl SurfaceBuffer {
     }
 }
 
+fn flush_bucket(emitter: &Emitter, bucket: &[Observation]) -> io::Result<()> {
+    match bucket {
+        [] => {}
+        [one] => {
+            let value = observation_wire(one);
+            let _recorded = emitter.emit(Display::Observation { value })?;
+        }
+        many => {
+            let values = many.iter().map(observation_wire).collect();
+            let _recorded = emitter.emit(Display::ObservationGroup { values })?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::seam::Published;
+    use crate::bus::{BusReceiver, Signal, UsageMeter, channel};
+    use crate::record::{FleetSink, Record};
     use ral_core::syntax::ast::RedirectMode;
     use ral_core::types::{CallSite, WriteOutcome};
-    use std::sync::mpsc::Receiver;
 
-    fn emitter() -> (Emitter, Receiver<Published>) {
+    fn emitter() -> (Emitter, BusReceiver) {
         let path = std::env::temp_dir().join(format!(
             "exarch-commit-test-{}-{:?}.jsonl",
             std::process::id(),
             std::thread::current().id()
         ));
-        Emitter::create(&path).expect("temp record log")
+        let emit = Emitter::create(&path).expect("temp record log");
+        let (tx, rx) = channel();
+        emit.attach(FleetSink {
+            id: 0,
+            tx: tx.downgrade(),
+            meter: UsageMeter::default(),
+        });
+        (emit, rx)
     }
 
     fn site() -> CallSite {
@@ -272,14 +348,14 @@ mod tests {
         observation(Observed::Read { path: path.into() })
     }
 
-    fn drain_display(rx: &Receiver<Published>) -> Vec<Display> {
-        rx.try_iter()
-            .filter_map(|p| match p {
-                Published::Fact(rec) => match rec.into_value() {
-                    crate::record::Record::Display(d) => Some(d),
-                    _ => None,
+    fn drain_display(rx: &BusReceiver) -> Vec<Display> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|sig| match sig {
+                Signal::Fact(_, rec) => match rec.into_value() {
+                    Record::Display(d) => Some(d),
+                    Record::Protocol(_) | Record::Forensic(_) => None,
                 },
-                Published::Transient(_) => None,
+                Signal::Event(_) | Signal::Transient(..) => None,
             })
             .collect()
     }
@@ -309,6 +385,58 @@ mod tests {
         assert!(
             at("g") < at("f"),
             "the read the write arrived before still records ahead of it: {commits:?}"
+        );
+    }
+
+    /// A deduped run of several reads is one grouped commit — the one visual
+    /// card the user saw — while a lone exec stays its own observation.
+    #[test]
+    fn a_deduped_bucket_records_grouped_and_a_singleton_alone() {
+        let (emit, rx) = emitter();
+        let mut buf = SurfaceBuffer::new();
+        buf.absorb_observation(&emit, 0, read("a")).unwrap();
+        buf.absorb_observation(&emit, 0, read("b")).unwrap();
+        buf.absorb_observation(&emit, 0, read("a")).unwrap();
+        buf.absorb_observation(&emit, 0, read("c")).unwrap();
+        buf.flush_surfaces(&emit).unwrap();
+
+        let commits = drain_display(&rx);
+        match commits.as_slice() {
+            [Display::ObservationGroup { values }] => {
+                assert_eq!(values.len(), 3, "the repeated read deduped: {values:?}");
+            }
+            other => panic!("expected one grouped commit, got {other:?}"),
+        }
+    }
+
+    /// The chopper commits each fence-safe paragraph as its own prefix and
+    /// never cuts inside an open fence; the boundary flush seals the tail.
+    #[test]
+    fn chopper_commits_fence_safe_prefixes_and_flushes_the_tail() {
+        let (emit, rx) = emitter();
+        let mut chopper = Chopper::default();
+        chopper.push(&emit, "first paragraph\n\n```\ncode").unwrap();
+        chopper.push(&emit, "\n\nstill code\n```\n\ntail").unwrap();
+        chopper.flush(&emit).unwrap();
+
+        let texts: Vec<String> = drain_display(&rx)
+            .into_iter()
+            .map(|d| {
+                if let Display::Answer { text } = d {
+                    text
+                } else {
+                    panic!("expected only answer commits, got {d:?}")
+                }
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "first paragraph\n\n".to_string(),
+                "```\ncode\n\nstill code\n```\n\n".to_string(),
+                "tail".to_string(),
+            ],
+            "the blank line inside the fence is not a cut point"
         );
     }
 }

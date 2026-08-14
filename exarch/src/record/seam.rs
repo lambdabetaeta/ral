@@ -3,26 +3,17 @@
 //! critical section inside [`Log`]'s own mutex, so the channel a printer
 //! drains can never run ahead of the file a resume replays.
 //!
-//! The queue is unbounded on purpose: a bounded one would couple the seam's
-//! availability to how fast a terminal drains, which is the dependency the
-//! whole plan exists to forbid.  A pressured consumer's escape is the log
-//! itself, since every fact carries a sequence number.
+//! The channel is the fleet-wide bus, unbounded for facts on purpose: a
+//! bounded queue would couple the seam's availability to how fast a terminal
+//! drains, which is the dependency the whole plan exists to forbid.  A
+//! pressured consumer's escape is the log itself, since every fact carries a
+//! sequence number.
 
-use super::log::Log;
-use super::{Class, Record, Recorded, Transient};
+use super::log::{FleetSink, Log};
+use super::{Class, Recorded, Transient};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::mpsc::Receiver;
-
-/// What the channel carries: a witnessed fact, or a transient that never
-/// touches the log.  The appender only ever accepts a [`Record`], so handing
-/// it a [`Transient`] — journaling a delta — is a type error, not a runtime
-/// check.
-pub enum Published {
-    Fact(Recorded<Record>),
-    Transient(Transient),
-}
 
 /// A cheap, cloneable handle onto one session's record log — the handle a
 /// worker stamps its facts through.
@@ -32,14 +23,40 @@ pub struct Emitter {
 }
 
 impl Emitter {
-    /// Open `path` for a fresh record log, returning the emitter and the
-    /// receiver its printers and folds drain.
+    /// Open `path` for a fresh record log.
     ///
     /// # Errors
     /// Returns `Err` if the log file cannot be created.
-    pub fn create(path: &Path) -> io::Result<(Self, Receiver<Published>)> {
-        let (log, rx) = Log::create(path)?;
-        Ok((Self { log: Arc::new(log) }, rx))
+    pub fn create(path: &Path) -> io::Result<Self> {
+        Ok(Self {
+            log: Arc::new(Log::create(path)?),
+        })
+    }
+
+    /// Reopen `path` for append — resume — with stamps continuing the file's
+    /// own numbering.  The caller quarantines any torn tail first.
+    ///
+    /// # Errors
+    /// Returns `Err` if the file cannot be read or reopened.
+    pub fn append_to(path: &Path) -> io::Result<Self> {
+        Ok(Self {
+            log: Arc::new(Log::append_to(path)?),
+        })
+    }
+
+    /// A seam with no file — `--no-logs` — that still stamps facts and
+    /// publishes them to an attached bus, matching `Transcript::none`.
+    pub fn none() -> Self {
+        Self {
+            log: Arc::new(Log::none()),
+        }
+    }
+
+    /// Point this session's log at a live fleet channel; facts append and
+    /// publish under one lock from then on.  Idempotent, and re-attaching
+    /// after a per-exchange bus died is the ordinary path back on air.
+    pub(crate) fn attach(&self, sink: FleetSink) {
+        self.log.attach(sink);
     }
 
     /// Append `value` and publish it, in that order, under one lock.
@@ -48,8 +65,7 @@ impl Emitter {
     /// Propagates a failed append: a write to the one authoritative log is a
     /// session error, never a shrug.
     pub fn emit<C: Class>(&self, value: C) -> io::Result<Recorded<C>> {
-        let record: Record = value.clone().into();
-        let stamp = self.log.append(record)?;
+        let stamp = self.log.append(value.clone().into())?;
         Ok(Recorded::new(stamp, value))
     }
 

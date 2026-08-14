@@ -46,7 +46,7 @@ fn drive_deliberate(
     let token = exarch::agent::cancel::Token::new();
     let outcome = session.deliberate(provider, prompt.map(str::to_string), None, &token, &emit);
     drop(emit);
-    let kinds = rx.into_iter().map(|e| e.kind).collect();
+    let kinds = rx.into_iter().filter_map(exarch::bus::Signal::into_event).map(|e| e.kind).collect();
     (outcome, kinds)
 }
 

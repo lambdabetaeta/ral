@@ -15,7 +15,6 @@ use crate::agent::digest::{
 use crate::agent::event::{
     ContextOp, EditAuthority, QuiesceReason, ToolResult as SessionToolResult,
 };
-use crate::agent::transcript::emit_context_edited;
 use crate::bus::{AgentState, Emitter, Item, Kind};
 use crate::provider::{CutShort, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use ral_core::serial::FOValue;
@@ -66,6 +65,10 @@ impl Agent {
         token: &cancel::Token,
         emit: &Emitter,
     ) -> Result<Outcome, ProviderError> {
+        self.couple(emit);
+        // The commit producer's handle: answer chunks and the step's final
+        // reasoning record through the seam as they are decided, worker-side.
+        let recorder = self.recorder();
         // A staged reply must not outlive the batch that staged it when a cancel
         // or an error lands between `invoke` and the post-batch drain; entry is
         // the one point every route into a deliberation is guaranteed to cross.
@@ -87,14 +90,12 @@ impl Agent {
             if n > MAX_STEPS {
                 return Ok(self.capped(emit));
             }
+            // The step's live row derives from the published record — the
+            // retired `Kind::Step` twin — so this is the one authoring site.
             self.log
                 .lock()
                 .record_step(n, provider.tuning().clone())
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
-            emit.emit(Kind::Step {
-                n,
-                tuning: provider.tuning().clone(),
-            });
             last_text.clear();
             #[cfg(debug_assertions)]
             let t_render = std::time::Instant::now();
@@ -114,9 +115,16 @@ impl Agent {
             #[cfg(debug_assertions)]
             let mut first_token: Option<std::time::Duration> = None;
             emit.emit(Kind::State(AgentState::AwaitingModel));
+            // One chopper per step, flushed at whichever boundary seals the
+            // stream below; a failed answer commit is stashed here, since a
+            // streaming closure has no error channel of its own.
+            let mut chopper = crate::record::commit::Chopper::default();
+            let mut chop_error: Option<std::io::Error> = None;
             let step_out = {
                 let token_emit = emit.clone();
                 let reasoning_emit = emit.clone();
+                let chopper = &mut chopper;
+                let chop_error = &mut chop_error;
                 provider.complete(
                     &self.system,
                     messages,
@@ -129,6 +137,11 @@ impl Agent {
                         }
                         last_text.push_str(t);
                         token_emit.emit(Kind::Token(t.to_string()));
+                        if chop_error.is_none()
+                            && let Err(error) = chopper.push(&recorder, t)
+                        {
+                            *chop_error = Some(error);
+                        }
                     },
                     &mut |r: &str| {
                         reasoning_emit.emit(Kind::Thinking(r.to_string()));
@@ -143,6 +156,7 @@ impl Agent {
             );
             if token.is_cancelled() {
                 emit.emit(Kind::Boundary);
+                seal_chopper(&mut chopper, &recorder);
                 return Ok(self.cancelled(emit));
             }
             let StepOut {
@@ -156,13 +170,21 @@ impl Agent {
                 Ok(s) => s,
                 Err(ProviderError::Cancelled(_)) => {
                     emit.emit(Kind::Boundary);
+                    seal_chopper(&mut chopper, &recorder);
                     return Ok(self.cancelled(emit));
                 }
                 Err(e) => {
                     emit.emit(Kind::Boundary);
+                    seal_chopper(&mut chopper, &recorder);
                     return Err(e);
                 }
             };
+            if let Some(error) = chop_error {
+                emit.emit(Kind::Boundary);
+                return Err(ProviderError::Other(format!(
+                    "an answer commit was not recorded in record.jsonl: {error}"
+                )));
+            }
             // Before the boundary, so the TUI lands `∴` ahead of the answer's
             // separate markdown rail.
             if let Some(reasoning) = reasoning.as_deref()
@@ -177,8 +199,23 @@ impl Agent {
                     text: reasoning.to_string(),
                     answer_chars,
                 });
+                let _recorded = recorder
+                    .emit(crate::record::Display::Thinking {
+                        text: reasoning.to_string(),
+                        answer_chars,
+                    })
+                    .map_err(|e| {
+                        ProviderError::Other(format!(
+                            "the step's reasoning commit was not recorded: {e}"
+                        ))
+                    })?;
             }
             emit.emit(Kind::Boundary);
+            chopper.flush(&recorder).map_err(|e| {
+                ProviderError::Other(format!(
+                    "the answer's tail commit was not recorded: {e}"
+                ))
+            })?;
             // The live numerator the next `compact` weighs against the window.
             let input_tokens = usage.input;
             let measured_at = {
@@ -230,9 +267,12 @@ impl Agent {
                         // Committing the streamed prefix salvages the turn; it does
                         // not make the provider's failure any less of one, and the
                         // cause — a refusal, a dropped connection — is the user's to
-                        // read in full.  Its own kind, not `ProviderError`: that one
-                        // ends an exchange, and this one is survived.
-                        let _ = self.log.lock().record_stall(cause);
+                        // read in full.  Its own record, not `ProviderError`: that
+                        // one ends an exchange, and this one is survived.
+                        let recorded = self.log.lock().record_stall(cause);
+                        if let Err(error) = recorded {
+                            eprintln!("exarch: a stream stall was not recorded: {error}");
+                        }
                         // The block above carries the detail; what rides on as the
                         // truncation reason is the one-line spelling.
                         cause.summary()
@@ -264,7 +304,7 @@ impl Agent {
             if !injected.is_empty() {
                 let mut text = String::new();
                 for item in &injected {
-                    announce(item, emit);
+                    announce(item, emit, &recorder);
                     if !text.is_empty() {
                         text.push_str("\n\n");
                     }
@@ -345,14 +385,12 @@ impl Agent {
                     },
                     EditAuthority::Harness,
                 );
-                let receipt = match edited {
-                    Ok(receipt) => receipt,
-                    Err(e) => {
-                        self.note_error(format!("compact failed: {e}"));
-                        return;
-                    }
-                };
-                emit_context_edited(emit, &receipt);
+                // `apply_edit` records `ContextEdited` through the seam, and
+                // the live row derives from the published record — there is
+                // no separate notification left to keep in step with it.
+                if let Err(e) = edited {
+                    self.note_error(format!("compact failed: {e}"));
+                }
             }
             Err(e) => self.note_error(format!("compact failed: {e}")),
         }
@@ -440,6 +478,16 @@ fn cancelled_result(id: String) -> SessionToolResult {
     SessionToolResult {
         id,
         content: "cancelled before tool execution".into(),
+    }
+}
+
+/// Seal a streaming step's chopper on an exit path that is already
+/// cancelling or erroring: the streamed prefix is what the user saw, so it
+/// still commits, best-effort — the exit in flight is the error being
+/// reported, and this one must not mask it.
+fn seal_chopper(chopper: &mut crate::record::commit::Chopper, recorder: &crate::record::Emitter) {
+    if let Err(error) = chopper.flush(recorder) {
+        eprintln!("exarch: a cancelled step's streamed prefix was not recorded: {error}");
     }
 }
 
@@ -687,7 +735,7 @@ mod tests {
             "both drained prompts coalesce into the one admitted message"
         );
         assert!(
-            std::iter::from_fn(|| rx.try_recv().ok())
+            std::iter::from_fn(|| rx.try_next_event().ok())
                 .any(|e| matches!(e.kind, Kind::UserPromptEcho(t) if t.contains("and report"))),
             "the arrival must be announced as it enters context"
         );

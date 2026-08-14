@@ -213,7 +213,9 @@ fn render_block_text(out: &mut String, kind: &BlockKind) {
     let line = match kind {
         BlockKind::Thinking { text, .. } => format!("∴ {text}"),
         BlockKind::Prompt { text } => format!("> {text}"),
-        BlockKind::Answer { text } => text.clone(),
+        BlockKind::Answer { text }
+        | BlockKind::SystemNote { text }
+        | BlockKind::HarnessResult { text } => text.clone(),
         BlockKind::ToolCall {
             tool,
             cmd,
@@ -283,7 +285,6 @@ fn render_block_text(out: &mut String, kind: &BlockKind) {
         BlockKind::Nudge { used, max, cause } => format!("[nudge {used}/{max}: {cause}]"),
         BlockKind::ProviderError { error } => format!("provider error: {error:?}"),
         BlockKind::Stalled { error } => format!("stream stalled, turn resumes: {error:?}"),
-        BlockKind::SystemNote { text } | BlockKind::HarnessResult { text } => text.clone(),
         BlockKind::ModelChanged { model, provider } => {
             format!("[model changed: {provider}/{model}]")
         }

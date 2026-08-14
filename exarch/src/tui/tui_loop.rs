@@ -498,7 +498,7 @@ mod tests {
         let _ = session.attend(&mut control, &emit);
 
         let event = rx
-            .try_recv()
+            .try_next_event()
             .expect("the /resources command must emit its fold");
         match &event.kind {
             Kind::Resources { rows, card } => {
@@ -519,7 +519,7 @@ mod tests {
         // follows: a command is not a turn, so no state ran before the fold.
         assert!(
             matches!(
-                rx.try_recv().map(|e| e.kind),
+                rx.try_next_event().map(|e| e.kind),
                 Ok(Kind::State(crate::bus::AgentState::Ready))
             ),
             "the fold is followed by the ready-boundary state alone"
@@ -544,7 +544,7 @@ mod tests {
         let _ = session.attend(&mut control, &emit);
 
         assert!(matches!(
-            rx.try_recv().map(|event| event.kind),
+            rx.try_next_event().map(|event| event.kind),
             Ok(Kind::Error(message)) if message.contains("exchange 7")
         ));
     }

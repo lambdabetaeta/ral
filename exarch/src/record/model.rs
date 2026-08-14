@@ -37,20 +37,12 @@ impl Fold for Model {
     fn step(memo: &mut Memo, record: &Recorded<Record>) -> Result<(), Refusal> {
         match record.value() {
             Record::Protocol(p) => {
-                step_protocol(memo, record.stamp().clone(), p.clone());
+                step_protocol(memo, record.stamp().clone(), p);
                 Ok(())
             }
             Record::Display(_) | Record::Forensic(_) => Ok(()),
         }
     }
-}
-
-/// Widen a witnessed [`Protocol`] into the [`Record`] enum [`Fold::step`]
-/// expects — the bridge from `Emitter::emit::<Protocol>`'s typed return to
-/// the class-blind dispatcher, for the attend thread's inline advance.
-pub fn widen(recorded: Recorded<Protocol>) -> Recorded<Record> {
-    let stamp = recorded.stamp().clone();
-    Recorded::new(stamp, Record::Protocol(recorded.into_value()))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -98,7 +90,7 @@ impl Ledger {
     fn append(&mut self, record: Recorded<Protocol>) -> usize {
         let index = self.len;
         self.len += 1;
-        self.resident.insert(index, record);
+        let _ = self.resident.insert(index, record);
         index
     }
 
@@ -121,7 +113,7 @@ impl Ledger {
 
     fn free(&mut self, index: usize) {
         if let Some(recorded) = self.resident.remove(&index) {
-            self.freed.insert(index, recorded.stamp().clone());
+            let _ = self.freed.insert(index, recorded.stamp().clone());
         }
     }
 
@@ -163,7 +155,7 @@ fn read_freed(reader: &mut File, stamp: &Stamp) -> io::Result<Protocol> {
     let bytes = stamp.bytes();
     let length = usize::try_from(bytes.end.saturating_sub(bytes.start))
         .map_err(|_| io::Error::other("a freed record range is too large to read"))?;
-    reader.seek(SeekFrom::Start(bytes.start))?;
+    let _ = reader.seek(SeekFrom::Start(bytes.start))?;
     let mut buf = vec![0; length];
     reader.read_exact(&mut buf)?;
     let line = buf.strip_suffix(b"\n").unwrap_or(&buf);
@@ -434,11 +426,11 @@ fn append_aborted_stubs(state: &mut State, messages: &mut Vec<ChatMessage>) {
 /// whatever no surviving span needs any more — the law that no recorded
 /// protocol record is ever truly discarded holds because `free` keeps the
 /// evicted index's `Stamp`, never drops it.
-fn step_protocol(memo: &mut Memo, stamp: Stamp, protocol: Protocol) {
+fn step_protocol(memo: &mut Memo, stamp: Stamp, protocol: &Protocol) {
     let index = memo.ledger.append(Recorded::new(stamp, protocol.clone()));
-    memo.state = advance(&memo.state, &protocol);
-    record_event_span(&mut memo.view, &mut memo.max_exchange, &protocol, index);
-    let removed = if let Protocol::ContextEdited { op, .. } = &protocol {
+    memo.state = advance(&memo.state, protocol);
+    record_event_span(&mut memo.view, &mut memo.max_exchange, protocol, index);
+    let removed = if let Protocol::ContextEdited { op, .. } = protocol {
         let removed = removed_event_ranges(&memo.view, op);
         apply_context_op(&mut memo.view, op);
         memo.newest_edit = Some(index);
@@ -677,7 +669,7 @@ pub fn resume(path: &Path) -> io::Result<Memo> {
     let mut memo = Memo::default();
     memo.attach_source(path.to_path_buf());
     for recorded in protocol_records {
-        step_protocol(&mut memo, recorded.stamp().clone(), recorded.into_value());
+        step_protocol(&mut memo, recorded.stamp().clone(), recorded.value());
     }
 
     let (state, view, max_exchange) = refold(&memo.ledger)?;

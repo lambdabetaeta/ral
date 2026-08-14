@@ -29,6 +29,12 @@ pub(crate) enum Pass {
 /// Drain up to `max` buffered events through `handle`, then report where the
 /// loop stands.
 ///
+/// The channel carries [`Signal`](crate::bus::Signal)s; each is projected
+/// through `Signal::into_event` — the legacy envelope verbatim, a seam fact
+/// as its retired-twin `Kind` — so both printers keep rendering from `Kind`
+/// until they are reborn over the view fold, at which point this projection
+/// and `Kind` retire together.
+///
 /// `done` is latched *before* the first receive: a finished worker ends the
 /// pass even while background producers keep the channel full, where waiting
 /// for a momentarily-empty channel would wait forever. Its buffered batch still
@@ -50,8 +56,10 @@ pub(crate) fn drain_pass(
             return if finished { Pass::Stop } else { Pass::More };
         }
         match rx.try_recv() {
-            Ok(ev) => {
-                handle(ev);
+            Ok(sig) => {
+                if let Some(ev) = sig.into_event() {
+                    handle(ev);
+                }
                 n += 1;
             }
             Err(TryRecvError::Empty) => {
@@ -80,7 +88,11 @@ pub trait Sink {
                 Pass::Stop => return Ok(()),
                 // An uncapped pass never reports `More`.
                 Pass::Idle | Pass::More => match rx.recv_timeout(DRAIN_POLL) {
-                    Ok(ev) => self.handle(ev),
+                    Ok(sig) => {
+                        if let Some(ev) = sig.into_event() {
+                            self.handle(ev);
+                        }
+                    }
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => return Ok(()),
                 },

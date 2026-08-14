@@ -10,7 +10,7 @@
 
 use crate::bus::AgentId;
 use crate::provider::{ProviderError, Tuning, Usage};
-use crate::record::Fold as _;
+use crate::record::{Fold as _, Record};
 use genai::chat::{ChatMessage, ChatRole, ToolResponse};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -38,6 +38,10 @@ pub struct UsageDelta {
     pub cache_creation: Option<u64>,
     pub cache_read: Option<u64>,
     pub dollars: f64,
+    /// Defaulted on deserialize so pre-existing logs, written before the
+    /// round trip back to [`Usage`] existed, still read.
+    #[serde(default)]
+    pub unmetered: bool,
 }
 
 impl From<Usage> for UsageDelta {
@@ -48,6 +52,20 @@ impl From<Usage> for UsageDelta {
             cache_creation: u.cache_creation,
             cache_read: u.cache_read,
             dollars: u.dollars,
+            unmetered: u.unmetered,
+        }
+    }
+}
+
+impl From<&UsageDelta> for Usage {
+    fn from(d: &UsageDelta) -> Self {
+        Self {
+            input: d.input,
+            output: d.output,
+            cache_creation: d.cache_creation,
+            cache_read: d.cache_read,
+            dollars: d.dollars,
+            unmetered: d.unmetered,
         }
     }
 }
@@ -260,6 +278,90 @@ impl SessionEvent {
                 .collect(),
             _ => Vec::new(),
         }
+    }
+}
+
+/// The [`Record`] twin a [`SessionEvent`] authors through the seam —
+/// field-identical, one arm per variant, so the funnel in
+/// [`AgentLog::record`] covers every fact this type can mint and a missed
+/// pair cannot arise.  Dies with `SessionEvent` itself in wave 2, when the
+/// twin becomes the only form.
+fn record_twin(ev: &SessionEvent) -> Record {
+    use crate::record::{Forensic, Protocol};
+    match ev {
+        SessionEvent::SessionStarted {
+            session_id,
+            parent,
+            model,
+            provider,
+            system_prompt_bytes,
+            log_dir,
+            at_unix_ms,
+        } => Record::Protocol(Protocol::SessionStarted {
+            session_id: *session_id,
+            parent: *parent,
+            model: model.clone(),
+            provider: provider.clone(),
+            system_prompt_bytes: *system_prompt_bytes,
+            log_dir: log_dir.clone(),
+            at_unix_ms: *at_unix_ms,
+        }),
+        SessionEvent::SessionResumed {
+            model,
+            provider,
+            system_prompt_bytes,
+            at_unix_ms,
+        } => Record::Protocol(Protocol::SessionResumed {
+            model: model.clone(),
+            provider: provider.clone(),
+            system_prompt_bytes: *system_prompt_bytes,
+            at_unix_ms: *at_unix_ms,
+        }),
+        SessionEvent::SessionEnded => Record::Protocol(Protocol::SessionEnded),
+        SessionEvent::UserPrompt { exchange, text } => Record::Protocol(Protocol::UserPrompt {
+            exchange: *exchange,
+            text: text.clone(),
+        }),
+        SessionEvent::ContextMessage { exchange, message } => {
+            Record::Protocol(Protocol::ContextMessage {
+                exchange: *exchange,
+                message: message.clone(),
+            })
+        }
+        SessionEvent::StepStarted { n, tuning } => Record::Protocol(Protocol::StepStarted {
+            n: *n,
+            tuning: tuning.clone(),
+        }),
+        SessionEvent::AssistantMessage {
+            message,
+            pending_tool_ids,
+            stop_reason,
+        } => Record::Protocol(Protocol::AssistantMessage {
+            message: message.clone(),
+            pending_tool_ids: pending_tool_ids.clone(),
+            stop_reason: stop_reason.clone(),
+        }),
+        SessionEvent::ToolResults { results } => Record::Protocol(Protocol::ToolResults {
+            results: results.clone(),
+        }),
+        SessionEvent::ContextEdited { op, by } => Record::Protocol(Protocol::ContextEdited {
+            op: op.clone(),
+            by: *by,
+        }),
+        SessionEvent::UsageDelta { usage } => Record::Forensic(Forensic::UsageDelta { usage: *usage }),
+        SessionEvent::Cancelled => Record::Forensic(Forensic::Cancelled),
+        SessionEvent::Error { text } => Record::Forensic(Forensic::Error { text: text.clone() }),
+        SessionEvent::Nudge { used, max, cause } => Record::Forensic(Forensic::Nudge {
+            used: *used,
+            max: *max,
+            cause: cause.clone(),
+        }),
+        SessionEvent::ProviderError { error } => Record::Forensic(Forensic::ProviderError {
+            error: error.clone(),
+        }),
+        SessionEvent::Stalled { error } => Record::Forensic(Forensic::Stalled {
+            error: error.clone(),
+        }),
     }
 }
 
@@ -561,12 +663,17 @@ pub struct AgentLog {
     /// owns no directory of its own.
     _scratch: Option<tempfile::TempDir>,
     /// The model fold's own projection, over `record.jsonl` — parcel P1 of
-    /// `dev/docs/plans/260814_one_seam_one_log.md`.  Advanced in parallel with
-    /// the ledger above, through [`Self::advance`]; nothing reads from it yet,
-    /// since every method above still answers from the ledger it has always
-    /// used.  `events.jsonl`'s retirement (wave 2) is what turns this from a
-    /// shadow projection into the one this type answers from.
+    /// `dev/docs/plans/260814_one_seam_one_log.md`.  Advanced inline through
+    /// [`Self::advance`] on every fact [`Self::record`] emits, so it stays
+    /// consistent with the ledger above by construction; nothing reads from
+    /// it yet, since every method above still answers from the ledger it has
+    /// always used.  `events.jsonl`'s retirement (wave 2) is what turns this
+    /// from a shadow projection into the one this type answers from.
     model_memo: crate::record::model::Memo,
+    /// The one seam: every fact this log authors crosses here as a `Record` —
+    /// appended to `sessions/<n>/record.jsonl` and published on whatever bus
+    /// `Agent::couple` has attached, in that order, under one lock.
+    seam: crate::record::Emitter,
 }
 
 /// A planned cut: the visible prefix through `through_exchange` becomes the
@@ -766,6 +873,26 @@ impl AgentLog {
                 ),
             )
         })?;
+        // The model fold's own projection, off `record.jsonl` — quarantining
+        // its torn tail first, so the seam reopened below appends to a clean
+        // file.  A pre-plan session has no record log yet; its fold starts
+        // empty and its file is created at the first live fact.
+        let record_path = dir.join("record.jsonl");
+        let model_memo = if record_path.exists() {
+            match crate::record::model::resume(&record_path) {
+                Ok(memo) => memo,
+                Err(error) => {
+                    eprintln!(
+                        "exarch: could not fold {} into the model view yet ({error}); the shadow projection starts empty",
+                        record_path.display()
+                    );
+                    crate::record::model::Memo::default()
+                }
+            }
+        } else {
+            crate::record::model::Memo::default()
+        };
+        let seam = crate::record::Emitter::append_to(&record_path)?;
         let mut resumed = Self {
             id: session_id,
             dir,
@@ -778,9 +905,9 @@ impl AgentLog {
             provider,
             sessions_root: sessions_root.to_path_buf(),
             _scratch: None,
-            model_memo: crate::record::model::Memo::default(),
+            model_memo,
+            seam,
         };
-        resumed.seed_model_memo();
         for recorded in read.events {
             resumed.append_mirror(recorded.event, Some(recorded.bytes));
         }
@@ -857,21 +984,11 @@ impl AgentLog {
         }
     }
 
-    /// Seed the model fold's projection from `record.jsonl`, if a session
-    /// producing one has run here yet — `events.jsonl` remains the log this
-    /// type answers from until events.jsonl retires.
-    fn seed_model_memo(&mut self) {
-        let record_path = self.dir.join("record.jsonl");
-        if !record_path.exists() {
-            return;
-        }
-        match crate::record::model::resume(&record_path) {
-            Ok(memo) => self.model_memo = memo,
-            Err(error) => eprintln!(
-                "exarch: could not fold {} into the model view yet ({error}); the shadow projection starts empty",
-                record_path.display()
-            ),
-        }
+    /// The record seam this session authors through — a cheap clone whoever
+    /// couples a live bus, records a display commit, or feeds the chopper
+    /// takes for themselves.
+    pub fn record_emitter(&self) -> crate::record::Emitter {
+        self.seam.clone()
     }
 
     pub fn id(&self) -> AgentId {
@@ -1148,8 +1265,11 @@ impl AgentLog {
         }
         // Only a cancellation earns its own breadcrumb; an abort's marker is
         // the `ProviderError` already on disk.
-        if quiesced && matches!(reason, QuiesceReason::Cancelled) {
-            let _ = self.record(SessionEvent::Cancelled);
+        if quiesced
+            && matches!(reason, QuiesceReason::Cancelled)
+            && let Err(error) = self.record(SessionEvent::Cancelled)
+        {
+            eprintln!("exarch: the cancellation breadcrumb was not recorded: {error}");
         }
     }
 
@@ -1346,6 +1466,7 @@ impl AgentLog {
             self.log = Ledger::new(None);
             self.projection = Projection::default();
             self.model_memo = crate::record::model::Memo::default();
+            self.seam = crate::record::Emitter::none();
             self.record_started_lossy(None, system_prompt_bytes, at_unix_ms);
             return Ok(ClearRecord {
                 rotation: None,
@@ -1367,7 +1488,8 @@ impl AgentLog {
         }
         drop(self.events_file.take());
 
-        let rotation = match first_free_rotation(&events_path, transcript_path) {
+        let record_path = self.dir.join("record.jsonl");
+        let rotation = match first_free_rotation(&events_path, transcript_path, &record_path) {
             Ok(n) => n,
             Err(error) => return Err(self.refuse_clear(&error)),
         };
@@ -1375,17 +1497,59 @@ impl AgentLog {
         if let Err(error) = fs::rename(&events_path, &rotated) {
             return Err(self.refuse_clear(&error));
         }
+        let record_error = self.rotate_record(&record_path, rotation);
 
         self.log = Ledger::new(Some(events_path));
         self.projection = Projection::default();
         self.model_memo = crate::record::model::Memo::default();
         self.events_offset = 0;
         let started = self.started_event(None, system_prompt_bytes, at_unix_ms);
+        let seam_error = self.emit_twin(&started).err();
         let events_error = self.establish_head(started);
         Ok(ClearRecord {
             rotation: Some(rotation),
-            events_error,
+            events_error: join_errors([record_error, seam_error, events_error]),
         })
+    }
+
+    /// Rotate `record.jsonl` beside the event log, opening a fresh segment.
+    /// A rename or create failure never truncates over the old segment — no
+    /// recorded event is ever removed — so the seam keeps appending to
+    /// whatever file survives, and the failure is reported, not shrugged.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:record-file] rotates the session's record.jsonl on /clear; output infra, not turn-time data I/O"
+    )]
+    fn rotate_record(&mut self, path: &Path, rotation: u64) -> Option<io::Error> {
+        let rotated = rotation_path(path, rotation);
+        match fs::rename(path, &rotated) {
+            Ok(()) => {}
+            // A pre-plan session with no record log yet: nothing to keep,
+            // and a fresh segment is still due.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Some(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "clear committed, but {} could not be rotated; the record log continues in place: {error}",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+        match crate::record::Emitter::create(path) {
+            Ok(seam) => {
+                self.seam = seam;
+                None
+            }
+            Err(error) => Some(io::Error::new(
+                error.kind(),
+                format!(
+                    "clear committed, but a fresh {} could not be opened; the old record segment stays live: {error}",
+                    path.display()
+                ),
+            )),
+        }
     }
 
     // ── Meta-events ───────────────────────────────────────────────────────
@@ -1455,6 +1619,11 @@ impl AgentLog {
         fs::create_dir_all(&dir)?;
         let events_file = durable.then(|| open_events_file(&dir)).transpose()?;
         let events_path = durable.then(|| dir.join("events.jsonl"));
+        let seam = if durable {
+            crate::record::Emitter::create(&dir.join("record.jsonl"))?
+        } else {
+            crate::record::Emitter::none()
+        };
         Ok(Self {
             id: session_id,
             dir,
@@ -1468,6 +1637,7 @@ impl AgentLog {
             sessions_root,
             _scratch: None,
             model_memo: crate::record::model::Memo::default(),
+            seam,
         })
     }
 
@@ -1592,9 +1762,32 @@ impl AgentLog {
         Ok(Some(start..end))
     }
 
+    /// The one funnel every fact takes: the record seam first — durable and
+    /// published in one breath, the model fold advanced on the witnessed
+    /// record — then the retiring `events.jsonl` engine, kept in step until
+    /// wave 2 deletes it.  Seam-first, so the authoritative log never misses
+    /// a fact the old one has.
     fn record(&mut self, ev: SessionEvent) -> io::Result<()> {
+        self.emit_twin(&ev)?;
         let offset = self.write_event(&ev)?;
         self.append_mirror(ev, offset);
+        Ok(())
+    }
+
+    /// Author `ev`'s [`Record`] twin through the seam and advance the model
+    /// fold on the witnessed result.
+    ///
+    /// # Errors
+    /// A failed append to the one authoritative log is a session error.
+    fn emit_twin(&mut self, ev: &SessionEvent) -> io::Result<()> {
+        let recorded = match record_twin(ev) {
+            Record::Protocol(p) => crate::record::widen(self.seam.emit(p)?),
+            Record::Forensic(f) => crate::record::widen(self.seam.emit(f)?),
+            Record::Display(_) => {
+                unreachable!("no SessionEvent maps to a display commit")
+            }
+        };
+        self.advance(&recorded);
         Ok(())
     }
 
@@ -1610,6 +1803,9 @@ impl AgentLog {
     /// [`State::ReadyForUser`] even when `events.jsonl` cannot be written,
     /// and the `SessionStarted` bookends of a mirror-only session.
     fn record_lossy(&mut self, ev: SessionEvent) {
+        if let Err(error) = self.emit_twin(&ev) {
+            eprintln!("exarch: a harness-synthesized event was not recorded in record.jsonl: {error}");
+        }
         let offset = self.write_event(&ev).ok().flatten();
         self.append_mirror(ev, offset);
     }
@@ -2211,18 +2407,34 @@ fn quarantine_tail(path: &Path, tail: &CrashTail) -> io::Result<()> {
     Ok(())
 }
 
-fn first_free_rotation(events: &Path, transcript: &Path) -> io::Result<u64> {
+fn first_free_rotation(events: &Path, transcript: &Path, record: &Path) -> io::Result<u64> {
     let mut n = 0;
     loop {
-        let events_rotated = rotation_path(events, n);
-        let transcript_rotated = rotation_path(transcript, n);
-        if !events_rotated.exists() && !transcript_rotated.exists() {
+        let free = [events, transcript, record]
+            .iter()
+            .all(|path| !rotation_path(path, n).exists());
+        if free {
             return Ok(n);
         }
         n = n
             .checked_add(1)
             .ok_or_else(|| io::Error::other("no free rotation number remains"))?;
     }
+}
+
+/// The one `io::Error` a multi-file boundary reports, joining whatever
+/// half-failures it collected; `None` when every leg succeeded.
+fn join_errors<const N: usize>(errors: [Option<io::Error>; N]) -> Option<io::Error> {
+    let mut it = errors.into_iter().flatten();
+    let first = it.next()?;
+    let rest: Vec<String> = it.map(|error| error.to_string()).collect();
+    if rest.is_empty() {
+        return Some(first);
+    }
+    Some(io::Error::new(
+        first.kind(),
+        format!("{first}; {}", rest.join("; ")),
+    ))
 }
 
 fn rotation_path(path: &Path, n: u64) -> PathBuf {

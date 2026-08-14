@@ -8,6 +8,7 @@ use crate::agent::event::{ContextOp, EditAuthority};
 use crate::bus::card::Card;
 use crate::bus::post::AgentOutcome;
 use crate::provider::{Tuning, Usage};
+use crate::record::{Record, Recorded, Transient};
 use ral_core::types::Observation;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -17,6 +18,65 @@ use std::time::Duration;
 pub struct Event {
     pub id: AgentId,
     pub kind: Kind,
+}
+
+/// What the fleet channel carries: the legacy [`Kind`] envelope, or the two
+/// passengers the record seam publishes — a fact witnessed at append, and a
+/// transient that never touches the log.
+///
+/// One channel, so the TUI's single per-fleet dispatch loop routes all three
+/// by [`AgentId`] without restructuring; [`Signal::Event`] retires with
+/// [`Kind`] itself once both printers draw the view fold instead.
+pub enum Signal {
+    Event(Event),
+    Fact(AgentId, Recorded<Record>),
+    Transient(AgentId, Transient),
+}
+
+impl Signal {
+    /// The legacy [`Event`] this signal still renders through, while the
+    /// printers predate the view fold: an `Event` passes through, a fact
+    /// projects to the one retired-twin `Kind` whose emit site the seam
+    /// collapsed ([`record_kind`]), and a transient — unpublished by any
+    /// production seam yet — has no legacy form.  This projection is the
+    /// whole transitional bridge; it is deleted with `Kind`.
+    pub fn into_event(self) -> Option<Event> {
+        match self {
+            Self::Event(ev) => Some(ev),
+            Self::Fact(id, fact) => record_kind(fact.value()).map(|kind| Event { id, kind }),
+            Self::Transient(..) => None,
+        }
+    }
+}
+
+/// The retired-twin [`Kind`] a seam-recorded fact still draws as — exactly
+/// the records whose dual-write emit sites the seam collapsed, and nothing
+/// else: every other class keeps a live legacy emit beside its record, so
+/// deriving a `Kind` here too would draw it twice.
+fn record_kind(record: &Record) -> Option<Kind> {
+    use crate::record::{Forensic, Protocol};
+    match record {
+        Record::Protocol(Protocol::StepStarted { n, tuning }) => Some(Kind::Step {
+            n: *n,
+            tuning: tuning.clone(),
+        }),
+        Record::Protocol(Protocol::ContextEdited { op, by }) => Some(Kind::ContextEdited {
+            op: op.clone(),
+            by: *by,
+        }),
+        Record::Forensic(Forensic::UsageDelta { usage }) => Some(Kind::Usage(usage.into())),
+        Record::Forensic(Forensic::Error { text }) => Some(Kind::Error(text.clone())),
+        Record::Forensic(Forensic::Nudge { used, max, cause }) => Some(Kind::Nudge {
+            used: *used,
+            max: *max,
+            cause: cause.clone(),
+        }),
+        Record::Forensic(Forensic::ProviderError { error }) => {
+            Some(Kind::ProviderError(error.clone()))
+        }
+        Record::Forensic(Forensic::Stalled { error }) => Some(Kind::Stalled(error.clone())),
+        Record::Protocol(_) | Record::Display(_) | Record::Forensic(_) => None,
+    }
 }
 
 /// Prefix of the [`Kind::Error`] a recovered worker panic emits, so a sink can

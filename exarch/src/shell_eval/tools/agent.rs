@@ -24,6 +24,18 @@ pub(crate) fn spawn_branch(
 ) -> Result<SpawnedChild, String> {
     let name = format!("branch-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed));
     let child = session.branch().map_err(|e| e.to_string())?;
+    // The branch row's display commit, authored beside the legacy rail row
+    // `spawn_async` emits from the same inputs; a harness spawn's recorded
+    // row is the desk's own HarnessCall commit instead.
+    if let Err(error) = session.recorder().emit(crate::record::Display::ToolCall {
+        tool: "/branch".to_string(),
+        cmd: prompt.unwrap_or("(waiting for you)").to_string(),
+        summary: Some(format!("Agent {name} spawned (/branch).")),
+    }) {
+        emit.emit(Kind::Error(format!(
+            "a spawn row was not recorded in record.jsonl: {error}"
+        )));
+    }
     let spec = AsyncSpawn {
         verb: "/branch",
         name,

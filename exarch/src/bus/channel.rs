@@ -13,7 +13,8 @@
 //! degradation the user sees, never silence.
 
 use super::AgentId;
-use crate::bus::event::{Event, Kind};
+use crate::bus::event::{Event, Kind, Signal};
+use crate::record::Transient;
 use crate::sync::LockExt;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -21,7 +22,7 @@ use std::sync::mpsc::{RecvTimeoutError, SendError, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-/// The coalescible class a `Kind` belongs to; `None` is a reserved kind.
+/// The coalescible class a signal belongs to; `None` is a reserved signal.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MergeClass {
     Token,
@@ -29,12 +30,59 @@ enum MergeClass {
     State,
 }
 
-fn merge_class(kind: &Kind) -> Option<MergeClass> {
-    match kind {
-        Kind::Token(_) => Some(MergeClass::Token),
-        Kind::Thinking(_) => Some(MergeClass::Thinking),
-        Kind::State(_) => Some(MergeClass::State),
-        _ => None,
+/// The envelope a coalescible signal rides — merging never crosses envelopes,
+/// so a legacy `Kind::Token` run and a seam-published `Transient::Token` run
+/// stay two entries even for one agent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lane {
+    Kind,
+    Seam,
+}
+
+fn merge_key(sig: &Signal) -> Option<(Lane, AgentId, MergeClass)> {
+    match sig {
+        Signal::Event(ev) => {
+            let class = match &ev.kind {
+                Kind::Token(_) => MergeClass::Token,
+                Kind::Thinking(_) => MergeClass::Thinking,
+                Kind::State(_) => MergeClass::State,
+                _ => return None,
+            };
+            Some((Lane::Kind, ev.id, class))
+        }
+        Signal::Transient(id, t) => {
+            let class = match t {
+                Transient::Token(_) => MergeClass::Token,
+                Transient::Thinking(_) => MergeClass::Thinking,
+                Transient::State(_) => MergeClass::State,
+                _ => return None,
+            };
+            Some((Lane::Seam, *id, class))
+        }
+        Signal::Fact(..) => None,
+    }
+}
+
+/// The accumulated text of a `Token`/`Thinking` signal, in either envelope.
+fn merged_text(sig: &mut Signal) -> Option<&mut String> {
+    match sig {
+        Signal::Event(ev) => match &mut ev.kind {
+            Kind::Token(s) | Kind::Thinking(s) => Some(s),
+            _ => None,
+        },
+        Signal::Transient(_, Transient::Token(s) | Transient::Thinking(s)) => Some(s),
+        Signal::Transient(..) | Signal::Fact(..) => None,
+    }
+}
+
+fn text_len(sig: &Signal) -> usize {
+    match sig {
+        Signal::Event(ev) => match &ev.kind {
+            Kind::Token(s) | Kind::Thinking(s) => s.len(),
+            _ => 0,
+        },
+        Signal::Transient(_, Transient::Token(s) | Transient::Thinking(s)) => s.len(),
+        Signal::Transient(..) | Signal::Fact(..) => 0,
     }
 }
 
@@ -43,10 +91,9 @@ fn merge_class(kind: &Kind) -> Option<MergeClass> {
 pub(crate) const MERGE_TEXT_CAP: usize = 256 * 1024;
 
 /// One resident entry, plus the bytes shed off its front past
-/// [`MERGE_TEXT_CAP`] — zero for `State` and for every reserved kind.
+/// [`MERGE_TEXT_CAP`] — zero for `State` and for every reserved signal.
 struct QueueEntry {
-    id: AgentId,
-    kind: Kind,
+    signal: Signal,
     elided: u64,
 }
 
@@ -54,7 +101,7 @@ struct BusQueue {
     items: VecDeque<QueueEntry>,
     /// Served ahead of `items`, so a marker immediately follows the entry it
     /// describes.
-    markers: VecDeque<Event>,
+    markers: VecDeque<Signal>,
     /// Resident coalescible bytes, kept incrementally so no reader has to walk
     /// the queue for the figure.
     bytes: usize,
@@ -69,30 +116,29 @@ impl BusQueue {
         }
     }
 
-    fn push(&mut self, id: AgentId, kind: Kind) {
-        if let Some(class) = merge_class(&kind)
+    fn push(&mut self, signal: Signal) {
+        if let Some(key) = merge_key(&signal)
             && let Some(tail) = self.items.back_mut()
-            && tail.id == id
-            && merge_class(&tail.kind) == Some(class)
+            && merge_key(&tail.signal) == Some(key)
         {
-            merge_into(tail, kind, &mut self.bytes);
+            merge_into(tail, signal, &mut self.bytes);
             return;
         }
-        self.bytes += payload_len(&kind);
-        self.items.push_back(QueueEntry {
-            id,
-            kind,
-            elided: 0,
-        });
+        self.bytes += text_len(&signal);
+        self.items.push_back(QueueEntry { signal, elided: 0 });
     }
 }
 
-/// `tail` is already confirmed to be the same class and agent as `incoming`.
-fn merge_into(tail: &mut QueueEntry, incoming: Kind, bytes: &mut usize) {
-    match (&mut tail.kind, incoming) {
-        (Kind::Token(acc), Kind::Token(add)) | (Kind::Thinking(acc), Kind::Thinking(add)) => {
+/// `tail` is already confirmed to be the same lane, class, and agent as
+/// `incoming`: text concatenates under the cap, a newer `State` replaces the
+/// older in place.
+fn merge_into(tail: &mut QueueEntry, mut incoming: Signal, bytes: &mut usize) {
+    match merged_text(&mut incoming) {
+        Some(add) => {
+            let acc = merged_text(&mut tail.signal)
+                .expect("merge_key agrees the incoming and tail signals match");
             *bytes += add.len();
-            acc.push_str(&add);
+            acc.push_str(add);
             if acc.len() > MERGE_TEXT_CAP {
                 // Round the cut forward to a char boundary, or the retained
                 // tail is no longer valid UTF-8.
@@ -102,15 +148,8 @@ fn merge_into(tail: &mut QueueEntry, incoming: Kind, bytes: &mut usize) {
                 *bytes -= cut;
             }
         }
-        (Kind::State(acc), Kind::State(add)) => *acc = add,
-        _ => unreachable!("merge_class agrees the incoming and tail kinds match"),
-    }
-}
-
-fn payload_len(kind: &Kind) -> usize {
-    match kind {
-        Kind::Token(s) | Kind::Thinking(s) => s.len(),
-        _ => 0,
+        // `State` in either envelope: supersession, not accumulation.
+        None => tail.signal = incoming,
     }
 }
 
@@ -127,26 +166,21 @@ fn overflow_note(class: MergeClass, elided: u64) -> String {
 
 /// A pending marker first, else the front entry — minting that entry's marker,
 /// for the *next* pop, when it shed text.
-fn pop_one(q: &mut BusQueue) -> Option<Event> {
-    if let Some(ev) = q.markers.pop_front() {
-        return Some(ev);
+fn pop_one(q: &mut BusQueue) -> Option<Signal> {
+    if let Some(sig) = q.markers.pop_front() {
+        return Some(sig);
     }
     let entry = q.items.pop_front()?;
-    if merge_class(&entry.kind).is_some() {
-        q.bytes -= payload_len(&entry.kind);
-    }
+    q.bytes -= text_len(&entry.signal);
     if entry.elided > 0 {
-        let class =
-            merge_class(&entry.kind).expect("elided is only ever set on a coalescible entry");
-        q.markers.push_back(Event {
-            id: entry.id,
+        let (_, id, class) =
+            merge_key(&entry.signal).expect("elided is only ever set on a coalescible entry");
+        q.markers.push_back(Signal::Event(Event {
+            id,
             kind: Kind::SystemNote(overflow_note(class, entry.elided)),
-        });
+        }));
     }
-    Some(Event {
-        id: entry.id,
-        kind: entry.kind,
-    })
+    Some(entry.signal)
 }
 
 /// `receiver_alive` lets a sender whose receiver is already gone — which
@@ -208,7 +242,60 @@ impl BusSender {
         if !self.0.receiver_alive.load(Ordering::Acquire) {
             return Err(SendError(ev));
         }
-        self.0.lock().push(ev.id, ev.kind);
+        self.0.lock().push(Signal::Event(ev));
+        self.0.signal.notify_all();
+        Ok(())
+    }
+
+    /// [`Self::send`] over the full [`Signal`] payload — what the record
+    /// seam's publisher rides.
+    ///
+    /// # Errors
+    /// Returns `Err(SendError(sig))` when the receiver has been dropped.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the Err payload is the undelivered Signal itself — handing it back is the contract, and its width is Signal's, not an error type's"
+    )]
+    pub fn send_signal(&self, sig: Signal) -> Result<(), SendError<Signal>> {
+        if !self.0.receiver_alive.load(Ordering::Acquire) {
+            return Err(SendError(sig));
+        }
+        self.0.lock().push(sig);
+        self.0.signal.notify_all();
+        Ok(())
+    }
+
+    /// Downgrade to a sender that does not hold the channel open — the record
+    /// seam's publisher.  A session's log outlives any one bus, and its facts
+    /// are durable without a channel, so the seam must never make a drain's
+    /// disconnect wait on a session object's lifetime: liveness belongs to
+    /// the real producers alone.
+    pub(crate) fn downgrade(&self) -> WeakSender {
+        WeakSender(self.0.clone())
+    }
+}
+
+/// A [`BusSender`] that plays no part in disconnect: it never counts as a
+/// live sender, and a push after every real sender has gone may be seen or
+/// may race the receiver's disconnect — either is sound, because a fact it
+/// carries is already durable and a consumer catches up from the file.
+pub(crate) struct WeakSender(Arc<BusShared>);
+
+impl WeakSender {
+    /// Push under the same merge rule as [`BusSender::send`]; a no-op once
+    /// the receiver is gone.
+    ///
+    /// # Errors
+    /// Returns `Err(SendError(sig))` when the receiver has been dropped.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the Err payload is the undelivered Signal itself — the same contract as BusSender::send"
+    )]
+    pub(crate) fn send_signal(&self, sig: Signal) -> Result<(), SendError<Signal>> {
+        if !self.0.receiver_alive.load(Ordering::Acquire) {
+            return Err(SendError(sig));
+        }
+        self.0.lock().push(sig);
         self.0.signal.notify_all();
         Ok(())
     }
@@ -223,11 +310,11 @@ impl BusReceiver {
     /// # Errors
     /// Returns `Err(RecvError)` once the queue is empty and every sender has
     /// dropped.
-    pub fn recv(&self) -> Result<Event, std::sync::mpsc::RecvError> {
+    pub fn recv(&self) -> Result<Signal, std::sync::mpsc::RecvError> {
         let mut q = self.0.lock();
         loop {
-            if let Some(ev) = pop_one(&mut q) {
-                return Ok(ev);
+            if let Some(sig) = pop_one(&mut q) {
+                return Ok(sig);
             }
             if self.0.senders.load(Ordering::Acquire) == 0 {
                 return Err(std::sync::mpsc::RecvError);
@@ -246,10 +333,10 @@ impl BusReceiver {
     /// Returns `Err(TryRecvError::Empty)` when no event is queued but senders
     /// remain, or `Err(TryRecvError::Disconnected)` when the queue is empty
     /// and every sender has dropped.
-    pub fn try_recv(&self) -> Result<Event, TryRecvError> {
+    pub fn try_recv(&self) -> Result<Signal, TryRecvError> {
         let mut q = self.0.lock();
         match pop_one(&mut q) {
-            Some(ev) => Ok(ev),
+            Some(sig) => Ok(sig),
             None if self.0.senders.load(Ordering::Acquire) == 0 => Err(TryRecvError::Disconnected),
             None => Err(TryRecvError::Empty),
         }
@@ -261,12 +348,12 @@ impl BusReceiver {
     /// Returns `Err(RecvTimeoutError::Timeout)` when `timeout` elapses before
     /// an event arrives, or `Err(RecvTimeoutError::Disconnected)` when the
     /// queue is empty and every sender has dropped.
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<Event, RecvTimeoutError> {
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Signal, RecvTimeoutError> {
         let deadline = Instant::now() + timeout;
         let mut q = self.0.lock();
         loop {
-            if let Some(ev) = pop_one(&mut q) {
-                return Ok(ev);
+            if let Some(sig) = pop_one(&mut q) {
+                return Ok(sig);
             }
             if self.0.senders.load(Ordering::Acquire) == 0 {
                 return Err(RecvTimeoutError::Disconnected);
@@ -281,6 +368,21 @@ impl BusReceiver {
                 .wait_timeout(q, deadline - now)
                 .unwrap_or_else(PoisonError::into_inner);
             q = guard;
+        }
+    }
+
+    /// [`Self::try_recv`] through the same transitional legacy projection
+    /// `drain_pass` applies: the next signal that still renders as a `Kind`
+    /// event, skipping the seam's other passengers.  Dies with `Kind` once
+    /// both printers draw the view fold.
+    ///
+    /// # Errors
+    /// As [`Self::try_recv`], once no projectable signal remains buffered.
+    pub fn try_next_event(&self) -> Result<Event, TryRecvError> {
+        loop {
+            if let Some(ev) = self.try_recv()?.into_event() {
+                return Ok(ev);
+            }
         }
     }
 
@@ -306,9 +408,9 @@ impl Drop for BusReceiver {
 /// Blocking iteration, so `for ev in rx` and `rx.into_iter()` read as they
 /// would on an `mpsc::Receiver`.
 impl Iterator for BusReceiver {
-    type Item = Event;
+    type Item = Signal;
 
-    fn next(&mut self) -> Option<Event> {
+    fn next(&mut self) -> Option<Signal> {
         self.recv().ok()
     }
 }
@@ -345,7 +447,7 @@ mod tests {
             1,
             "an uninterrupted same-agent token run merges into one entry"
         );
-        let ev = rx.try_recv().expect("the merged entry");
+        let ev = rx.try_next_event().expect("the merged entry");
         let expected: String = (0..200).map(|i| i.to_string()).collect();
         match ev.kind {
             Kind::Token(text) => assert_eq!(text, expected, "concatenation keeps arrival order"),
@@ -371,7 +473,7 @@ mod tests {
         })
         .unwrap();
 
-        let ev = rx.try_recv().expect("the merged, capped entry");
+        let ev = rx.try_next_event().expect("the merged, capped entry");
         match ev.kind {
             Kind::Token(text) => {
                 assert_eq!(
@@ -388,7 +490,7 @@ mod tests {
             _ => panic!("expected the merged Token entry"),
         }
 
-        let marker = rx.try_recv().expect("exactly one overflow marker");
+        let marker = rx.try_next_event().expect("exactly one overflow marker");
         match marker.kind {
             Kind::SystemNote(note) => {
                 assert!(note.contains("100"), "names the elided count: {note}");
@@ -451,17 +553,17 @@ mod tests {
             5,
             "Born, one merged run, ToolCall, one merged run, Died: five entries"
         );
-        assert!(matches!(rx.try_recv().unwrap().kind, Kind::Born { .. }));
-        match rx.try_recv().unwrap().kind {
+        assert!(matches!(rx.try_next_event().unwrap().kind, Kind::Born { .. }));
+        match rx.try_next_event().unwrap().kind {
             Kind::Token(t) => assert_eq!(t, "x".repeat(50)),
             _ => panic!("expected the pre-ToolCall merged run"),
         }
-        assert!(matches!(rx.try_recv().unwrap().kind, Kind::ToolCall { .. }));
-        match rx.try_recv().unwrap().kind {
+        assert!(matches!(rx.try_next_event().unwrap().kind, Kind::ToolCall { .. }));
+        match rx.try_next_event().unwrap().kind {
             Kind::Token(t) => assert_eq!(t, "y".repeat(50)),
             _ => panic!("expected the post-ToolCall merged run"),
         }
-        assert!(matches!(rx.try_recv().unwrap().kind, Kind::Died));
+        assert!(matches!(rx.try_next_event().unwrap().kind, Kind::Died));
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
@@ -486,7 +588,7 @@ mod tests {
             1,
             "a same-agent State run replaces in place rather than growing"
         );
-        match rx.try_recv().unwrap().kind {
+        match rx.try_next_event().unwrap().kind {
             Kind::State(s) => assert_eq!(
                 s,
                 crate::bus::AgentState::Compacting,
@@ -521,7 +623,7 @@ mod tests {
             "an interleaving agent id never merges into another agent's tail entry"
         );
         for (want_id, want_text) in [(1, "a"), (2, "b"), (1, "c")] {
-            let ev = rx.try_recv().expect("three separate entries");
+            let ev = rx.try_next_event().expect("three separate entries");
             assert_eq!(ev.id, want_id);
             match ev.kind {
                 Kind::Token(t) => assert_eq!(t, want_text),
@@ -546,7 +648,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(rx.bytes(), 5, "the merge grows the byte figure");
-        rx.try_recv().unwrap();
+        let _ = rx.try_next_event().unwrap();
         assert_eq!(rx.bytes(), 0, "draining the entry frees its bytes");
     }
 

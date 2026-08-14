@@ -86,6 +86,7 @@ impl Agent {
         emit: &Emitter,
         policy: impl Fn(&Self, ParkMode) -> ParkMode,
     ) -> (AgentOutcome, Option<FOValue>) {
+        self.couple(emit);
         // Only the trunk publishes to the OS-signal slot; a sub-agent's token
         // is reached through the registry cascade instead.
         let _slot = self.parent.is_none().then(|| cancel::publish(&self.cancel));
@@ -146,6 +147,7 @@ impl Agent {
     /// oversight: converse posts no [`Item::Command`], so a slash-shaped user
     /// message reaches the model as ordinary text.
     pub(crate) fn attend_backlog(&mut self, emit: &Emitter) -> (AgentOutcome, Option<FOValue>) {
+        self.couple(emit);
         let mut control = NoControl;
         let mut final_outcome = (AgentOutcome::Empty, None);
         loop {
@@ -197,7 +199,7 @@ impl Agent {
                 Verdict::Continue => Flow::Continue,
             };
         }
-        announce(item, emit);
+        announce(item, emit, &self.recorder());
         // Read once, so a `/model` swap on the UI thread lands on the next
         // item rather than mid-item.
         let active = self.provider.current();
@@ -235,8 +237,10 @@ impl Agent {
         *final_outcome = agent_outcome(&outcome);
         // Before any nudge decision, and whether or not one follows: a chat
         // trunk keeps no registry, and its failures must still reach the human.
-        if let Err(e) = &outcome {
-            let _ = self.log.lock().record_provider_error(e);
+        if let Err(e) = &outcome
+            && let Err(error) = self.log.lock().record_provider_error(e)
+        {
+            eprintln!("exarch: a provider error was not recorded: {error}");
         }
         let waiting_on_children = self.has_live_children();
         // `last_input` is fresh off `deliberate`, so the gauge reads this
@@ -457,7 +461,7 @@ impl Agent {
 
 /// Emit the chrome an item's source shows as it enters context.  A nudge is an
 /// internal continuation and a command never reaches the model, so both are quiet.
-pub(super) fn announce(item: &Item, emit: &Emitter) {
+pub(super) fn announce(item: &Item, emit: &Emitter, recorder: &crate::record::Emitter) {
     match item {
         Item::Human(_) | Item::Wakeup(_) | Item::Message(_) => {
             emit.emit(Kind::UserPromptEcho(item.text()));
@@ -469,13 +473,27 @@ pub(super) fn announce(item: &Item, emit: &Emitter) {
             elapsed: r.elapsed,
         }),
         // A detached `spawn`'s deferred batch, decoded as the live foreground
-        // decode would.  It was stamped with and posted to this same session,
-        // so the emitter's id already routes its cards to the right viewport.
-        Item::Surface { values, .. } => {
+        // decode would — its io and diff surfaces through the same commit
+        // producer, one buffer per batch.  It was stamped with and posted to
+        // this same session, so the emitter's id already routes its cards to
+        // the right viewport.
+        Item::Surface { id, values, .. } => {
+            let mut buf = crate::record::commit::SurfaceBuffer::new();
             for v in values {
                 if let Some(kind) = shell_eval::accepted_surface(v, emit) {
+                    if let Err(error) = crate::fleet::desk::absorb_kind(&mut buf, recorder, *id, &kind)
+                    {
+                        emit.emit(Kind::Error(format!(
+                            "a display commit was not recorded in record.jsonl: {error}"
+                        )));
+                    }
                     emit.emit(kind);
                 }
+            }
+            if let Err(error) = buf.flush_surfaces(recorder) {
+                emit.emit(Kind::Error(format!(
+                    "a display commit was not recorded in record.jsonl: {error}"
+                )));
             }
         }
         Item::Nudge { .. } | Item::Command(_) => {}
@@ -681,7 +699,7 @@ mod tests {
         session.seed("but answer this one".into());
         let (outcome, _) = session.attend(&mut NoControl, &emit);
 
-        let kinds: Vec<Kind> = std::iter::from_fn(|| rx.try_recv().ok())
+        let kinds: Vec<Kind> = std::iter::from_fn(|| rx.try_next_event().ok())
             .map(|e| e.kind)
             .collect();
         assert!(
@@ -775,7 +793,7 @@ mod tests {
         session.run_shell("c0".into(), "return 1", 5, &emit);
 
         let mut notices = 0;
-        while let Ok(event) = rx.try_recv() {
+        while let Ok(event) = rx.try_next_event() {
             let Kind::Notice {
                 notice: crate::bus::card::Notice::Reap { cmd, cause },
                 ..
@@ -794,7 +812,7 @@ mod tests {
         assert_eq!(notices, 1, "the queued reap surfaces exactly once");
 
         session.run_shell("c1".into(), "return 1", 5, &emit);
-        while let Ok(event) = rx.try_recv() {
+        while let Ok(event) = rx.try_next_event() {
             assert!(
                 !matches!(event.kind, Kind::Notice { .. }),
                 "a further run with nothing new queued must surface no second notice"
@@ -840,7 +858,7 @@ mod tests {
             );
         }
         let mut saw_pin = false;
-        while let Ok(event) = rx.try_recv() {
+        while let Ok(event) = rx.try_next_event() {
             if let Kind::Pin { key, .. } = event.kind {
                 assert_eq!(key, shell_eval::SERVICES_PIN_KEY);
                 saw_pin = true;
@@ -881,7 +899,7 @@ mod tests {
             "the services pin must be retired once no durable service remains"
         );
         let mut saw_unpin = false;
-        while let Ok(event) = rx.try_recv() {
+        while let Ok(event) = rx.try_next_event() {
             if let Kind::Unpin { key } = event.kind {
                 assert_eq!(key, shell_eval::SERVICES_PIN_KEY);
                 saw_unpin = true;
@@ -902,7 +920,7 @@ mod tests {
         session.run_shell("c1".into(), r#"surface `unpin [key: "services"]"#, 5, &emit);
 
         let mut saw_error = false;
-        while let Ok(event) = rx.try_recv() {
+        while let Ok(event) = rx.try_next_event() {
             if let Kind::Error(msg) = event.kind {
                 assert!(msg.contains("protected service-ledger pin"));
                 saw_error = true;
@@ -948,7 +966,7 @@ mod tests {
         session.attend(&mut NoControl, &emit);
 
         assert!(
-            std::iter::from_fn(|| rx.try_recv().ok()).any(
+            std::iter::from_fn(|| rx.try_next_event().ok()).any(
                 |e| matches!(e.kind, Kind::Nudge { cause, .. } if cause == "pinned-state reminder")
             ),
             "the live register must raise a pinned-state nudge"
@@ -975,7 +993,7 @@ mod tests {
         session.attend_backlog(&emit);
 
         assert!(
-            !std::iter::from_fn(|| rx.try_recv().ok())
+            !std::iter::from_fn(|| rx.try_next_event().ok())
                 .any(|e| matches!(e.kind, Kind::Nudge { .. })),
             "a chat trunk raises no nudge"
         );
@@ -1012,7 +1030,7 @@ mod tests {
         session.run_shell("c2".into(), "$[0]", 5, &emit);
 
         let mut prunes = Vec::new();
-        while let Ok(event) = rx.try_recv() {
+        while let Ok(event) = rx.try_next_event() {
             if let Kind::Notice {
                 notice: crate::bus::card::Notice::Prune { names, idle_calls },
                 ..
@@ -1032,7 +1050,7 @@ mod tests {
         assert!(idle_calls[0] >= 2, "idle at least the armed bound");
 
         session.run_shell("c3".into(), "$[0]", 5, &emit);
-        while let Ok(event) = rx.try_recv() {
+        while let Ok(event) = rx.try_next_event() {
             assert!(
                 !matches!(
                     event.kind,
@@ -1100,7 +1118,7 @@ mod tests {
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
         session.check_disk_warn(&emit);
-        let event = rx.try_recv().expect("the first crossing warns");
+        let event = rx.try_next_event().expect("the first crossing warns");
         match event.kind {
             Kind::SystemNote(text) => assert!(text.contains("disk"), "{text}"),
             _ => panic!("expected Kind::SystemNote"),
@@ -1146,7 +1164,7 @@ mod tests {
         // The prune fires at this call's own ready boundary (idle bound 1).
         session.run_shell("c1".into(), "$[0]", 5, &emit);
         let after_prune_call = session.log.lock().event_count();
-        let pruned = std::iter::from_fn(|| rx.try_recv().ok()).any(|event| {
+        let pruned = std::iter::from_fn(|| rx.try_next_event().ok()).any(|event| {
             matches!(
                 event.kind,
                 Kind::Notice {

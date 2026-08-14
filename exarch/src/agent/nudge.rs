@@ -127,7 +127,9 @@ impl Registry {
                     let msg = "agent finished without calling `reply` after the nudge budget; \
                                returning a failure"
                         .to_string();
-                    let _ = log.record_error(msg);
+                    if let Err(error) = log.record_error(msg) {
+                        eprintln!("exarch: a nudge-budget failure was not recorded: {error}");
+                    }
                     return None;
                 }
             }
@@ -162,7 +164,9 @@ impl Registry {
         };
         if self.used >= BUDGET {
             let msg = format!("nudge budget exhausted ({BUDGET} attempts; last cause: {cause})");
-            let _ = log.record_error(msg);
+            if let Err(error) = log.record_error(msg) {
+                eprintln!("exarch: a nudge-budget failure was not recorded: {error}");
+            }
             return None;
         }
         self.used += 1;
@@ -173,9 +177,12 @@ impl Registry {
 
 /// The one call through the seam: `record_nudge` is durable and published in
 /// the same breath, so there is no separate display-side emit left to keep in
-/// step with it.
+/// step with it.  Best effort at this last resort alone — a nudge whose
+/// breadcrumb cannot land still has to reach the model.
 fn record_nudge(log: &mut AgentLog, used: u32, cause: String) {
-    let _ = log.record_nudge(used, BUDGET, cause);
+    if let Err(error) = log.record_nudge(used, BUDGET, cause) {
+        eprintln!("exarch: a nudge breadcrumb was not recorded: {error}");
+    }
 }
 
 /// The headless root's one-shot reply-verification nudge.

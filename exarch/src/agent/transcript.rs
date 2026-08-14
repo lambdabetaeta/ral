@@ -9,9 +9,8 @@
 //! whoever drains the live bus, so a child muted off the display still records
 //! its full trace.
 
-use crate::agent::event::EditReceipt;
 use crate::bus::card::observation_json;
-use crate::bus::{AgentId, Emitter, Kind};
+use crate::bus::{AgentId, Kind};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
@@ -159,13 +158,6 @@ fn rotation_path(path: &Path, n: u64) -> std::path::PathBuf {
         |name| name.to_string_lossy().into_owned(),
     );
     path.with_file_name(format!("{name}.{n}"))
-}
-
-pub(crate) fn emit_context_edited(emit: &Emitter, receipt: &EditReceipt) {
-    emit.emit(Kind::ContextEdited {
-        op: receipt.op.clone(),
-        by: receipt.by,
-    });
 }
 
 /// Project one bus event into its `transcript.jsonl` record, or `None` for a

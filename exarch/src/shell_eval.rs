@@ -293,6 +293,9 @@ pub(crate) fn run_shell(
     let seamless = crate::fleet::desk::SurfaceApplier {
         emit: emit.clone(),
         pins: None,
+        id: 0,
+        recorder: crate::record::Emitter::none(),
+        surface: std::sync::Mutex::new(crate::record::commit::SurfaceBuffer::new()),
     };
     let apply = seam.map_or(&seamless, |seam| &seam.apply);
     let report = ral_core::transport::dispatch_to_report(
@@ -1210,7 +1213,7 @@ keep-bottom
             card: crate::bus::card::Card(Vec::new()),
         };
         assert!(reject_protected_pin(&protected, &emit));
-        let event = rx.try_recv().expect("rejection should emit an error");
+        let event = rx.try_next_event().expect("rejection should emit an error");
         assert!(
             matches!(event.kind, Kind::Error(msg) if msg.contains("protected service-ledger pin")),
             "expected protected-pin diagnostic"
@@ -1815,7 +1818,7 @@ return !{{length $hits}}"
         // Drop the emitter so the channel disconnects and `try_recv` drains to
         // empty rather than blocking.
         drop(emit);
-        let kinds: Vec<crate::bus::Kind> = std::iter::from_fn(|| rx.try_recv().ok())
+        let kinds: Vec<crate::bus::Kind> = std::iter::from_fn(|| rx.try_next_event().ok())
             .map(|ev| ev.kind)
             .collect();
         (result, kinds)

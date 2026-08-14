@@ -8,13 +8,14 @@
 //! handler's chrome would otherwise outrun the run's earlier surface output.
 
 use crate::agent::event::{CACHE_SENTENCE, ContextOp, EditAuthority};
-use crate::agent::transcript::emit_context_edited;
 use crate::agent::{Agent, Build, LogCell, ProviderHandle, ReplyCell};
 use crate::bus::{AgentId, Emitter, Kind, Mailbox};
 use crate::egress;
 use crate::fleet::registry::{AgentRegistry, MessageError, NotADescendant};
 use crate::fleet::schedule::{CronSchedule, ScheduleRegistry, Trigger, parse_duration};
+use crate::record::commit::SurfaceBuffer;
 use crate::shell_eval::{self, PinDigests};
+use crate::sync::LockExt;
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
 use ral_core::transport::{Event, EventReceiver};
@@ -258,6 +259,12 @@ impl HostServices {
                 refused,
             },
         );
+        self.record_display(crate::record::Display::HarnessCall {
+            verb: act.verb().to_string(),
+            subject: subject.map(str::to_string),
+            payload: payload.clone(),
+            failed: refused,
+        });
         self.emit.emit(Kind::HarnessCall {
             verb: act.verb(),
             subject: subject.map(str::to_string),
@@ -266,6 +273,30 @@ impl HostServices {
         });
         if !refused {
             self.acts.lock().push(obs);
+        }
+    }
+
+    /// Author one display commit through the session's record seam.  A desk
+    /// handler runs while the attend thread is parked in `run_shell`, so the
+    /// log cell is free to lend the seam; the append failure a handler cannot
+    /// propagate surfaces as its own error row instead of a shrug.
+    fn record_display(&self, commit: crate::record::Display) {
+        let recorder = self.log.lock().record_emitter();
+        if let Err(error) = recorder.emit(commit) {
+            self.emit.emit(Kind::Error(format!(
+                "a display commit was not recorded in record.jsonl: {error}"
+            )));
+        }
+    }
+
+    /// [`Self::record_display`] for the forensic class — the harness-result
+    /// breadcrumbs that pair with an act's row.
+    fn record_forensic(&self, fact: crate::record::Forensic) {
+        let recorder = self.log.lock().record_emitter();
+        if let Err(error) = recorder.emit(fact) {
+            self.emit.emit(Kind::Error(format!(
+                "a forensic record was not appended to record.jsonl: {error}"
+            )));
         }
     }
 }
@@ -973,6 +1004,9 @@ impl ExarchDesk {
             ),
         };
         s.commit_act(DeskAct::Cancel, Some(&name), payload, !landed);
+        s.record_forensic(crate::record::Forensic::HarnessResult {
+            text: content.clone(),
+        });
         s.emit.emit(Kind::HarnessResult(content.clone()));
         // Only a scope violation raises; the raise is the model's only copy
         // of it. A real cancel and a miss both answer — the tag names which.
@@ -1022,6 +1056,9 @@ impl ExarchDesk {
             ),
         };
         s.commit_act(DeskAct::Message, Some(&name), payload, !ok);
+        s.record_forensic(crate::record::Forensic::HarnessResult {
+            text: content.clone(),
+        });
         s.emit.emit(Kind::HarnessResult(content.clone()));
         // Success is its own confirmation; a refusal raises, and the raise is
         // the model's only copy of it.
@@ -1078,6 +1115,9 @@ impl ExarchDesk {
             Err(e) => (format!("refused: {e}"), format!("could not schedule: {e}")),
         };
         s.commit_act(DeskAct::Schedule, Some(&label), payload, result.is_err());
+        s.record_forensic(crate::record::Forensic::HarnessResult {
+            text: content.clone(),
+        });
         s.emit.emit(Kind::HarnessResult(content.clone()));
         match result {
             Ok(receipt) => Ok(FOValue::Map {
@@ -1160,6 +1200,9 @@ impl ExarchDesk {
             )
         };
         s.commit_act(DeskAct::Unschedule, Some(&label), payload, !removed);
+        s.record_forensic(crate::record::Forensic::HarnessResult {
+            text: content.clone(),
+        });
         s.emit.emit(Kind::HarnessResult(content));
         Ok(answer)
     }
@@ -1300,6 +1343,13 @@ impl ExarchDesk {
         let exchanges = payload_exchanges(payload, "context-read")?;
         let subject = exchanges_subject(&exchanges);
         let result = self.services.log.lock().read_context(&exchanges);
+        self.services
+            .record_display(crate::record::Display::HarnessCall {
+                verb: "context-read".to_string(),
+                subject: Some(subject.clone()),
+                payload: subject.clone(),
+                failed: result.is_err(),
+            });
         self.services.emit.emit(Kind::HarnessCall {
             verb: "context-read",
             subject: Some(subject.clone()),
@@ -1360,13 +1410,15 @@ impl ExarchDesk {
             .lock()
             .apply_edit(op, EditAuthority::Model);
         match result {
+            // `apply_edit` records `ContextEdited` through the seam, and the
+            // live row derives from that published record: nothing separate
+            // to emit here.
             Ok(receipt) => {
                 self.services.commit_act(act, subject, payload, false);
-                emit_context_edited(&self.services.emit, &receipt);
-                self.services.emit.emit(Kind::HarnessResult(format!(
-                    "context changed by {:+} serialized bytes",
-                    receipt.bytes_delta
-                )));
+                let text = format!("context changed by {:+} serialized bytes", receipt.bytes_delta);
+                self.services
+                    .record_forensic(crate::record::Forensic::HarnessResult { text: text.clone() });
+                self.services.emit.emit(Kind::HarnessResult(text));
                 Ok(FOValue::Map {
                     entries: vec![(
                         "bytes-delta".to_string(),
@@ -1378,6 +1430,9 @@ impl ExarchDesk {
             }
             Err(error) => {
                 self.services.commit_act(act, subject, payload, true);
+                self.services.record_forensic(crate::record::Forensic::HarnessResult {
+                    text: error.clone(),
+                });
                 self.services.emit.emit(Kind::HarnessResult(error.clone()));
                 Err(Error::new(error, 1))
             }
@@ -1386,13 +1441,22 @@ impl ExarchDesk {
 }
 
 /// Decodes a surfaced value onto the bus, folding a `` `pin ``/`` `unpin ``
-/// into the pin mirror. [`HostSeam::apply`] is the one instance
+/// into the pin mirror and the io/diff surfaces into the commit producer's
+/// [`SurfaceBuffer`], so what reaches the record is the deduped, coalesced
+/// form the user saw. [`HostSeam::apply`] is the one instance
 /// `shell_eval::run_shell`'s own drain and [`DeskBinding`]'s both reach
 /// through, so the two paths render off the same applier rather than two that
 /// could drift.
 pub(crate) struct SurfaceApplier {
     pub(crate) emit: Emitter,
     pub(crate) pins: Option<PinDigests>,
+    /// The owning session's id and record seam — what the buffered commits
+    /// stamp through when they flush.
+    pub(crate) id: AgentId,
+    pub(crate) recorder: crate::record::Emitter,
+    /// Per-call, like the applier itself: `run_shell` flushes it at the call
+    /// boundary, so a call's effects record contiguously.
+    pub(crate) surface: Mutex<SurfaceBuffer>,
 }
 
 impl SurfaceApplier {
@@ -1413,8 +1477,64 @@ impl SurfaceApplier {
                     _ => {}
                 }
             }
+            let mut buf = self.surface.lock_ignore_poison();
+            if let Err(error) = absorb_kind(&mut buf, &self.recorder, self.id, &kind) {
+                drop(buf);
+                self.emit.emit(Kind::Error(format!(
+                    "a display commit was not recorded in record.jsonl: {error}"
+                )));
+            }
             self.emit.emit(kind);
         }
+    }
+
+    /// The call boundary: record whatever the buffers still hold, in their
+    /// barrier order.
+    pub(crate) fn flush(&self) {
+        let mut buf = self.surface.lock_ignore_poison();
+        if let Err(error) = buf.flush_surfaces(&self.recorder) {
+            drop(buf);
+            self.emit.emit(Kind::Error(format!(
+                "a display commit was not recorded in record.jsonl: {error}"
+            )));
+        }
+    }
+}
+
+/// Feed one decoded surface [`Kind`] to the commit producer — an io
+/// observation into its bucket, a lone diff card into the patch buffer —
+/// shared by [`SurfaceApplier::live`] and the deferred-batch path in
+/// `agent::attend::announce`, so the two cannot drift on what records.
+///
+/// Only the bucketed kinds — read, exec, grep, write — enter the buffer; a
+/// worker birth or capability check joins no group and records at once as
+/// its own commit, exactly the line the buffer's own `unreachable!` arms
+/// draw.
+pub(crate) fn absorb_kind(
+    buf: &mut SurfaceBuffer,
+    recorder: &crate::record::Emitter,
+    id: AgentId,
+    kind: &Kind,
+) -> std::io::Result<()> {
+    match kind {
+        Kind::Io { event, .. } => match &event.what {
+            Observed::Read { .. }
+            | Observed::Command { .. }
+            | Observed::Grep { .. }
+            | Observed::Write { .. } => buf.absorb_observation(recorder, id, event.clone()),
+            Observed::Worker { .. } | Observed::Capability { .. } | Observed::Act { .. } => {
+                let value = crate::bus::card::observation_wire(event);
+                let _recorded = recorder.emit(crate::record::Display::Observation { value })?;
+                Ok(())
+            }
+        },
+        Kind::Card(card) => match card.clone().into_single_diff() {
+            Ok((path, hunks)) => buf.absorb_patch(recorder, id, path, hunks),
+            // A richer card is a rendering of state, not an effect; it stays
+            // off the record until the remaining display commits land.
+            Err(_) => Ok(()),
+        },
+        _ => Ok(()),
     }
 }
 
@@ -1841,7 +1961,7 @@ mod tests {
         assert!(value.contains("[user]\nfirst prompt"));
         assert!(value.contains("[assistant]\nfirst answer"));
         assert!(desk.services.acts.audit().is_none(), "a read has no act");
-        let event = rx.try_recv().expect("the read must reach the trace");
+        let event = rx.try_next_event().expect("the read must reach the trace");
         assert!(matches!(
             event.kind,
             Kind::HarnessCall {
@@ -1860,7 +1980,7 @@ mod tests {
             "context-read must name at least one exchange"
         );
         let event = rx
-            .try_recv()
+            .try_next_event()
             .expect("a refused read still reaches the trace");
         assert!(matches!(
             event.kind,
@@ -2004,7 +2124,13 @@ mod tests {
         let binding = DeskBinding {
             seam: Arc::new(HostSeam {
                 desk: desk(),
-                apply: SurfaceApplier { emit, pins: None },
+                apply: SurfaceApplier {
+                    emit,
+                    pins: None,
+                    id: 0,
+                    recorder: crate::record::Emitter::none(),
+                    surface: Mutex::new(SurfaceBuffer::new()),
+                },
             }),
             events: transport.events_shared(),
         };
@@ -2022,7 +2148,7 @@ mod tests {
 
         // Proof `apply` ran, not just that `handle` did.
         let mut saw_unpin = false;
-        while let Ok(event) = rx.try_recv() {
+        while let Ok(event) = rx.try_next_event() {
             if let Kind::Unpin { key } = event.kind {
                 assert_eq!(key, "test-marker");
                 saw_unpin = true;
@@ -2105,6 +2231,9 @@ mod tests {
         SurfaceApplier {
             emit,
             pins: Some(mirror.clone()),
+            id: 0,
+            recorder: crate::record::Emitter::none(),
+            surface: Mutex::new(SurfaceBuffer::new()),
         }
         .live(pin_value("tasks", "hi"));
 
@@ -2138,6 +2267,9 @@ mod tests {
         let applier = SurfaceApplier {
             emit,
             pins: Some(mirror.clone()),
+            id: 0,
+            recorder: crate::record::Emitter::none(),
+            surface: Mutex::new(SurfaceBuffer::new()),
         };
         let d = ExarchDesk {
             services: HostServices {
@@ -2168,6 +2300,9 @@ mod tests {
         let applier = SurfaceApplier {
             emit,
             pins: Some(mirror.clone()),
+            id: 0,
+            recorder: crate::record::Emitter::none(),
+            surface: Mutex::new(SurfaceBuffer::new()),
         };
         let d = ExarchDesk {
             services: HostServices {
@@ -2888,7 +3023,7 @@ mod tests {
 
         let mut saw_unpin = false;
         let mut saw_spawn = false;
-        for event in rx {
+        for event in rx.filter_map(crate::bus::Signal::into_event) {
             match event.kind {
                 Kind::Unpin { .. } => saw_unpin = true,
                 Kind::HarnessCall { verb: "spawn", .. } => {
@@ -3167,7 +3302,7 @@ mod tests {
         .expect_err("a duplicate label must be refused");
 
         let mut acts = Vec::new();
-        while let Ok(event) = rx.try_recv() {
+        while let Ok(event) = rx.try_next_event() {
             if let Kind::HarnessCall {
                 verb: "schedule",
                 subject,
@@ -3245,7 +3380,7 @@ mod tests {
         );
 
         let mut acts = Vec::new();
-        while let Ok(event) = rx.try_recv() {
+        while let Ok(event) = rx.try_next_event() {
             if let Kind::HarnessCall {
                 verb: "reply",
                 subject,
@@ -3380,7 +3515,7 @@ mod tests {
         .expect_err("a message to an unknown name must be refused");
 
         let mut rows = Vec::new();
-        while let Ok(event) = rx.try_recv() {
+        while let Ok(event) = rx.try_next_event() {
             if let Kind::HarnessCall { verb, failed, .. } = event.kind {
                 rows.push((verb, failed));
             }

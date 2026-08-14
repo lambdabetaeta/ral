@@ -72,12 +72,35 @@ impl LogCell {
 }
 
 impl Agent {
-    /// Best effort: a failed log write must not swallow the line the user is
-    /// owed.  `record_error` is the one call through the seam — durable and
-    /// published in the same breath — so there is no second write to keep in
-    /// step with it.
+    /// Point this session's record seam at the bus `emit` rides, so every
+    /// fact the log authors is published live as it lands on disk.  Called
+    /// at each entry where a session meets a bus — `attend`, `deliberate`,
+    /// `run_shell`, `rewind` — because the seam outlives any one bus:
+    /// idempotent, and re-coupling over a dead per-exchange channel is how a
+    /// headless session's next exchange comes back on air.
+    pub(crate) fn couple(&self, emit: &Emitter) {
+        self.log.lock().record_emitter().attach(emit.fleet_sink());
+    }
+
+    /// This session's record seam, for whoever authors a display commit —
+    /// the chopper, the surface buffer, a tool-call row.
+    pub(crate) fn recorder(&self) -> crate::record::Emitter {
+        self.log.lock().record_emitter()
+    }
+
+    /// `record_error` is one call through the seam — durable and published in
+    /// the same breath, so there is no second write to keep in step with it.
+    /// Best effort at this last resort alone: the line the user is owed must
+    /// not vanish silently when the log itself is the failure.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "the message is consumed by the record on the happy path; the clone only funds the last-resort stderr copy"
+    )]
     pub(crate) fn note_error(&self, msg: String) {
-        let _ = self.log.lock().record_error(msg);
+        let recorded = self.log.lock().record_error(msg.clone());
+        if let Err(error) = recorded {
+            eprintln!("exarch: {msg} (and the error itself was not recorded: {error})");
+        }
     }
 
     /// An operational note: it reaches the transcript and the display, but has
@@ -148,6 +171,7 @@ impl Agent {
         timeout_secs: u64,
         emit: &Emitter,
     ) -> SessionToolResult {
+        self.couple(emit);
         // At entry, so a call that fails to evaluate still ages the clock.
         self.ral_epoch += 1;
         // The adoption end of a handler's body-side `Shell::fork_into_nursery`,
@@ -165,6 +189,9 @@ impl Agent {
             apply: desk::SurfaceApplier {
                 emit: emit.clone(),
                 pins: Some(self.pins.clone()),
+                id: self.id,
+                recorder: self.recorder(),
+                surface: Mutex::new(crate::record::commit::SurfaceBuffer::new()),
             },
         });
         let outcome = {
@@ -184,6 +211,10 @@ impl Agent {
                 Some(&seam),
             )
         };
+        // The call boundary: whatever the commit producer still buffers —
+        // deduped io groups, a coalesced diff — records now, so a call's
+        // effects land contiguously ahead of its result.
+        seam.apply.flush();
         // Only now, with the dispatch returned and the install dropped: the
         // worker probe below is legal at a run boundary and nowhere else.
         let content = match outcome {
@@ -313,7 +344,7 @@ mod tests {
             result.content
         );
         assert!(
-            std::iter::from_fn(|| rx.try_recv().ok()).any(|event| {
+            std::iter::from_fn(|| rx.try_next_event().ok()).any(|event| {
                 matches!(
                     event.kind,
                     Kind::HarnessCall {
@@ -674,7 +705,7 @@ mod tests {
         let mut reaps = 0;
         for i in 0..6 {
             session.run_shell(format!("spin{i}"), "$[0]", 5, &emit);
-            while let Ok(event) = rx.try_recv() {
+            while let Ok(event) = rx.try_next_event() {
                 let Kind::Notice {
                     notice: crate::bus::card::Notice::Reap { cmd, cause },
                     ..

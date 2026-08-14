@@ -1964,7 +1964,7 @@ mod tests {
             5,
             &emit,
         );
-        let saw_refusal = std::iter::from_fn(|| rx.try_recv().ok()).any(|event| {
+        let saw_refusal = std::iter::from_fn(|| rx.try_next_event().ok()).any(|event| {
             matches!(&event.kind, crate::bus::Kind::Error(msg) if msg.contains("protected service-ledger pin"))
         });
         assert!(saw_refusal, "expected the protected-pin diagnostic");
