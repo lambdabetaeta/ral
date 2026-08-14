@@ -14,17 +14,20 @@ use crate::bus::card::{
     self, Card, Mark, Row, execs_card, greps_card, observation_card, observation_from_wire,
     rail_place, reads_card,
 };
-use crate::bus::{AgentId, AgentOutcome, Event, FleetBus, Kind, Sink, pump};
+use crate::bus::{AgentId, AgentOutcome, BusReceiver, Event, FleetBus, Kind, Signal, Sink, pump};
 use crate::fleet::Fleet;
 use crate::provider::{Engine, Provider, Usage};
-use crate::record::{self, Blocks, Printer, Transient};
+use crate::record::{self, Blocks, Fold, Printer, Record, Transient, View};
 use crate::shell_eval::user_json;
 use crate::tui::SessionInfo;
 use ral_core::serial::FOValue;
 use ral_core::types::{CommandOrigin, Observation, Observed};
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
+use std::time::{Duration, Instant};
 
 /// What the root agent's output looks like on stdout in headless mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -68,12 +71,11 @@ pub struct Headless<'a> {
     panicked: bool,
     ended_with_newline: bool,
     /// The [`record::Seq`] of [`record::Blocks::rows`] this printer has
-    /// already turned into stderr progress lines — see [`Printer`]'s impl
-    /// below, additive to the [`Sink`] impl above and not yet the live
-    /// driver (`dev/docs/plans/260814_one_seam_one_log.md`'s R1 owns that
-    /// wiring).  A cursor by identity rather than position, since a windowed
-    /// memo makes an index wrong.
-    synced_through: record::Seq,
+    /// already turned into stderr progress lines, per source agent — a
+    /// fact's `Seq` is only unique within its own session log, so root's and
+    /// a child's commits each need their own cursor. A cursor by identity
+    /// rather than position, since a windowed memo makes an index wrong.
+    synced_through: HashMap<AgentId, record::Seq>,
 }
 
 impl<'a> Headless<'a> {
@@ -95,7 +97,7 @@ impl<'a> Headless<'a> {
             reply: None,
             panicked: false,
             ended_with_newline: false,
-            synced_through: record::Seq::new(0),
+            synced_through: HashMap::new(),
         }
     }
 
@@ -233,13 +235,6 @@ impl Sink for Headless<'_> {
                 }
             }
             Kind::Token(_) => {}
-            Kind::Usage(_) => {}
-            Kind::Step { n, .. } => {
-                if id == self.root_id {
-                    self.steps += 1;
-                    let _ = writeln!(self.err, "[step {n}]");
-                }
-            }
             Kind::ToolCall {
                 tool, cmd, summary, ..
             } if id == self.root_id => {
@@ -270,7 +265,6 @@ impl Sink for Headless<'_> {
                 }
             }
             Kind::ToolCall { .. } | Kind::HarnessCall { .. } => {}
-            Kind::ToolResult(_) | Kind::HarnessResult(_) => {}
             Kind::StopReason(raw) => {
                 if id == self.root_id {
                     self.last_stop = Some(raw.clone());
@@ -286,32 +280,12 @@ impl Sink for Headless<'_> {
             Kind::SystemNote(text) => {
                 let _ = writeln!(self.err, "{text}");
             }
-            Kind::Cleared => {}
-            Kind::ContextEdited { .. } => {}
             Kind::Nudge {
                 used, max, cause, ..
             } if id == self.root_id => {
                 let _ = writeln!(self.err, "[nudge {used}/{max}: {cause}]");
             }
             Kind::Nudge { .. } => {}
-            Kind::ProviderError(error) => {
-                let _ = writeln!(self.err, "provider error: {error:?}");
-            }
-            Kind::Stalled(error) => {
-                let _ = writeln!(self.err, "stream stalled, turn resumes: {error:?}");
-            }
-            // Every kind carrying a card projects the same way: only the card,
-            // since the structural fact riding beside it is the trace's business.
-            Kind::Card(card)
-            | Kind::Io { card, .. }
-            | Kind::Done { card, .. }
-            | Kind::Notice { card, .. }
-            | Kind::Context { card, .. }
-            | Kind::Resources { card, .. } => {
-                for line in card_stderr(&card) {
-                    let _ = writeln!(self.err, "{line}");
-                }
-            }
             // Sub-agent tokens never reach `out`, so this breadcrumb is the
             // only live sign of a child; its own log dir holds the rest.
             Kind::SubagentDone {
@@ -331,30 +305,133 @@ impl Sink for Headless<'_> {
                     }
                 }
             }
-            // Interactive-only, or pure presentation.  Nothing is lost: a
-            // boundary carries no value (`result` comes from the attend digest),
-            // and reasoning round-trips on the assistant message anyway.
-            Kind::Boundary
-            | Kind::Born { .. }
-            | Kind::Died
-            | Kind::UserPromptEcho(_)
-            | Kind::Reasoning { .. }
-            | Kind::Thinking(_)
-            | Kind::State(_) => {}
+            // `/resources` and `/context` still ride a direct `Kind` — the one
+            // fold neither survey has a `Transient`/`Display` producer for.
+            Kind::Resources { card, .. } | Kind::Context { card, .. } => {
+                for line in card_stderr(&card) {
+                    let _ = writeln!(self.err, "{line}");
+                }
+            }
             // A pin overwrites a TUI register; headless has none.
             Kind::Pin { .. } | Kind::Unpin { .. } => {}
+            // `Step` rides `Protocol` alone, with no `Display` twin of its
+            // own yet, so `Signal::into_event` (see `Self::absorb`) is still
+            // its one route to this arm.
+            Kind::Step { n, .. } if id == self.root_id => {
+                self.steps += 1;
+                let _ = writeln!(self.err, "[step {n}]");
+            }
+            Kind::Step { .. } => {}
+            // Every other class has crossed to the record seam: its live row
+            // now rides a `Signal::Fact`, folded by `record::View` and drawn
+            // by `Printer` below — never a raw `Kind` here. `ContextEdited`
+            // is the one further exception, for the same reason as `Step`
+            // above, but drawn no differently here than it always was — a
+            // context edit is chrome, never shown to headless.
+            Kind::ContextEdited { .. }
+            | Kind::Reasoning { .. }
+            | Kind::UserPromptEcho(_)
+            | Kind::Usage(_)
+            | Kind::ProviderError(_)
+            | Kind::Stalled(_)
+            | Kind::ToolResult(_)
+            | Kind::HarnessResult(_)
+            | Kind::Cleared
+            | Kind::Boundary
+            | Kind::Born { .. }
+            | Kind::Died
+            | Kind::Thinking(_)
+            | Kind::State(_)
+            | Kind::Card(_)
+            | Kind::Io { .. }
+            | Kind::Done { .. }
+            | Kind::Notice { .. } => {}
+        }
+    }
+
+    /// Drain the bus fully, dispatching every `Signal` — never only the
+    /// `Event`s [`Signal::into_event`] can still bridge — then block for the
+    /// next arrival exactly as the default [`Sink::drive`] does.  Headless
+    /// overrides rather than shares that default because a `Signal::Fact` or
+    /// `Signal::Transient` has no `Event` form to hand it once its producer
+    /// has crossed to the record seam.
+    fn drive(&mut self, rx: &BusReceiver, done: &AtomicBool) -> io::Result<()> {
+        /// How often a blocked drain wakes to re-check `done` — mirrors
+        /// `bus::sink::DRAIN_POLL`, kept as its own constant rather than a
+        /// shared one so this override stays self-contained.
+        const POLL: Duration = Duration::from_millis(10);
+        let mut blocks: HashMap<AgentId, Blocks> = HashMap::new();
+        loop {
+            loop {
+                match rx.try_recv() {
+                    Ok(sig) => self.absorb(sig, &mut blocks),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => return Ok(()),
+                }
+            }
+            if done.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            match rx.recv_timeout(POLL) {
+                Ok(sig) => self.absorb(sig, &mut blocks),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            }
         }
     }
 }
 
-// ── `record::Printer`: the view fold's second consumer ─────────────────────
-//
-// Additive to the `Sink` impl above, which stays what `pump` actually drives
-// today — `dev/docs/plans/260814_one_seam_one_log.md`'s R1 owns rewiring
-// `pump`/`Fleet` onto the record seam, and that rewiring is what would let a
-// real session hand this a live `Blocks` value. Headless's own totals
-// (`steps`, `usage`, `reply`) stay printer-local state per the plan's own
-// module map, not folded into `Blocks`.
+impl Headless<'_> {
+    /// One `Signal`, dispatched to whichever half still carries it.
+    ///
+    /// A `Protocol` fact (`Step`, `ContextEdited`) has no `Display`/`Forensic`
+    /// twin yet, so it is still drawn through the legacy `Kind` bridge
+    /// [`Signal::into_event`] projects it to. Every other fact is `Display`
+    /// or `Forensic`, folded into its source agent's own [`Blocks`] — each
+    /// agent's `Seq` numbers its own log, so root's and a child's commits
+    /// never share one memo — and drawn fresh from there.
+    fn absorb(&mut self, sig: Signal, blocks: &mut HashMap<AgentId, Blocks>) {
+        match sig {
+            Signal::Event(e) => self.handle(e),
+            Signal::Fact(id, rec) if matches!(rec.value(), Record::Protocol(_)) => {
+                if let Some(event) = Signal::Fact(id, rec).into_event() {
+                    self.handle(event);
+                }
+            }
+            Signal::Fact(id, rec) => {
+                let entry = blocks.entry(id).or_default();
+                View::step(entry, &rec)
+                    .expect("the view fold never refuses a live Display/Forensic record");
+                self.sync_agent(id, entry);
+            }
+            Signal::Transient(id, t) => {
+                // Every printer draws a fault whatever its source, since an
+                // unwritable log is a fact about the plumbing, not one agent;
+                // everything else here rides root's own register.
+                if id == self.root_id || matches!(t, Transient::Fault { .. }) {
+                    self.transient(&t);
+                }
+            }
+        }
+    }
+
+    /// Print every row `blocks` has committed since this source agent's own
+    /// cursor, then advance it.
+    fn sync_agent(&mut self, id: AgentId, blocks: &Blocks) {
+        let since = self
+            .synced_through
+            .get(&id)
+            .copied()
+            .unwrap_or_else(|| record::Seq::new(0));
+        for row in blocks.rows().iter().filter(|r| r.id().seq() > since) {
+            self.print_row(id, row.kind());
+        }
+        if let Some(last) = blocks.rows().last() {
+            self.synced_through.insert(id, last.id().seq());
+        }
+    }
+}
+
 impl Printer for Headless<'_> {
     fn transient(&mut self, t: &Transient) {
         match t {
@@ -365,15 +442,17 @@ impl Printer for Headless<'_> {
                     self.ended_with_newline = *last == b'\n';
                 }
             }
-            // One boundary per step, mirroring `Kind::Step`'s old count —
-            // `record::Protocol::StepStarted` carries the authoritative index,
-            // but that class is the model fold's alone; the view side only
-            // ever had the boundary to count by.
             Transient::Boundary => self.steps += 1,
             Transient::StopReason(raw) => {
                 self.last_stop = Some(raw.clone());
                 let _ = writeln!(self.err, "[stop: {raw}]");
             }
+            // The seam's own diagnostic: drawn by every printer whatever
+            // else it is doing, since it is a fact about the log itself.
+            Transient::Fault { text } => {
+                let _ = writeln!(self.err, "{text}");
+            }
+            // A pin overwrites a TUI register; headless has none.
             Transient::Token(_)
             | Transient::Thinking(_)
             | Transient::State(_)
@@ -382,20 +461,13 @@ impl Printer for Headless<'_> {
             | Transient::Cleared
             | Transient::Resources { .. }
             | Transient::Pin { .. }
-            | Transient::Unpin { .. }
-            | Transient::Fault { .. } => {}
+            | Transient::Unpin { .. } => {}
         }
     }
 
     fn sync(&mut self, blocks: &Blocks) {
-        let rows = blocks.rows();
-        let since = self.synced_through;
-        for row in rows.iter().filter(|r| r.id().seq() > since) {
-            self.print_row(row.kind());
-        }
-        if let Some(last) = rows.last() {
-            self.synced_through = last.id().seq();
-        }
+        let root_id = self.root_id;
+        self.sync_agent(root_id, blocks);
     }
 }
 
@@ -403,36 +475,15 @@ impl Headless<'_> {
     /// One fold commit, projected onto stderr exactly as [`Sink::handle`]
     /// projects its `Kind` twin — a rendering, chosen fresh each time from
     /// whichever record vocabulary reached this printer.
-    fn print_row(&mut self, kind: &record::BlockKind) {
+    #[allow(clippy::match_same_arms)]
+    fn print_row(&mut self, id: AgentId, kind: &record::BlockKind) {
         use record::BlockKind as K;
         match kind {
-            K::ToolCall {
-                tool, cmd, summary, ..
-            } => {
-                let _ = writeln!(self.err, "[tool: {tool}]");
-                if let Some(s) = summary {
-                    for line in s.lines() {
-                        let _ = writeln!(self.err, "  {line}");
-                    }
-                }
-                for line in cmd.lines() {
-                    let _ = writeln!(self.err, "  {line}");
-                }
-            }
-            K::HarnessCall {
-                verb,
-                subject,
-                payload,
-                ..
-            } => {
-                let _ = writeln!(self.err, "[tool: {verb}]");
-                if let Some(s) = subject {
-                    let _ = writeln!(self.err, "  {s}");
-                }
-                for line in payload.lines() {
-                    let _ = writeln!(self.err, "  {line}");
-                }
-            }
+            // Still dual-emitted directly as a `Kind` from `shell_eval`'s
+            // tools, `fleet::desk`, and `agent::attend` — drawn from that
+            // legacy path in `Sink::handle` until each site's own cut retires
+            // the direct emit, per this class's one-producer invariant.
+            K::ToolCall { .. } | K::HarnessCall { .. } | K::SubagentDone { .. } => {}
             K::Error { text } => {
                 if text.starts_with(crate::bus::WORKER_PANIC_PREFIX) {
                     self.panicked = true;
@@ -443,7 +494,9 @@ impl Headless<'_> {
                 let _ = writeln!(self.err, "{text}");
             }
             K::Nudge { used, max, cause } => {
-                let _ = writeln!(self.err, "[nudge {used}/{max}: {cause}]");
+                if id == self.root_id {
+                    let _ = writeln!(self.err, "[nudge {used}/{max}: {cause}]");
+                }
             }
             K::ProviderError { error } => {
                 let _ = writeln!(self.err, "provider error: {error:?}");
@@ -464,31 +517,15 @@ impl Headless<'_> {
             K::Notice { notice } => {
                 self.print_card(&card::notice_card(&card::to_card_notice(notice)));
             }
-            K::Context { rows } => self.print_card(&card::context_rows_card(rows)),
-            K::SubagentDone {
-                name,
-                text: _,
-                error,
-                elapsed_ms,
-            } => {
-                #[allow(
-                    clippy::cast_precision_loss,
-                    reason = "elapsed-ms display precision; far below f64's mantissa"
-                )]
-                let secs = *elapsed_ms as f64 / 1000.0;
-                match error {
-                    Some(reason) => {
-                        let _ =
-                            writeln!(self.err, "[agent: {name} failed in {secs:.1}s — {reason}]");
-                    }
-                    None => {
-                        let _ = writeln!(self.err, "[agent: {name} done in {secs:.1}s]");
-                    }
-                }
-            }
+            // Still dual-emitted directly as `Kind::Context` from
+            // `agent::resources` — drawn from that legacy path for the same
+            // reason as `ToolCall` above.
+            K::Context { .. } => {}
             K::Step { n } => {
-                self.steps += 1;
-                let _ = writeln!(self.err, "[step {n}]");
+                if id == self.root_id {
+                    self.steps += 1;
+                    let _ = writeln!(self.err, "[step {n}]");
+                }
             }
             K::ContextEdited { op, by } => {
                 let authority = match by {
@@ -919,35 +956,99 @@ mod tests {
         assert_eq!(v["stop_reason"], serde_json::json!("panicked"), "{out}");
     }
 
-    /// The `Kind::Step(n)` index restarts each time the root resumes after an
-    /// async-spawned block, so storing `n` would report only the last segment.
+    /// A `Protocol::StepStarted` fact through the real live path — `absorb`,
+    /// which `drive` calls in production — rather than a hand-fed `Kind`: a
+    /// step has no `Display` twin of its own, so this is the one class that
+    /// still crosses `Signal::into_event`'s legacy bridge, and this test is
+    /// what pins that bridge open. `n`'s index restarts each time the root
+    /// resumes after an async-spawned block, so storing it would report only
+    /// the last segment; a child's own steps never count toward root's.
     #[test]
     fn num_steps_counts_root_steps_across_segments() {
+        use crate::record::{Protocol, Record, Recorded, Seq, Stamp};
         let root: AgentId = 1;
         let sub: AgentId = 2;
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
         let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
+        let mut blocks = HashMap::new();
+        let mut seq = 0u64;
+        let mut step_started = |id: AgentId, n: u32| {
+            seq += 1;
+            Signal::Fact(
+                id,
+                Recorded::new(
+                    Stamp::new(Seq::new(seq), 0..0),
+                    Record::Protocol(Protocol::StepStarted {
+                        n,
+                        tuning: Tuning::default(),
+                    }),
+                ),
+            )
+        };
         // Two segments whose indices reset (1..3, then 1..2).
         for n in [1, 2, 3, 1, 2] {
-            h.handle(Event {
-                id: root,
-                kind: Kind::Step {
-                    n,
-                    tuning: Tuning::default(),
-                },
-            });
+            h.absorb(step_started(root, n), &mut blocks);
         }
-        h.handle(Event {
-            id: sub,
-            kind: Kind::Step {
-                n: 1,
-                tuning: Tuning::default(),
-            },
-        });
+        h.absorb(step_started(sub, 1), &mut blocks);
         let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
         let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
         assert_eq!(v["num_steps"], serde_json::json!(5), "{out}");
+    }
+
+    /// A `Display::Card` fact — one of the classes with no legacy `Kind`
+    /// emitter left anywhere in the tree — reaches stderr only through the
+    /// view fold `absorb` drives, never through `Sink::handle`.
+    #[test]
+    fn a_card_fact_reaches_stderr_through_the_view_fold() {
+        use crate::record::{Display, Record, Recorded, Seq, Stamp};
+        let root: AgentId = 1;
+        let mut sink_out = Vec::new();
+        let mut sink_err = Vec::new();
+        let mut h = Headless::new(Projection::HeadlessText, root, &mut sink_out, &mut sink_err);
+        let mut blocks = HashMap::new();
+        let marks = serde_json::to_value(Card(vec![Mark::Raw {
+            bytes: b"a rendered surface".to_vec(),
+        }]))
+        .expect("a Card always serialises");
+        h.absorb(
+            Signal::Fact(
+                root,
+                Recorded::new(
+                    Stamp::new(Seq::new(1), 0..0),
+                    Record::Display(Display::Card { marks }),
+                ),
+            ),
+            &mut blocks,
+        );
+        let err = String::from_utf8_lossy(&sink_err);
+        assert!(
+            err.contains("a rendered surface"),
+            "the fact's card must reach stderr: {err:?}"
+        );
+    }
+
+    /// A seam fault reaches stderr from any source agent, root or a child —
+    /// it names a plumbing failure, not a fact about one agent's session.
+    #[test]
+    fn a_transient_fault_reaches_stderr_from_any_agent() {
+        let root: AgentId = 1;
+        let sub: AgentId = 2;
+        let mut sink_out = Vec::new();
+        let mut sink_err = Vec::new();
+        let mut h = Headless::new(Projection::HeadlessText, root, &mut sink_out, &mut sink_err);
+        let mut blocks = HashMap::new();
+        h.absorb(
+            Signal::Transient(
+                sub,
+                Transient::Fault {
+                    text: "disk is full".into(),
+                },
+            ),
+            &mut blocks,
+        );
+        let err = String::from_utf8_lossy(&sink_err);
+        assert!(err.contains("disk is full"), "{err:?}");
     }
 
     /// An object stays an object: stringifying it would double-encode the
