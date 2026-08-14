@@ -464,8 +464,9 @@ impl Agent {
 pub(super) fn announce(item: &Item, emit: &Emitter, recorder: &crate::record::Emitter) {
     match item {
         Item::Human(_) | Item::Wakeup(_) | Item::Message(_) => {
+            // The live row derives from the published record — the retired
+            // `Kind::UserPromptEcho` twin — so this is the one authoring site.
             record_commit(recorder, crate::record::Display::Prompt { text: item.text() });
-            emit.emit(Kind::UserPromptEcho(item.text()));
         }
         Item::Agent(r) => {
             // The record carries the breadcrumb-reduced pair the scrollback
@@ -591,10 +592,13 @@ mod tests {
     use crate::provider::scripted::{Reply, Script};
     use ral_core::Value;
 
-    /// Every item `announce` draws also records its display commit through
-    /// the seam, beside — never instead of — the legacy `Kind`, so a resumed
-    /// scrollback rebuilds the prompt echo and the subagent breadcrumb the
-    /// user saw live.
+    /// Every item `announce` draws records its display commit through the
+    /// seam.  A prompt has crossed: its only signal is the `Display::Prompt`
+    /// fact, and the live row is `record_kind`'s derivation of it, never a
+    /// direct emit.  A subagent's breadcrumb has not — `AgentOutcome` cannot
+    /// be rebuilt from the reduced `error: Option<String>` a resumed
+    /// scrollback needs, so it still dual-writes the legacy `Kind` beside its
+    /// fact.
     #[test]
     fn announce_records_display_twins_beside_its_kinds() {
         use crate::bus::{AgentResult, Signal};
@@ -624,42 +628,55 @@ mod tests {
 
         let mut kinds: Vec<&'static str> = Vec::new();
         let mut facts: Vec<&'static str> = Vec::new();
+        let mut derived: Vec<&'static str> = Vec::new();
         while let Ok(sig) = rx.try_recv() {
             match sig {
                 Signal::Event(event) => match event.kind {
-                    Kind::UserPromptEcho(text) => {
-                        assert_eq!(text, "hello");
-                        kinds.push("prompt");
-                    }
                     Kind::SubagentDone { name, .. } => {
                         assert_eq!(name, "helper");
                         kinds.push("subagent");
                     }
-                    _ => {}
+                    _ => panic!("a prompt must no longer carry a direct legacy Kind"),
                 },
-                Signal::Fact(_, fact) => match fact.value() {
-                    Record::Display(Display::Prompt { text }) => {
-                        assert_eq!(text, "hello");
-                        facts.push("prompt");
+                Signal::Fact(id, fact) => {
+                    match fact.value() {
+                        Record::Display(Display::Prompt { text }) => {
+                            assert_eq!(text, "hello");
+                            facts.push("prompt");
+                        }
+                        Record::Display(Display::SubagentDone {
+                            name,
+                            error,
+                            elapsed_ms,
+                            ..
+                        }) => {
+                            assert_eq!(name, "helper");
+                            assert_eq!(error.as_deref(), Some("boom"));
+                            assert_eq!(*elapsed_ms, 1500);
+                            facts.push("subagent");
+                        }
+                        _ => {}
                     }
-                    Record::Display(Display::SubagentDone {
-                        name,
-                        error,
-                        elapsed_ms,
-                        ..
-                    }) => {
-                        assert_eq!(name, "helper");
-                        assert_eq!(error.as_deref(), Some("boom"));
-                        assert_eq!(*elapsed_ms, 1500);
-                        facts.push("subagent");
+                    let is_prompt = matches!(fact.value(), Record::Display(Display::Prompt { .. }));
+                    if is_prompt {
+                        let event = Signal::Fact(id, fact)
+                            .into_event()
+                            .expect("record_kind derives a prompt fact into Kind::UserPromptEcho");
+                        match event.kind {
+                            Kind::UserPromptEcho(text) => {
+                                assert_eq!(text, "hello");
+                                derived.push("prompt");
+                            }
+                            _ => panic!("expected Kind::UserPromptEcho"),
+                        }
                     }
-                    _ => {}
-                },
+                }
                 Signal::Transient(..) => {}
             }
         }
-        assert_eq!(kinds, ["prompt", "subagent"], "both legacy kinds still emit");
+        assert_eq!(kinds, ["subagent"], "only the subagent still dual-writes a legacy Kind");
         assert_eq!(facts, ["prompt", "subagent"], "both commits reach the seam");
+        assert_eq!(derived, ["prompt"], "the prompt's live row derives from its fact");
     }
 
     /// The park verdict reads engagement from the registry, never from the

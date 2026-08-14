@@ -195,10 +195,9 @@ impl Agent {
                     reason = "answer char count cannot approach u32::MAX"
                 )]
                 let answer_chars = last_text.chars().count() as u32;
-                emit.emit(Kind::Reasoning {
-                    text: reasoning.to_string(),
-                    answer_chars,
-                });
+                // The live row derives from the published record — the
+                // retired `Kind::Reasoning` twin — so this is the one
+                // authoring site.
                 let _recorded = recorder
                     .emit(crate::record::Display::Thinking {
                         text: reasoning.to_string(),

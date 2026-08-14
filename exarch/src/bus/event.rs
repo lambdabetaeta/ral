@@ -54,7 +54,7 @@ impl Signal {
 /// else: every other class keeps a live legacy emit beside its record, so
 /// deriving a `Kind` here too would draw it twice.
 fn record_kind(record: &Record) -> Option<Kind> {
-    use crate::record::{Forensic, Protocol};
+    use crate::record::{Display, Forensic, Protocol};
     match record {
         Record::Protocol(Protocol::StepStarted { n, tuning }) => Some(Kind::Step {
             n: *n,
@@ -64,6 +64,11 @@ fn record_kind(record: &Record) -> Option<Kind> {
             op: op.clone(),
             by: *by,
         }),
+        Record::Display(Display::Thinking { text, answer_chars }) => Some(Kind::Reasoning {
+            text: text.clone(),
+            answer_chars: *answer_chars,
+        }),
+        Record::Display(Display::Prompt { text }) => Some(Kind::UserPromptEcho(text.clone())),
         Record::Forensic(Forensic::UsageDelta { usage }) => Some(Kind::Usage(usage.into())),
         Record::Forensic(Forensic::Error { text }) => Some(Kind::Error(text.clone())),
         Record::Forensic(Forensic::Nudge { used, max, cause }) => Some(Kind::Nudge {
