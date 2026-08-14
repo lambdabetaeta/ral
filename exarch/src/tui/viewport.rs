@@ -399,7 +399,10 @@ impl Viewport {
         let mut log = open_log(&self.log_path);
         let mut prev_blank = true;
         for (i, entry) in self.blocks.iter().enumerate() {
-            let lead = opens_rail_run(i.checked_sub(1).map(|j| &self.blocks[j].block), &entry.block);
+            let lead = opens_rail_run(
+                i.checked_sub(1).map(|j| &self.blocks[j].block),
+                &entry.block,
+            );
             for line in entry.block.log_lines(self.agent, lead) {
                 if is_blank(&line) {
                     if prev_blank {
@@ -1147,7 +1150,10 @@ impl Viewport {
             K::Thinking { text, answer_chars } => {
                 vec![Block::thinking(text.clone(), *answer_chars)]
             }
-            K::Prompt { text } => vec![Block::chrome(RailShape::Prompt, super::line::user_prompt(text))],
+            K::Prompt { text } => vec![Block::chrome(
+                RailShape::Prompt,
+                super::line::user_prompt(text),
+            )],
             K::Answer { text } => {
                 let echo = last_ral_cmd.map_or(0, |cmd| super::fidelity::echo_delta(text, cmd));
                 let fidelity = super::fidelity::Fidelity {
@@ -1223,26 +1229,41 @@ impl Viewport {
                 vec![Block::card(card::done_card(&card::to_card_done(outcome)))]
             }
             K::Notice { notice } => {
-                vec![Block::card(card::notice_card(&card::to_card_notice(notice)))]
+                vec![Block::card(card::notice_card(&card::to_card_notice(
+                    notice,
+                )))]
             }
             K::Context { rows } => vec![Block::card(card::context_rows_card(rows))],
-            K::Cancelled => vec![Block::chrome(RailShape::Plain, super::line::note("cancelled"))],
+            K::Cancelled => vec![Block::chrome(
+                RailShape::Plain,
+                super::line::note("cancelled"),
+            )],
             K::Error { text } => vec![Block::chrome(RailShape::Error, super::line::error(text))],
             K::Nudge { used, max, cause } => vec![Block::chrome(
                 RailShape::Plain,
                 super::line::note(&format!("nudge {used}/{max}: {cause}")),
             )],
             K::ProviderError { error } => {
-                vec![Block::chrome(RailShape::Error, super::line::provider_error(error))]
+                vec![Block::chrome(
+                    RailShape::Error,
+                    super::line::provider_error(error),
+                )]
             }
-            K::Stalled { error } => vec![Block::chrome(RailShape::Error, super::line::stalled(error))],
-            K::SystemNote { text } => vec![Block::chrome(RailShape::Plain, super::line::note(text))],
+            K::Stalled { error } => {
+                vec![Block::chrome(RailShape::Error, super::line::stalled(error))]
+            }
+            K::SystemNote { text } => {
+                vec![Block::chrome(RailShape::Plain, super::line::note(text))]
+            }
             K::HarnessResult { .. } => Vec::new(),
             K::ModelChanged { model, provider } => vec![Block::chrome(
                 RailShape::Plain,
                 super::line::note(&format!("model changed: {provider}/{model}")),
             )],
-            K::Step { n } => vec![Block::chrome(RailShape::Step, super::line::step(*n as usize))],
+            K::Step { n } => vec![Block::chrome(
+                RailShape::Step,
+                super::line::step(*n as usize),
+            )],
             K::ContextEdited { op, by } => {
                 let authority = match by {
                     EditAuthority::Model => "model",
@@ -1308,7 +1329,8 @@ fn render_observation_group(values: &[ral_core::serial::FOValue]) -> Vec<Block> 
         match what {
             Observed::Read { path } => reads.push(path),
             Observed::Command {
-                origin: ral_core::types::CommandOrigin::External | ral_core::types::CommandOrigin::Detached,
+                origin:
+                    ral_core::types::CommandOrigin::External | ral_core::types::CommandOrigin::Detached,
                 ..
             } => execs.push(what),
             Observed::Grep { .. } => greps.push(what),
@@ -1321,13 +1343,22 @@ fn render_observation_group(values: &[ral_core::serial::FOValue]) -> Vec<Block> 
     )]
     {
         if let Some(card) = reads_card(&reads) {
-            out.insert(0, Block::observation_card(card, ObservationKind::Read, reads.len() as u32));
+            out.insert(
+                0,
+                Block::observation_card(card, ObservationKind::Read, reads.len() as u32),
+            );
         }
         if let Some(card) = execs_card(&execs) {
-            out.insert(0, Block::observation_card(card, ObservationKind::Exec, execs.len() as u32));
+            out.insert(
+                0,
+                Block::observation_card(card, ObservationKind::Exec, execs.len() as u32),
+            );
         }
         if let Some(card) = greps_card(&greps) {
-            out.insert(0, Block::observation_card(card, ObservationKind::Grep, greps.len() as u32));
+            out.insert(
+                0,
+                Block::observation_card(card, ObservationKind::Grep, greps.len() as u32),
+            );
         }
     }
     out
@@ -1918,9 +1949,7 @@ mod tests {
         advance(
             &mut memo,
             &mut seq,
-            Record::Display(Display::Prompt {
-                text: "one".into(),
-            }),
+            Record::Display(Display::Prompt { text: "one".into() }),
         );
 
         let mut vp = viewport();
@@ -1930,9 +1959,7 @@ mod tests {
         advance(
             &mut memo,
             &mut seq,
-            Record::Display(Display::Prompt {
-                text: "two".into(),
-            }),
+            Record::Display(Display::Prompt { text: "two".into() }),
         );
         vp.sync(&memo);
 

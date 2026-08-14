@@ -82,7 +82,10 @@ impl Log {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(error),
         };
-        let seq = bytes.split(|&b| b == b'\n').filter(|l| !l.is_empty()).count() as u64;
+        let seq = bytes
+            .split(|&b| b == b'\n')
+            .filter(|l| !l.is_empty())
+            .count() as u64;
         let pos = bytes.len() as u64;
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self::over(Some(BufWriter::new(file)), seq, pos))
@@ -146,7 +149,11 @@ impl Log {
                 sink.meter.add(usage.into());
             }
             let recorded = Recorded::new(stamp.clone(), record);
-            if sink.tx.send_signal(Signal::Fact(sink.id, recorded)).is_err() {
+            if sink
+                .tx
+                .send_signal(Signal::Fact(sink.id, recorded))
+                .is_err()
+            {
                 // No live receiver — the record is already durable on disk,
                 // which is the whole point: a pressured or absent consumer
                 // catches up from the file, never from the channel.

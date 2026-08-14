@@ -1076,7 +1076,10 @@ fn quarantine_tail(path: &Path, tail: &CrashTail) -> io::Result<()> {
     let mut sidecar_name = path.file_name().unwrap_or_default().to_os_string();
     sidecar_name.push(".crash");
     let sidecar = path.with_file_name(sidecar_name);
-    let mut quarantine = OpenOptions::new().create(true).append(true).open(&sidecar)?;
+    let mut quarantine = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&sidecar)?;
     quarantine.write_all(&tail.bytes)?;
     quarantine.flush()?;
     quarantine.sync_all()?;
@@ -1134,9 +1137,7 @@ pub fn resume(path: &Path) -> io::Result<(Memo, String, String)> {
             ..
         } => (model.clone(), provider.clone()),
         Protocol::SessionStarted {
-            session_id,
-            parent,
-            ..
+            session_id, parent, ..
         } => {
             return Err(io::Error::other(format!(
                 "cannot resume {}: the first record starts session {session_id:?} with parent {parent:?}; expected SessionStarted {{ session_id: 0, parent: None }} — is this a child log?",

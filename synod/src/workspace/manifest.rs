@@ -346,7 +346,8 @@ mod tests {
     fn a_link_is_recorded_as_its_target_and_never_followed() {
         let dir = workshop("manifest-link");
         std::os::unix::fs::symlink("nowhere/at-all", dir.path().join("dangling")).expect("fixture");
-        let manifest = Manifest::of_folder(dir.path()).expect("a dangling link must not break the walk");
+        let manifest =
+            Manifest::of_folder(dir.path()).expect("a dangling link must not break the walk");
         assert_eq!(
             manifest.entries.get("dangling"),
             Some(&EntryKind::Link {

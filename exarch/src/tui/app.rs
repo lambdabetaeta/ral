@@ -819,7 +819,8 @@ mod tests {
             )
         };
         let mut buf = SurfaceBuffer::new();
-        buf.absorb_observation(&recorder, 1, read_at("a.rs")).unwrap();
+        buf.absorb_observation(&recorder, 1, read_at("a.rs"))
+            .unwrap();
         // The pin lands directly in the viewport's own register — it is
         // ambient state like usage, never routed through the buffer that
         // groups reads — so it cannot stand between the two below.
@@ -832,7 +833,8 @@ mod tests {
                     bytes: b"one left".to_vec(),
                 }]),
             );
-        buf.absorb_observation(&recorder, 1, read_at("b.rs")).unwrap();
+        buf.absorb_observation(&recorder, 1, read_at("b.rs"))
+            .unwrap();
         buf.flush_surfaces(&recorder).unwrap();
 
         let mut blocks = Blocks::default();

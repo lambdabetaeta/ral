@@ -741,7 +741,9 @@ pub fn converse_sink<S: Sink>(
     };
     session.seed(message);
     let root_id = session.id;
-    let outcome = pump(sink, &fleet.bus, root_id, |emit| session.attend_backlog(emit));
+    let outcome = pump(sink, &fleet.bus, root_id, |emit| {
+        session.attend_backlog(emit)
+    });
     match outcome {
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err("worker panicked".to_string()),

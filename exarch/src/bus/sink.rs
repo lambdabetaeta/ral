@@ -6,7 +6,9 @@
 //! `agent`) may hold a sender clone forever. Both the headless [`Sink::drive`]
 //! and the TUI's `ui_loop` in `tui/tui_loop.rs` drive it, so they cannot drift.
 
-use super::{AgentId, BusReceiver, Emitter, Event, FleetBus, Kind, WORKER_PANIC_PREFIX};
+use super::event::record_kind;
+use super::{AgentId, BusReceiver, Emitter, Event, FleetBus, Kind, Signal, WORKER_PANIC_PREFIX};
+use crate::record::{Record, Transient};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
@@ -69,33 +71,84 @@ pub(crate) fn drain_pass(
     }
 }
 
+/// [`Sink::drive`]'s own twin of [`drain_pass`], carrying the raw
+/// [`Signal`] rather than projecting it through `Signal::into_event` first —
+/// so [`Sink::fact`] and [`Sink::transient`] see a seam publish even where
+/// no legacy `Kind` exists for it. Kept apart from `drain_pass` rather than
+/// widening it, since `tui::tui_loop`'s `ui_loop` drains that one directly
+/// and is no part of this trait's boundary.
+fn drain_signals(
+    rx: &BusReceiver,
+    done: &AtomicBool,
+    max: Option<usize>,
+    mut handle: impl FnMut(Signal),
+) -> Pass {
+    let finished = done.load(Ordering::Acquire);
+    let mut n = 0usize;
+    loop {
+        if max.is_some_and(|m| n >= m) {
+            return if finished { Pass::Stop } else { Pass::More };
+        }
+        match rx.try_recv() {
+            Ok(sig) => {
+                handle(sig);
+                n += 1;
+            }
+            Err(TryRecvError::Empty) => {
+                return if finished { Pass::Stop } else { Pass::Idle };
+            }
+            Err(TryRecvError::Disconnected) => return Pass::Stop,
+        }
+    }
+}
+
 /// One presentation surface.
 ///
 /// The default [`Self::drive`] — headless and the tests — blocks between
-/// [`drain_pass`] passes; the TUI is not a `Sink`, but its `ui_loop` drains
-/// the same [`drain_pass`] on its render cadence, so completion is identical
-/// on both.
+/// drain passes; the TUI is not a `Sink`, but its `ui_loop` drains
+/// [`drain_pass`] on its render cadence, so completion is identical on both.
 pub trait Sink {
     fn handle(&mut self, e: Event);
+
+    /// A durable fact reaching the sink live, as [`Signal::Fact`] carries it.
+    /// The default reprojects through [`record_kind`] and renders via
+    /// `handle`, exactly [`Signal::into_event`]'s bridge — so a printer that
+    /// still folds over `Kind` is unaffected. A printer that folds over
+    /// `Record` directly (synod) overrides this and never calls `handle`.
+    fn fact(&mut self, id: AgentId, fact: &Record) {
+        if let Some(kind) = record_kind(fact) {
+            self.handle(Event { id, kind });
+        }
+    }
+
+    /// A [`Transient`] delta reaching the sink live — unpublished to any
+    /// `Kind`, so the default does nothing. Only a printer folding over
+    /// `Transient` directly has a use for one.
+    fn transient(&mut self, _id: AgentId, _t: &Transient) {}
 
     /// # Errors
     /// Propagates an implementation's surface write failure; the default
     /// drain-and-render loop is infallible.
     fn drive(&mut self, rx: &BusReceiver, done: &AtomicBool) -> io::Result<()> {
         loop {
-            match drain_pass(rx, done, None, |ev| self.handle(ev)) {
+            match drain_signals(rx, done, None, |sig| self.accept(sig)) {
                 Pass::Stop => return Ok(()),
                 // An uncapped pass never reports `More`.
                 Pass::Idle | Pass::More => match rx.recv_timeout(DRAIN_POLL) {
-                    Ok(sig) => {
-                        if let Some(ev) = sig.into_event() {
-                            self.handle(ev);
-                        }
-                    }
+                    Ok(sig) => self.accept(sig),
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => return Ok(()),
                 },
             }
+        }
+    }
+
+    /// Route one raw signal to `handle`, `fact`, or `transient` by kind.
+    fn accept(&mut self, sig: Signal) {
+        match sig {
+            Signal::Event(e) => self.handle(e),
+            Signal::Fact(id, fact) => self.fact(id, fact.value()),
+            Signal::Transient(id, t) => self.transient(id, &t),
         }
     }
 }

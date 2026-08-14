@@ -14,11 +14,11 @@
 //! `ChatMessage` serialisation the live request uses.
 
 use exarch::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord};
-use exarch::record::{Protocol, Record};
 use exarch::agent::{Agent, deliberate};
 use exarch::bus::{AgentId, AgentState, Emitter, Kind, channel};
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Provider, ProviderError, ProviderKind};
+use exarch::record::{Protocol, Record};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
 use std::sync::Arc;
 
@@ -47,7 +47,11 @@ fn drive_deliberate(
     let token = exarch::agent::cancel::Token::new();
     let outcome = session.deliberate(provider, prompt.map(str::to_string), None, &token, &emit);
     drop(emit);
-    let kinds = rx.into_iter().filter_map(exarch::bus::Signal::into_event).map(|e| e.kind).collect();
+    let kinds = rx
+        .into_iter()
+        .filter_map(exarch::bus::Signal::into_event)
+        .map(|e| e.kind)
+        .collect();
     (outcome, kinds)
 }
 

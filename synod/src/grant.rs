@@ -464,7 +464,8 @@ mod tests {
         let admissions = dir.path().join("Admissions");
         std::fs::create_dir(&admissions).expect("fixture folder");
         let grant = Grant::open(
-            &dir.path().join("Admissions")
+            &dir.path()
+                .join("Admissions")
                 .join(".")
                 .join("..")
                 .join("Admissions"),

@@ -553,12 +553,18 @@ mod tests {
             5,
             "Born, one merged run, ToolCall, one merged run, Died: five entries"
         );
-        assert!(matches!(rx.try_next_event().unwrap().kind, Kind::Born { .. }));
+        assert!(matches!(
+            rx.try_next_event().unwrap().kind,
+            Kind::Born { .. }
+        ));
         match rx.try_next_event().unwrap().kind {
             Kind::Token(t) => assert_eq!(t, "x".repeat(50)),
             _ => panic!("expected the pre-ToolCall merged run"),
         }
-        assert!(matches!(rx.try_next_event().unwrap().kind, Kind::ToolCall { .. }));
+        assert!(matches!(
+            rx.try_next_event().unwrap().kind,
+            Kind::ToolCall { .. }
+        ));
         match rx.try_next_event().unwrap().kind {
             Kind::Token(t) => assert_eq!(t, "y".repeat(50)),
             _ => panic!("expected the post-ToolCall merged run"),

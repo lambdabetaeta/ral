@@ -90,7 +90,7 @@ pub(crate) fn rail_place(what: &Observed) -> Option<RailPlace> {
 /// and the outcome, status, or decision roled by its level. A write is the one
 /// observation that carries a body, and so the one that departs — see
 /// [`write_card`].
-pub(crate) fn observation_card(what: &Observed) -> Card {
+pub fn observation_card(what: &Observed) -> Card {
     let spans = match what {
         Observed::Read { path } => read_spans(path),
         Observed::Write {
@@ -303,7 +303,7 @@ fn write_preview(path: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> Vec<Mark
 // Writes and capability checks never reach here — each lands alone.
 
 /// `read p1, read p2, …`
-pub(crate) fn reads_card(reads: &[String]) -> Option<Card> {
+pub fn reads_card(reads: &[String]) -> Option<Card> {
     if reads.is_empty() {
         return None;
     }
@@ -320,7 +320,7 @@ pub(crate) fn reads_card(reads: &[String]) -> Option<Card> {
 /// joined run reads as the *set of commands run*, where per-command statuses
 /// would be noise. Nothing is lost — each status still rides its own bus
 /// event; only this presentation omits it.
-pub(crate) fn execs_card(execs: &[Observed]) -> Option<Card> {
+pub fn execs_card(execs: &[Observed]) -> Option<Card> {
     if execs.is_empty() {
         return None;
     }
@@ -334,7 +334,7 @@ pub(crate) fn execs_card(execs: &[Observed]) -> Option<Card> {
 }
 
 /// `grep p1 in s1, p2 in s2, …` under one verb.
-pub(crate) fn greps_card(greps: &[Observed]) -> Option<Card> {
+pub fn greps_card(greps: &[Observed]) -> Option<Card> {
     if greps.is_empty() {
         return None;
     }
@@ -375,13 +375,9 @@ pub(crate) fn observation_wire(event: &Observation) -> FOValue {
 }
 
 /// The decode leg, inverse of [`observation_wire`]: rebuilds the
-/// [`Observation`] a resumed `Display::Observation` record carried, for the
-/// view fold to hand to [`observation_card`].
-#[allow(
-    dead_code,
-    reason = "P4 of dev/docs/plans/260814_one_seam_one_log.md: the view fold (P3) calls this to rebuild a card from a resumed Display::Observation record, landing concurrently"
-)]
-pub(crate) fn observation_from_wire(value: FOValue) -> Option<Observation> {
+/// [`Observation`] a `Display::Observation` or `Display::ObservationGroup`
+/// record carried, for a renderer to hand to [`observation_card`].
+pub fn observation_from_wire(value: FOValue) -> Option<Observation> {
     Observation::from_value(&RalValue::from(value))
 }
 

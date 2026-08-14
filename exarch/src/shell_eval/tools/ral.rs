@@ -184,7 +184,12 @@ pub(crate) fn dispatch(
         Ok(a) => a,
         Err(reason) => return invalid_input(id, &reason, session, emit),
     };
-    let call = record_call(session, args.cmd.clone(), Some(args.description.clone()), emit);
+    let call = record_call(
+        session,
+        args.cmd.clone(),
+        Some(args.description.clone()),
+        emit,
+    );
     emit.emit(Kind::ToolCall {
         tool: NAME,
         cmd: args.cmd.clone(),

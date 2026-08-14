@@ -665,7 +665,11 @@ mod tests {
         store
             .capture(&folder, Moment::Before)
             .expect("first capture");
-        assert_eq!(object_count(dir.path()), 1, "identical files share one object");
+        assert_eq!(
+            object_count(dir.path()),
+            1,
+            "identical files share one object"
+        );
         store
             .capture(&folder, Moment::After)
             .expect("second capture");
@@ -832,7 +836,8 @@ mod tests {
     fn two_stores_over_the_same_directory_coexist() {
         let dir = bare_workshop("history-shared-shared");
         let first = HistoryStore::open_at(dir.path()).expect("first store opens");
-        let second = HistoryStore::open_at(dir.path()).expect("a second shared open must not refuse");
+        let second =
+            HistoryStore::open_at(dir.path()).expect("a second shared open must not refuse");
 
         drop(first);
         drop(second);
