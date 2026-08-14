@@ -209,8 +209,24 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("exarch/src/cli.rs", "io-door:silent:seed-file"),
     ("exarch/src/config.rs", "io-door:silent:config-load"),
     ("exarch/src/egress.rs", "io-door:silent:net-audit"),
-    ("exarch/src/agent/event.rs", "io-door:silent:events-file"),
+    ("exarch/src/agent/event.rs", "io-door:silent:record-file"),
     ("exarch/src/agent/event.rs", "io-door:silent:session-dir"),
+    (
+        "exarch/src/record/log.rs",
+        "io-door:silent:record-file",
+    ),
+    (
+        "exarch/src/record/model.rs",
+        "io-door:silent:model-fold-crash-quarantine",
+    ),
+    (
+        "exarch/src/record/model.rs",
+        "io-door:silent:model-fold-crash-scan",
+    ),
+    (
+        "exarch/src/record/model.rs",
+        "io-door:silent:model-fold-freed-read",
+    ),
     (
         "exarch/src/provider/models.rs",
         "io-door:silent:models-cache-read",

@@ -57,7 +57,7 @@ pub fn discover_git_dir(cwd: &Path) -> Result<Option<PathBuf>, PolicyError> {
 /// against grant prefixes.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:git-dir-discovery]"
+    reason = "[io-door:silent:git-dir-discovery] reads a worktree's .git file to find its gitdir: pointer; session-startup discovery, not turn-time I/O"
 )]
 fn read_pointer(dot_git: &Path) -> Result<PathBuf, PolicyError> {
     let contents = std::fs::read_to_string(dot_git).map_err(|e| unreadable_message(dot_git, &e))?;
@@ -77,7 +77,7 @@ fn read_pointer(dot_git: &Path) -> Result<PathBuf, PolicyError> {
 /// or another one.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:git-dir-discovery]"
+    reason = "[io-door:silent:git-dir-discovery] reads a candidate git directory's own back-pointer (a linked worktree's gitdir file, or core.worktree in config) to check it claims this tree; session-startup discovery, not turn-time I/O"
 )]
 fn claims(gitdir: &Path, dot_git: &Path) -> bool {
     if let Ok(back) = std::fs::read_to_string(gitdir.join("gitdir")) {
@@ -106,7 +106,7 @@ fn same_path(a: &Path, b: &Path) -> bool {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:git-dir-discovery]"
+    reason = "[io-door:silent:git-dir-discovery] reads a git config file to find its core.worktree entry, one of the two back-pointer forms claims() checks; session-startup discovery, not turn-time I/O"
 )]
 fn core_worktree(config: &Path) -> Option<String> {
     core_worktree_of(&std::fs::read_to_string(config).ok()?)
