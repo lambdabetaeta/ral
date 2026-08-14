@@ -235,6 +235,75 @@ impl Card {
     }
 }
 
+/// `record::DoneOutcome` → [`DoneOutcome`]: identical shapes.
+///
+/// Kept as two types per `record.rs`'s own rule of carrying no rendering
+/// vocabulary in what it durably records.  Shared by `tui` and `headless`,
+/// and `pub` so synod's own fold can draw the same card a scrollback would.
+pub fn to_card_done(outcome: &crate::record::DoneOutcome) -> DoneOutcome {
+    match outcome {
+        crate::record::DoneOutcome::Ok => DoneOutcome::Ok,
+        crate::record::DoneOutcome::Err { message, status } => DoneOutcome::Err {
+            message: message.clone(),
+            status: *status,
+        },
+        crate::record::DoneOutcome::Panic { message } => DoneOutcome::Panic {
+            message: message.clone(),
+        },
+    }
+}
+
+/// `record::NoticeFact` → [`Notice`], parsing `cause` back into
+/// [`ral_core::types::ReapCause`] the same three spellings `record.rs`'s doc
+/// names.  Shared by `tui` and `headless`, and `pub` for synod.
+pub fn to_card_notice(notice: &crate::record::NoticeFact) -> Notice {
+    match notice {
+        crate::record::NoticeFact::Reap { cmd, cause } => Notice::Reap {
+            cmd: cmd.clone(),
+            cause: match cause.as_str() {
+                "backstop" => ral_core::types::ReapCause::Backstop,
+                "retention" => ral_core::types::ReapCause::Retention,
+                _ => ral_core::types::ReapCause::Idle,
+            },
+        },
+        crate::record::NoticeFact::Prune { names, idle_calls } => Notice::Prune {
+            names: names.clone(),
+            idle_calls: idle_calls.clone(),
+        },
+    }
+}
+
+/// A `/context` survey's rows as one [`Mark::Fields`] matrix under a
+/// "context" header — the one rendering `tui` and `headless` both draw from,
+/// and `pub` for synod.
+pub fn context_rows_card(rows: &[crate::record::ContextRow]) -> Card {
+    let fields = rows
+        .iter()
+        .map(|row| Field {
+            label: format!("{} {}", row.kind, row.exchange),
+            value: FieldVal::Inline(vec![
+                Span::plain(row.opening.clone()),
+                Span::new(
+                    Role::Muted,
+                    format!(
+                        "  {} B · {} step{}{}",
+                        row.bytes,
+                        row.steps,
+                        if row.steps == 1 { "" } else { "s" },
+                        if row.live { " · live" } else { "" }
+                    ),
+                ),
+            ]),
+        })
+        .collect();
+    Card(vec![
+        Mark::Text {
+            spans: vec![Span::new(Role::Strong, "context")],
+        },
+        Mark::Fields { rows: fields },
+    ])
+}
+
 /// A [`Card`] as one line — the digest the periodic nudge shows the model of
 /// its pinned state, where the TUI's framed rendering is out of reach.
 pub(crate) fn summary_line(card: &Card) -> String {

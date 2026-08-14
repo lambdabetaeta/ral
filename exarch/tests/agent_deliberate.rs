@@ -329,10 +329,15 @@ fn compaction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
     assert!(session.is_ready());
 
     // Reclamation is heap-only: the one seam's log keeps every byte.
-    let records = serde_json::Deserializer::from_reader(std::io::BufReader::new(
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        record: Record,
+    }
+    let records: Vec<Record> = serde_json::Deserializer::from_reader(std::io::BufReader::new(
         std::fs::File::open(session.log_dir().join("record.jsonl")).unwrap(),
     ))
-    .into_iter::<Record>()
+    .into_iter::<Entry>()
+    .map(|entry| entry.map(|e| e.record))
     .collect::<Result<Vec<_>, _>>()
     .unwrap();
     assert!(

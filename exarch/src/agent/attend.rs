@@ -464,11 +464,7 @@ impl Agent {
 pub(super) fn announce(item: &Item, emit: &Emitter, recorder: &crate::record::Emitter) {
     match item {
         Item::Human(_) | Item::Wakeup(_) | Item::Message(_) => {
-            record_commit(
-                recorder,
-                emit,
-                crate::record::Display::Prompt { text: item.text() },
-            );
+            record_commit(recorder, crate::record::Display::Prompt { text: item.text() });
             emit.emit(Kind::UserPromptEcho(item.text()));
         }
         Item::Agent(r) => {
@@ -477,7 +473,6 @@ pub(super) fn announce(item: &Item, emit: &Emitter, recorder: &crate::record::Em
             let (text, error) = r.outcome.breadcrumb(&r.text);
             record_commit(
                 recorder,
-                emit,
                 crate::record::Display::SubagentDone {
                     name: r.name.clone(),
                     text,
@@ -503,17 +498,13 @@ pub(super) fn announce(item: &Item, emit: &Emitter, recorder: &crate::record::Em
                 if let Some(kind) = shell_eval::accepted_surface(v, emit) {
                     if let Err(error) = crate::fleet::desk::absorb_kind(&mut buf, recorder, *id, &kind)
                     {
-                        emit.emit(Kind::Error(format!(
-                            "a display commit was not recorded in record.jsonl: {error}"
-                        )));
+                        recorder.report_fault(&error);
                     }
                     emit.emit(kind);
                 }
             }
             if let Err(error) = buf.flush_surfaces(recorder) {
-                emit.emit(Kind::Error(format!(
-                    "a display commit was not recorded in record.jsonl: {error}"
-                )));
+                recorder.report_fault(&error);
             }
         }
         Item::Nudge { .. } | Item::Command(_) => {}
@@ -521,12 +512,10 @@ pub(super) fn announce(item: &Item, emit: &Emitter, recorder: &crate::record::Em
 }
 
 /// Record one display commit beside its legacy `Kind` emission, surfacing a
-/// failed append as an error row exactly as the surface path does.
-fn record_commit(recorder: &crate::record::Emitter, emit: &Emitter, commit: crate::record::Display) {
+/// failed append as a `Transient::Fault` exactly as the surface path does.
+fn record_commit(recorder: &crate::record::Emitter, commit: crate::record::Display) {
     if let Err(error) = recorder.emit(commit) {
-        emit.emit(Kind::Error(format!(
-            "a display commit was not recorded in record.jsonl: {error}"
-        )));
+        recorder.report_fault(&error);
     }
 }
 
@@ -821,10 +810,7 @@ mod tests {
         );
         assert!(session.is_ready());
 
-        let records = std::fs::read_to_string(session.log_dir().join("record.jsonl")).unwrap();
-        let parsed: Vec<Record> = serde_json::Deserializer::from_str(&records)
-            .into_iter()
-            .collect::<Result<_, _>>()
+        let parsed = crate::record::read_records(&session.log_dir().join("record.jsonl"))
             .expect("the panicked exchange must leave a parseable log");
         assert!(
             parsed.iter().any(|r| matches!(

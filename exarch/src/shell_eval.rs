@@ -126,6 +126,30 @@ pub(crate) fn is_service_pin(key: &str) -> bool {
     key == SERVICES_PIN_KEY
 }
 
+/// The shell's own decode target: the five shapes the `surface` channel
+/// carries, closed and named rather than borrowed from the bus's vocabulary.
+///
+/// [`Kind`] is what `decode_surface` builds today, eagerly rendering a
+/// [`crate::bus::card::Card`] mark tree that `absorb_kind` discards and the
+/// view fold rebuilds; `Surface` is the honest codomain, whose card fields
+/// carry the fact a card *is* (`Card`, `Pin`) rather than one a printer
+/// merely wants a copy of. Not yet `decode_surface`'s return type — that
+/// crossing is a later parcel's.
+#[allow(dead_code, reason = "decode_surface -> Surface lands in a later wave")]
+pub enum Surface {
+    Observation(Box<Observation>),
+    Card(crate::bus::card::Card),
+    Notice(crate::bus::card::Notice),
+    Done(crate::bus::card::DoneOutcome),
+    Pin {
+        key: String,
+        card: crate::bus::card::Card,
+    },
+    Unpin {
+        key: String,
+    },
+}
+
 /// Decode one surfaced `Value` into the [`Kind`] it renders as — the single
 /// decoder both delivery regimes share, so the live sink's events and the
 /// deferred sink's later `deliver` cannot drift.

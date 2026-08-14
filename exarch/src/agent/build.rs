@@ -848,12 +848,11 @@ mod tests {
     /// Read `system_prompt_bytes` off a session's `SessionStarted` bookend,
     /// the first record in its `record.jsonl`.
     fn recorded_system_prompt_bytes(log_dir: &std::path::Path) -> usize {
-        let body = std::fs::read_to_string(log_dir.join("record.jsonl")).expect("record.jsonl");
-        let first: crate::record::Record = serde_json::Deserializer::from_str(&body)
+        let records = crate::record::read_records(&log_dir.join("record.jsonl")).unwrap();
+        let first = records
             .into_iter()
             .next()
-            .expect("record.jsonl must have at least one record")
-            .expect("first record must parse");
+            .expect("record.jsonl must have at least one record");
         match first {
             crate::record::Record::Protocol(crate::record::Protocol::SessionStarted {
                 system_prompt_bytes,
@@ -1273,12 +1272,8 @@ mod tests {
         ] {
             assert!(text.contains(loss), "resume note must name {loss}: {text}");
         }
-        let records: Vec<crate::record::Record> = serde_json::Deserializer::from_reader(
-            File::open(dir.path().join("sessions/0/record.jsonl")).unwrap(),
-        )
-        .into_iter()
-        .collect::<Result<_, _>>()
-        .unwrap();
+        let records =
+            crate::record::read_records(&dir.path().join("sessions/0/record.jsonl")).unwrap();
         let resumed_at = records
             .iter()
             .find_map(|record| match record {
@@ -1324,11 +1319,7 @@ mod tests {
                 .starts_with(b"reserved")
         );
 
-        let current_records: Vec<crate::record::Record> =
-            serde_json::Deserializer::from_reader(File::open(&record).unwrap())
-                .into_iter()
-                .collect::<Result<_, _>>()
-                .unwrap();
+        let current_records = crate::record::read_records(&record).unwrap();
         let stamp = match current_records.first().expect("new session head") {
             crate::record::Record::Protocol(crate::record::Protocol::SessionStarted {
                 at_unix_ms,

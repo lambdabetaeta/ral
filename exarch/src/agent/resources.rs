@@ -569,10 +569,9 @@ impl Agent {
                 live: item.live,
             })
             .collect();
-        if let Err(error) = self.recorder().emit(crate::record::Display::Context { rows }) {
-            emit.emit(Kind::Error(format!(
-                "a display commit was not recorded in record.jsonl: {error}"
-            )));
+        let recorder = self.recorder();
+        if let Err(error) = recorder.emit(crate::record::Display::Context { rows }) {
+            recorder.report_fault(&error);
         }
         emit.emit(Kind::Context {
             rows: survey.items,

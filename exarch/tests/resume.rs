@@ -21,6 +21,13 @@ fn scripted(model: &str, script: Script) -> Arc<Provider> {
     Arc::new(Provider::scripted(model, ProviderKind::Openai, script))
 }
 
+/// A hand-written `record.jsonl` line needs the `Entry` envelope too, since
+/// [`record::log::Log::read`] is private to the crate and these tests write
+/// past it on purpose.
+fn envelope_line(record: &record::Record) -> String {
+    serde_json::json!({ "at_unix_ms": 0, "record": record }).to_string()
+}
+
 fn drive(session: &mut Agent, provider: &Arc<Provider>, prompt: &str) {
     let (tx, _rx) = channel();
     let emit = Emitter::new(tx, session.id);
@@ -205,7 +212,11 @@ fn replay_refuses_a_ledger_line_it_does_not_recognise() {
         .append(true)
         .open(&path)
         .expect("record log");
-    writeln!(file, r#"{{"FutureClass":{{"anything":1}}}}"#).expect("append a foreign line");
+    writeln!(
+        file,
+        r#"{{"at_unix_ms":0,"record":{{"FutureClass":{{"anything":1}}}}}}"#
+    )
+    .expect("append a foreign line");
     file.flush().expect("flush the foreign line");
 
     match record::replay::<View>(&path) {
@@ -245,7 +256,8 @@ fn resume_child() {
         .append(true)
         .open(&path)
         .expect("record log");
-    serde_json::to_writer(&mut file, &record).expect("write crash prompt");
+    file.write_all(envelope_line(&record).as_bytes())
+        .expect("write crash prompt");
     file.write_all(b"\n").expect("terminate crash prompt line");
     file.flush().expect("flush crash prompt");
     loop {

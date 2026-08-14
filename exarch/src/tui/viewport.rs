@@ -21,14 +21,15 @@ use super::line::{is_blank, plain, size_bar};
 use super::palette::READ_W;
 use super::rail::{self, RailKind};
 use super::select::plain_slice;
+use crate::agent::event::{ContextOp, EditAuthority};
 use crate::bus::AgentId;
 use crate::bus::card::{
-    self, Card, Mark, ObservationKind, RailPlace, execs_card, greps_card, observation_card,
+    self, Card, ObservationKind, RailPlace, execs_card, greps_card, observation_card,
     observation_from_wire, rail_place, reads_card,
 };
 use crate::provider::Usage;
-use crate::record::{self, BlockId, Blocks, Printer, Transient};
-use ral_core::types::{Observation, Observed, ReapCause};
+use crate::record::{self, BlockId, Blocks, Printer, Seq, Transient};
+use ral_core::types::{Observation, Observed};
 use ratatui::text::Line;
 use std::collections::HashMap;
 use std::fs;
@@ -43,12 +44,12 @@ pub(super) const VIEWPORT_MAX_BLOCKS: usize = 500;
 /// Rendered-row cap — a second eviction trigger, for the oversized block that
 /// blows the row budget long before the block count does.
 pub(super) const VIEWPORT_MAX_ROWS: usize = 20_000;
-/// The fold's memo never evicts (`crate::record::view::Blocks`'s own law), so
-/// [`Viewport::sync`] rebuilds only the most recent slice of it — generous
-/// enough that [`VIEWPORT_MAX_BLOCKS`] and [`VIEWPORT_MAX_ROWS`] always trim
-/// the tail they actually want, cheap enough that a session's whole history
-/// is never re-rendered on every arriving commit.
-const SYNC_WINDOW: usize = VIEWPORT_MAX_BLOCKS * 2;
+
+/// The highest [`record::Seq`] the viewport had seen when a chrome row was
+/// authored — `None` for a row drawn before any record, the banner.  A chrome
+/// row is named by log position, not by arrival, so a rebuild can place it
+/// again rather than lose it.
+type Anchor = Option<Seq>;
 
 /// All that outlives a dead sub-agent view once [`super::LINGER`] elapses.
 /// Nothing is ever reloaded from the log; it stays readable outside the TUI.
@@ -118,13 +119,22 @@ pub(super) struct Viewport {
     /// stamps — set by `App::update_live_model`, since the fold's own memo
     /// carries usage but not the provider's cap.
     context_window: Option<u64>,
-    /// How many of the fold's rows [`Self::sync`] has already drained `open`
-    /// against.  A commit is a prefix of the accumulated stream by
-    /// construction, so each new [`record::BlockKind::Answer`] this cursor
-    /// has not yet seen drains that many bytes off `open`'s front — the
+    /// The [`record::Seq`] of the fold's rows [`Self::sync`] has already
+    /// drained `open` against — `Seq::new(0)` before the first commit.  A
+    /// commit is a prefix of the accumulated stream by construction, so each
+    /// row past this cursor drains that many bytes off `open`'s front — the
     /// printer-side half of "a printer's `open` is always exactly the
-    /// unconsumed suffix."
-    drained_through: usize,
+    /// unconsumed suffix."  A cursor by identity rather than position, since
+    /// a windowed memo makes an index wrong.
+    drained_through: Seq,
+    /// Chrome rows [`Self::push_chrome`] has authored, named by the
+    /// [`Anchor`] they were drawn at.  [`Self::sync`] stable-merges these
+    /// into the folded rows it rebuilds; nothing reads this lane yet, since
+    /// production still draws chrome straight into [`Self::blocks`].
+    chrome: Vec<(Anchor, RailShape, Vec<Line<'static>>)>,
+    /// The highest [`record::Seq`] [`Self::sync`] has last seen — the anchor
+    /// a chrome row drawn right now would be named by.
+    last_seq: Anchor,
 }
 
 /// The agent's state, when it was entered, and the model text that has arrived
@@ -248,7 +258,9 @@ impl Viewport {
             last_ral_cmd: None,
             reveal: HashMap::new(),
             context_window: None,
-            drained_through: 0,
+            drained_through: Seq::new(0),
+            chrome: Vec::new(),
+            last_seq: None,
         }
     }
 
@@ -363,6 +375,7 @@ impl Viewport {
         self.open = String::new();
         self.flat = Flat::default();
         self.pins = Vec::new();
+        self.chrome = Vec::new();
     }
 
     pub(super) fn tombstone(&self) -> Option<&Tombstone> {
@@ -484,8 +497,12 @@ impl Viewport {
         self.push_block(Block::write_card(card));
     }
 
-    /// Append pre-rendered chrome; `shape` lets the rail dispatch on the sub-kind.
+    /// Append pre-rendered chrome; `shape` lets the rail dispatch on the
+    /// sub-kind.  Also records the row into the chrome lane, anchored at the
+    /// last `Seq` [`Self::sync`] saw — the door [`Self::sync`]'s stable merge
+    /// draws from once the fold, not `push_*`, drives the live screen.
     pub(super) fn push_chrome(&mut self, shape: RailShape, lines: Vec<Line<'static>>) {
+        self.chrome.push((self.last_seq, shape, lines.clone()));
         self.push_block(Block::chrome(shape, lines));
     }
 
@@ -1014,11 +1031,16 @@ impl Printer for Viewport {
             Transient::Cleared => self.reset(),
             // The producer's own tail flush lands as a commit `sync` will
             // see; nothing to do here but wait for it.
+            // The register and the chrome lane both gain a live producer in a
+            // later wave; for now these publish with nothing yet drawing them.
             Transient::Boundary
             | Transient::Born { .. }
             | Transient::Died
             | Transient::StopReason(_)
-            | Transient::Resources { .. } => {}
+            | Transient::Resources { .. }
+            | Transient::Pin { .. }
+            | Transient::Unpin { .. }
+            | Transient::Fault { .. } => {}
         }
     }
 
@@ -1026,19 +1048,20 @@ impl Printer for Viewport {
         let rows = blocks.rows();
         // `open` is always exactly the unconsumed suffix of the raw stream:
         // drain it against every `Answer` commit not yet accounted for,
-        // whether or not that commit fell inside this call's render window.
-        for row in &rows[self.drained_through..] {
+        // named by `Seq` rather than position, since the memo is windowed.
+        for row in rows.iter().filter(|r| r.id().seq() > self.drained_through) {
             if let record::BlockKind::Answer { text } = row.kind() {
                 let n = text.len().min(self.open.len());
                 let _ = self.open.drain(..n);
             }
         }
-        self.drained_through = rows.len();
+        if let Some(last) = rows.last() {
+            self.drained_through = last.id().seq();
+        }
 
-        let start = rows.len().saturating_sub(SYNC_WINDOW);
-        let mut built: Vec<Entry> = Vec::with_capacity(rows.len() - start);
+        let mut built: Vec<Entry> = Vec::with_capacity(rows.len());
         let mut last_ral_cmd: Option<&str> = None;
-        for row in &rows[start..] {
+        for row in rows {
             let id = row.id();
             for mut block in self.render_block(row.kind(), blocks, &mut last_ral_cmd) {
                 if let Some(level) = self.reveal.get(&id) {
@@ -1052,9 +1075,58 @@ impl Printer for Viewport {
                 });
             }
         }
-        self.blocks = built;
+        self.last_seq = rows.last().map(|r| r.id().seq());
+        self.blocks = self.merge_chrome(built);
         self.last_call = self.blocks.iter().rposition(|e| e.block.is_call());
         self.flat.dirty = true;
+    }
+}
+
+impl Viewport {
+    /// Stable-merge the chrome lane into `built` by [`Anchor`], arrival
+    /// order breaking ties, dropping any chrome whose anchor fell out of the
+    /// fold's window along with the row it named — the fix that lets a live
+    /// `sync` redraw chrome instead of erasing it.
+    fn merge_chrome(&mut self, built: Vec<Entry>) -> Vec<Entry> {
+        let floor = built.first().and_then(|e| e.id).map(BlockId::seq);
+        self.chrome.retain(|(anchor, ..)| match (anchor, floor) {
+            (_, None) => true,
+            (Some(a), Some(f)) => *a >= f,
+            (None, Some(f)) => f.get() <= 1,
+        });
+
+        let mut merged = Vec::with_capacity(built.len() + self.chrome.len());
+        let mut chrome = self.chrome.iter();
+        let mut next = chrome.next();
+        while let Some((None, shape, lines)) = next {
+            merged.push(Self::chrome_entry(self.agent, *shape, lines.clone()));
+            next = chrome.next();
+        }
+        for entry in built {
+            let seq = entry.id.map(BlockId::seq);
+            merged.push(entry);
+            while let Some((anchor, shape, lines)) = next
+                && *anchor == seq
+            {
+                merged.push(Self::chrome_entry(self.agent, *shape, lines.clone()));
+                next = chrome.next();
+            }
+        }
+        while let Some((_, shape, lines)) = next {
+            merged.push(Self::chrome_entry(self.agent, *shape, lines.clone()));
+            next = chrome.next();
+        }
+        merged
+    }
+
+    fn chrome_entry(agent: AgentSlot, shape: RailShape, lines: Vec<Line<'static>>) -> Entry {
+        let block = Block::chrome(shape, lines);
+        let rows = Self::estimate_rows(&block, agent);
+        Entry {
+            block,
+            rows,
+            id: None,
+        }
     }
 }
 
@@ -1147,9 +1219,13 @@ impl Viewport {
                 Ok(card) => vec![Block::card(card)],
                 Err(_) => Vec::new(),
             },
-            K::Done { outcome } => vec![Block::card(card::done_card(&to_card_done(outcome)))],
-            K::Notice { notice } => vec![Block::card(card::notice_card(&to_card_notice(notice)))],
-            K::Context { rows } => vec![Block::card(context_rows_card(rows))],
+            K::Done { outcome } => {
+                vec![Block::card(card::done_card(&card::to_card_done(outcome)))]
+            }
+            K::Notice { notice } => {
+                vec![Block::card(card::notice_card(&card::to_card_notice(notice)))]
+            }
+            K::Context { rows } => vec![Block::card(card::context_rows_card(rows))],
             K::Cancelled => vec![Block::chrome(RailShape::Plain, super::line::note("cancelled"))],
             K::Error { text } => vec![Block::chrome(RailShape::Error, super::line::error(text))],
             K::Nudge { used, max, cause } => vec![Block::chrome(
@@ -1166,75 +1242,32 @@ impl Viewport {
                 RailShape::Plain,
                 super::line::note(&format!("model changed: {provider}/{model}")),
             )],
+            K::Step { n } => vec![Block::chrome(RailShape::Step, super::line::step(*n as usize))],
+            K::ContextEdited { op, by } => {
+                let authority = match by {
+                    EditAuthority::Model => "model",
+                    EditAuthority::User => "user",
+                    EditAuthority::Harness => "harness",
+                };
+                let text = match op {
+                    ContextOp::Fold {
+                        through_exchange, ..
+                    } => format!(
+                        "[context folded through exchange {through_exchange} ({authority})]"
+                    ),
+                    ContextOp::Drop { exchanges } => {
+                        let list = exchanges
+                            .iter()
+                            .map(u64::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("[context dropped exchange(s) {list} ({authority})]")
+                    }
+                };
+                vec![Block::chrome(RailShape::Plain, super::line::note(&text))]
+            }
         }
     }
-}
-
-/// `record::DoneOutcome` → `bus::card::DoneOutcome`: identical shapes, kept as
-/// two types per `record.rs`'s own rule of carrying no rendering vocabulary in
-/// what it durably records.
-fn to_card_done(outcome: &record::DoneOutcome) -> card::DoneOutcome {
-    match outcome {
-        record::DoneOutcome::Ok => card::DoneOutcome::Ok,
-        record::DoneOutcome::Err { message, status } => card::DoneOutcome::Err {
-            message: message.clone(),
-            status: *status,
-        },
-        record::DoneOutcome::Panic { message } => card::DoneOutcome::Panic {
-            message: message.clone(),
-        },
-    }
-}
-
-/// `record::NoticeFact` → `bus::card::Notice`, parsing `cause` back into
-/// [`ReapCause`] the same three spellings `record.rs`'s doc names.
-fn to_card_notice(notice: &record::NoticeFact) -> card::Notice {
-    match notice {
-        record::NoticeFact::Reap { cmd, cause } => card::Notice::Reap {
-            cmd: cmd.clone(),
-            cause: match cause.as_str() {
-                "backstop" => ReapCause::Backstop,
-                "retention" => ReapCause::Retention,
-                _ => ReapCause::Idle,
-            },
-        },
-        record::NoticeFact::Prune { names, idle_calls } => card::Notice::Prune {
-            names: names.clone(),
-            idle_calls: idle_calls.clone(),
-        },
-    }
-}
-
-/// A `/context` survey's rows as one [`Mark::Fields`] matrix — the same shape
-/// `agent::resources::context_card` renders for the live probe, rebuilt here
-/// from the record's own [`record::ContextRow`] rather than that private
-/// helper's `ContextSurvey`.
-fn context_rows_card(rows: &[record::ContextRow]) -> Card {
-    let fields = rows
-        .iter()
-        .map(|row| card::Field {
-            label: format!("{} {}", row.kind, row.exchange),
-            value: card::FieldVal::Inline(vec![
-                card::Span::plain(row.opening.clone()),
-                card::Span::new(
-                    card::Role::Muted,
-                    format!(
-                        "  {} B · {} step{}{}",
-                        row.bytes,
-                        row.steps,
-                        if row.steps == 1 { "" } else { "s" },
-                        if row.live { " · live" } else { "" }
-                    ),
-                ),
-            ]),
-        })
-        .collect();
-    Card(vec![
-        Mark::Text {
-            spans: vec![card::Span::new(card::Role::Strong, "context")],
-        },
-        Mark::Fields { rows: fields },
-    ])
 }
 
 /// Rebuild one [`Display::Observation`](record::Display::Observation)'s card,
@@ -1862,6 +1895,97 @@ mod tests {
             vp.blocks[0].block.level(),
             opened,
             "the rebuilt block keeps the dial a prior sync set"
+        );
+    }
+
+    /// A running counter's worth of `View::step`, so a test can interleave
+    /// `push_chrome` between commits without two calls to [`step`] colliding
+    /// on the same `Seq`.
+    fn advance(memo: &mut Blocks, seq: &mut u64, record: Record) {
+        *seq += 1;
+        let stamp = Stamp::new(Seq::new(*seq), 0..0);
+        View::step(memo, &Recorded::new(stamp, record)).expect("a display-only fold never refuses");
+    }
+
+    /// A chrome row drawn between two commits keeps its place across a
+    /// `sync` that rebuilds the folded lane from scratch — the whole point
+    /// of naming it by [`Anchor`] rather than by where `push_chrome` happened
+    /// to land it in `blocks`.
+    #[test]
+    fn chrome_holds_its_place_across_a_resync() {
+        let mut memo = Blocks::default();
+        let mut seq = 0u64;
+        advance(
+            &mut memo,
+            &mut seq,
+            Record::Display(Display::Prompt {
+                text: "one".into(),
+            }),
+        );
+
+        let mut vp = viewport();
+        vp.sync(&memo);
+        vp.push_chrome(RailShape::Plain, vec![Line::from("between")]);
+
+        advance(
+            &mut memo,
+            &mut seq,
+            Record::Display(Display::Prompt {
+                text: "two".into(),
+            }),
+        );
+        vp.sync(&memo);
+
+        let rendered = vp
+            .render_window(READ_W, 40)
+            .lines
+            .iter()
+            .map(plain)
+            .collect::<Vec<_>>();
+        let one = rendered.iter().position(|l| l.contains("one")).unwrap();
+        let between = rendered.iter().position(|l| l.contains("between")).unwrap();
+        let two = rendered.iter().position(|l| l.contains("two")).unwrap();
+        assert!(
+            one < between && between < two,
+            "chrome anchored between two commits must render between them: {rendered:?}"
+        );
+    }
+
+    /// Chrome anchored at a commit the fold has since evicted is dropped
+    /// along with it, rather than piling up forever in the chrome lane.
+    #[test]
+    fn chrome_falls_out_of_the_window_with_its_anchor() {
+        let mut memo = Blocks::default();
+        let mut seq = 0u64;
+        advance(
+            &mut memo,
+            &mut seq,
+            Record::Display(Display::Prompt {
+                text: "first".into(),
+            }),
+        );
+
+        let mut vp = viewport();
+        vp.sync(&memo);
+        vp.push_chrome(RailShape::Plain, vec![Line::from("anchored on first")]);
+        assert_eq!(vp.chrome.len(), 1);
+
+        // Flushing and pushing past the fold's own window evicts `first`.
+        let _ = memo.render_since();
+        for i in 0..1100 {
+            advance(
+                &mut memo,
+                &mut seq,
+                Record::Display(Display::Prompt {
+                    text: format!("filler {i}"),
+                }),
+            );
+        }
+        vp.sync(&memo);
+
+        assert!(
+            vp.chrome.is_empty(),
+            "chrome anchored on an evicted row must be dropped too"
         );
     }
 }

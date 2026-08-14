@@ -11,7 +11,7 @@
 use super::{
     ContextRow, Display, Fold, Forensic, Recorded, Refusal, Seq,
 };
-use crate::agent::event::ProviderErrorRecord;
+use crate::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord};
 use ral_core::serial::FOValue;
 
 pub use super::{DoneOutcome, NoticeFact};
@@ -93,6 +93,13 @@ pub enum BlockKind {
         model: String,
         provider: String,
     },
+    Step {
+        n: u32,
+    },
+    ContextEdited {
+        op: ContextOp,
+        by: EditAuthority,
+    },
 }
 
 /// One committed row of scrollback, named by the [`Seq`] of the record that
@@ -124,14 +131,18 @@ struct UsageTotal {
     output: u64,
 }
 
+/// Past this many resident rows, the oldest already-flushed ones are
+/// dropped — replacing the old per-printer `SYNC_WINDOW`, so a live memo is
+/// bounded once for every printer rather than trimmed per call.  Nothing
+/// before [`Blocks::rendered_through`] is ever evicted, so a flush never
+/// loses a row it has not yet rendered.
+const BLOCKS_WINDOW: usize = 1000;
+
 /// The view fold's memo: every commit and drawn breadcrumb this session has
-/// recorded, in log order.
+/// recorded, in log order, windowed once flushed.
 ///
-/// Never evicts — a printer's own window
-/// ([`VIEWPORT_MAX_BLOCKS`](crate::tui) and friends) is presentation, not
-/// this fold's business, so a rendering of every block this memo ever
-/// admitted is what makes `user.log` regenerable rather than patched.
-#[derive(Default)]
+/// A printer's own window ([`VIEWPORT_MAX_BLOCKS`](crate::tui) and friends)
+/// stays a second, purely presentational trim on top of this one.
 pub struct Blocks {
     rows: Vec<Block>,
     usage: UsageTotal,
@@ -141,6 +152,20 @@ pub struct Blocks {
     /// has no entry here.  A printer wanting the opening model too must read
     /// it off the model fold's own memo; this fold does not duplicate it.
     model: Option<(String, String)>,
+    /// The highest [`Seq`] a flush has already rendered to `user.log` —
+    /// [`Self::render_since`]'s cursor, and the floor eviction never crosses.
+    rendered_through: Seq,
+}
+
+impl Default for Blocks {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            usage: UsageTotal::default(),
+            model: None,
+            rendered_through: Seq::new(0),
+        }
+    }
 }
 
 impl Blocks {
@@ -165,9 +190,10 @@ impl Blocks {
         self.model.as_ref().map(|(m, p)| (m.as_str(), p.as_str()))
     }
 
-    /// A rendering of every committed block, content only — never styling —
+    /// A rendering of every resident block, content only — never styling —
     /// the regenerable text a printer's `user.log` is a render of, never a
-    /// patch of.
+    /// patch of.  Windowed, like [`Self::rows`]; a full-session render reads
+    /// `record.jsonl` through [`super::replay`] instead.
     pub fn render_log(&self) -> String {
         let mut out = String::new();
         for block in &self.rows {
@@ -176,15 +202,46 @@ impl Blocks {
         out
     }
 
+    /// Render every row since the last flush and advance
+    /// [`Self::rendered_through`] to cover it — what a printer's append-only
+    /// `user.log` writes each commit.  Appending this is *equal* to
+    /// rendering the whole resident window, which is the regenerability
+    /// identity [`Self::render_log`] states as an invariant made testable.
+    pub fn render_since(&mut self) -> String {
+        let mut out = String::new();
+        let mut through = self.rendered_through;
+        for block in &self.rows {
+            if block.seq > self.rendered_through {
+                render_block_text(&mut out, block.kind());
+                through = block.seq;
+            }
+        }
+        self.rendered_through = through;
+        self.evict();
+        out
+    }
+
+    /// Drop the oldest resident rows past [`BLOCKS_WINDOW`], never crossing
+    /// [`Self::rendered_through`] — a row a flush has not yet rendered is
+    /// never lost to eviction.
+    fn evict(&mut self) {
+        while self.rows.len() > BLOCKS_WINDOW
+            && self.rows.first().is_some_and(|b| b.seq <= self.rendered_through)
+        {
+            let _ = self.rows.remove(0);
+        }
+    }
+
     fn push(&mut self, seq: Seq, kind: BlockKind) {
         self.rows.push(Block::new(seq, kind));
+        self.evict();
     }
 
     /// Attach a result's line count to the call it names — a patch record
     /// addressed by `BlockId`, replacing the tail-walk `set_result_size`
     /// used to guess at the same correlation.  A target this fold cannot
-    /// find (never happens today, since it never evicts) is a no-op rather
-    /// than a panic.
+    /// find — evicted, or simply never resident — is a no-op rather than a
+    /// panic.
     fn attach_result(&mut self, call: super::BlockId, text: &str) {
         let n = u32::try_from(text.lines().count()).unwrap_or(u32::MAX);
         let target = call.seq();
@@ -288,6 +345,27 @@ fn render_block_text(out: &mut String, kind: &BlockKind) {
         BlockKind::ModelChanged { model, provider } => {
             format!("[model changed: {provider}/{model}]")
         }
+        BlockKind::Step { n } => format!("[step {n}]"),
+        BlockKind::ContextEdited { op, by } => {
+            let authority = match by {
+                EditAuthority::Model => "model",
+                EditAuthority::User => "user",
+                EditAuthority::Harness => "harness",
+            };
+            match op {
+                ContextOp::Fold {
+                    through_exchange, ..
+                } => format!("[context folded through exchange {through_exchange} ({authority})]"),
+                ContextOp::Drop { exchanges } => {
+                    let list = exchanges
+                        .iter()
+                        .map(u64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("[context dropped exchange(s) {list} ({authority})]")
+                }
+            }
+        }
     };
     out.push_str(&line);
     out.push('\n');
@@ -346,6 +424,10 @@ fn step_display(memo: &mut Blocks, seq: Seq, d: Display) {
         Display::Done { outcome } => memo.push(seq, BlockKind::Done { outcome }),
         Display::Notice { notice } => memo.push(seq, BlockKind::Notice { notice }),
         Display::Context { rows } => memo.push(seq, BlockKind::Context { rows }),
+        Display::Step { n } => memo.push(seq, BlockKind::Step { n }),
+        Display::ContextEdited { op, by } => {
+            memo.push(seq, BlockKind::ContextEdited { op, by });
+        }
     }
 }
 
@@ -387,5 +469,57 @@ impl Fold for View {
             super::Record::Forensic(f) => step_forensic(memo, seq, f),
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn push(memo: &mut Blocks, seq: u64, text: &str) {
+        step_display(
+            memo,
+            Seq::new(seq),
+            Display::Answer { text: text.into() },
+        );
+    }
+
+    #[test]
+    fn render_since_over_a_fresh_memo_equals_render_log() {
+        let mut memo = Blocks::default();
+        for i in 1..=5u64 {
+            push(&mut memo, i, &format!("line {i}"));
+        }
+        assert_eq!(memo.render_since(), memo.render_log());
+    }
+
+    #[test]
+    fn a_second_flush_renders_only_the_rows_since_the_first() {
+        let mut memo = Blocks::default();
+        push(&mut memo, 1, "one");
+        let _ = memo.render_since();
+        push(&mut memo, 2, "two");
+        assert_eq!(memo.render_since(), "two\n");
+    }
+
+    #[test]
+    fn eviction_never_crosses_the_flush_cursor() {
+        let mut memo = Blocks::default();
+        let total = BLOCKS_WINDOW + 50;
+        for i in 1..=total {
+            push(&mut memo, i as u64, &format!("row {i}"));
+        }
+        assert_eq!(
+            memo.rows().len(),
+            total,
+            "nothing is flushed yet, so nothing may be evicted"
+        );
+        let rendered = memo.render_since();
+        assert_eq!(rendered.lines().count(), total);
+        assert_eq!(
+            memo.rows().len(),
+            BLOCKS_WINDOW,
+            "past the window, only rows already flushed evict"
+        );
     }
 }

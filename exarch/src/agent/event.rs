@@ -1093,11 +1093,7 @@ mod tests {
     }
 
     fn records(log: &AgentLog) -> Vec<Record> {
-        let file = fs::File::open(record_path(log)).unwrap();
-        serde_json::Deserializer::from_reader(file)
-            .into_iter::<Record>()
-            .collect::<Result<_, _>>()
-            .expect("record.jsonl round-trip")
+        crate::record::read_records(&record_path(log)).expect("record.jsonl round-trip")
     }
 
     #[test]
@@ -1570,7 +1566,7 @@ mod tests {
             stop_reason: None,
         });
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        serde_json::to_writer(&mut file, &foreign).unwrap();
+        file.write_all(&crate::record::envelope_line(&foreign)).unwrap();
         file.write_all(b"\n").unwrap();
         file.flush().unwrap();
         let before = fs::read(&path).unwrap();
@@ -1596,7 +1592,7 @@ mod tests {
             text: "stale".into(),
         });
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        serde_json::to_writer(&mut file, &stale).unwrap();
+        file.write_all(&crate::record::envelope_line(&stale)).unwrap();
         file.write_all(b"\n").unwrap();
         file.flush().unwrap();
         let before = fs::read(&path).unwrap();
@@ -1653,7 +1649,8 @@ mod tests {
         let data = fs::read(&path).unwrap();
         let mut repaired = Vec::with_capacity(data.len());
         for fragment in data.split_inclusive(|byte| *byte == b'\n') {
-            let record: Record = serde_json::from_slice(&fragment[..fragment.len() - 1]).unwrap();
+            let record =
+                crate::record::record_from_line(&fragment[..fragment.len() - 1]).unwrap();
             if matches!(
                 record,
                 Record::Protocol(Protocol::AssistantMessage {

@@ -15,7 +15,8 @@
 //! no-op on purpose: the record is already durable, and a consumer that was
 //! not listening catches up from the file, never from the channel.
 
-use super::{Record, Recorded, Seq, Stamp, Transient};
+use super::{Entry, Record, Recorded, Seq, Stamp, Transient};
+use crate::bootstrap::now_unix_ms;
 use crate::bus::{AgentId, Signal, UsageMeter, WeakSender};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
@@ -124,8 +125,13 @@ impl Log {
             .inner
             .lock()
             .map_err(|_| io::Error::other("record log lock poisoned"))?;
-        let mut line = serde_json::to_vec(&record).map_err(io::Error::other)?;
+        let entry = Entry {
+            at_unix_ms: now_unix_ms(),
+            record,
+        };
+        let mut line = serde_json::to_vec(&entry).map_err(io::Error::other)?;
         line.push(b'\n');
+        let Entry { record, .. } = entry;
         let start = inner.pos;
         if let Some(writer) = inner.writer.as_mut() {
             writer.write_all(&line)?;
@@ -186,11 +192,72 @@ impl Log {
             let end = start + line.len() as u64 + 1;
             pos = end;
             seq += 1;
-            let parsed = serde_json::from_slice::<Record>(line)
-                .map(|record| Recorded::new(Stamp::new(Seq::new(seq), start..end), record))
-                .map_err(io::Error::other);
+            let parsed = serde_json::from_slice::<Entry>(line)
+                .map(|entry| Recorded::new(Stamp::new(Seq::new(seq), start..end), entry.record))
+                .map_err(|error| {
+                    io::Error::other(format!(
+                        "line {seq} does not parse as the `Entry` envelope ({error}); a session recorded before this exarch's Entry-envelope change cannot be resumed — was this session started with an older exarch?"
+                    ))
+                });
             out.push(parsed);
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::record::Forensic;
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "exarch-log-test-{name}-{}-{:?}.jsonl",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
+    #[test]
+    fn a_record_round_trips_through_the_entry_envelope() {
+        let path = temp_path("round-trip");
+        let log = Log::create(&path).expect("temp record log");
+        let record = Record::Forensic(Forensic::Error {
+            text: "boom".into(),
+        });
+        let _stamp = log.append(record).expect("append");
+
+        let back = Log::read(&path).expect("read back");
+        assert_eq!(back.len(), 1);
+        let recorded = back.into_iter().next().unwrap().expect("parses");
+        assert!(matches!(
+            recorded.into_value(),
+            Record::Forensic(Forensic::Error { text }) if text == "boom"
+        ));
+
+        let bytes = std::fs::read(&path).unwrap();
+        let line = String::from_utf8(bytes).unwrap();
+        assert!(
+            line.contains("\"at_unix_ms\""),
+            "the line on disk must carry the Entry envelope: {line}"
+        );
+    }
+
+    #[test]
+    fn a_pre_envelope_line_is_refused_by_name() {
+        let path = temp_path("pre-envelope");
+        let record = Record::Forensic(Forensic::Error {
+            text: "boom".into(),
+        });
+        let mut line = serde_json::to_vec(&record).unwrap();
+        line.push(b'\n');
+        std::fs::write(&path, &line).unwrap();
+
+        let back = Log::read(&path).expect("the file itself reads back");
+        assert_eq!(back.len(), 1);
+        let error = back.into_iter().next().unwrap().expect_err("no envelope");
+        let text = error.to_string();
+        assert!(text.contains("Entry"), "{text}");
+        assert!(text.contains("older exarch"), "{text}");
     }
 }

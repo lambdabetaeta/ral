@@ -10,6 +10,7 @@
 //! [`crate::agent::event`].
 
 use crate::agent::Agent;
+use crate::agent::event::{ContextOp, EditAuthority};
 use crate::bus::card::{
     self, Card, Mark, Row, execs_card, greps_card, observation_card, observation_from_wire,
     rail_place, reads_card,
@@ -21,7 +22,7 @@ use crate::record::{self, Blocks, Printer, Transient};
 use crate::shell_eval::user_json;
 use crate::tui::SessionInfo;
 use ral_core::serial::FOValue;
-use ral_core::types::{CommandOrigin, Observation, Observed, ReapCause};
+use ral_core::types::{CommandOrigin, Observation, Observed};
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Instant;
@@ -67,11 +68,13 @@ pub struct Headless<'a> {
     /// report as a clean, empty success.
     panicked: bool,
     ended_with_newline: bool,
-    /// How many of [`record::Blocks::rows`] this printer has already turned
-    /// into stderr progress lines — see [`Printer`]'s impl below, additive to
-    /// the [`Sink`] impl above and not yet the live driver
-    /// (`dev/docs/plans/260814_one_seam_one_log.md`'s R1 owns that wiring).
-    synced_through: usize,
+    /// The [`record::Seq`] of [`record::Blocks::rows`] this printer has
+    /// already turned into stderr progress lines — see [`Printer`]'s impl
+    /// below, additive to the [`Sink`] impl above and not yet the live
+    /// driver (`dev/docs/plans/260814_one_seam_one_log.md`'s R1 owns that
+    /// wiring).  A cursor by identity rather than position, since a windowed
+    /// memo makes an index wrong.
+    synced_through: record::Seq,
 }
 
 impl<'a> Headless<'a> {
@@ -93,7 +96,7 @@ impl<'a> Headless<'a> {
             reply: None,
             panicked: false,
             ended_with_newline: false,
-            synced_through: 0,
+            synced_through: record::Seq::new(0),
         }
     }
 
@@ -378,16 +381,22 @@ impl Printer for Headless<'_> {
             | Transient::Born { .. }
             | Transient::Died
             | Transient::Cleared
-            | Transient::Resources { .. } => {}
+            | Transient::Resources { .. }
+            | Transient::Pin { .. }
+            | Transient::Unpin { .. }
+            | Transient::Fault { .. } => {}
         }
     }
 
     fn sync(&mut self, blocks: &Blocks) {
         let rows = blocks.rows();
-        for row in &rows[self.synced_through..] {
+        let since = self.synced_through;
+        for row in rows.iter().filter(|r| r.id().seq() > since) {
             self.print_row(row.kind());
         }
-        self.synced_through = rows.len();
+        if let Some(last) = rows.last() {
+            self.synced_through = last.id().seq();
+        }
     }
 }
 
@@ -450,9 +459,13 @@ impl Headless<'_> {
                     self.print_card(&card);
                 }
             }
-            K::Done { outcome } => self.print_card(&card::done_card(&to_card_done(outcome))),
-            K::Notice { notice } => self.print_card(&card::notice_card(&to_card_notice(notice))),
-            K::Context { rows } => self.print_card(&context_rows_card(rows)),
+            K::Done { outcome } => {
+                self.print_card(&card::done_card(&card::to_card_done(outcome)));
+            }
+            K::Notice { notice } => {
+                self.print_card(&card::notice_card(&card::to_card_notice(notice)));
+            }
+            K::Context { rows } => self.print_card(&card::context_rows_card(rows)),
             K::SubagentDone {
                 name,
                 text: _,
@@ -471,6 +484,38 @@ impl Headless<'_> {
                     }
                     None => {
                         let _ = writeln!(self.err, "[agent: {name} done in {secs:.1}s]");
+                    }
+                }
+            }
+            K::Step { n } => {
+                self.steps += 1;
+                let _ = writeln!(self.err, "[step {n}]");
+            }
+            K::ContextEdited { op, by } => {
+                let authority = match by {
+                    EditAuthority::Model => "model",
+                    EditAuthority::User => "user",
+                    EditAuthority::Harness => "harness",
+                };
+                match op {
+                    ContextOp::Fold {
+                        through_exchange, ..
+                    } => {
+                        let _ = writeln!(
+                            self.err,
+                            "[context folded through exchange {through_exchange} ({authority})]"
+                        );
+                    }
+                    ContextOp::Drop { exchanges } => {
+                        let list = exchanges
+                            .iter()
+                            .map(u64::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let _ = writeln!(
+                            self.err,
+                            "[context dropped exchange(s) {list} ({authority})]"
+                        );
                     }
                 }
             }
@@ -537,68 +582,6 @@ impl Headless<'_> {
             self.print_card(&card);
         }
     }
-}
-
-/// `record::DoneOutcome` → `bus::card::DoneOutcome`: identical shapes, kept as
-/// two types per `record.rs`'s own rule of carrying no rendering vocabulary in
-/// what it durably records.
-fn to_card_done(outcome: &record::DoneOutcome) -> card::DoneOutcome {
-    match outcome {
-        record::DoneOutcome::Ok => card::DoneOutcome::Ok,
-        record::DoneOutcome::Err { message, status } => card::DoneOutcome::Err {
-            message: message.clone(),
-            status: *status,
-        },
-        record::DoneOutcome::Panic { message } => card::DoneOutcome::Panic {
-            message: message.clone(),
-        },
-    }
-}
-
-/// `record::NoticeFact` → `bus::card::Notice`, parsing `cause` back into
-/// [`ReapCause`] the same three spellings `record.rs`'s doc names.
-fn to_card_notice(notice: &record::NoticeFact) -> card::Notice {
-    match notice {
-        record::NoticeFact::Reap { cmd, cause } => card::Notice::Reap {
-            cmd: cmd.clone(),
-            cause: match cause.as_str() {
-                "backstop" => ReapCause::Backstop,
-                "retention" => ReapCause::Retention,
-                _ => ReapCause::Idle,
-            },
-        },
-        record::NoticeFact::Prune { names, idle_calls } => card::Notice::Prune {
-            names: names.clone(),
-            idle_calls: idle_calls.clone(),
-        },
-    }
-}
-
-/// A `/context` survey's rows as one [`Mark::Fields`] matrix, minus the
-/// `Role`/dial richness the TUI's own copy in `tui::viewport` affords —
-/// stderr has no columns to align, just the label and the one line beneath it.
-fn context_rows_card(rows: &[record::ContextRow]) -> Card {
-    use card::{Field, FieldVal, Role, Span};
-    let fields = rows
-        .iter()
-        .map(|row| Field {
-            label: format!("{} {}", row.kind, row.exchange),
-            value: FieldVal::Inline(vec![
-                Span::plain(row.opening.clone()),
-                Span::new(
-                    Role::Muted,
-                    format!(
-                        "  {} B · {} step{}{}",
-                        row.bytes,
-                        row.steps,
-                        if row.steps == 1 { "" } else { "s" },
-                        if row.live { " · live" } else { "" }
-                    ),
-                ),
-            ]),
-        })
-        .collect();
-    Card(vec![Mark::Fields { rows: fields }])
 }
 
 /// Attend `session` to quiescence in a one-shot headless run from `seed`.

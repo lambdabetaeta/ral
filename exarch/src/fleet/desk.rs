@@ -1480,9 +1480,7 @@ impl SurfaceApplier {
             let mut buf = self.surface.lock_ignore_poison();
             if let Err(error) = absorb_kind(&mut buf, &self.recorder, self.id, &kind) {
                 drop(buf);
-                self.emit.emit(Kind::Error(format!(
-                    "a display commit was not recorded in record.jsonl: {error}"
-                )));
+                self.recorder.report_fault(&error);
             }
             self.emit.emit(kind);
         }
@@ -1494,9 +1492,7 @@ impl SurfaceApplier {
         let mut buf = self.surface.lock_ignore_poison();
         if let Err(error) = buf.flush_surfaces(&self.recorder) {
             drop(buf);
-            self.emit.emit(Kind::Error(format!(
-                "a display commit was not recorded in record.jsonl: {error}"
-            )));
+            self.recorder.report_fault(&error);
         }
     }
 }
@@ -2691,12 +2687,11 @@ mod tests {
     /// Read `system_prompt_bytes` off a session's opening bookend — the first
     /// record in its `record.jsonl`.
     fn recorded_system_prompt_bytes(log_dir: &std::path::Path) -> usize {
-        let body = std::fs::read_to_string(log_dir.join("record.jsonl")).expect("record.jsonl");
-        let first: crate::record::Record = serde_json::Deserializer::from_str(&body)
+        let records = crate::record::read_records(&log_dir.join("record.jsonl")).unwrap();
+        let first = records
             .into_iter()
             .next()
-            .expect("record.jsonl must have at least one record")
-            .expect("first record must parse");
+            .expect("record.jsonl must have at least one record");
         match first {
             crate::record::Record::Protocol(crate::record::Protocol::SessionStarted {
                 system_prompt_bytes,

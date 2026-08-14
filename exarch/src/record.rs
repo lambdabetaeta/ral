@@ -52,6 +52,20 @@ pub enum Record {
     Forensic(Forensic),
 }
 
+/// The line `record.jsonl` actually holds: a [`Record`] with the wall-clock
+/// moment it was appended.  Written and read by [`log`] alone — every other
+/// module sees a bare `Record`, since a resume, a fold, and a channel
+/// publish have no use yet for the moment a line was appended.
+///
+/// Deliberately not `#[serde(flatten)]`: flattening would swallow the class
+/// enums' own `deny_unknown_fields` into this envelope's unknown-key check,
+/// which defeats the reason that attribute is on them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Entry {
+    at_unix_ms: u64,
+    record: Record,
+}
+
 mod sealed {
     pub trait Sealed {}
 }
@@ -225,6 +239,17 @@ pub enum Display {
     Context {
         rows: Vec<ContextRow>,
     },
+    /// Beside `Protocol::StepStarted`, whose `tuning` the screen never
+    /// showed — the display class never derives from the protocol twin it
+    /// duplicates a field of.
+    Step {
+        n: u32,
+    },
+    /// Beside `Protocol::ContextEdited`, for the same reason.
+    ContextEdited {
+        op: ContextOp,
+        by: EditAuthority,
+    },
 }
 
 /// A detached worker's `` `done `` completion, minus the one-line card the
@@ -352,6 +377,21 @@ pub enum Transient {
         rows: Vec<crate::agent::resources::ProbeRow>,
         card: Card,
     },
+    /// The live register's copy of a pin — [`Forensic::Pin`] is the durable
+    /// breadcrumb, this is the rendered card the process is holding, which a
+    /// resume does not restore.
+    Pin {
+        key: String,
+        card: Card,
+    },
+    Unpin {
+        key: String,
+    },
+    /// A seam append failure, or a channel elision marker: a fact about the
+    /// plumbing itself, not about the session, so it has no durable form.
+    Fault {
+        text: String,
+    },
 }
 
 /// A record's position in the log — the line it was assigned at append.
@@ -476,4 +516,53 @@ pub trait Fold {
 pub trait Printer {
     fn transient(&mut self, t: &Transient);
     fn sync(&mut self, blocks: &Blocks);
+}
+
+/// Read `path`'s [`Record`]s back, past their `Entry` envelope, for tests
+/// across the crate that assert on the raw log rather than on a fold's
+/// memo — the one sanctioned exception to this module's own "read the log
+/// back only through [`replay`]" rule, since what these tests exercise is
+/// the wire shape itself.
+///
+/// # Errors
+/// Returns `Err` under exactly [`log::Log::read`]'s own conditions.
+#[cfg(test)]
+pub(crate) fn read_records(path: &std::path::Path) -> std::io::Result<Vec<Record>> {
+    Ok(log::Log::read(path)?
+        .into_iter()
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .map(Recorded::into_value)
+        .collect())
+}
+
+/// The other half of [`read_records`]: a test that hand-writes or
+/// hand-edits `record.jsonl` needs the envelope shape too, without reaching
+/// for the private [`Entry`] type itself.
+#[cfg(test)]
+pub(crate) fn envelope_line(record: &Record) -> Vec<u8> {
+    #[derive(Serialize)]
+    struct Envelope<'a> {
+        at_unix_ms: u64,
+        record: &'a Record,
+    }
+    serde_json::to_vec(&Envelope {
+        at_unix_ms: 0,
+        record,
+    })
+    .expect("a Record always serialises")
+}
+
+/// The read-side twin of [`envelope_line`], for a test that pulls one line
+/// back off a live-written `record.jsonl` to inspect or edit it.
+///
+/// # Errors
+/// Returns `Err` when `line` does not parse as the `Entry` envelope.
+#[cfg(test)]
+pub(crate) fn record_from_line(line: &[u8]) -> serde_json::Result<Record> {
+    #[derive(Deserialize)]
+    struct Envelope {
+        record: Record,
+    }
+    serde_json::from_slice::<Envelope>(line).map(|e| e.record)
 }

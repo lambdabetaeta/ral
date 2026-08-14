@@ -168,8 +168,8 @@ fn read_freed(reader: &mut File, stamp: &Stamp) -> io::Result<Protocol> {
     let mut buf = vec![0; length];
     reader.read_exact(&mut buf)?;
     let line = buf.strip_suffix(b"\n").unwrap_or(&buf);
-    let record: Record = serde_json::from_slice(line).map_err(io::Error::other)?;
-    match record {
+    let entry: super::Entry = serde_json::from_slice(line).map_err(io::Error::other)?;
+    match entry.record {
         Record::Protocol(p) => Ok(p),
         Record::Display(_) | Record::Forensic(_) => Err(io::Error::other(
             "a freed model-fold slot pointed at a non-protocol record — the ledger's own invariant broke",
