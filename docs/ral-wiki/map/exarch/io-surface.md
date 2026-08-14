@@ -137,12 +137,15 @@ kit `` `card ``.
 
 `decode_surface` ([[map/exarch/shell-eval|shell-eval]]) is the shared surface
 decoder: a map matching the projection above decodes through
-`Observation::from_value` (`exarch/src/bus/card/observation.rs`) and is bound
-to a card by `observation_card`, emitted as **`Kind::Io { event, card }`**
-(`bus/event.rs`) so the bus event carries *both* the raw observation and the
-rendered mark tree. The other surface shapes (pin, notice, card, done) have
-their own arms; a value matching none drops, the same graceful degradation as
-before.
+`Observation::from_value` into `Surface::Observation`, the raw observation
+alone — no card built yet, since the decoder's own codomain carries the
+structured value and nothing a printer merely wants a copy of. The card is
+bound by `observation_card` only where a `Kind` is still needed for the bus's
+still-live frontends (`Surface::into_kind`, emitting **`Kind::Io { event,
+card }`**, `bus/event.rs`), and by `absorb_surface` never at all — the
+observation records without one. The other surface shapes (pin, notice, card,
+done) have their own arms; a value matching none drops, the same graceful
+degradation as before.
 
 `observation_card` composes from the existing marks ([[map/exarch/cards|cards]]).
 The operation is a *nominal category*, so it is carried by a word, not a

@@ -183,12 +183,18 @@ nothing else in the digest walks the journal yet.
 regimes share: the live foreground sink `run_shell` hands `dispatch_to_report`
 emits now, and the deferred sink (`deferred_sink`, installed on the transport
 before each dispatch) mints identical events when a detached worker's batch
-flushes. `accepted_surface` wraps it with the protected-pin guard; each decoded
-`Kind` reaches the [[map/exarch/frontend|bus]] through the call's `Emitter`.
-Five shapes ride the one `surface` channel, tried pin-first:
+flushes. `accepted_surface` wraps it with the protected-pin guard. Neither
+decodes to `Kind` any more: the codomain is `Surface`, the shell's own closed
+vocabulary, five shapes wide and tried pin-first, which carries only the
+structured value each shape names — no `Card` mark tree, since that is built
+by whoever renders (`Surface::into_kind`, at the bus-emitting boundary, until
+the frontends move off `Kind` themselves) or whoever records
+(`absorb_surface`, [[map/exarch/frontend|desk]]), never by the decoder:
 
-- a `` `pin ``/`` `unpin `` wrapper decodes to `Kind::Pin` / `Kind::Unpin`, but
-  the host-owned `services` key is protected
+- a `` `pin ``/`` `unpin `` wrapper decodes to `Surface::Pin { key, card }` /
+  `Surface::Unpin { key }` — a pin is a rendered card in a slot, so its card
+  is the fact itself, not a copy of one — but the host-owned `services` key is
+  protected
   ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]):
   ordinary `surface` writes or clears there are rejected with a diagnostic
   before they reach the pin mirror or viewport; accepted pins are mirrored as
@@ -196,17 +202,16 @@ Five shapes ride the one `surface` channel, tried pin-first:
   without parsing rendered text — the read side reuses the same store rather
   than adding a second one ([[design/pins|pins]]);
 - a `Map` core emits at a redirect, exec, or capability-check door decodes
-  through `Observation::from_value` / `observation_card` into a
-  `Kind::Io { event, card }`, carrying the raw observation beside its
-  rendering ([[map/exarch/io-surface|io-surface]]);
+  through `Observation::from_value` into `Surface::Observation`, the raw
+  observation alone ([[map/exarch/io-surface|io-surface]]);
 - a `` `notice `` core's ready-boundary housekeeping pushes (a worker reap, an
-  idle-binding prune, a large-binding warning) decodes to
-  `Kind::Notice { notice, card }` ([[decisions/260706_enquiry-channel|enquiry-channel]]);
-- any other value tries `value_to_card` and becomes a `Kind::Card`; the closed
-  mark set and the `value_to_card` / `render_card` decode-and-bind path live in
-  [[map/exarch/cards|cards]];
+  idle-binding prune, a large-binding warning) decodes to `Surface::Notice`
+  ([[decisions/260706_enquiry-channel|enquiry-channel]]);
+- any other value tries `value_to_card` and becomes a `Surface::Card`, the one
+  shape whose payload *is* a card; the closed mark set and the `value_to_card`
+  / `render_card` decode-and-bind path live in [[map/exarch/cards|cards]];
 - the `` `done `` completion event a detached worker flushes at the end of its
-  batch decodes to `Kind::Done { outcome, card }`;
+  batch decodes to `Surface::Done`;
 - a value that is none of these is dropped, the same graceful degradation
   `value_to_card` gives an unknown mark.
 

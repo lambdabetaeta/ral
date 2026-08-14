@@ -14,7 +14,7 @@ use crate::egress;
 use crate::fleet::registry::{AgentRegistry, MessageError, NotADescendant};
 use crate::fleet::schedule::{CronSchedule, ScheduleRegistry, Trigger, parse_duration};
 use crate::record::commit::SurfaceBuffer;
-use crate::shell_eval::{self, PinDigests};
+use crate::shell_eval::{self, PinDigests, Surface};
 use crate::sync::LockExt;
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
@@ -1462,27 +1462,27 @@ pub(crate) struct SurfaceApplier {
 impl SurfaceApplier {
     /// Apply one live [`Event::Surface`] value.
     pub(crate) fn live(&self, val: FOValue) {
-        if let Some(kind) = shell_eval::accepted_surface(&RalValue::from(val), &self.emit) {
+        if let Some(surface) = shell_eval::accepted_surface(&RalValue::from(val), &self.emit) {
             if let Some(pins) = &self.pins {
                 // Fatal, never skipped: dropping a disposition here would
                 // desync the mirror from the stream with no signal at all.
                 let mut m = pins.lock().expect("pin register poisoned");
-                match &kind {
-                    Kind::Pin { key, card } => {
+                match &surface {
+                    Surface::Pin { key, card } => {
                         m.insert(key.clone(), shell_eval::PinDigest::new(card.clone()));
                     }
-                    Kind::Unpin { key } => {
+                    Surface::Unpin { key } => {
                         m.remove(key);
                     }
                     _ => {}
                 }
             }
             let mut buf = self.surface.lock_ignore_poison();
-            if let Err(error) = absorb_kind(&mut buf, &self.recorder, self.id, &kind) {
+            if let Err(error) = absorb_surface(&mut buf, &self.recorder, self.id, &surface) {
                 drop(buf);
                 self.recorder.report_fault(&error);
             }
-            self.emit.emit(kind);
+            self.emit.emit(surface.into_kind());
         }
     }
 
@@ -1497,37 +1497,43 @@ impl SurfaceApplier {
     }
 }
 
-/// Feed one decoded surface [`Kind`] to the commit producer — an io
-/// observation into its bucket, a lone diff card into the patch buffer, and
-/// every other surface class as its own commit — shared by
-/// [`SurfaceApplier::live`] and the deferred-batch path in
-/// `agent::attend::announce`, so the two cannot drift on what records.
+/// Feed one decoded [`Surface`] to the commit producer — an io observation
+/// into its bucket, a lone diff card into the patch buffer, and every other
+/// surface class as its own commit — shared by [`SurfaceApplier::live`] and
+/// the deferred-batch path in `agent::attend::announce`, so the two cannot
+/// drift on what records.
 ///
-/// Only the bucketed kinds — read, exec, grep, write — enter the buffer; a
-/// worker birth or capability check joins no group and records at once as
-/// its own commit, exactly the line the buffer's own `unreachable!` arms
-/// draw.  A done, notice, or generic card flushes the buffer first: those
-/// close or interrupt the run around them, so the record keeps the order the
-/// user saw.
-pub(crate) fn absorb_kind(
+/// Only the bucketed observations — read, exec, grep, write — enter the
+/// buffer; a worker birth or capability check joins no group and records at
+/// once as its own commit, exactly the line the buffer's own `unreachable!`
+/// arms draw.  A done, notice, or generic card flushes the buffer first:
+/// those close or interrupt the run around them, so the record keeps the
+/// order the user saw.
+///
+/// A pin publishes twice, per the mirror it also feeds in
+/// [`SurfaceApplier::live`]: [`crate::record::Forensic::Pin`]/`Unpin` is the
+/// durable breadcrumb a resume replays, [`crate::record::Transient::Pin`]/
+/// `Unpin` is the register the live process is holding, which a resume does
+/// not restore.
+pub(crate) fn absorb_surface(
     buf: &mut SurfaceBuffer,
     recorder: &crate::record::Emitter,
     id: AgentId,
-    kind: &Kind,
+    surface: &Surface,
 ) -> std::io::Result<()> {
-    match kind {
-        Kind::Io { event, .. } => match &event.what {
+    match surface {
+        Surface::Observation(event) => match &event.what {
             Observed::Read { .. }
             | Observed::Command { .. }
             | Observed::Grep { .. }
-            | Observed::Write { .. } => buf.absorb_observation(recorder, id, event.clone()),
+            | Observed::Write { .. } => buf.absorb_observation(recorder, id, (**event).clone()),
             Observed::Worker { .. } | Observed::Capability { .. } | Observed::Act { .. } => {
                 let value = crate::bus::card::observation_wire(event);
                 let _recorded = recorder.emit(crate::record::Display::Observation { value })?;
                 Ok(())
             }
         },
-        Kind::Card(card) => match card.clone().into_single_diff() {
+        Surface::Card(card) => match card.clone().into_single_diff() {
             Ok((path, hunks)) => buf.absorb_patch(recorder, id, path, hunks),
             // A richer card is the kit's own communication: the mark tree is
             // the fact, so it records whole and opaquely.  The buffers flush
@@ -1541,14 +1547,14 @@ pub(crate) fn absorb_kind(
                 Ok(())
             }
         },
-        Kind::Done { outcome, .. } => {
+        Surface::Done(outcome) => {
             buf.flush_surfaces(recorder)?;
             let _recorded = recorder.emit(crate::record::Display::Done {
                 outcome: done_fact(outcome),
             })?;
             Ok(())
         }
-        Kind::Notice { notice, .. } => {
+        Surface::Notice(notice) => {
             buf.flush_surfaces(recorder)?;
             let _recorded = recorder.emit(crate::record::Display::Notice {
                 notice: notice_fact(notice),
@@ -1558,15 +1564,19 @@ pub(crate) fn absorb_kind(
         // Register state, not scrollback: the history informs the resume note,
         // and the buffer is left unflushed on purpose — a pin joins no group
         // and must not split the one it is never offered to.
-        Kind::Pin { key, .. } => {
+        Surface::Pin { key, card } => {
             let _recorded = recorder.emit(crate::record::Forensic::Pin { key: key.clone() })?;
+            recorder.transient(crate::record::Transient::Pin {
+                key: key.clone(),
+                card: card.clone(),
+            });
             Ok(())
         }
-        Kind::Unpin { key } => {
+        Surface::Unpin { key } => {
             let _recorded = recorder.emit(crate::record::Forensic::Unpin { key: key.clone() })?;
+            recorder.transient(crate::record::Transient::Unpin { key: key.clone() });
             Ok(())
         }
-        _ => Ok(()),
     }
 }
 
@@ -2412,11 +2422,13 @@ mod tests {
     /// seam — the legacy `Kind` beside a `Display` (or, for the pin register,
     /// `Forensic`) record, never one without the other — and a generic card
     /// records *behind* the io group buffered before it, keeping the record
-    /// in the order the user saw.
+    /// in the order the user saw.  A pin/unpin additionally publishes a
+    /// `Transient` beside its `Forensic` twin: the durable breadcrumb and the
+    /// live register the process is holding, two records for one act.
     #[test]
     fn live_surfaces_record_their_seam_twins_beside_the_kinds() {
         use crate::bus::Signal;
-        use crate::record::{Display, Forensic, Record};
+        use crate::record::{Display, Forensic, Record, Transient};
 
         let (tx, rx) = channel();
         let emit = crate::bus::Emitter::new(tx.clone(), 0);
@@ -2480,6 +2492,7 @@ mod tests {
 
         let mut kinds: Vec<&'static str> = Vec::new();
         let mut facts: Vec<&'static str> = Vec::new();
+        let mut transients: Vec<&'static str> = Vec::new();
         while let Ok(sig) = rx.try_recv() {
             match sig {
                 Signal::Event(event) => kinds.push(match event.kind {
@@ -2504,13 +2517,22 @@ mod tests {
                     Record::Forensic(Forensic::Unpin { key }) if key == "tasks" => "unpin",
                     _ => continue,
                 }),
-                Signal::Transient(..) => {}
+                Signal::Transient(_, t) => transients.push(match t {
+                    Transient::Pin { key, .. } if key == "tasks" => "pin",
+                    Transient::Unpin { key } if key == "tasks" => "unpin",
+                    _ => continue,
+                }),
             }
         }
         assert_eq!(
             kinds,
             ["io", "card", "done", "notice", "pin", "unpin"],
             "every legacy kind still emits, in arrival order"
+        );
+        assert_eq!(
+            transients,
+            ["pin", "unpin"],
+            "the pin register's live copy also publishes as a Transient beside its Forensic twin"
         );
         assert_eq!(
             facts,

@@ -496,12 +496,13 @@ pub(super) fn announce(item: &Item, emit: &Emitter, recorder: &crate::record::Em
         Item::Surface { id, values, .. } => {
             let mut buf = crate::record::commit::SurfaceBuffer::new();
             for v in values {
-                if let Some(kind) = shell_eval::accepted_surface(v, emit) {
-                    if let Err(error) = crate::fleet::desk::absorb_kind(&mut buf, recorder, *id, &kind)
+                if let Some(surface) = shell_eval::accepted_surface(v, emit) {
+                    if let Err(error) =
+                        crate::fleet::desk::absorb_surface(&mut buf, recorder, *id, &surface)
                     {
                         recorder.report_fault(&error);
                     }
-                    emit.emit(kind);
+                    emit.emit(surface.into_kind());
                 }
             }
             if let Err(error) = buf.flush_surfaces(recorder) {

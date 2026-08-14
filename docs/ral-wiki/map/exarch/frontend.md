@@ -19,9 +19,10 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   `WaitingOnAgents` — a total state named on the status rule, never recorded:
   the model never saw it), or a decoded surface class — a `Card` render document a kit raises through the
   `surface` builtin, a structural `Io` event, a housekeeping `Notice`, a
-  `Pin`/`Unpin`, or a worker's `Done` — decoded onto the bus by
-  [[map/exarch/shell-eval|shell-eval]]'s `decode_surface` and drawn by one
-  generic interpreter ([[map/exarch/cards|cards]]).
+  `Pin`/`Unpin`, or a worker's `Done` — decoded by
+  [[map/exarch/shell-eval|shell-eval]]'s `decode_surface` into its own closed
+  `Surface` vocabulary, rendered onto the bus as a `Kind` (`Surface::into_kind`)
+  and drawn by one generic interpreter ([[map/exarch/cards|cards]]).
 - `Inbox` (`bus/inbox.rs`) is the typed inbound twin — a per-session queue of
   `Post`s (`bus/post.rs`), each carrying its source and drain boundary. User
   steering drains mid-exchange at a

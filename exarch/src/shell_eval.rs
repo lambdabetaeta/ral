@@ -129,13 +129,11 @@ pub(crate) fn is_service_pin(key: &str) -> bool {
 /// The shell's own decode target: the five shapes the `surface` channel
 /// carries, closed and named rather than borrowed from the bus's vocabulary.
 ///
-/// [`Kind`] is what `decode_surface` builds today, eagerly rendering a
-/// [`crate::bus::card::Card`] mark tree that `absorb_kind` discards and the
-/// view fold rebuilds; `Surface` is the honest codomain, whose card fields
-/// carry the fact a card *is* (`Card`, `Pin`) rather than one a printer
-/// merely wants a copy of. Not yet `decode_surface`'s return type — that
-/// crossing is a later parcel's.
-#[allow(dead_code, reason = "decode_surface -> Surface lands in a later wave")]
+/// `Surface` carries the fact a card *is* (`Card`, `Pin`) rather than one a
+/// printer merely wants a copy of — an observation, a notice, and a done
+/// keep only their structured value, so a printer's own mark tree is built
+/// once, by whoever renders, not eagerly here and thrown away by whoever
+/// records.
 pub enum Surface {
     Observation(Box<Observation>),
     Card(crate::bus::card::Card),
@@ -150,7 +148,32 @@ pub enum Surface {
     },
 }
 
-/// Decode one surfaced `Value` into the [`Kind`] it renders as — the single
+impl Surface {
+    /// Render this decoded value into the bus's still-living [`Kind`]
+    /// vocabulary, building the [`crate::bus::card::Card`] mark tree a
+    /// `Surface` deliberately does not carry for its own three plain shapes.
+    pub(crate) fn into_kind(self) -> Kind {
+        match self {
+            Self::Observation(event) => {
+                let card = observation_card(&event.what);
+                Kind::Io { event: *event, card }
+            }
+            Self::Card(card) => Kind::Card(card),
+            Self::Notice(notice) => {
+                let card = crate::bus::card::notice_card(&notice);
+                Kind::Notice { notice, card }
+            }
+            Self::Done(outcome) => {
+                let card = done_card(&outcome);
+                Kind::Done { outcome, card }
+            }
+            Self::Pin { key, card } => Kind::Pin { key, card },
+            Self::Unpin { key } => Kind::Unpin { key },
+        }
+    }
+}
+
+/// Decode one surfaced `Value` into the [`Surface`] it names — the single
 /// decoder both delivery regimes share, so the live sink's events and the
 /// deferred sink's later `deliver` cannot drift.
 ///
@@ -160,11 +183,11 @@ pub enum Surface {
 /// odd one: it is *state*, keyed to a register slot and overwritten in place
 /// on re-pin, not an event appended to scrollback.  Anything else drops to
 /// `None`.
-pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
+pub fn decode_surface(ev: &RalValue) -> Option<Surface> {
     if let Some((key, body)) = value_to_pin(ev) {
         Some(match body {
-            Some(card) => Kind::Pin { key, card },
-            None => Kind::Unpin { key },
+            Some(card) => Surface::Pin { key, card },
+            None => Surface::Unpin { key },
         })
     } else if let Some(event) = Observation::from_value(ev) {
         // Core reports every observation it makes and judges none of them;
@@ -172,31 +195,26 @@ pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
         // dispatch is one observation, so a rejected one is dropped outright
         // rather than offered to the decoders below.
         rail_place(&event.what)?;
-        let card = observation_card(&event.what);
-        Some(Kind::Io { event, card })
+        Some(Surface::Observation(Box::new(event)))
     } else if let Some(notice) = crate::bus::card::value_to_notice(ev) {
-        let card = crate::bus::card::notice_card(&notice);
-        Some(Kind::Notice { notice, card })
+        Some(Surface::Notice(notice))
     } else if let Some(card) = value_to_card(ev) {
-        Some(Kind::Card(card))
+        Some(Surface::Card(card))
     } else {
-        value_to_done(ev).map(|outcome| {
-            let card = done_card(&outcome);
-            Kind::Done { outcome, card }
-        })
+        value_to_done(ev).map(Surface::Done)
     }
 }
 
 /// Decode one surfaced value and apply the protected-pin guard.  Shared by the
 /// live and deferred-batch surface sinks.
-pub(crate) fn accepted_surface(val: &RalValue, emit: &Emitter) -> Option<Kind> {
-    let kind = decode_surface(val)?;
-    (!reject_protected_pin(&kind, emit)).then_some(kind)
+pub(crate) fn accepted_surface(val: &RalValue, emit: &Emitter) -> Option<Surface> {
+    let surface = decode_surface(val)?;
+    (!reject_protected_pin(&surface, emit)).then_some(surface)
 }
 
-fn reject_protected_pin(kind: &Kind, emit: &Emitter) -> bool {
-    let key = match kind {
-        Kind::Pin { key, .. } | Kind::Unpin { key } if is_service_pin(key) => key,
+fn reject_protected_pin(surface: &Surface, emit: &Emitter) -> bool {
+    let key = match surface {
+        Surface::Pin { key, .. } | Surface::Unpin { key } if is_service_pin(key) => key,
         _ => return false,
     };
     let msg = format!(
@@ -1110,9 +1128,10 @@ keep-bottom
         assert_round_trips("leading-zero", &line_with_digit_digest(true));
     }
 
-    /// Every surface class round-trips to its `Kind`, structured payload kept
-    /// beside the rendered card, and junk drops to `None`.  One decoder, so
-    /// what the live sink emits now is what a deferred `deliver` mints later.
+    /// Every surface class round-trips to its `Surface`, structured payload
+    /// kept without a rendered card, and junk drops to `None`.  One decoder,
+    /// so what the live sink emits now is what a deferred `deliver` mints
+    /// later.
     #[test]
     fn decode_surface_round_trips_each_class() {
         assert!(matches!(
@@ -1130,7 +1149,7 @@ keep-bottom
                 )
                 .to_value()
             ),
-            Some(Kind::Io { .. })
+            Some(Surface::Observation(_))
         ));
         assert!(matches!(
             decode_surface(&RalValue::Variant {
@@ -1147,17 +1166,14 @@ keep-bottom
                     ("cause".into(), RalValue::String("idle".into())),
                 ]))),
             }),
-            Some(Kind::Notice {
-                notice: crate::bus::card::Notice::Reap { .. },
-                ..
-            })
+            Some(Surface::Notice(crate::bus::card::Notice::Reap { .. }))
         ));
         assert!(matches!(
             decode_surface(&RalValue::Variant {
                 label: "card".into(),
                 payload: Some(Box::new(RalValue::list(vec![]))),
             }),
-            Some(Kind::Card(_))
+            Some(Surface::Card(_))
         ));
         assert!(matches!(
             decode_surface(&RalValue::Variant {
@@ -1173,10 +1189,7 @@ keep-bottom
                     ),
                 ]))),
             }),
-            Some(Kind::Done {
-                outcome: crate::bus::card::DoneOutcome::Ok,
-                ..
-            })
+            Some(Surface::Done(crate::bus::card::DoneOutcome::Ok))
         ));
         assert!(matches!(
             decode_surface(&RalValue::Variant {
@@ -1194,7 +1207,7 @@ keep-bottom
                     ),
                 ]))),
             }),
-            Some(Kind::Pin { .. })
+            Some(Surface::Pin { .. })
         ));
         for label in ["unpin", "pin"] {
             assert!(matches!(
@@ -1205,7 +1218,7 @@ keep-bottom
                         RalValue::String("tasks".into()),
                     )]))),
                 }),
-                Some(Kind::Unpin { .. })
+                Some(Surface::Unpin { .. })
             ));
         }
         // An *empty* card drops the slot too: a pin with nothing to show is
@@ -1224,7 +1237,7 @@ keep-bottom
                     ),
                 ]))),
             }),
-            Some(Kind::Unpin { .. })
+            Some(Surface::Unpin { .. })
         ));
         assert!(decode_surface(&RalValue::String("nope".into())).is_none());
     }
@@ -1232,7 +1245,7 @@ keep-bottom
     #[test]
     fn model_surface_cannot_write_service_pins() {
         let (emit, rx) = crate::bus::dummy_emitter();
-        let protected = Kind::Pin {
+        let protected = Surface::Pin {
             key: SERVICES_PIN_KEY.to_string(),
             card: crate::bus::card::Card(Vec::new()),
         };
@@ -1244,7 +1257,7 @@ keep-bottom
         );
 
         let (emit, _rx) = crate::bus::dummy_emitter();
-        let ordinary = Kind::Unpin {
+        let ordinary = Surface::Unpin {
             key: "tasks".into(),
         };
         assert!(!reject_protected_pin(&ordinary, &emit));
@@ -1834,7 +1847,8 @@ return !{{length $hits}}"
 
     /// One tool call through `run_shell` over a real bus `Emitter`, returning
     /// the result and every `Kind` off the channel — the whole
-    /// `core surface → decode_surface → Kind` path the io-door tests assert on.
+    /// `core surface → decode_surface → Surface → Kind` path the io-door
+    /// tests assert on.
     fn run_capturing(shell: &mut Shell, cmd: &str) -> (ToolResult, Vec<crate::bus::Kind>) {
         let (tx, rx) = channel();
         let emit = Emitter::new(tx, 0);

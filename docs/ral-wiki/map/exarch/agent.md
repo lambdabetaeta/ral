@@ -163,8 +163,8 @@ Worker-reap and large-binding notices need no drain at `attend`'s top:
 core's own engine pushes both as `` `notice `` surface classes at the ready
 boundary of the run that produced them
 ([[decisions/260706_enquiry-channel|enquiry-channel]]), decoded by
-[[map/exarch/shell-eval|shell-eval]]'s `decode_surface` into `Kind::Notice` at
-the emit seam. A reap notice names a worker removed by policy — the lease
+[[map/exarch/shell-eval|shell-eval]]'s `decode_surface` into `Surface::Notice`
+and recorded/rendered from there. A reap notice names a worker removed by policy — the lease
 chain's idle or backstop bound on a running worker, or the retention sweep
 expiring a settled entry's unclaimed result — rather than one an eliminator
 observed away. Transcript and TUI only — the rendered one-liner is
