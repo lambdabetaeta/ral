@@ -178,8 +178,23 @@ pub enum Display {
     },
     /// The byte-identical third copy of a result: emitted, drawn, and
     /// recorded from the one clipped string the model saw.
+    ///
+    /// `call` names the `ToolCall` commit this result belongs to — the
+    /// producer already knows it, being the one that just emitted that
+    /// commit — so the view fold addresses it directly rather than walking
+    /// backward to the nearest resident tail, the mechanism `set_result_size`
+    /// used and this plan retires.
     Result {
         text: String,
+        call: BlockId,
+    },
+    /// One read/exec/grep run the producer grouped into a single visual
+    /// card — the same dedup and grouping `SurfaceBuffer` already does at
+    /// record time, carried as its members' wire forms so the view fold can
+    /// rebuild exactly the one card the user saw via `reads_card` /
+    /// `execs_card` / `greps_card`, never a mark tree recorded up front.
+    ObservationGroup {
+        values: Vec<FOValue>,
     },
     SubagentDone {
         name: String,
@@ -338,7 +353,7 @@ pub enum Transient {
 }
 
 /// A record's position in the log — the line it was assigned at append.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Seq(u64);
 
 impl Seq {
@@ -411,7 +426,7 @@ impl<R> Recorded<R> {
 ///
 /// A `result_size` patch can carry its call's `BlockId`, and the fold can
 /// tolerate a patch whose target it has already evicted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BlockId(Seq);
 
 impl BlockId {

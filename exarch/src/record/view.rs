@@ -36,9 +36,10 @@ pub enum BlockKind {
         tool: String,
         cmd: String,
         summary: Option<String>,
-        /// Attached after the fact by [`Blocks::attach_result`] — the one
-        /// correlation this fold cannot do by id (see the module's own note).
         result_lines: Option<u32>,
+    },
+    ObservationGroup {
+        values: Vec<FOValue>,
     },
     HarnessCall {
         verb: String,
@@ -96,13 +97,6 @@ pub enum BlockKind {
 
 /// One committed row of scrollback, named by the [`Seq`] of the record that
 /// produced it.
-///
-/// The fold keys on `Seq` rather than [`super::BlockId`]: `BlockId` wraps a
-/// `Seq` but exposes no way to read it back out or compare two for equality,
-/// so it cannot serve as this fold's own correlation key — only as the
-/// opaque handle [`Self::id`] hands to a caller that already has one to
-/// compare against structurally (a patch record carrying its own `BlockId`,
-/// once one exists — see the module's note on `Display::Result`).
 pub struct Block {
     seq: Seq,
     kind: BlockKind,
@@ -186,20 +180,19 @@ impl Blocks {
         self.rows.push(Block::new(seq, kind));
     }
 
-    /// Attach a result's line count to the nearest preceding tool call.
-    ///
-    /// This is the tail-walk the plan's own text asks to retire in favour of
-    /// a patch record naming its call by `BlockId` — retired here only in
-    /// spelling, not in mechanism: `Display::Result` carries no target id to
-    /// address instead, so the walk survives.  See the module's own note.
-    fn attach_result(&mut self, text: &str) {
+    /// Attach a result's line count to the call it names — a patch record
+    /// addressed by `BlockId`, replacing the tail-walk `set_result_size`
+    /// used to guess at the same correlation.  A target this fold cannot
+    /// find (never happens today, since it never evicts) is a no-op rather
+    /// than a panic.
+    fn attach_result(&mut self, call: super::BlockId, text: &str) {
         let n = u32::try_from(text.lines().count()).unwrap_or(u32::MAX);
+        let target = call.seq();
         if let Some(BlockKind::ToolCall { result_lines, .. }) = self
             .rows
             .iter_mut()
-            .rev()
+            .find(|b| b.seq == target)
             .map(Block::kind_mut)
-            .find(|k| matches!(k, BlockKind::ToolCall { .. }))
         {
             *result_lines = Some(n);
         }
@@ -260,6 +253,7 @@ fn render_block_text(out: &mut String, kind: &BlockKind) {
             }
         }
         BlockKind::Observation { value } => format!("· {value:?}"),
+        BlockKind::ObservationGroup { values } => format!("· {} items", values.len()),
         BlockKind::Card { marks } => format!("· {marks}"),
         BlockKind::Done { outcome } => match outcome {
             DoneOutcome::Ok => "[done: ok]".to_string(),
@@ -328,8 +322,10 @@ fn step_display(memo: &mut Blocks, seq: Seq, d: Display) {
                 failed,
             },
         ),
-        // No id of its own to address instead — see `Blocks::attach_result`.
-        Display::Result { text } => memo.attach_result(&text),
+        Display::Result { text, call } => memo.attach_result(call, &text),
+        Display::ObservationGroup { values } => {
+            memo.push(seq, BlockKind::ObservationGroup { values });
+        }
         Display::SubagentDone {
             name,
             text,
