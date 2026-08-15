@@ -14,10 +14,21 @@ use genai::chat::{ChatMessage, ChatOptions, ChatStreamEvent, StopReason, StreamE
 pub struct StepOut {
     pub assistant_message: ChatMessage,
     pub tool_calls: Vec<ToolCall>,
-    pub reasoning: Option<String>,
     pub usage: Usage,
     pub stop_reason: Option<StopReason>,
     pub cut_short: Option<CutShort>,
+}
+
+/// One streamed piece of an assistant turn.
+///
+/// Prose and reasoning arrive interleaved on a single stream and their order
+/// carries meaning — a reasoning run ends exactly where the prose after it
+/// begins — so they reach the caller through one callback, which cannot lose
+/// that order, rather than through two independent ones, which can.
+#[derive(Clone, Copy)]
+pub enum Delta<'a> {
+    Say(&'a str),
+    Think(&'a str),
 }
 
 /// Why an assistant turn ended before the model chose to stop.
@@ -38,7 +49,7 @@ pub struct SummaryOut {
 
 impl Engine {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn complete<F: FnMut(&str), G: FnMut(&str)>(
+    pub(super) fn complete<F: FnMut(Delta<'_>)>(
         &self,
         transport: &Transport,
         model: &str,
@@ -49,8 +60,7 @@ impl Engine {
         messages: Vec<ChatMessage>,
         tool_enabled: bool,
         search: bool,
-        on_text: &mut F,
-        on_think: &mut G,
+        on_delta: &mut F,
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
         self.refresh_if_stale(transport);
@@ -115,13 +125,13 @@ impl Engine {
                             ChatStreamEvent::Chunk(chunk) => {
                                 seen_streamed_content |= !chunk.content.is_empty();
                                 streamed.push_str(&chunk.content);
-                                on_text(&chunk.content);
+                                on_delta(Delta::Say(&chunk.content));
                             }
                             ChatStreamEvent::End(end) => return Ok(end),
                             ChatStreamEvent::ReasoningChunk(chunk) => {
                                 seen_streamed_content |= !chunk.content.is_empty();
                                 streamed_reasoning.push_str(&chunk.content);
-                                on_think(&chunk.content);
+                                on_delta(Delta::Think(&chunk.content));
                             }
                             // Nothing to add to the turn: signatures and tool calls
                             // arrive whole in `End`, and a heartbeat's only use is
@@ -238,10 +248,8 @@ fn step_out_from_end(model: &str, end: StreamEnd, metered: bool, adapter: Adapte
         .filter(|reason| matches!(reason, StopReason::MaxTokens(_)))
         .map(|_| CutShort::OutputCap);
     StepOut {
-        assistant_message: ChatMessage::assistant(content)
-            .with_reasoning_content(reasoning.clone()),
+        assistant_message: ChatMessage::assistant(content).with_reasoning_content(reasoning),
         tool_calls,
-        reasoning,
         usage: usage_from(model, &raw_usage, metered, adapter),
         stop_reason,
         cut_short,
@@ -259,9 +267,8 @@ fn stalled_step_out(
     let reasoning = (!streamed_reasoning.is_empty()).then(|| streamed_reasoning.to_string());
     StepOut {
         assistant_message: ChatMessage::assistant(streamed.to_string())
-            .with_reasoning_content(reasoning.clone()),
+            .with_reasoning_content(reasoning),
         tool_calls: Vec::new(),
-        reasoning,
         usage: usage_from(model, &genai::chat::Usage::default(), metered, adapter),
         stop_reason: None,
         cut_short: Some(CutShort::Stalled(cause.clone())),
@@ -391,7 +398,14 @@ mod tests {
             step.assistant_message.content.first_text(),
             Some("partial answer so far")
         );
-        assert!(step.reasoning.is_none());
+        assert!(
+            !step
+                .assistant_message
+                .content
+                .iter()
+                .any(|part| matches!(part, ContentPart::ReasoningContent(_))),
+            "a stall with no reasoning attaches none"
+        );
     }
 
     #[test]
@@ -407,10 +421,6 @@ mod tests {
             &cause,
             false,
             AdapterKind::OpenAI,
-        );
-        assert_eq!(
-            step.reasoning.as_deref(),
-            Some("let me work through the cases")
         );
         assert!(step.assistant_message.content.iter().any(|part| matches!(
             part,

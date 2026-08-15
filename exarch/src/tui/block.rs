@@ -61,15 +61,14 @@ pub(super) enum CardOrigin {
     Surfaced,
 }
 
-/// One reasoning phase.  `answer_chars` is its answer mass, the deliberation
-/// grain's denominator.  `provisional` holds the phase's streamed deltas —
-/// revealed live wherever the block is dialed open — until
-/// [`Block::commit_thinking`] lands the authoritative `text` and supersedes
-/// them.  An empty `text` is what marks the phase still streaming.
+/// One committed reasoning run.  `answer_chars` is the mass of the prose it
+/// became, the deliberation grain's denominator, measured by the view that
+/// draws it: the run commits ahead of that prose and so cannot carry it.
+/// While the run is still streaming it has no block at all — the live edge is
+/// `Viewport::thinking_seat`, a magnitude row.
 pub(super) struct Thinking {
     pub(super) text: String,
     pub(super) answer_chars: u32,
-    pub(super) provisional: String,
 }
 
 /// What a block carries — each variant a pure function of its data, the target
@@ -312,11 +311,7 @@ impl Block {
     }
     pub(super) fn thinking(text: String, answer_chars: u32) -> Self {
         Self::new(
-            BlockKind::Thinking(Thinking {
-                text,
-                answer_chars,
-                provisional: String::new(),
-            }),
+            BlockKind::Thinking(Thinking { text, answer_chars }),
             Fidelity::default(),
         )
     }
@@ -372,9 +367,7 @@ impl Block {
         match &self.kind {
             BlockKind::Card { card, .. } => card.magnitude(),
             BlockKind::Markdown { src, .. } => Some(src.lines().count() as u32),
-            BlockKind::Thinking(t) => {
-                Some((t.text.lines().count() + t.provisional.lines().count()) as u32)
-            }
+            BlockKind::Thinking(t) => Some(t.text.lines().count() as u32),
             BlockKind::Subagent { text, .. } => Some(text.lines().count() as u32),
             _ => None,
         }
@@ -690,28 +683,13 @@ impl Block {
             }
             BlockKind::Markdown { src } => md::render_md(src, width, MD_INDENT, self.fidelity),
             BlockKind::Thinking(t) => {
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
-                )]
-                let think_chars = (t.text.chars().count() + t.provisional.chars().count()) as u32;
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "think-block char/line count; u32 headroom far exceeds any in-memory transcript"
-                )]
-                let think_lines = (t.text.lines().count() + t.provisional.lines().count()) as u32;
+                let think_chars = u32::try_from(t.text.chars().count()).unwrap_or(u32::MAX);
+                let think_lines = u32::try_from(t.text.lines().count()).unwrap_or(u32::MAX);
                 let mut ls = line::thinking_header(think_chars, think_lines, t.answer_chars);
                 // Two rungs only: the header alone, or the whole trace.
                 if level >= Reveal::Context {
                     ls.push(Line::default());
-                    // Exactly one of the pair is ever non-empty: the streamed
-                    // deltas until the commit, the authoritative text after.
-                    let src = if t.text.is_empty() {
-                        &t.provisional
-                    } else {
-                        &t.text
-                    };
-                    ls.extend(md::render_reasoning(src, width, MD_INDENT));
+                    ls.extend(md::render_reasoning(&t.text, width, MD_INDENT));
                 }
                 ls
             }

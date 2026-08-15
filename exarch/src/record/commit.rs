@@ -2,12 +2,15 @@
 //! display half of the log records, upstream of the seam — so what is
 //! recorded is what the user saw, and a resumed scrollback rebuilds it.
 //!
-//! Three producers live here.  [`Chopper`] accumulates the assistant's token
-//! deltas and commits a [`Display::Answer`] at each fence-safe paragraph
-//! break, flushing the tail at the step boundary — every commit a prefix of
-//! the accumulated stream, so a printer's open tail is always exactly the
-//! unconsumed suffix.  [`SurfaceBuffer`] (moved here whole from
-//! `tui/surface.rs` by `git mv` and re-pointed at the seam) coalesces
+//! Two producers live here.  [`Stream`] is the model's, pairing a
+//! [`Chopper`] with a [`Trace`]: the chopper accumulates the assistant's
+//! token deltas and commits a [`Display::Answer`] at each fence-safe
+//! paragraph break, flushing the tail at the step boundary — every commit a
+//! prefix of the accumulated stream, so a printer's open tail is always
+//! exactly the unconsumed suffix — while the trace accumulates the reasoning
+//! deltas and seals a run where the prose it precedes begins, so a `∴` never
+//! lands mid-answer.  [`SurfaceBuffer`] is the shell's (moved here whole
+//! from `tui/surface.rs` by `git mv` and re-pointed at the seam): it coalesces
 //! consecutive same-`(id, path)` diff hunks into one `▎ diff`
 //! [`Display::Card`], and dedupes read/exec/grep observations by kind —
 //! a deduped bucket of several records as one [`Display::ObservationGroup`],
@@ -29,6 +32,7 @@ use std::io;
 
 use crate::bus::AgentId;
 use crate::bus::card::{Card, Hunk, Mark, observation_wire};
+use crate::provider::Delta;
 use crate::record::{Display, Emitter};
 use ral_core::types::{Observation, Observed};
 
@@ -81,7 +85,9 @@ impl Chopper {
         if chunk.trim().is_empty() {
             return Ok(());
         }
-        let _recorded = emitter.emit(Display::Answer { text: chunk })?;
+        let _recorded = emitter
+            .emit(Display::Answer { text: chunk })
+            .map_err(|e| unrecorded("an answer paragraph", &e))?;
         Ok(())
     }
 
@@ -95,7 +101,80 @@ impl Chopper {
         if leftover.trim().is_empty() {
             return Ok(());
         }
-        let _recorded = emitter.emit(Display::Answer { text: leftover })?;
+        let _recorded = emitter
+            .emit(Display::Answer { text: leftover })
+            .map_err(|e| unrecorded("the answer's tail", &e))?;
+        Ok(())
+    }
+}
+
+/// A failed commit, named by what it was: the producers are the only place
+/// that knows, and their caller hands the message straight to the user.
+fn unrecorded(what: &str, error: &io::Error) -> io::Error {
+    io::Error::other(format!("{what} was not recorded in record.jsonl: {error}"))
+}
+
+/// The model's stream, committed: the prose [`Chopper`] and the open
+/// reasoning run under one roof, since the two share one order and only a
+/// producer holding both can see the seam between them.
+///
+/// The order is the whole point.  A reasoning run is complete the moment the
+/// first prose delta after it arrives — that is where it commits, ahead of
+/// every paragraph of the answer it deliberated into, rather than at the
+/// step's end, which falls *between* the paragraphs already committed and
+/// the tail not yet.  A run no prose follows seals at the boundary.
+///
+/// A streaming callback has no error channel of its own, so the first failed
+/// commit is stashed and answered at [`Self::seal`]; nothing commits after
+/// it, a half-ordered scrollback being worse than a short one.
+#[derive(Default)]
+pub(crate) struct Stream {
+    prose: Chopper,
+    trace: String,
+}
+
+impl Stream {
+    /// Absorb one delta.  Reasoning only accumulates — a run's extent is
+    /// known nowhere but where the prose resumes — and prose closes the run
+    /// before committing the paragraph it completes, if any.
+    ///
+    /// # Errors
+    /// Propagates a failed commit of the run or of the paragraph.
+    pub(crate) fn push(&mut self, emitter: &Emitter, delta: Delta<'_>) -> io::Result<()> {
+        match delta {
+            Delta::Think(run) => {
+                self.trace.push_str(run);
+                Ok(())
+            }
+            Delta::Say(text) => self
+                .seal_trace(emitter)
+                .and_then(|()| self.prose.push(emitter, text)),
+        }
+    }
+
+    /// Seal the step: the reasoning run no prose followed, then the prose
+    /// tail — the same two commits in the same order as a prose delta makes,
+    /// at whichever boundary ends the stream, completed or stalled or
+    /// cancelled.
+    ///
+    /// # Errors
+    /// Propagates the failed commit of either.
+    pub(crate) fn seal(&mut self, emitter: &Emitter) -> io::Result<()> {
+        self.seal_trace(emitter)
+            .and_then(|()| self.prose.flush(emitter))
+    }
+
+    /// Commit the open reasoning run, if any.  Idempotent: a sealed run
+    /// leaves the buffer empty, so every later seal is a no-op until the
+    /// next run opens.
+    fn seal_trace(&mut self, emitter: &Emitter) -> io::Result<()> {
+        let run = std::mem::take(&mut self.trace);
+        if run.trim().is_empty() {
+            return Ok(());
+        }
+        let _recorded = emitter
+            .emit(Display::Thinking { text: run })
+            .map_err(|e| unrecorded("the step's reasoning run", &e))?;
         Ok(())
     }
 }
@@ -403,6 +482,56 @@ mod tests {
                 assert_eq!(values.len(), 3, "the repeated read deduped: {values:?}");
             }
             other => panic!("expected one grouped commit, got {other:?}"),
+        }
+    }
+
+    /// Reasoning precedes the answer inside a step, so its commit precedes
+    /// every one of the answer's: the run seals at the first prose delta, not
+    /// at the step's end, which would strand it between the paragraphs the
+    /// chopper had already committed and the tail it had not.
+    #[test]
+    fn a_reasoning_run_commits_ahead_of_all_the_prose_that_follows_it() {
+        let (emit, rx) = emitter();
+        let mut stream = Stream::default();
+        stream
+            .push(&emit, Delta::Think("weighing the cases\n"))
+            .unwrap();
+        stream
+            .push(&emit, Delta::Say("First paragraph.\n\n"))
+            .unwrap();
+        stream
+            .push(&emit, Delta::Say("Second paragraph.\n\ntail"))
+            .unwrap();
+        stream.seal(&emit).unwrap();
+
+        let commits = drain_display(&rx);
+        match commits.as_slice() {
+            [Display::Thinking { text }, rest @ ..] => {
+                assert_eq!(text, "weighing the cases\n");
+                assert!(
+                    rest.iter().all(|c| matches!(c, Display::Answer { .. })),
+                    "nothing but prose follows the run: {rest:?}"
+                );
+                assert_eq!(rest.len(), 3, "two paragraphs and the tail: {rest:?}");
+            }
+            other => panic!("expected the reasoning run first, got {other:?}"),
+        }
+    }
+
+    /// A step that reasons and then calls a tool without a word has no prose
+    /// seam to seal at, so the boundary seals it.
+    #[test]
+    fn a_wordless_step_seals_its_reasoning_at_the_boundary() {
+        let (emit, rx) = emitter();
+        let mut stream = Stream::default();
+        stream
+            .push(&emit, Delta::Think("straight to the shell\n"))
+            .unwrap();
+        stream.seal(&emit).unwrap();
+
+        match drain_display(&rx).as_slice() {
+            [Display::Thinking { text }] => assert_eq!(text, "straight to the shell\n"),
+            other => panic!("expected the run alone, got {other:?}"),
         }
     }
 

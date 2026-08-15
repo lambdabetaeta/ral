@@ -1,6 +1,6 @@
 //! Canned replies for the `Backend::Scripted` arm, so tests never dial out.
 
-use super::{CutShort, ProviderError, StepOut, SummaryOut, Usage};
+use super::{CutShort, Delta, ProviderError, StepOut, SummaryOut, Usage};
 use genai::chat::{ChatMessage, StopReason, ToolCall};
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -22,7 +22,6 @@ impl Reply {
             outcome: Ok(StepOut {
                 assistant_message: ChatMessage::assistant(text.to_string()),
                 tool_calls: Vec::new(),
-                reasoning: None,
                 usage: Usage::default(),
                 stop_reason: Some(StopReason::Completed("end_turn".into())),
                 cut_short: None,
@@ -40,7 +39,6 @@ impl Reply {
             outcome: Ok(StepOut {
                 assistant_message: ChatMessage::assistant(text.to_string()),
                 tool_calls: Vec::new(),
-                reasoning: None,
                 usage: Usage::default(),
                 stop_reason: None,
                 cut_short: Some(CutShort::Stalled(ProviderError::Other(
@@ -62,7 +60,6 @@ impl Reply {
             outcome: Ok(StepOut {
                 assistant_message: ChatMessage::assistant(parts),
                 tool_calls: calls,
-                reasoning: None,
                 usage: Usage::default(),
                 stop_reason: Some(StopReason::ToolCall("tool_use".into())),
                 cut_short: None,
@@ -83,7 +80,6 @@ impl Reply {
             outcome: Ok(StepOut {
                 assistant_message: ChatMessage::assistant(parts),
                 tool_calls: calls,
-                reasoning: None,
                 usage: Usage::default(),
                 stop_reason: Some(StopReason::MaxTokens("max_tokens".into())),
                 cut_short: Some(CutShort::OutputCap),
@@ -100,7 +96,6 @@ impl Reply {
             outcome: Ok(StepOut {
                 assistant_message: ChatMessage::assistant(genai::chat::MessageContent::default()),
                 tool_calls: Vec::new(),
-                reasoning: None,
                 usage: Usage::default(),
                 stop_reason: Some(StopReason::Completed("end_turn".into())),
                 cut_short: None,
@@ -149,14 +144,13 @@ impl Script {
     }
 
     /// The scripted counterpart to `Engine::complete`: no stream, so the whole
-    /// reply fires through `on_text` at once and `on_think` never runs. Panics
+    /// reply fires as one [`Delta::Say`] and no reasoning ever arrives. Panics
     /// once the queue runs dry — a test drove more turns than it scripted —
     /// and on a [`Reply::panicking`] turn, by construction.
-    pub(super) fn complete<F: FnMut(&str), G: FnMut(&str)>(
+    pub(super) fn complete<F: FnMut(Delta<'_>)>(
         &self,
         _model: &str,
-        on_text: &mut F,
-        _on_think: &mut G,
+        on_delta: &mut F,
     ) -> Result<StepOut, ProviderError> {
         let reply = self
             .completes
@@ -166,7 +160,7 @@ impl Script {
             .expect("scripted provider ran out of `complete` replies");
         assert!(!reply.panics, "scripted host panic");
         if !reply.text.is_empty() {
-            on_text(&reply.text);
+            on_delta(Delta::Say(&reply.text));
         }
         reply.outcome
     }

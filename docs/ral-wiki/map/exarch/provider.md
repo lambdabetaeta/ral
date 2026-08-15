@@ -142,11 +142,16 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
 
 ## The streaming and summary paths
 
-- `complete(system, messages, tool_enabled, search, on_text, on_think, cancel)` —
-  streams one assistant reply, calling `on_text` for text and `on_think` for
-  reasoning, and projects the `StreamEnd` into a `StepOut` (assistant message,
-  tool calls, reasoning, `Usage`, `StopReason`). It preserves
-  `reasoning_content` on the assistant message so thinking mode round-trips.
+- `complete(system, messages, tool_enabled, search, on_delta, cancel)` —
+  streams one assistant reply, calling `on_delta` with a `Delta::Say` per text
+  chunk and a `Delta::Think` per reasoning chunk, and projects the `StreamEnd`
+  into a `StepOut` (assistant message, tool calls, `Usage`, `StopReason`). One
+  callback rather than two because the *order* of the two kinds is the
+  caller's whole interest: a reasoning run ends exactly where the prose after
+  it begins, and two independent callbacks cannot say so. It preserves
+  `reasoning_content` on the assistant message so thinking mode round-trips —
+  that is the only route reasoning takes back into context, since the display
+  commit is authored from the deltas.
   The stream-event match is exhaustive — thought-signature and tool-call chunks
   are captured in the `End` frame and replayed by `step_out_from_end`, so they
   are dropped by a *named* arm, never a wildcard, and a new genai stream variant
@@ -179,7 +184,7 @@ driver**, `provider/retry.rs::retry_with_backoff`, over an `Attempt<T>` (`Done`
 / `Failed`):
 
 - The streaming-specific rule rides on `Done`: once text or reasoning has
-  flowed to `on_text`/`on_think` the UI has committed to a partial render, so a
+  flowed to `on_delta` the UI has committed to a partial render, so a
   re-issue that would double output is *not* retried — `stalled_step_out`
   projects the streamed prefix and reasoning into a `CutShort::Stalled`
   `StepOut` returned as `Attempt::Done`, and the session commits it. No third

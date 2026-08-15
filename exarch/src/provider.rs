@@ -33,7 +33,7 @@ pub use request::{EFFORT_LADDER, Tuning, default_effort_label, effort_by_label, 
     reason = "crate-private facade path retained for tls rustdoc and subsystem callers"
 )]
 pub(crate) use retry::MAX_ATTEMPTS;
-pub use stream::{CutShort, StepOut, SummaryOut};
+pub use stream::{CutShort, Delta, StepOut, SummaryOut};
 pub use transport::Engine;
 pub use usage::{Usage, UsageParts, humanize_tokens};
 
@@ -133,19 +133,18 @@ impl Provider {
         }
     }
 
-    /// Stream one assistant turn; `on_text`/`on_think` fire per chunk. Raced
-    /// against `cancel`, so an interrupt need not wait on the next network
-    /// chunk. `tool_enabled` gates our tool definitions, `search` the
-    /// provider's own built-in web search.
+    /// Stream one assistant turn; `on_delta` fires per chunk, prose and
+    /// reasoning in arrival order. Raced against `cancel`, so an interrupt
+    /// need not wait on the next network chunk. `tool_enabled` gates our tool
+    /// definitions, `search` the provider's own built-in web search.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn complete<F: FnMut(&str), G: FnMut(&str)>(
+    pub(crate) fn complete<F: FnMut(Delta<'_>)>(
         &self,
         system: &str,
         messages: Vec<ChatMessage>,
         tool_enabled: bool,
         search: bool,
-        on_text: &mut F,
-        on_think: &mut G,
+        on_delta: &mut F,
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
         match &self.backend {
@@ -159,11 +158,10 @@ impl Provider {
                 messages,
                 tool_enabled,
                 search,
-                on_text,
-                on_think,
+                on_delta,
                 cancel,
             ),
-            Backend::Scripted(script) => script.complete(&self.model, on_text, on_think),
+            Backend::Scripted(script) => script.complete(&self.model, on_delta),
         }
     }
 

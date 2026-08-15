@@ -178,13 +178,18 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    the open buffer as a single trailing row — the markdown rail glyph plus a
    `size_bar` of its line count — that grows in place as one extra scroll row,
    so the settled transcript above stays a finished image until a fence-safe
-   break commits the real `Block::markdown`. Reasoning differs: each phase
-   seats its own `∴` block at its first streamed delta
-   (`Viewport::push_thinking`), arriving *open* — the trace streams as the
-   deltas land — and the final `Display::Thinking` commit supersedes them with
-   the authoritative text in that same block (`Viewport::commit_thinking`). The
-   next phase opens a new block, so a turn's thinking reads interleaved with
-   the tool calls it preceded. A thinking block has two rungs only — its
+   break commits the real `Block::markdown`. Reasoning reads the same way: while it
+   streams it is a `∴` magnitude row (`Viewport::thinking_seat`), seated
+   *above* the answer's, and a `Display::Thinking` commit supersedes it with a
+   block of the authoritative text. The commit is sealed at the seam where the
+   prose resumes (`record::commit::Stream`), never at the step's end — the
+   step's own end sits *between* the paragraphs the chopper has already
+   committed and the tail it has not, which is exactly where a `∴` block must
+   not land. One block per reasoning run, so a turn's thinking reads
+   interleaved with the prose and the tool calls it preceded. Its grain header
+   weighs the run against the prose it became, which the commit cannot carry
+   (it precedes it) and the view therefore measures: `viewport::answer_mass`
+   reads the unbroken answer run that follows each `∴` row. A thinking block has two rungs only — its
    grain header, or the whole trace — the dial hopping over `Context`
    (`Block::rung_up`/`rung_down`), which for a trace would be a dead detent.
  - **a surfaced general card as a bounded object.** A diff-less

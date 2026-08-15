@@ -22,7 +22,6 @@ pub use super::{DoneOutcome, NoticeFact};
 pub enum BlockKind {
     Thinking {
         text: String,
-        answer_chars: u32,
     },
     Prompt {
         text: String,
@@ -388,9 +387,7 @@ fn render_block_text(out: &mut String, kind: &BlockKind) {
 
 fn step_display(memo: &mut Blocks, seq: Seq, d: Display) {
     match d {
-        Display::Thinking { text, answer_chars } => {
-            memo.push(seq, BlockKind::Thinking { text, answer_chars });
-        }
+        Display::Thinking { text } => memo.push(seq, BlockKind::Thinking { text }),
         Display::Prompt { text } => memo.push(seq, BlockKind::Prompt { text }),
         Display::Answer { text } => memo.push(seq, BlockKind::Answer { text }),
         Display::ToolCall { tool, cmd, summary } => memo.push(

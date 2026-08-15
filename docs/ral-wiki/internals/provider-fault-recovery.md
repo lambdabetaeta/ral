@@ -174,7 +174,7 @@ transport blip.
 ## The streaming-specific rule: commit, don't double-render
 
 Streaming adds one wrinkle the driver respects. Once text or reasoning has
-flowed to `on_text` / `on_think`, the UI has *committed* to a partial render; a
+flowed to `on_delta`, the UI has *committed* to a partial render; a
 re-issue would print that content twice. So `complete` tracks whether either
 stream has yielded content, and when the stream breaks:
 

@@ -164,10 +164,10 @@ pub enum Protocol {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Display {
-    /// The step's final model reasoning, superseding the streamed deltas.
+    /// One reasoning run, sealed where the prose it precedes begins and
+    /// superseding that run's streamed deltas.
     Thinking {
         text: String,
-        answer_chars: u32,
     },
     /// Any item entering context — prompt, wakeup, or peer message.
     Prompt {
@@ -353,7 +353,7 @@ pub enum Forensic {
 pub enum Transient {
     Token(String),
     /// A live reasoning token, superseded by [`Display::Thinking`] once the
-    /// step lands its authoritative text.
+    /// run lands its authoritative text.
     Thinking(String),
     State(AgentState),
     /// The producer's flush signal ending a streaming step, emitted once the

@@ -16,7 +16,7 @@ use crate::agent::event::{
     ContextOp, EditAuthority, QuiesceReason, ToolResult as SessionToolResult,
 };
 use crate::bus::{AgentState, Emitter, Item};
-use crate::provider::{CutShort, Provider, ProviderError, StepOut, StopReason, ToolCall};
+use crate::provider::{CutShort, Delta, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::record::Transient;
 use ral_core::serial::FOValue;
 use std::sync::Arc;
@@ -67,8 +67,8 @@ impl Agent {
         emit: &Emitter,
     ) -> Result<Outcome, ProviderError> {
         self.couple(emit);
-        // The commit producer's handle: answer chunks and the step's final
-        // reasoning record through the seam as they are decided, worker-side.
+        // The commit producer's handle: answer paragraphs and reasoning runs
+        // record through the seam as they are decided, worker-side.
         let recorder = self.recorder();
         // A staged reply must not outlive the batch that staged it when a cancel
         // or an error lands between `invoke` and the post-batch drain; entry is
@@ -117,34 +117,40 @@ impl Agent {
             #[cfg(debug_assertions)]
             let mut first_token: Option<std::time::Duration> = None;
             recorder.transient(Transient::State(AgentState::AwaitingModel));
-            // One chopper per step, flushed at whichever boundary seals the
-            // stream below; a failed answer commit is stashed here, since a
-            // streaming closure has no error channel of its own.
-            let mut chopper = crate::record::commit::Chopper::default();
-            let mut chop_error: Option<std::io::Error> = None;
+            // One producer per step, sealed at whichever boundary ends the
+            // stream below.  A streaming callback has no error channel of its
+            // own, so the first failed commit is stashed and answered at that
+            // boundary; nothing commits after it, a half-ordered scrollback
+            // being worse than a short one.
+            let mut stream = crate::record::commit::Stream::default();
+            let mut unrecorded: Option<std::io::Error> = None;
             let step_out = {
-                let chopper = &mut chopper;
-                let chop_error = &mut chop_error;
+                let stream = &mut stream;
+                let unrecorded = &mut unrecorded;
                 provider.complete(
                     &self.system,
                     messages,
                     self.tool_enabled,
                     self.search,
-                    &mut |t: &str| {
-                        #[cfg(debug_assertions)]
-                        if first_token.is_none() {
-                            first_token = Some(t_req.elapsed());
+                    &mut |delta: Delta<'_>| {
+                        match delta {
+                            Delta::Say(t) => {
+                                #[cfg(debug_assertions)]
+                                if first_token.is_none() {
+                                    first_token = Some(t_req.elapsed());
+                                }
+                                last_text.push_str(t);
+                                recorder.transient(Transient::Token(t.to_string()));
+                            }
+                            Delta::Think(r) => {
+                                recorder.transient(Transient::Thinking(r.to_string()));
+                            }
                         }
-                        last_text.push_str(t);
-                        recorder.transient(Transient::Token(t.to_string()));
-                        if chop_error.is_none()
-                            && let Err(error) = chopper.push(&recorder, t)
+                        if unrecorded.is_none()
+                            && let Err(error) = stream.push(&recorder, delta)
                         {
-                            *chop_error = Some(error);
+                            *unrecorded = Some(error);
                         }
-                    },
-                    &mut |r: &str| {
-                        recorder.transient(Transient::Thinking(r.to_string()));
                     },
                     token,
                 )
@@ -155,63 +161,34 @@ impl Agent {
                 t_req.elapsed()
             );
             if token.is_cancelled() {
-                seal_chopper(&mut chopper, &recorder);
+                seal_abandoned(&mut stream, unrecorded, &recorder);
                 recorder.transient(Transient::Boundary);
                 return Ok(self.cancelled());
             }
             let StepOut {
                 mut assistant_message,
                 tool_calls,
-                reasoning,
                 usage,
                 stop_reason,
                 cut_short,
             } = match step_out {
                 Ok(s) => s,
                 Err(ProviderError::Cancelled(_)) => {
-                    seal_chopper(&mut chopper, &recorder);
+                    seal_abandoned(&mut stream, unrecorded, &recorder);
                     recorder.transient(Transient::Boundary);
                     return Ok(self.cancelled());
                 }
                 Err(e) => {
-                    seal_chopper(&mut chopper, &recorder);
+                    seal_abandoned(&mut stream, unrecorded, &recorder);
                     recorder.transient(Transient::Boundary);
                     return Err(e);
                 }
             };
-            if let Some(error) = chop_error {
-                recorder.transient(Transient::Boundary);
-                return Err(ProviderError::Other(format!(
-                    "an answer commit was not recorded in record.jsonl: {error}"
-                )));
-            }
-            // Ahead of the answer's tail commit, so the TUI lands `∴` before
-            // the markdown rail the same step's prose wears.
-            if let Some(reasoning) = reasoning.as_deref()
-                && !reasoning.trim().is_empty()
-            {
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "answer char count cannot approach u32::MAX"
-                )]
-                let answer_chars = last_text.chars().count() as u32;
-                // The live row derives from the published `Display::Thinking`
-                // record, so this is the one authoring site.
-                let _recorded = recorder
-                    .emit(crate::record::Display::Thinking {
-                        text: reasoning.to_string(),
-                        answer_chars,
-                    })
-                    .map_err(|e| {
-                        ProviderError::Other(format!(
-                            "the step's reasoning commit was not recorded: {e}"
-                        ))
-                    })?;
-            }
-            chopper.flush(&recorder).map_err(|e| {
-                ProviderError::Other(format!("the answer's tail commit was not recorded: {e}"))
-            })?;
+            // The boundary follows the seal whether or not it held: a printer
+            // is owed the signal to retire its live edge either way.
+            let sealed = seal_step(&mut stream, unrecorded, &recorder);
             recorder.transient(Transient::Boundary);
+            sealed.map_err(|e| ProviderError::Other(e.to_string()))?;
             // The live numerator the next `compact` weighs against the window.
             let input_tokens = usage.input;
             let measured_at = {
@@ -482,9 +459,26 @@ fn cancelled_result(id: String) -> SessionToolResult {
 /// cancelling or erroring: the streamed prefix is what the user saw, so it
 /// still commits, best-effort — the exit in flight is the error being
 /// reported, and this one must not mask it.
-fn seal_chopper(chopper: &mut crate::record::commit::Chopper, recorder: &crate::record::Emitter) {
-    if let Err(error) = chopper.flush(recorder) {
+fn seal_abandoned(
+    stream: &mut crate::record::commit::Stream,
+    unrecorded: Option<std::io::Error>,
+    recorder: &crate::record::Emitter,
+) {
+    if let Err(error) = seal_step(stream, unrecorded, recorder) {
         eprintln!("exarch: a cancelled step's streamed prefix was not recorded: {error}");
+    }
+}
+
+/// Seal a step, honouring whatever the streaming callback stashed: a failed
+/// commit has already broken the order, so nothing is committed on top of it.
+fn seal_step(
+    stream: &mut crate::record::commit::Stream,
+    unrecorded: Option<std::io::Error>,
+    recorder: &crate::record::Emitter,
+) -> std::io::Result<()> {
+    match unrecorded {
+        Some(error) => Err(error),
+        None => stream.seal(recorder),
     }
 }
 

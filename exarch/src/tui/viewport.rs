@@ -863,6 +863,25 @@ impl Viewport {
     }
 }
 
+/// The mass of the unbroken answer run opening `rows`: a reasoning block's
+/// grain denominator, weighing the deliberation against the prose it became.
+///
+/// The commit cannot carry it — a reasoning run is recorded *before* the
+/// prose it precedes — so the view measures it instead, which is also what
+/// lets the grain fill as the answer accrues.  Any other kind of row ends
+/// the run, so reasoning that led to a tool call rather than to prose is
+/// honestly weighed against nothing.
+fn answer_run(rows: &[record::Block]) -> u32 {
+    let chars: usize = rows
+        .iter()
+        .map_while(|row| match row.kind() {
+            record::BlockKind::Answer { text } => Some(text.chars().count()),
+            _ => None,
+        })
+        .sum();
+    u32::try_from(chars).unwrap_or(u32::MAX)
+}
+
 /// Retire the run of `raw` a landing commit accounts for.
 ///
 /// A commit is a prefix of the raw stream only up to what the producer
@@ -952,9 +971,11 @@ impl Printer for Viewport {
 
         let mut built: Vec<Entry> = Vec::with_capacity(rows.len());
         let mut last_ral_cmd: Option<&str> = None;
-        for row in rows {
+        for (i, row) in rows.iter().enumerate() {
             let id = row.id();
-            for mut block in self.render_block(row.kind(), blocks, &mut last_ral_cmd) {
+            for mut block in
+                self.render_block(row.kind(), &rows[i + 1..], blocks, &mut last_ral_cmd)
+            {
                 if let Some(level) = self.reveal.get(&id) {
                     block.set_reveal(*level);
                 }
@@ -1029,18 +1050,19 @@ impl Viewport {
     /// [`record::BlockKind::ObservationGroup`] explodes into one card per
     /// bucket, everything else is exactly one block.  `last_ral_cmd` threads
     /// through the caller's window scan, so an [`record::BlockKind::Answer`]'s
-    /// echo signal can see the most recent `ral` script without a second pass.
+    /// echo signal can see the most recent `ral` script without a second
+    /// pass; `after` is the rest of the window, which only a `∴` row reads —
+    /// its grain is a fact about the prose that follows it ([`answer_run`]).
     fn render_block<'a>(
         &self,
         kind: &'a record::BlockKind,
+        after: &[record::Block],
         blocks: &Blocks,
         last_ral_cmd: &mut Option<&'a str>,
     ) -> Vec<Block> {
         use record::BlockKind as K;
         match kind {
-            K::Thinking { text, answer_chars } => {
-                vec![Block::thinking(text.clone(), *answer_chars)]
-            }
+            K::Thinking { text } => vec![Block::thinking(text.clone(), answer_run(after))],
             K::Prompt { text } => vec![Block::chrome(
                 RailShape::Prompt,
                 super::line::user_prompt(text),
@@ -1395,7 +1417,6 @@ mod tests {
         for (seq, record) in [
             Record::Display(Display::Thinking {
                 text: "considering the shape\n".into(),
-                answer_chars: 30,
             }),
             Record::Display(Display::Answer {
                 text: "First paragraph.\n\nSecond paragraph still streaming".into(),
@@ -1511,7 +1532,6 @@ mod tests {
                 stamp,
                 Record::Display(Display::Thinking {
                     text: "considering the shape\n".into(),
-                    answer_chars: 30,
                 }),
             ),
         )
