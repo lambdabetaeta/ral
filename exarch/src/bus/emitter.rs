@@ -3,7 +3,6 @@
 
 use super::AgentId;
 use super::channel::{BusReceiver, BusSender, channel};
-use super::event::{Event, Kind};
 use super::inbox::{Inbox, Mailbox};
 use crate::provider::Usage;
 use crate::sync::LockExt;
@@ -88,14 +87,6 @@ impl Emitter {
             children: self.children,
             meter: self.meter.clone(),
         }
-    }
-
-    /// Usage no longer meters here: it rides the record seam
-    /// ([`Self::fleet_sink`] hands the meter to the session's log), so
-    /// accounting follows the fact whether or not any legacy `Kind` is ever
-    /// derived from it.
-    pub(crate) fn emit(&self, kind: Kind) {
-        let _ = self.tx.send(Event { id: self.id, kind });
     }
 
     /// Where a session's record log publishes: this emitter's channel and run

@@ -239,8 +239,8 @@ pub(super) struct Block {
     /// The epistemic signal — context pressure and echo, set at markdown
     /// commit.  Sound (`0/0`) elsewhere, so only prose degrades its medium.
     fidelity: Fidelity,
-    /// A tool call's result magnitude — the line count of its
-    /// [`crate::bus::Kind::ToolResult`], attached after the fact by
+    /// A tool call's result magnitude — the line count from its
+    /// `Display::ToolCall`'s `result_lines`, attached after the fact by
     /// `Viewport::set_result_size`.
     result_size: Option<u32>,
     /// Lines for the current state at `cache_w`, `None` once stale.

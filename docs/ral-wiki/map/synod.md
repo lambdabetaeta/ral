@@ -191,7 +191,7 @@ conversation's narration into the window, and knows the root agent's id so it
 can route by depth rather than by blindly assuming there is only one agent —
 the two comments that once justified id-blindness by `fuel: 0` are retired
 along with the fuel figure. A helper's `Token`/`Thinking`/`State` events are
-dropped (a helper's prose is not the conversation); its `Io`/`Done`/`Notice`/
+dropped (a helper's prose is not the conversation); its `Observation`/`Done`/`Notice`/
 `Resources` fold to `ProcessCard` exactly as the root's already do, and its
 `Card` folds in beside them — deliberately, where the root's own `Card` stays
 first-class, since a helper's card is process, not conversation; `Usage`

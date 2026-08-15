@@ -253,7 +253,7 @@ queryable store.
 Receipts and listings are ral records the model can bind, filter, and fan out
 over, rather than stringly-typed JSON it re-parses — the composability the
 retired tool form lacked. Acting verbs render as *acts* — the
-`Kind::HarnessCall`/`HarnessResult` rail pair
+`Display::HarnessCall`/`Forensic::HarnessResult` rail pair
 ([[decisions/260720_harness-calls-are-acts|harness-calls-are-acts]]; a spawn
 additionally derives a child tab);
 listings stay silent, since their value *is* the returned record.

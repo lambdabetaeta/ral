@@ -201,7 +201,7 @@ impl Agent {
                 Verdict::Continue => Flow::Continue,
             };
         }
-        announce(item, emit, &self.recorder());
+        announce(item, &self.recorder());
         // Read once, so a `/model` swap on the UI thread lands on the next
         // item rather than mid-item.
         let active = self.provider.current();
@@ -467,11 +467,11 @@ impl Agent {
 
 /// Emit the chrome an item's source shows as it enters context.  A nudge is an
 /// internal continuation and a command never reaches the model, so both are quiet.
-pub(super) fn announce(item: &Item, emit: &Emitter, recorder: &crate::record::Emitter) {
+pub(super) fn announce(item: &Item, recorder: &crate::record::Emitter) {
     match item {
         Item::Human(_) | Item::Wakeup(_) | Item::Message(_) => {
-            // The live row derives from the published record — the retired
-            // `Kind::UserPromptEcho` twin — so this is the one authoring site.
+            // The live row derives from the published `Display::Prompt`
+            // record, so this is the one authoring site.
             record_commit(
                 recorder,
                 crate::record::Display::Prompt { text: item.text() },
@@ -499,13 +499,11 @@ pub(super) fn announce(item: &Item, emit: &Emitter, recorder: &crate::record::Em
         Item::Surface { id, values, .. } => {
             let mut buf = crate::record::commit::SurfaceBuffer::new();
             for v in values {
-                if let Some(surface) = shell_eval::accepted_surface(v, recorder) {
-                    if let Err(error) =
+                if let Some(surface) = shell_eval::accepted_surface(v, recorder)
+                    && let Err(error) =
                         crate::fleet::desk::absorb_surface(&mut buf, recorder, *id, &surface)
-                    {
-                        recorder.report_fault(&error);
-                    }
-                    emit.emit(surface.into_kind());
+                {
+                    recorder.report_fault(&error);
                 }
             }
             if let Err(error) = buf.flush_surfaces(recorder) {
@@ -516,8 +514,8 @@ pub(super) fn announce(item: &Item, emit: &Emitter, recorder: &crate::record::Em
     }
 }
 
-/// Record one display commit beside its legacy `Kind` emission, surfacing a
-/// failed append as a `Transient::Fault` exactly as the surface path does.
+/// Record one display commit, surfacing a failed append as a
+/// `Transient::Fault` exactly as the surface path does.
 fn record_commit(recorder: &crate::record::Emitter, commit: crate::record::Display) {
     if let Err(error) = recorder.emit(commit) {
         recorder.report_fault(&error);
@@ -591,24 +589,19 @@ mod tests {
     use super::*;
     use crate::agent::ProviderHandle;
     use crate::agent::testkit::*;
-    use crate::bus::Kind;
-    use crate::record::{Forensic, Record};
     use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
     use crate::provider::scripted::{Reply, Script};
+    use crate::record::{Display, Forensic, Record};
     use ral_core::Value;
 
     /// Every item `announce` draws records its display commit through the
-    /// seam, with no direct legacy `Kind` twin of its own: a prompt's live
-    /// row is `record_kind`'s derivation of `Display::Prompt`, and a
-    /// subagent's breadcrumb is `Display::SubagentDone` alone — the TUI's
-    /// fact fold routes it to root without any `Kind::SubagentDone` bridge.
+    /// seam: a prompt commits `Display::Prompt`, and a subagent's breadcrumb
+    /// commits `Display::SubagentDone`.
     #[test]
-    fn announce_records_display_facts_with_no_legacy_kind_twin() {
-        use crate::bus::{AgentResult, Signal};
-        use crate::record::Display;
+    fn announce_records_display_facts() {
+        use crate::bus::AgentResult;
 
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::new(tx.clone(), 0);
         let recorder = crate::record::Emitter::none();
         recorder.attach(crate::record::FleetSink {
             id: 0,
@@ -616,7 +609,7 @@ mod tests {
             meter: crate::bus::UsageMeter::default(),
         });
 
-        announce(&Item::Human("hello".into()), &emit, &recorder);
+        announce(&Item::Human("hello".into()), &recorder);
         announce(
             &Item::Agent(AgentResult {
                 name: "helper".into(),
@@ -625,57 +618,31 @@ mod tests {
                 elapsed: std::time::Duration::from_millis(1500),
                 generation: 0,
             }),
-            &emit,
             &recorder,
         );
 
         let mut facts: Vec<&'static str> = Vec::new();
-        let mut derived: Vec<&'static str> = Vec::new();
-        while let Ok(sig) = rx.try_recv() {
-            match sig {
-                Signal::Event(_) => panic!("neither class carries a direct legacy Kind"),
-                Signal::Fact(id, fact) => {
-                    match fact.value() {
-                        Record::Display(Display::Prompt { text }) => {
-                            assert_eq!(text, "hello");
-                            facts.push("prompt");
-                        }
-                        Record::Display(Display::SubagentDone {
-                            name,
-                            error,
-                            elapsed_ms,
-                            ..
-                        }) => {
-                            assert_eq!(name, "helper");
-                            assert_eq!(error.as_deref(), Some("boom"));
-                            assert_eq!(*elapsed_ms, 1500);
-                            facts.push("subagent");
-                        }
-                        _ => {}
-                    }
-                    let is_prompt = matches!(fact.value(), Record::Display(Display::Prompt { .. }));
-                    if is_prompt {
-                        let event = Signal::Fact(id, fact)
-                            .into_event()
-                            .expect("record_kind derives a prompt fact into Kind::UserPromptEcho");
-                        match event.kind {
-                            Kind::UserPromptEcho(text) => {
-                                assert_eq!(text, "hello");
-                                derived.push("prompt");
-                            }
-                            _ => panic!("expected Kind::UserPromptEcho"),
-                        }
-                    }
+        for record in crate::bus::drain_records(&rx) {
+            match record {
+                Record::Display(Display::Prompt { text }) => {
+                    assert_eq!(text, "hello");
+                    facts.push("prompt");
                 }
-                Signal::Transient(..) => {}
+                Record::Display(Display::SubagentDone {
+                    name,
+                    error,
+                    elapsed_ms,
+                    ..
+                }) => {
+                    assert_eq!(name, "helper");
+                    assert_eq!(error.as_deref(), Some("boom"));
+                    assert_eq!(elapsed_ms, 1500);
+                    facts.push("subagent");
+                }
+                _ => {}
             }
         }
         assert_eq!(facts, ["prompt", "subagent"], "both commits reach the seam");
-        assert_eq!(
-            derived,
-            ["prompt"],
-            "the prompt's live row derives from its fact"
-        );
     }
 
     /// The park verdict reads engagement from the registry, never from the
@@ -897,32 +864,30 @@ mod tests {
 
         session.run_shell("c0".into(), "return 1", 5, &emit);
 
-        let mut notices = 0;
-        while let Ok(event) = rx.try_next_event() {
-            let Kind::Notice {
-                notice: crate::bus::card::Notice::Reap { cmd, cause },
-                ..
-            } = event.kind
-            else {
-                continue;
-            };
-            notices += 1;
-            assert_eq!(cmd, "<block>", "the reap must name the spawned body");
-            assert_eq!(
-                cause,
-                ral_core::types::ReapCause::Idle,
-                "an unpolled worker past its idle bound reaps as Idle"
-            );
-        }
-        assert_eq!(notices, 1, "the queued reap surfaces exactly once");
+        let reaps: Vec<(String, String)> = crate::bus::drain_records(&rx)
+            .into_iter()
+            .filter_map(|record| match record {
+                Record::Display(Display::Notice {
+                    notice: crate::record::NoticeFact::Reap { cmd, cause },
+                }) => Some((cmd, cause)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reaps.len(), 1, "the queued reap surfaces exactly once");
+        let (cmd, cause) = &reaps[0];
+        assert_eq!(cmd, "<block>", "the reap must name the spawned body");
+        assert_eq!(
+            cause, "idle",
+            "an unpolled worker past its idle bound reaps as Idle"
+        );
 
         session.run_shell("c1".into(), "return 1", 5, &emit);
-        while let Ok(event) = rx.try_next_event() {
-            assert!(
-                !matches!(event.kind, Kind::Notice { .. }),
-                "a further run with nothing new queued must surface no second notice"
-            );
-        }
+        assert!(
+            crate::bus::drain_records(&rx)
+                .into_iter()
+                .all(|record| !matches!(record, Record::Display(Display::Notice { .. }))),
+            "a further run with nothing new queued must surface no second notice"
+        );
     }
 
     // ── the `services` pin ledger ─────────────────────────────────────────
@@ -1025,15 +990,17 @@ mod tests {
 
         session.run_shell("c1".into(), r#"surface `unpin [key: "services"]"#, 5, &emit);
 
-        let mut saw_error = false;
-        while let Ok(event) = rx.try_next_event() {
-            if let Kind::Error(msg) = event.kind {
-                assert!(msg.contains("protected service-ledger pin"));
-                saw_error = true;
-            }
-        }
+        let errors: Vec<String> = crate::bus::drain_records(&rx)
+            .into_iter()
+            .filter_map(|record| match record {
+                Record::Forensic(Forensic::Error { text }) => Some(text),
+                _ => None,
+            })
+            .collect();
         assert!(
-            saw_error,
+            errors
+                .iter()
+                .any(|text| text.contains("protected service-ledger pin")),
             "the forged pin must be rejected with a diagnostic"
         );
     }
@@ -1072,9 +1039,10 @@ mod tests {
         session.attend(&mut NoControl, &emit);
 
         assert!(
-            std::iter::from_fn(|| rx.try_next_event().ok()).any(
-                |e| matches!(e.kind, Kind::Nudge { cause, .. } if cause == "pinned-state reminder")
-            ),
+            crate::bus::drain_records(&rx).into_iter().any(|record| matches!(
+                record,
+                Record::Forensic(Forensic::Nudge { cause, .. }) if cause == "pinned-state reminder"
+            )),
             "the live register must raise a pinned-state nudge"
         );
         let view = serde_json::to_string(&session.rendered_messages()).unwrap();
@@ -1099,8 +1067,9 @@ mod tests {
         session.attend_backlog(&emit);
 
         assert!(
-            !std::iter::from_fn(|| rx.try_next_event().ok())
-                .any(|e| matches!(e.kind, Kind::Nudge { .. })),
+            !crate::bus::drain_records(&rx)
+                .into_iter()
+                .any(|record| matches!(record, Record::Forensic(Forensic::Nudge { .. }))),
             "a chat trunk raises no nudge"
         );
         let view = serde_json::to_string(&session.rendered_messages()).unwrap();
@@ -1114,9 +1083,9 @@ mod tests {
         );
     }
 
-    /// A boundary prune's `Kind::Notice` rides the surface stream of the call
-    /// it fires inside — one notice naming the binding, none once nothing is
-    /// left idle.  The tiny re-armed bound is for speed only.
+    /// A boundary prune's `Display::Notice` rides the surface stream of the
+    /// call it fires inside — one notice naming the binding, none once
+    /// nothing is left idle.  The tiny re-armed bound is for speed only.
     #[test]
     fn boundary_prune_notice_rides_the_runs_own_stream() {
         let mut session = Agent::for_test("system").unwrap();
@@ -1135,16 +1104,15 @@ mod tests {
         session.run_shell("c1".into(), "$[0]", 5, &emit);
         session.run_shell("c2".into(), "$[0]", 5, &emit);
 
-        let mut prunes = Vec::new();
-        while let Ok(event) = rx.try_next_event() {
-            if let Kind::Notice {
-                notice: crate::bus::card::Notice::Prune { names, idle_calls },
-                ..
-            } = event.kind
-            {
-                prunes.push((names, idle_calls));
-            }
-        }
+        let prunes: Vec<(Vec<String>, Vec<u64>)> = crate::bus::drain_records(&rx)
+            .into_iter()
+            .filter_map(|record| match record {
+                Record::Display(Display::Notice {
+                    notice: crate::record::NoticeFact::Prune { names, idle_calls },
+                }) => Some((names, idle_calls)),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
             prunes.len(),
             1,
@@ -1156,18 +1124,17 @@ mod tests {
         assert!(idle_calls[0] >= 2, "idle at least the armed bound");
 
         session.run_shell("c3".into(), "$[0]", 5, &emit);
-        while let Ok(event) = rx.try_next_event() {
-            assert!(
+        assert!(
+            crate::bus::drain_records(&rx).into_iter().all(|record| {
                 !matches!(
-                    event.kind,
-                    Kind::Notice {
-                        notice: crate::bus::card::Notice::Prune { .. },
-                        ..
-                    }
-                ),
-                "nothing left idle — no second prune notice"
-            );
-        }
+                    record,
+                    Record::Display(Display::Notice {
+                        notice: crate::record::NoticeFact::Prune { .. },
+                    })
+                )
+            }),
+            "nothing left idle — no second prune notice"
+        );
     }
 
     /// Unconfigured, the check returns before the epoch bookkeeping: no walk,
@@ -1294,13 +1261,12 @@ mod tests {
         // The prune fires at this call's own ready boundary (idle bound 1).
         session.run_shell("c1".into(), "$[0]", 5, &emit);
         let after_prune_call = session.log.lock().event_count();
-        let pruned = std::iter::from_fn(|| rx.try_next_event().ok()).any(|event| {
+        let pruned = crate::bus::drain_records(&rx).into_iter().any(|record| {
             matches!(
-                event.kind,
-                Kind::Notice {
-                    notice: crate::bus::card::Notice::Prune { .. },
-                    ..
-                }
+                record,
+                Record::Display(Display::Notice {
+                    notice: crate::record::NoticeFact::Prune { .. },
+                })
             )
         });
         assert!(pruned, "the prune notice must have fired on the bus");

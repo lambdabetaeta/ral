@@ -36,7 +36,7 @@ through. `shell_eval/tools.rs` shrinks to:
 
 The harness verbs are answered by the `ExarchDesk` (`exarch/src/fleet/desk.rs`),
 installed per `ral` call and reached through `shell.enquire(...)` from the
-builtin's body; acting verbs emit `Kind::HarnessCall`/`HarnessResult` and, on
+builtin's body; acting verbs emit `Display::HarnessCall`/`Forensic::HarnessResult` and, on
 the arm where the act genuinely landed, file it in the call's act ledger for the
 audit every raise owes the model ([[map/exarch/shell-eval|shell-eval]]).
 They are rendered as **acts** — verb, subject, payload rows that never fold into

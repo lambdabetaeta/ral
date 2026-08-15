@@ -4,7 +4,8 @@
 //! once the run finishes; progress, tool calls, cards, failures, and the run
 //! summary go to `err`. A conversational host takes a different projection
 //! through [`converse_on`], which streams assistant tokens, or drives
-//! [`converse_sink`] with its own [`Sink`] for `Kind` events unflattened.
+//! [`converse_sink`] with its own [`Sink`], seeing raw `Signal`s rather than
+//! rendered text.
 //! Recording is not this module's concern: every session writes its own
 //! record at the seam, through [`crate::agent::event`].
 
@@ -14,10 +15,10 @@ use crate::bus::card::{
     self, Card, Mark, Row, execs_card, greps_card, observation_card, observation_from_wire,
     rail_place, reads_card,
 };
-use crate::bus::{AgentId, AgentOutcome, BusReceiver, Event, FleetBus, Kind, Signal, Sink, pump};
+use crate::bus::{AgentId, AgentOutcome, BusReceiver, FleetBus, Signal, Sink, pump};
 use crate::fleet::Fleet;
 use crate::provider::{Engine, Provider, Usage};
-use crate::record::{self, Blocks, Fold, Printer, Record, Transient, View};
+use crate::record::{self, Blocks, Fold, Printer, Transient, View};
 use crate::shell_eval::user_json;
 use crate::tui::SessionInfo;
 use ral_core::serial::FOValue;
@@ -52,14 +53,14 @@ pub struct Headless<'a> {
     out: &'a mut (dyn Write + Send),
     err: &'a mut (dyn Write + Send),
     /// Read once from the bus's shared usage meter at the end of the run, so
-    /// it counts muted sub-agents too.  A `Kind::Usage` reaching the sink is
-    /// already in that meter and must not be added again.
+    /// it counts muted sub-agents too.  A `Forensic::UsageDelta` reaching the
+    /// sink is already in that meter and must not be added again.
     usage: Usage,
     root_id: AgentId,
     started: Instant,
     projection: Projection,
-    /// Counted, not tracked: the per-segment `Kind::Step(n)` index restarts
-    /// each time the root resumes after an async-spawned block.
+    /// Counted, not tracked: the per-segment `Display::Step { n }` index
+    /// restarts each time the root resumes after an async-spawned block.
     steps: u32,
     last_stop: Option<String>,
     /// The root's deliberate `reply`, kept as a value until the consuming
@@ -218,89 +219,11 @@ fn result_json(h: &Headless, r: &Result<(), String>, elapsed: std::time::Duratio
 }
 
 impl Sink for Headless<'_> {
-    #[allow(clippy::match_same_arms)]
-    fn handle(&mut self, e: Event) {
-        let id = e.id;
-        match e.kind {
-            // Conversational mode streams assistant tokens. Both headless
-            // projections wait for the deliberate reply, so incidental prose
-            // cannot become the answer; a sub-agent's tokens are always muted.
-            Kind::Token(text)
-                if id == self.root_id && self.projection == Projection::Conversation =>
-            {
-                let _ = self.out.write_all(text.as_bytes());
-                let _ = self.out.flush();
-                if let Some(last) = text.as_bytes().last() {
-                    self.ended_with_newline = *last == b'\n';
-                }
-            }
-            Kind::Token(_) => {}
-            Kind::StopReason(raw) => {
-                if id == self.root_id {
-                    self.last_stop = Some(raw.clone());
-                }
-                let _ = writeln!(self.err, "[stop: {raw}]");
-            }
-            // `bus::sink::pump`'s last-resort panic-catch is the one producer
-            // left, out of a recorder's reach; every other class's error has
-            // crossed to `Forensic::Error`, drawn by `print_row` below.
-            Kind::Error(msg) => {
-                if msg.starts_with(crate::bus::WORKER_PANIC_PREFIX) {
-                    self.panicked = true;
-                }
-                let _ = writeln!(self.err, "error: {msg}");
-            }
-            // A pin overwrites a TUI register; headless has none.
-            Kind::Pin { .. } | Kind::Unpin { .. } => {}
-            // `Step` rides `Protocol` alone, with no `Display` twin of its
-            // own yet, so `Signal::into_event` (see `Self::absorb`) is still
-            // its one route to this arm.
-            Kind::Step { n, .. } if id == self.root_id => {
-                self.steps += 1;
-                let _ = writeln!(self.err, "[step {n}]");
-            }
-            Kind::Step { .. } => {}
-            // Every other class has crossed to the record seam: its live row
-            // now rides a `Signal::Fact`/`Signal::Transient`, folded by
-            // `record::View` and drawn by `Printer` below — never a raw
-            // `Kind` here. `ContextEdited` is the one further exception, for
-            // the same reason as `Step` above, but drawn no differently here
-            // than it always was — a context edit is chrome, never shown to
-            // headless.
-            Kind::ContextEdited { .. }
-            | Kind::Reasoning { .. }
-            | Kind::UserPromptEcho(_)
-            | Kind::Usage(_)
-            | Kind::SystemNote(_)
-            | Kind::Nudge { .. }
-            | Kind::ProviderError(_)
-            | Kind::Stalled(_)
-            | Kind::ToolCall { .. }
-            | Kind::HarnessCall { .. }
-            | Kind::ToolResult(_)
-            | Kind::HarnessResult(_)
-            | Kind::Resources { .. }
-            | Kind::Context { .. }
-            | Kind::Cleared
-            | Kind::Boundary
-            | Kind::Born { .. }
-            | Kind::Died
-            | Kind::Thinking(_)
-            | Kind::State(_)
-            | Kind::Card(_)
-            | Kind::Io { .. }
-            | Kind::Done { .. }
-            | Kind::Notice { .. }
-            | Kind::SubagentDone { .. } => {}
-        }
-    }
-
-    /// Drain the bus fully, dispatching every `Signal` — never only the
-    /// `Event`s [`Signal::into_event`] can still bridge — then block for the
+    /// Drain the bus fully, dispatching every `Signal`, then block for the
     /// next arrival exactly as the default [`Sink::drive`] does.  Headless
-    /// overrides rather than shares that default because a `Signal::Fact` or
-    /// `Signal::Transient` has no `Event` form to hand it once its producer
-    /// has crossed to the record seam.
+    /// overrides rather than shares that default because it folds each source
+    /// agent's facts into its own [`Blocks`] memo, which the default's
+    /// stateless `accept` has nowhere to keep.
     fn drive(&mut self, rx: &BusReceiver, done: &AtomicBool) -> io::Result<()> {
         /// How often a blocked drain wakes to re-check `done` — mirrors
         /// `bus::sink::DRAIN_POLL`, kept as its own constant rather than a
@@ -328,22 +251,13 @@ impl Sink for Headless<'_> {
 }
 
 impl Headless<'_> {
-    /// One `Signal`, dispatched to whichever half still carries it.
+    /// One `Signal`, dispatched to whichever half carries it.
     ///
-    /// A `Protocol` fact (`Step`, `ContextEdited`) has no `Display`/`Forensic`
-    /// twin yet, so it is still drawn through the legacy `Kind` bridge
-    /// [`Signal::into_event`] projects it to. Every other fact is `Display`
-    /// or `Forensic`, folded into its source agent's own [`Blocks`] — each
-    /// agent's `Seq` numbers its own log, so root's and a child's commits
-    /// never share one memo — and drawn fresh from there.
+    /// A fact is folded into its source agent's own [`Blocks`] — each agent's
+    /// `Seq` numbers its own log, so root's and a child's commits never share
+    /// one memo — and drawn fresh from there.
     fn absorb(&mut self, sig: Signal, blocks: &mut HashMap<AgentId, Blocks>) {
         match sig {
-            Signal::Event(e) => self.handle(e),
-            Signal::Fact(id, rec) if matches!(rec.value(), Record::Protocol(_)) => {
-                if let Some(event) = Signal::Fact(id, rec).into_event() {
-                    self.handle(event);
-                }
-            }
             Signal::Fact(id, rec) => {
                 let entry = blocks.entry(id).or_default();
                 View::step(entry, &rec)
@@ -422,9 +336,8 @@ impl Printer for Headless<'_> {
 }
 
 impl Headless<'_> {
-    /// One fold commit, projected onto stderr exactly as [`Sink::handle`]
-    /// projects its `Kind` twin — a rendering, chosen fresh each time from
-    /// whichever record vocabulary reached this printer.
+    /// One fold commit, projected onto stderr as a rendering chosen fresh
+    /// each time from whichever record vocabulary reached this printer.
     #[allow(clippy::match_same_arms)]
     fn print_row(&mut self, id: AgentId, kind: &record::BlockKind) {
         use record::BlockKind as K;
@@ -552,8 +465,8 @@ impl Headless<'_> {
                     }
                 }
             }
-            // Interactive-only, or pure presentation — the same "nothing is
-            // lost" reasoning `Sink::handle` states for their `Kind` twins.
+            // Interactive-only, or pure presentation: nothing is lost by
+            // leaving them undrawn here.
             K::Thinking { .. }
             | K::Prompt { .. }
             | K::Answer { .. }
@@ -664,7 +577,8 @@ pub fn run(
     // `&mut` borrow outlives the closure `pump` runs on its scoped thread.
     let mut control = crate::agent::NoControl;
     let root_id = session.id;
-    let outcome = pump(&mut headless, &fleet.bus, root_id, |emit| {
+    let recorder = session.recorder();
+    let outcome = pump(&mut headless, &fleet.bus, root_id, &recorder, |emit| {
         session.attend(&mut control, emit)
     });
     // The attend digest: an outcome driving `is_error`/`error`, and the root's
@@ -756,7 +670,8 @@ pub fn converse_on(
 /// One exchange of a converse session, projected onto any [`Sink`].
 ///
 /// The structured twin of [`converse_on`], which carries the contract: here the
-/// caller supplies the sink and so sees `Kind` events unflattened.
+/// caller supplies the sink and so sees raw `Signal`s rather than rendered
+/// text.
 ///
 /// # Errors
 /// Returns `Err` if the attend worker panics or the sink's drive fails.
@@ -775,7 +690,8 @@ pub fn converse_sink<S: Sink>(
     };
     session.seed(message);
     let root_id = session.id;
-    let outcome = pump(sink, &fleet.bus, root_id, |emit| {
+    let recorder = session.recorder();
+    let outcome = pump(sink, &fleet.bus, root_id, &recorder, |emit| {
         session.attend_backlog(emit)
     });
     match outcome {
@@ -828,7 +744,8 @@ pub fn converse_settled<S: Sink>(
     };
     session.seed(message);
     let root_id = session.id;
-    let outcome = pump(sink, &fleet.bus, root_id, |emit| {
+    let recorder = session.recorder();
+    let outcome = pump(sink, &fleet.bus, root_id, &recorder, |emit| {
         session.attend_with(
             &mut crate::agent::NoControl,
             emit,
@@ -852,9 +769,8 @@ mod tests {
     use crate::agent::{RootConfig, RootSeat, SPAWN_FUEL};
     use crate::bus::{AgentResult, AgentState, Post};
     use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
-    use crate::provider::Tuning;
     use crate::provider::scripted::{Reply, Script};
-    use crate::record::Display;
+    use crate::record::{Display, Record};
     use crate::shell_eval::tools::agent::{AsyncSpawn, spawn_async};
 
     /// A fresh conversing trunk over a scripted provider, in a throwaway run
@@ -939,33 +855,43 @@ mod tests {
     }
 
     /// `pump` absorbs the unwind and returns normally, so `run` builds its
-    /// result from `Ok(())`; only the bus's `Kind::Error` betrays the panic.
+    /// result from `Ok(())`; only the recorded `Forensic::Error` whose text
+    /// carries [`crate::bus::WORKER_PANIC_PREFIX`] betrays the panic, latched
+    /// in `print_row`'s `K::Error` arm.
     #[test]
     fn recovered_worker_panic_reports_error_not_success() {
+        use crate::record::{Forensic, Record, Recorded, Seq, Stamp};
         let root: AgentId = 1;
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
         let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
-        h.handle(Event {
-            id: root,
-            kind: Kind::Error(format!("{}boom", crate::bus::WORKER_PANIC_PREFIX)),
-        });
+        let mut blocks = HashMap::new();
+        h.absorb(
+            Signal::Fact(
+                root,
+                Recorded::new(
+                    Stamp::new(Seq::new(1), 0..0),
+                    Record::Forensic(Forensic::Error {
+                        text: format!("{}boom", crate::bus::WORKER_PANIC_PREFIX),
+                    }),
+                ),
+            ),
+            &mut blocks,
+        );
         let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
         let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
         assert_eq!(v["is_error"], serde_json::json!(true), "{out}");
         assert_eq!(v["stop_reason"], serde_json::json!("panicked"), "{out}");
     }
 
-    /// A `Protocol::StepStarted` fact through the real live path — `absorb`,
-    /// which `drive` calls in production — rather than a hand-fed `Kind`: a
-    /// step has no `Display` twin of its own, so this is the one class that
-    /// still crosses `Signal::into_event`'s legacy bridge, and this test is
-    /// what pins that bridge open. `n`'s index restarts each time the root
-    /// resumes after an async-spawned block, so storing it would report only
-    /// the last segment; a child's own steps never count toward root's.
+    /// A `Display::Step` fact through the real live path — `absorb`, which
+    /// `drive` calls in production — folded into blocks and drawn from there.
+    /// `n`'s index restarts each time the root resumes after an async-spawned
+    /// block, so storing it would report only the last segment; a child's own
+    /// steps never count toward root's.
     #[test]
     fn num_steps_counts_root_steps_across_segments() {
-        use crate::record::{Protocol, Record, Recorded, Seq, Stamp};
+        use crate::record::{Display, Record, Recorded, Seq, Stamp};
         let root: AgentId = 1;
         let sub: AgentId = 2;
         let mut sink_out = Vec::new();
@@ -979,10 +905,7 @@ mod tests {
                 id,
                 Recorded::new(
                     Stamp::new(Seq::new(seq), 0..0),
-                    Record::Protocol(Protocol::StepStarted {
-                        n,
-                        tuning: Tuning::default(),
-                    }),
+                    Record::Display(Display::Step { n }),
                 ),
             )
         };
@@ -996,9 +919,8 @@ mod tests {
         assert_eq!(v["num_steps"], serde_json::json!(5), "{out}");
     }
 
-    /// A `Display::Card` fact — one of the classes with no legacy `Kind`
-    /// emitter left anywhere in the tree — reaches stderr only through the
-    /// view fold `absorb` drives, never through `Sink::handle`.
+    /// A `Display::Card` fact reaches stderr only through the view fold
+    /// `absorb` drives.
     #[test]
     fn a_card_fact_reaches_stderr_through_the_view_fold() {
         use crate::record::{Display, Record, Recorded, Seq, Stamp};
@@ -1220,7 +1142,6 @@ mod tests {
         );
     }
 
-
     // ── `converse_settled`: the quiescent exchange driver ──────────────────
 
     /// A conversing trunk with real spawn fuel, so a test may register a
@@ -1290,18 +1211,13 @@ mod tests {
     }
 
     /// Every signal a caller's own `Sink` can receive, folded into one place —
-    /// the legacy `Kind` a class still emits directly, or the seam's own
-    /// `Record`/`Transient` for a class that has crossed.
+    /// the seam's own `Record`/`Transient`.
     #[derive(Default)]
     struct Collecting {
-        kinds: Vec<Kind>,
         facts: Vec<Record>,
         transients: Vec<Transient>,
     }
     impl Sink for Collecting {
-        fn handle(&mut self, e: Event) {
-            self.kinds.push(e.kind);
-        }
         fn fact(&mut self, _id: AgentId, fact: &Record) {
             self.facts.push(fact.clone());
         }
@@ -1320,9 +1236,6 @@ mod tests {
     }
 
     impl<S: Sink> Sink for SignalOnWaiting<S> {
-        fn handle(&mut self, e: Event) {
-            self.inner.handle(e);
-        }
         fn fact(&mut self, id: AgentId, fact: &Record) {
             self.inner.fact(id, fact);
         }
@@ -1385,10 +1298,10 @@ mod tests {
         settler.join().expect("the settling thread must not panic");
 
         assert!(
-            sink.inner.transients.iter().any(|t| matches!(
-                t,
-                Transient::State(AgentState::WaitingOnAgents)
-            )),
+            sink.inner
+                .transients
+                .iter()
+                .any(|t| matches!(t, Transient::State(AgentState::WaitingOnAgents))),
             "parking on a live child must emit WaitingOnAgents"
         );
         assert!(
@@ -1471,7 +1384,7 @@ mod tests {
             "the refusal must name what it refuses: {err}"
         );
         assert!(
-            sink.kinds.is_empty() && sink.facts.is_empty() && sink.transients.is_empty(),
+            sink.facts.is_empty() && sink.transients.is_empty(),
             "a refused construction must touch no bus"
         );
     }

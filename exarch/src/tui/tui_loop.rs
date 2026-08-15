@@ -111,7 +111,9 @@ impl Control for ReplControl {
         match trimmed {
             "/clear" => {
                 let result = session.clear();
-                emit.emit(crate::bus::Kind::Cleared);
+                session
+                    .recorder()
+                    .transient(crate::record::Transient::Cleared);
                 if let Err(error) = result {
                     session.note_error(format!("clear failed: {error}"));
                 }
@@ -297,22 +299,17 @@ pub struct CommandCtx<'a> {
     pub(super) engine: &'a Arc<provider::Engine>,
 }
 
-/// Route one `Signal` to its `App` entry point: `Fact`/`Transient` reach
-/// [`App::fact`]/[`App::transient`] directly, and `Event` — the classes no
-/// producer has crossed to the seam yet — still reaches [`App::handle`].
+/// Route one `Signal` to its `App` entry point.
 fn dispatch(tui: &mut Tui, rx: &BusReceiver, sig: Signal) {
     match sig {
-        Signal::Event(ev) => tui.app.handle(ev, rx),
         Signal::Fact(id, fact) => tui.app.fact(id, &fact),
         Signal::Transient(id, t) => tui.app.transient(id, t, rx),
     }
 }
 
-/// [`crate::bus::sink::drain_pass`]'s contract — the worker's explicit `done`
-/// flag ends a pass, never the channel merely emptying — reimplemented over
-/// the raw `Signal` rather than its legacy `Event` projection.  The TUI's own
-/// dispatch loop, so a `Signal::Fact`/`Transient` reaches `App` without first
-/// being resolved (and narrowed) by `Signal::into_event`.
+/// The drain contract — the worker's explicit `done` flag ends a pass, never
+/// the channel merely emptying — over the TUI's own dispatch loop, on its
+/// render cadence rather than a `Sink`'s blocking one.
 fn drain_signals(
     rx: &BusReceiver,
     done: &AtomicBool,
@@ -547,7 +544,7 @@ pub fn key_action(k: &KeyEvent, enter_submits: bool) -> KeyAction {
 )]
 mod tests {
     use super::*;
-    use crate::bus::Kind;
+    use crate::record::{Forensic, Record};
 
     /// `/resources` travels the `/clear` route — inbox, exchange boundary,
     /// [`ReplControl`] — and folds into exactly one event with no provider
@@ -569,7 +566,10 @@ mod tests {
             .try_recv()
             .expect("the /resources command must publish its fold");
         match sig {
-            crate::bus::Signal::Transient(_, crate::record::Transient::Resources { rows, card }) => {
+            crate::bus::Signal::Transient(
+                _,
+                crate::record::Transient::Resources { rows, card },
+            ) => {
                 assert!(!rows.is_empty(), "the agent half of the fold has rows");
                 assert!(
                     rows.iter().any(|r| r.name == "workers.running"),
@@ -581,7 +581,6 @@ mod tests {
         }
         // The park the loop settles into announces itself, and nothing else
         // follows: a command is not a turn, so no state ran before the fold.
-        // The idle state is `Transient::State` now, not a legacy `Kind`.
         assert!(
             matches!(
                 rx.try_recv(),
@@ -611,9 +610,12 @@ mod tests {
         let mut control = ReplControl;
         let _ = session.attend(&mut control, &emit);
 
-        assert!(matches!(
-            rx.try_next_event().map(|event| event.kind),
-            Ok(Kind::Error(message)) if message.contains("exchange 7")
-        ));
+        assert!(
+            crate::bus::drain_records(&rx).iter().any(|rec| matches!(
+                rec,
+                Record::Forensic(Forensic::Error { text }) if text.contains("exchange 7")
+            )),
+            "a /rewind past the last exchange reports the bad anchor"
+        );
     }
 }

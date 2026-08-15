@@ -42,11 +42,12 @@
 //! Usage: `boot-run <kernel> <initramfs> <rootfs> <folder>`
 
 use exarch::agent::{Agent, RootConfig, RootSeat, SPAWN_FUEL};
-use exarch::bus::{Event, Kind, Sink};
+use exarch::bus::{AgentId, Sink};
 use exarch::egress::Egress;
 use exarch::headless::converse_settled;
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Engine, Provider, ProviderKind, ToolCall};
+use exarch::record::{Display, Record, Transient};
 use ral_core::transport::{Liveness, WireTransport};
 use ral_core::types::Capabilities;
 use std::path::PathBuf;
@@ -238,18 +239,24 @@ fn ral_call(id: &str, cmd: &str) -> ToolCall {
     }
 }
 
-/// Prints every event's shape as it streams by — enough to follow the
-/// exchange along in a terminal without rendering a real UI.
+/// Prints the exchange's shape as it streams by — enough to follow it along
+/// in a terminal without rendering a real UI.
 struct PrintSink;
 
 impl Sink for PrintSink {
-    fn handle(&mut self, e: Event) {
-        match e.kind {
-            Kind::Token(text) => print!("{text}"),
-            Kind::SubagentDone { name, outcome, .. } => {
-                println!("\n[{name} finished: {outcome:?}]");
+    fn fact(&mut self, _id: AgentId, fact: &Record) {
+        if let Record::Display(Display::SubagentDone { name, error, .. }) = fact {
+            match error {
+                Some(e) => println!("\n[{name} failed: {e}]"),
+                None => println!("\n[{name} finished]"),
             }
-            Kind::State(state) => println!("\n[state: {state:?}]"),
+        }
+    }
+
+    fn transient(&mut self, _id: AgentId, t: &Transient) {
+        match t {
+            Transient::Token(text) => print!("{text}"),
+            Transient::State(state) => println!("\n[state: {state:?}]"),
             _ => {}
         }
     }

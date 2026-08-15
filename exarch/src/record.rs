@@ -1,5 +1,5 @@
 //! The one seam, one log: every fact a session records crosses here, once,
-//! as a [`Record`] — never a `Kind`, never a `SessionEvent`.
+//! as a [`Record`].
 //!
 //! A `Record` is one of three classes: [`Protocol`] (verbatim payloads the
 //! model fold folds), [`Display`] (commits the view fold folds), [`Forensic`]
@@ -102,8 +102,7 @@ impl From<Forensic> for Record {
 }
 
 /// Verbatim payloads the model fold needs — the provider's exact
-/// `ChatMessage`, tool-call ids, and the session bookends.  Unchanged in
-/// shape from the `SessionEvent` they retire.
+/// `ChatMessage`, tool-call ids, and the session bookends.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Protocol {
@@ -156,8 +155,8 @@ pub enum Protocol {
 /// *before* they reach the seam, so a resumed scrollback matches what the
 /// user actually saw.
 ///
-/// Field shapes here are this parcel's own choice: they carry each source
-/// `Kind`'s "data half" in a form the log can round-trip, never the mark
+/// Field shapes here are this parcel's own choice: they carry each fact's
+/// "data half" in a form the log can round-trip, never the mark
 /// tree a `card` field renders (recomputed by the view fold), with two
 /// exceptions this parcel decided on the same rule — `Observation` and
 /// `Card` carry the whole fact because there is no other durable trace of it
@@ -295,10 +294,8 @@ pub struct ContextRow {
 
 /// Breadcrumbs that determine no model projection but are worth keeping.
 ///
-/// `Error`, `Nudge`, `ProviderError`, and `Stalled` fold what were, before
-/// this plan, two separate dual-written facts — one from `SessionEvent`, one
-/// from `Kind` — into the one record their existing dual-write sites already
-/// treat as a single fact.
+/// `Error`, `Nudge`, `ProviderError`, and `Stalled` are each the one record
+/// their dual-write sites emit for a single fact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Forensic {

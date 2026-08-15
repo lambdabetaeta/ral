@@ -3,7 +3,7 @@
 //!
 //! The fold has two halves, split by who may legally read what: the agent
 //! assembles its own rows on its attend thread ([`Agent::resource_rows`]),
-//! and the TUI's `Kind::Resources` arm appends the rows for the accumulators
+//! and the TUI's `Transient::Resources` arm appends the rows for the accumulators
 //! *it* owns ([`frontend_rows`]). Neither half reaches across a thread for
 //! the other's figures. Probing mutates nothing and renews no lease, so
 //! `/resources` cannot immortalise the zombies it exists to reveal.
@@ -153,7 +153,7 @@ pub struct BusFigures {
 /// The rows for the accumulators the frontend owns.
 ///
 /// Pure in its figures so the row shapes are unit-testable without a
-/// terminal: the TUI's `Kind::Resources` arm reads them off the
+/// terminal: the TUI's `Transient::Resources` arm reads them off the
 /// tabs/viewport/bus it holds.
 pub fn frontend_rows(
     viewport: ViewportFigures,

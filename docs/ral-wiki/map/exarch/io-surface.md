@@ -1,7 +1,7 @@
 ---
 generated_at_commit: 7d9410f0
 generated_at_date: 2026-08-13
-covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/event.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/headless.rs, exarch/src/tui/surface.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
+covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
 ---
 
 # Map: exarch / io surface
@@ -140,12 +140,13 @@ decoder: a map matching the projection above decodes through
 `Observation::from_value` into `Surface::Observation`, the raw observation
 alone — no card built yet, since the decoder's own codomain carries the
 structured value and nothing a printer merely wants a copy of. The card is
-bound by `observation_card` only where a `Kind` is still needed for the bus's
-still-live frontends (`Surface::into_kind`, emitting **`Kind::Io { event,
-card }`**, `bus/event.rs`), and by `absorb_surface` never at all — the
-observation records without one. The other surface shapes (pin, notice, card,
-done) have their own arms; a value matching none drops, the same graceful
-degradation as before.
+bound by `observation_card` only at draw time — from whichever printer's fold
+reads the recorded `Display::Observation`/`ObservationGroup` — never by the
+commit producer (`record/commit.rs`'s `SurfaceBuffer`) that records it: the
+observation crosses the seam as its raw wire form alone (`observation_wire`),
+and the card is rebuilt fresh wherever it is drawn. The other surface shapes
+(pin, notice, card, done) have their own arms; a value matching none drops,
+the same graceful degradation as before.
 
 `observation_card` composes from the existing marks ([[map/exarch/cards|cards]]).
 The operation is a *nominal category*, so it is carried by a word, not a
@@ -167,10 +168,10 @@ as `key=value` pairs in the map's own order, whatever is present, nothing
 inferred. `Role::Path` carries a real hue, so the subject of every row stands
 as figure against the muted label and the body prose.
 
-The TUI renders observation `Kind::Io`s not one card per event but **grouped by
-kind**. Core surfaces each effect as its own `Kind::Io`, so a burst would read
+The TUI renders observations not one card per event but **grouped by
+kind**. Core surfaces each effect as its own observation, so a burst would read
 as `read…`, `$…`, `read…`, `$…` — noisy clutter at the rail. An
-`ObservationBuf` (`tui/surface.rs`, beside the patch buffer but kept separate)
+`ObservationBuf` (`record/commit.rs`, beside the patch buffer but kept separate)
 buckets a consecutive run — even *interleaved*, order-independent — into deduped
 buckets (reads by path, execs by argv, greps by `(scope, pattern)`), flushed at
 natural boundaries through per-kind group helpers into **one card per
@@ -188,8 +189,9 @@ them. Buffered, every effect of one call reaches
 `observation_card` span vocabulary, so a lone surface renders identically; the
 one departure is that the exec group **drops the `→ status` tail** — a
 comma-joined run reads as the *set* of commands run, and per-command status
-survives in the structured observation. The render path is shared with
-`Kind::Card` (`render_card`), so width-reflow and the rest are free.
+survives in the structured observation. The render path is shared with a
+deliberately `surface`d `Display::Card` (`render_card`), so width-reflow and
+the rest are free.
 
 ## One surface per operation — bulk plumbing below the ral line
 

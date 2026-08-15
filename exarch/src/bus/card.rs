@@ -310,8 +310,7 @@ pub fn context_rows_card(rows: &[crate::record::ContextRow]) -> Card {
 
 /// The one observation a producer didn't group.
 ///
-/// A worker birth, a capability denial, a desk-fed act — rendered the same
-/// way a live `Kind::Io` once carried its card ready-made. `pub` for
+/// A worker birth, a capability denial, a desk-fed act. `pub` for
 /// synod's fold: `record::Display` keeps only the wire value, so the card is
 /// built here, at render time, exactly as `record/view.rs` will for a
 /// resumed scrollback.

@@ -1,6 +1,5 @@
-//! The model fold: the provider-facing projection `AgentLog` used to build
-//! by folding `SessionEvent`s off `events.jsonl`, now built the same way off
-//! [`Protocol`] records off `record.jsonl` — the same `step`, whether it is
+//! The model fold: the provider-facing projection `AgentLog`, built off the
+//! [`Protocol`] records of `record.jsonl` — the same `step`, whether it is
 //! applied inline on the attend thread right after [`super::Emitter::emit`]
 //! returns, or by [`super::replay`] from disk.
 //!

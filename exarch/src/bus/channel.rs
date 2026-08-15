@@ -1,19 +1,20 @@
 //! The bus transport: a bounded, coalescing queue shaped like `std::sync::mpsc`
 //! — same method names, same error types — so `Emitter` and `sink.rs`'s
-//! `drain_pass` need only name the type.
+//! `drain_signals` and `Sink::drive` need only name the type.
 //!
 //! Pushing a `Token`/`Thinking` (concatenate) or `State` (replace) merges into
 //! the tail entry iff that tail is the same class and the same agent; every
-//! other [`Kind`] is reserved, always pushed as its own entry, never merged,
+//! other signal is reserved, always pushed as its own entry, never merged,
 //! never dropped. So a token run can never migrate across a `ToolCall` of the
 //! same agent, and a flood bounds itself to one growing entry.
 //!
 //! Past [`MERGE_TEXT_CAP`] a merged entry sheds its oldest text and the shed
-//! count rides out as a `SystemNote` marker when the entry drains —
-//! degradation the user sees, never silence.
+//! count rides out as a `Transient::Fault` marker when the entry drains —
+//! degradation the user sees, never silence; being a fact about the
+//! transport, not the session, it is never durable.
 
 use super::AgentId;
-use crate::bus::event::{Event, Kind, Signal};
+use crate::bus::signal::Signal;
 use crate::record::Transient;
 use crate::sync::LockExt;
 use std::collections::VecDeque;
@@ -30,26 +31,8 @@ enum MergeClass {
     State,
 }
 
-/// The envelope a coalescible signal rides — merging never crosses envelopes,
-/// so a legacy `Kind::Token` run and a seam-published `Transient::Token` run
-/// stay two entries even for one agent.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Lane {
-    Kind,
-    Seam,
-}
-
-fn merge_key(sig: &Signal) -> Option<(Lane, AgentId, MergeClass)> {
+fn merge_key(sig: &Signal) -> Option<(AgentId, MergeClass)> {
     match sig {
-        Signal::Event(ev) => {
-            let class = match &ev.kind {
-                Kind::Token(_) => MergeClass::Token,
-                Kind::Thinking(_) => MergeClass::Thinking,
-                Kind::State(_) => MergeClass::State,
-                _ => return None,
-            };
-            Some((Lane::Kind, ev.id, class))
-        }
         Signal::Transient(id, t) => {
             let class = match t {
                 Transient::Token(_) => MergeClass::Token,
@@ -57,19 +40,15 @@ fn merge_key(sig: &Signal) -> Option<(Lane, AgentId, MergeClass)> {
                 Transient::State(_) => MergeClass::State,
                 _ => return None,
             };
-            Some((Lane::Seam, *id, class))
+            Some((*id, class))
         }
         Signal::Fact(..) => None,
     }
 }
 
-/// The accumulated text of a `Token`/`Thinking` signal, in either envelope.
+/// The accumulated text of a `Token`/`Thinking` signal.
 fn merged_text(sig: &mut Signal) -> Option<&mut String> {
     match sig {
-        Signal::Event(ev) => match &mut ev.kind {
-            Kind::Token(s) | Kind::Thinking(s) => Some(s),
-            _ => None,
-        },
         Signal::Transient(_, Transient::Token(s) | Transient::Thinking(s)) => Some(s),
         Signal::Transient(..) | Signal::Fact(..) => None,
     }
@@ -77,10 +56,6 @@ fn merged_text(sig: &mut Signal) -> Option<&mut String> {
 
 fn text_len(sig: &Signal) -> usize {
     match sig {
-        Signal::Event(ev) => match &ev.kind {
-            Kind::Token(s) | Kind::Thinking(s) => s.len(),
-            _ => 0,
-        },
         Signal::Transient(_, Transient::Token(s) | Transient::Thinking(s)) => s.len(),
         Signal::Transient(..) | Signal::Fact(..) => 0,
     }
@@ -129,9 +104,9 @@ impl BusQueue {
     }
 }
 
-/// `tail` is already confirmed to be the same lane, class, and agent as
-/// `incoming`: text concatenates under the cap, a newer `State` replaces the
-/// older in place.
+/// `tail` is already confirmed to be the same class and agent as `incoming`:
+/// text concatenates under the cap, a newer `State` replaces the older in
+/// place.
 fn merge_into(tail: &mut QueueEntry, mut incoming: Signal, bytes: &mut usize) {
     match merged_text(&mut incoming) {
         Some(add) => {
@@ -173,12 +148,14 @@ fn pop_one(q: &mut BusQueue) -> Option<Signal> {
     let entry = q.items.pop_front()?;
     q.bytes -= text_len(&entry.signal);
     if entry.elided > 0 {
-        let (_, id, class) =
+        let (id, class) =
             merge_key(&entry.signal).expect("elided is only ever set on a coalescible entry");
-        q.markers.push_back(Signal::Event(Event {
+        q.markers.push_back(Signal::Transient(
             id,
-            kind: Kind::SystemNote(overflow_note(class, entry.elided)),
-        }));
+            Transient::Fault {
+                text: overflow_note(class, entry.elided),
+            },
+        ));
     }
     Some(entry.signal)
 }
@@ -203,7 +180,7 @@ impl BusShared {
     }
 }
 
-/// The cloneable sender side — the `mpsc::Sender<Event>` replacement.
+/// The cloneable sender side — the `mpsc::Sender<Signal>` replacement.
 pub struct BusSender(Arc<BusShared>);
 
 impl Clone for BusSender {
@@ -228,27 +205,9 @@ impl Drop for BusSender {
 }
 
 impl BusSender {
-    /// Push `ev` under the merge rule and wake a parked receiver; a no-op once
-    /// the receiver is gone, which is what lets `Emitter::muted_child` swallow
-    /// a display stream forever without leaking it.
-    ///
-    /// # Errors
-    /// Returns `Err(SendError(ev))` when the receiver has been dropped.
-    #[allow(
-        clippy::result_large_err,
-        reason = "the Err payload is the undelivered Event itself — handing it back is the contract, and its width is Event's, not an error type's"
-    )]
-    pub fn send(&self, ev: Event) -> Result<(), SendError<Event>> {
-        if !self.0.receiver_alive.load(Ordering::Acquire) {
-            return Err(SendError(ev));
-        }
-        self.0.lock().push(Signal::Event(ev));
-        self.0.signal.notify_all();
-        Ok(())
-    }
-
-    /// [`Self::send`] over the full [`Signal`] payload — what the record
-    /// seam's publisher rides.
+    /// Push `sig` under the merge rule and wake a parked receiver; a no-op
+    /// once the receiver is gone, which is what lets `Emitter::muted_child`
+    /// swallow a display stream forever without leaking it.
     ///
     /// # Errors
     /// Returns `Err(SendError(sig))` when the receiver has been dropped.
@@ -301,7 +260,7 @@ impl WeakSender {
     }
 }
 
-/// The single-consumer receiver side — the `mpsc::Receiver<Event>` replacement.
+/// The single-consumer receiver side — the `mpsc::Receiver<Signal>` replacement.
 pub struct BusReceiver(Arc<BusShared>);
 
 impl BusReceiver {
@@ -371,21 +330,6 @@ impl BusReceiver {
         }
     }
 
-    /// [`Self::try_recv`] through the same transitional legacy projection
-    /// `drain_pass` applies: the next signal that still renders as a `Kind`
-    /// event, skipping the seam's other passengers.  Dies with `Kind` once
-    /// both printers draw the view fold.
-    ///
-    /// # Errors
-    /// As [`Self::try_recv`], once no projectable signal remains buffered.
-    pub fn try_next_event(&self) -> Result<Event, TryRecvError> {
-        loop {
-            if let Some(ev) = self.try_recv()?.into_event() {
-                return Ok(ev);
-            }
-        }
-    }
-
     /// Queue depth, a whole merged run counting as one entry — the
     /// `/resources` `bus.depth` figure. Drains nothing and wakes nobody.
     pub fn depth(&self) -> usize {
@@ -428,29 +372,27 @@ pub fn channel() -> (BusSender, BusReceiver) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Event, Kind, MERGE_TEXT_CAP, channel};
-    use std::path::PathBuf;
+    use super::{MERGE_TEXT_CAP, Signal, channel};
+    use crate::record::Transient;
     use std::sync::mpsc::TryRecvError;
 
     #[test]
     fn bus_queue_token_flood_coalesces_to_one_entry_in_order() {
         let (tx, rx) = channel();
         for i in 0..200 {
-            tx.send(Event {
-                id: 1,
-                kind: Kind::Token(i.to_string()),
-            })
-            .unwrap();
+            tx.send_signal(Signal::Transient(1, Transient::Token(i.to_string())))
+                .unwrap();
         }
         assert_eq!(
             rx.depth(),
             1,
             "an uninterrupted same-agent token run merges into one entry"
         );
-        let ev = rx.try_next_event().expect("the merged entry");
         let expected: String = (0..200).map(|i| i.to_string()).collect();
-        match ev.kind {
-            Kind::Token(text) => assert_eq!(text, expected, "concatenation keeps arrival order"),
+        match rx.try_recv().expect("the merged entry") {
+            Signal::Transient(1, Transient::Token(text)) => {
+                assert_eq!(text, expected, "concatenation keeps arrival order");
+            }
             _ => panic!("expected a merged Token entry"),
         }
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
@@ -461,21 +403,14 @@ mod tests {
     fn bus_queue_flood_past_the_byte_cap_yields_one_overflow_marker() {
         let (tx, rx) = channel();
         let first = "a".repeat(MERGE_TEXT_CAP);
-        tx.send(Event {
-            id: 1,
-            kind: Kind::Token(first),
-        })
-        .unwrap();
+        tx.send_signal(Signal::Transient(1, Transient::Token(first)))
+            .unwrap();
         let overflow = "b".repeat(100);
-        tx.send(Event {
-            id: 1,
-            kind: Kind::Token(overflow.clone()),
-        })
-        .unwrap();
+        tx.send_signal(Signal::Transient(1, Transient::Token(overflow.clone())))
+            .unwrap();
 
-        let ev = rx.try_next_event().expect("the merged, capped entry");
-        match ev.kind {
-            Kind::Token(text) => {
+        match rx.try_recv().expect("the merged, capped entry") {
+            Signal::Transient(1, Transient::Token(text)) => {
                 assert_eq!(
                     text.len(),
                     MERGE_TEXT_CAP,
@@ -490,13 +425,12 @@ mod tests {
             _ => panic!("expected the merged Token entry"),
         }
 
-        let marker = rx.try_next_event().expect("exactly one overflow marker");
-        match marker.kind {
-            Kind::SystemNote(note) => {
-                assert!(note.contains("100"), "names the elided count: {note}");
-                assert!(note.contains("token"), "names the class: {note}");
+        match rx.try_recv().expect("exactly one overflow marker") {
+            Signal::Transient(1, Transient::Fault { text }) => {
+                assert!(text.contains("100"), "names the elided count: {text}");
+                assert!(text.contains("token"), "names the class: {text}");
             }
-            _ => panic!("expected a SystemNote overflow marker"),
+            _ => panic!("expected a Transient::Fault overflow marker"),
         }
         assert!(
             matches!(rx.try_recv(), Err(TryRecvError::Empty)),
@@ -504,72 +438,59 @@ mod tests {
         );
     }
 
-    /// Two floods either side of a `ToolCall` stay two entries rather than
-    /// merging through it, which is what keeps ordering intact.
+    /// Two floods either side of a reserved signal stay two entries rather
+    /// than merging through it, which is what keeps ordering intact.
     #[test]
     fn bus_queue_lifecycle_events_survive_a_flood_uncrossed() {
         let (tx, rx) = channel();
-        tx.send(Event {
-            id: 1,
-            kind: Kind::Born {
-                log_dir: PathBuf::new(),
+        tx.send_signal(Signal::Transient(
+            1,
+            Transient::Born {
+                log_dir: std::path::PathBuf::new(),
                 name: "a".into(),
                 parent: 0,
                 branch: false,
             },
-        })
+        ))
         .unwrap();
         for _ in 0..50 {
-            tx.send(Event {
-                id: 1,
-                kind: Kind::Token("x".into()),
-            })
-            .unwrap();
+            tx.send_signal(Signal::Transient(1, Transient::Token("x".into())))
+                .unwrap();
         }
-        tx.send(Event {
-            id: 1,
-            kind: Kind::ToolCall {
-                tool: "ral",
-                cmd: "pwd".into(),
-                summary: None,
-            },
-        })
-        .unwrap();
+        tx.send_signal(Signal::Transient(1, Transient::Boundary))
+            .unwrap();
         for _ in 0..50 {
-            tx.send(Event {
-                id: 1,
-                kind: Kind::Token("y".into()),
-            })
-            .unwrap();
+            tx.send_signal(Signal::Transient(1, Transient::Token("y".into())))
+                .unwrap();
         }
-        tx.send(Event {
-            id: 1,
-            kind: Kind::Died,
-        })
-        .unwrap();
+        tx.send_signal(Signal::Transient(1, Transient::Died))
+            .unwrap();
 
         assert_eq!(
             rx.depth(),
             5,
-            "Born, one merged run, ToolCall, one merged run, Died: five entries"
+            "Born, one merged run, Boundary, one merged run, Died: five entries"
         );
         assert!(matches!(
-            rx.try_next_event().unwrap().kind,
-            Kind::Born { .. }
+            rx.try_recv().unwrap(),
+            Signal::Transient(1, Transient::Born { .. })
         ));
-        match rx.try_next_event().unwrap().kind {
-            Kind::Token(t) => assert_eq!(t, "x".repeat(50)),
-            _ => panic!("expected the pre-ToolCall merged run"),
+        match rx.try_recv().unwrap() {
+            Signal::Transient(1, Transient::Token(t)) => assert_eq!(t, "x".repeat(50)),
+            _ => panic!("expected the pre-Boundary merged run"),
         }
         assert!(matches!(
-            rx.try_next_event().unwrap().kind,
-            Kind::ToolCall { .. }
+            rx.try_recv().unwrap(),
+            Signal::Transient(1, Transient::Boundary)
         ));
-        match rx.try_next_event().unwrap().kind {
-            Kind::Token(t) => assert_eq!(t, "y".repeat(50)),
-            _ => panic!("expected the post-ToolCall merged run"),
+        match rx.try_recv().unwrap() {
+            Signal::Transient(1, Transient::Token(t)) => assert_eq!(t, "y".repeat(50)),
+            _ => panic!("expected the post-Boundary merged run"),
         }
-        assert!(matches!(rx.try_next_event().unwrap().kind, Kind::Died));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            Signal::Transient(1, Transient::Died)
+        ));
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
@@ -579,23 +500,23 @@ mod tests {
     #[test]
     fn bus_queue_newer_state_replaces_older() {
         let (tx, rx) = channel();
-        tx.send(Event {
-            id: 1,
-            kind: Kind::State(crate::bus::AgentState::AwaitingModel),
-        })
+        tx.send_signal(Signal::Transient(
+            1,
+            Transient::State(crate::bus::AgentState::AwaitingModel),
+        ))
         .unwrap();
-        tx.send(Event {
-            id: 1,
-            kind: Kind::State(crate::bus::AgentState::Compacting),
-        })
+        tx.send_signal(Signal::Transient(
+            1,
+            Transient::State(crate::bus::AgentState::Compacting),
+        ))
         .unwrap();
         assert_eq!(
             rx.depth(),
             1,
             "a same-agent State run replaces in place rather than growing"
         );
-        match rx.try_next_event().unwrap().kind {
-            Kind::State(s) => assert_eq!(
+        match rx.try_recv().unwrap() {
+            Signal::Transient(1, Transient::State(s)) => assert_eq!(
                 s,
                 crate::bus::AgentState::Compacting,
                 "the newer state replaced the older"
@@ -608,31 +529,23 @@ mod tests {
     #[test]
     fn bus_queue_never_merges_across_agents() {
         let (tx, rx) = channel();
-        tx.send(Event {
-            id: 1,
-            kind: Kind::Token("a".into()),
-        })
-        .unwrap();
-        tx.send(Event {
-            id: 2,
-            kind: Kind::Token("b".into()),
-        })
-        .unwrap();
-        tx.send(Event {
-            id: 1,
-            kind: Kind::Token("c".into()),
-        })
-        .unwrap();
+        tx.send_signal(Signal::Transient(1, Transient::Token("a".into())))
+            .unwrap();
+        tx.send_signal(Signal::Transient(2, Transient::Token("b".into())))
+            .unwrap();
+        tx.send_signal(Signal::Transient(1, Transient::Token("c".into())))
+            .unwrap();
         assert_eq!(
             rx.depth(),
             3,
             "an interleaving agent id never merges into another agent's tail entry"
         );
         for (want_id, want_text) in [(1, "a"), (2, "b"), (1, "c")] {
-            let ev = rx.try_next_event().expect("three separate entries");
-            assert_eq!(ev.id, want_id);
-            match ev.kind {
-                Kind::Token(t) => assert_eq!(t, want_text),
+            match rx.try_recv().expect("three separate entries") {
+                Signal::Transient(id, Transient::Token(t)) => {
+                    assert_eq!(id, want_id);
+                    assert_eq!(t, want_text);
+                }
                 _ => panic!("expected Token"),
             }
         }
@@ -642,19 +555,13 @@ mod tests {
     fn bus_queue_bytes_tracks_resident_merged_text() {
         let (tx, rx) = channel();
         assert_eq!(rx.bytes(), 0);
-        tx.send(Event {
-            id: 1,
-            kind: Kind::Token("abc".into()),
-        })
-        .unwrap();
+        tx.send_signal(Signal::Transient(1, Transient::Token("abc".into())))
+            .unwrap();
         assert_eq!(rx.bytes(), 3);
-        tx.send(Event {
-            id: 1,
-            kind: Kind::Token("de".into()),
-        })
-        .unwrap();
+        tx.send_signal(Signal::Transient(1, Transient::Token("de".into())))
+            .unwrap();
         assert_eq!(rx.bytes(), 5, "the merge grows the byte figure");
-        let _ = rx.try_next_event().unwrap();
+        let _ = rx.try_recv().unwrap();
         assert_eq!(rx.bytes(), 0, "draining the entry frees its bytes");
     }
 
@@ -665,11 +572,8 @@ mod tests {
         let (tx, rx) = channel();
         drop(rx);
         let err = tx
-            .send(Event {
-                id: 1,
-                kind: Kind::Token("x".into()),
-            })
+            .send_signal(Signal::Transient(1, Transient::Token("x".into())))
             .unwrap_err();
-        assert!(matches!(err.0.kind, Kind::Token(ref s) if s == "x"));
+        assert!(matches!(err.0, Signal::Transient(1, Transient::Token(ref s)) if s == "x"));
     }
 }

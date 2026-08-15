@@ -5,8 +5,8 @@
 
 use crate::agent::Agent;
 use crate::bus::{AgentId, AgentOutcome, AgentResult, Emitter, Mailbox, Post};
-use crate::record::Transient;
 use crate::fleet::registry::{AGENT_LEASE_IDLE, AgentRegistry, RegisterError, Registration};
+use crate::record::Transient;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Instant;
@@ -232,9 +232,9 @@ pub(crate) fn spawn_async(
             // with no worker to ever `settle`, this is the one place that can.
             registry.settle(agent_id, generation);
             let msg = format!("could not spawn a worker thread for agent {agent_id}: {e}");
-            if let Err(error) = spawn_recorder.emit(crate::record::Forensic::Error {
-                text: msg.clone(),
-            }) {
+            if let Err(error) =
+                spawn_recorder.emit(crate::record::Forensic::Error { text: msg.clone() })
+            {
                 spawn_recorder.report_fault(&error);
             }
             Err(msg)

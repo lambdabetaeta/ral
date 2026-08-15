@@ -476,7 +476,6 @@ mod tests {
                     services: wire_host_services(&emit, &registry),
                 },
                 apply: crate::fleet::desk::SurfaceApplier {
-                    emit: emit.clone(),
                     pins: None,
                     id: root_id,
                     recorder: crate::record::Emitter::none(),

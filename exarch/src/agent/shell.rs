@@ -190,7 +190,6 @@ impl Agent {
                 services: self.host_services(emit, nursery.clone(), reply_cell.clone()),
             },
             apply: desk::SurfaceApplier {
-                emit: emit.clone(),
                 pins: Some(self.pins.clone()),
                 id: self.id,
                 recorder: self.recorder(),
@@ -212,8 +211,8 @@ impl Agent {
                 &self.caps,
                 cmd,
                 timeout_secs,
-                emit,
                 Some(&seam),
+                &self.recorder(),
             )
         };
         // The call boundary: whatever the commit producer still buffers —
@@ -289,7 +288,6 @@ mod tests {
     use crate::agent::cancel;
     use crate::agent::testkit::*;
     use crate::agent::{NoControl, ProviderHandle, deliberate};
-    use crate::bus::Kind;
     use crate::provider::scripted::{Reply, Script};
     use ral_core::Shell;
     use ral_core::Value;
@@ -349,14 +347,16 @@ mod tests {
             result.content
         );
         assert!(
-            crate::bus::drain_records(&rx).into_iter().any(|rec| matches!(
-                rec,
-                crate::record::Record::Display(crate::record::Display::HarnessCall {
-                    verb,
-                    failed: false,
-                    ..
-                }) if verb == "context-read"
-            )),
+            crate::bus::drain_records(&rx)
+                .into_iter()
+                .any(|rec| matches!(
+                    rec,
+                    crate::record::Record::Display(crate::record::Display::HarnessCall {
+                        verb,
+                        failed: false,
+                        ..
+                    }) if verb == "context-read"
+                )),
             "the probe still records its harness call"
         );
     }
@@ -708,18 +708,16 @@ mod tests {
         let mut reaps = 0;
         for i in 0..6 {
             session.run_shell(format!("spin{i}"), "$[0]", 5, &emit);
-            while let Ok(event) = rx.try_next_event() {
-                let Kind::Notice {
-                    notice: crate::bus::card::Notice::Reap { cmd, cause },
-                    ..
-                } = event.kind
+            for record in crate::bus::drain_records(&rx) {
+                let crate::record::Record::Display(crate::record::Display::Notice {
+                    notice: crate::record::NoticeFact::Reap { cmd, cause },
+                }) = record
                 else {
                     continue;
                 };
                 assert_eq!(cmd, "<block>", "the reap names the spawned body");
                 assert_eq!(
-                    cause,
-                    ral_core::types::ReapCause::Retention,
+                    cause, "retention",
                     "an unclaimed settled entry expires as Retention"
                 );
                 reaps += 1;

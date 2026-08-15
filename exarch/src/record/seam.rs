@@ -116,7 +116,7 @@ mod tests {
                 assert_eq!(id, 7);
                 assert!(text.contains("disk is full"), "{text}");
             }
-            Signal::Event(_) | Signal::Fact(..) | Signal::Transient(..) => {
+            Signal::Fact(..) | Signal::Transient(..) => {
                 panic!("expected a Transient::Fault")
             }
         }

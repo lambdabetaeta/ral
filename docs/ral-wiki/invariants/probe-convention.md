@@ -20,7 +20,7 @@ silence.
 `/resources` is a **fold over the registered probes**, not a bespoke report.
 It has two halves, split by who may legally read what: the agent assembles
 its own rows on its attend thread (the shell's worker registry and bindings,
-its inbox, event log, and disk) and emits them as one `Kind::Resources` —
+its inbox, event log, and disk) and emits them as one `Transient::Resources` —
 raw rows beside the rendered card — and the frontend appends the rows for the
 accumulators *it* owns (viewports, views, the bus) at render time. Neither
 half reaches across a thread for the other's figures, and the fold is never

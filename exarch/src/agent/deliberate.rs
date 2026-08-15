@@ -16,8 +16,8 @@ use crate::agent::event::{
     ContextOp, EditAuthority, QuiesceReason, ToolResult as SessionToolResult,
 };
 use crate::bus::{AgentState, Emitter, Item};
-use crate::record::Transient;
 use crate::provider::{CutShort, Provider, ProviderError, StepOut, StopReason, ToolCall};
+use crate::record::Transient;
 use ral_core::serial::FOValue;
 use std::sync::Arc;
 
@@ -91,8 +91,9 @@ impl Agent {
             if n > MAX_STEPS {
                 return Ok(self.capped());
             }
-            // The step's live row derives from the published record — the
-            // retired `Kind::Step` twin — so this is the one authoring site.
+            // The step's live row derives from the published `Display::Step`
+            // record, which `record_step` authors alongside the protocol
+            // one — so this is the one authoring site.
             self.log
                 .lock()
                 .record_step(n, provider.tuning().clone())
@@ -194,9 +195,8 @@ impl Agent {
                     reason = "answer char count cannot approach u32::MAX"
                 )]
                 let answer_chars = last_text.chars().count() as u32;
-                // The live row derives from the published record — the
-                // retired `Kind::Reasoning` twin — so this is the one
-                // authoring site.
+                // The live row derives from the published `Display::Thinking`
+                // record, so this is the one authoring site.
                 let _recorded = recorder
                     .emit(crate::record::Display::Thinking {
                         text: reasoning.to_string(),
@@ -300,7 +300,7 @@ impl Agent {
             if !injected.is_empty() {
                 let mut text = String::new();
                 for item in &injected {
-                    announce(item, emit, &recorder);
+                    announce(item, &recorder);
                     if !text.is_empty() {
                         text.push_str("\n\n");
                     }
@@ -528,7 +528,6 @@ fn admit_assistant(msg: &mut genai::chat::ChatMessage) {
 )]
 mod tests {
     use super::*;
-    use crate::bus::Kind;
     use crate::agent::testkit::*;
     use crate::agent::{NoControl, ProviderHandle, fresh_id};
     use crate::bus::{AgentOutcome, Inbox, Post};
@@ -733,8 +732,13 @@ mod tests {
             "both drained prompts coalesce into the one admitted message"
         );
         assert!(
-            std::iter::from_fn(|| rx.try_next_event().ok())
-                .any(|e| matches!(e.kind, Kind::UserPromptEcho(t) if t.contains("and report"))),
+            crate::bus::drain_records(&rx)
+                .into_iter()
+                .any(|record| matches!(
+                    record,
+                    crate::record::Record::Display(crate::record::Display::Prompt { text })
+                        if text.contains("and report")
+                )),
             "the arrival must be announced as it enters context"
         );
         assert!(session.is_ready());

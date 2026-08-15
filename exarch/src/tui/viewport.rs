@@ -903,7 +903,10 @@ impl Printer for Viewport {
             }
             // The producer's own tail flush lands as a commit `sync` will
             // see; nothing to do here but wait for it.
-            Transient::Boundary | Transient::Born { .. } | Transient::Died | Transient::Resources { .. } => {}
+            Transient::Boundary
+            | Transient::Born { .. }
+            | Transient::Died
+            | Transient::Resources { .. } => {}
         }
     }
 
@@ -919,7 +922,10 @@ impl Printer for Viewport {
                 let _ = self.open.drain(..n);
             }
         }
-        for row in rows.iter().filter(|r| r.id().seq() > self.thinking_drained_through) {
+        for row in rows
+            .iter()
+            .filter(|r| r.id().seq() > self.thinking_drained_through)
+        {
             if let record::BlockKind::Thinking { text, .. } = row.kind() {
                 let n = text.len().min(self.thinking.len());
                 let _ = self.thinking.drain(..n);
@@ -1312,7 +1318,10 @@ mod tests {
         let stamp = Stamp::new(Seq::new(1), 0..0);
         View::step(
             &mut memo,
-            &Recorded::new(stamp, Record::Display(Display::Answer { text: text.into() })),
+            &Recorded::new(
+                stamp,
+                Record::Display(Display::Answer { text: text.into() }),
+            ),
         )
         .expect("a display-only fold never refuses");
         vp.sync(&memo);
@@ -1352,7 +1361,10 @@ mod tests {
         let answer = rail_rows(&w.lines, "· ");
         assert_eq!(thinking.len(), 1, "the reasoning wears its own live rail");
         assert_eq!(answer.len(), 1, "the answer wears its own live rail");
-        assert!(thinking[0] < answer[0], "reasoning seats ahead of the answer");
+        assert!(
+            thinking[0] < answer[0],
+            "reasoning seats ahead of the answer"
+        );
 
         let mut memo = Blocks::default();
         for (seq, record) in [

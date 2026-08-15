@@ -1,7 +1,7 @@
 ---
 generated_at_commit: 99bcdf39
 generated_at_date: 2026-08-14
-covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/event.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
+covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
 # Map: exarch / frontend
@@ -9,19 +9,22 @@ covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.r
 The agent core and the user interface meet at **one outbound event stream and
 one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
 
-- workers stamp a `Kind` (`bus/event.rs`) with an `AgentId` through an
-  `Emitter` (`bus/emitter.rs`); a `Sink` (`bus/sink.rs`)
-  consumes them. A `Kind` is a token or reasoning run (a streamed `Thinking`
-  delta, committed by a final `Reasoning` event), boundary, usage, tool or
-  harness call/result,
-  sub-agent lifecycle, a transition into one of the five `AgentState`s the agent
-  is ever in (`Ready`/`AwaitingModel`/`Evaluating`/`Compacting`/
+- workers stamp a `Record` — `Protocol`/`Display`/`Forensic` (below) — through
+  `record::Emitter::emit` (`record/seam.rs`), which appends to `record.jsonl`
+  and publishes the witnessed `Recorded<Record>` onto the fleet channel in one
+  lock; the channel's other passenger is a live-only `Transient` — a streamed
+  token or reasoning delta, a state transition, a worker's birth/death, the
+  seam's own fault — with no sequence number and no durable form, published
+  through `Emitter::transient`. Together these are the two `Signal` variants
+  (`bus/signal.rs`) a `Sink` (`bus/sink.rs`) consumes. `AgentState` is the five
+  states an agent is ever in (`Ready`/`AwaitingModel`/`Evaluating`/`Compacting`/
   `WaitingOnAgents` — a total state named on the status rule, never recorded:
-  the model never saw it), or a decoded surface class — a `Card` render document a kit raises through the
-  `surface` builtin, a structural `Io` event, a housekeeping `Notice`, a
-  `Pin`/`Unpin`, or a worker's `Done` — decoded by
-  [[map/exarch/shell-eval|shell-eval]]'s `decode_surface` into its own closed
-  `Surface` vocabulary, rendered onto the bus as a `Kind` (`Surface::into_kind`)
+  the model never sees it), riding as `Transient::State`. A decoded surface
+  class — a `Card` render document a kit raises through the `surface` builtin,
+  a structural observation, a housekeeping notice, a `Pin`/`Unpin`, or a
+  worker's `done` — is decoded by [[map/exarch/shell-eval|shell-eval]]'s
+  `decode_surface` into its own closed `Surface` vocabulary first, then
+  recorded as a `Display` commit by the commit producer (`record/commit.rs`)
   and drawn by one generic interpreter ([[map/exarch/cards|cards]]).
 - `Inbox` (`bus/inbox.rs`) is the typed inbound twin — a per-session queue of
   `Post`s (`bus/post.rs`), each carrying its source and drain boundary. User
@@ -31,33 +34,31 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
   [[decisions/260617_scheduled-wakeups|scheduled-wakeups]],
   [[decisions/260617_async-agent-tool|async-agent-tool]]).
-- a `FleetBus` (`bus/emitter.rs`) owns the event channel and the inbox; `pump`
+- a `FleetBus` (`bus/emitter.rs`) owns the channel and the inbox; `pump`
   (`bus/sink.rs`) borrows it, runs
-  the worker on a scoped thread, drains events into the sink, and reports a
-  worker panic as a final `Kind::Error`. Completion is the per-exchange `done` flag,
-  latched by `drain_pass` (`bus/sink.rs`) so an exchange ends even while a background producer keeps
-  the channel non-empty — never the channel's state
+  the worker on a scoped thread, drains signals into the sink, and reports a
+  worker panic as a recorded `Forensic::Error`, prefixed so a sink can tell it
+  from a clean completion (`bus::WORKER_PANIC_PREFIX`). Completion is the
+  per-exchange `done` flag, latched by `drain_signals` (`bus/sink.rs`, mirrored
+  by the TUI's own copy in `tui/tui_loop.rs`) so an exchange ends even while a
+  background producer keeps the channel non-empty — never the channel's state
   ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]).
 - the channel itself (`bus/channel.rs`) is bounded and coalescing, not a bare `mpsc` pair
   (`BusSender`/`BusReceiver`, same `send`/`try_recv`/`recv_timeout` shape):
   pushing `Token`/`Thinking` (concatenate) or `State` (replace) merges into the
   queue's tail entry when it is the same class and the same agent id; every
-  other `Kind` — lifecycle, tool frames, cards, errors — is reserved and always
-  enqueued on its own, so a producer flood can only ever grow one coalescing
-  run, never bury or reorder a lifecycle event. A merged `Token`/`Thinking`
+  other `Signal` — every `Fact`, and every other `Transient` — is reserved and
+  always enqueued on its own, so a producer flood can only ever grow one
+  coalescing run, never bury or reorder a fact. A merged `Token`/`Thinking`
   run's text is capped (`MERGE_TEXT_CAP`, 256 KiB); past it the front elides
-  and one `Kind::SystemNote` overflow marker rides the next drain, naming the
+  and one `Transient::Fault` overflow marker rides the next drain, naming the
   class and the elided count. `/resources` reads `BusReceiver::depth`/`bytes`
   for its `bus.depth`/`bus.bytes` rows.
-- what the channel carries is `Signal` (`bus/event.rs`): the legacy `Kind`
-  envelope, a seam-witnessed fact (`Recorded<Record>`), or an unrecorded
-  `Transient`. `Signal::into_event` is the transitional bridge that projects
-  a fact back to a `Kind` for exactly the retired-twin classes whose
-  dual-write emit sites the record seam collapsed (`Step`, `ContextEdited`,
-  `Usage`, `Error`, `Nudge`, `ProviderError`, `Stalled`); every other class
-  keeps a live legacy emit beside its record, so the live frame is still
-  drawn from `Kind`s while the log carries the facts
-  ([[decisions/260814_one-seam-one-log|one-seam-one-log]]).
+- what the channel carries is `Signal` (`bus/signal.rs`): a seam-witnessed fact
+  (`Signal::Fact`, an `AgentId` beside its `Recorded<Record>`) or an unrecorded
+  delta (`Signal::Transient`, the `AgentId` beside its `Transient`) — one
+  channel, so the TUI's single per-fleet dispatch loop routes both by
+  `AgentId` without restructuring.
 
 `record.rs` + `record/` is the one-seam-one-log module tree: the sealed
 `Record { Protocol, Display, Forensic }` vocabulary and the disjoint
@@ -70,8 +71,10 @@ commit producer: the `Chopper` and `SurfaceBuffer`, moved whole from
 `tui/surface.rs`); `record/model.rs` (the model fold, `Protocol` alone);
 `record/view.rs` (the view fold into `Blocks`; `Block`'s constructor is
 private). `Viewport` and `Headless` both implement `record::Printer`
-(`transient`/`sync`), exercised by tests and by resume seeding — the live
-per-event path does not drive them yet.
+(`transient`/`sync`): a live `Signal::Fact` steps the view fold beside the
+printer and re-syncs it wholesale (`Viewport::commit_fact`, `Headless::absorb`),
+the same fold resume seeds with one `Printer::sync` call from a `record.jsonl`
+replay — so the live path and resume draw through the identical fold.
 
 The TUI mints one **session-lived** bus, so a detached async agent clones its
 sender and streams a live tab through the same id-routed draw path a sync child
@@ -111,10 +114,13 @@ On resume, a viewport is a fold's memo: `tui_loop::run` replays
 root viewport with one `Printer::sync` call, and restores cumulative usage
 from the replayed deltas — the "resumed" note is the boundary between
 replayed history and the live session. For the running session the viewport
-stays its own live accumulator over the `Kind` stream (`App::handle`); the
-live path does not drive `sync`.
+stays its own live accumulator, fed one `Signal` at a time: `tui_loop::dispatch`
+routes a `Signal::Fact` to `App::fact` (which steps the view fold and re-syncs)
+and a `Signal::Transient` to `App::transient` (drawn directly, with no fold
+behind it) — the same two entry points a resume's `sync` call primes.
 
-Two `Sink` implementations:
+Two presentation surfaces, both folding the one `Signal` vocabulary through
+`fact`/`transient`:
 
  `tui.rs` (+ `tui/{app,banner,block,commands,fidelity,gesture,group,highlight,line,login,matrix,md,model_picker,palette,picker,prompt,rail,render,select,status,tabs,terminal,tui_loop,viewport}.rs`) — the full-screen
  TUI. It owns the alternate screen and its own scrollback: each session is a
@@ -175,8 +181,8 @@ Two `Sink` implementations:
    break commits the real `Block::markdown`. Reasoning differs: each phase
    seats its own `∴` block at its first streamed delta
    (`Viewport::push_thinking`), arriving *open* — the trace streams as the
-   deltas land — and the final `Reasoning` event supersedes them with the
-   authoritative text in that same block (`Viewport::commit_thinking`). The
+   deltas land — and the final `Display::Thinking` commit supersedes them with
+   the authoritative text in that same block (`Viewport::commit_thinking`). The
    next phase opens a new block, so a turn's thinking reads interleaved with
    the tool calls it preceded. A thinking block has two rungs only — its
    grain header, or the whole trace — the dial hopping over `Context`
@@ -226,7 +232,8 @@ Two `Sink` implementations:
  one `wait_for_cancel` poll (~50 ms) rather than running to its natural end.
  Straggler tokens the worker already emitted into the bus before the
  cancel noticed are dropped by `App`'s `root_clear_drain` guard, which arms in
- `App::clear` and disarms at the next `UserPromptEcho`.
+ `App::clear` and disarms at the next `Transient::Cleared` — or, if that
+ acknowledgement itself was lost, at the next `Display::Prompt` fact.
  The TUI owns the REPL loop and the raw-mode / bracketed-paste /
  alt-screen / mouse-capture guard. Every tab shares one submit path: a typed
  line goes to the *focused* agent (the prompt chrome follows the focused tab,
@@ -269,9 +276,12 @@ Two `Sink` implementations:
   `converse_on` is the conversational projection that keeps streaming tokens
   to a non-CLI host (synod's GUI) one exchange at a time on a parked interactive
   trunk.
-  Takes the default `Sink::drive` and a per-exchange bus, so its async children stay
-  muted. It is a display only — the durable `record.jsonl` is written by each
-  session's own `agent/event.rs` seam, in headless exactly as in the TUI.
+  `Headless` overrides `Sink::drive` rather than taking the default, since it
+  folds each source agent's facts into its own `Blocks` memo, which the
+  default's stateless `accept` has nowhere to keep; it takes a per-exchange
+  bus, so its async children stay muted. It is a display only — the durable
+  `record.jsonl` is written by each session's own `agent/event.rs` seam, in
+  headless exactly as in the TUI.
 
 `agent/cancel.rs` is the per-agent exchange cancellation layered on ral's interrupt
 handling. Every agent holds one **sticky** `Token` (an `Arc<AtomicU8>`) for its

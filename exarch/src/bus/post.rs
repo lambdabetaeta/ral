@@ -37,8 +37,8 @@ pub enum AgentOutcome {
 }
 
 impl AgentOutcome {
-    /// The `(body, error)` a `↘` subagent breadcrumb shows.  Every consumer of
-    /// [`crate::bus::Kind::SubagentDone`] — transcript, headless stderr, the
+    /// The `(body, error)` a `↘` subagent breadcrumb shows.  Every consumer
+    /// of `record::Display::SubagentDone` — transcript, headless stderr, the
     /// TUI — reduces through here, so the three render alike.
     pub(crate) fn breadcrumb(&self, text: &str) -> (String, Option<String>) {
         match self {
@@ -100,7 +100,7 @@ impl AgentMessage {
 }
 
 /// One typed message waiting in a session's inbox, the inbound twin of the
-/// outbound [`crate::bus::Kind`] stream.  Cancellation is deliberately not a
+/// outbound [`crate::bus::Signal`] stream.  Cancellation is deliberately not a
 /// variant: control plane and data plane ride separate rails, so a cancellation
 /// is unconstructable here by type.
 #[derive(Clone, Debug)]

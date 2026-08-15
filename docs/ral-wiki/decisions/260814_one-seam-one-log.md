@@ -52,8 +52,12 @@ had already named **two-record unification**, with the bus as the blocker.
   each `Stamp`'s byte range, never by contiguous run.
 - **The view fold exists and follows the same law.** `record/view.rs` folds
   `Display` commits and the `Forensic` rows a scrollback draws into `Blocks`;
-  `Block`'s constructor is private, printers are handed `&Blocks` and never a
-  `Record`, and `replay` carries the `fold == memo` proof once, generically.
+  `Block`'s constructor is private, so `Blocks` is unforgeable — only
+  `View::step` may push a row, and a printer draws blocks it cannot mint.
+  What a frontend builds from the vocabulary is its own fold, exhaustive over
+  `Record` and `Transient` under `deny(clippy::wildcard_enum_match_arm)`, so a
+  new variant breaks every frontend that must decide about it; `replay`
+  carries the `fold == memo` proof once, generically.
   A record no fold recognises is a `Refusal` that refuses the session —
   the display vocabulary is a designed, validated protocol, not a byproduct.
 - **Commits are authored worker-side.** `record/commit.rs` owns the
@@ -90,6 +94,10 @@ tee's data-loss bug, where a truncate-and-rebuild past eviction silently
 deleted the session's own evicted transcript from disk.
 
 ## What is deliberately not unified: live display
+
+**All four blockers below are since closed**: the channel carries `Signal
+{ Fact, Transient }` alone, and every frontend folds it.  The reasoning stands
+recorded because each blocker was a real design question, not an oversight.
 
 The plan's end-state — both printers driven live by `Printer::sync(&Blocks)`
 over a live-folded stream — **did not land, on purpose**. The live dispatch

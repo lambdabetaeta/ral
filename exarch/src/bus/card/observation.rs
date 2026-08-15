@@ -367,7 +367,7 @@ fn join_spans<T>(spans: &mut Vec<Span>, items: &[T], each: impl Fn(&mut Vec<Span
 /// only in the sense that a bug in that scrub would be a bug worth a panic.
 #[allow(
     dead_code,
-    reason = "P4 of dev/docs/plans/260814_one_seam_one_log.md: the commit producer (P2) calls this at its Kind::Io emit site, landing concurrently"
+    reason = "P4 of dev/docs/plans/260814_one_seam_one_log.md: the commit producer (P2) calls this at its Display::Observation emit site, landing concurrently"
 )]
 pub(crate) fn observation_wire(event: &Observation) -> FOValue {
     FOValue::try_from(&event.to_wire())

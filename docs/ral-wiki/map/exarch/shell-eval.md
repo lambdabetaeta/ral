@@ -137,7 +137,7 @@ stderr, in order, and exits 124:
    `Agent::host_services`, the one place a call's whole desk capture is
    assembled, so the fragment's extent *is* the call's — and it builds one
    `Observed::Act` per attempt, at the arm where the outcome is known, and fans
-   it out itself: the rail's `Kind::HarnessCall` row *always*, off the very
+   it out itself: the rail's `Display::HarnessCall` row *always*, off the very
    `verb`/`subject`/`payload`/`refused` the observation carries, and the
    fragment *only* when `refused` is `false`. A refused attempt leaves no
    fragment entry: it answers one question — what stands — and an entry for
@@ -183,13 +183,12 @@ nothing else in the digest walks the journal yet.
 regimes share: the live foreground sink `run_shell` hands `dispatch_to_report`
 emits now, and the deferred sink (`deferred_sink`, installed on the transport
 before each dispatch) mints identical events when a detached worker's batch
-flushes. `accepted_surface` wraps it with the protected-pin guard. Neither
-decodes to `Kind` any more: the codomain is `Surface`, the shell's own closed
-vocabulary, five shapes wide and tried pin-first, which carries only the
-structured value each shape names — no `Card` mark tree, since that is built
-by whoever renders (`Surface::into_kind`, at the bus-emitting boundary, until
-the frontends move off `Kind` themselves) or whoever records
-(`absorb_surface`, [[map/exarch/frontend|desk]]), never by the decoder:
+flushes. `accepted_surface` wraps it with the protected-pin guard. The
+codomain is `Surface`, the shell's own closed vocabulary, five shapes wide and
+tried pin-first, which carries only the structured value each shape names —
+no `Card` mark tree, since that is built by whoever renders (a printer's fold
+over the recorded `Display` commit) or whoever records (the commit producer's
+`SurfaceBuffer`, [[map/exarch/frontend|frontend]]), never by the decoder:
 
 - a `` `pin ``/`` `unpin `` wrapper decodes to `Surface::Pin { key, card }` /
   `Surface::Unpin { key }` — a pin is a rendered card in a slot, so its card

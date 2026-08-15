@@ -1422,7 +1422,6 @@ impl ExarchDesk {
 /// through, so the two paths render off the same applier rather than two that
 /// could drift.
 pub(crate) struct SurfaceApplier {
-    pub(crate) emit: Emitter,
     pub(crate) pins: Option<PinDigests>,
     /// The owning session's id and record seam — what the buffered commits
     /// stamp through when they flush.
@@ -1456,7 +1455,6 @@ impl SurfaceApplier {
                 drop(buf);
                 self.recorder.report_fault(&error);
             }
-            self.emit.emit(surface.into_kind());
         }
     }
 
@@ -1662,14 +1660,14 @@ mod tests {
     use super::*;
     use crate::agent::event::AgentLog;
     use crate::agent::testkit::ral_call;
-    use crate::bus::{Inbox, Kind, Signal, channel};
-    use crate::record::{Display, FleetSink, Record, Transient};
+    use crate::bus::{Inbox, Signal, channel};
     use crate::egress::Egress;
     use crate::fleet::registry::{AGENT_LEASE_IDLE, EvalReach, InterruptTarget, Registration};
     use crate::provider::{
         Provider, ProviderKind,
         scripted::{Reply, Script},
     };
+    use crate::record::{Display, FleetSink, Record, Transient};
     use crate::shell_eval::builtins::harness;
     use ral_core::transport::{DispatchId, IdentityTransport, Program, Run, Transport};
     use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
@@ -2181,15 +2179,20 @@ mod tests {
             },
         );
 
-        let (emit, rx) = crate::bus::dummy_emitter();
+        let (tx, rx) = crate::bus::channel();
+        let recorder = crate::record::Emitter::none();
+        recorder.attach(crate::record::FleetSink {
+            id: 0,
+            tx: tx.downgrade(),
+            meter: crate::bus::UsageMeter::default(),
+        });
         let binding = DeskBinding {
             seam: Arc::new(HostSeam {
                 desk: desk(),
                 apply: SurfaceApplier {
-                    emit,
                     pins: None,
                     id: 0,
-                    recorder: crate::record::Emitter::none(),
+                    recorder,
                     surface: Mutex::new(SurfaceBuffer::new()),
                 },
             }),
@@ -2208,13 +2211,9 @@ mod tests {
         assert_eq!(answer.message, "unrecognised enquiry class `probe`");
 
         // Proof `apply` ran, not just that `handle` did.
-        let mut saw_unpin = false;
-        while let Ok(event) = rx.try_next_event() {
-            if let Kind::Unpin { key } = event.kind {
-                assert_eq!(key, "test-marker");
-                saw_unpin = true;
-            }
-        }
+        let saw_unpin = crate::bus::drain_transients(&rx)
+            .into_iter()
+            .any(|t| matches!(t, Transient::Unpin { key } if key == "test-marker"));
         assert!(
             saw_unpin,
             "the drained surface frame must render onto the bus"
@@ -2288,9 +2287,7 @@ mod tests {
     #[test]
     fn pin_read_returns_the_canonical_card() {
         let mirror = fresh_mirror();
-        let (emit, _rx) = crate::bus::dummy_emitter();
         SurfaceApplier {
-            emit,
             pins: Some(mirror.clone()),
             id: 0,
             recorder: crate::record::Emitter::none(),
@@ -2324,9 +2321,7 @@ mod tests {
     #[test]
     fn pin_read_answers_unit_on_miss_and_after_unpin() {
         let mirror = fresh_mirror();
-        let (emit, _rx) = crate::bus::dummy_emitter();
         let applier = SurfaceApplier {
-            emit,
             pins: Some(mirror.clone()),
             id: 0,
             recorder: crate::record::Emitter::none(),
@@ -2357,9 +2352,7 @@ mod tests {
     #[test]
     fn pin_list_tracks_set_and_clear() {
         let mirror = fresh_mirror();
-        let (emit, _rx) = crate::bus::dummy_emitter();
         let applier = SurfaceApplier {
-            emit,
             pins: Some(mirror.clone()),
             id: 0,
             recorder: crate::record::Emitter::none(),
@@ -2403,19 +2396,18 @@ mod tests {
     }
 
     /// Every surface class the live applier renders also records through the
-    /// seam — the legacy `Kind` beside a `Display` (or, for the pin register,
-    /// `Forensic`) record, never one without the other — and a generic card
-    /// records *behind* the io group buffered before it, keeping the record
+    /// seam — a `Display` record (or, for the pin register, `Forensic`) —
+    /// and a generic card records *behind* the io group buffered before it,
+    /// keeping the record
     /// in the order the user saw.  A pin/unpin additionally publishes a
     /// `Transient` beside its `Forensic` twin: the durable breadcrumb and the
     /// live register the process is holding, two records for one act.
     #[test]
-    fn live_surfaces_record_their_seam_twins_beside_the_kinds() {
+    fn live_surfaces_record_their_seam_twins() {
         use crate::bus::Signal;
         use crate::record::{Display, Forensic, Record, Transient};
 
         let (tx, rx) = channel();
-        let emit = crate::bus::Emitter::new(tx.clone(), 0);
         let recorder = crate::record::Emitter::none();
         recorder.attach(crate::record::FleetSink {
             id: 0,
@@ -2423,7 +2415,6 @@ mod tests {
             meter: crate::bus::UsageMeter::default(),
         });
         let applier = SurfaceApplier {
-            emit,
             pins: None,
             id: 0,
             recorder,
@@ -2491,20 +2482,10 @@ mod tests {
         applier.live(pin_value("tasks", "hi"));
         applier.live(unpin_value("tasks"));
 
-        let mut kinds: Vec<&'static str> = Vec::new();
         let mut facts: Vec<&'static str> = Vec::new();
         let mut transients: Vec<&'static str> = Vec::new();
         while let Ok(sig) = rx.try_recv() {
             match sig {
-                Signal::Event(event) => kinds.push(match event.kind {
-                    Kind::Io { .. } => "io",
-                    Kind::Card(_) => "card",
-                    Kind::Done { .. } => "done",
-                    Kind::Notice { .. } => "notice",
-                    Kind::Pin { .. } => "pin",
-                    Kind::Unpin { .. } => "unpin",
-                    _ => continue,
-                }),
                 Signal::Fact(_, fact) => facts.push(match fact.value() {
                     Record::Display(Display::Observation { .. }) => "io",
                     Record::Display(Display::Card { .. }) => "card",
@@ -2525,11 +2506,6 @@ mod tests {
                 }),
             }
         }
-        assert_eq!(
-            kinds,
-            ["io", "card", "done", "notice", "pin", "unpin"],
-            "every legacy kind still emits, in arrival order"
-        );
         assert_eq!(
             transients,
             ["pin", "unpin"],
@@ -3237,7 +3213,7 @@ mod tests {
                         saw_spawn = true;
                     }
                 }
-                Signal::Event(_) | Signal::Transient(..) => {}
+                Signal::Transient(..) => {}
             }
         }
         assert!(
@@ -3740,14 +3716,14 @@ mod tests {
         let rows: Vec<(String, bool)> = crate::bus::drain_records(&rx)
             .into_iter()
             .filter_map(|rec| match rec {
-                Record::Display(Display::HarnessCall { verb, failed, .. }) => {
-                    Some((verb, failed))
-                }
+                Record::Display(Display::HarnessCall { verb, failed, .. }) => Some((verb, failed)),
                 _ => None,
             })
             .collect();
         assert_eq!(
-            rows.iter().map(|(v, f)| (v.as_str(), *f)).collect::<Vec<_>>(),
+            rows.iter()
+                .map(|(v, f)| (v.as_str(), *f))
+                .collect::<Vec<_>>(),
             vec![("schedule", false), ("message", true)],
             "the rail draws one row per attempt, landed or refused"
         );

@@ -1,14 +1,13 @@
 //! The consuming end of the bus: the [`Sink`] presentation surface and
-//! [`drain_pass`], the one rule for when an exchange's event loop ends.
+//! [`drain_signals`], the one rule for when an exchange's signal loop ends.
 //!
 //! That rule is the worker's explicit `done` flag — never the channel emptying
 //! or disconnecting, since a detached worker (a `spawn`ed server, a background
 //! `agent`) may hold a sender clone forever. Both the headless [`Sink::drive`]
 //! and the TUI's `ui_loop` in `tui/tui_loop.rs` drive it, so they cannot drift.
 
-use super::event::record_kind;
-use super::{AgentId, BusReceiver, Emitter, Event, FleetBus, Kind, Signal, WORKER_PANIC_PREFIX};
-use crate::record::{Record, Transient};
+use super::{AgentId, BusReceiver, Emitter, FleetBus, Signal, WORKER_PANIC_PREFIX};
+use crate::record::{Forensic, Record, Transient};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
@@ -19,22 +18,16 @@ use std::time::Duration;
 /// disconnect — is what lets a finished worker be noticed.
 const DRAIN_POLL: Duration = Duration::from_millis(10);
 
-/// The verdict of one [`drain_pass`]: end the loop, wait for the next event,
-/// or drain again at once.
+/// The verdict of one [`drain_signals`] pass: end the loop, wait for the next
+/// signal, or drain again at once.
 pub(crate) enum Pass {
     Stop,
     Idle,
     More,
 }
 
-/// Drain up to `max` buffered events through `handle`, then report where the
+/// Drain up to `max` buffered signals through `handle`, then report where the
 /// loop stands.
-///
-/// The channel carries [`Signal`](crate::bus::Signal)s; each is projected
-/// through `Signal::into_event` — the legacy envelope verbatim, a seam fact
-/// as its retired-twin `Kind` — so both printers keep rendering from `Kind`
-/// until they are reborn over the view fold, at which point this projection
-/// and `Kind` retire together.
 ///
 /// `done` is latched *before* the first receive: a finished worker ends the
 /// pass even while background producers keep the channel full, where waiting
@@ -42,41 +35,8 @@ pub(crate) enum Pass {
 /// drains up to `max` — the caller renders a final frame from it — and the
 /// remainder is left for the caller, which is why the TUI's exit path runs one
 /// last uncapped pass. `None` `max` drains everything (headless renders nothing
-/// between events); `Some(n)` bounds a pass so a token flood cannot starve the
+/// between signals); `Some(n)` bounds a pass so a token flood cannot starve the
 /// TUI's input poll, reporting [`Pass::More`]. Disconnect also stops.
-pub(crate) fn drain_pass(
-    rx: &BusReceiver,
-    done: &AtomicBool,
-    max: Option<usize>,
-    mut handle: impl FnMut(Event),
-) -> Pass {
-    let finished = done.load(Ordering::Acquire);
-    let mut n = 0usize;
-    loop {
-        if max.is_some_and(|m| n >= m) {
-            return if finished { Pass::Stop } else { Pass::More };
-        }
-        match rx.try_recv() {
-            Ok(sig) => {
-                if let Some(ev) = sig.into_event() {
-                    handle(ev);
-                }
-                n += 1;
-            }
-            Err(TryRecvError::Empty) => {
-                return if finished { Pass::Stop } else { Pass::Idle };
-            }
-            Err(TryRecvError::Disconnected) => return Pass::Stop,
-        }
-    }
-}
-
-/// [`Sink::drive`]'s own twin of [`drain_pass`], carrying the raw
-/// [`Signal`] rather than projecting it through `Signal::into_event` first —
-/// so [`Sink::fact`] and [`Sink::transient`] see a seam publish even where
-/// no legacy `Kind` exists for it. Kept apart from `drain_pass` rather than
-/// widening it, since `tui::tui_loop`'s `ui_loop` drains that one directly
-/// and is no part of this trait's boundary.
 fn drain_signals(
     rx: &BusReceiver,
     done: &AtomicBool,
@@ -106,24 +66,17 @@ fn drain_signals(
 ///
 /// The default [`Self::drive`] — headless and the tests — blocks between
 /// drain passes; the TUI is not a `Sink`, but its `ui_loop` drains
-/// [`drain_pass`] on its render cadence, so completion is identical on both.
+/// [`drain_signals`] on its render cadence, so completion is identical on both.
 pub trait Sink {
-    fn handle(&mut self, e: Event);
-
     /// A durable fact reaching the sink live, as [`Signal::Fact`] carries it.
-    /// The default reprojects through [`record_kind`] and renders via
-    /// `handle`, exactly [`Signal::into_event`]'s bridge — so a printer that
-    /// still folds over `Kind` is unaffected. A printer that folds over
-    /// `Record` directly (synod) overrides this and never calls `handle`.
-    fn fact(&mut self, id: AgentId, fact: &Record) {
-        if let Some(kind) = record_kind(fact) {
-            self.handle(Event { id, kind });
-        }
-    }
+    /// The default does nothing: a printer draws whichever half of the seam
+    /// it has a use for, and one that folds a session into blocks (headless)
+    /// or narrates it as a stream (synod) overrides this.
+    fn fact(&mut self, _id: AgentId, _fact: &Record) {}
 
-    /// A [`Transient`] delta reaching the sink live — unpublished to any
-    /// `Kind`, so the default does nothing. Only a printer folding over
-    /// `Transient` directly has a use for one.
+    /// A [`Transient`] delta reaching the sink live — no durable form and no
+    /// sequence number, so only a printer folding over `Transient` directly
+    /// has a use for one.
     fn transient(&mut self, _id: AgentId, _t: &Transient) {}
 
     /// # Errors
@@ -143,10 +96,9 @@ pub trait Sink {
         }
     }
 
-    /// Route one raw signal to `handle`, `fact`, or `transient` by kind.
+    /// Route one raw signal to `fact` or `transient`.
     fn accept(&mut self, sig: Signal) {
         match sig {
-            Signal::Event(e) => self.handle(e),
             Signal::Fact(id, fact) => self.fact(id, fact.value()),
             Signal::Transient(id, t) => self.transient(id, &t),
         }
@@ -155,11 +107,10 @@ pub trait Sink {
 
 /// Run `work` on a scoped thread over `bus`'s channel, drive `sink`, join.
 ///
-/// A worker panic rides out through the still-open [`Emitter`] as a final
-/// [`Kind::Error`] and `pump` returns `None`. The channel is `bus`'s, not
-/// `pump`'s, so it outlives the exchange whenever the bus does (the TUI's
-/// session bus, streaming a background `agent`); completion follows
-/// [`drain_pass`] regardless.
+/// A worker panic rides out through `recorder` as a [`Forensic::Error`] and
+/// `pump` returns `None`. The channel is `bus`'s, not `pump`'s, so it outlives
+/// the exchange whenever the bus does (the TUI's session bus, streaming a
+/// background `agent`); completion follows [`drain_signals`] regardless.
 ///
 /// # Errors
 /// Propagates a failure from [`Sink::drive`].
@@ -167,6 +118,7 @@ pub(crate) fn pump<S, R>(
     sink: &mut S,
     bus: &FleetBus,
     root_id: AgentId,
+    recorder: &crate::record::Emitter,
     work: impl Send + FnOnce(&Emitter) -> R,
 ) -> io::Result<Option<R>>
 where
@@ -183,7 +135,10 @@ where
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&emit)));
             if let Err(p) = &r {
                 let msg = crate::agent::panic_msg(p);
-                emit.emit(Kind::Error(format!("{WORKER_PANIC_PREFIX}{msg}")));
+                let text = format!("{WORKER_PANIC_PREFIX}{msg}");
+                if let Err(e) = recorder.emit(Forensic::Error { text }) {
+                    recorder.report_fault(&e);
+                }
             }
             // Set before `emit` — and its sender clone — drops: the drain stops
             // on this, not on the channel closing.
@@ -195,15 +150,14 @@ where
     })
 }
 
-/// Every [`Record`] a test's own channel has buffered — the seam's own
-/// vocabulary, not `Kind`'s retired-twin projection, so a test asserts what a
-/// producer actually recorded rather than what a legacy bridge could derive.
+/// Every [`Record`] a test's own channel has buffered, so a test asserts what
+/// a producer actually recorded.
 #[cfg(test)]
 pub(crate) fn drain_records(rx: &BusReceiver) -> Vec<Record> {
     std::iter::from_fn(|| rx.try_recv().ok())
         .filter_map(|sig| match sig {
             Signal::Fact(_, rec) => Some(rec.into_value()),
-            Signal::Event(_) | Signal::Transient(..) => None,
+            Signal::Transient(..) => None,
         })
         .collect()
 }
@@ -214,128 +168,18 @@ pub(crate) fn drain_transients(rx: &BusReceiver) -> Vec<Transient> {
     std::iter::from_fn(|| rx.try_recv().ok())
         .filter_map(|sig| match sig {
             Signal::Transient(_, t) => Some(t),
-            Signal::Event(_) | Signal::Fact(..) => None,
+            Signal::Fact(..) => None,
         })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Pass, Sink, drain_pass, pump};
-    use crate::bus::{Emitter, Event, FleetBus, Inbox, Kind, channel};
-    use crate::provider::Tuning;
+    use super::{Sink, pump};
+    use crate::bus::{AgentId, Emitter, FleetBus, Inbox};
+    use crate::record::{Record, Transient};
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
-
-    /// Completion is the worker's `done`, not the channel: a detached sender
-    /// clone — a `spawn`ed server's — stays live across the stop.
-    #[test]
-    fn drain_pass_stops_on_done_with_a_live_detached_sender() {
-        let (tx, rx) = channel();
-        let done = AtomicBool::new(false);
-        let holder = tx.clone();
-
-        tx.send(Event {
-            id: 0,
-            kind: Kind::Step {
-                n: 1,
-                tuning: Tuning::default(),
-            },
-        })
-        .unwrap();
-        tx.send(Event {
-            id: 0,
-            kind: Kind::Step {
-                n: 2,
-                tuning: Tuning::default(),
-            },
-        })
-        .unwrap();
-        done.store(true, Ordering::Release);
-
-        let mut seen = 0usize;
-        assert!(
-            matches!(drain_pass(&rx, &done, None, |_| seen += 1), Pass::Stop),
-            "must stop once the worker is done"
-        );
-        assert_eq!(seen, 2, "every buffered event is handled before stopping");
-        assert!(
-            holder
-                .send(Event {
-                    id: 0,
-                    kind: Kind::Died
-                })
-                .is_ok(),
-            "the detached sender outlived the stop"
-        );
-    }
-
-    /// The batch cap bounds one pass and reports `More`; an empty channel with
-    /// the worker unfinished reports `Idle`.
-    #[test]
-    fn drain_pass_caps_batch_as_more_and_reports_idle_when_empty() {
-        let (tx, rx) = channel();
-        let done = AtomicBool::new(false);
-        for _ in 0..3 {
-            tx.send(Event {
-                id: 0,
-                kind: Kind::Boundary,
-            })
-            .unwrap();
-        }
-
-        let mut seen = 0usize;
-        assert!(
-            matches!(drain_pass(&rx, &done, Some(2), |_| seen += 1), Pass::More),
-            "a full batch reports More"
-        );
-        assert_eq!(seen, 2, "the batch cap bounds one pass");
-        assert!(
-            matches!(drain_pass(&rx, &done, Some(2), |_| seen += 1), Pass::Idle),
-            "an empty channel with no done reports Idle"
-        );
-        assert_eq!(seen, 3, "the rest drains on the next pass");
-    }
-
-    /// A finished worker stops the pass while the channel is never empty — the
-    /// shape that hangs a foreground exchange when a background `agent` floods
-    /// the bus.
-    #[test]
-    fn drain_pass_stops_on_done_even_while_a_background_producer_floods() {
-        let (tx, rx) = channel();
-        let done = AtomicBool::new(false);
-        // `ToolResult` is a reserved kind, so the channel's merge rule never
-        // coalesces these sends: each is its own entry and the count measures
-        // the cap, not the merge.
-        let background = tx;
-        for _ in 0..200 {
-            background
-                .send(Event {
-                    id: 9,
-                    kind: Kind::ToolResult("x".into()),
-                })
-                .unwrap();
-        }
-        // The foreground worker finishes while the channel is still full.
-        done.store(true, Ordering::Release);
-
-        let mut seen = 0usize;
-        assert!(
-            matches!(drain_pass(&rx, &done, Some(64), |_| seen += 1), Pass::Stop),
-            "a finished worker stops the pass even though the channel is non-empty"
-        );
-        assert_eq!(seen, 64, "the buffered batch is drained up to the cap");
-        assert!(
-            background
-                .send(Event {
-                    id: 9,
-                    kind: Kind::Died
-                })
-                .is_ok(),
-            "the background producer outlives the foreground stop"
-        );
-    }
 
     /// `pump` returns on the worker's `done` while a holder keeps an `Emitter`
     /// clone — a live sender — past the worker's return, as a `spawn`ed server
@@ -344,7 +188,7 @@ mod tests {
     fn pump_returns_on_worker_done_not_sender_disconnect() {
         struct CountSink(usize);
         impl Sink for CountSink {
-            fn handle(&mut self, _e: Event) {
+            fn transient(&mut self, _id: AgentId, _t: &Transient) {
                 self.0 += 1;
             }
         }
@@ -355,13 +199,13 @@ mod tests {
         // channel from ever disconnecting.
         let holder: Mutex<Option<Emitter>> = Mutex::new(None);
 
+        let recorder = crate::record::Emitter::none();
+        recorder.attach(bus.emitter(0).fleet_sink());
+
         let t0 = Instant::now();
-        let r = pump(&mut sink, &bus, 0, |emit| {
+        let r = pump(&mut sink, &bus, 0, &recorder, |emit| {
             *holder.lock().unwrap() = Some(emit.clone());
-            emit.emit(Kind::Step {
-                n: 1,
-                tuning: Tuning::default(),
-            });
+            recorder.transient(Transient::Boundary);
             "done"
         })
         .expect("pump returns Ok");
@@ -372,7 +216,39 @@ mod tests {
             t0.elapsed()
         );
         assert_eq!(r, Some("done"), "pump returns the worker's value");
-        assert_eq!(sink.0, 1, "the worker's one event was delivered");
+        assert_eq!(sink.0, 1, "the worker's one delta was delivered");
         assert!(holder.lock().unwrap().is_some());
+    }
+
+    /// A recovered worker panic records a `Forensic::Error` through the seam
+    /// rather than vanishing into the join, and `pump` reports `None`.
+    #[test]
+    fn recovered_panic_records_a_forensic_error() {
+        struct FactSink(Vec<String>);
+        impl Sink for FactSink {
+            fn fact(&mut self, _id: AgentId, fact: &Record) {
+                if let Record::Forensic(crate::record::Forensic::Error { text }) = fact {
+                    self.0.push(text.clone());
+                }
+            }
+        }
+
+        let mut sink = FactSink(Vec::new());
+        let bus = FleetBus::session(&Inbox::new());
+        let recorder = crate::record::Emitter::none();
+        recorder.attach(bus.emitter(0).fleet_sink());
+
+        let r = pump(&mut sink, &bus, 0, &recorder, |_emit| panic!("boom"))
+            .expect("pump returns Ok even when the worker panics");
+
+        assert_eq!(r, None, "a panicked worker yields no value");
+        assert!(
+            sink.0
+                .iter()
+                .any(|text| text.starts_with(crate::bus::WORKER_PANIC_PREFIX)
+                    && text.contains("boom")),
+            "the panic reaches the seam as a Forensic::Error, got {:?}",
+            sink.0
+        );
     }
 }

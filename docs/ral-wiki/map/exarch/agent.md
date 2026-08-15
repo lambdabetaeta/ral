@@ -198,7 +198,7 @@ large-binding residency nudge rides the pushed `` `notice `` channel above,
 and the prune half is engine housekeeping too: idle top-level names fall at
 the engine's own ready boundary, announced as a pushed
 `` `notice [kind: `prune] `` class the host decodes into the same
-transcript-and-TUI `Kind::Notice` posture as a reap. The engine's
+recorded `Display::Notice` posture as a reap. The engine's
 run-entry checkpoint orders after any prior boundary's prune, so a later
 panic rollback can never resurrect a name a pass just pruned.
 
@@ -214,8 +214,10 @@ binding-ledger figures read as *data* through the transport's Enquiry desk
 source, the event ledger's logical length and history bytes, log-dir and scratch
 disk walked at invocation, and the sub-agent idle lease as two rows (nearest
 time-to-reap, and the demote threshold) — and
-`emit_resources` posts one `Kind::Resources`
-carrying the raw rows beside their rendered card — the `Kind::Io` pairing.
+`emit_resources` posts one `Transient::Resources`
+carrying the raw rows beside their already-rendered card together — chrome
+only, so unlike a recorded observation there is no later fold to re-render one
+from.
 A probe fold is an interactive diagnostic, read when it is run: no session
 keeps a pressure history, so the figures live only in this emission, never
 in `record.jsonl`. The frontend appends the rows for the accumulators *it*
@@ -263,7 +265,7 @@ every actionable agent role: budget-free while anything is pinned, independent
 of and additive with `must_reply` — a returning agent that finishes without
 replying while it still holds pinned state is nudged for both after its
 children have landed. Reporting an attempt is not the nudger's job at all:
-`take_up` emits `Kind::ProviderError` for whatever error the attempt carries,
+`take_up` emits `Forensic::ProviderError` for whatever error the attempt carries,
 before it asks for a nudge and whether or not one follows, so `react` decides
 and nothing more.
 
@@ -440,7 +442,7 @@ by construction: no walk, no cost, ever. Configured, it rides the same
 amortized to once every `DISK_WARN_CHECK_INTERVAL` (32) calls, at the same
 ready boundary as `reconcile_service_pins` in `attend`'s loop.
 Crossing the ceiling (session log dir + `EXARCH_SCRATCH`, summed via the
-existing `resources::dir_size`) emits one `Kind::SystemNote`, latched until
+existing `resources::dir_size`) emits one `Forensic::SystemNote`, latched until
 a later check finds the total back under — one warning per excursion, not
 one per boundary.
 
@@ -469,7 +471,8 @@ prompt drops the spawn family — `agent`, `agents`, `message`, and
 the desk remains the runtime wall
 ([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]) — so a delegation
 chain bottoms out by refusal a fixed number of generations down. The fork
-mirrors on the bus as `Kind::Born` / `Kind::Died` regardless of remaining fuel.
+mirrors on the bus as `Transient::Born` / `Transient::Died` regardless of
+remaining fuel.
 
 `fork_with(caps, returns)` is the shared fork core — a returning child passes
 `true`; `branch` is `fork_with(self.caps, returns: false)` plus

@@ -12,10 +12,8 @@ pub(crate) mod report;
 pub mod skill;
 pub mod tools;
 
-use crate::bus::card::{
-    done_card, observation_card, rail_place, value_to_card, value_to_done, value_to_pin,
-};
-use crate::bus::{AgentId, Emitter, Kind, Mailbox, Post};
+use crate::bus::card::{rail_place, value_to_card, value_to_done, value_to_pin};
+use crate::bus::{AgentId, Emitter, Mailbox, Post};
 use crate::fleet::registry::AgentRegistry;
 use base64::Engine;
 use ral_core::Value as RalValue;
@@ -95,8 +93,8 @@ pub(crate) enum Outcome {
     Static(String),
 }
 
-/// One mirrored pin.  The bus and viewport carry plain [`Kind::Pin`]; this
-/// exists only inside the agent's session mirror.
+/// One mirrored pin.  The bus and viewport carry `Forensic::Pin` and
+/// `Transient::Pin`; this exists only inside the agent's session mirror.
 #[derive(Clone, Debug)]
 pub struct PinDigest {
     pub(crate) card: crate::bus::card::Card,
@@ -145,34 +143,6 @@ pub enum Surface {
     Unpin {
         key: String,
     },
-}
-
-impl Surface {
-    /// Render this decoded value into the bus's still-living [`Kind`]
-    /// vocabulary, building the [`crate::bus::card::Card`] mark tree a
-    /// `Surface` deliberately does not carry for its own three plain shapes.
-    pub(crate) fn into_kind(self) -> Kind {
-        match self {
-            Self::Observation(event) => {
-                let card = observation_card(&event.what);
-                Kind::Io {
-                    event: *event,
-                    card,
-                }
-            }
-            Self::Card(card) => Kind::Card(card),
-            Self::Notice(notice) => {
-                let card = crate::bus::card::notice_card(&notice);
-                Kind::Notice { notice, card }
-            }
-            Self::Done(outcome) => {
-                let card = done_card(&outcome);
-                Kind::Done { outcome, card }
-            }
-            Self::Pin { key, card } => Kind::Pin { key, card },
-            Self::Unpin { key } => Kind::Unpin { key },
-        }
-    }
 }
 
 /// Decode one surfaced `Value` into the [`Surface`] it names — the single
@@ -251,7 +221,7 @@ struct InboxDeferred {
     /// a `Result` to, so recording here is how a dropped batch stays visible.
     /// A record-seam handle rather than a bus `Emitter`: this sink outlives
     /// the run, and an `Emitter`'s live bus sender held that long is the
-    /// daemon-task-hang shape `drain_pass` guards against; the seam's own
+    /// daemon-task-hang shape `drain_signals` guards against; the seam's own
     /// handle is a cheap, long-lived `Arc` with no channel to leak.
     recorder: crate::record::Emitter,
 }
@@ -301,8 +271,8 @@ pub(crate) fn run_shell(
     caps: &ral_core::types::Capabilities,
     cmd: &str,
     timeout_secs: u64,
-    emit: &Emitter,
     seam: Option<&crate::fleet::desk::HostSeam>,
+    recorder: &crate::record::Emitter,
 ) -> Outcome {
     let name = "<tool>";
 
@@ -337,10 +307,9 @@ pub(crate) fn run_shell(
     // second way of applying a value, so `SurfaceApplier` stays the only
     // spelling of how a surfaced value reaches the bus.
     let seamless = crate::fleet::desk::SurfaceApplier {
-        emit: emit.clone(),
         pins: None,
         id: 0,
-        recorder: crate::record::Emitter::none(),
+        recorder: recorder.clone(),
         surface: std::sync::Mutex::new(crate::record::commit::SurfaceBuffer::new()),
     };
     let apply = seam.map_or(&seamless, |seam| &seam.apply);
@@ -365,13 +334,19 @@ pub(crate) fn run_shell(
         },
     );
 
+    // A `Some(seam)` caller flushes `seam.apply` itself, once the call and its
+    // desk installation both drop; the seamless applier has no such caller,
+    // so this is its only chance to record what it buffered.
     let Some(report) = report else {
+        if seam.is_none() {
+            seamless.flush();
+        }
         return Outcome::Static("internal error: dispatch completed without a Report".into());
     };
 
     ral_core::dbg_trace!("shell", "eval in {:?}", tool_start.elapsed());
 
-    match report {
+    let outcome = match report {
         Report::Static { diagnostics } => {
             use ral_core::transport::Diagnostics;
             match diagnostics {
@@ -401,7 +376,12 @@ pub(crate) fn run_shell(
                 trail,
             }
         }
+    };
+
+    if seam.is_none() {
+        seamless.flush();
     }
+    outcome
 }
 
 /// Print settings for the `VALUE` section: structured values print in ral
@@ -502,6 +482,7 @@ mod tests {
     //! pin that `run_shell`'s wrapping does not perturb it.
 
     use super::*;
+    use crate::bus::card::observation_from_wire;
     use crate::bus::{Emitter, Inbox, channel};
     use crate::shell_eval::builtins;
     use ral_core::Shell;
@@ -543,7 +524,7 @@ mod tests {
         caps: &Capabilities,
         cmd: &str,
         timeout_secs: u64,
-        emit: &Emitter,
+        recorder: &crate::record::Emitter,
     ) -> ToolResult {
         // The transport owns its `Shell`, so move the live one out behind a
         // placeholder that the swap below discards.
@@ -552,7 +533,7 @@ mod tests {
             ral_core::Shell::new(ral_core::io::TerminalState::probe_from_env().1),
         );
         let transport = ral_core::transport::IdentityTransport::new(taken);
-        let outcome = run_shell(&transport, caps, cmd, timeout_secs, emit, None);
+        let outcome = run_shell(&transport, caps, cmd, timeout_secs, None, recorder);
         // Recover the mutated shell so `let`/`cd`/binding state reaches the
         // caller's next run — the across-calls contract these tests pin.
         *shell = transport.into_shell();
@@ -587,8 +568,13 @@ mod tests {
     /// default, so every source here runs without exercising the OS sandbox,
     /// which `core/tests/top_level_vs_block.rs` covers separately.
     fn run_once(shell: &mut ral_core::Shell, cmd: &str) -> ToolResult {
-        let (emit, _rx) = crate::bus::dummy_emitter();
-        run_shell_direct(shell, &Capabilities::root(), cmd, 30, &emit)
+        run_shell_direct(
+            shell,
+            &Capabilities::root(),
+            cmd,
+            30,
+            &crate::record::Emitter::none(),
+        )
     }
 
     /// A restrictive exarch base: the body evaluates locally under an `fs`
@@ -640,14 +626,13 @@ mod tests {
                 ..Capabilities::root()
             };
             let mut shell = fresh_shell();
-            let (emit, _rx) = crate::bus::dummy_emitter();
             let cmd = format!(
                 "cd '{root}'\n\
                  let hits = grep-files 'NEEDLE'\n\
                  let listing = explore-dir 3\n\
                  return [hits: $hits, listing: $listing]"
             );
-            let r = run_shell_direct(&mut shell, &caps, &cmd, 30, &emit);
+            let r = run_shell_direct(&mut shell, &caps, &cmd, 30, &crate::record::Emitter::none());
             assert_eq!(
                 r.exit,
                 0,
@@ -1339,13 +1324,18 @@ keep-bottom
     #[test]
     fn timeout_kills_external_subprocess_tree() {
         let mut shell = fresh_shell();
-        let (emit, _rx) = crate::bus::dummy_emitter();
         // The leader blocks in `wait`, holding the call open unless the
         // timeout tears the group down; the grandchild prints its pid so the
         // test can prove it was reaped.
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
-        let r = run_shell_direct(&mut shell, &Capabilities::root(), cmd, 2, &emit);
+        let r = run_shell_direct(
+            &mut shell,
+            &Capabilities::root(),
+            cmd,
+            2,
+            &crate::record::Emitter::none(),
+        );
         let elapsed = t0.elapsed();
 
         assert!(
@@ -1388,9 +1378,14 @@ keep-bottom
     #[test]
     fn timeout_message_names_budget_and_knob() {
         let mut shell = fresh_shell();
-        let (emit, _rx) = crate::bus::dummy_emitter();
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
-        let r = run_shell_direct(&mut shell, &Capabilities::root(), cmd, 2, &emit);
+        let r = run_shell_direct(
+            &mut shell,
+            &Capabilities::root(),
+            cmd,
+            2,
+            &crate::record::Emitter::none(),
+        );
         assert_eq!(
             r.exit, 124,
             "a timed-out call reports the timeout exit code"
@@ -1413,13 +1408,12 @@ keep-bottom
     #[test]
     fn command_exit_is_the_tool_exit() {
         let mut shell = fresh_shell();
-        let (emit, _rx) = crate::bus::dummy_emitter();
         let r = run_shell_direct(
             &mut shell,
             &Capabilities::root(),
             "/bin/sh -c 'exit 3'",
             10,
-            &emit,
+            &crate::record::Emitter::none(),
         );
         assert_eq!(r.exit, 3, "the command's true exit code is the tool exit");
     }
@@ -1428,13 +1422,12 @@ keep-bottom
     #[test]
     fn raised_error_status_is_the_tool_exit() {
         let mut shell = fresh_shell();
-        let (emit, _rx) = crate::bus::dummy_emitter();
         let r = run_shell_direct(
             &mut shell,
             &Capabilities::root(),
             "fail [status: 7]",
             10,
-            &emit,
+            &crate::record::Emitter::none(),
         );
         assert_eq!(r.exit, 7, "the raised error's status is the tool exit");
     }
@@ -1446,10 +1439,15 @@ keep-bottom
     #[test]
     fn timeout_kills_sandboxed_subprocess_tree() {
         let mut shell = fresh_shell();
-        let (emit, _rx) = crate::bus::dummy_emitter();
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
-        let r = run_shell_direct(&mut shell, &projecting_caps(), cmd, 2, &emit);
+        let r = run_shell_direct(
+            &mut shell,
+            &projecting_caps(),
+            cmd,
+            2,
+            &crate::record::Emitter::none(),
+        );
         let elapsed = t0.elapsed();
         let stderr = String::from_utf8_lossy(&r.stderr);
         if r.exit != 124
@@ -1502,12 +1500,18 @@ keep-bottom
     fn root_cancel_unwinds_inflight_run_shell() {
         let mut shell = fresh_shell().fork_session();
         let handle = shell.cancel_handle();
-        let (emit, _rx) = crate::bus::dummy_emitter();
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
         let r = std::thread::scope(|s| {
-            let worker =
-                s.spawn(|| run_shell_direct(&mut shell, &Capabilities::root(), cmd, 30, &emit));
+            let worker = s.spawn(|| {
+                run_shell_direct(
+                    &mut shell,
+                    &Capabilities::root(),
+                    cmd,
+                    30,
+                    &crate::record::Emitter::none(),
+                )
+            });
             // Let the eval reach the blocking external wait, then cancel from
             // outside — the registry cascade's move.
             std::thread::sleep(std::time::Duration::from_millis(300));
@@ -1686,16 +1690,16 @@ return !{{length $hits}}"
 
     /// `edit-replace` goes through core's atomic write door, so it raises the
     /// same structural `write` event a committed `>` does — old and new
-    /// snapshots riding along for the card to diff — and inherits that door's
+    /// snapshots riding along on the observation — and inherits that door's
     /// mode, symlink, and durability preservation.
     #[test]
-    fn edit_replace_surfaces_a_write_observation_with_diff() {
+    fn edit_replace_surfaces_a_write_observation_with_old_and_new_snapshots() {
         use ral_core::syntax::ast::RedirectMode;
         use ral_core::types::WriteOutcome;
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("edit-replace-io", "b", "hello\nworld\n");
 
-        let (r, kinds) = run_capturing(
+        let (r, records) = run_capturing(
             &mut shell,
             &format!("edit-replace '{path}' 'world' 'friend'"),
         );
@@ -1712,7 +1716,7 @@ return !{{length $hits}}"
             "the edit committed to disk"
         );
 
-        let obs = observations(&kinds);
+        let obs = observations(&records);
         assert_eq!(
             obs.len(),
             1,
@@ -1720,7 +1724,7 @@ return !{{length $hits}}"
         );
         assert_eq!(
             obs[0],
-            &Observed::Write {
+            Observed::Write {
                 path,
                 mode: RedirectMode::Write,
                 outcome: WriteOutcome::Committed,
@@ -1729,19 +1733,14 @@ return !{{length $hits}}"
             },
             "old/new snapshots ride the write observation so the card can diff them"
         );
-        let card = observation_card(obs[0]);
-        assert!(
-            card.has_diff(),
-            "the write card renders a diff, not a plain listing; got {card:?}"
-        );
     }
 
-    /// An edit makes the same diff-versus-listing choice a committed `>` makes:
-    /// both snapshots must fit `DIFF_SNAPSHOT_CAP`, or the pre-image is withheld
-    /// and the card degrades to the listing preview a fresh write gets.  Both
-    /// sides of the gate, so a cap drifted to either extreme fails one.
+    /// An edit makes the same pre-image cap decision a committed `>` makes:
+    /// the old snapshot rides along only when both snapshots fit
+    /// `DIFF_SNAPSHOT_CAP`, and is withheld otherwise. Both sides of the gate,
+    /// so a cap drifted to either extreme fails one.
     #[test]
-    fn edit_over_an_oversized_file_falls_back_to_a_listing_card() {
+    fn edit_over_an_oversized_file_withholds_the_pre_image() {
         use ral_core::types::WriteOutcome;
         for (tag, tail, diffed) in [
             ("edit-oversized", "x".repeat(70_000), false),
@@ -1750,7 +1749,7 @@ return !{{length $hits}}"
             let mut shell = fresh_shell();
             let (dir, path) = scratch_file(tag, "big.txt", &format!("HEAD\n{tail}"));
 
-            let (r, kinds) =
+            let (r, records) =
                 run_capturing(&mut shell, &format!("edit-replace '{path}' 'HEAD' 'TAIL'"));
             let wrote = std::fs::read_to_string(dir.path().join("big.txt")).ok();
             assert_eq!(
@@ -1765,7 +1764,7 @@ return !{{length $hits}}"
                 "the edit committed to disk"
             );
 
-            let obs = observations(&kinds);
+            let obs = observations(&records);
             assert_eq!(
                 obs.len(),
                 1,
@@ -1773,7 +1772,7 @@ return !{{length $hits}}"
             );
             let Observed::Write {
                 outcome, old_bytes, ..
-            } = obs[0]
+            } = &obs[0]
             else {
                 panic!("expected a Write observation, got {:?}", obs[0])
             };
@@ -1782,11 +1781,6 @@ return !{{length $hits}}"
                 old_bytes.is_some(),
                 diffed,
                 "only a file within the cap carries its pre-image ({tag})"
-            );
-            assert_eq!(
-                observation_card(obs[0]).has_diff(),
-                diffed,
-                "the card diffs exactly when both snapshots fit the cap ({tag})"
             );
         }
     }
@@ -1864,31 +1858,32 @@ return !{{length $hits}}"
         }
     }
 
-    /// One tool call through `run_shell` over a real bus `Emitter`, returning
-    /// the result and every `Kind` off the channel — the whole
-    /// `core surface → decode_surface → Surface → Kind` path the io-door
-    /// tests assert on.
-    fn run_capturing(shell: &mut Shell, cmd: &str) -> (ToolResult, Vec<crate::bus::Kind>) {
+    /// One tool call through `run_shell`, over a real record-seam channel,
+    /// returning the result and every [`crate::record::Record`] the run
+    /// witnessed — the whole `core surface → decode_surface → Surface →
+    /// Display` path the io-door tests assert on.
+    fn run_capturing(shell: &mut Shell, cmd: &str) -> (ToolResult, Vec<crate::record::Record>) {
         let (tx, rx) = channel();
-        let emit = Emitter::new(tx, 0);
-        let result = run_shell_direct(shell, &Capabilities::root(), cmd, 30, &emit);
-        // Drop the emitter so the channel disconnects and `try_recv` drains to
-        // empty rather than blocking.
-        drop(emit);
-        let kinds: Vec<crate::bus::Kind> = std::iter::from_fn(|| rx.try_next_event().ok())
-            .map(|ev| ev.kind)
-            .collect();
-        (result, kinds)
+        let recorder = crate::record::Emitter::none();
+        recorder.attach(crate::record::FleetSink {
+            id: 0,
+            tx: tx.downgrade(),
+            meter: crate::bus::UsageMeter::default(),
+        });
+        let result = run_shell_direct(shell, &Capabilities::root(), cmd, 30, &recorder);
+        (result, crate::bus::drain_records(&rx))
     }
 
-    /// The [`Observed`] fact carried by each captured `Kind::Io` event, in
-    /// order, dropping the envelope (site/time/principal) and the card
-    /// composed beside it.
-    fn observations(kinds: &[crate::bus::Kind]) -> Vec<&Observed> {
-        kinds
+    /// The [`Observed`] fact carried by each captured [`Display::Observation`],
+    /// in order, decoded off its recorded wire form and dropping the envelope
+    /// (site/time/principal) and the card composed beside it.
+    fn observations(records: &[crate::record::Record]) -> Vec<Observed> {
+        records
             .iter()
-            .filter_map(|k| match k {
-                Kind::Io { event, .. } => Some(&event.what),
+            .filter_map(|r| match r {
+                crate::record::Record::Display(crate::record::Display::Observation { value }) => {
+                    observation_from_wire(value.clone()).map(|o| o.what)
+                }
                 _ => None,
             })
             .collect()
@@ -1920,7 +1915,7 @@ return !{{length $hits}}"
         let mut shell = fresh_shell();
         let (_dir, path) = scratch_file("cov-read", "a", "hello\n");
 
-        let (r, kinds) = run_capturing(&mut shell, &format!("from-string < '{path}'"));
+        let (r, records) = run_capturing(&mut shell, &format!("from-string < '{path}'"));
         assert_eq!(
             r.exit,
             0,
@@ -1928,7 +1923,7 @@ return !{{length $hits}}"
             String::from_utf8_lossy(&r.stderr)
         );
 
-        let obs = observations(&kinds);
+        let obs = observations(&records);
         assert_eq!(
             obs.len(),
             1,
@@ -1936,7 +1931,7 @@ return !{{length $hits}}"
         );
         assert_eq!(
             obs[0],
-            &Observed::Read { path },
+            Observed::Read { path },
             "the one observation is a read of the redirect path"
         );
     }
@@ -1952,7 +1947,7 @@ return !{{length $hits}}"
         let dir = scratch_dir("cov-write");
         let path = display_no_trailing_sep(&dir.path().join("b"));
 
-        let (r, kinds) = run_capturing(&mut shell, &format!("to-string 'x' > '{path}'"));
+        let (r, records) = run_capturing(&mut shell, &format!("to-string 'x' > '{path}'"));
         let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
         assert_eq!(
             r.exit,
@@ -1962,7 +1957,7 @@ return !{{length $hits}}"
         );
         assert_eq!(wrote.as_deref(), Some("x"), "the write committed to disk");
 
-        let obs = observations(&kinds);
+        let obs = observations(&records);
         assert_eq!(
             obs.len(),
             1,
@@ -1970,7 +1965,7 @@ return !{{length $hits}}"
         );
         assert_eq!(
             obs[0],
-            &Observed::Write {
+            Observed::Write {
                 path,
                 mode: RedirectMode::Write,
                 outcome: WriteOutcome::Committed,
@@ -1984,16 +1979,15 @@ return !{{length $hits}}"
 
     /// Overwriting an *existing* file: the atomic recipe leaves the target
     /// untouched until the rename, so core reads it for free and threads it
-    /// through as `old_bytes`.  The card layer turns the pair into a whole-file
-    /// diff, so any `>` redirect gets one with no builtin required.
+    /// through as `old_bytes` alongside the committed `new_bytes`.
     #[test]
-    fn bare_write_redirect_over_existing_file_surfaces_a_diff_card() {
+    fn bare_write_redirect_over_existing_file_surfaces_old_and_new_bytes() {
         use ral_core::syntax::ast::RedirectMode;
         use ral_core::types::WriteOutcome;
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("cov-write-diff", "b", "hello\nworld\n");
 
-        let (r, kinds) = run_capturing(
+        let (r, records) = run_capturing(
             &mut shell,
             &format!("to-string \"hello\\nfriend\\n\" > '{path}'"),
         );
@@ -2010,7 +2004,7 @@ return !{{length $hits}}"
             "the write committed to disk"
         );
 
-        let obs = observations(&kinds);
+        let obs = observations(&records);
         assert_eq!(
             obs.len(),
             1,
@@ -2018,7 +2012,7 @@ return !{{length $hits}}"
         );
         assert_eq!(
             obs[0],
-            &Observed::Write {
+            Observed::Write {
                 path,
                 mode: RedirectMode::Write,
                 outcome: WriteOutcome::Committed,
@@ -2028,27 +2022,20 @@ return !{{length $hits}}"
             },
             "old_bytes carries the pre-existing content, new_bytes the committed one"
         );
-
-        let card = observation_card(obs[0]);
-        assert!(
-            card.has_diff(),
-            "overwriting an existing file renders a diff card, not a write-preview listing; got {card:?}"
-        );
     }
 
     /// Overwriting a file too large to diff safely: `old_snapshot_for_diff`
-    /// gates on both sides fitting its 64KiB read cap, so rather than render a
-    /// partial and misleading diff it withholds `old_bytes` and the card falls
-    /// back to the listing preview a brand-new write gets.
+    /// gates on both sides fitting its 64KiB read cap, so rather than carry a
+    /// partial and misleading pre-image it withholds `old_bytes` entirely.
     #[test]
-    fn bare_write_redirect_over_oversized_existing_file_falls_back_to_listing() {
+    fn bare_write_redirect_over_oversized_existing_file_withholds_old_bytes() {
         use ral_core::types::WriteOutcome;
         let mut shell = fresh_shell();
         // Comfortably past the 64KiB read cap.
         let big = "x".repeat(70_000);
         let (dir, path) = scratch_file("cov-write-oversized", "b", &big);
 
-        let (r, kinds) = run_capturing(&mut shell, &format!("to-string 'short' > '{path}'"));
+        let (r, records) = run_capturing(&mut shell, &format!("to-string 'short' > '{path}'"));
         let wrote = std::fs::read_to_string(dir.path().join("b")).ok();
         assert_eq!(
             r.exit,
@@ -2062,13 +2049,13 @@ return !{{length $hits}}"
             "the write committed to disk"
         );
 
-        let obs = observations(&kinds);
+        let obs = observations(&records);
         assert_eq!(
             obs.len(),
             1,
             "a bare `to-string > b` raises exactly one observation, got {obs:?}"
         );
-        match obs[0] {
+        match &obs[0] {
             Observed::Write {
                 outcome, old_bytes, ..
             } => {
@@ -2080,12 +2067,6 @@ return !{{length $hits}}"
             }
             other => panic!("expected a Write observation, got {other:?}"),
         }
-
-        let card = observation_card(obs[0]);
-        assert!(
-            !card.has_diff(),
-            "an oversized pre-existing file falls back to the listing preview; got {card:?}"
-        );
     }
 
     /// The EXEC door end to end: a bare external raises exactly one `Command`
@@ -2096,7 +2077,7 @@ return !{{length $hits}}"
         use ral_core::types::{AuditIo, CommandOrigin};
         let mut shell = fresh_shell();
 
-        let (r, kinds) = run_capturing(&mut shell, "/usr/bin/true");
+        let (r, records) = run_capturing(&mut shell, "/usr/bin/true");
         assert_eq!(
             r.exit,
             0,
@@ -2104,7 +2085,7 @@ return !{{length $hits}}"
             String::from_utf8_lossy(&r.stderr)
         );
 
-        let obs = observations(&kinds);
+        let obs = observations(&records);
         assert_eq!(
             obs.len(),
             1,
@@ -2112,7 +2093,7 @@ return !{{length $hits}}"
         );
         assert_eq!(
             obs[0],
-            &Observed::Command {
+            Observed::Command {
                 argv: vec!["/usr/bin/true".into()],
                 status: 0,
                 origin: CommandOrigin::External,
@@ -2133,7 +2114,7 @@ return !{{length $hits}}"
         let mut shell = fresh_shell();
         let (_dir, path) = scratch_file("cov-view", "a", "alpha\nbeta\ngamma\n");
 
-        let (r, kinds) = run_capturing(&mut shell, &format!("view-text '{path}' 1 2"));
+        let (r, records) = run_capturing(&mut shell, &format!("view-text '{path}' 1 2"));
         assert_eq!(
             r.exit,
             0,
@@ -2141,7 +2122,7 @@ return !{{length $hits}}"
             String::from_utf8_lossy(&r.stderr)
         );
 
-        let obs = observations(&kinds);
+        let obs = observations(&records);
         let reads = obs
             .iter()
             .filter(|e| matches!(e, Observed::Read { .. }))
@@ -2167,7 +2148,7 @@ return !{{length $hits}}"
         let mut shell = fresh_shell();
         let (_dir, path) = scratch_file("cov-cat", "a", "one\ntwo\n");
 
-        let (r, kinds) = run_capturing(&mut shell, &format!("/bin/cat < '{path}'"));
+        let (r, records) = run_capturing(&mut shell, &format!("/bin/cat < '{path}'"));
         assert_eq!(
             r.exit,
             0,
@@ -2180,7 +2161,7 @@ return !{{length $hits}}"
             "cat echoes the redirected stdin"
         );
 
-        let obs = observations(&kinds);
+        let obs = observations(&records);
         assert_eq!(
             obs.len(),
             2,
@@ -2188,12 +2169,12 @@ return !{{length $hits}}"
         );
         assert_eq!(
             obs[0],
-            &Observed::Read { path },
+            Observed::Read { path },
             "the read installs first, before the body runs"
         );
         assert_eq!(
             obs[1],
-            &Observed::Command {
+            Observed::Command {
                 argv: vec!["/bin/cat".into()],
                 status: 0,
                 origin: CommandOrigin::External,
@@ -2213,7 +2194,7 @@ return !{{length $hits}}"
         let mut shell = fresh_shell();
         let (_dir, path) = scratch_file("cov-source", "lib.ral", "let answer = 42\n");
 
-        let (sr, source_kinds) = run_capturing(&mut shell, &format!("source '{path}'"));
+        let (sr, source_records) = run_capturing(&mut shell, &format!("source '{path}'"));
         assert_eq!(
             sr.exit,
             0,
@@ -2221,12 +2202,12 @@ return !{{length $hits}}"
             String::from_utf8_lossy(&sr.stderr)
         );
         assert!(
-            observations(&source_kinds).is_empty(),
+            observations(&source_records).is_empty(),
             "code loading is not data I/O — source raises no io card, got {:?}",
-            observations(&source_kinds)
+            observations(&source_records)
         );
 
-        let (ur, use_kinds) = run_capturing(&mut shell, &format!("use '{path}'"));
+        let (ur, use_records) = run_capturing(&mut shell, &format!("use '{path}'"));
         assert_eq!(
             ur.exit,
             0,
@@ -2234,9 +2215,9 @@ return !{{length $hits}}"
             String::from_utf8_lossy(&ur.stderr)
         );
         assert!(
-            observations(&use_kinds).is_empty(),
+            observations(&use_records).is_empty(),
             "use is code loading too — no io card, got {:?}",
-            observations(&use_kinds)
+            observations(&use_records)
         );
     }
 

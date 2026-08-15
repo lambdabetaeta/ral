@@ -1,8 +1,6 @@
 //! One [`App`] owns the tabs, viewports, prompt, and gesture state, and folds
 //! the [`crate::bus::Signal`] stream — [`Signal::Fact`] through [`Self::fact`],
-//! [`Signal::Transient`] through [`Self::transient`], and whatever `Kind`
-//! classes still ride the legacy [`Signal::Event`] bridge through
-//! [`Self::handle`] — into scrollback blocks.
+//! [`Signal::Transient`] through [`Self::transient`] — into scrollback blocks.
 
 use super::banner;
 use super::block::{AgentSlot, RailShape};
@@ -18,9 +16,8 @@ use super::render::draw;
 use super::tabs::Tabs;
 use super::terminal::Term;
 use super::viewport::Viewport;
-use crate::agent::event::{ContextOp, EditAuthority};
 use crate::agent::resources::{BusFigures, ViewFigures, ViewportFigures};
-use crate::bus::{AgentId, AgentState, BusReceiver, Event, Inbox, Kind};
+use crate::bus::{AgentId, AgentState, BusReceiver, Inbox};
 use crate::fleet::registry::{AGENT_DEMOTE_IDLE, AgentRegistry};
 use crate::provider::{Provider, Usage};
 use crate::record::{Display, Forensic, Printer as _, Record, Recorded, Transient};
@@ -249,9 +246,9 @@ impl App {
     /// cancelled by `/clear` cannot paint into the rebuilt session. And past
     /// a `/clear`, everything before the acknowledgement is cancelled-exchange
     /// residue, everything after it is new context — `disarm` is whether this
-    /// particular occurrence is that acknowledgement (`Kind::Cleared` on the
-    /// legacy path, `Transient::Cleared` once it crosses, or a fresh prompt
-    /// arriving as a `Display::Prompt` fact when the ack itself was lost).
+    /// particular occurrence is that acknowledgement (`Transient::Cleared`, or
+    /// a fresh prompt arriving as a `Display::Prompt` fact when the ack itself
+    /// was lost).
     fn admits(&mut self, id: AgentId, disarm: bool) -> bool {
         if self.tabs.is_dying(id) {
             return false;
@@ -266,154 +263,6 @@ impl App {
         true
     }
 
-    /// Route one still-direct `Kind` event to its viewport — the legacy
-    /// bridge kept alive only for the classes a producer has not yet crossed
-    /// to the record seam: `Cleared` (`/clear`'s own command), `Error`'s one
-    /// remaining producer (`bus::sink::pump`'s last-resort panic-catch, out
-    /// of a recorder's reach), `Resources`/`Context` (the probe folds, whose
-    /// card the decoder still builds), and `Card`/`Notice`/`Done`/`Pin`/`Unpin`
-    /// (the shell's `Surface` decode, `into_kind()` — headless has not yet
-    /// crossed these, so the bridge stays live for its sake even though the
-    /// fact path already draws them here). Every other class has either
-    /// crossed outright (`Born`/`Died`, `Token`/`Thinking`/`Boundary`,
-    /// `Reasoning`, `StopReason`, `SubagentDone`, `ToolCall`/`HarnessCall`/
-    /// `ToolResult`/`HarnessResult`, `SystemNote`, `State`) or was always
-    /// derived-only (`Step`/`ContextEdited`/`Usage`/`UserPromptEcho`/`Nudge`/
-    /// `ProviderError`/`Stalled`) — either way `bus`'s dispatch loop never
-    /// routes a `Signal::Event` carrying one, so their arms are gone rather
-    /// than kept as unreachable ballast; `Kind` still matches them
-    /// exhaustively until it retires whole.
-    ///
-    /// `bus` is read only for `Kind::Resources`'s depth/byte figures — it is
-    /// the UI thread's own receiver, so this never contends with a
-    /// producer's push.
-    pub fn handle(&mut self, Event { id, kind }: Event, bus: &BusReceiver) {
-        if !self.admits(id, matches!(kind, Kind::Cleared | Kind::UserPromptEcho(_))) {
-            return;
-        }
-        match kind {
-            Kind::Born {
-                log_dir,
-                name,
-                parent,
-                branch,
-            } => {
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "modulus by AGENT_HUES.len() yields 0..6, fits u8"
-                )]
-                let agent_slot = AgentSlot((self.tabs.len() % AGENT_HUES.len()) as u8);
-                self.tabs
-                    .born(id, &log_dir, name, parent, branch, agent_slot);
-            }
-            Kind::Died => {
-                // Root never enters the linger window; it outlives the session.
-                self.tabs.died(id);
-            }
-            Kind::Usage(u) => {
-                // `u.input` already folds in the cache_creation and cache_read
-                // counts on every adapter, so adding them again double-counts.
-                // Only root's own size belongs on the ctx gauge — a sub-agent's
-                // small fresh context would clobber it until root's next turn.
-                if id == self.tabs.root() {
-                    self.last_input = u.input;
-                }
-                self.total_usage += u;
-                if let Some(vp) = self.tabs.viewport_mut(id) {
-                    vp.add_usage(u);
-                }
-            }
-            // Every class below is either fully crossed — `Token`/`Thinking`/
-            // `Boundary`/`Reasoning`/`SubagentDone` have no producer left to
-            // emit a `Kind` at all — or derived-only
-            // (`Step`, from `Display::Step`) — or dual-writes a `Display`
-            // commit beside this direct emit already (`HarnessCall`/`ToolCall`/
-            // `ToolResult` at `fleet::desk`/`shell_eval::tools::ral`;
-            // `Card`/`Done`/`Notice`/`Context` at the shell's `Surface` decode
-            // or a probe fold; `Io` at the commit producer's
-            // `Observation`/`ObservationGroup`).  Either way the fact path
-            // already draws the identical row, so `handle` goes quiet rather
-            // than draw it twice or reach for a deleted `Viewport` method.
-            Kind::Token(_)
-            | Kind::Thinking(_)
-            | Kind::Boundary
-            | Kind::Reasoning { .. }
-            | Kind::Step { .. }
-            | Kind::HarnessCall { .. }
-            | Kind::ToolCall { .. }
-            | Kind::ToolResult(_)
-            | Kind::SubagentDone { .. }
-            | Kind::Card(_)
-            | Kind::Done { .. }
-            | Kind::Notice { .. }
-            | Kind::Context { .. }
-            | Kind::Io { .. }
-            | Kind::SystemNote(_)
-            | Kind::ProviderError(_)
-            | Kind::Stalled(_)
-            // Quiet on the rail, recorded in the trace at the emit seam. A
-            // desk result is always one line, so a size bar would be
-            // constant ink — unrelated to the crossing above, but the same
-            // empty body.
-            | Kind::Cleared
-            | Kind::Nudge { .. }
-            | Kind::HarnessResult(_) => {}
-            Kind::State(state) => self.with_viewport(id, |vp| vp.set_state(state)),
-            Kind::UserPromptEcho(text) => {
-                self.push_chrome(id, RailShape::Prompt, line::user_prompt(&text));
-            }
-            Kind::StopReason(raw) => {
-                self.push_chrome(id, RailShape::Plain, line::stop_reason(&raw));
-            }
-            // The seam's own last-resort panic-catch (`bus::sink::pump`) is
-            // the one producer left: unreachable in scope for a recorder, so
-            // it stays a direct `Kind::Error`. Every other class's error
-            // already crossed to `Forensic::Error`, drawn by the fact path.
-            Kind::Error(msg) => self.push_chrome(id, RailShape::Error, line::error(&msg)),
-            Kind::ContextEdited { op, by } => {
-                let authority = match by {
-                    EditAuthority::Model => "model",
-                    EditAuthority::User => "user",
-                    EditAuthority::Harness => "harness",
-                };
-                let text = match op {
-                    ContextOp::Fold {
-                        through_exchange, ..
-                    } => format!(
-                        "[context folded through exchange {through_exchange} ({authority})]"
-                    ),
-                    ContextOp::Drop { exchanges } => {
-                        let list = exchanges
-                            .iter()
-                            .map(u64::to_string)
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        format!("[context dropped exchange(s) {list} ({authority})]")
-                    }
-                };
-                self.push_chrome(id, RailShape::Plain, line::note(&text));
-            }
-            // `/resources` is chrome, never recorded — no `Display` twin
-            // exists to draw instead, so it stays legacy-driven; the same
-            // fold lands `Transient::Resources` in `Self::transient`, once
-            // some producer publishes one.
-            Kind::Resources { card, .. } => self.frontend_resources(id, card, bus),
-            // A pin is ambient state like `Kind::Usage`, never a scrollback
-            // barrier, so it is routed directly rather than through
-            // `with_viewport`, which would flush the grouping windows.
-            Kind::Pin { key, card } => {
-                if let Some(vp) = self.tabs.viewport_mut(id) {
-                    vp.set_pin(key, card);
-                }
-            }
-            Kind::Unpin { key } => {
-                if let Some(vp) = self.tabs.viewport_mut(id) {
-                    vp.drop_pin(&key);
-                }
-            }
-        }
-    }
-
     /// Fold one witnessed record fact into the screen — the sole way a
     /// `Display`/`Forensic` commit reaches it.  Steps the recording
     /// viewport's own fold-memo and re-syncs from it
@@ -421,7 +270,10 @@ impl App {
     /// root's scrollback, whatever nesting depth drained the result, since
     /// the trunk is the permanent record of delegated work.
     pub fn fact(&mut self, id: AgentId, rec: &Recorded<Record>) {
-        if !self.admits(id, matches!(rec.value(), Record::Display(Display::Prompt { .. }))) {
+        if !self.admits(
+            id,
+            matches!(rec.value(), Record::Display(Display::Prompt { .. })),
+        ) {
             return;
         }
         // Bookkeeping the view fold does not itself keep: the richer
@@ -479,7 +331,12 @@ impl App {
     /// appends the accumulators it owns.  Here, at the render seam, because
     /// only this thread may read the tabs and viewports.  Chrome, never
     /// recorded — no `Display` twin exists to draw it instead.
-    fn frontend_resources(&mut self, id: AgentId, mut card: crate::bus::card::Card, bus: &BusReceiver) {
+    fn frontend_resources(
+        &mut self,
+        id: AgentId,
+        mut card: crate::bus::card::Card,
+        bus: &BusReceiver,
+    ) {
         let (blocks, rows, bytes) = self
             .tabs
             .viewport(id)
@@ -536,7 +393,7 @@ impl App {
     }
 
     /// A dim view-local note — a slash legend, a clipboard ack. Drawn, not
-    /// recorded: unlike `Kind::SystemNote` it never becomes an event.
+    /// recorded: unlike `Forensic::SystemNote` it never becomes a fact.
     pub(super) fn push_note(&mut self, id: AgentId, text: &str) {
         self.push_chrome(id, RailShape::Plain, line::note(text));
     }
@@ -765,14 +622,11 @@ mod tests {
     }
 
     /// A pin is ambient register state, and the coalescing that used to be
-    /// `App::handle`'s own grouping window is now `SurfaceBuffer`'s, entirely
-    /// worker-side (`dev/docs/plans/260814_one_seam_one_log.md`'s commit
-    /// producer): a pin never reaches that buffer at all, so it cannot split
-    /// a run it is never offered to.  This drives the real production
-    /// pipeline — `SurfaceBuffer` grouping into a `Display::ObservationGroup`
-    /// commit, folded by `record::View`, drawn by `Viewport::sync` — rather
-    /// than the retired raw-`Kind` path `App::handle` no longer coalesces on
-    /// its own.
+    /// The grouping window is `SurfaceBuffer`'s, entirely worker-side: a pin
+    /// never reaches that buffer at all, so it cannot split a run it is never
+    /// offered to.  This drives the real production pipeline — `SurfaceBuffer`
+    /// grouping into a `Display::ObservationGroup` commit, folded by
+    /// `record::View`, drawn by `Viewport::sync`.
     #[test]
     fn a_pin_never_splits_a_coalesced_observation_run() {
         use crate::record::commit::SurfaceBuffer;

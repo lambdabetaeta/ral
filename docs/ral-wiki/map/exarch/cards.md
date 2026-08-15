@@ -1,7 +1,7 @@
 ---
 generated_at_commit: 19d53bb
 generated_at_date: 2026-07-28
-covers_paths: [exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/surface.rs, exarch/src/tui/viewport.rs, exarch/data/agent.ral]
+covers_paths: [exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/record/commit.rs, exarch/src/tui/viewport.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / cards
@@ -85,10 +85,11 @@ where the inverse law is stated.
 Some cards are composed in Rust, never decoded from a kit-authored `` `card ``.
 `done_card` renders a detached worker's completion outcome — the `` `done ``
 event core appends to every deferred surface batch, decoded by `value_to_done`
-into a `Kind::Done { outcome, card }` — as one line: an outcome span roled by
-how it settled (`ok`/`bad`), plus a plain gloss naming it a background block.
-`notice_card` is its sibling for core's ready-boundary housekeeping
-(`value_to_notice` → `Kind::Notice { notice, card }`): a `Notice::Reap` renders
+into a `DoneOutcome` and recorded as `Display::Done { outcome }` — as one line: an
+outcome span roled by how it settled (`ok`/`bad`), plus a plain gloss naming it
+a background block. `notice_card` is its sibling for core's ready-boundary
+housekeeping (`value_to_notice` → a `Notice` recorded as `Display::Notice
+{ notice }`): a `Notice::Reap` renders
 through `reap_card` as a `warn` span plus the worker's `cmd` and which lease
 fired ("idle 1h unobserved" / "24h backstop"), with prune and large-binding
 notices rendered by its per-kind siblings
@@ -97,10 +98,11 @@ value marks, never an animation, and all stay inside the existing `text` mark
 vocabulary, so none widens the closed mark set above. `services_pin_card` is
 the host-authored protected `services` pin ([[map/exarch/agent|agent]]).
 
-A notice's raw facts ride beside its rendered card on the bus's
-`Kind::Notice`, the same pairing `Kind::Io` uses for a structural I/O event:
-the raw fact reaches the record log as a `Display`/`Forensic` commit, the
-card is a rendering and does not ([[map/exarch/agent|agent]]).
+A notice's raw fact is what reaches the record log — `Display::Notice
+{ notice }` — exactly as a structural observation records only its raw wire
+form (`Display::Observation`/`ObservationGroup`, [[map/exarch/io-surface|io-surface]]):
+the card is a rendering, built fresh by whoever draws, and is never itself
+recorded ([[map/exarch/agent|agent]]).
 
 ## Render — one interpreter, one binding table
 
@@ -136,7 +138,7 @@ magnitude, feeding the rail's value-step and the agent matrix's size readout;
 `lines_changed()` exposes the same diff total as the matrix's write footprint,
 distinct from prose volume.
 
-A single-`diff` card joins the patch-grouping buffer in `tui/surface.rs`
+A single-`diff` card joins the patch-grouping buffer in `record/commit.rs`
 (`Card::into_single_diff` → `SurfaceBuffer::absorb_patch`): consecutive
 same-`(id, path)` diff cards merge their hunks into one `diff <path>` block, the
 way a unified diff presents one file. Every richer card is its own block, pushed

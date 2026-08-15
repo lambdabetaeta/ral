@@ -15,10 +15,10 @@
 
 use exarch::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord};
 use exarch::agent::{Agent, deliberate};
-use exarch::bus::{AgentId, AgentState, Emitter, Kind, channel};
+use exarch::bus::{AgentId, AgentState, Emitter, channel};
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Provider, ProviderError, ProviderKind};
-use exarch::record::{Display, Protocol, Record, Transient};
+use exarch::record::{Display, Forensic, Protocol, Record, Transient};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
 use std::sync::Arc;
 
@@ -34,40 +34,36 @@ fn scripted(model: &str, script: Script) -> Arc<Provider> {
 // reject; see [`exarch::dispatch_pre_main`].
 exarch::pre_main_ctor!();
 
-/// Run one `deliberate` against a fresh `Emitter`/collector pair, returning
-/// the outcome, every legacy event the worker emitted, and every fact it
-/// recorded through the seam — a class that has crossed lives only in the
-/// second list.
-fn drive_deliberate(
-    session: &mut Agent,
-    provider: &Arc<Provider>,
-    prompt: Option<&str>,
-) -> (Result<deliberate::Outcome, ProviderError>, Vec<Kind>, Vec<Record>) {
+/// The drained result of one `deliberate` run: the outcome, every durable
+/// fact recorded through the seam, and every transient the worker emitted.
+struct Drive {
+    outcome: Result<deliberate::Outcome, ProviderError>,
+    facts: Vec<Record>,
+    transients: Vec<Transient>,
+}
+
+/// Run one `deliberate` against a fresh `Emitter`/collector pair, draining
+/// the bus into its facts and transients.
+fn drive_deliberate(session: &mut Agent, provider: &Arc<Provider>, prompt: Option<&str>) -> Drive {
     let id: AgentId = session.id;
     let (tx, rx) = channel();
     let emit = Emitter::new(tx, id);
     let token = exarch::agent::cancel::Token::new();
     let outcome = session.deliberate(provider, prompt.map(str::to_string), None, &token, &emit);
     drop(emit);
-    let mut kinds = Vec::new();
     let mut facts = Vec::new();
+    let mut transients = Vec::new();
     for sig in rx {
-        if let exarch::bus::Signal::Fact(_, ref fact) = sig {
-            facts.push(fact.value().clone());
-        }
         match sig {
-            // `AgentState` has crossed to the seam alone — no legacy `Kind`
-            // twin exists to derive, so this test's own observer bridges it
-            // back, exactly as `Signal::into_event` once did for every class.
-            exarch::bus::Signal::Transient(_, Transient::State(s)) => kinds.push(Kind::State(s)),
-            other => {
-                if let Some(event) = other.into_event() {
-                    kinds.push(event.kind);
-                }
-            }
+            exarch::bus::Signal::Fact(_, fact) => facts.push(fact.into_value()),
+            exarch::bus::Signal::Transient(_, transient) => transients.push(transient),
         }
     }
-    (outcome, kinds, facts)
+    Drive {
+        outcome,
+        facts,
+        transients,
+    }
 }
 
 /// A `ral` tool call invoking `cmd`.
@@ -103,7 +99,7 @@ fn plain_text_reaches_quiescence() {
     let mut session = Agent::for_test("system").unwrap();
     let provider = scripted("test-model", Script::new().then(Reply::text("hello")));
 
-    let (outcome, _kinds, _facts) = drive_deliberate(&mut session, &provider, Some("hi"));
+    let Drive { outcome, .. } = drive_deliberate(&mut session, &provider, Some("hi"));
 
     match outcome {
         Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "hello"),
@@ -123,16 +119,17 @@ fn tool_call_then_completion() {
             .then(Reply::text("done")),
     );
 
-    let (outcome, _kinds, facts) = drive_deliberate(&mut session, &provider, Some("set x then report"));
+    let Drive { outcome, facts, .. } =
+        drive_deliberate(&mut session, &provider, Some("set x then report"));
 
     match outcome {
         Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "done"),
         other => panic!("expected Complete, got {other:?}"),
     }
     assert!(
-        facts.iter().any(
-            |f| matches!(f, Record::Display(Display::ToolCall { tool, .. }) if tool == "ral")
-        ),
+        facts
+            .iter()
+            .any(|f| matches!(f, Record::Display(Display::ToolCall { tool, .. }) if tool == "ral")),
         "ral tool call should reach the bus"
     );
     assert!(session.is_ready());
@@ -152,7 +149,7 @@ fn bindings_persist_across_tool_calls() {
             .then(Reply::text("done")),
     );
 
-    let (outcome, _kinds, _facts) = drive_deliberate(&mut session, &provider, Some("compute"));
+    let Drive { outcome, .. } = drive_deliberate(&mut session, &provider, Some("compute"));
     assert!(matches!(outcome, Ok(deliberate::Outcome::Complete(_))));
 
     // The second tool result must show 42 — the binding survived.
@@ -195,16 +192,16 @@ fn truncated_with_tool_calls_runs_and_continues() {
             .then(Reply::text("resumed after truncation")),
     );
 
-    let (outcome, _kinds, facts) =
+    let Drive { outcome, facts, .. } =
         drive_deliberate(&mut session, &provider, Some("do work then get cut off"));
     match outcome {
         Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "resumed after truncation"),
         other => panic!("truncated-with-tools must run and complete, got {other:?}"),
     }
     assert!(
-        facts.iter().any(
-            |f| matches!(f, Record::Display(Display::ToolCall { tool, .. }) if tool == "ral")
-        ),
+        facts
+            .iter()
+            .any(|f| matches!(f, Record::Display(Display::ToolCall { tool, .. }) if tool == "ral")),
         "the captured tool call must be run, not dropped"
     );
     assert!(session.is_ready());
@@ -215,9 +212,9 @@ fn truncated_with_tool_calls_runs_and_continues() {
 /// work and end the run: `deliberate` commits the streamed prefix as the
 /// assistant message and returns `Truncated` (carrying the stall cause) so
 /// the nudge continues the exchange with `continue`.  Salvaging the prefix
-/// does not soften the failure — it surfaces as `Kind::Stalled`, carrying the
-/// classified cause under the error chrome — but neither does it end the run,
-/// which is why the kind is its own and not `Kind::ProviderError`.
+/// does not soften the failure — it surfaces as `Forensic::Stalled`, carrying
+/// the classified cause under the error chrome — but neither does it end the
+/// run, which is why the fact is its own and not `Forensic::ProviderError`.
 #[test]
 fn stalled_stream_commits_partial_and_truncates() {
     let mut session = Agent::for_test("system").unwrap();
@@ -226,7 +223,8 @@ fn stalled_stream_commits_partial_and_truncates() {
         Script::new().then(Reply::stalled("partial answer before the stall")),
     );
 
-    let (outcome, kinds, _facts) = drive_deliberate(&mut session, &provider, Some("answer at length"));
+    let Drive { outcome, facts, .. } =
+        drive_deliberate(&mut session, &provider, Some("answer at length"));
     match outcome {
         Err(ProviderError::Truncated { reason }) => {
             assert_eq!(reason, "Failed to parse stream data for model 'test-model'");
@@ -251,16 +249,18 @@ fn stalled_stream_commits_partial_and_truncates() {
     // ` | `-joined slate note beside a model switch reads as housekeeping, and a
     // stall is a refusal or a dropped connection the user has to act on.
     assert!(
-        kinds.iter().any(|k| matches!(
-            k,
-            Kind::Stalled(ProviderErrorRecord::Other { cause })
+        facts.iter().any(|f| matches!(
+            f,
+            Record::Forensic(Forensic::Stalled { error: ProviderErrorRecord::Other { cause } })
                 if cause == "Failed to parse stream data for model 'test-model'"
         )),
-        "the stall cause must surface as Kind::Stalled",
+        "the stall cause must surface as Forensic::Stalled",
     );
-    // Not the kind that ends an exchange: this run continues.
+    // Not the fact that ends an exchange: this run continues.
     assert!(
-        !kinds.iter().any(|k| matches!(k, Kind::ProviderError(_))),
+        !facts
+            .iter()
+            .any(|f| matches!(f, Record::Forensic(Forensic::ProviderError { .. }))),
         "a survived stall is not a ProviderError",
     );
     assert!(session.is_ready());
@@ -275,7 +275,7 @@ fn empty_reply_commits_a_stub_not_empty_content() {
     let mut session = Agent::for_test("system").unwrap();
     let provider = scripted("test-model", Script::new().then(Reply::empty()));
 
-    let (outcome, _kinds, _facts) = drive_deliberate(&mut session, &provider, Some("say nothing"));
+    let Drive { outcome, .. } = drive_deliberate(&mut session, &provider, Some("say nothing"));
     assert!(
         matches!(outcome, Ok(deliberate::Outcome::Empty)),
         "an empty reply still surfaces as Empty for the nudge"
@@ -314,19 +314,23 @@ fn compaction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
     let first = format!("EXCHANGE1 {}", "x".repeat(450_000));
     let second = format!("EXCHANGE2 {}", "y".repeat(150_000));
     for prompt in [&first, &second] {
-        let (acked, _, _) = drive_deliberate(&mut session, &provider, Some(prompt));
+        let Drive { outcome: acked, .. } = drive_deliberate(&mut session, &provider, Some(prompt));
         assert!(matches!(acked, Ok(deliberate::Outcome::Complete(_))));
     }
-    let (outcome, kinds, _facts) = drive_deliberate(&mut session, &provider, Some("after"));
+    let Drive {
+        outcome,
+        transients,
+        ..
+    } = drive_deliberate(&mut session, &provider, Some("after"));
 
     match outcome {
         Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "done"),
         other => panic!("expected Complete, got {other:?}"),
     }
     assert!(
-        kinds
+        transients
             .iter()
-            .any(|k| matches!(k, Kind::State(AgentState::Compacting))),
+            .any(|t| matches!(t, Transient::State(AgentState::Compacting))),
         "the compaction must announce its own state"
     );
     let view = session.rendered_messages();
@@ -398,7 +402,7 @@ fn malformed_tool_arguments_are_normalised_to_object() {
             .then(Reply::text("recovered")),
     );
 
-    let (outcome, _kinds, _facts) = drive_deliberate(&mut session, &provider, Some("emit a bad call"));
+    let Drive { outcome, .. } = drive_deliberate(&mut session, &provider, Some("emit a bad call"));
     assert!(matches!(outcome, Ok(deliberate::Outcome::Complete(_))));
 
     // Every committed tool call's arguments must be a JSON object.

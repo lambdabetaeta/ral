@@ -665,7 +665,7 @@ impl Drop for Agent {
 mod tests {
     use super::*;
     use crate::agent::testkit::*;
-    use crate::bus::{Emitter, Item, Kind, Post};
+    use crate::bus::{Emitter, Item, Post};
     use crate::provider::scripted::Script;
     use genai::chat::ChatMessage;
     use std::fs;
@@ -1115,13 +1115,15 @@ mod tests {
         // rewind attempt coupled the seam, so the drop is asserted anywhere on
         // the channel rather than at a fixed position.
         assert!(
-            std::iter::from_fn(|| rx.try_next_event().ok()).any(|event| matches!(
-                event.kind,
-                Kind::ContextEdited {
-                    op: ContextOp::Drop { exchanges },
-                    by: EditAuthority::User,
-                } if exchanges == vec![2, 3]
-            )),
+            crate::bus::drain_records(&rx)
+                .into_iter()
+                .any(|record| matches!(
+                    record,
+                    crate::record::Record::Protocol(crate::record::Protocol::ContextEdited {
+                        op: ContextOp::Drop { exchanges },
+                        by: EditAuthority::User,
+                    }) if exchanges == vec![2, 3]
+                )),
             "rewind must be durable on the trace"
         );
     }
@@ -1244,9 +1246,6 @@ mod tests {
         let record = session.log_dir().join("record.jsonl");
         fs::write(record.with_file_name("record.jsonl.0"), b"reserved").unwrap();
 
-        let bus = crate::bus::FleetBus::session(&session.inbox());
-        let first = bus.emitter(session.id);
-        let second = first.clone();
         session.clear().expect("clear rotation");
 
         let rotated_record = record.with_file_name("record.jsonl.1");
@@ -1263,9 +1262,6 @@ mod tests {
             current_records.first().expect("new session head"),
             crate::record::Record::Protocol(crate::record::Protocol::SessionStarted { .. })
         ));
-
-        first.emit(Kind::SystemNote("from first emitter".into()));
-        second.emit(Kind::SystemNote("from second emitter".into()));
     }
 
     #[test]

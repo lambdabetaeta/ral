@@ -11,9 +11,9 @@
 //! routed event to `app.emit`.
 //!
 //! `#![deny(clippy::wildcard_enum_match_arm)]` at the top of this module is
-//! the guarantee's crate-boundary half: `record::Record` and `record::Transient`
-//! carry no `Kind` here, only their own three-and-one classes, so a new
-//! variant on either is a compile error in this fold, not a silent drop.
+//! the guarantee's crate-boundary half: this fold matches `record::Record`
+//! and `record::Transient` exhaustively on their own three-and-one classes,
+//! so a new variant on either is a compile error here, not a silent drop.
 #![deny(clippy::wildcard_enum_match_arm)]
 
 use exarch::agent::event::ProviderErrorRecord;
@@ -21,7 +21,7 @@ use exarch::bus::card::{
     Card, Field, Hunk, Mark, Measure, Span, context_rows_card, done_card, notice_card,
     observation_display_card, observation_group_card, to_card_done, to_card_notice,
 };
-use exarch::bus::{AgentId, Event, Sink};
+use exarch::bus::{AgentId, Sink};
 use exarch::record::{Display, Forensic, Protocol, Record, Transient};
 use serde::Serialize;
 
@@ -190,8 +190,8 @@ fn project_protocol(protocol: &Protocol) -> Option<SynodEvent> {
 
 /// The trunk's own fold over [`Display`] — the view fold's commits.
 ///
-/// The card-carrying arms split by intent, exactly as the retired `Kind`
-/// match once did: [`Display::Card`] is a deliberate user-facing act and
+/// The card-carrying arms split by intent: [`Display::Card`] is a deliberate
+/// user-facing act and
 /// projects to [`SynodEvent::Card`], which the window stands in the
 /// transcript; the grouped and single observations, a done, a notice, and a
 /// context survey are raw-fact pairings whose card is a presentation of
@@ -287,8 +287,8 @@ fn project_forensic(forensic: &Forensic) -> Option<SynodEvent> {
             record: error.clone(),
         }),
         // The harness minding itself, a forensic pairing whose act row
-        // already said everything, a cancellation with no prior `Kind`
-        // twin, and a register slot the window does not have: kept for
+        // already said everything, a cancellation with nothing to pair
+        // with, and a register slot the window does not have: kept for
         // post-mortem alone.
         Forensic::Cancelled
         | Forensic::Nudge { .. }
@@ -496,9 +496,8 @@ impl Router {
 /// emits what survives as `synod-event` through the worker's own gated
 /// [`Emitter`](super::commands::Emitter).
 ///
-/// [`Sink::handle`] is left empty: the window no longer draws from the
-/// legacy `Kind` bridge at all, only from [`Sink::fact`]/[`Sink::transient`]
-/// below, which this impl overrides.
+/// The window draws only from [`Sink::fact`]/[`Sink::transient`] below,
+/// which this impl overrides.
 pub struct TauriSink {
     emitter: super::commands::Emitter,
     router: Router,
@@ -520,8 +519,6 @@ impl TauriSink {
 }
 
 impl Sink for TauriSink {
-    fn handle(&mut self, _e: Event) {}
-
     fn fact(&mut self, id: AgentId, fact: &Record) {
         let dto = self.router.route_fact(id, fact);
         self.send(dto);
