@@ -206,11 +206,14 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
 
  The `rule_line` carries a value-ramp `ctx%` bar, the agent's state in a
  fixed-width slot, and an elapsed-wait bar reading the time *in that state* —
- anchored to the transition, never reset by an arriving event, so an
- `awaiting model` whose streamed-character count has stopped growing under a
- rising `Ns` is a stalled stream and reads as one. The `StateSpan` (state,
- entry instant, characters streamed since) lives on `Viewport`, not `App`, so
- each tab times its own.
+ anchored to the transition, never reset by an arriving event, so a
+ streamed-character count that has stopped growing under a rising `Ns` is a
+ stalled stream and reads as one. `AwaitingModel` is named by that count
+ alone rather than by its label, the count being the datum the elapsed bar
+ gives meaning to; `Ready` waits on nothing and so is drawn with the wait
+ slot blank — no bar, no clock. The `StateSpan` (state, entry instant,
+ characters streamed since) lives on `Viewport`, not `App`, so each tab times
+ its own.
  Sub-agent sessions get matrix rows/tabs that linger for 90 seconds
  (`LINGER`, `tui.rs`) after `Died`, each keeping its own scroll position; dead
  rows dim and keep their final step cells without a countdown. The conversing

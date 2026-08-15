@@ -25,9 +25,19 @@ pub(super) fn rule_line(
     let mut spans: Vec<Span<'static>> = Vec::new();
 
     // The `Ns` digit ticks once a second, and the clock runs from the state's
-    // own start: an `awaiting model` that reads minutes with a frozen streamed
-    // count is a stalled stream, which a per-event reset could never show.
-    spans.extend(wait_bar(state.elapsed()));
+    // own start: a streamed count that freezes under a wait reading minutes is
+    // a stalled stream, which a per-event reset could never show.  `Ready` is
+    // settled — nothing is outstanding to time — so it gets no clock at all.
+    if state.state.pending() {
+        spans.extend(wait_bar(state.elapsed()));
+    } else {
+        // Blank, not absent: the bar plus its four-column ` 0s ` readout is the
+        // width the fields after it are aligned against, in every state.
+        spans.push(Span::styled(
+            " ".repeat(WAIT_BAR_W + 4),
+            Style::default().fg(SLATE),
+        ));
+    }
     let mut label = state_label(state);
     // Pad by display width: `…` is three bytes and one column, so `label.len()`
     // would leave the slot short and shift every field after it.
@@ -83,15 +93,17 @@ pub(super) fn rule_line(
     Line::from(spans)
 }
 
-/// The state's name, plus — while a step is open and something has come back —
-/// how much text has arrived in it.  Only [`AgentState::Ready`] goes
-/// unpunctuated: nothing is outstanding, so nothing is awaited.
+/// The state's name — except [`AgentState::AwaitingModel`], which is named by
+/// the text arrived in it instead: beside the elapsed bar, a count that has
+/// stopped growing is the whole datum, and the state's own name says nothing
+/// the bar does not.  Only [`AgentState::Ready`] goes unpunctuated: nothing is
+/// outstanding, so nothing is awaited.
 fn state_label(span: StateSpan) -> String {
-    let mut label = span.state.label().to_owned();
-    if span.state == AgentState::AwaitingModel && span.streamed > 0 {
-        label.push(' ');
-        label.push_str(&streamed_count(span.streamed));
-    }
+    let mut label = if span.state == AgentState::AwaitingModel {
+        streamed_count(span.streamed)
+    } else {
+        span.state.label().to_owned()
+    };
     if span.state.pending() {
         label.push('…');
     }
@@ -159,10 +171,9 @@ pub(super) fn ctx_ramp(pct: u64) -> Vec<Span<'static>> {
 
 /// Width of the elapsed-wait bar, in cells.
 pub(super) const WAIT_BAR_W: usize = 10;
-/// Fixed state-label slot, wide enough for the longest label plus a streamed
-/// count (`awaiting model 1.2k… `): a state change never shifts the fields
-/// after it.
-pub(super) const STATE_SLOT_W: usize = 22;
+/// Fixed state-label slot, wide enough for the longest label (`waiting on
+/// agents… `): a state change never shifts the fields after it.
+pub(super) const STATE_SLOT_W: usize = 19;
 /// Elapsed seconds to a `0..=3` lightness step. Not [`rail::value_step`], whose
 /// 4/20/80 thresholds are calibrated for line counts and would burn this bar
 /// white on nearly every turn.
