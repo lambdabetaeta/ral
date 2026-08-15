@@ -63,10 +63,8 @@ had already named **two-record unification**, with the bus as the blocker.
 - **Commits are authored worker-side.** `record/commit.rs` owns the
   coalescers that used to live in the frontend: the step's `Stream` cuts the
   assistant's delta stream at fence-safe paragraph breaks into
-  `Display::Answer` commits (its `Chopper`) and seals each reasoning run as a
-  `Display::Thinking` where the prose after it begins (a later correction —
-  authored at the step's *end*, a run lands between the paragraphs already
-  committed and the tail not yet), and `SurfaceBuffer` (moved whole from
+  `Display::Answer` commits and seals each reasoning run as a
+  `Display::Thinking`, and `SurfaceBuffer` (moved whole from
   `tui/surface.rs`) groups observations into one `Display::ObservationGroup`
   and coalesces diff hunks — so the screen still authors nothing, and 260623's
   maxim survives the move: recording a commit is not the worker narrating the
@@ -174,6 +172,26 @@ log with no independent sibling.
   still stamps and publishes, and no resumable history, unchanged.
 - Dial state and the provisional thinking seat are UI state, not records,
   and do not survive a resume.
+
+## Later corrections
+
+- **260815 — a reasoning run commits where the prose after it begins.**
+  Authoring commits worker-side settled *who* records; it left one authoring
+  site in the wrong place. `Display::Thinking` was written at the step's end,
+  which was the answer's end too until the chopper began cutting prose into
+  paragraph commits — after which the step's end falls between the paragraphs
+  already committed and the tail not yet, and that is where the `∴` landed.
+  A run seals at the seam where prose resumes instead, which is where it
+  actually ended; a run no prose follows still seals at the boundary. Two
+  things followed. The provider's two stream callbacks became one over
+  `Delta::{Say,Think}`: two independent callbacks are precisely the type that
+  cannot say a run ended where the prose began. And `Display::Thinking` gave
+  up its `answer_chars` — a commit that precedes the prose cannot carry that
+  prose's mass, so the view measures it from the answer run following the
+  row, which also lets the deliberation grain fill as the answer accrues.
+  The general lesson for this page's producers: a commit's *position* is a
+  claim about when the fact ended, so a producer that only learns its
+  content later must not also defer its authoring.
 
 ## See also
 
