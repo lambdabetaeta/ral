@@ -153,6 +153,10 @@ pub struct Blocks {
     /// The highest [`Seq`] a flush has already rendered to `user.log` —
     /// [`Self::render_since`]'s cursor, and the floor eviction never crosses.
     rendered_through: Seq,
+    /// The [`Seq`] of the first row this fold ever held, remembered past
+    /// eviction — the door [`Self::rows`] no longer names once the window
+    /// has moved off the session's opening row.
+    origin: Option<Seq>,
 }
 
 impl Default for Blocks {
@@ -162,6 +166,7 @@ impl Default for Blocks {
             usage: UsageTotal::default(),
             model: None,
             rendered_through: Seq::new(0),
+            origin: None,
         }
     }
 }
@@ -169,6 +174,14 @@ impl Default for Blocks {
 impl Blocks {
     pub fn rows(&self) -> &[Block] {
         &self.rows
+    }
+
+    /// The [`Seq`] of the first row this fold ever held — `None` until one
+    /// lands.  Unlike `rows().first()` it survives eviction, so a printer can
+    /// ask whether its window still reaches the session's opening row: the
+    /// question chrome drawn *before* any row, the startup banner, hangs on.
+    pub fn origin(&self) -> Option<Seq> {
+        self.origin
     }
 
     /// Cumulative input tokens billed so far, per the forensic usage trail —
@@ -234,6 +247,7 @@ impl Blocks {
     }
 
     fn push(&mut self, seq: Seq, kind: BlockKind) {
+        let _ = self.origin.get_or_insert(seq);
         self.rows.push(Block::new(seq, kind));
         self.evict();
     }

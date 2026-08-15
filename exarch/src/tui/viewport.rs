@@ -953,7 +953,7 @@ impl Printer for Viewport {
             }
         }
         self.last_seq = rows.last().map(|r| r.id().seq());
-        self.blocks = self.merge_chrome(built);
+        self.blocks = self.merge_chrome(built, blocks.origin());
         self.enforce_window_caps();
         self.flat.dirty = true;
     }
@@ -964,12 +964,15 @@ impl Viewport {
     /// order breaking ties, dropping any chrome whose anchor fell out of the
     /// fold's window along with the row it named — the fix that lets a live
     /// `sync` redraw chrome instead of erasing it.
-    fn merge_chrome(&mut self, built: Vec<Entry>) -> Vec<Entry> {
+    fn merge_chrome(&mut self, built: Vec<Entry>, origin: Option<Seq>) -> Vec<Entry> {
         let floor = built.first().and_then(|e| e.id).map(BlockId::seq);
         self.chrome.retain(|(anchor, ..)| match (anchor, floor) {
             (_, None) => true,
             (Some(a), Some(f)) => *a >= f,
-            (None, Some(f)) => f.get() <= 1,
+            // Chrome authored before any row — the banner — sits above the
+            // session's opening row, so it lives exactly as long as that row
+            // is still the window's floor.
+            (None, Some(f)) => origin == Some(f),
         });
 
         let mut merged = Vec::with_capacity(built.len() + self.chrome.len());
