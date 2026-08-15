@@ -382,7 +382,20 @@ interrupt target; a wire session instead clears by killing its engine
 process and booting a fresh one from the same recipe, so no caller routes
 `/clear` to that seat. The identity seat rotates `record.jsonl` to the
 first-free `.n`, then starts a fresh record ledger; it never truncates the
-old record. The record rename is the rotation commit point. Clear also
+old record. The record rename is the rotation commit point. The rotation
+swaps the *file* behind the seam, never the seam: the `Emitter` and its
+attached bus sink are the session's, so every clone already handed out — the
+surface buffer's, the frontend's coupled channel — writes into the new
+segment and keeps publishing. Swapping the `Emitter` instead stranded them
+on the rotated-away file, and the frontend, whose clear-drain gate opens on
+the `Transient::Cleared` that seam publishes, stayed dark for the whole first
+exchange of the cleared session. The rotation
+swaps the *file* behind the seam and never the seam itself (`Emitter::rotate`):
+the seam is the session's, so the attached bus and every `Emitter` clone
+already handed out follow the new segment. Minting a fresh `Emitter` instead
+would strand them on the rotated-away file, and the frontend — whose
+`Transient::Cleared` and next `Display::Prompt` both cross that seam — would
+go dark for the whole first exchange of the cleared session. Clear also
 clears the schedule registry and cascades cancel to its subtree. Replacing the
 transport drops the outgoing shell, whose `LocalState` teardown cancels
 every worker still registered on it — explicit destruction outranks every

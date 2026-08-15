@@ -52,6 +52,18 @@ impl Emitter {
         }
     }
 
+    /// Point this seam at a fresh segment — `Some(path)` a new file, `None`
+    /// the mirror-only seam `--no-logs` keeps.  `/clear` rotates the file, not
+    /// the seam, so the attached bus and every clone already handed out follow
+    /// the new segment rather than going quiet on the old one.
+    ///
+    /// # Errors
+    /// Returns `Err` if the new segment cannot be opened; the old one stays
+    /// live.
+    pub fn rotate(&self, path: Option<&Path>) -> io::Result<()> {
+        self.log.rotate(path)
+    }
+
     /// Point this session's log at a live fleet channel; facts append and
     /// publish under one lock from then on.  Idempotent, and re-attaching
     /// after a per-exchange bus died is the ordinary path back on air.

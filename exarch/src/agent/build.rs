@@ -1245,11 +1245,18 @@ mod tests {
         )));
     }
 
+    /// The rotation swaps the segment behind the seam, never the seam itself:
+    /// a recorder handed out before the clear, and the bus coupled before it,
+    /// both keep publishing afterwards.  Swapping the seam instead left the
+    /// frontend dark for the whole first exchange of the cleared session.
     #[test]
     fn clear_rotates_record_jsonl_and_shared_emitters_follow_the_new_segment() {
         let mut session = Agent::for_test("system").unwrap();
         let record = session.log_dir().join("record.jsonl");
         fs::write(record.with_file_name("record.jsonl.0"), b"reserved").unwrap();
+        let (tx, rx) = crate::bus::channel();
+        session.couple(&Emitter::new(tx, session.id));
+        let recorder = session.recorder();
 
         session.clear().expect("clear rotation");
 
@@ -1262,11 +1269,44 @@ mod tests {
                 .starts_with(b"reserved")
         );
 
+        let _recorded = recorder
+            .emit(crate::record::Display::Prompt {
+                text: "after the clear".into(),
+            })
+            .expect("the pre-clear recorder still appends");
+        recorder.transient(crate::record::Transient::Cleared);
+
         let current_records = crate::record::read_records(&record).unwrap();
         assert!(matches!(
             current_records.first().expect("new session head"),
             crate::record::Record::Protocol(crate::record::Protocol::SessionStarted { .. })
         ));
+        assert!(
+            current_records.iter().any(|r| matches!(
+                r,
+                crate::record::Record::Display(crate::record::Display::Prompt { text })
+                    if text == "after the clear"
+            )),
+            "the pre-clear recorder must write into the new segment, not the rotated one"
+        );
+
+        let published: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            published.iter().any(|s| matches!(
+                s,
+                crate::bus::Signal::Fact(_, rec)
+                    if matches!(rec.value(), crate::record::Record::Display(
+                        crate::record::Display::Prompt { text }) if text == "after the clear")
+            )),
+            "and the bus coupled before the clear must still see it"
+        );
+        assert!(
+            published.iter().any(|s| matches!(
+                s,
+                crate::bus::Signal::Transient(_, crate::record::Transient::Cleared)
+            )),
+            "including the `Cleared` acknowledgement the frontend waits on"
+        );
     }
 
     #[test]

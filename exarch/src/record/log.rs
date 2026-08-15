@@ -107,6 +107,32 @@ impl Log {
         }
     }
 
+    /// Rotate onto a fresh segment — `Some(path)` a new file, `None` the
+    /// mirror-only seam a `--no-logs` session keeps — restarting the sequence
+    /// and cursor while leaving the attached sink in place.  The segment is
+    /// the file's, never the session's: swapping the `Log` instead would
+    /// strand the bus and every `Emitter` clone on the rotated-away file.
+    ///
+    /// # Errors
+    /// Returns `Err` if the new file cannot be created, or the lock is
+    /// poisoned; on either the old segment stays live.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:record-file] opens the session's next record.jsonl segment; output infra, not turn-time data I/O"
+    )]
+    pub(super) fn rotate(&self, path: Option<&Path>) -> io::Result<()> {
+        let writer = path.map(File::create).transpose()?.map(BufWriter::new);
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("record log lock poisoned"))?;
+        inner.writer = writer;
+        inner.seq = 0;
+        inner.pos = 0;
+        drop(inner);
+        Ok(())
+    }
+
     /// Point this log's publisher at a live fleet channel.  Called wherever a
     /// session's seam meets a run's bus (attend, deliberate, a direct
     /// `run_shell`); re-attaching over a dead per-exchange channel is the

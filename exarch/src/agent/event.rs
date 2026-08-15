@@ -753,11 +753,9 @@ impl AgentLog {
     ) -> io::Result<ClearRecord> {
         if !self.durable {
             self.model_memo = Memo::default();
-            self.seam = crate::record::Emitter::none();
+            let rotation_error = self.seam.rotate(None).err();
             self.record_started_lossy(None, system_prompt_bytes, at_unix_ms);
-            return Ok(ClearRecord {
-                rotation_error: None,
-            });
+            return Ok(ClearRecord { rotation_error });
         }
 
         let record_path = self.dir.join("record.jsonl");
@@ -787,7 +785,7 @@ impl AgentLog {
         clippy::disallowed_methods,
         reason = "[io-door:silent:record-file] rotates the session's record.jsonl on /clear; output infra, not turn-time data I/O"
     )]
-    fn rotate_record(&mut self, path: &Path, rotation: u64) -> Option<io::Error> {
+    fn rotate_record(&self, path: &Path, rotation: u64) -> Option<io::Error> {
         let rotated = rotation_path(path, rotation);
         match fs::rename(path, &rotated) {
             Ok(()) => {}
@@ -801,19 +799,15 @@ impl AgentLog {
                 ));
             }
         }
-        match crate::record::Emitter::create(path) {
-            Ok(seam) => {
-                self.seam = seam;
-                None
-            }
-            Err(error) => Some(io::Error::new(
+        self.seam.rotate(Some(path)).err().map(|error| {
+            io::Error::new(
                 error.kind(),
                 format!(
                     "clear committed, but a fresh {} could not be opened; the old record segment stays live: {error}",
                     path.display()
                 ),
-            )),
-        }
+            )
+        })
     }
 
     // ── Meta-records ──────────────────────────────────────────────────────
