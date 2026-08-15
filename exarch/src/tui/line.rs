@@ -1,6 +1,6 @@
 //! Line builders: each returns `Vec<Line<'static>>` ready for the scrollback,
 //! drawing colour and width from [`super::palette`].  [`super::App::handle`]
-//! calls in here to turn a typed [`crate::bus::Event`] into rows.
+//! calls in here to turn a typed [`crate::bus::card::Card`] into rows.
 //!
 //! No builder here draws a rail glyph: `Block::render_with` in `block.rs` seats
 //! it on the first content row, so a selection through a block copies clean.
