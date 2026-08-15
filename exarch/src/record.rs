@@ -356,7 +356,9 @@ pub enum Transient {
     /// step lands its authoritative text.
     Thinking(String),
     State(AgentState),
-    /// The producer's flush signal ending a streaming step.
+    /// The producer's flush signal ending a streaming step, emitted once the
+    /// step's last commit has landed: a printer may take it as leave to retire
+    /// whatever is left in the raw streams it drew the live edge from.
     Boundary,
     Born {
         log_dir: PathBuf,

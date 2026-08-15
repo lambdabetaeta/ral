@@ -155,8 +155,8 @@ impl Agent {
                 t_req.elapsed()
             );
             if token.is_cancelled() {
-                recorder.transient(Transient::Boundary);
                 seal_chopper(&mut chopper, &recorder);
+                recorder.transient(Transient::Boundary);
                 return Ok(self.cancelled());
             }
             let StepOut {
@@ -169,13 +169,13 @@ impl Agent {
             } = match step_out {
                 Ok(s) => s,
                 Err(ProviderError::Cancelled(_)) => {
-                    recorder.transient(Transient::Boundary);
                     seal_chopper(&mut chopper, &recorder);
+                    recorder.transient(Transient::Boundary);
                     return Ok(self.cancelled());
                 }
                 Err(e) => {
-                    recorder.transient(Transient::Boundary);
                     seal_chopper(&mut chopper, &recorder);
+                    recorder.transient(Transient::Boundary);
                     return Err(e);
                 }
             };
@@ -185,8 +185,8 @@ impl Agent {
                     "an answer commit was not recorded in record.jsonl: {error}"
                 )));
             }
-            // Before the boundary, so the TUI lands `∴` ahead of the answer's
-            // separate markdown rail.
+            // Ahead of the answer's tail commit, so the TUI lands `∴` before
+            // the markdown rail the same step's prose wears.
             if let Some(reasoning) = reasoning.as_deref()
                 && !reasoning.trim().is_empty()
             {
@@ -208,10 +208,10 @@ impl Agent {
                         ))
                     })?;
             }
-            recorder.transient(Transient::Boundary);
             chopper.flush(&recorder).map_err(|e| {
                 ProviderError::Other(format!("the answer's tail commit was not recorded: {e}"))
             })?;
+            recorder.transient(Transient::Boundary);
             // The live numerator the next `compact` weighs against the window.
             let input_tokens = usage.input;
             let measured_at = {

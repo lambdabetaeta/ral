@@ -114,15 +114,12 @@ pub(super) struct Viewport {
     /// carries usage but not the provider's cap.
     context_window: Option<u64>,
     /// The [`record::Seq`] of the fold's rows [`Self::sync`] has already
-    /// drained `open` against — `Seq::new(0)` before the first commit.  A
-    /// commit is a prefix of the accumulated stream by construction, so each
-    /// row past this cursor drains that many bytes off `open`'s front — the
-    /// printer-side half of "a printer's `open` is always exactly the
-    /// unconsumed suffix."  A cursor by identity rather than position, since
-    /// a windowed memo makes an index wrong.
+    /// drained [`Self::open`] and [`Self::thinking`] against — `Seq::new(0)`
+    /// before the first commit.  One cursor serves both: a row is a commit of
+    /// at most one of them, so a pass that drains either has consumed the row
+    /// for both.  A cursor by identity rather than position, since a windowed
+    /// memo makes an index wrong.
     drained_through: Seq,
-    /// [`Self::drained_through`]'s twin for [`Self::thinking`].
-    thinking_drained_through: Seq,
     /// Chrome rows [`Self::push_chrome`] has authored, named by the
     /// [`Anchor`] they were drawn at.  [`Self::sync`] stable-merges these
     /// into the folded rows it rebuilds.
@@ -254,7 +251,6 @@ impl Viewport {
             reveal: HashMap::new(),
             context_window: None,
             drained_through: Seq::new(0),
-            thinking_drained_through: Seq::new(0),
             chrome: Vec::new(),
             last_seq: None,
         }
@@ -867,6 +863,27 @@ impl Viewport {
     }
 }
 
+/// Retire the run of `raw` a landing commit accounts for.
+///
+/// A commit is a prefix of the raw stream only up to what the producer
+/// declined to record: [`Chopper`](crate::record::commit::Chopper) drops a
+/// paragraph that is whitespace alone rather than commit an empty block.  So
+/// the cut is *found* by the committed text rather than counted from its
+/// length — counted, a dropped run would stay behind and shift every later
+/// drain by its width, stranding committed text in the buffer and with it a
+/// seat that never goes out.  The skipped gap is whitespace by construction,
+/// so the first match is the right one.
+///
+/// A commit that matches nowhere is one whose head the bus shed off an
+/// over-cap merge ([`MERGE_TEXT_CAP`](crate::bus::MERGE_TEXT_CAP)):
+/// `raw` is then no longer the stream's tail, so it goes whole.
+fn drain_through(raw: &mut String, text: &str) {
+    match raw.find(text) {
+        Some(at) => drop(raw.drain(..at + text.len())),
+        None => raw.clear(),
+    }
+}
+
 // ── `record::Printer`: the sole live producer ───────────────────────────────
 
 impl Printer for Viewport {
@@ -901,39 +918,36 @@ impl Printer for Viewport {
             Transient::Fault { text } => {
                 self.push_chrome(RailShape::Error, super::line::error(text));
             }
-            // The producer's own tail flush lands as a commit `sync` will
-            // see; nothing to do here but wait for it.
-            Transient::Boundary
-            | Transient::Born { .. }
-            | Transient::Died
-            | Transient::Resources { .. } => {}
+            // The step's stream is sealed: its every commit has landed ahead
+            // of this signal, so whatever is left in the raw buffers is text
+            // the producer chose not to record — a cancelled trace, a
+            // whitespace-only tail.  Retiring it here is what keeps a seat
+            // from outliving the step it was reading.
+            Transient::Boundary => {
+                self.open.clear();
+                self.thinking.clear();
+            }
+            Transient::Born { .. } | Transient::Died | Transient::Resources { .. } => {}
         }
     }
 
     fn sync(&mut self, blocks: &Blocks) {
         let rows = blocks.rows();
         // `open` and `thinking` are always exactly the unconsumed suffix of
-        // their raw streams: drain each against every commit of its own kind
+        // their raw streams: retire each against every commit of its own kind
         // not yet accounted for, named by `Seq` rather than position, since
         // the memo is windowed.
         for row in rows.iter().filter(|r| r.id().seq() > self.drained_through) {
-            if let record::BlockKind::Answer { text } = row.kind() {
-                let n = text.len().min(self.open.len());
-                let _ = self.open.drain(..n);
-            }
-        }
-        for row in rows
-            .iter()
-            .filter(|r| r.id().seq() > self.thinking_drained_through)
-        {
-            if let record::BlockKind::Thinking { text, .. } = row.kind() {
-                let n = text.len().min(self.thinking.len());
-                let _ = self.thinking.drain(..n);
+            match row.kind() {
+                record::BlockKind::Answer { text } => drain_through(&mut self.open, text),
+                record::BlockKind::Thinking { text, .. } => {
+                    drain_through(&mut self.thinking, text);
+                }
+                _ => {}
             }
         }
         if let Some(last) = rows.last() {
             self.drained_through = last.id().seq();
-            self.thinking_drained_through = last.id().seq();
         }
 
         let mut built: Vec<Entry> = Vec::with_capacity(rows.len());
