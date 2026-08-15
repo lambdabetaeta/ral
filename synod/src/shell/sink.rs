@@ -18,8 +18,8 @@
 
 use exarch::agent::event::ProviderErrorRecord;
 use exarch::bus::card::{
-    Card, Field, Hunk, Mark, Measure, Span, context_rows_card, done_card, notice_card,
-    observation_display_card, observation_group_card, to_card_done, to_card_notice,
+    Card, Field, Hunk, Mark, Measure, Span, context_rows_card, notice_card,
+    observation_display_card, observation_group_card, to_card_notice,
 };
 use exarch::bus::{AgentId, Sink};
 use exarch::record::{Display, Forensic, Protocol, Record, Transient};
@@ -222,16 +222,17 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
         Display::Card { marks } => decode_card(marks).map(|card| SynodEvent::Card {
             marks: marks_dto(card),
         }),
-        Display::Done { outcome } => process_card(Some(done_card(&to_card_done(outcome)))),
         Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
         Display::Context { rows } => process_card(Some(context_rows_card(rows))),
         Display::Step { n } => Some(SynodEvent::Step { n: *n }),
         // The trunk's committed reasoning, its prose chopped for the
         // durable scrollback, a tool result already said on its call row,
-        // and a display twin of a protocol fact the screen never actually
-        // drew live: none of these are narrated to the window, which draws
-        // only from the live deltas and the acts above.
-        Display::Thinking { .. }
+        // a settled background block — a worker thread is no business of a
+        // secretary's — and a display twin of a protocol fact the screen
+        // never actually drew live: none of these are narrated to the window,
+        // which draws only from the live deltas and the acts above.
+        Display::Done { .. }
+        | Display::Thinking { .. }
         | Display::Prompt { .. }
         | Display::Answer { .. }
         | Display::Result { .. }
@@ -252,10 +253,10 @@ fn project_display_helper(display: &Display) -> Option<SynodEvent> {
         Display::ObservationGroup { values } => process_card(observation_group_card(values)),
         Display::Observation { value } => process_card(observation_display_card(value)),
         Display::Card { marks } => process_card(decode_card(marks)),
-        Display::Done { outcome } => process_card(Some(done_card(&to_card_done(outcome)))),
         Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
         Display::Context { rows } => process_card(Some(context_rows_card(rows))),
-        Display::Thinking { .. }
+        Display::Done { .. }
+        | Display::Thinking { .. }
         | Display::Prompt { .. }
         | Display::Answer { .. }
         | Display::ToolCall { .. }
@@ -636,10 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn done_notice_context_and_a_lone_observation_all_collapse_to_process_card() {
-        let done = Record::Display(Display::Done {
-            outcome: DoneOutcome::Ok,
-        });
+    fn notice_context_and_a_lone_observation_all_collapse_to_process_card() {
         let notice = Record::Display(Display::Notice {
             notice: NoticeFact::Prune {
                 names: vec!["x".to_string()],
@@ -654,12 +652,24 @@ mod tests {
                 class: ral_core::types::LeaseClass::Worker,
             }),
         });
-        for record in [done, notice, context, observation] {
+        for record in [notice, context, observation] {
             let Some(SynodEvent::ProcessCard { marks }) = project(&record) else {
                 panic!("expected a ProcessCard event for {record:?}");
             };
             assert!(!marks.is_empty(), "every one of these renders some ink");
         }
+    }
+
+    /// A settled background block is not among them: a worker thread is exarch's
+    /// own bookkeeping, and the window narrates none of it.
+    #[test]
+    fn a_settled_background_block_reaches_the_window_not_at_all() {
+        assert!(
+            project(&Record::Display(Display::Done {
+                outcome: DoneOutcome::Ok,
+            }))
+            .is_none()
+        );
     }
 
     #[test]
@@ -714,13 +724,16 @@ mod tests {
                 .is_none()
         );
 
-        let done = Record::Display(Display::Done {
-            outcome: DoneOutcome::Ok,
+        let notice = Record::Display(Display::Notice {
+            notice: NoticeFact::Prune {
+                names: vec!["x".to_string()],
+                idle_calls: vec![0],
+            },
         });
-        let Some(SynodEvent::ProcessCard { marks }) = router.route_fact(1, &done) else {
+        let Some(SynodEvent::ProcessCard { marks }) = router.route_fact(1, &notice) else {
             panic!("a helper's structural facts still fold into the dial");
         };
-        assert!(!marks.is_empty(), "a done outcome always renders some ink");
+        assert!(!marks.is_empty(), "a notice always renders some ink");
     }
 
     #[test]

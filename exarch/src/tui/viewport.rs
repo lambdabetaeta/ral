@@ -1102,8 +1102,16 @@ impl Viewport {
                 Ok(card) => vec![Block::card(card)],
                 Err(_) => Vec::new(),
             },
+            // Not a card: a settled block is announced, not bounded — a line
+            // on the rail, exactly as a subagent's answer arrives.  The shape
+            // holds however it settled: `╳` is the turn's own failure (a
+            // provider error, a stall), never a nonzero exit, which reads as a
+            // red status in the row here just as it does on an exec.
             K::Done { outcome } => {
-                vec![Block::card(card::done_card(&card::to_card_done(outcome)))]
+                vec![Block::chrome(
+                    RailShape::Settled,
+                    super::line::render_text(&card::settled_spans(&card::to_card_done(outcome))),
+                )]
             }
             K::Notice { notice } => {
                 vec![Block::card(card::notice_card(&card::to_card_notice(

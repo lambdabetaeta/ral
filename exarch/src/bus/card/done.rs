@@ -1,13 +1,12 @@
 //! How a detached worker's completion reads.
 //!
 //! Core flushes a single `` `done `` value at the end of a background block's
-//! deferred buffer; [`value_to_done`] decodes it, [`done_card`] renders it.
+//! deferred buffer; [`value_to_done`] decodes it, [`settled_spans`] words it.
 
 use ral_core::Value as RalValue;
-use std::fmt::Write;
 
 use super::value::{int_field, map_of, str_field};
-use super::{Card, Mark, Role, Span};
+use super::{Role, Span};
 
 /// How a detached `spawn` worker settled: the decoded form of the `` `done ``
 /// event core appends to the worker's deferred buffer at completion.
@@ -28,8 +27,8 @@ pub enum DoneOutcome {
 /// else — and since `decode_surface` in `shell_eval.rs` tries this branch last,
 /// `None` drops the value rather than passing it on.
 ///
-/// The record's sibling `cmd` field goes unread: [`done_card`] names the worker
-/// generically, not by which one it was.
+/// The record's sibling `cmd` field goes unread: core spells it `<block>` for
+/// every `spawn`, so it names no worker in particular.
 pub(crate) fn value_to_done(v: &RalValue) -> Option<DoneOutcome> {
     let RalValue::Variant { label, payload } = v else {
         return None;
@@ -61,33 +60,42 @@ pub(crate) fn value_to_done(v: &RalValue) -> Option<DoneOutcome> {
     Some(outcome)
 }
 
-/// Word a settled outcome as a one-line [`Card`] for the human — the same fact
-/// `surface_notice` in `bus/post.rs` words for the model.
-pub fn done_card(outcome: &DoneOutcome) -> Card {
-    let mut spans = Vec::new();
-    match outcome {
-        DoneOutcome::Ok => {
-            spans.push(Span::new(Role::Ok, "done"));
-            spans.push(Span::plain("  Background block finished (exit 0)"));
-        }
+/// How a settled block reads: muted prose around the outcome.
+///
+/// The outcome alone carries a level, roled `ok`/`bad` exactly as the
+/// `$ cmd → status` exec row roles an exit code — which is what a settled
+/// block's is.
+///
+/// It names no worker: a `defer`'s `cmd` is core's constant `<block>`
+/// (`prelude.ral`'s `defer` is `spawn`, which passes it), so there is nothing
+/// yet to distinguish one settlement from another.
+pub fn settled_spans(outcome: &DoneOutcome) -> Vec<Span> {
+    let (role, how, message) = match outcome {
+        DoneOutcome::Ok => (Role::Ok, "exit 0".to_string(), ""),
         DoneOutcome::Err { message, status } => {
-            spans.push(Span::new(Role::Bad, format!("failed ({status})")));
-            let mut body = String::from("  Background block error");
-            if !message.is_empty() {
-                let _ = write!(body, ": {message}");
-            }
-            spans.push(Span::plain(body));
+            (Role::Bad, format!("exit {status}"), message.as_str())
         }
-        DoneOutcome::Panic { message } => {
-            spans.push(Span::new(Role::Bad, "panicked"));
-            let mut body = String::from("  Background block error");
-            if !message.is_empty() {
-                let _ = write!(body, ": {message}");
-            }
-            spans.push(Span::plain(body));
-        }
+        DoneOutcome::Panic { message } => (Role::Bad, "panic".to_string(), message.as_str()),
+    };
+    let mut spans = vec![
+        Span::new(Role::Muted, "background block settled ("),
+        Span::new(role, how),
+        Span::new(Role::Muted, ")"),
+    ];
+    if !message.is_empty() {
+        spans.push(Span::new(Role::Muted, format!(": {message}")));
     }
-    Card(vec![Mark::Text { spans }])
+    spans
+}
+
+/// [`settled_spans`] flattened, for the two sinks that have no ink to spend:
+/// the headless stderr tee and the model's wake-up notice (`surface_notice` in
+/// `bus/post.rs`).
+pub fn settled_text(outcome: &DoneOutcome) -> String {
+    settled_spans(outcome)
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect()
 }
 
 #[cfg(test)]

@@ -820,7 +820,7 @@ fn truncate_spans(spans: &[Span<'static>], max_w: usize) -> Vec<Span<'static>> {
 
 /// A `text` mark's roled spans as `Line`s, broken on embedded newlines.
 /// Width-folding happens later, in [`wrap_line`].
-fn render_text(spans: &[CardSpan]) -> Vec<Line<'static>> {
+pub(super) fn render_text(spans: &[CardSpan]) -> Vec<Line<'static>> {
     fold_styled_lines(
         spans
             .iter()

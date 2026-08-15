@@ -82,13 +82,31 @@ where the inverse law is stated.
 
 ## Host-composed one-liners — `done`, notices
 
-Some cards are composed in Rust, never decoded from a kit-authored `` `card ``.
-`done_card` renders a detached worker's completion outcome — the `` `done ``
+Some of what the marks describe is composed in Rust, never decoded from a
+kit-authored `` `card ``. `settled_spans` words a detached worker's completion outcome — the `` `done ``
 event core appends to every deferred surface batch, decoded by `value_to_done`
-into a `DoneOutcome` and recorded as `Display::Done { outcome }` — as one line: an
-outcome span roled by how it settled (`ok`/`bad`), plus a plain gloss naming it
-a background block. `notice_card` is its sibling for core's ready-boundary
-housekeeping (`value_to_notice` → a `Notice` recorded as `Display::Notice
+into a `DoneOutcome` and recorded as `Display::Done { outcome }` — as one
+sentence, `background block settled (exit n)`, with a failure's message
+appended. The outcome alone carries a level, roled `ok`/`bad` exactly as the
+`$ cmd → status` exec row roles an exit code, which is what a settled block's
+is: `╳` stays reserved for the turn's own failures (a provider error, a stall),
+never a nonzero exit. `settled_text` flattens the spans for the two sinks with
+no ink to spend — the headless tee and the model's wake-up notice
+(`surface_notice`, [[map/exarch/agent|agent]]) — so none of the three can drift;
+only `record::view`'s ledger keeps its own `[done: …]`, the bracketed register
+every fact wears there. It names no worker, because there is nothing to name:
+core spells a `spawn`'s `cmd` `<block>` and `prelude.ral`'s `defer` is a
+`spawn`.
+
+A settlement is *announced*, not bounded, so it is no card at all. Exarch's
+transcript seats those spans as a chrome line on the rail — `RailShape::Settled`
+lifts to the `↘` of `RailKind::Subagent`, since background work landing in
+root's scrollback turns after the run that spawned it is the same event as an
+agent's answer arriving, whatever produced it — and synod's fold drops
+`Display::Done` unnarrated, a worker thread being exarch's own bookkeeping
+rather than anything the window's reader has business with.
+
+`notice_card` is `done`'s sibling for core's ready-boundary housekeeping (`value_to_notice` → a `Notice` recorded as `Display::Notice
 { notice }`): a `Notice::Reap` renders
 through `reap_card` as a `warn` span plus the worker's `cmd` and which lease
 fired ("idle 1h unobserved" / "24h backstop"), with prune and large-binding

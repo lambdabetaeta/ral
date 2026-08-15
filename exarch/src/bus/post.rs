@@ -200,20 +200,16 @@ pub(super) fn source_name(msg: &Post) -> &'static str {
 /// The notice [`Item::Surface`] wakes the model with.  The cards already reached
 /// the rail through `agent::attend::announce`, so this only names the outcome.
 fn surface_notice(values: &[Value]) -> String {
-    use crate::bus::card::DoneOutcome;
-    let settled = match values
+    let settled = values
         .iter()
         .rev()
         .find_map(crate::bus::card::value_to_done)
-    {
-        Some(DoneOutcome::Ok) => "finished (exit 0)".to_string(),
-        Some(DoneOutcome::Err { message, status }) => {
-            format!("finished (exit {status}): {message}")
-        }
-        Some(DoneOutcome::Panic { message }) => format!("panicked: {message}"),
-        None => "finished".to_string(),
-    };
-    format!("Background block {settled}. Await its handle for the value.")
+        .as_ref()
+        .map_or_else(
+            || "background block settled".to_string(),
+            crate::bus::card::settled_text,
+        );
+    format!("{settled}. Await its handle for the value.")
 }
 
 /// What a drain yields: the model-facing text *and* its source, so the attend

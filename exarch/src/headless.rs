@@ -423,7 +423,11 @@ impl Headless<'_> {
                 }
             }
             K::Done { outcome } => {
-                self.print_card(&card::done_card(&card::to_card_done(outcome)));
+                let _ = writeln!(
+                    self.err,
+                    "{}",
+                    card::settled_text(&card::to_card_done(outcome))
+                );
             }
             K::Notice { notice } => {
                 self.print_card(&card::notice_card(&card::to_card_notice(notice)));

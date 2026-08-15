@@ -96,7 +96,7 @@ pub fn notice_card(notice: &Notice) -> Card {
     }
 }
 
-/// One policy removal as a warned one-liner.  Unlike `done_card` it names the
+/// One policy removal as a warned one-liner.  Unlike `settled_spans` it names the
 /// `cmd`: once the registry entry is gone, nothing else says which worker this
 /// was.
 fn reap_card(cmd: &str, cause: ral_core::types::ReapCause) -> Card {

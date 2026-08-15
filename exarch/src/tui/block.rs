@@ -29,6 +29,11 @@ pub(super) struct AgentSlot(pub u8);
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub(super) enum RailShape {
     Step,
+    /// A detached block that settled — the `` `done `` a deferred worker flushes
+    /// at completion. It wears the `↘` of [`RailKind::Subagent`]: background
+    /// work landing in root's scrollback turns after the run that spawned it is
+    /// the same event as an agent's answer arriving, whatever produced it.
+    Settled,
     Error,
     /// A meta-notice — a model switch, an export, a stall: an annotation
     /// rather than a navigable block.
@@ -788,6 +793,7 @@ impl Block {
             }
             BlockKind::Chrome { shape, .. } => match shape {
                 RailShape::Step => Some(RailKind::Step),
+                RailShape::Settled => Some(RailKind::Subagent),
                 RailShape::Error => Some(RailKind::Error),
                 RailShape::Plain => Some(RailKind::Note),
                 RailShape::Prompt => Some(RailKind::Prompt),

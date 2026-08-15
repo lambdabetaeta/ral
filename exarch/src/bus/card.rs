@@ -41,11 +41,12 @@ pub(crate) use notice::{services_pin_card, value_to_notice};
 pub(crate) use observation::observation_wire;
 pub(crate) use observation::{ObservationKind, RailPlace, rail_place};
 
-/// `done` and `notice` each decode one class of event core surfaces into a
-/// [`Card`]; `pub` alongside [`to_card_done`] and [`to_card_notice`], the two
-/// record-type converters that hand them their argument, so synod's fold
-/// draws the same card a scrollback would rather than a copy of it.
-pub use done::done_card;
+/// `done` and `notice` each word one class of event core surfaces, `pub`
+/// alongside [`to_card_done`] and [`to_card_notice`], the two record-type
+/// converters that hand them their argument. A notice is a card; a settlement
+/// is a line on the rail, so `done` exports spans and their flattening rather
+/// than a [`Card`] nothing would draw.
+pub use done::{settled_spans, settled_text};
 pub use notice::notice_card;
 pub use observation::{
     execs_card, greps_card, observation_card, observation_from_wire, reads_card,
