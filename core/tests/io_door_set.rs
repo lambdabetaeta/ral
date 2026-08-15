@@ -302,10 +302,6 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
         "io-door:silent:resources-disk-probe",
     ),
     (
-        "exarch/src/agent/transcript.rs",
-        "io-door:silent:transcript-file",
-    ),
-    (
         "exarch/src/tui/terminal.rs",
         "io-door:silent:editor-compose",
     ),
