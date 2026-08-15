@@ -427,6 +427,12 @@ impl Agent {
 
     pub(crate) fn clear(&mut self) -> io::Result<()> {
         let at_unix_ms = crate::bootstrap::now_unix_ms();
+        // The queue goes first, before the seat reboot below spends real time
+        // booting a shell: what is waiting *now* is old context, but a prompt
+        // typed during the reboot was typed against an already-blanked screen
+        // and belongs to the new one.  Sweeping it afterwards eats it in
+        // silence — the queue holds no record of what it dropped.
+        self.inbox.clear();
         let record = self.log.lock().clear(self.system.len(), at_unix_ms)?;
         let error = record.rotation_error;
         // Rebooting the seat drops the outgoing shell, whose teardown cancels
@@ -436,13 +442,12 @@ impl Agent {
         self.last_input = (0, 0);
         // A fresh context carries no pressure of its own to warn about.
         self.context_warn_latched = false;
-        // Retire the subtree — this agent itself stays registered — then
-        // disarm the schedules and drop the queue.  A straggler that composed
-        // its message before this call carries its own stamp and is rejected
-        // at a consuming edge, so no ordering among the three is load-bearing.
+        // Retire the subtree — this agent itself stays registered — and disarm
+        // the schedules.  A straggler that composed its message before this
+        // call carries its own stamp and is rejected at a consuming edge, so
+        // neither order is load-bearing.
         self.agents.clear_subtree(self.id);
         self.schedules.clear();
-        self.inbox.clear();
         // The frontend wipes its pin register on `/clear`, so the session's
         // mirror must follow.
         self.pins.lock().expect("pin register poisoned").clear();

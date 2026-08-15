@@ -302,7 +302,14 @@ impl App {
     /// `Viewport` cannot see, so they are answered here; everything else
     /// forwards to [`record::Printer::transient`] on the recording viewport.
     pub fn transient(&mut self, id: AgentId, t: Transient, bus: &BusReceiver) {
-        if !self.admits(id, matches!(t, Transient::Cleared)) {
+        // A `Cleared` answering *our* `/clear` is the gate's key and nothing
+        // more: [`Self::clear`] already blanked the viewport and redrew the
+        // banner at the keystroke, and the drain kept the interval empty, so
+        // wiping again here would only cost the banner.  A `Cleared` this
+        // frontend did not author finds no armed gate and blanks as ever.
+        let cleared = matches!(t, Transient::Cleared);
+        let ours = cleared && id == self.tabs.root() && self.root_clear_drain;
+        if !self.admits(id, cleared) || ours {
             return;
         }
         match t {
