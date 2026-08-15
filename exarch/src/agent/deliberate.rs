@@ -78,7 +78,6 @@ impl Agent {
         // place `can_compact()` is guaranteed to hold, and every exchange and
         // nudge alike crosses it.
         self.compact(provider, false, token, continues);
-        let mut last_text = String::new();
         if let Some(p) = prompt {
             self.log
                 .lock()
@@ -98,7 +97,6 @@ impl Agent {
                 .lock()
                 .record_step(n, provider.tuning().clone())
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
-            last_text.clear();
             #[cfg(debug_assertions)]
             let t_render = std::time::Instant::now();
             let messages = self
@@ -139,7 +137,6 @@ impl Agent {
                                 if first_token.is_none() {
                                     first_token = Some(t_req.elapsed());
                                 }
-                                last_text.push_str(t);
                                 recorder.transient(Transient::Token(t.to_string()));
                             }
                             Delta::Think(r) => {
@@ -260,8 +257,8 @@ impl Agent {
                             reason: r.raw().to_string(),
                         }
                     }
-                    _ if last_text.is_empty() => Outcome::Empty,
-                    _ => Outcome::Complete(last_text),
+                    _ if stream.said().is_empty() => Outcome::Empty,
+                    _ => Outcome::Complete(stream.said().to_string()),
                 });
             }
             if truncated {

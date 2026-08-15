@@ -36,10 +36,10 @@ use crate::provider::Delta;
 use crate::record::{Display, Emitter};
 use ral_core::types::{Observation, Observed};
 
-/// The byte index just past the last `\n\n` at fence depth zero, so
-/// `open.drain(..idx)` peels off the committable prefix; `None` means every
-/// candidate sits inside an open fence.  `CommonMark` has no nested fences,
-/// so one bit of depth suffices.
+/// The byte index, relative to the slice given, just past the last `\n\n` at
+/// fence depth zero — the caller offsets it by whatever prefix is already
+/// committed.  `None` means every candidate sits inside an open fence.
+/// `CommonMark` has no nested fences, so one bit of depth suffices.
 fn safe_paragraph_break(open: &str) -> Option<usize> {
     let bytes = open.as_bytes();
     let mut depth = 0u8;
@@ -64,10 +64,13 @@ fn safe_paragraph_break(open: &str) -> Option<usize> {
 
 /// The assistant-prose chopper: one exists, on the worker side, so the live
 /// view and the folded view are the same blocks by construction and there is
-/// nothing to prove confluent.
+/// nothing to prove confluent.  `open` is the step's whole prose and
+/// `committed` the byte index just past the prefix already recorded, so the
+/// answer stays readable in full while its paragraphs commit one by one.
 #[derive(Default)]
 pub(crate) struct Chopper {
     open: String,
+    committed: usize,
 }
 
 impl Chopper {
@@ -78,10 +81,12 @@ impl Chopper {
     /// Propagates a failed commit of a completed paragraph.
     pub(crate) fn push(&mut self, emitter: &Emitter, delta: &str) -> io::Result<()> {
         self.open.push_str(delta);
-        let Some(cut) = safe_paragraph_break(&self.open) else {
+        let Some(cut) = safe_paragraph_break(&self.open[self.committed..]) else {
             return Ok(());
         };
-        let chunk: String = self.open.drain(..cut).collect();
+        let end = self.committed + cut;
+        let chunk = self.open[self.committed..end].to_string();
+        self.committed = end;
         if chunk.trim().is_empty() {
             return Ok(());
         }
@@ -97,7 +102,8 @@ impl Chopper {
     /// # Errors
     /// Propagates a failed commit of the tail.
     pub(crate) fn flush(&mut self, emitter: &Emitter) -> io::Result<()> {
-        let leftover = std::mem::take(&mut self.open);
+        let leftover = self.open[self.committed..].to_string();
+        self.committed = self.open.len();
         if leftover.trim().is_empty() {
             return Ok(());
         }
@@ -162,6 +168,13 @@ impl Stream {
     pub(crate) fn seal(&mut self, emitter: &Emitter) -> io::Result<()> {
         self.seal_trace(emitter)
             .and_then(|()| self.prose.flush(emitter))
+    }
+
+    /// The step's whole prose — what it settles into as an `Outcome`.  The
+    /// chopper already holds every delta, so the driver keeps no second
+    /// accumulator of the same stream.
+    pub(crate) fn said(&self) -> &str {
+        &self.prose.open
     }
 
     /// Commit the open reasoning run, if any.  Idempotent: a sealed run
