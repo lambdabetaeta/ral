@@ -7,6 +7,9 @@ use std::sync::Mutex;
 
 /// One scripted completion reply.
 pub struct Reply {
+    /// Reasoning this turn streams ahead of its text, as a thinking model
+    /// does — empty for a turn that does not deliberate.
+    reasoning: String,
     text: String,
     outcome: Result<StepOut, ProviderError>,
     /// Set by [`Self::panicking`]: the turn unwinds as it is consumed, rather
@@ -17,6 +20,7 @@ pub struct Reply {
 impl Reply {
     pub fn text(text: &str) -> Self {
         Self {
+            reasoning: String::new(),
             text: text.to_string(),
             panics: false,
             outcome: Ok(StepOut {
@@ -34,6 +38,7 @@ impl Reply {
     /// only re-loses — so the driver must report it rather than resend.
     pub fn stalled(text: &str) -> Self {
         Self {
+            reasoning: String::new(),
             text: text.to_string(),
             panics: false,
             outcome: Ok(StepOut {
@@ -55,6 +60,7 @@ impl Reply {
             .map(genai::chat::ContentPart::ToolCall)
             .collect::<Vec<_>>();
         Self {
+            reasoning: String::new(),
             text: String::new(),
             panics: false,
             outcome: Ok(StepOut {
@@ -75,6 +81,7 @@ impl Reply {
             .map(genai::chat::ContentPart::ToolCall)
             .collect::<Vec<_>>();
         Self {
+            reasoning: String::new(),
             text: String::new(),
             panics: false,
             outcome: Ok(StepOut {
@@ -91,6 +98,7 @@ impl Reply {
     /// the turn `admit_assistant` in `agent/deliberate.rs` must fill with a stub.
     pub fn empty() -> Self {
         Self {
+            reasoning: String::new(),
             text: String::new(),
             panics: false,
             outcome: Ok(StepOut {
@@ -113,8 +121,19 @@ impl Reply {
         }
     }
 
+    /// The reasoning this turn streams before its text:
+    /// `Reply::text("…").thinking("…")`.
+    #[must_use]
+    pub fn thinking(self, reasoning: &str) -> Self {
+        Self {
+            reasoning: reasoning.to_string(),
+            ..self
+        }
+    }
+
     pub fn error(error: ProviderError) -> Self {
         Self {
+            reasoning: String::new(),
             text: String::new(),
             panics: false,
             outcome: Err(error),
@@ -143,8 +162,9 @@ impl Script {
         self
     }
 
-    /// The scripted counterpart to `Engine::complete`: no stream, so the whole
-    /// reply fires as one [`Delta::Say`] and no reasoning ever arrives. Panics
+    /// The scripted counterpart to `Engine::complete`: no stream, so the
+    /// reply's reasoning fires as one [`Delta::Think`] and its text as one
+    /// [`Delta::Say`], in that order — the order a thinking model sends. Panics
     /// once the queue runs dry — a test drove more turns than it scripted —
     /// and on a [`Reply::panicking`] turn, by construction.
     pub(super) fn complete<F: FnMut(Delta<'_>)>(
@@ -159,6 +179,9 @@ impl Script {
             .pop_front()
             .expect("scripted provider ran out of `complete` replies");
         assert!(!reply.panics, "scripted host panic");
+        if !reply.reasoning.is_empty() {
+            on_delta(Delta::Think(&reply.reasoning));
+        }
         if !reply.text.is_empty() {
             on_delta(Delta::Say(&reply.text));
         }

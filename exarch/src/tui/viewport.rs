@@ -665,10 +665,16 @@ impl Viewport {
         ]))
     }
 
-    /// [`Self::streaming_seat`]'s twin for [`Self::thinking`] — the step's
-    /// reasoning trace grows into a magnitude mark exactly like the answer's,
-    /// never streamed as text, and precedes it: reasoning lands ahead of the
-    /// answer within a step.
+    /// [`Self::streaming_seat`]'s twin for [`Self::thinking`] — the open
+    /// reasoning run grows into a magnitude mark exactly like the answer's,
+    /// never streamed as text, and seats above it.
+    ///
+    /// Exact for the run that opens a step, which commits ahead of the prose
+    /// it precedes.  A *second* run inside one step — reasoning resumed after
+    /// prose — seats above that prose too while both are still open, which is
+    /// the one place the two live seats can read out of order; it costs a
+    /// mark's position for a moment, and both commits land in arrival order
+    /// regardless.
     fn thinking_seat(&self) -> Option<Line<'static>> {
         if self.thinking.trim().is_empty() {
             return None;

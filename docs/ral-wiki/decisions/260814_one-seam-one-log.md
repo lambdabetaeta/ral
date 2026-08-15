@@ -61,9 +61,12 @@ had already named **two-record unification**, with the bus as the blocker.
   A record no fold recognises is a `Refusal` that refuses the session —
   the display vocabulary is a designed, validated protocol, not a byproduct.
 - **Commits are authored worker-side.** `record/commit.rs` owns the
-  coalescers that used to live in the frontend: the `Chopper` cuts the
+  coalescers that used to live in the frontend: the step's `Stream` cuts the
   assistant's delta stream at fence-safe paragraph breaks into
-  `Display::Answer` commits, and `SurfaceBuffer` (moved whole from
+  `Display::Answer` commits (its `Chopper`) and seals each reasoning run as a
+  `Display::Thinking` where the prose after it begins (a later correction —
+  authored at the step's *end*, a run lands between the paragraphs already
+  committed and the tail not yet), and `SurfaceBuffer` (moved whole from
   `tui/surface.rs`) groups observations into one `Display::ObservationGroup`
   and coalesces diff hunks — so the screen still authors nothing, and 260623's
   maxim survives the move: recording a commit is not the worker narrating the

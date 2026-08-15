@@ -109,6 +109,49 @@ fn plain_text_reaches_quiescence() {
     assert_admissible(&session);
 }
 
+/// A step's reasoning commits ahead of *every* paragraph of the answer it
+/// deliberated into, not merely ahead of the tail.  The chopper commits
+/// prose paragraph by paragraph, so a `∴` authored at the step's end lands
+/// between the paragraphs already committed and the tail not yet — which is
+/// what the reader sees as thinking arriving mid-answer.
+#[test]
+fn reasoning_commits_ahead_of_every_paragraph_of_the_answer() {
+    let mut session = Agent::for_test("system").unwrap();
+    let provider = scripted(
+        "test-model",
+        Script::new().then(
+            Reply::text("First paragraph.\n\nSecond paragraph.").thinking("weighing the cases"),
+        ),
+    );
+
+    let Drive { facts, .. } = drive_deliberate(&mut session, &provider, Some("hi"));
+    let kinds: Vec<&Display> = facts
+        .iter()
+        .filter_map(|record| match record {
+            Record::Display(d) => Some(d),
+            Record::Protocol(_) | Record::Forensic(_) => None,
+        })
+        .collect();
+    let thinking = kinds
+        .iter()
+        .position(|d| matches!(d, Display::Thinking { .. }))
+        .unwrap_or_else(|| panic!("the step's reasoning never committed: {kinds:?}"));
+    let answers: Vec<usize> = kinds
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| matches!(d, Display::Answer { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        answers.len() >= 2,
+        "the answer must chop into more than one commit for this to discriminate: {kinds:?}"
+    );
+    assert!(
+        thinking < answers[0],
+        "reasoning commits ahead of the whole answer, not between its paragraphs: {kinds:?}"
+    );
+}
+
 #[test]
 fn tool_call_then_completion() {
     let mut session = Agent::for_test("system").unwrap();
