@@ -760,7 +760,22 @@ impl Block {
                 Some(q) => line::tool_call_static(q),
                 None => Vec::new(),
             },
-            BlockKind::Chrome { lines, .. } => lines.clone(),
+            // A notice is not prose: it sits in its own gap, one blank row
+            // above and below, whatever blanks its builder happened to bring.
+            // `Viewport::reflow` collapses the gap against a blank tail, so
+            // framing here reads as one row between neighbours, never two.
+            BlockKind::Chrome { lines, .. } => {
+                let body = trim_blanks(lines);
+                if body.is_empty() {
+                    // The step rule *is* a gap; there is nothing to frame.
+                    vec![Line::default()]
+                } else {
+                    std::iter::once(Line::default())
+                        .chain(body.iter().cloned())
+                        .chain(std::iter::once(Line::default()))
+                        .collect()
+                }
+            }
         }
     }
     /// The rail shape this block wears, `None` for one that seats no rail.  A
@@ -800,6 +815,17 @@ impl Block {
             },
         }
     }
+}
+
+/// `lines` without its leading and trailing blank rows.
+fn trim_blanks<'a>(lines: &'a [Line<'static>]) -> &'a [Line<'static>] {
+    let start = lines.iter().take_while(|l| line::is_blank(l)).count();
+    let tail = lines[start..]
+        .iter()
+        .rev()
+        .take_while(|l| line::is_blank(l))
+        .count();
+    &lines[start..lines.len() - tail]
 }
 
 /// The first `k` rendered rows of `lines`, always at least one so the rail has
