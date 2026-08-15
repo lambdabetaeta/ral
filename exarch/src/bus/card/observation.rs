@@ -85,11 +85,12 @@ pub(crate) fn rail_place(what: &Observed) -> Option<RailPlace> {
     })
 }
 
-/// Compose an [`Observed`] into a [`Card`]: one [`Mark::Text`] heading of a
-/// muted verb, the path, program, or resource as its [`Role::Path`] subject,
-/// and the outcome, status, or decision roled by its level. A write is the one
-/// observation that carries a body, and so the one that departs — see
-/// [`write_card`].
+/// Compose an [`Observed`] into a [`Card`].
+///
+/// One [`Mark::Text`] heading of a muted verb, the path, program, or resource
+/// as its [`Role::Path`] subject, and the outcome, status, or decision roled by
+/// its level.  A write is the one observation that carries a body, and so the
+/// one that departs — see [`write_card`].
 pub fn observation_card(what: &Observed) -> Card {
     let spans = match what {
         Observed::Read { path } => read_spans(path),
