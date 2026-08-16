@@ -75,7 +75,7 @@ pub(super) const RAIL_SHAPES: &[(RailKind, &str)] = &[
     ),
     (RailKind::TimeAct, "time act — schedule, unschedule"),
     (RailKind::Step, "step boundary"),
-    (RailKind::Error, "error"),
+    (RailKind::Error, "error, or a turn you stopped"),
     (RailKind::Prompt, "your prompt — the fence"),
     (RailKind::Note, "system note"),
 ];

@@ -1324,7 +1324,7 @@ impl Viewport {
             }
             K::Context { rows } => vec![Block::card(card::context_rows_card(rows))],
             K::Cancelled => vec![Block::chrome(
-                RailShape::Plain,
+                RailShape::Cancelled,
                 super::line::note("cancelled"),
             )],
             K::Error { text } => vec![Block::chrome(RailShape::Error, super::line::error(text))],

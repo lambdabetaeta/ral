@@ -35,6 +35,10 @@ pub(super) enum RailShape {
     /// the same event as an agent's answer arriving, whatever produced it.
     Settled,
     Error,
+    /// The turn the human stopped: it wears the `╳` an error does — the work
+    /// broke off either way — but stays a separate shape so [`Block::is_error`]
+    /// and the matrix cell it drives keep reporting failures only.
+    Cancelled,
     /// A meta-notice — a model switch, an export, a stall: an annotation
     /// rather than a navigable block.
     #[default]
@@ -798,6 +802,7 @@ impl Block {
                 RailShape::Step => Some(RailKind::Step),
                 RailShape::Settled => Some(RailKind::Subagent),
                 RailShape::Error => Some(RailKind::Error),
+                RailShape::Cancelled => Some(RailKind::Error),
                 RailShape::Plain => Some(RailKind::Note),
                 RailShape::Prompt => Some(RailKind::Prompt),
             },
