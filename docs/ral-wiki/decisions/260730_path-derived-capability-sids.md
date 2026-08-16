@@ -82,8 +82,15 @@ Split the two: derive the SID from the path, and let the token select.
   `S-1-16-4096` (`Low`) alongside the capability ACE, witnessed and
   memoized the same way, under its own stamp-key namespace. Read-only and deny
   grants need no label, since `Low` already reads `Medium` under the default
-  policy. This closed the first item in "Open work" below — the end-to-end rw
-  arm failed on every real Windows CI run until this landed.
+  policy.
+- **Two mutations, two witnesses, and neither may speak for the other.** A
+  read-write grant is complete only when both have landed, so the label is
+  asked *before* the ACE's witness is consulted rather than inside the branch
+  that applies it. Otherwise a path whose ACE some earlier ral stamped when
+  the label half did not yet exist reads as complete for ever: the store says
+  the propagation ran, the root's DACL agrees, and the label — which nothing
+  looks at — is never stamped. Nothing here reverting, that path stays
+  unwritable permanently, and no witness in the design can say why.
 
 ## Consequences
 
@@ -158,14 +165,43 @@ The enforcement claims above rest on Windows access-check behaviour that is
 asserted, not yet exercised end to end. Until this matrix passes, treat the
 design as shipped-but-unvalidated:
 
-- ~~an end-to-end LowBox spawn with privately derived capability SIDs, in all
-  three arms — no capability, ro capability, rw capability~~ — run
-  continuously by `session::tests::confined_child_writes_inside_the_grant_and_not_outside`
-  on real Windows CI. The rw arm failed 100% of the time from this decision's
-  landing until the mandatory-label stamp above closed it: the capability ACE
-  was correct and matched, but a `Medium`-labeled tempdir refused every
-  `Low`-IL write at the mandatory-integrity gate before the DACL was ever
-  consulted;
+- an end-to-end LowBox spawn with privately derived capability SIDs, in all
+  three arms — no capability, ro capability, rw capability — run continuously
+  by `session::tests::confined_child_writes_inside_the_grant_and_not_outside`
+  on real Windows CI. **The rw arm has failed on every run since this decision
+  landed, and still does.** The mandatory-label stamp above was necessary — a
+  `Medium`-labeled tempdir refuses every `Low`-IL write at the
+  mandatory-integrity gate before the DACL is ever consulted — but it was not
+  sufficient, and an earlier revision of this page wrongly recorded it as
+  closing this item. What the trace shows is a grant that lands and does not
+  bite: the ACE is stamped, the label is stamped, `CreateProcessW` accepts the
+  capability, and the child leaves the directory empty. Two of the three
+  premises are now confirmed against Microsoft's own account of the check — a
+  capability SID in a DACL does admit an `AppContainer` that holds it, and the
+  permitted access is the *intersection* of the user pass and the
+  `AppContainer` pass — so the mechanism is not what is wrong. **The test was.**
+  Its `cmd /c` string quoted the redirect target, and `CreateProcessW` takes one
+  flat command line: `process::launch`'s quoter escapes an embedded `"` as `\"`,
+  which `cmd.exe` — having no backslash escape — reads as a literal backslash
+  before a quote. The child was therefore redirecting into
+  `\C:\…\ok.txt\`, failing its own syntax check and exiting nonzero without
+  asking the filesystem anything, on every run since the test was written. This
+  is the same hazard `process::launch::reject_batch` refuses `.bat`/`.cmd`
+  images over, met from the other side. The target is now a bare relative name
+  under the granted cwd, which admits no second reading, so the exit status the
+  assertion prints finally means what it says. Until a green run, this stays
+  open — and if it stays red at exit 1, the next suspect is a host precondition
+  ral never establishes: MXC, whose DACL engine this is a port of, ships a
+  separate elevated `wxc-host-prep prepare-system-drive`, which stamps a
+  non-inheriting `0x0012_0088` metadata ACE for `ALL APPLICATION PACKAGES` and
+  `ALL RESTRICTED APPLICATION PACKAGES` on the system-drive root because
+  `cmd.exe`, `pwsh.exe` and `node.exe` stat `C:\` during startup and fail
+  `ERROR_ACCESS_DENIED` inside an `AppContainer` without it — and a
+  `prepare-null-device` for the same reason on `\Device\Null`, whose security
+  descriptor the kernel resets at every boot. Neither is ported, and adopting
+  either means an elevated, permanent mutation of the system drive's DACL on
+  every developer machine and CI runner — its own decision, not a fix to reach
+  for before the cheap reading has been ruled out;
 - a deny capability overriding an enclosing allow, observed from inside the
   child;
 - attenuation: a wide token and a narrowed token over the same tree;

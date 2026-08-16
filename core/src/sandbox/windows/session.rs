@@ -546,16 +546,21 @@ mod tests {
     fn confined_child_writes_inside_the_grant_and_not_outside() {
         let _env = crate::test_env::env_guard();
         use crate::process::cancel::CancelScope;
-        use crate::process::{Launch, PgidPolicy, StdioSpec};
+        use crate::process::{Launch, PgidPolicy, StdioSpec, WaitOutcome};
         use crate::types::{ExecProjection, FsProjection, FsRules, SandboxProjection};
         use std::path::Path;
 
-        let granted = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        // Siblings under one root, so the child can name the ungranted one
+        // relative to the granted cwd it runs in — see the quoting note below.
+        let root = tempfile::tempdir().unwrap();
+        let granted = root.path().join("granted");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&granted).unwrap();
+        std::fs::create_dir(&outside).unwrap();
         let projection = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
-                read_prefixes: vec![granted.path().to_string_lossy().into_owned()],
-                write_prefixes: vec![granted.path().to_string_lossy().into_owned()],
+                read_prefixes: vec![granted.to_string_lossy().into_owned()],
+                write_prefixes: vec![granted.to_string_lossy().into_owned()],
                 deny_paths: Vec::new(),
                 pinned_dirs: Vec::new(),
             }),
@@ -567,11 +572,27 @@ mod tests {
         // the only filesystem authority under test is the derived
         // capability's. Redirection creates the file directly; `copy NUL`
         // would additionally require access to a global DOS device.
+        //
+        // The `/c` string must carry no quote character, and so names its
+        // target relative to the granted cwd the child runs in. That is not
+        // tidiness: `CreateProcessW` takes one flat command line, so an
+        // embedded `"` leaves this process escaped as `\"` — and `cmd.exe`,
+        // which has no backslash escape, would then redirect into a filename
+        // beginning with a backslash and a quote, fail its own syntax check,
+        // and exit nonzero having never asked the filesystem anything. A bare
+        // relative name admits no such reading, which is what leaves the exit
+        // status below able to speak: the only way this child can now fail is
+        // that the write was refused.
+        //
+        // Both arms report how the child *ended*, not just whether the file
+        // appeared: a refused write and a child that never reached the write
+        // leave the same empty directory, and only the exit status tells a
+        // reader on another machine which of the two it is looking at.
         let cmd = Path::new(r"C:\Windows\System32\cmd.exe");
-        let run_copy_to = |dest: &Path| -> bool {
+        let run_echo_to = |rel: &str| -> WaitOutcome {
             let mut launch = Launch::new(cmd);
-            launch.args(["/d", "/s", "/c", &format!("echo ok>\"{}\"", dest.display())]);
-            launch.current_dir(granted.path());
+            launch.args(["/d", "/s", "/c", &format!("echo ok>{rel}")]);
+            launch.current_dir(&granted);
             launch.stdin(StdioSpec::null());
             launch.stdout(StdioSpec::null());
             launch.stderr(StdioSpec::null());
@@ -582,18 +603,24 @@ mod tests {
                 .expect("CreateProcessW must accept the derived capability SIDs");
             child
                 .wait_handling_stop(pgid, false)
-                .expect("wait for the confined child");
-            dest.exists()
+                .expect("wait for the confined child")
         };
 
+        let ended_inside = run_echo_to("ok.txt");
         assert!(
-            run_copy_to(&granted.path().join("ok.txt")),
-            "write inside the granted prefix must land — the stamped \
-             capability ACE failed to grant"
+            granted.join("ok.txt").exists(),
+            "write inside the granted prefix must land, and did not; the child \
+             ended {ended_inside:?}. A nonzero exit means it ran and the write \
+             was refused — the stamped capability ACE or the Low mandatory \
+             label failed to admit it. An exit that is neither 0 nor 1 means \
+             the child never reached the write at all, and the grant is not \
+             what is under test."
         );
+        let ended_outside = run_echo_to(r"..\outside\nope.txt");
         assert!(
-            !run_copy_to(&outside.path().join("nope.txt")),
-            "write outside the grant must be held by deny-by-default"
+            !outside.join("nope.txt").exists(),
+            "write outside the grant must be held by deny-by-default; the \
+             child ended {ended_outside:?}"
         );
 
         super::teardown();
