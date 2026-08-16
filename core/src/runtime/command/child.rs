@@ -68,6 +68,9 @@ pub(crate) struct RunningChild {
 /// status interpretation carry a borrow-check proof that the child has exited.
 pub(crate) struct WaitedChild {
     pub outcome: crate::process::WaitOutcome,
+    /// When the OS recorded the exit, where the OS records it; `None` on Unix,
+    /// which reads a broken pipe off SIGPIPE instead.
+    exited_at: Option<std::time::SystemTime>,
     pump: Option<std::thread::JoinHandle<()>>,
     stderr_pump: Option<std::thread::JoinHandle<()>>,
     /// Trace context carried from the `RunningChild` so `drain`'s pump-join
@@ -450,6 +453,7 @@ impl RunningChild {
         );
         Ok(WaitedChild {
             outcome,
+            exited_at: child.exited_at(),
             pump: self.pump.take(),
             stderr_pump: self.stderr_pump.take(),
             name: self.name.clone(),
@@ -461,20 +465,37 @@ impl RunningChild {
 
 impl RunningChild {
     /// Wait, classify, and join the drainers: the user-visible exit code paired
-    /// with whatever failure the outcome maps to.  `is_pipeline_non_final`
-    /// forgives a SIGPIPE as success.  The pipeline collector and the helper
-    /// stage in `runtime::pipeline` both reduce a child this way, so it lives
-    /// here once.
+    /// with whatever failure the outcome maps to.  `reader` is the stage that
+    /// reads this child's stdout, `None` when the caller does — a producer that
+    /// was still running when its reader ended is forgiven whatever status it
+    /// went out with.  The pipeline collector and the helper stage in
+    /// `runtime::pipeline` both reduce a child this way, so it lives here once.
     pub(crate) fn observe(
         self,
-        is_pipeline_non_final: bool,
+        reader: Option<&Self>,
     ) -> Settled<(i32, Option<crate::process::CommandFailure>)> {
         let waited = self.wait()?;
         let outcome = waited.outcome;
+        // Asked only now: a reader still running while this child lived has
+        // ended by the time this child's own wait returns, if it ever will.
+        let reader = match reader.map(Self::exited_at) {
+            None => crate::process::Reader::Caller,
+            Some(reader_exit) => crate::process::Reader::Stage {
+                outlived: matches!(
+                    (reader_exit, waited.exited_at),
+                    (Some(reader), Some(child)) if reader < child
+                ),
+            },
+        };
         let code = outcome.to_user_exit_code();
-        let failure = crate::process::CommandFailure::from_outcome(outcome, is_pipeline_non_final);
+        let failure = crate::process::CommandFailure::from_outcome(outcome, reader);
         waited.drain();
         Ok((code, failure))
+    }
+
+    /// When the OS recorded this child's exit, or `None` while it still runs.
+    pub(crate) fn exited_at(&self) -> Option<std::time::SystemTime> {
+        self.child.as_ref()?.exited_at()
     }
 
     /// Release the OS child without killing or reaping it, for when a sibling
@@ -601,7 +622,7 @@ mod tests {
             scope.cancel(CancelCause::Deadline);
         });
 
-        let (code, failure) = running.observe(false).expect("wait should not error");
+        let (code, failure) = running.observe(None).expect("wait should not error");
         canceller.join().expect("canceller thread");
 
         assert_eq!(code, 128 + libc::SIGTERM, "the status must not shift");

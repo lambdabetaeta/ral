@@ -3,11 +3,6 @@
 
 use super::cancel::CancelCause;
 
-/// The NTSTATUS for Windows' SIGPIPE analogue, which reaches us through
-/// `ExitStatus::code()` as an ordinary `Exited` code rather than as a signal.
-#[cfg(windows)]
-const STATUS_PIPE_CLOSING: u32 = 0xC000_00B1;
-
 /// The escalation ladder ral's own teardown sends, and the whole of it: SIGINT
 /// for an interrupt, SIGTERM for every other cause, SIGKILL to finish.
 /// `terminate_group` in `runtime/command/child.rs` sends exactly these, so a
@@ -241,16 +236,12 @@ impl WaitOutcome {
         matches!(self, Self::Exited(0) | Self::NativeCode(0))
     }
 
-    /// SIGPIPE, or the Windows exit code that stands in for it.
+    /// Death by SIGPIPE: the child wrote where nobody was reading, and the
+    /// kernel said so.  Windows arranges no such death — a producer there
+    /// merely fails at its own write and exits however its author chose — so
+    /// this is a Unix fact, and [`Reader::Stage`] carries the Windows one.
     pub fn is_broken_pipe(self) -> bool {
-        match self {
-            Self::Signaled(sig) => sig.is_sigpipe(),
-            #[cfg(windows)]
-            Self::Exited(code) | Self::NativeCode(code) => {
-                code.cast_unsigned() == STATUS_PIPE_CLOSING
-            }
-            _ => false,
-        }
+        matches!(self, Self::Signaled(sig) if sig.is_sigpipe())
     }
 }
 
@@ -281,16 +272,30 @@ pub enum CommandFailure {
     Spawn(SpawnFailure),
 }
 
+/// Who was reading a child's stdout when it died — the question its exit
+/// status has to be read against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reader {
+    /// The caller.  Every nonzero status is the child's own.
+    Caller,
+    /// The next byte-pipe stage.  `outlived` says this child was still running
+    /// when that stage ended, so the rest of its output was owed to nobody and
+    /// however it died is no failure.  Unix hears that same fact from the
+    /// kernel as SIGPIPE and leaves `outlived` false; Windows, which has no
+    /// such signal, reads it off the order the two ended in.
+    Stage { outlived: bool },
+}
+
 impl CommandFailure {
-    /// The failure an outcome amounts to, or `None` for success — a non-final
-    /// pipeline stage is forgiven a broken pipe, since its reader simply left.
-    pub fn from_outcome(outcome: WaitOutcome, is_pipeline_non_final: bool) -> Option<Self> {
+    /// The failure an outcome amounts to, or `None` for success: a stage that
+    /// owed its reader nothing more keeps none.
+    pub fn from_outcome(outcome: WaitOutcome, reader: Reader) -> Option<Self> {
+        if matches!(reader, Reader::Stage { outlived } if outlived || outcome.is_broken_pipe()) {
+            return None;
+        }
         match outcome {
-            WaitOutcome::Exited(0) => None,
-            #[cfg(windows)]
-            WaitOutcome::Exited(_) if is_pipeline_non_final && outcome.is_broken_pipe() => None,
-            WaitOutcome::Exited(code) => Some(Self::ExitCode(code)),
-            WaitOutcome::Signaled(sig) if is_pipeline_non_final && sig.is_sigpipe() => None,
+            WaitOutcome::Exited(0) | WaitOutcome::NativeCode(0) => None,
+            WaitOutcome::Exited(code) | WaitOutcome::NativeCode(code) => Some(Self::ExitCode(code)),
             WaitOutcome::Signaled(sig) => Some(Self::Signal(sig)),
             WaitOutcome::Cancelled { cause, signal } => Some(Self::Cancelled { cause, signal }),
             WaitOutcome::Stopped(_) => unreachable!(
@@ -305,13 +310,6 @@ impl CommandFailure {
                 stop_signal: stopped_by,
                 killed_by,
             }),
-            WaitOutcome::NativeCode(code)
-                if is_pipeline_non_final && WaitOutcome::NativeCode(code).is_broken_pipe() =>
-            {
-                None
-            }
-            WaitOutcome::NativeCode(0) => None,
-            WaitOutcome::NativeCode(code) => Some(Self::ExitCode(code)),
         }
     }
 
@@ -411,11 +409,11 @@ mod tests {
     #[test]
     fn ordinary_exit_and_signal_death_stay_distinct() {
         assert_eq!(
-            CommandFailure::from_outcome(WaitOutcome::Exited(137), false),
+            CommandFailure::from_outcome(WaitOutcome::Exited(137), Reader::Caller),
             Some(CommandFailure::ExitCode(137))
         );
         assert_eq!(
-            CommandFailure::from_outcome(WaitOutcome::Signaled(Signal::new(9)), false),
+            CommandFailure::from_outcome(WaitOutcome::Signaled(Signal::new(9)), Reader::Caller),
             Some(CommandFailure::Signal(Signal::new(9)))
         );
     }
@@ -428,7 +426,7 @@ mod tests {
             killed_by: Signal::new(libc::SIGKILL),
         };
         assert_eq!(outcome.to_user_exit_code(), 128 + libc::SIGSTOP);
-        let failure = CommandFailure::from_outcome(outcome, false).unwrap();
+        let failure = CommandFailure::from_outcome(outcome, Reader::Caller).unwrap();
         assert!(failure.message("cmd").contains("stopped by signal"));
         assert_eq!(failure.to_user_exit_code(), 128 + libc::SIGSTOP);
     }
@@ -452,7 +450,7 @@ mod tests {
                 outcome.to_user_exit_code(),
                 WaitOutcome::Signaled(term).to_user_exit_code()
             );
-            let failure = CommandFailure::from_outcome(outcome, false).unwrap();
+            let failure = CommandFailure::from_outcome(outcome, Reader::Caller).unwrap();
             assert_eq!(failure.to_user_exit_code(), 128 + libc::SIGTERM);
             assert_eq!(
                 failure.message("sleep"),
@@ -480,7 +478,7 @@ mod tests {
         let segv = Signal::new(libc::SIGSEGV);
         let outcome = WaitOutcome::Signaled(segv).attribute_to(CancelCause::Deadline);
         assert_eq!(outcome, WaitOutcome::Signaled(segv));
-        let failure = CommandFailure::from_outcome(outcome, false).unwrap();
+        let failure = CommandFailure::from_outcome(outcome, Reader::Caller).unwrap();
         assert_eq!(failure.message("sh"), "sh: killed by signal 11 (SIGSEGV)");
         assert_eq!(
             failure.default_hint("sh").as_deref(),
@@ -497,7 +495,10 @@ mod tests {
         let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGPIPE));
         for cause in [CancelCause::Interrupt, CancelCause::Terminate] {
             assert_eq!(
-                CommandFailure::from_outcome(outcome.attribute_to(cause), true),
+                CommandFailure::from_outcome(
+                    outcome.attribute_to(cause),
+                    Reader::Stage { outlived: false }
+                ),
                 None,
                 "{cause:?} must not turn a forgiven broken pipe into a failure"
             );
@@ -509,9 +510,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_foreign_signal_is_still_reported_as_a_signal() {
-        let failure =
-            CommandFailure::from_outcome(WaitOutcome::Signaled(Signal::new(libc::SIGKILL)), false)
-                .unwrap();
+        let failure = CommandFailure::from_outcome(
+            WaitOutcome::Signaled(Signal::new(libc::SIGKILL)),
+            Reader::Caller,
+        )
+        .unwrap();
         assert_eq!(failure.message("sh"), "sh: killed by signal 9 (SIGKILL)");
         assert_eq!(
             WaitOutcome::Exited(3).attribute_to(CancelCause::Deadline),
@@ -523,16 +526,29 @@ mod tests {
     #[test]
     fn non_final_sigpipe_is_success() {
         let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGPIPE));
-        assert_eq!(CommandFailure::from_outcome(outcome, true), None);
-        assert!(CommandFailure::from_outcome(outcome, false).is_some());
+        assert_eq!(
+            CommandFailure::from_outcome(outcome, Reader::Stage { outlived: false }),
+            None
+        );
+        assert!(CommandFailure::from_outcome(outcome, Reader::Caller).is_some());
     }
 
-    #[cfg(windows)]
+    /// The Windows half of the same law, and the only half Windows has: a
+    /// producer still running when its reader ended was keeping nothing from
+    /// anyone, so whatever status it chose is not the pipeline's failure.  The
+    /// statuses here are deliberately arbitrary — the rule is the order the
+    /// two ended in, never a number.
     #[test]
-    fn non_final_pipe_closing_is_success() {
-        let outcome = WaitOutcome::Exited(STATUS_PIPE_CLOSING.cast_signed());
-        assert!(outcome.is_broken_pipe());
-        assert_eq!(CommandFailure::from_outcome(outcome, true), None);
-        assert!(CommandFailure::from_outcome(outcome, false).is_some());
+    fn a_stage_that_outlived_its_reader_is_success() {
+        for outcome in [WaitOutcome::Exited(3328), WaitOutcome::NativeCode(1)] {
+            assert_eq!(
+                CommandFailure::from_outcome(outcome, Reader::Stage { outlived: true }),
+                None
+            );
+            assert!(
+                CommandFailure::from_outcome(outcome, Reader::Stage { outlived: false }).is_some()
+            );
+            assert!(CommandFailure::from_outcome(outcome, Reader::Caller).is_some());
+        }
     }
 }

@@ -1237,7 +1237,8 @@ external program. Use a path head to select a particular system binary.
 
 A missing bare command fails with status 127. A file found on `PATH` but not
 executable fails with status 126. A non-zero process result is a failure,
-except for the specified SIGPIPE case in a non-final byte-pipe stage.
+except in a non-final byte-pipe stage that was still running when the stage
+reading it ended.
 
 ### 6.8. Returned values and emitted bytes
 
@@ -1476,7 +1477,9 @@ A producer often receives a broken-pipe signal when a downstream command intenti
 large-producer | head
 ```
 
-ral treats that signal as success for a non-final stage. The same condition in the final stage remains a failure. Windows applies the equivalent rule to its pipe-closing status.
+ral treats that signal as success for a non-final stage. The same condition in the final stage remains a failure.
+
+The rule ral states is about the two stages, not about the producer's status: a non-final stage that was still running when the stage reading it ended keeps no failure, whatever status it exited with, because the rest of its output was owed to nobody. Unix delivers that fact as the broken-pipe signal. Windows delivers no such signal, and no Windows exit status means "broken pipe" — a cut-short producer there exits however its author chose — so ral reads the fact off the order the two stages ended in. A producer that ends before its reader therefore keeps whatever status it chose, on both platforms; a producer that ends after it keeps none, on either.
 
 On Unix, an interactive process-staged pipeline receives the foreground terminal as one process group only when the session owns a terminal lease and final standard output is attached to that terminal. A captured pipeline normally writes to a buffer, so the parent keeps terminal ownership. Ordinary application and bind do not create a pipeline process group.
 

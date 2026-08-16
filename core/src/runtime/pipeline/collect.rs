@@ -22,12 +22,12 @@ use crate::types::{
 )]
 fn observe_external_stage(
     running: command::RunningChild,
-    is_last: bool,
+    reader: Option<&command::RunningChild>,
     shell: &Shell,
     started: std::time::Instant,
 ) -> Settled<StageObservation> {
     let name = running.name.clone();
-    let (code, failure) = match running.observe(!is_last) {
+    let (code, failure) = match running.observe(reader) {
         Ok(pair) => pair,
         Err(br) => return Ok(StageObservation::from_break(br)),
     };
@@ -289,8 +289,8 @@ impl RunningPipeline {
     ) -> PipelineCollector {
         let handles = std::mem::take(&mut self.handles);
         let mut collector = PipelineCollector::new();
-        let last_idx = handles.len().saturating_sub(1);
-        for (idx, handle) in handles.into_iter().enumerate() {
+        let mut stages = handles.into_iter().peekable();
+        while let Some(handle) = stages.next() {
             // `wait` on a stopped child would block, and `Drop` would SIGKILL
             // the parked pgid, so abandon what is left instead.
             #[cfg(unix)]
@@ -303,12 +303,16 @@ impl RunningPipeline {
                 }
                 continue;
             }
-            let is_pipeline_final = idx == last_idx;
+            // The next stage is this one's reader, and the last stage's reader
+            // is the caller — which is what being final means.
+            let reader = stages.peek().map(|next| match next {
+                StageHandle::External(running) => running,
+                StageHandle::Helper(helper) => &helper.running,
+            });
+            let is_pipeline_final = reader.is_none();
             let result = match handle {
-                StageHandle::External(h) => {
-                    observe_external_stage(h, is_pipeline_final, shell, started)
-                }
-                StageHandle::Helper(h) => h.observe(shell, is_pipeline_final, started),
+                StageHandle::External(h) => observe_external_stage(h, reader, shell, started),
+                StageHandle::Helper(h) => h.observe(shell, reader, started),
             };
             let obs = result.unwrap_or_else(StageObservation::from_break);
             collector.fold(mooring, shell, is_pipeline_final, obs);

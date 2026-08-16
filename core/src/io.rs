@@ -29,7 +29,8 @@ use std::io;
 ///
 /// It decides pgid placement — a top-level standalone external may lead its own
 /// group, so a watchdog cancel can `kill(-pgid, …)` the whole subtree — and
-/// forgives SIGPIPE on pipeline children.  Being top-level is also one conjunct
+/// names the reader a child's exit status is read against
+/// ([`Reader`](crate::process::Reader)).  Being top-level is also one conjunct
 /// of the foreground gate in `runtime/command/foreground.rs`; holding the
 /// session's [`TerminalLease`](crate::process::TerminalLease) is another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

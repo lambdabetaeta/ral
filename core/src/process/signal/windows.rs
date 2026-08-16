@@ -810,6 +810,43 @@ pub(super) fn try_wait_handling_stop(
         .map(|opt| opt.map(crate::process::WaitOutcome::from_exit_status))
 }
 
+/// The instant the kernel recorded `process`'s exit, or `None` while it still
+/// runs — `GetProcessTimes` leaves the exit time undefined until then, so the
+/// zero-timeout wait is what makes the answer meaningful.  Reached only through
+/// `ChildHandle::exited_at`.
+pub(super) fn exit_time(process: HANDLE) -> Option<std::time::SystemTime> {
+    use std::time::{Duration, UNIX_EPOCH};
+    use windows_sys::Win32::Foundation::{FILETIME, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{GetProcessTimes, WaitForSingleObject};
+
+    if process.is_null() || unsafe { WaitForSingleObject(process, 0) } != WAIT_OBJECT_0 {
+        return None;
+    }
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut creation, mut exit, mut kernel, mut user) = (zero, zero, zero, zero);
+    let ok = unsafe {
+        GetProcessTimes(
+            process,
+            &raw mut creation,
+            &raw mut exit,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    // FILETIME counts 100 ns ticks from 1601-01-01, 11_644_473_600 s before
+    // the Unix epoch.
+    const EPOCH_TICKS: u64 = 11_644_473_600 * 10_000_000;
+    let ticks = u64::from(exit.dwHighDateTime) << 32 | u64::from(exit.dwLowDateTime);
+    let nanos = ticks.checked_sub(EPOCH_TICKS)?.checked_mul(100)?;
+    Some(UNIX_EPOCH + Duration::from_nanos(nanos))
+}
+
 // ── Foreground ownership ───────────────────────────────────────────────────
 
 /// Windows shares one console across every attached process, so there is nothing

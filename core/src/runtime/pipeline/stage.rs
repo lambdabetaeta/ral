@@ -39,15 +39,16 @@ impl HelperStageHandle {
     pub(super) fn observe(
         self,
         shell: &Shell,
-        is_last: bool,
+        reader: Option<&command::RunningChild>,
         started: std::time::Instant,
     ) -> Settled<StageObservation> {
+        let is_last = reader.is_none();
         let Self {
             running,
             span,
             report,
         } = self;
-        let (helper_exit, failure) = match running.observe(!is_last) {
+        let (helper_exit, failure) = match running.observe(reader) {
             Ok(pair) => pair,
             Err(br) => return Ok(StageObservation::from_break(br)),
         };

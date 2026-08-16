@@ -77,7 +77,11 @@ parent's session.
 Failure is a separate axis. A pipeline propagates a stage's failure, but the
 pipe never reacts to it: recovering from failure is `?`'s and `try`'s job, and
 branching is on `Bool`, never on command success
-([[design/failure|failure]]).
+([[design/failure|failure]]). One stage is exempt, and the exemption is stated
+about the pair rather than about a status: a producer still running when the
+stage reading it ended was keeping nothing from anyone, so `yes | head`
+succeeds. Unix hears that as SIGPIPE, Windows as the order the two ended in
+([[decisions/260816_a-producer-that-outlived-its-reader|a-producer-that-outlived-its-reader]]).
 
 The terminal-handoff and process-containment machinery is transport detail, not
 surface semantics. Unix uses process groups, a foreground guard, and helper

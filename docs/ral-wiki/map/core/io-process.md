@@ -22,8 +22,8 @@ interactive / terminal / launch_role / capture_outer), and
 orchestrator (`TopLevel`) from a pipeline-local child (`PipelineStage`). It
 decides pgid *placement* (a top-level standalone external may lead its own
 group so a watchdog cancel can `kill(-pgid, …)` the whole subtree; a stage
-joins the pipeline's pgid) and forgives SIGPIPE on pipeline children — never
-who may foreground. `Io::inherit_from` / `return_to` move the read-once stdin
+joins the pipeline's pgid) and says whether a child's reader is the caller or
+the next stage — never who may foreground. `Io::inherit_from` / `return_to` move the read-once stdin
 between parent and child shells.
 
 - `source.rs` — `Source`, a stage's byte input: `Pipe` (upstream stage),
@@ -60,7 +60,13 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   variant (`Cancelled`, carrying the `CancelCause` and the signal we sent), so a
   torn-down child reports the cause — an expired time limit, a `cancel`, an
   interrupt, a shutdown — while a signal from outside ral still reports its
-  number. Same status either way.
+  number. Same status either way. `Reader` is the second argument every status
+  is read against — `Caller`, or `Stage { outlived }` for a byte-pipe producer
+  — and carries the one forgiveness: a stage that outlived its reader keeps no
+  failure, `outlived` being how Windows says what Unix says with SIGPIPE
+  ([[decisions/260816_a-producer-that-outlived-its-reader|a-producer-that-outlived-its-reader]]).
+  `ChildHandle::exited_at` supplies the instants it is computed from —
+  `GetProcessTimes` on Windows, `None` on Unix, which needs no clock here.
 - `lease.rs` — `TerminalLease`, the unforgeable authority to hand the
   controlling terminal to a child via `tcsetpgrp`. No public constructor,
   neither `Clone` nor `Copy`: a host cannot forge or duplicate it. Minted at
