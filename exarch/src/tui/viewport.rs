@@ -31,7 +31,7 @@ use ratatui::text::Line;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -111,6 +111,16 @@ pub(super) struct Viewport {
     sticky: bool,
     flat: Flat,
     log_path: PathBuf,
+    log: Log,
+    /// The highest fold [`Seq`] this viewport's own window has evicted — the
+    /// floor a [`Self::sync`] starts at, so a row the screen has let go is
+    /// never built a second time to be dropped again.
+    evicted_through: Option<Seq>,
+    /// The fold revision [`Self::sync`] last built at.  A row whose
+    /// [`record::Block::rev`] is no greater still renders as it did, so its
+    /// block is carried over whole — line memo and all — and only the rows
+    /// the fold has since touched are rendered again.
+    synced_rev: u64,
     /// Total, never absent: the status line always has a state to name.
     state: StateSpan,
     /// Kit-authored *state*: a `key → Card` register drawn as the right-hand
@@ -198,29 +208,121 @@ fn opens_rail_run(prev: Option<&Block>, block: &Block) -> bool {
     !(block.markdown_src().is_some() && prev.is_some_and(|p| p.markdown_src().is_some()))
 }
 
-/// Open the session's rendered-text log, always fresh: `user.log` is a
-/// regenerable render of the fold's commits, never a file patched in place,
-/// so there is no append mode left to preserve a resumed prefix into. Falls
-/// back to a discarding sink, so a log-path failure never disables the
-/// viewport.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:viewport-log] opens the viewport's rendered-text log; render dump infra, not turn-time data I/O"
-)]
-fn open_log(path: &Path) -> io::BufWriter<Box<dyn io::Write + Send>> {
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+/// The session's rendered transcript, `user.log`.
+///
+/// A block is written once, when it leaves the viewport's window ([`Self::retire`]),
+/// into a prefix that only ever grows — so the file keeps the whole session
+/// however long it runs, while the viewport keeps only what fits on screen.
+/// The blocks still resident are written past that prefix on demand
+/// ([`Self::flush`]) and rewound by the next retirement, which is what lets
+/// `/export` read a whole transcript mid-session without the tail being
+/// written twice.
+///
+/// A path that will not open leaves [`Self::file`] `None` and the transcript
+/// silently unrecorded, so a log failure never disables the viewport.
+struct Log {
+    file: Option<fs::File>,
+    /// Bytes of retired blocks; everything past this is provisional.
+    durable: u64,
+    /// Whether the retired prefix ends blank, so a block joining it collapses
+    /// its leading blanks exactly as the flatten does.
+    prev_blank: bool,
+    /// Whether the last retired block was prose — what decides whether the
+    /// next one opens its own rail run ([`opens_rail_run`]).
+    prev_md: bool,
+    /// Leading scrollback entries this file already holds: a resumed
+    /// session's seeded window, which the run that recorded it already wrote.
+    seeded: usize,
+}
+
+impl Log {
+    /// `append` continues a resumed session's transcript; otherwise the file
+    /// starts empty, since a fresh session shares none of its history.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:viewport-log] opens the viewport's rendered-text log; render dump infra, not turn-time data I/O"
+    )]
+    fn open(path: &Path, append: bool) -> Self {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(!append)
+            .open(path)
+            .ok();
+        let durable = if append {
+            file.as_ref()
+                .and_then(|f| f.metadata().ok())
+                .map_or(0, |m| m.len())
+        } else {
+            0
+        };
+        Self {
+            file,
+            durable,
+            prev_blank: true,
+            prev_md: false,
+            seeded: 0,
+        }
     }
-    let sink: Box<dyn io::Write + Send> = match std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)
-    {
-        Ok(f) => Box::new(f),
-        Err(_) => Box::new(io::sink()),
-    };
-    io::BufWriter::new(sink)
+
+    /// Render `entries` at the end of the retired prefix, returning the length
+    /// and the continuation state that keeping them would leave behind.
+    fn write(&mut self, entries: &[Entry], agent: AgentSlot) -> io::Result<(u64, bool, bool)> {
+        let (mut prev_blank, mut prev_md) = (self.prev_blank, self.prev_md);
+        let Some(file) = self.file.as_mut() else {
+            return Ok((self.durable, prev_blank, prev_md));
+        };
+        file.set_len(self.durable)?;
+        file.seek(io::SeekFrom::Start(self.durable))?;
+        {
+            let mut out = io::BufWriter::new(&mut *file);
+            for entry in entries {
+                let md = entry.block.markdown_src().is_some();
+                for line in entry.block.log_lines(agent, !(md && prev_md)) {
+                    if is_blank(&line) {
+                        if prev_blank {
+                            continue;
+                        }
+                        prev_blank = true;
+                    } else {
+                        prev_blank = false;
+                    }
+                    for s in &line.spans {
+                        out.write_all(s.content.as_bytes())?;
+                    }
+                    out.write_all(b"\n")?;
+                }
+                prev_md = md;
+            }
+            out.flush()?;
+        }
+        Ok((file.stream_position()?, prev_blank, prev_md))
+    }
+
+    /// Write `entries` and keep them: they have left the window and no later
+    /// write may rewind over them.  A transcript that will not write is
+    /// abandoned rather than retried, so a failing disk costs one attempt.
+    fn retire(&mut self, entries: &[Entry], agent: AgentSlot) {
+        match self.write(entries, agent) {
+            Ok((durable, prev_blank, prev_md)) => {
+                self.durable = durable;
+                self.prev_blank = prev_blank;
+                self.prev_md = prev_md;
+            }
+            Err(_) => self.file = None,
+        }
+    }
+
+    /// Write `entries` provisionally, so the file reads whole right now.
+    ///
+    /// # Errors
+    /// Returns the write's own error, which `/export` reports.
+    fn flush(&mut self, entries: &[Entry], agent: AgentSlot) -> io::Result<()> {
+        self.write(entries, agent).map(|_| ())
+    }
 }
 
 /// Copy a flushed `user.log` to `dest` for `/export` — the caller resolves
@@ -235,13 +337,15 @@ pub(super) fn export_log(src: &Path, dest: &Path) -> io::Result<u64> {
 }
 
 impl Viewport {
-    /// `append` is accepted for signature compatibility with `Tabs::new`'s
-    /// resume plumbing, but no longer changes how `user.log` opens: a
-    /// regenerated render has no "preserved prefix" to protect, and seeding a
-    /// resumed session's scrollback is `dev/docs/plans/260814_one_seam_one_log.md`'s
-    /// own step 7 (parcel P6), not yet wired.
-    pub(super) fn new(log_path: PathBuf, agent: AgentSlot, _append: bool) -> Self {
+    /// `append` continues a resumed session's `user.log` where the run that
+    /// recorded it left off; a fresh session starts the file empty.  The
+    /// resumed window itself is seeded by [`Self::seed`], which is what keeps
+    /// the continuation from repeating what the file already holds.
+    pub(super) fn new(log_path: PathBuf, agent: AgentSlot, append: bool) -> Self {
         Self {
+            log: Log::open(&log_path, append),
+            evicted_through: None,
+            synced_rev: 0,
             blocks: Vec::new(),
             tombstone: None,
             agent,
@@ -373,6 +477,10 @@ impl Viewport {
     /// Drop this view's heap state for a [`Tombstone`], reading the final status
     /// off the last block before that block goes.  Idempotent: by a second call
     /// the view is clean, so re-reading the status would record a lie.
+    ///
+    /// The scrollback is retired to `user.log` on the way out — the tombstone
+    /// promises that log is readable, and a dead view's blocks are the last
+    /// stretch of it nothing else would ever write.
     pub(super) fn evict_to_tombstone(&mut self, id: AgentId) {
         if self.tombstone.is_some() {
             return;
@@ -382,6 +490,9 @@ impl Viewport {
             error: self.last_is_error(),
             log_path: self.log_path.clone(),
         });
+        let seeded = self.log.seeded.min(self.blocks.len());
+        self.log.retire(&self.blocks[seeded..], self.agent);
+        self.log.seeded = 0;
         self.blocks = Vec::new();
         self.answer = String::new();
         self.reasoning = String::new();
@@ -394,43 +505,16 @@ impl Viewport {
         self.tombstone.as_ref()
     }
 
-    /// Final flush at session end: regenerate `user.log` from the resident
-    /// blocks and flush it.  The caller owns the I/O error policy.
-    pub(super) fn flush_log(&self) -> io::Result<&Path> {
-        self.regenerate_log()?;
+    /// Write the resident window past the retired prefix and flush, so
+    /// `user.log` reads as the whole session right now — what `/export` copies
+    /// and what session end leaves behind.  The caller owns the I/O error policy.
+    ///
+    /// # Errors
+    /// Returns the write's own error.
+    pub(super) fn flush_log(&mut self) -> io::Result<&Path> {
+        let seeded = self.log.seeded.min(self.blocks.len());
+        self.log.flush(&self.blocks[seeded..], self.agent)?;
         Ok(&self.log_path)
-    }
-
-    /// Rewrite `user.log` whole from the resident blocks — the regenerable
-    /// render `dev/docs/plans/260814_one_seam_one_log.md` asks for, never a
-    /// file patched incrementally.  This is also the bug fix step 6 names: the
-    /// old incremental tee truncated to a resumed prefix and then, past
-    /// eviction, silently deleted this session's own evicted transcript from
-    /// disk. A render of whatever is resident right now has no such tail to lose.
-    fn regenerate_log(&self) -> io::Result<()> {
-        let mut log = open_log(&self.log_path);
-        let mut prev_blank = true;
-        for (i, entry) in self.blocks.iter().enumerate() {
-            let lead = opens_rail_run(
-                i.checked_sub(1).map(|j| &self.blocks[j].block),
-                &entry.block,
-            );
-            for line in entry.block.log_lines(self.agent, lead) {
-                if is_blank(&line) {
-                    if prev_blank {
-                        continue;
-                    }
-                    prev_blank = true;
-                } else {
-                    prev_blank = false;
-                }
-                for s in &line.spans {
-                    log.write_all(s.content.as_bytes())?;
-                }
-                log.write_all(b"\n")?;
-            }
-        }
-        log.flush()
     }
 
     // ── pinned state (the register) ────────────────────────────────────────
@@ -489,7 +573,9 @@ impl Viewport {
 
     /// Evict oldest-first once either cap is crossed: one walk from the tail for
     /// the longest suffix satisfying both, then one `drain`.  The newest block
-    /// always survives, however oversized.
+    /// always survives, however oversized.  What leaves the window is retired
+    /// to `user.log` on the way out, and the fold row it came from is
+    /// remembered so no later sync builds it again.
     fn enforce_window_caps(&mut self) {
         let mut kept = 0usize;
         let mut rows = 0usize;
@@ -500,11 +586,31 @@ impl Viewport {
             kept += 1;
             rows += entry.rows;
         }
-        let drop = self.blocks.len() - kept;
-        if drop > 0 {
-            self.blocks.drain(..drop);
-            self.flat.dirty = true;
+        let mut drop = self.blocks.len() - kept;
+        if drop == 0 {
+            return;
         }
+        // Neither the far half of a fold row that renders as several blocks,
+        // nor a chrome row the dropped rows anchored, may be left behind: both
+        // would be stranded above a window that can no longer place them, and
+        // would leave the transcript by the next sync without ever entering it.
+        let last = self.blocks[drop - 1].id;
+        let anchored = self.blocks[..drop].iter().any(|e| e.id.is_some());
+        while drop + 1 < self.blocks.len() {
+            match self.blocks[drop].id {
+                Some(id) if Some(id) == last => drop += 1,
+                None if anchored => drop += 1,
+                _ => break,
+            }
+        }
+        let dropped: Vec<Entry> = self.blocks.drain(..drop).collect();
+        if let Some(seq) = dropped.iter().rev().find_map(|e| e.id).map(BlockId::seq) {
+            self.evicted_through = Some(seq);
+        }
+        let seeded = self.log.seeded.min(dropped.len());
+        self.log.seeded -= seeded;
+        self.log.retire(&dropped[seeded..], self.agent);
+        self.flat.dirty = true;
     }
 
     // ── interaction ──────────────────────────────────────────────────────
@@ -558,6 +664,10 @@ impl Viewport {
         f(block);
         let changed = block.level() != before;
         if changed {
+            // A dialed block is carried over by later syncs, so its row count
+            // has to move with it or the window would budget against the rung
+            // it was opened at.
+            entry.rows = Self::estimate_rows(block, self.agent);
             self.flat.dirty = true;
             if let Some(id) = entry.id {
                 self.reveal.insert(id, block.level());
@@ -954,14 +1064,46 @@ impl Printer for Viewport {
         }
     }
 
+    /// Rebuild from the fold, carrying over every block the fold has not
+    /// moved.  A record lands as one changed row, so the work here is the
+    /// rendering of that row and not of the window around it — the difference
+    /// between a session that costs more the longer it runs and one that does
+    /// not.
     fn sync(&mut self, blocks: &Blocks) {
-        let rows = blocks.rows();
-        let mut built: Vec<Entry> = Vec::with_capacity(rows.len());
-        let mut last_ral_cmd: Option<&str> = None;
-        for (i, row) in rows.iter().enumerate() {
+        let all = blocks.rows();
+        // Rows this window has already let go stay gone; rebuilding them only
+        // to evict them again is the whole cost this sync exists to avoid.
+        let rows = &all[all.partition_point(|r| Some(r.id().seq()) <= self.evicted_through)..];
+        let mut cache: Vec<Entry> = std::mem::take(&mut self.blocks)
+            .into_iter()
+            .filter(|e| e.id.is_some())
+            .collect();
+        let floor = self.rebuild_floor(rows);
+        // What the cache still serves: the blocks of `rows[..floor]`.  A row
+        // at or past the floor is about to be rendered again, and one below
+        // `rows[0]` names a row the fold itself has since let go — which it
+        // only ever does to a printer that stopped syncing.
+        let low = rows.first().map(|r| r.id().seq());
+        let high = rows.get(floor).map(|r| r.id().seq());
+        let held = cache.len();
+        cache.retain(|e| {
+            e.id.is_some_and(|id| {
+                low.is_some_and(|l| id.seq() >= l) && high.is_none_or(|h| id.seq() < h)
+            })
+        });
+        let rebuilt = floor < rows.len() || cache.len() < held;
+
+        // The most recent `ral` script an answer's echo signal reads against
+        // is a fact about the rows below the floor, which are not being walked.
+        let mut last_ral_cmd = rows[..floor].iter().rev().find_map(|r| match r.kind() {
+            record::BlockKind::ToolCall { tool, cmd, .. } if tool == "ral" => Some(cmd.as_str()),
+            _ => None,
+        });
+        let mut built = cache;
+        for (i, row) in rows[floor..].iter().enumerate() {
             let id = row.id();
             for mut block in
-                self.render_block(row.kind(), &rows[i + 1..], blocks, &mut last_ral_cmd)
+                self.render_block(row.kind(), &rows[floor + i + 1..], blocks, &mut last_ral_cmd)
             {
                 if let Some(level) = self.reveal.get(&id) {
                     block.set_reveal(*level);
@@ -975,19 +1117,57 @@ impl Printer for Viewport {
             }
         }
         self.last_seq = rows.last().map(|r| r.id().seq());
+        self.synced_rev = blocks.rev();
         self.blocks = self.merge_chrome(built, blocks.origin());
         self.enforce_window_caps();
-        self.flat.dirty = true;
+        self.flat.dirty |= rebuilt;
     }
 }
 
 impl Viewport {
+    /// Seed a resumed session's scrollback from the replayed fold.  The run
+    /// that recorded these rows already wrote them into `user.log`, so the
+    /// seeded window is marked as the file's own and the transcript continues
+    /// rather than repeats.
+    pub(super) fn seed(&mut self, blocks: &Blocks) {
+        self.sync(blocks);
+        self.log.seeded = self.blocks.len();
+    }
+
+    /// The first row whose rendering no longer stands: one the fold has
+    /// touched since [`Self::synced_rev`], whether by opening it, growing the
+    /// run it holds, or patching a result onto it.  Everything below is
+    /// carried over.
+    ///
+    /// A reasoning row joins the rebuild whenever the answer run beneath it
+    /// has grown, since its grain is a fact about that prose ([`answer_run`])
+    /// and not about the row itself.
+    fn rebuild_floor(&self, rows: &[record::Block]) -> usize {
+        let mut floor = rows
+            .iter()
+            .position(|r| r.rev() > self.synced_rev)
+            .unwrap_or(rows.len());
+        if rows
+            .get(floor)
+            .is_some_and(|r| matches!(r.kind(), record::BlockKind::Answer { .. }))
+        {
+            while floor > 0 && matches!(rows[floor - 1].kind(), record::BlockKind::Answer { .. }) {
+                floor -= 1;
+            }
+            if floor > 0 && matches!(rows[floor - 1].kind(), record::BlockKind::Thinking { .. }) {
+                floor -= 1;
+            }
+        }
+        floor
+    }
+
     /// Stable-merge the chrome lane into `built` by [`Anchor`], arrival
     /// order breaking ties, dropping any chrome whose anchor fell out of the
     /// fold's window along with the row it named — the fix that lets a live
     /// `sync` redraw chrome instead of erasing it.
     fn merge_chrome(&mut self, built: Vec<Entry>, origin: Option<Seq>) -> Vec<Entry> {
         let floor = built.first().and_then(|e| e.id).map(BlockId::seq);
+        let before = self.chrome.len();
         self.chrome.retain(|(anchor, ..)| match (anchor, floor) {
             (_, None) => true,
             (Some(a), Some(f)) => *a >= f,
@@ -996,6 +1176,7 @@ impl Viewport {
             // is still the window's floor.
             (None, Some(f)) => origin == Some(f),
         });
+        self.flat.dirty |= self.chrome.len() != before;
 
         let mut merged = Vec::with_capacity(built.len() + self.chrome.len());
         let mut chrome = self.chrome.iter();
@@ -1863,6 +2044,209 @@ mod tests {
         assert!(
             one < between && between < two,
             "chrome anchored between two commits must render between them: {rendered:?}"
+        );
+    }
+
+    // ── the transcript ──────────────────────────────────────────────────────
+
+    /// Lines of `vp`'s `user.log` ending in `marker`, which is how a test asks
+    /// whether a block reached the transcript, and how many times.
+    fn logged(path: &Path, marker: &str) -> usize {
+        fs::read_to_string(path)
+            .expect("the transcript reads back")
+            .lines()
+            .filter(|l| l.ends_with(marker))
+            .count()
+    }
+
+    /// The window is bounded; the transcript is not.  What scrolls out of
+    /// heap is on disk by the time it goes, so a session outliving its own
+    /// window still leaves a whole `user.log` behind.
+    #[test]
+    fn the_transcript_keeps_what_the_window_evicts() {
+        let mut vp = viewport();
+        for i in 0..(VIEWPORT_MAX_BLOCKS + 50) {
+            vp.push_chrome(RailShape::Plain, vec![Line::from(format!("marker {i}"))]);
+        }
+        let path = vp.flush_log().expect("the transcript flushes").to_path_buf();
+        let text = fs::read_to_string(&path).expect("the transcript reads back");
+        let last = format!("marker {}", VIEWPORT_MAX_BLOCKS + 49);
+        assert_eq!(logged(&path, "marker 0"), 1, "the evicted head is on disk");
+        assert_eq!(logged(&path, &last), 1, "and so is the resident tail");
+        assert!(
+            text.find("marker 0") < text.find(&last),
+            "in the order they were written"
+        );
+    }
+
+    /// A flush writes the resident window provisionally, so `/export` mid-session
+    /// reads a whole transcript; the next one rewinds over it rather than
+    /// writing the same blocks twice.
+    #[test]
+    fn a_second_flush_rewinds_the_provisional_tail() {
+        let mut vp = viewport();
+        for i in 0..3 {
+            vp.push_chrome(RailShape::Plain, vec![Line::from(format!("marker {i}"))]);
+        }
+        let path = vp.flush_log().expect("the transcript flushes").to_path_buf();
+        let once = fs::read_to_string(&path).expect("the transcript reads back");
+
+        vp.push_chrome(RailShape::Plain, vec![Line::from("marker 3")]);
+        vp.flush_log().expect("the transcript flushes");
+        let twice = fs::read_to_string(&path).expect("the transcript reads back");
+
+        assert!(twice.starts_with(&once), "the first flush is a prefix");
+        assert_eq!(logged(&path, "marker 0"), 1, "written once, not twice");
+        assert_eq!(logged(&path, "marker 3"), 1, "and the new block joins it");
+    }
+
+    /// A resumed session's window was rendered by the run that recorded it, so
+    /// the continuation appends to that transcript instead of repeating it.
+    #[test]
+    fn a_resumed_transcript_continues_rather_than_repeats() {
+        let mut memo = Blocks::default();
+        let mut seq = 0u64;
+        advance(
+            &mut memo,
+            &mut seq,
+            Record::Display(Display::Prompt { text: "one".into() }),
+        );
+        let mut first = viewport();
+        let path = first.log_path.clone();
+        first.sync(&memo);
+        first.flush_log().expect("the transcript flushes");
+        assert_eq!(logged(&path, "one"), 1);
+
+        let mut resumed = Viewport::new(path.clone(), AgentSlot(0), true);
+        resumed.seed(&memo);
+        advance(
+            &mut memo,
+            &mut seq,
+            Record::Display(Display::Prompt { text: "two".into() }),
+        );
+        resumed.sync(&memo);
+        resumed.flush_log().expect("the transcript flushes");
+
+        assert_eq!(logged(&path, "one"), 1, "the seeded window is not rewritten");
+        assert_eq!(logged(&path, "two"), 1, "and the new row joins it");
+    }
+
+    // ── incremental sync ────────────────────────────────────────────────────
+
+    /// A record moves one row, so a sync rebuilds one row — which is what
+    /// makes the cost of a step independent of how long the session has run.
+    #[test]
+    fn a_sync_rebuilds_only_the_rows_the_fold_has_moved() {
+        let mut memo = Blocks::default();
+        let mut seq = 0u64;
+        for i in 0..5 {
+            advance(
+                &mut memo,
+                &mut seq,
+                Record::Display(Display::Prompt {
+                    text: format!("p{i}"),
+                }),
+            );
+        }
+        let mut vp = viewport();
+        vp.sync(&memo);
+        assert_eq!(
+            vp.rebuild_floor(memo.rows()),
+            5,
+            "a sync over a fold nothing has touched rebuilds nothing"
+        );
+
+        advance(
+            &mut memo,
+            &mut seq,
+            Record::Display(Display::Prompt { text: "p5".into() }),
+        );
+        assert_eq!(
+            vp.rebuild_floor(memo.rows()),
+            5,
+            "one landed record reopens one row"
+        );
+    }
+
+    /// A result patches the call it names, wherever that call sits — so the
+    /// floor follows the fold's revision rather than the tail.
+    #[test]
+    fn a_result_reopens_the_call_it_patches() {
+        let mut memo = Blocks::default();
+        let call = Stamp::new(Seq::new(1), 0..0);
+        View::step(
+            &mut memo,
+            &Recorded::new(
+                call.clone(),
+                Record::Display(Display::ToolCall {
+                    tool: "ral".into(),
+                    cmd: "read 'x'".into(),
+                    summary: Some("look at x".into()),
+                }),
+            ),
+        )
+        .expect("a display-only fold never refuses");
+        let mut seq = 1u64;
+        advance(
+            &mut memo,
+            &mut seq,
+            Record::Display(Display::Prompt {
+                text: "meanwhile".into(),
+            }),
+        );
+        let mut vp = viewport();
+        vp.sync(&memo);
+
+        advance(
+            &mut memo,
+            &mut seq,
+            Record::Display(Display::Result {
+                text: "a line\n".repeat(3),
+                call: BlockId::new(call.seq()),
+            }),
+        );
+        assert_eq!(
+            vp.rebuild_floor(memo.rows()),
+            0,
+            "the patched call reopens, though rows landed after it"
+        );
+    }
+
+    /// A reasoning row's grain is a fact about the prose beneath it, so the
+    /// answer run growing reopens the row above — the one dependency that
+    /// reaches backwards past the floor.
+    #[test]
+    fn a_growing_answer_run_reopens_the_reasoning_above_it() {
+        let mut memo = Blocks::default();
+        let mut seq = 0u64;
+        advance(
+            &mut memo,
+            &mut seq,
+            Record::Display(Display::Thinking {
+                text: "why\n".into(),
+            }),
+        );
+        advance(
+            &mut memo,
+            &mut seq,
+            Record::Display(Display::Answer {
+                text: "because\n".into(),
+            }),
+        );
+        let mut vp = viewport();
+        vp.sync(&memo);
+
+        advance(
+            &mut memo,
+            &mut seq,
+            Record::Display(Display::Answer {
+                text: "and also\n".into(),
+            }),
+        );
+        assert_eq!(
+            vp.rebuild_floor(memo.rows()),
+            0,
+            "the reasoning row is weighed against prose that has just grown"
         );
     }
 

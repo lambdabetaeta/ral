@@ -104,19 +104,25 @@ pub enum BlockKind {
 pub struct Block {
     seq: Seq,
     kind: BlockKind,
+    rev: u64,
 }
 
 impl Block {
-    fn new(seq: Seq, kind: BlockKind) -> Self {
-        Self { seq, kind }
-    }
-
     pub fn id(&self) -> super::BlockId {
         super::BlockId::new(self.seq)
     }
 
     pub fn kind(&self) -> &BlockKind {
         &self.kind
+    }
+
+    /// [`Blocks::rev`] as of this row's last change — its opening, the growth
+    /// of the run it holds, or a result patched onto it.  A printer that
+    /// caches a rendering keeps it exactly while this stays under the
+    /// revision it last synced at, which is what lets a sync rebuild only
+    /// what the fold has actually moved.
+    pub fn rev(&self) -> u64 {
+        self.rev
     }
 }
 
@@ -143,6 +149,10 @@ const BLOCKS_WINDOW: usize = 1000;
 #[derive(Default)]
 pub struct Blocks {
     rows: Vec<Block>,
+    /// Counts every change this fold has made to a row, so that a row can say
+    /// when it last moved ([`Block::rev`]).  Monotone and never reset; `0` is
+    /// the revision of a memo nothing has landed in yet, so it stamps no row.
+    rev: u64,
     usage: UsageTotal,
     /// The model in force, from the most recent [`Forensic::ModelChanged`].
     /// A session's *first* model rides `Protocol::SessionStarted`, which is
@@ -159,6 +169,12 @@ pub struct Blocks {
 impl Blocks {
     pub fn rows(&self) -> &[Block] {
         &self.rows
+    }
+
+    /// This memo's current revision — the watermark a printer syncs at and
+    /// then compares each row's own [`Block::rev`] against.
+    pub fn rev(&self) -> u64 {
+        self.rev
     }
 
     /// The [`Seq`] of the first row this fold ever held — `None` until one
@@ -218,16 +234,21 @@ impl Blocks {
     /// anywhere meaningful, and it keeps a block's `Seq` the one it opened
     /// with, so a reveal dial set on it survives the growth.
     fn push(&mut self, seq: Seq, kind: BlockKind) {
-        match (self.rows.last_mut().map(Block::kind_mut), &kind) {
-            (Some(BlockKind::Answer { text }), BlockKind::Answer { text: more })
-            | (Some(BlockKind::Thinking { text }), BlockKind::Thinking { text: more }) => {
-                text.push_str(more);
-                return;
+        self.rev += 1;
+        let rev = self.rev;
+        if let Some(row) = self.rows.last_mut() {
+            match (&mut row.kind, &kind) {
+                (BlockKind::Answer { text }, BlockKind::Answer { text: more })
+                | (BlockKind::Thinking { text }, BlockKind::Thinking { text: more }) => {
+                    text.push_str(more);
+                    row.rev = rev;
+                    return;
+                }
+                _ => {}
             }
-            _ => {}
         }
         let _ = self.origin.get_or_insert(seq);
-        self.rows.push(Block::new(seq, kind));
+        self.rows.push(Block { seq, kind, rev });
         self.evict();
     }
 
@@ -239,20 +260,14 @@ impl Blocks {
     fn attach_result(&mut self, call: super::BlockId, text: &str) {
         let n = u32::try_from(text.lines().count()).unwrap_or(u32::MAX);
         let target = call.seq();
-        if let Some(BlockKind::ToolCall { result_lines, .. }) = self
-            .rows
-            .iter_mut()
-            .find(|b| b.seq == target)
-            .map(Block::kind_mut)
+        self.rev += 1;
+        let rev = self.rev;
+        if let Some(row) = self.rows.iter_mut().find(|b| b.seq == target)
+            && let BlockKind::ToolCall { result_lines, .. } = &mut row.kind
         {
             *result_lines = Some(n);
+            row.rev = rev;
         }
-    }
-}
-
-impl Block {
-    fn kind_mut(&mut self) -> &mut BlockKind {
-        &mut self.kind
     }
 }
 

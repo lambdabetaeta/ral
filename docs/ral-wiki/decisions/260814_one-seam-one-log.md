@@ -92,7 +92,11 @@ rather than silently started empty; no migrator is written. `user.log`
 becomes a regenerable render of the fold's resident blocks, written whole at
 flush points and never patched — which also removes the old incremental
 tee's data-loss bug, where a truncate-and-rebuild past eviction silently
-deleted the session's own evicted transcript from disk.
+deleted the session's own evicted transcript from disk. Superseded 260816 by
+[[decisions/260816_the-window-is-not-the-transcript|the-window-is-not-the-transcript]]:
+a render of the *resident* window loses the same history at the other end,
+since past eviction it writes a tail and calls it the session. A block is now
+written once, when eviction drops it, into a prefix that only grows.
 
 ## What is deliberately not unified: live display
 

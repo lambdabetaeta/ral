@@ -97,23 +97,30 @@ finishes, keeping async children muted to their own log.
   caps before they ever enter the log. A directory with no `record.jsonl`
   refuses to resume, with a named error.
 
-The TUI renders a sibling `user.log` — the "user view" — as a regenerable
-render of the viewport's resident blocks, rewritten whole at flush points
-(session end, `/export`) and never patched in place; crash durability lives
-in `record.jsonl`, which is flushed per record. Both files live
-under the durable per-run log directory (`bootstrap::log_run_dir`,
+The TUI renders a sibling `user.log` — the "user view" — as a stream the
+viewport is a window over: a block is written once, when eviction drops it
+(`Viewport::enforce_window_caps`), into a retired prefix that only ever grows,
+and the blocks still resident are written past that prefix provisionally at
+flush points (session end, `/export`), which the next retirement rewinds over
+rather than repeating
+([[decisions/260816_the-window-is-not-the-transcript|the-window-is-not-the-transcript]]).
+So the file keeps the whole session however long it runs, while the window
+keeps only what fits; crash durability still lives in `record.jsonl`, which is
+flushed per record. Both files live under the durable per-run log directory
+(`bootstrap::log_run_dir`,
 `$XDG_STATE_HOME/exarch/<project>/<run>/sessions/<id>/`). Every touch of that
-file lives in one place: `tui/viewport.rs` keeps both the render writer
-(`open_log`) and the `/export` copy (`export_log`) beside each other, the
-single `user.log` I/O door, so the `/export` handler (`tui/commands.rs`,
-`resolve_export_path`) resolves and guards the destination but never reaches
-the filesystem itself.
+file lives in one place: `tui/viewport.rs` keeps both the writer (`Log`) and
+the `/export` copy (`export_log`) beside each other, the single `user.log` I/O
+door, so the `/export` handler (`tui/commands.rs`, `resolve_export_path`)
+resolves and guards the destination but never reaches the filesystem itself.
 
 On resume, a viewport is a fold's memo: `tui_loop::run` replays
 `record.jsonl` into `record::Blocks` before the worker spawns, seeds the
-root viewport with one `Printer::sync` call, and restores cumulative usage
+root viewport with one `Viewport::seed` call, and restores cumulative usage
 from the replayed deltas — the "resumed" note is the boundary between
-replayed history and the live session. For the running session the viewport
+replayed history and the live session. `seed` is `sync` plus the fact that
+the seeded window is already in `user.log`, written by the run that recorded
+it, so the resumed transcript continues rather than repeats. For the running session the viewport
 stays its own live accumulator, fed one `Signal` at a time: `tui_loop::dispatch`
 routes a `Signal::Fact` to `App::fact` (which steps the view fold and re-syncs)
 and a `Signal::Transient` to `App::transient` (drawn directly, with no fold
@@ -239,17 +246,24 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  Once `LINGER` elapses, `Tabs::tick` evicts the dead view into a `Tombstone`
  (`Viewport::evict_to_tombstone`) — exactly agent id, final status, and log
  path, everything else (blocks, the flatten, streaming buffers, pins)
- dropped; no reload-from-`user.log` machinery is built. Every live viewport
- also caps its own retained window — `VIEWPORT_MAX_BLOCKS` blocks and
+ dropped — but retired to `user.log` first, since the tombstone promises that
+ log is readable; no reload-from-`user.log` machinery is built. Every live
+ viewport also caps its own retained window — `VIEWPORT_MAX_BLOCKS` blocks and
  `VIEWPORT_MAX_ROWS` rendered rows, oldest evicted first — since older
- blocks are already durable in the session's `record.jsonl`. That cap is
- presentational, on top of the one bound the view fold itself keeps:
- `BLOCKS_WINDOW` resident rows (`record/view.rs`), oldest dropped as new ones
- land, so the memo every printer syncs from is bounded once rather than
- trimmed per printer. A printer that draws incrementally instead of
- wholesale holds its own cursor by `Seq` identity (`Headless::sync_agent`) —
- the memo keeps no cursor of anyone else's, since a windowed memo makes an
- index wrong and a flush-gated floor makes the window never move.
+ blocks are durable in the session's `record.jsonl` and in `user.log` by the
+ time they go. That cap is presentational, on top of the one bound the view
+ fold itself keeps: `BLOCKS_WINDOW` resident rows (`record/view.rs`), oldest
+ dropped as new ones land, so the memo every printer syncs from is bounded
+ once rather than trimmed per printer. A printer that draws incrementally
+ instead of wholesale holds its own cursor by `Seq` identity
+ (`Headless::sync_agent`) — the memo keeps no cursor of anyone else's, since a
+ windowed memo makes an index wrong and a flush-gated floor makes the window
+ never move. `Viewport::sync` draws wholesale but rebuilds incrementally: the
+ fold stamps every row with the revision it last moved at (`Block::rev`), and
+ the printer rebuilds from the first row past the revision it last synced
+ (`Viewport::rebuild_floor`), carrying every block below over whole. Rows this
+ viewport's own window has already evicted (`Viewport::evicted_through`) are
+ never built again to be dropped again.
  `/clear` also cancels the in-flight exchange: `route_submit` raises
  `cancel::raise_interrupt` and cascades `agents.cancel_descendants(root)` *before* blanking
  the viewport, so the streaming `select!` in `provider::complete` unwinds within
@@ -349,7 +363,7 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/tui_loop.rs` — REPL/ui loop: `run`, `Tui`, `CommandCtx`, `ReplControl`, `ui_loop`, `OverlayTick`, `overlay_tick`, `KeyAction`, `key_action`, `ctrl_key`
         - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch, `compose_in_editor`
         - `tui/tabs.rs` — session/view lifecycle: `Tabs`, viewports, dispatch order, tabs, titles, dying linger, parent chain, focus management, `tick`'s tombstone eviction past `LINGER`
-        - `tui/viewport.rs` — per-session scrollback: `Viewport`, block push/flatten/render, the `VIEWPORT_MAX_BLOCKS`/`VIEWPORT_MAX_ROWS` window caps (oldest evicted first), `Tombstone`
+        - `tui/viewport.rs` — per-session scrollback: `Viewport`, block push/flatten/render, incremental `Printer::sync` (`rebuild_floor`, `evicted_through`), the `VIEWPORT_MAX_BLOCKS`/`VIEWPORT_MAX_ROWS` window caps (oldest evicted first, retired to `user.log` on the way out), the `Log` transcript writer, `Tombstone`
         - `record/commit.rs` — event coalescing, worker-side: `Stream`/`Chopper`, `SurfaceBuffer`, `PatchBuf`, `ObservationBuf`, absorb/flush into `Display` commits
         - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input
         - `tui/gesture.rs` — mouse/selection: `GestureState`, `Press`, frame geometry, selection, copy toast, hover, scroll

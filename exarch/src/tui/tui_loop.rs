@@ -25,7 +25,7 @@ use crate::{
         credential::CredentialStore,
         models::{LiveSource, ModelCatalog},
     },
-    record::{Emitter as Recorder, Printer},
+    record::Emitter as Recorder,
 };
 use std::sync::mpsc::TryRecvError;
 
@@ -220,7 +220,7 @@ pub fn run(
         tui.app.total_usage.input = blocks.input_tokens();
         tui.app.total_usage.output = blocks.output_tokens();
         if let Some(vp) = tui.app.tabs.viewport_mut(session.id) {
-            vp.sync(&blocks);
+            vp.seed(&blocks);
         }
         // The boundary itself is chrome, never recorded: a second resume must
         // not replay a prior resume's note as if it were history.
