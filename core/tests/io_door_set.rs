@@ -211,10 +211,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("exarch/src/egress.rs", "io-door:silent:net-audit"),
     ("exarch/src/agent/event.rs", "io-door:silent:record-file"),
     ("exarch/src/agent/event.rs", "io-door:silent:session-dir"),
-    (
-        "exarch/src/record/log.rs",
-        "io-door:silent:record-file",
-    ),
+    ("exarch/src/record/log.rs", "io-door:silent:record-file"),
     (
         "exarch/src/record/model.rs",
         "io-door:silent:model-fold-crash-quarantine",

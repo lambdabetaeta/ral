@@ -725,8 +725,8 @@ mod tests {
             },
         );
 
-        let fo = FOValue::try_from(&obs.to_wire())
-            .expect("to_wire scrubs every leaf try_from rejects");
+        let fo =
+            FOValue::try_from(&obs.to_wire()).expect("to_wire scrubs every leaf try_from rejects");
         let json = serde_json::to_vec(&fo).expect("serialise FOValue");
         let back_fo: FOValue = serde_json::from_slice(&json).expect("deserialise FOValue");
         let back = Observation::from_value(&Value::from(back_fo)).expect("the wire form decodes");

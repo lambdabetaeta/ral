@@ -264,8 +264,7 @@ impl LexErrorKind {
     pub fn message(&self) -> String {
         match self {
             Self::UnterminatedString { form, inner, .. } => {
-                let mut msg =
-                    format!("unterminated {form}: expected closing `{}`", form.closing());
+                let mut msg = format!("unterminated {form}: expected closing `{}`", form.closing());
                 if let Some(inner) = inner {
                     msg.push_str("; nested ");
                     msg.push_str(&inner.message());
