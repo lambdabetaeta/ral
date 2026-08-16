@@ -253,7 +253,7 @@ fn a_firehose_into_a_non_reading_consumer_terminates() {
     let script = format!(
         r#"
         let n = !{{ within [env: [{FIREHOSE_ENV}: yes]] {{
-            '{helper}' --exact firehose_writer_helper --nocapture
+            {helper} --exact firehose_writer_helper --nocapture
         }} | !{{ return 5 }} }}
         echo $n
         "#,
