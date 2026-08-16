@@ -211,10 +211,15 @@ log with no independent sibling.
   and the whitespace-partition rule go; a block's `Seq` stays the one it
   opened with, so a reveal dial survives the growth. The printer keeps only
   the open line — the text past the last newline — because the worker cut at
-  that same newline: block and seat are complementary by one shared rule
-  rather than by an invariant either side could drift from, and all of
-  `Unaccounted` deletes. The answer reads as prose while it streams instead
-  of as a size bar. The general lesson: if a producer's cut has to be
+  that same newline, and all of `Unaccounted` deletes. There is then one
+  rendering path rather than two: `Viewport::live_tail` draws the open line
+  *inside* the block that will absorb it, in that block's own ink, so the
+  record that completes the line changes the text and not the picture, and
+  the markdown context the line sits in is the block's own. Prose ends the
+  reasoning run on the printer's side exactly as it does on the worker's, so
+  at most one lane is ever open and the live tail is unambiguous. The answer
+  reads as prose while it streams, and reasoning as reasoning, instead of as
+  size bars. The general lesson: if a producer's cut has to be
   meaningful, ask first whether the consumer could simply put the pieces back
   together.
 

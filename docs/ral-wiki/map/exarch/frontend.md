@@ -179,17 +179,25 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    in scrollback as it is spoken, a line at a time, in one block per run.
    Where a cut falls therefore carries no meaning, which is what frees the
    producer from ever having to find a safe place to break. What no record
-   covers is exactly the text past the last newline: `Viewport::streaming_seat`
-   draws that open line as a single trailing row on the markdown rail, and
-   `Viewport::thinking_seat` does the same for reasoning, seated *above* the
-   answer's. Block text and open line are complementary by that one rule —
-   both sides split at the same newline — so the printer counts nothing and
-   retires nothing; `Transient::Boundary` merely drops whatever either lane
-   left open, which by then no record will cover. Reasoning flushes its tail
-   where the prose after it resumes (`record::commit::Stream`), never at the
-   step's end, which is exactly where a `∴` block must not land. Its grain
-   header weighs the run against the prose it became, which the record cannot
-   carry (it precedes it) and the view therefore measures: `viewport::answer_run`
+   covers is exactly the text past the last newline, and `Viewport::live_tail`
+   renders that open line *inside the block that will absorb it*: the trailing
+   block's own source plus the open line plus the newline it is about to gain,
+   in that block's own `Fidelity`, drawn through the one path a committed
+   block draws by — so the record that completes the line changes the text and
+   not the picture, and the markdown context the line sits in (an open fence,
+   a list) is the block's own. The absorbed block's rows come off the
+   flattened tail and are redrawn whole; what is on screen is the authority,
+   which agrees with the fold because both are "the run of records of one
+   lane". At most one lane is ever open: prose ends the reasoning run on the
+   printer's side exactly as it does on the worker's, so `Transient::Token`
+   clears the trace's open line as `Stream::push` flushes the trace lane, and
+   `Transient::Boundary` clears whatever is left when no record will cover it.
+   Reasoning therefore streams as reasoning — dimmed through
+   `md::render_reasoning`, on the `∴` rail — rather than as a magnitude, and
+   its tail records where the prose after it resumes, never at the step's end,
+   which is exactly where a `∴` block must not land. Its grain header weighs
+   the run against the prose it became, which the record cannot carry (it
+   precedes it) and the view therefore measures: `viewport::answer_run`
    reads the unbroken answer run that follows each `∴` row. A thinking block has two rungs only — its
    grain header, or the whole trace — the dial hopping over `Context`
    (`Block::rung_up`/`rung_down`), which for a trace would be a dead detent.

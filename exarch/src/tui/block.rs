@@ -463,8 +463,18 @@ impl Block {
         }
     }
 
-    pub(super) fn is_markdown(&self) -> bool {
-        matches!(self.kind, BlockKind::Markdown { .. })
+    /// [`Self::markdown_src`] for the reasoning lane.
+    pub(super) fn thinking_src(&self) -> Option<&str> {
+        match &self.kind {
+            BlockKind::Thinking(t) => Some(&t.text),
+            _ => None,
+        }
+    }
+
+    /// The epistemic signal this block was built with — what a live tail
+    /// re-renders under, so growing prose keeps the ink it commits in.
+    pub(super) fn fidelity(&self) -> Fidelity {
+        self.fidelity
     }
 
     pub(super) fn is_thinking(&self) -> bool {

@@ -14,7 +14,7 @@
 
 use super::block::{AgentSlot, Block, RailShape, Reveal, append_visual_rows};
 use super::group;
-use super::line::{is_blank, plain, wrap_line};
+use super::line::{is_blank, plain};
 use super::palette::READ_W;
 use super::rail::{self, RailKind};
 use super::select::plain_slice;
@@ -27,7 +27,7 @@ use crate::bus::card::{
 use crate::provider::Usage;
 use crate::record::{self, BlockId, Blocks, Fold as _, Printer, Seq, Transient};
 use ral_core::types::{Observation, Observed};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -641,44 +641,80 @@ impl Viewport {
 
     // ── rendering ────────────────────────────────────────────────────────
 
-    fn trailing_markdown_start(&self) -> Option<usize> {
-        let start = self
-            .blocks
-            .iter()
-            .rposition(|e| !e.block.is_markdown() && !e.block.is_thinking())
-            .map_or(0, |i| i + 1);
-        self.blocks
-            .get(start)
-            .is_some_and(|e| e.block.is_markdown())
-            .then_some(start)
-    }
-
-    /// The trailing seat for the in-flight response: the answer's open line,
-    /// on the rail the block it will join wears, so the newest words read in
-    /// place while the transcript above stays a finished image.
-    fn streaming_seat(&self) -> Option<Line<'static>> {
-        (!self.answer.is_empty()).then(|| {
-            Line::from(vec![
-                rail::span(RailKind::Markdown, self.agent, None),
-                Span::raw(self.answer.clone()),
-            ])
-        })
-    }
-
-    /// [`Self::streaming_seat`]'s twin for [`Self::reasoning`], seated above
-    /// it — a reasoning run precedes the prose it deliberated into.
+    /// The tail as it reads right now: the lane's open line rendered *inside*
+    /// the block that will absorb it, together with the count of flattened
+    /// rows standing above it.
     ///
-    /// A *second* run inside one step — reasoning resumed after prose — seats
-    /// above that prose too while both lines are open, which is the one place
-    /// the two seats can read out of order; it costs a line's position for a
-    /// moment, and both lanes record in arrival order regardless.
-    fn thinking_seat(&self) -> Option<Line<'static>> {
-        (!self.reasoning.is_empty()).then(|| {
-            Line::from(vec![
-                rail::span(RailKind::Thinking, self.agent, None),
-                Span::raw(self.reasoning.clone()),
-            ])
-        })
+    /// One rendering path serves the live text and the committed text, because
+    /// they are the same block — the open line is simply the part of it no
+    /// record covers yet.  So the markdown context the line sits inside (an
+    /// open fence, a list) is the block's own, and the record that completes
+    /// the line changes the text without changing the picture.
+    fn live_tail(&self, width: u16) -> (usize, Vec<Line<'static>>) {
+        let all = self.flat.rows.len();
+        let answering = !self.answer.is_empty();
+        let open = if answering {
+            &self.answer
+        } else {
+            &self.reasoning
+        };
+        if open.is_empty() {
+            return (all, Vec::new());
+        }
+        // The block the line continues: the one already drawn at the tail,
+        // when it is this lane's.  What is on screen is the authority — this
+        // splice and the fold's rule for growing a block must agree, and they
+        // do, both being "the run of records of one lane".
+        //
+        // Rendered with the newline the line is about to gain, since markdown
+        // reads an unterminated last line differently from a whole one, and
+        // in the ink its own block already carries, so the record that lands
+        // changes the text and nothing else.
+        let tail = self.blocks.last().map(|e| &e.block);
+        let joins = tail.and_then(if answering {
+            Block::markdown_src
+        } else {
+            Block::thinking_src
+        });
+        let text = format!("{}{open}\n", joins.unwrap_or_default());
+        let mut block = if answering {
+            let ink = tail.map(Block::fidelity).unwrap_or_default();
+            Block::markdown(text, ink)
+        } else {
+            // No prose has followed the run yet — that is what makes it live.
+            Block::thinking(text, 0)
+        };
+        // The absorbed block's own rows come off the flattened tail: it is
+        // about to be drawn again, whole.
+        let above = self.blocks.len().wrapping_sub(1);
+        let keep = match joins {
+            Some(_) => self
+                .flat
+                .row_block
+                .iter()
+                .rposition(|&b| b != above)
+                .map_or(0, |i| i + 1),
+            None => all,
+        };
+        let prev = self
+            .blocks
+            .len()
+            .checked_sub(usize::from(joins.is_some()) + 1)
+            .map(|i| &self.blocks[i].block);
+        let content_w = width.min(READ_W);
+        let lead = opens_rail_run(prev, &block);
+        let lines = block.lines(content_w, self.agent, lead).to_vec();
+        // A segment's leading blanks collapse against an already-blank tail,
+        // exactly as they do in the flatten above.
+        let mut first = 0;
+        if self.flat.rows[..keep].last().is_some_and(is_blank) {
+            while first < lines.len() && is_blank(&lines[first]) {
+                first += 1;
+            }
+        }
+        let mut out: Vec<Line<'static>> = Vec::new();
+        append_visual_rows(&mut out, &lines[first..], content_w, false, None);
+        (keep, out)
     }
 
     /// The visible slice at `width` × `height`.  While `sticky`, `offset` is
@@ -686,22 +722,8 @@ impl Viewport {
     /// re-arms once it reaches the bottom.
     pub(super) fn render_window(&mut self, width: u16, height: usize) -> RenderWindow {
         self.reflow(width);
-        // Wrapped at the reading width the blocks above are laid out to: an
-        // open line is a whole paragraph as often as not, and it must read
-        // where it stands rather than run off the right edge.
-        let mut seat: Vec<Line<'static>> = self
-            .thinking_seat()
-            .into_iter()
-            .chain(self.streaming_seat())
-            .flat_map(|line| wrap_line(&line, usize::from(width.min(READ_W))))
-            .collect();
-        let committed = self.flat.rows.len();
-        // Following a non-markdown block, the streaming seat opens a fresh run,
-        // so it wears the blank separator a committing lead paragraph would.
-        if !seat.is_empty() && self.trailing_markdown_start().is_none() && committed > 0 {
-            seat.insert(0, Line::default());
-        }
-        let total = committed + seat.len();
+        let (committed, tail) = self.live_tail(width);
+        let total = committed + tail.len();
         let max_off = total.saturating_sub(height);
         if self.sticky {
             self.offset = max_off;
@@ -715,11 +737,9 @@ impl Viewport {
         )]
         let scroll_pct =
             (max_off > 0).then(|| (self.offset.min(max_off) * 100 / max_off).min(100) as u16);
-        let lines: Vec<Line<'static>> = self
-            .flat
-            .rows
+        let lines: Vec<Line<'static>> = self.flat.rows[..committed]
             .iter()
-            .chain(&seat)
+            .chain(&tail)
             .skip(self.offset)
             .take(height)
             .cloned()
@@ -898,8 +918,13 @@ impl Printer for Viewport {
     /// `App::transient` intercepts and answers them itself, ahead of this call.
     fn transient(&mut self, t: &Transient) {
         match t {
+            // Prose ends the reasoning run, on this side exactly as on the
+            // worker's: the run's tail records where the prose begins, so the
+            // line it left open is covered by then, and at most one lane is
+            // ever open at once.
             Transient::Token(text) => {
                 self.note_streamed(text.chars().count());
+                self.reasoning.clear();
                 carry(&mut self.answer, text);
             }
             Transient::Thinking(text) => {
@@ -1294,101 +1319,81 @@ mod tests {
         assert!(vp.pins().is_empty(), "reset wipes the register");
     }
 
-    /// The open line renders as text where its block will be, and the record
-    /// that completes it takes it over: block and seat are complementary, so
-    /// the reader sees each word once.
+    /// The open line reads inside the block it will join, and the record that
+    /// completes it changes the text without changing the picture — the one
+    /// claim that says live and committed are the same rendering.
     #[test]
-    fn the_open_line_seats_as_text_until_its_record_lands() {
+    fn the_record_that_completes_a_line_does_not_change_the_picture() {
         use crate::record::{Blocks, Display, Fold, Record, Recorded, Seq, Stamp, View};
 
         let mut vp = viewport();
-        vp.transient(&Transient::Token("```ral\nlet x = 1".into()));
-
-        let w = vp.render_window(READ_W, 24);
-        let seat_line = w.lines.last().expect("a seat row while streaming");
-        // Read off the spans, since `plain` would strip the rail glyph.
-        assert_eq!(
-            seat_line.spans.first().map(|s| s.content.as_ref()),
-            Some("· "),
-            "the seat wears the rail of the block it will join",
-        );
-        assert_eq!(
-            plain(seat_line),
-            "let x = 1",
-            "the seat holds the line no record covers, and only that line"
-        );
-
-        // The worker records the line it completed; the printer's own newline
-        // rule opens the next one.
         let mut memo = Blocks::default();
-        let stamp = Stamp::new(Seq::new(1), 0..0);
-        View::step(
-            &mut memo,
-            &Recorded::new(
-                stamp,
-                Record::Display(Display::Answer {
-                    text: "```ral\n".into(),
-                }),
-            ),
-        )
-        .expect("a display-only fold never refuses");
-        vp.sync(&memo);
+        let land = |vp: &mut Viewport, memo: &mut Blocks, seq: u64, text: &str| {
+            View::step(
+                memo,
+                &Recorded::new(
+                    Stamp::new(Seq::new(seq), 0..0),
+                    Record::Display(Display::Answer { text: text.into() }),
+                ),
+            )
+            .expect("a display-only fold never refuses");
+            vp.sync(memo);
+        };
 
-        vp.transient(&Transient::Token("\nlet y = 2".into()));
-        View::step(
-            &mut memo,
-            &Recorded::new(
-                Stamp::new(Seq::new(2), 0..0),
-                Record::Display(Display::Answer {
-                    text: "let x = 1\n".into(),
-                }),
-            ),
-        )
-        .expect("a display-only fold never refuses");
-        vp.sync(&memo);
-
-        let w = vp.render_window(READ_W, 24);
-        let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        // A fence opens and a line of code streams: the fence is recorded, the
+        // line is still open.
+        vp.transient(&Transient::Token("```ral\nlet x = 1".into()));
+        land(&mut vp, &mut memo, 1, "```ral\n");
+        let live = format!("{:?}", vp.render_window(READ_W, 24).lines);
         assert!(
-            all.matches("let x = 1").count() == 1,
-            "the recorded line reads once, in its block: {all:?}"
+            plain(vp.render_window(READ_W, 24).lines.last().expect("a row")).contains("let x = 1"),
+            "the open line reads where its block will hold it"
         );
+
+        // Its record lands and the printer's own newline rule closes it.
+        vp.transient(&Transient::Token("\n".into()));
+        land(&mut vp, &mut memo, 2, "let x = 1\n");
         assert_eq!(
-            plain(w.lines.last().expect("a seat row")),
-            "let y = 2",
-            "the seat has moved on to the line now open"
+            format!("{:?}", vp.render_window(READ_W, 24).lines),
+            live,
+            "the record changed the text and not the picture"
         );
     }
 
-    /// A live reasoning line seats above the answer's, and the step's boundary
-    /// clears whatever either lane left open.
+    /// At most one lane is ever open, because prose ends the reasoning run on
+    /// the printer's side exactly as it does on the worker's — and the step's
+    /// boundary clears whatever is left.
     #[test]
-    fn live_thinking_seats_above_the_answer_and_the_boundary_clears_both() {
+    fn prose_ends_the_open_reasoning_line_and_the_boundary_clears_both() {
         let mut vp = viewport();
         vp.transient(&Transient::Thinking("considering the shape".into()));
-        vp.transient(&Transient::Token("First words".into()));
 
         let w = vp.render_window(READ_W, 24);
         let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
         assert!(
-            all.contains("considering the shape") && all.contains("First words"),
-            "each lane seats the line it has open: {all:?}"
+            all.contains("considering the shape"),
+            "the reasoning's open line reads on its own rail: {all:?}"
         );
-        let thinking = rail_rows(&w.lines, "∴ ");
-        let answer = rail_rows(&w.lines, "· ");
-        assert_eq!(thinking.len(), 1, "the reasoning wears its own live rail");
-        assert_eq!(answer.len(), 1, "the answer wears its own live rail");
+        assert_eq!(
+            rail_rows(&w.lines, "∴ ").len(),
+            1,
+            "and wears the reasoning rail: {all:?}"
+        );
+
+        vp.transient(&Transient::Token("First words".into()));
+        let w = vp.render_window(READ_W, 24);
+        let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
         assert!(
-            thinking[0] < answer[0],
-            "reasoning seats ahead of the answer"
+            !all.contains("considering the shape") && all.contains("First words"),
+            "prose closed the run, whose tail the worker recorded at the same delta: {all:?}"
         );
 
         vp.transient(&Transient::Boundary);
         let w = vp.render_window(READ_W, 24);
         let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
         assert!(
-            !all.contains("considering the shape") && !all.contains("First words"),
-            "no seat outlives the step it was reading: {all:?}"
+            !all.contains("First words"),
+            "no open line outlives the step it was read from: {all:?}"
         );
     }
 
