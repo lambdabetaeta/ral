@@ -474,7 +474,7 @@ derived at the edge that owns the renderer.** Concretely:
    so `record.jsonl` records how the worker settled, not just the ink.
    (`DoneOutcome` already exists and already decodes; only the `Kind` flattens
    it away.) Landed as `Surface::Done`/`Surface::Io`
-   (`dev/docs/plans/260814_kind_dissolves.md`), decoded once and never
+   ([[decisions/260814_a-trace-is-a-fold|a-trace-is-a-fold]]), decoded once and never
    through `transcript.jsonl`, which is since deleted.
 2. **Notices become a pushed surface class** *(landed, with one residue)*.
    The engine runs its own ready-boundary housekeeping:

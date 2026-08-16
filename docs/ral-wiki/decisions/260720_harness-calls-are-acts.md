@@ -153,7 +153,7 @@ Two consequences, both load-bearing:
   long-form sentence is for the model, and it is the model's only copy.
 - **`HarnessResult` is not deleted from the bus.** It still rides `Kind` to the
   live display; `agent/transcript.rs` (since deleted,
-  `dev/docs/plans/260814_kind_dissolves.md`) is no longer the forensic trace
+  [[decisions/260814_a-trace-is-a-fold|a-trace-is-a-fold]]) is no longer the forensic trace
   that kept it — `record.jsonl`'s own `Display`/`Forensic` commits are. Only
   the TUI's consumption of it — the fake line count — goes away.
 

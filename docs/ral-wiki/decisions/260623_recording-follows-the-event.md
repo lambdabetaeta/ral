@@ -4,7 +4,7 @@ status: accepted
 
 # Recording follows the event, not its emitter
 
-**Amended by `dev/docs/plans/260814_kind_dissolves.md`**: `transcript.jsonl`,
+**Amended by [[decisions/260814_a-trace-is-a-fold|a-trace-is-a-fold]]**: `transcript.jsonl`,
 the second record this page mints, is deleted outright rather than folded —
 its one genuinely unique field, a per-line clock, becomes `record.jsonl`'s
 own `Entry.at_unix_ms`. The "recording follows the event, not its emitter"

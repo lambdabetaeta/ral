@@ -143,7 +143,7 @@ bus emit seam outside these parcels' boundary, and says so in its own
 header. The 260623 debt is therefore paid for the durable log and for
 resume, and open for live display and the transcript.
 
-**Superseded**: `dev/docs/plans/260814_kind_dissolves.md` deletes
+**Superseded**: [[decisions/260814_a-trace-is-a-fold|a-trace-is-a-fold]] deletes
 `transcript.jsonl` outright rather than folding it — its three genuinely
 unique facts move elsewhere (`Entry.at_unix_ms` per record, a child's own
 `SessionStarted`/`SessionEnded` for `born`/`died`, `stop_reason` already on

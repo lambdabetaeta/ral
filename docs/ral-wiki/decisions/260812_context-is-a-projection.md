@@ -128,7 +128,7 @@ and the fold can reconstruct the edit.
 
 `transcript.jsonl` remained the operational projection for a user-facing
 trace, and was not a second model state — until
-`dev/docs/plans/260814_kind_dissolves.md` deleted it outright, paying the
+[[decisions/260814_a-trace-is-a-fold|a-trace-is-a-fold]] deleted it outright, paying the
 unification debt in full rather than keeping the two records. The amended
 recording ADR names the rent this page had assumed would persist.
 
