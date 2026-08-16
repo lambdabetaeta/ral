@@ -453,9 +453,16 @@ pub(crate) fn fs_capability_name(canonical: &Path, kind: GrantKind) -> String {
 
 /// Ensure the persistent ACE for `(canonical, kind)` under `sid_str` — the
 /// SID [`fs_capability_name`] derives to — and, for a read-write grant, the
-/// mandatory label alongside it (see [`ensure_low_integrity_label`]). Skipped
-/// only when both witnesses hold: the stamp store records a completed
-/// propagation, and the root's own DACL still carries the ACE. `cancel` is
+/// mandatory label alongside it (see [`ensure_low_integrity_label`]).
+///
+/// A read-write grant is two mutations, so each answers for itself and
+/// neither may speak for the other: the label is asked *before* the ACE's
+/// witness is consulted, since a witness that only knows the DACL would
+/// otherwise wave through as complete a grant some earlier ral stamped when
+/// the label half did not yet exist — and, nothing here reverting, that path
+/// would stay unwritable for good with no witness able to say why. The ACE's
+/// own skip stands when both of its witnesses hold: the stamp store records a
+/// completed propagation, and the root's own DACL still carries it. `cancel` is
 /// polled at entry, which is as fine-grained as this gets: each stamp is a
 /// single `SetNamedSecurityInfoW`, not interruptible from here — but under
 /// this scheme every stamp runs once per `(path, kind)` ever, not once per
@@ -477,6 +484,13 @@ pub(crate) fn ensure_fs_grant(
             reason: format!("metadata: {e}"),
         })?
         .is_dir();
+    // A capability ACE alone cannot admit the write: the mandatory-integrity
+    // check runs first, and a `Low`-IL child clears it only if the object's
+    // own label is `Low` or below. Read-only and deny grants need no label —
+    // `Low` already reads `Medium` under the default no-write-up-only policy.
+    if kind == GrantKind::ReadWrite {
+        ensure_low_integrity_label(canonical, inheritable)?;
+    }
     let key = stamp_key(canonical, kind);
     if stamp_recorded(&key) && capability_ace_present(canonical, sid_str, kind, inheritable) {
         return Ok(());
@@ -491,14 +505,6 @@ pub(crate) fn ensure_fs_grant(
         inheritable,
         kind.ace_type(),
     )?;
-    if kind == GrantKind::ReadWrite {
-        // A capability ACE alone cannot admit the write: the mandatory-
-        // integrity check runs first, and a `Low`-IL child clears it only if
-        // the object's own label is `Low` or below. Read-only and deny grants
-        // need no label — `Low` already reads `Medium` under the default
-        // no-write-up-only policy.
-        ensure_low_integrity_label(canonical, inheritable)?;
-    }
     // Apply, then record: dying between the two leaves no witness, and the
     // next grant re-runs a propagation that is idempotent by construction.
     record_stamp(&key)
@@ -506,7 +512,8 @@ pub(crate) fn ensure_fs_grant(
 
 /// The mandatory-label half of a read-write grant, stamped and witnessed the
 /// same way [`ensure_fs_grant`] treats the capability ACE — its own stamp-key
-/// namespace, so the two mutations' idempotency never entangles.
+/// namespace, so the two mutations' idempotency never entangles, and its own
+/// probe, so a label removed or never stamped is seen whatever the DACL says.
 fn ensure_low_integrity_label(canonical: &Path, inheritable: bool) -> Result<(), DaclError> {
     let key = label_stamp_key(canonical);
     if stamp_recorded(&key) && low_integrity_label_present(canonical, inheritable) {
