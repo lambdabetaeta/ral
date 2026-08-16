@@ -242,7 +242,14 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  dropped; no reload-from-`user.log` machinery is built. Every live viewport
  also caps its own retained window — `VIEWPORT_MAX_BLOCKS` blocks and
  `VIEWPORT_MAX_ROWS` rendered rows, oldest evicted first — since older
- blocks are already durable in the session's `record.jsonl`.
+ blocks are already durable in the session's `record.jsonl`. That cap is
+ presentational, on top of the one bound the view fold itself keeps:
+ `BLOCKS_WINDOW` resident rows (`record/view.rs`), oldest dropped as new ones
+ land, so the memo every printer syncs from is bounded once rather than
+ trimmed per printer. A printer that draws incrementally instead of
+ wholesale holds its own cursor by `Seq` identity (`Headless::sync_agent`) —
+ the memo keeps no cursor of anyone else's, since a windowed memo makes an
+ index wrong and a flush-gated floor makes the window never move.
  `/clear` also cancels the in-flight exchange: `route_submit` raises
  `cancel::raise_interrupt` and cascades `agents.cancel_descendants(root)` *before* blanking
  the viewport, so the streaming `select!` in `provider::complete` unwinds within

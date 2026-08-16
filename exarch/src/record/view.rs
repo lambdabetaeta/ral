@@ -128,18 +128,19 @@ struct UsageTotal {
     output: u64,
 }
 
-/// Past this many resident rows, the oldest already-flushed ones are
-/// dropped — replacing the old per-printer `SYNC_WINDOW`, so a live memo is
-/// bounded once for every printer rather than trimmed per call.  Nothing
-/// before [`Blocks::rendered_through`] is ever evicted, so a flush never
-/// loses a row it has not yet rendered.
+/// Past this many resident rows, the oldest are dropped — the one window
+/// that bounds this fold for every printer, rather than a trim each printer
+/// repeats.  A printer that renders incrementally holds its own cursor by
+/// [`Seq`] identity, so the memo owes it no unrendered tail: it owes it only
+/// the slack this window leaves between two of its syncs.
 const BLOCKS_WINDOW: usize = 1000;
 
-/// The view fold's memo: every commit and drawn breadcrumb this session has
-/// recorded, in log order, windowed once flushed.
+/// The view fold's memo: the last [`BLOCKS_WINDOW`] commits and drawn
+/// breadcrumbs this session has recorded, in log order.
 ///
 /// A printer's own window ([`VIEWPORT_MAX_BLOCKS`](crate::tui) and friends)
 /// stays a second, purely presentational trim on top of this one.
+#[derive(Default)]
 pub struct Blocks {
     rows: Vec<Block>,
     usage: UsageTotal,
@@ -149,25 +150,10 @@ pub struct Blocks {
     /// has no entry here.  A printer wanting the opening model too must read
     /// it off the model fold's own memo; this fold does not duplicate it.
     model: Option<(String, String)>,
-    /// The highest [`Seq`] a flush has already rendered to `user.log` —
-    /// [`Self::render_since`]'s cursor, and the floor eviction never crosses.
-    rendered_through: Seq,
     /// The [`Seq`] of the first row this fold ever held, remembered past
     /// eviction — the door [`Self::rows`] no longer names once the window
     /// has moved off the session's opening row.
     origin: Option<Seq>,
-}
-
-impl Default for Blocks {
-    fn default() -> Self {
-        Self {
-            rows: Vec::new(),
-            usage: UsageTotal::default(),
-            model: None,
-            rendered_through: Seq::new(0),
-            origin: None,
-        }
-    }
 }
 
 impl Blocks {
@@ -212,35 +198,11 @@ impl Blocks {
         out
     }
 
-    /// Render every row since the last flush and advance
-    /// [`Self::rendered_through`] to cover it — what a printer's append-only
-    /// `user.log` writes each commit.  Appending this is *equal* to
-    /// rendering the whole resident window, which is the regenerability
-    /// identity [`Self::render_log`] states as an invariant made testable.
-    pub fn render_since(&mut self) -> String {
-        let mut out = String::new();
-        let mut through = self.rendered_through;
-        for block in &self.rows {
-            if block.seq > self.rendered_through {
-                render_block_text(&mut out, block.kind());
-                through = block.seq;
-            }
-        }
-        self.rendered_through = through;
-        self.evict();
-        out
-    }
-
-    /// Drop the oldest resident rows past [`BLOCKS_WINDOW`], never crossing
-    /// [`Self::rendered_through`] — a row a flush has not yet rendered is
-    /// never lost to eviction.
+    /// Drop the oldest resident rows past [`BLOCKS_WINDOW`], as each row
+    /// lands — the fold's whole bound, and unconditional, since no cursor of
+    /// another's lives here to hold the floor down.
     fn evict(&mut self) {
-        while self.rows.len() > BLOCKS_WINDOW
-            && self
-                .rows
-                .first()
-                .is_some_and(|b| b.seq <= self.rendered_through)
-        {
+        while self.rows.len() > BLOCKS_WINDOW {
             let _ = self.rows.remove(0);
         }
     }
@@ -562,25 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn render_since_over_a_fresh_memo_equals_render_log() {
-        let mut memo = Blocks::default();
-        for i in 1..=5u64 {
-            push(&mut memo, i, &format!("line {i}"));
-        }
-        assert_eq!(memo.render_since(), memo.render_log());
-    }
-
-    #[test]
-    fn a_second_flush_renders_only_the_rows_since_the_first() {
-        let mut memo = Blocks::default();
-        push(&mut memo, 1, "one");
-        let _ = memo.render_since();
-        push(&mut memo, 2, "two");
-        assert_eq!(memo.render_since(), "two\n");
-    }
-
-    #[test]
-    fn eviction_never_crosses_the_flush_cursor() {
+    fn the_window_bounds_the_fold_as_rows_land() {
         let mut memo = Blocks::default();
         let total = BLOCKS_WINDOW + 50;
         for i in 1..=total {
@@ -588,15 +532,18 @@ mod tests {
         }
         assert_eq!(
             memo.rows().len(),
-            total,
-            "nothing is flushed yet, so nothing may be evicted"
-        );
-        let rendered = memo.render_since();
-        assert_eq!(rendered.lines().count(), total);
-        assert_eq!(
-            memo.rows().len(),
             BLOCKS_WINDOW,
-            "past the window, only rows already flushed evict"
+            "the window binds while rows land, with no flush to wait on"
+        );
+        assert_eq!(
+            memo.rows().first().map(|b| b.seq),
+            Some(Seq::new(51)),
+            "the oldest rows go first"
+        );
+        assert_eq!(
+            memo.origin(),
+            Some(Seq::new(1)),
+            "the session's opening row is remembered past its eviction"
         );
     }
 }

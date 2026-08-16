@@ -1885,8 +1885,7 @@ mod tests {
         vp.push_chrome(RailShape::Plain, vec![Line::from("anchored on first")]);
         assert_eq!(vp.chrome.len(), 1);
 
-        // Flushing and pushing past the fold's own window evicts `first`.
-        let _ = memo.render_since();
+        // Pushing past the fold's own window evicts `first`.
         for i in 0..1100 {
             advance(
                 &mut memo,
