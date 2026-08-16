@@ -10,7 +10,7 @@
 //! steps the fold beside the viewport and re-syncs [`Self::blocks`] wholesale
 //! from it, and [`Printer::transient`] draws whatever is live-only —
 //! [`Self::push_chrome`], the chrome lane's door, and [`Self::push_thinking`],
-//! the raw buffer a reasoning delta grows behind a magnitude seat.
+//! which grows the volume a reasoning delta's magnitude seat reads.
 
 use super::block::{AgentSlot, Block, RailShape, Reveal, append_visual_rows};
 use super::group;
@@ -68,6 +68,69 @@ impl Tombstone {
     }
 }
 
+/// The volume of a live stream that no commit has accounted for yet — what a
+/// seat projects while the text it measures is still in flight.  A seat draws
+/// a magnitude and never the characters, so the printer keeps the figure and
+/// lets the text go.
+///
+/// Lines are counted as [`str::lines`] counts them: a delta ending mid-line
+/// and the delta continuing it share the line they share.
+#[derive(Clone, Copy, Default)]
+struct Unaccounted {
+    /// Lines a newline has closed.
+    closed: u32,
+    /// Whether a line stands open at the stream's edge.  [`str::lines`] counts
+    /// it, so the magnitude does too; but the next delta continues it rather
+    /// than opening another, which is why it is a flag and not a count.
+    unclosed: bool,
+}
+
+impl Unaccounted {
+    /// Take in one streamed delta.
+    fn grow(&mut self, delta: &str) {
+        self.closed = self.closed.saturating_add(newlines(delta));
+        if !delta.is_empty() {
+            self.unclosed = !delta.ends_with('\n');
+        }
+    }
+
+    /// Retire the volume a landing commit accounts for.
+    ///
+    /// A commit is the head of the unaccounted stream, and one this printer
+    /// saw whole carries away exactly its own line count: newline-aligned
+    /// where [`Chopper`](crate::record::commit::Chopper) cut it at a paragraph
+    /// break, and closing the open line where the step's boundary flushed the
+    /// tail instead.
+    ///
+    /// Saturating, because a commit can account for more than this printer
+    /// ever saw: past [`MERGE_TEXT_CAP`](crate::bus::MERGE_TEXT_CAP) the bus
+    /// sheds a merged entry's oldest text, leaving the deltas that arrived a
+    /// proper suffix of the text that commits.  Nothing outstanding is the
+    /// floor, and there the seat goes out.
+    ///
+    /// Counting is sound only because the commits partition the stream: a
+    /// whitespace-only prefix waits for the paragraph it precedes rather
+    /// than vanishing between two commits.  A whitespace tail at the step's
+    /// end is the one exception, and [`Transient::Boundary`] retires it.
+    fn retire(&mut self, text: &str) {
+        self.closed = self.closed.saturating_sub(newlines(text));
+        if !text.ends_with('\n') {
+            self.unclosed = false;
+        }
+    }
+
+    /// The magnitude a seat draws — `0` while nothing is outstanding.
+    fn magnitude(self) -> u32 {
+        self.closed.saturating_add(u32::from(self.unclosed))
+    }
+}
+
+/// Newlines in `text`, saturating: the figure ends up a mark on a rail, which
+/// no terminal ever wanted more than `u32::MAX` of.
+fn newlines(text: &str) -> u32 {
+    u32::try_from(text.bytes().filter(|&b| b == b'\n').count()).unwrap_or(u32::MAX)
+}
+
 pub(super) struct Viewport {
     /// The session's scrollback, oldest block first.
     blocks: Vec<Entry>,
@@ -79,14 +142,16 @@ pub(super) struct Viewport {
     /// This session's spend — the matrix's per-agent readout, where
     /// `App::total_usage` is the rule line's sum over all of them.
     usage: Usage,
-    /// Assistant text since the last [`Display::Answer`](crate::record::Display::Answer)
-    /// commit [`Self::sync`] has drained.  It never streams as prose: only its
-    /// magnitude shows ([`Self::streaming_seat`]) until the commit lands.
-    open: String,
-    /// Reasoning text since the last [`Display::Thinking`](crate::record::Display::Thinking)
-    /// commit [`Self::sync`] has drained — `open`'s analogue for the step's
-    /// own `∴` seat ([`Self::thinking_seat`]), grown by [`Self::push_thinking`].
-    thinking: String,
+    /// Assistant text streamed past the last [`Display::Answer`](crate::record::Display::Answer)
+    /// commit [`Self::sync`] has retired it against.  It never streams as
+    /// prose: only its magnitude shows ([`Self::streaming_seat`]) until the
+    /// commit lands.
+    answer: Unaccounted,
+    /// Reasoning streamed past the last [`Display::Thinking`](crate::record::Display::Thinking)
+    /// commit [`Self::sync`] has retired it against — `answer`'s analogue for
+    /// the step's own `∴` seat ([`Self::thinking_seat`]), grown by
+    /// [`Self::push_thinking`].
+    reasoning: Unaccounted,
     /// The fold's own memo, stepped by every [`Self::commit_fact`] and
     /// re-synced from in the same call — the memo P5 moves to live beside the
     /// viewport, fed only through [`crate::record::View::step`].
@@ -114,12 +179,12 @@ pub(super) struct Viewport {
     /// carries usage but not the provider's cap.
     context_window: Option<u64>,
     /// The [`record::Seq`] of the fold's rows [`Self::sync`] has already
-    /// drained [`Self::open`] and [`Self::thinking`] against — `Seq::new(0)`
+    /// retired [`Self::answer`] and [`Self::reasoning`] against — `Seq::new(0)`
     /// before the first commit.  One cursor serves both: a row is a commit of
-    /// at most one of them, so a pass that drains either has consumed the row
+    /// at most one of them, so a pass that retires either has consumed the row
     /// for both.  A cursor by identity rather than position, since a windowed
     /// memo makes an index wrong.
-    drained_through: Seq,
+    retired_through: Seq,
     /// Chrome rows [`Self::push_chrome`] has authored, named by the
     /// [`Anchor`] they were drawn at.  [`Self::sync`] stable-merges these
     /// into the folded rows it rebuilds.
@@ -239,8 +304,8 @@ impl Viewport {
             tombstone: None,
             agent,
             usage: Usage::default(),
-            open: String::new(),
-            thinking: String::new(),
+            answer: Unaccounted::default(),
+            reasoning: Unaccounted::default(),
             fold: Blocks::default(),
             offset: 0,
             sticky: true,
@@ -250,7 +315,7 @@ impl Viewport {
             pins: Vec::new(),
             reveal: HashMap::new(),
             context_window: None,
-            drained_through: Seq::new(0),
+            retired_through: Seq::new(0),
             chrome: Vec::new(),
             last_seq: None,
         }
@@ -377,7 +442,8 @@ impl Viewport {
             log_path: self.log_path.clone(),
         });
         self.blocks = Vec::new();
-        self.open = String::new();
+        self.answer = Unaccounted::default();
+        self.reasoning = Unaccounted::default();
         self.flat = Flat::default();
         self.pins = Vec::new();
         self.chrome = Vec::new();
@@ -455,12 +521,12 @@ impl Viewport {
         self.push_block(Block::chrome(shape, lines));
     }
 
-    /// Stream a live reasoning delta into [`Self::thinking`] — the raw buffer
+    /// Stream a live reasoning delta into [`Self::reasoning`] — the volume
     /// [`Self::thinking_seat`] projects the magnitude of, and [`Self::sync`]
-    /// drains against the step's landing
+    /// retires against the step's landing
     /// [`Display::Thinking`](crate::record::Display::Thinking) commit.
     pub(super) fn push_thinking(&mut self, text: &str) {
-        self.thinking.push_str(text);
+        self.reasoning.grow(text);
     }
 
     fn push_block(&mut self, block: Block) {
@@ -647,25 +713,22 @@ impl Viewport {
             .then_some(start)
     }
 
-    /// The trailing seat for the in-flight response: one row projecting only the
-    /// *magnitude* of [`Self::open`], never its text, so the growing edge reads
-    /// as accruing volume while the transcript above stays a finished image.
+    /// The trailing seat for the in-flight response: one row projecting only
+    /// the *magnitude* of [`Self::answer`], never its text, so the growing edge
+    /// reads as accruing volume while the transcript above stays a finished
+    /// image.
     fn streaming_seat(&self) -> Option<Line<'static>> {
-        if self.open.trim().is_empty() {
+        let magnitude = self.answer.magnitude();
+        if magnitude == 0 {
             return None;
         }
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "content count; u32 headroom far exceeds any in-memory transcript"
-        )]
-        let magnitude = self.open.lines().count() as u32;
         Some(Line::from(vec![
             rail::span(RailKind::Markdown, self.agent, Some(magnitude)),
             size_bar(magnitude),
         ]))
     }
 
-    /// [`Self::streaming_seat`]'s twin for [`Self::thinking`] — the open
+    /// [`Self::streaming_seat`]'s twin for [`Self::reasoning`] — the open
     /// reasoning run grows into a magnitude mark exactly like the answer's,
     /// never streamed as text, and seats above it.
     ///
@@ -676,14 +739,10 @@ impl Viewport {
     /// mark's position for a moment, and both commits land in arrival order
     /// regardless.
     fn thinking_seat(&self) -> Option<Line<'static>> {
-        if self.thinking.trim().is_empty() {
+        let magnitude = self.reasoning.magnitude();
+        if magnitude == 0 {
             return None;
         }
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "content count; u32 headroom far exceeds any in-memory transcript"
-        )]
-        let magnitude = self.thinking.lines().count() as u32;
         Some(Line::from(vec![
             rail::span(RailKind::Thinking, self.agent, Some(magnitude)),
             size_bar(magnitude),
@@ -888,37 +947,16 @@ fn answer_run(rows: &[record::Block]) -> u32 {
     u32::try_from(chars).unwrap_or(u32::MAX)
 }
 
-/// Retire the run of `raw` a landing commit accounts for.
-///
-/// A commit is a prefix of the raw stream only up to what the producer
-/// declined to record: [`Chopper`](crate::record::commit::Chopper) drops a
-/// paragraph that is whitespace alone rather than commit an empty block.  So
-/// the cut is *found* by the committed text rather than counted from its
-/// length — counted, a dropped run would stay behind and shift every later
-/// drain by its width, stranding committed text in the buffer and with it a
-/// seat that never goes out.  The skipped gap is whitespace by construction,
-/// so the first match is the right one.
-///
-/// A commit that matches nowhere is one whose head the bus shed off an
-/// over-cap merge ([`MERGE_TEXT_CAP`](crate::bus::MERGE_TEXT_CAP)):
-/// `raw` is then no longer the stream's tail, so it goes whole.
-fn drain_through(raw: &mut String, text: &str) {
-    match raw.find(text) {
-        Some(at) => drop(raw.drain(..at + text.len())),
-        None => raw.clear(),
-    }
-}
-
 // ── `record::Printer`: the sole live producer ───────────────────────────────
 
 impl Printer for Viewport {
     /// A transient never authors scrollback: [`Transient::Token`] and
-    /// [`Transient::Thinking`] only grow the raw streams the seat and the
-    /// live `∴` block draw their *magnitude* from ([`Self::streaming_seat`],
+    /// [`Transient::Thinking`] only grow the volume the seat and the live `∴`
+    /// block draw their *magnitude* from ([`Self::streaming_seat`],
     /// [`Self::push_thinking`]).  The committed text those deltas become
     /// arrives, chopped, through [`Self::sync`] instead — a printer never
-    /// mints a [`record::Block`] of its own — and [`Self::sync`] drains the
-    /// matching prefix back off `open` once it sees the commit land.
+    /// mints a [`record::Block`] of its own — and [`Self::sync`] retires the
+    /// volume that commit accounts for once it sees it land.
     ///
     /// [`Transient::Born`], [`Transient::Died`], and [`Transient::Resources`]
     /// reach no-ops here: they need the tabs a bare `Viewport` cannot see, so
@@ -927,7 +965,7 @@ impl Printer for Viewport {
         match t {
             Transient::Token(text) => {
                 self.note_streamed(text.chars().count());
-                self.open.push_str(text);
+                self.answer.grow(text);
             }
             Transient::Thinking(text) => {
                 self.note_streamed(text.chars().count());
@@ -944,13 +982,13 @@ impl Printer for Viewport {
                 self.push_chrome(RailShape::Error, super::line::error(text));
             }
             // The step's stream is sealed: its every commit has landed ahead
-            // of this signal, so whatever is left in the raw buffers is text
-            // the producer chose not to record — a cancelled trace, a
+            // of this signal, so whatever volume is still unaccounted stands
+            // for text the producer chose not to record — a cancelled trace, a
             // whitespace-only tail.  Retiring it here is what keeps a seat
             // from outliving the step it was reading.
             Transient::Boundary => {
-                self.open.clear();
-                self.thinking.clear();
+                self.answer = Unaccounted::default();
+                self.reasoning = Unaccounted::default();
             }
             Transient::Born { .. } | Transient::Died | Transient::Resources { .. } => {}
         }
@@ -958,21 +996,19 @@ impl Printer for Viewport {
 
     fn sync(&mut self, blocks: &Blocks) {
         let rows = blocks.rows();
-        // `open` and `thinking` are always exactly the unconsumed suffix of
-        // their raw streams: retire each against every commit of its own kind
-        // not yet accounted for, named by `Seq` rather than position, since
-        // the memo is windowed.
-        for row in rows.iter().filter(|r| r.id().seq() > self.drained_through) {
+        // `answer` and `reasoning` measure exactly what their streams have
+        // shown and no commit has taken away: retire each against every commit
+        // of its own kind not yet accounted for, named by `Seq` rather than
+        // position, since the memo is windowed.
+        for row in rows.iter().filter(|r| r.id().seq() > self.retired_through) {
             match row.kind() {
-                record::BlockKind::Answer { text } => drain_through(&mut self.open, text),
-                record::BlockKind::Thinking { text, .. } => {
-                    drain_through(&mut self.thinking, text);
-                }
+                record::BlockKind::Answer { text } => self.answer.retire(text),
+                record::BlockKind::Thinking { text, .. } => self.reasoning.retire(text),
                 _ => {}
             }
         }
         if let Some(last) = rows.last() {
-            self.drained_through = last.id().seq();
+            self.retired_through = last.id().seq();
         }
 
         let mut built: Vec<Entry> = Vec::with_capacity(rows.len());
@@ -1350,7 +1386,11 @@ mod tests {
         let text = "```ral\nlet x = 1\nlet y = 2\n";
         let mut vp = viewport();
         vp.transient(&Transient::Token(text.into()));
-        assert!(vp.open.contains("let x = 1"));
+        assert_eq!(
+            vp.answer.magnitude(),
+            u32::try_from(text.lines().count()).expect("three lines"),
+            "the delta's whole volume stands unaccounted"
+        );
 
         let w = vp.render_window(READ_W, 24);
         let seat_line = w.lines.last().expect("a seat row while streaming");
@@ -1378,7 +1418,11 @@ mod tests {
         )
         .expect("a display-only fold never refuses");
         vp.sync(&memo);
-        assert!(vp.open.is_empty());
+        assert_eq!(
+            vp.answer.magnitude(),
+            0,
+            "the commit accounts for the whole stream, and the seat goes out"
+        );
         let w = vp.render_window(READ_W, 24);
         let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
         assert!(
@@ -1436,7 +1480,11 @@ mod tests {
                 .expect("a display-only fold never refuses");
         }
         vp.sync(&memo);
-        assert!(vp.open.is_empty() && vp.thinking.is_empty());
+        assert_eq!(
+            (vp.answer.magnitude(), vp.reasoning.magnitude()),
+            (0, 0),
+            "both commits account for their streams, and both seats go out"
+        );
         let w = vp.render_window(READ_W, 24);
         let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
         assert!(

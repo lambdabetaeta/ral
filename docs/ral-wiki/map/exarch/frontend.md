@@ -175,8 +175,9 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    `PROMPT_INK` so it never reads as just another agent's mark.
  - **the in-flight reply as a growing magnitude.** Streamed-but-uncommitted
    assistant text never paints as prose: `Viewport::streaming_seat` projects
-   the open buffer as a single trailing row — the markdown rail glyph plus a
-   `size_bar` of its line count — that grows in place as one extra scroll row,
+   the volume no commit has yet accounted for as a single trailing row — the
+   markdown rail glyph plus a `size_bar` of its line count, the printer keeping
+   the figure and letting the text go — growing in place as one extra scroll row,
    so the settled transcript above stays a finished image until a fence-safe
    break commits the real `Block::markdown`. Reasoning reads the same way: while it
    streams it is a `∴` magnitude row (`Viewport::thinking_seat`), seated

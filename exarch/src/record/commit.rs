@@ -77,6 +77,11 @@ impl Chopper {
     /// Accumulate one streamed delta, committing the fence-safe prefix it
     /// completes, if any.
     ///
+    /// A prefix that is whitespace alone waits rather than commits: an empty
+    /// block is not worth recording, and letting the blank lines ride along
+    /// with the paragraph after them keeps the commits a *partition* of the
+    /// stream — the law a printer counts on to retire exactly what it drew.
+    ///
     /// # Errors
     /// Propagates a failed commit of a completed paragraph.
     pub(crate) fn push(&mut self, emitter: &Emitter, delta: &str) -> io::Result<()> {
@@ -85,11 +90,11 @@ impl Chopper {
             return Ok(());
         };
         let end = self.committed + cut;
-        let chunk = self.open[self.committed..end].to_string();
-        self.committed = end;
-        if chunk.trim().is_empty() {
+        if self.open[self.committed..end].trim().is_empty() {
             return Ok(());
         }
+        let chunk = self.open[self.committed..end].to_string();
+        self.committed = end;
         let _recorded = emitter
             .emit(Display::Answer { text: chunk })
             .map_err(|e| unrecorded("an answer paragraph", &e))?;
@@ -97,7 +102,10 @@ impl Chopper {
     }
 
     /// Commit whatever tail remains — the step's boundary, where the stream
-    /// is sealed whether it completed, stalled, or was cancelled.
+    /// is sealed whether it completed, stalled, or was cancelled.  A tail of
+    /// whitespace alone is the one thing the commits never cover; nothing
+    /// follows it to ride with, and the boundary that calls this is also what
+    /// retires it from the printer's edge.
     ///
     /// # Errors
     /// Propagates a failed commit of the tail.
@@ -546,6 +554,33 @@ mod tests {
             [Display::Thinking { text }] => assert_eq!(text, "straight to the shell\n"),
             other => panic!("expected the run alone, got {other:?}"),
         }
+    }
+
+    /// The commits partition the stream: blank lines that arrive alone do
+    /// not vanish between two commits but ride with the paragraph after
+    /// them, so a printer that counts what it drew against what commits can
+    /// never strand a seat measuring nothing.
+    #[test]
+    fn the_commits_reassemble_the_whole_stream() {
+        let (emit, rx) = emitter();
+        let mut chopper = Chopper::default();
+        let deltas = ["first\n\n", "\n\n", "second\n\n", "tail"];
+        for delta in deltas {
+            chopper.push(&emit, delta).unwrap();
+        }
+        chopper.flush(&emit).unwrap();
+
+        let committed: String = drain_display(&rx)
+            .into_iter()
+            .map(|d| {
+                if let Display::Answer { text } = d {
+                    text
+                } else {
+                    panic!("expected only answer commits, got {d:?}")
+                }
+            })
+            .collect();
+        assert_eq!(committed, deltas.concat());
     }
 
     /// The chopper commits each fence-safe paragraph as its own prefix and
