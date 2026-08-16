@@ -7,6 +7,6 @@
 # handle's replayable bytes are empty.
 
 let h = watch "job" { printf "one\ntwo" }
-let r = await $h
+let joined = await $h
 echo after
-echo !{length !{to-bytes $r[stdout]}}
+echo !{length !{to-bytes $joined[stdout]}}
