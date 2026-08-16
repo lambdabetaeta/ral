@@ -158,8 +158,7 @@ impl Agent {
                 t_req.elapsed()
             );
             if token.is_cancelled() {
-                seal_abandoned(&mut stream, unrecorded, &recorder);
-                recorder.transient(Transient::Boundary);
+                abandon_step(&mut stream, unrecorded, &recorder);
                 return Ok(self.cancelled());
             }
             let StepOut {
@@ -171,21 +170,16 @@ impl Agent {
             } = match step_out {
                 Ok(s) => s,
                 Err(ProviderError::Cancelled(_)) => {
-                    seal_abandoned(&mut stream, unrecorded, &recorder);
-                    recorder.transient(Transient::Boundary);
+                    abandon_step(&mut stream, unrecorded, &recorder);
                     return Ok(self.cancelled());
                 }
                 Err(e) => {
-                    seal_abandoned(&mut stream, unrecorded, &recorder);
-                    recorder.transient(Transient::Boundary);
+                    abandon_step(&mut stream, unrecorded, &recorder);
                     return Err(e);
                 }
             };
-            // The boundary follows the seal whether or not it held: a printer
-            // is owed the signal to retire its live edge either way.
-            let sealed = seal_step(&mut stream, unrecorded, &recorder);
-            recorder.transient(Transient::Boundary);
-            sealed.map_err(|e| ProviderError::Other(e.to_string()))?;
+            close_step(&mut stream, unrecorded, &recorder)
+                .map_err(|e| ProviderError::Other(e.to_string()))?;
             // The live numerator the next `compact` weighs against the window.
             let input_tokens = usage.input;
             let measured_at = {
@@ -452,30 +446,41 @@ fn cancelled_result(id: String) -> SessionToolResult {
     }
 }
 
-/// Seal a streaming step's chopper on an exit path that is already
-/// cancelling or erroring: the streamed prefix is what the user saw, so it
-/// still commits, best-effort — the exit in flight is the error being
-/// reported, and this one must not mask it.
-fn seal_abandoned(
-    stream: &mut crate::record::commit::Stream,
-    unrecorded: Option<std::io::Error>,
-    recorder: &crate::record::Emitter,
-) {
-    if let Err(error) = seal_step(stream, unrecorded, recorder) {
-        eprintln!("exarch: a cancelled step's streamed prefix was not recorded: {error}");
-    }
-}
-
-/// Seal a step, honouring whatever the streaming callback stashed: a failed
-/// commit has already broken the order, so nothing is committed on top of it.
-fn seal_step(
+/// Close a streaming step: every commit it still owes, then the boundary
+/// that lets a printer retire its live edge.  The boundary follows the seal
+/// whether or not it held — a live edge outliving its step is the one
+/// failure the printer cannot recover from on its own.
+///
+/// A commit the streaming callback could not make is answered here, since a
+/// callback has no error channel of its own; nothing commits on top of it,
+/// the order being broken already.
+///
+/// # Errors
+/// The first commit that failed anywhere in the step.
+fn close_step(
     stream: &mut crate::record::commit::Stream,
     unrecorded: Option<std::io::Error>,
     recorder: &crate::record::Emitter,
 ) -> std::io::Result<()> {
-    match unrecorded {
+    let sealed = match unrecorded {
         Some(error) => Err(error),
         None => stream.seal(recorder),
+    };
+    recorder.transient(Transient::Boundary);
+    sealed
+}
+
+/// [`close_step`] on an exit path that is already cancelling or erroring:
+/// the streamed prefix is what the user saw, so it still commits,
+/// best-effort — the exit in flight is the error being reported, and this
+/// one must not mask it.
+fn abandon_step(
+    stream: &mut crate::record::commit::Stream,
+    unrecorded: Option<std::io::Error>,
+    recorder: &crate::record::Emitter,
+) {
+    if let Err(error) = close_step(stream, unrecorded, recorder) {
+        eprintln!("exarch: a cancelled step's streamed prefix was not recorded: {error}");
     }
 }
 
