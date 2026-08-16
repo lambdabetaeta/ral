@@ -1559,11 +1559,11 @@ mod tests {
         file.flush().unwrap();
         let before = fs::read(&path).unwrap();
 
-        let error = AgentLog::resume(sessions.path(), 0)
-            .err()
-            .expect("garbage is not a crash tail");
+        assert!(
+            AgentLog::resume(sessions.path(), 0).is_err(),
+            "garbage is not a crash tail"
+        );
         assert_eq!(fs::read(&path).unwrap(), before);
-        let _ = error;
     }
 
     #[test]

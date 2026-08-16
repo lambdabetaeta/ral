@@ -139,13 +139,17 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
 /// Being in `deny_paths` is not the claim; being unwritable is.  The frozen
 /// entry is lexical, and the gate expands it — so the file is refused by both
 /// its own spelling and its canonical one, while its sibling stays writable.
+///
+/// The ceiling is `cwd:`, the directory holding both files: a literal `/`
+/// would be a foreign-rooted dead grant on Windows, leaving nothing writable
+/// and the sibling refused for the wrong reason.
 #[test]
 fn a_restrict_file_is_refused_by_the_fs_gate_under_either_spelling() {
     let dir = Scratch::for_test(EXARCH, "restrict-unwritable").expect("scratch dir");
     let restrict = profile(
         &dir,
         "restrict.ral",
-        "return [fs: [read: ['/'], write: ['/']]]\n",
+        "return [fs: [read: ['cwd:'], write: ['cwd:']]]\n",
     );
     let sibling = profile(&dir, "scratch.txt", "ordinary work\n");
     let canonical = std::fs::canonicalize(&restrict).expect("the restrict file exists");
@@ -173,8 +177,9 @@ fn a_restrict_file_is_refused_by_the_fs_gate_under_either_spelling() {
 
 /// The summary is the model's only view of its own authority, so it has to
 /// agree with the grant the session holds: `minimal` must not read as ambient,
-/// and its Homebrew veto — the carve-out the base exists to make — must reach
-/// the page.
+/// and the veto it exists to carve out — Homebrew on Unix, the interactive
+/// shell on Windows, where a Unix-rooted deny freezes to a dead grant — must
+/// reach the page.
 #[test]
 fn the_grant_summary_agrees_with_an_attenuated_grant() {
     let dir = Scratch::for_test(EXARCH, "grant-prompt").expect("scratch dir");
@@ -193,9 +198,14 @@ fn the_grant_summary_agrees_with_an_attenuated_grant() {
         Some(false) => "deny",
     };
     assert_eq!(bullet(&text, "- net:"), format!("- net: {rendered}"));
+    let veto = if cfg!(windows) {
+        "cmd"
+    } else {
+        "/opt/homebrew/"
+    };
     assert!(
-        bullet(&text, "- exec deny:").contains("/opt/homebrew/"),
-        "minimal's Homebrew veto must reach the model:\n{text}"
+        bullet(&text, "- exec deny:").contains(veto),
+        "minimal's {veto} veto must reach the model:\n{text}"
     );
     let frozen_cwd = NormalizedPrefix::from_surface(&cwd).into_string();
     assert!(bullet(&text, "- fs read:").contains(&frozen_cwd), "{text}");
