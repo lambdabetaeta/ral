@@ -245,7 +245,25 @@ impl Blocks {
         }
     }
 
+    /// Open a row for `kind` — or, where `kind` continues the lane the last
+    /// row already holds, grow that row instead.
+    ///
+    /// The model's prose and reasoning arrive as many records, one per line,
+    /// so a reader sees the text as it is spoken.  A block is the run of
+    /// records that meet: any record of another kind — a tool call, a prompt
+    /// — ends the run, and the next line of prose opens a fresh block.  This
+    /// is what frees the commit producer from having to cut
+    /// anywhere meaningful, and it keeps a block's `Seq` the one it opened
+    /// with, so a reveal dial set on it survives the growth.
     fn push(&mut self, seq: Seq, kind: BlockKind) {
+        match (self.rows.last_mut().map(Block::kind_mut), &kind) {
+            (Some(BlockKind::Answer { text }), BlockKind::Answer { text: more })
+            | (Some(BlockKind::Thinking { text }), BlockKind::Thinking { text: more }) => {
+                text.push_str(more);
+                return;
+            }
+            _ => {}
+        }
         let _ = self.origin.get_or_insert(seq);
         self.rows.push(Block::new(seq, kind));
         self.evict();
@@ -488,8 +506,59 @@ impl Fold for View {
 mod tests {
     use super::*;
 
+    /// A row that never joins the one before it, so a test about flushing or
+    /// eviction counts rows rather than the lanes that grow.
     fn push(memo: &mut Blocks, seq: u64, text: &str) {
-        step_display(memo, Seq::new(seq), Display::Answer { text: text.into() });
+        step_forensic(
+            memo,
+            Seq::new(seq),
+            Forensic::SystemNote { text: text.into() },
+        );
+    }
+
+    /// One lane, many records, one block: consecutive prose grows the row it
+    /// opened, and a record of another kind ends the run.
+    #[test]
+    fn consecutive_records_of_one_lane_grow_a_single_block() {
+        let mut memo = Blocks::default();
+        for (seq, text) in [(1, "first line\n"), (2, "second line\n")] {
+            step_display(
+                &mut memo,
+                Seq::new(seq),
+                Display::Answer { text: text.into() },
+            );
+        }
+        match memo.rows() {
+            [row] => {
+                let BlockKind::Answer { text } = row.kind() else {
+                    panic!("expected one answer block")
+                };
+                assert_eq!(text, "first line\nsecond line\n", "the block holds the run");
+            }
+            other => panic!("expected one row, got {} rows", other.len()),
+        }
+
+        step_display(
+            &mut memo,
+            Seq::new(3),
+            Display::ToolCall {
+                tool: "ral".into(),
+                cmd: "ls".into(),
+                summary: None,
+            },
+        );
+        step_display(
+            &mut memo,
+            Seq::new(4),
+            Display::Answer {
+                text: "after the call\n".into(),
+            },
+        );
+        assert_eq!(
+            memo.rows().len(),
+            3,
+            "the tool call ends the run, so the prose after it opens its own block"
+        );
     }
 
     #[test]

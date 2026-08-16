@@ -193,6 +193,31 @@ log with no independent sibling.
   claim about when the fact ended, so a producer that only learns its
   content later must not also defer its authoring.
 
+- **260816 — a block is a run of records, so a cut needs no meaning.** Cutting
+  the prose into commits mid-stream is what lets a reader watch an answer
+  arrive; the mistake was leaving each commit to stand alone as a block. Since
+  nothing downstream rejoined them, the cut had to be semantically correct,
+  and one requirement paid for three mechanisms: a fence-safe paragraph
+  scanner in the producer, a rule that whitespace ride along so the commits
+  stayed a partition of the stream, and — because the screen was then always
+  ahead of the log — an arithmetic on the printer's side (`Unaccounted`:
+  grow, retire, saturate) to track how much of what it drew no commit had
+  accounted for, with the seat reduced to a bare magnitude because the text
+  could not be trusted to line up.
+
+  The fold now grows a block from consecutive records of one lane
+  (`Blocks::push`), exactly as a tool call's result is patched onto its call.
+  The cut falls at the last newline and means nothing, so `safe_paragraph_break`
+  and the whitespace-partition rule go; a block's `Seq` stays the one it
+  opened with, so a reveal dial survives the growth. The printer keeps only
+  the open line — the text past the last newline — because the worker cut at
+  that same newline: block and seat are complementary by one shared rule
+  rather than by an invariant either side could drift from, and all of
+  `Unaccounted` deletes. The answer reads as prose while it streams instead
+  of as a size bar. The general lesson: if a producer's cut has to be
+  meaningful, ask first whether the consumer could simply put the pieces back
+  together.
+
 ## See also
 
 [[decisions/260623_recording-follows-the-event|recording-follows-the-event]]

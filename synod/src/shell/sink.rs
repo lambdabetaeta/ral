@@ -225,8 +225,8 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
         Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
         Display::Context { rows } => process_card(Some(context_rows_card(rows))),
         Display::Step { n } => Some(SynodEvent::Step { n: *n }),
-        // The trunk's committed reasoning, its prose chopped for the
-        // durable scrollback, a tool result already said on its call row,
+        // The trunk's committed reasoning, its prose cut line by line for
+        // the durable scrollback, a tool result already said on its call row,
         // a settled background block — a worker thread is no business of a
         // secretary's — and a display twin of a protocol fact the screen
         // never actually drew live: none of these are narrated to the window,

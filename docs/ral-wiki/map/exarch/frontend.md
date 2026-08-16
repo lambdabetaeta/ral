@@ -67,8 +67,8 @@ append-then-publish under the log's own mutex, so channel order is log
 order); `record/log.rs` (the `record.jsonl` io-door, with the attachable
 `FleetSink` inside the writer's mutex); `record/replay.rs` (the generic
 `fold == memo` driver and `Refusal`); `record/commit.rs` (the worker-side
-commit producer: the `Chopper` and `SurfaceBuffer`, moved whole from
-`tui/surface.rs`); `record/model.rs` (the model fold, `Protocol` alone);
+commit producer: one `Chopper` per lane of the model's stream, and
+`SurfaceBuffer`, moved whole from `tui/surface.rs`); `record/model.rs` (the model fold, `Protocol` alone);
 `record/view.rs` (the view fold into `Blocks`; `Block`'s constructor is
 private). `Viewport` and `Headless` both implement `record::Printer`
 (`transient`/`sync`): a live `Signal::Fact` steps the view fold beside the
@@ -173,23 +173,23 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    whole rail glows one hue, read on a tab-switch as "whose transcript is
    this". The human's prompt fence is the lone exception — a `❖` in neutral
    `PROMPT_INK` so it never reads as just another agent's mark.
- - **the in-flight reply as a growing magnitude.** Streamed-but-uncommitted
-   assistant text never paints as prose: `Viewport::streaming_seat` projects
-   the volume no commit has yet accounted for as a single trailing row — the
-   markdown rail glyph plus a `size_bar` of its line count, the printer keeping
-   the figure and letting the text go — growing in place as one extra scroll row,
-   so the settled transcript above stays a finished image until a fence-safe
-   break commits the real `Block::markdown`. Reasoning reads the same way: while it
-   streams it is a `∴` magnitude row (`Viewport::thinking_seat`), seated
-   *above* the answer's, and a `Display::Thinking` commit supersedes it with a
-   block of the authoritative text. The commit is sealed at the seam where the
-   prose resumes (`record::commit::Stream`), never at the step's end — the
-   step's own end sits *between* the paragraphs the chopper has already
-   committed and the tail it has not, which is exactly where a `∴` block must
-   not land. One block per reasoning run, so a turn's thinking reads
-   interleaved with the prose and the tool calls it preceded. Its grain header
-   weighs the run against the prose it became, which the commit cannot carry
-   (it precedes it) and the view therefore measures: `viewport::answer_mass`
+ - **the in-flight reply as an open line.** The worker cuts a `Display::Answer`
+   at every newline it completes, and the view fold grows one block from the
+   run of records that meet (`Blocks::push`) — so the assistant's prose lands
+   in scrollback as it is spoken, a line at a time, in one block per run.
+   Where a cut falls therefore carries no meaning, which is what frees the
+   producer from ever having to find a safe place to break. What no record
+   covers is exactly the text past the last newline: `Viewport::streaming_seat`
+   draws that open line as a single trailing row on the markdown rail, and
+   `Viewport::thinking_seat` does the same for reasoning, seated *above* the
+   answer's. Block text and open line are complementary by that one rule —
+   both sides split at the same newline — so the printer counts nothing and
+   retires nothing; `Transient::Boundary` merely drops whatever either lane
+   left open, which by then no record will cover. Reasoning flushes its tail
+   where the prose after it resumes (`record::commit::Stream`), never at the
+   step's end, which is exactly where a `∴` block must not land. Its grain
+   header weighs the run against the prose it became, which the record cannot
+   carry (it precedes it) and the view therefore measures: `viewport::answer_run`
    reads the unbroken answer run that follows each `∴` row. A thinking block has two rungs only — its
    grain header, or the whole trace — the dial hopping over `Context`
    (`Block::rung_up`/`rung_down`), which for a trace would be a dead detent.
@@ -335,7 +335,7 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch, `compose_in_editor`
         - `tui/tabs.rs` — session/view lifecycle: `Tabs`, viewports, dispatch order, tabs, titles, dying linger, parent chain, focus management, `tick`'s tombstone eviction past `LINGER`
         - `tui/viewport.rs` — per-session scrollback: `Viewport`, block push/flatten/render, the `VIEWPORT_MAX_BLOCKS`/`VIEWPORT_MAX_ROWS` window caps (oldest evicted first), `Tombstone`
-        - `record/commit.rs` — event coalescing, worker-side: `Chopper`, `SurfaceBuffer`, `PatchBuf`, `ObservationBuf`, absorb/flush into `Display` commits
+        - `record/commit.rs` — event coalescing, worker-side: `Stream`/`Chopper`, `SurfaceBuffer`, `PatchBuf`, `ObservationBuf`, absorb/flush into `Display` commits
         - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input
         - `tui/gesture.rs` — mouse/selection: `GestureState`, `Press`, frame geometry, selection, copy toast, hover, scroll
         - `tui/render.rs` — frame layout: `draw`, `FrameGeom`, `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`

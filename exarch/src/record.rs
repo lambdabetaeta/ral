@@ -151,9 +151,9 @@ pub enum Protocol {
     },
 }
 
-/// The commits the view fold needs — chopped, coalesced, and reduced
-/// *before* they reach the seam, so a resumed scrollback matches what the
-/// user actually saw.
+/// The commits the view fold needs — cut, coalesced, and reduced *before*
+/// they reach the seam, so a resumed scrollback matches what the user
+/// actually saw.
 ///
 /// Field shapes here are this parcel's own choice: they carry each fact's
 /// "data half" in a form the log can round-trip, never the mark
@@ -164,8 +164,9 @@ pub enum Protocol {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Display {
-    /// One reasoning run, sealed where the prose it precedes begins and
-    /// superseding that run's streamed deltas.
+    /// One line of a reasoning run, or the run's tail where the prose after
+    /// it begins.  Consecutive ones grow one block, and the run's own deltas
+    /// are superseded line by line as they land.
     Thinking {
         text: String,
     },
@@ -173,10 +174,10 @@ pub enum Display {
     Prompt {
         text: String,
     },
-    /// One chopper-committed block of the assistant's own prose, cut at a
-    /// fence-safe paragraph break — so one `AssistantMessage` yields several
-    /// of these where the live view streamed many `Token`s. A prefix of the
-    /// accumulated delta stream, never the whole answer at once.
+    /// One line of the assistant's own prose, cut at the newline that
+    /// completed it — so one `AssistantMessage` yields many of these, and a
+    /// reader sees the answer as it is spoken.  Consecutive ones grow one
+    /// block, which is why the cut needs no meaning of its own.
     Answer {
         text: String,
     },
@@ -352,13 +353,13 @@ pub enum Forensic {
 #[derive(Debug, Clone)]
 pub enum Transient {
     Token(String),
-    /// A live reasoning token, superseded by [`Display::Thinking`] once the
-    /// run lands its authoritative text.
+    /// A live reasoning token, superseded line by line by [`Display::Thinking`]
+    /// as the worker records each line it completes.
     Thinking(String),
     State(AgentState),
     /// The producer's flush signal ending a streaming step, emitted once the
-    /// step's last commit has landed: a printer may take it as leave to retire
-    /// whatever is left in the raw streams it drew the live edge from.
+    /// step's last record has landed: a printer may take it as leave to drop
+    /// whatever line each lane still has open, since no record will cover it.
     Boundary,
     Born {
         log_dir: PathBuf,

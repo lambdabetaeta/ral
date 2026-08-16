@@ -10,11 +10,11 @@
 //! steps the fold beside the viewport and re-syncs [`Self::blocks`] wholesale
 //! from it, and [`Printer::transient`] draws whatever is live-only —
 //! [`Self::push_chrome`], the chrome lane's door, and [`Self::push_thinking`],
-//! which grows the volume a reasoning delta's magnitude seat reads.
+//! which carries the open line a reasoning seat draws.
 
 use super::block::{AgentSlot, Block, RailShape, Reveal, append_visual_rows};
 use super::group;
-use super::line::{is_blank, plain, size_bar};
+use super::line::{is_blank, plain, wrap_line};
 use super::palette::READ_W;
 use super::rail::{self, RailKind};
 use super::select::plain_slice;
@@ -27,7 +27,7 @@ use crate::bus::card::{
 use crate::provider::Usage;
 use crate::record::{self, BlockId, Blocks, Fold as _, Printer, Seq, Transient};
 use ral_core::types::{Observation, Observed};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -68,67 +68,18 @@ impl Tombstone {
     }
 }
 
-/// The volume of a live stream that no commit has accounted for yet — what a
-/// seat projects while the text it measures is still in flight.  A seat draws
-/// a magnitude and never the characters, so the printer keeps the figure and
-/// lets the text go.
-///
-/// Lines are counted as [`str::lines`] counts them: a delta ending mid-line
-/// and the delta continuing it share the line they share.
-#[derive(Clone, Copy, Default)]
-struct Unaccounted {
-    /// Lines a newline has closed.
-    closed: u32,
-    /// Whether a line stands open at the stream's edge.  [`str::lines`] counts
-    /// it, so the magnitude does too; but the next delta continues it rather
-    /// than opening another, which is why it is a flag and not a count.
-    unclosed: bool,
-}
-
-impl Unaccounted {
-    /// Take in one streamed delta.
-    fn grow(&mut self, delta: &str) {
-        self.closed = self.closed.saturating_add(newlines(delta));
-        if !delta.is_empty() {
-            self.unclosed = !delta.ends_with('\n');
+/// Carry a lane's open line across one delta: the text after the last newline
+/// is exactly what no record holds yet, since the worker cuts its records at
+/// that same newline.  Block text and open line are complementary by that one
+/// rule, so neither side has anything to count.
+fn carry(open: &mut String, delta: &str) {
+    match delta.rfind('\n') {
+        Some(nl) => {
+            open.clear();
+            open.push_str(&delta[nl + 1..]);
         }
+        None => open.push_str(delta),
     }
-
-    /// Retire the volume a landing commit accounts for.
-    ///
-    /// A commit is the head of the unaccounted stream, and one this printer
-    /// saw whole carries away exactly its own line count: newline-aligned
-    /// where [`Chopper`](crate::record::commit::Chopper) cut it at a paragraph
-    /// break, and closing the open line where the step's boundary flushed the
-    /// tail instead.
-    ///
-    /// Saturating, because a commit can account for more than this printer
-    /// ever saw: past [`MERGE_TEXT_CAP`](crate::bus::MERGE_TEXT_CAP) the bus
-    /// sheds a merged entry's oldest text, leaving the deltas that arrived a
-    /// proper suffix of the text that commits.  Nothing outstanding is the
-    /// floor, and there the seat goes out.
-    ///
-    /// Counting is sound only because the commits partition the stream: a
-    /// whitespace-only prefix waits for the paragraph it precedes rather
-    /// than vanishing between two commits.  A whitespace tail at the step's
-    /// end is the one exception, and [`Transient::Boundary`] retires it.
-    fn retire(&mut self, text: &str) {
-        self.closed = self.closed.saturating_sub(newlines(text));
-        if !text.ends_with('\n') {
-            self.unclosed = false;
-        }
-    }
-
-    /// The magnitude a seat draws — `0` while nothing is outstanding.
-    fn magnitude(self) -> u32 {
-        self.closed.saturating_add(u32::from(self.unclosed))
-    }
-}
-
-/// Newlines in `text`, saturating: the figure ends up a mark on a rail, which
-/// no terminal ever wanted more than `u32::MAX` of.
-fn newlines(text: &str) -> u32 {
-    u32::try_from(text.bytes().filter(|&b| b == b'\n').count()).unwrap_or(u32::MAX)
 }
 
 pub(super) struct Viewport {
@@ -142,16 +93,14 @@ pub(super) struct Viewport {
     /// This session's spend — the matrix's per-agent readout, where
     /// `App::total_usage` is the rule line's sum over all of them.
     usage: Usage,
-    /// Assistant text streamed past the last [`Display::Answer`](crate::record::Display::Answer)
-    /// commit [`Self::sync`] has retired it against.  It never streams as
-    /// prose: only its magnitude shows ([`Self::streaming_seat`]) until the
-    /// commit lands.
-    answer: Unaccounted,
-    /// Reasoning streamed past the last [`Display::Thinking`](crate::record::Display::Thinking)
-    /// commit [`Self::sync`] has retired it against — `answer`'s analogue for
-    /// the step's own `∴` seat ([`Self::thinking_seat`]), grown by
-    /// [`Self::push_thinking`].
-    reasoning: Unaccounted,
+    /// The answer's open line: assistant text past the last newline, which is
+    /// past the last [`Display::Answer`](crate::record::Display::Answer)
+    /// record the worker has cut.  It seats below the block it will join
+    /// ([`Self::streaming_seat`]).
+    answer: String,
+    /// The reasoning's open line — `answer`'s twin for the step's own `∴`
+    /// seat ([`Self::thinking_seat`]), grown by [`Self::push_thinking`].
+    reasoning: String,
     /// The fold's own memo, stepped by every [`Self::commit_fact`] and
     /// re-synced from in the same call — the memo P5 moves to live beside the
     /// viewport, fed only through [`crate::record::View::step`].
@@ -178,13 +127,6 @@ pub(super) struct Viewport {
     /// stamps — set by `App::update_live_model`, since the fold's own memo
     /// carries usage but not the provider's cap.
     context_window: Option<u64>,
-    /// The [`record::Seq`] of the fold's rows [`Self::sync`] has already
-    /// retired [`Self::answer`] and [`Self::reasoning`] against — `Seq::new(0)`
-    /// before the first commit.  One cursor serves both: a row is a commit of
-    /// at most one of them, so a pass that retires either has consumed the row
-    /// for both.  A cursor by identity rather than position, since a windowed
-    /// memo makes an index wrong.
-    retired_through: Seq,
     /// Chrome rows [`Self::push_chrome`] has authored, named by the
     /// [`Anchor`] they were drawn at.  [`Self::sync`] stable-merges these
     /// into the folded rows it rebuilds.
@@ -304,8 +246,8 @@ impl Viewport {
             tombstone: None,
             agent,
             usage: Usage::default(),
-            answer: Unaccounted::default(),
-            reasoning: Unaccounted::default(),
+            answer: String::new(),
+            reasoning: String::new(),
             fold: Blocks::default(),
             offset: 0,
             sticky: true,
@@ -315,7 +257,6 @@ impl Viewport {
             pins: Vec::new(),
             reveal: HashMap::new(),
             context_window: None,
-            retired_through: Seq::new(0),
             chrome: Vec::new(),
             last_seq: None,
         }
@@ -442,8 +383,8 @@ impl Viewport {
             log_path: self.log_path.clone(),
         });
         self.blocks = Vec::new();
-        self.answer = Unaccounted::default();
-        self.reasoning = Unaccounted::default();
+        self.answer = String::new();
+        self.reasoning = String::new();
         self.flat = Flat::default();
         self.pins = Vec::new();
         self.chrome = Vec::new();
@@ -521,12 +462,11 @@ impl Viewport {
         self.push_block(Block::chrome(shape, lines));
     }
 
-    /// Stream a live reasoning delta into [`Self::reasoning`] — the volume
-    /// [`Self::thinking_seat`] projects the magnitude of, and [`Self::sync`]
-    /// retires against the step's landing
-    /// [`Display::Thinking`](crate::record::Display::Thinking) commit.
+    /// Stream a live reasoning delta into [`Self::reasoning`] — the open line
+    /// [`Self::thinking_seat`] draws, which the delta's own newline retires
+    /// as the worker's record of that line lands.
     pub(super) fn push_thinking(&mut self, text: &str) {
-        self.reasoning.grow(text);
+        carry(&mut self.reasoning, text);
     }
 
     fn push_block(&mut self, block: Block) {
@@ -713,40 +653,32 @@ impl Viewport {
             .then_some(start)
     }
 
-    /// The trailing seat for the in-flight response: one row projecting only
-    /// the *magnitude* of [`Self::answer`], never its text, so the growing edge
-    /// reads as accruing volume while the transcript above stays a finished
-    /// image.
+    /// The trailing seat for the in-flight response: the answer's open line,
+    /// on the rail the block it will join wears, so the newest words read in
+    /// place while the transcript above stays a finished image.
     fn streaming_seat(&self) -> Option<Line<'static>> {
-        let magnitude = self.answer.magnitude();
-        if magnitude == 0 {
-            return None;
-        }
-        Some(Line::from(vec![
-            rail::span(RailKind::Markdown, self.agent, Some(magnitude)),
-            size_bar(magnitude),
-        ]))
+        (!self.answer.is_empty()).then(|| {
+            Line::from(vec![
+                rail::span(RailKind::Markdown, self.agent, None),
+                Span::raw(self.answer.clone()),
+            ])
+        })
     }
 
-    /// [`Self::streaming_seat`]'s twin for [`Self::reasoning`] — the open
-    /// reasoning run grows into a magnitude mark exactly like the answer's,
-    /// never streamed as text, and seats above it.
+    /// [`Self::streaming_seat`]'s twin for [`Self::reasoning`], seated above
+    /// it — a reasoning run precedes the prose it deliberated into.
     ///
-    /// Exact for the run that opens a step, which commits ahead of the prose
-    /// it precedes.  A *second* run inside one step — reasoning resumed after
-    /// prose — seats above that prose too while both are still open, which is
-    /// the one place the two live seats can read out of order; it costs a
-    /// mark's position for a moment, and both commits land in arrival order
-    /// regardless.
+    /// A *second* run inside one step — reasoning resumed after prose — seats
+    /// above that prose too while both lines are open, which is the one place
+    /// the two seats can read out of order; it costs a line's position for a
+    /// moment, and both lanes record in arrival order regardless.
     fn thinking_seat(&self) -> Option<Line<'static>> {
-        let magnitude = self.reasoning.magnitude();
-        if magnitude == 0 {
-            return None;
-        }
-        Some(Line::from(vec![
-            rail::span(RailKind::Thinking, self.agent, Some(magnitude)),
-            size_bar(magnitude),
-        ]))
+        (!self.reasoning.is_empty()).then(|| {
+            Line::from(vec![
+                rail::span(RailKind::Thinking, self.agent, None),
+                Span::raw(self.reasoning.clone()),
+            ])
+        })
     }
 
     /// The visible slice at `width` × `height`.  While `sticky`, `offset` is
@@ -754,10 +686,14 @@ impl Viewport {
     /// re-arms once it reaches the bottom.
     pub(super) fn render_window(&mut self, width: u16, height: usize) -> RenderWindow {
         self.reflow(width);
+        // Wrapped at the reading width the blocks above are laid out to: an
+        // open line is a whole paragraph as often as not, and it must read
+        // where it stands rather than run off the right edge.
         let mut seat: Vec<Line<'static>> = self
             .thinking_seat()
             .into_iter()
             .chain(self.streaming_seat())
+            .flat_map(|line| wrap_line(&line, usize::from(width.min(READ_W))))
             .collect();
         let committed = self.flat.rows.len();
         // Following a non-markdown block, the streaming seat opens a fresh run,
@@ -951,12 +887,11 @@ fn answer_run(rows: &[record::Block]) -> u32 {
 
 impl Printer for Viewport {
     /// A transient never authors scrollback: [`Transient::Token`] and
-    /// [`Transient::Thinking`] only grow the volume the seat and the live `∴`
-    /// block draw their *magnitude* from ([`Self::streaming_seat`],
-    /// [`Self::push_thinking`]).  The committed text those deltas become
-    /// arrives, chopped, through [`Self::sync`] instead — a printer never
-    /// mints a [`record::Block`] of its own — and [`Self::sync`] retires the
-    /// volume that commit accounts for once it sees it land.
+    /// [`Transient::Thinking`] only carry their lane's open line, which the
+    /// seats draw ([`Self::streaming_seat`], [`Self::push_thinking`]).  Every
+    /// line the worker has finished arrives as a record through
+    /// [`Self::sync`] instead — a printer never mints a [`record::Block`] of
+    /// its own — and grows the block it belongs to.
     ///
     /// [`Transient::Born`], [`Transient::Died`], and [`Transient::Resources`]
     /// reach no-ops here: they need the tabs a bare `Viewport` cannot see, so
@@ -965,7 +900,7 @@ impl Printer for Viewport {
         match t {
             Transient::Token(text) => {
                 self.note_streamed(text.chars().count());
-                self.answer.grow(text);
+                carry(&mut self.answer, text);
             }
             Transient::Thinking(text) => {
                 self.note_streamed(text.chars().count());
@@ -981,14 +916,14 @@ impl Printer for Viewport {
             Transient::Fault { text } => {
                 self.push_chrome(RailShape::Error, super::line::error(text));
             }
-            // The step's stream is sealed: its every commit has landed ahead
-            // of this signal, so whatever volume is still unaccounted stands
-            // for text the producer chose not to record — a cancelled trace, a
-            // whitespace-only tail.  Retiring it here is what keeps a seat
-            // from outliving the step it was reading.
+            // The step's stream is sealed: the worker has recorded every
+            // line it means to, tails included, so an open line still
+            // standing here stands for text the producer chose not to record
+            // — a cancelled trace, a whitespace-only tail.  Dropping it is
+            // what keeps a seat from outliving the step it was reading.
             Transient::Boundary => {
-                self.answer = Unaccounted::default();
-                self.reasoning = Unaccounted::default();
+                self.answer.clear();
+                self.reasoning.clear();
             }
             Transient::Born { .. } | Transient::Died | Transient::Resources { .. } => {}
         }
@@ -996,21 +931,6 @@ impl Printer for Viewport {
 
     fn sync(&mut self, blocks: &Blocks) {
         let rows = blocks.rows();
-        // `answer` and `reasoning` measure exactly what their streams have
-        // shown and no commit has taken away: retire each against every commit
-        // of its own kind not yet accounted for, named by `Seq` rather than
-        // position, since the memo is windowed.
-        for row in rows.iter().filter(|r| r.id().seq() > self.retired_through) {
-            match row.kind() {
-                record::BlockKind::Answer { text } => self.answer.retire(text),
-                record::BlockKind::Thinking { text, .. } => self.reasoning.retire(text),
-                _ => {}
-            }
-        }
-        if let Some(last) = rows.last() {
-            self.retired_through = last.id().seq();
-        }
-
         let mut built: Vec<Entry> = Vec::with_capacity(rows.len());
         let mut last_ral_cmd: Option<&str> = None;
         for (i, row) in rows.iter().enumerate() {
@@ -1374,23 +1294,15 @@ mod tests {
         assert!(vp.pins().is_empty(), "reset wipes the register");
     }
 
-    /// A streaming response renders as one trailing magnitude row and never its
-    /// text; the prose appears only when the boundary commits it.
-    /// The raw stream a [`Transient::Token`] grows never itself renders as
-    /// text — only its magnitude, until the landing [`Display::Answer`]
-    /// commit drains it and the fold renders the committed prose instead.
+    /// The open line renders as text where its block will be, and the record
+    /// that completes it takes it over: block and seat are complementary, so
+    /// the reader sees each word once.
     #[test]
-    fn streaming_renders_a_magnitude_seat_not_text() {
+    fn the_open_line_seats_as_text_until_its_record_lands() {
         use crate::record::{Blocks, Display, Fold, Record, Recorded, Seq, Stamp, View};
 
-        let text = "```ral\nlet x = 1\nlet y = 2\n";
         let mut vp = viewport();
-        vp.transient(&Transient::Token(text.into()));
-        assert_eq!(
-            vp.answer.magnitude(),
-            u32::try_from(text.lines().count()).expect("three lines"),
-            "the delta's whole volume stands unaccounted"
-        );
+        vp.transient(&Transient::Token("```ral\nlet x = 1".into()));
 
         let w = vp.render_window(READ_W, 24);
         let seat_line = w.lines.last().expect("a seat row while streaming");
@@ -1398,61 +1310,69 @@ mod tests {
         assert_eq!(
             seat_line.spans.first().map(|s| s.content.as_ref()),
             Some("· "),
-            "seat wears the markdown rail glyph",
+            "the seat wears the rail of the block it will join",
         );
-        let seat = plain(seat_line);
-        assert!(seat.contains('█'), "seat shows a filled size-bar: {seat:?}");
-        assert!(
-            !seat.contains("let x = 1"),
-            "seat withholds the streamed text: {seat:?}"
+        assert_eq!(
+            plain(seat_line),
+            "let x = 1",
+            "the seat holds the line no record covers, and only that line"
         );
 
+        // The worker records the line it completed; the printer's own newline
+        // rule opens the next one.
         let mut memo = Blocks::default();
         let stamp = Stamp::new(Seq::new(1), 0..0);
         View::step(
             &mut memo,
             &Recorded::new(
                 stamp,
-                Record::Display(Display::Answer { text: text.into() }),
+                Record::Display(Display::Answer {
+                    text: "```ral\n".into(),
+                }),
             ),
         )
         .expect("a display-only fold never refuses");
         vp.sync(&memo);
-        assert_eq!(
-            vp.answer.magnitude(),
-            0,
-            "the commit accounts for the whole stream, and the seat goes out"
-        );
+
+        vp.transient(&Transient::Token("\nlet y = 2".into()));
+        View::step(
+            &mut memo,
+            &Recorded::new(
+                Stamp::new(Seq::new(2), 0..0),
+                Record::Display(Display::Answer {
+                    text: "let x = 1\n".into(),
+                }),
+            ),
+        )
+        .expect("a display-only fold never refuses");
+        vp.sync(&memo);
+
         let w = vp.render_window(READ_W, 24);
         let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
         assert!(
-            all.contains("let x = 1"),
-            "committed prose now renders: {all:?}"
+            all.matches("let x = 1").count() == 1,
+            "the recorded line reads once, in its block: {all:?}"
         );
-        assert!(
-            !plain(w.lines.last().expect("committed rows")).contains('░'),
-            "no provisional seat remains after commit: {all:?}"
+        assert_eq!(
+            plain(w.lines.last().expect("a seat row")),
+            "let y = 2",
+            "the seat has moved on to the line now open"
         );
     }
 
-    /// A live reasoning delta shows only its magnitude, ahead of the answer's
-    /// own seat; the landing [`Display::Thinking`] commit drains it and the
-    /// fold renders the committed trace as its own dialable block.
+    /// A live reasoning line seats above the answer's, and the step's boundary
+    /// clears whatever either lane left open.
     #[test]
-    fn live_thinking_streams_a_magnitude_seat_before_the_answer() {
-        use crate::record::{Blocks, Display, Fold, Record, Recorded, Seq, Stamp, View};
-
+    fn live_thinking_seats_above_the_answer_and_the_boundary_clears_both() {
         let mut vp = viewport();
-        vp.transient(&Transient::Thinking("considering the shape\n".into()));
-        vp.transient(&Transient::Token(
-            "First paragraph.\n\nSecond paragraph still streaming".into(),
-        ));
+        vp.transient(&Transient::Thinking("considering the shape".into()));
+        vp.transient(&Transient::Token("First words".into()));
 
         let w = vp.render_window(READ_W, 24);
         let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
         assert!(
-            !all.contains("considering the shape") && !all.contains("First paragraph."),
-            "neither seat streams text, only magnitude: {all:?}"
+            all.contains("considering the shape") && all.contains("First words"),
+            "each lane seats the line it has open: {all:?}"
         );
         let thinking = rail_rows(&w.lines, "∴ ");
         let answer = rail_rows(&w.lines, "· ");
@@ -1463,35 +1383,12 @@ mod tests {
             "reasoning seats ahead of the answer"
         );
 
-        let mut memo = Blocks::default();
-        for (seq, record) in [
-            Record::Display(Display::Thinking {
-                text: "considering the shape\n".into(),
-            }),
-            Record::Display(Display::Answer {
-                text: "First paragraph.\n\nSecond paragraph still streaming".into(),
-            }),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let stamp = Stamp::new(Seq::new(seq as u64 + 1), 0..0);
-            View::step(&mut memo, &Recorded::new(stamp, record))
-                .expect("a display-only fold never refuses");
-        }
-        vp.sync(&memo);
-        assert_eq!(
-            (vp.answer.magnitude(), vp.reasoning.magnitude()),
-            (0, 0),
-            "both commits account for their streams, and both seats go out"
-        );
+        vp.transient(&Transient::Boundary);
         let w = vp.render_window(READ_W, 24);
         let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
         assert!(
-            all.contains("considering the shape")
-                && all.contains("First paragraph.")
-                && all.contains("Second paragraph"),
-            "both commits render whole once the fold syncs: {all:?}"
+            !all.contains("considering the shape") && !all.contains("First words"),
+            "no seat outlives the step it was reading: {all:?}"
         );
     }
 
@@ -1569,7 +1466,7 @@ mod tests {
                 ],
             );
         }
-        vp.transient(&Transient::Thinking("considering the shape\n".into()));
+        vp.transient(&Transient::Thinking("considering the shape".into()));
         let live = vp.render_window(READ_W, 8);
         let live_text = live.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
         let live_thinking = rail_rows(&live.lines, "∴ ");

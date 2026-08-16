@@ -2,14 +2,14 @@
 //! display half of the log records, upstream of the seam — so what is
 //! recorded is what the user saw, and a resumed scrollback rebuilds it.
 //!
-//! Two producers live here.  [`Stream`] is the model's, pairing a
-//! [`Chopper`] with a [`Trace`]: the chopper accumulates the assistant's
-//! token deltas and commits a [`Display::Answer`] at each fence-safe
-//! paragraph break, flushing the tail at the step boundary — every commit a
-//! prefix of the accumulated stream, so a printer's open tail is always
-//! exactly the unconsumed suffix — while the trace accumulates the reasoning
-//! deltas and seals a run where the prose it precedes begins, so a `∴` never
-//! lands mid-answer.  [`SurfaceBuffer`] is the shell's (moved here whole
+//! Two producers live here.  [`Stream`] is the model's: one [`Chopper`] per
+//! lane, each cutting its deltas into records at the last newline it holds
+//! and flushing the tail at the step boundary, so the screen shows the text
+//! as it arrives.  Where a cut falls carries no meaning — the view fold
+//! joins consecutive records of one lane back into a single block — which is
+//! why the rule is a newline and not a paragraph.  The reasoning lane
+//! flushes where the prose after it begins, so a `∴` never lands mid-answer.
+//! [`SurfaceBuffer`] is the shell's (moved here whole
 //! from `tui/surface.rs` by `git mv` and re-pointed at the seam): it coalesces
 //! consecutive same-`(id, path)` diff hunks into one `▎ diff`
 //! [`Display::Card`], and dedupes read/exec/grep observations by kind —
@@ -36,88 +36,67 @@ use crate::provider::Delta;
 use crate::record::{Display, Emitter};
 use ral_core::types::{Observation, Observed};
 
-/// The byte index, relative to the slice given, just past the last `\n\n` at
-/// fence depth zero — the caller offsets it by whatever prefix is already
-/// committed.  `None` means every candidate sits inside an open fence.
-/// `CommonMark` has no nested fences, so one bit of depth suffices.
-fn safe_paragraph_break(open: &str) -> Option<usize> {
-    let bytes = open.as_bytes();
-    let mut depth = 0u8;
-    let mut last_safe = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        let nl = match bytes[i..].iter().position(|&b| b == b'\n') {
-            Some(p) => i + p,
-            None => break,
-        };
-        let t = open[i..nl].trim_start();
-        if t.starts_with("```") || t.starts_with("~~~") {
-            depth ^= 1;
-        }
-        if nl + 1 < bytes.len() && bytes[nl + 1] == b'\n' && depth == 0 {
-            last_safe = Some(nl + 2);
-        }
-        i = nl + 1;
-    }
-    last_safe
+/// Which lane's block a chopper's records grow.
+#[derive(Clone, Copy)]
+enum Lane {
+    Answer,
+    Thinking,
 }
 
-/// The assistant-prose chopper: one exists, on the worker side, so the live
-/// view and the folded view are the same blocks by construction and there is
-/// nothing to prove confluent.  `open` is the step's whole prose and
-/// `committed` the byte index just past the prefix already recorded, so the
-/// answer stays readable in full while its paragraphs commit one by one.
-#[derive(Default)]
-pub(crate) struct Chopper {
+/// One lane of the model's stream, cut into records at the last newline it
+/// holds.  `open` is the lane's whole text and `committed` the byte index just
+/// past the prefix already recorded, so the lane stays readable in full while
+/// its lines record one after another.
+///
+/// The cut is a newline and nothing more: [`Blocks`](crate::record::Blocks)
+/// grows the lane's block by every record that continues it, so a fence, a
+/// paragraph, or a sentence is never divided in the block a reader sees.
+struct Chopper {
+    lane: Lane,
     open: String,
     committed: usize,
 }
 
 impl Chopper {
-    /// Accumulate one streamed delta, committing the fence-safe prefix it
-    /// completes, if any.
-    ///
-    /// A prefix that is whitespace alone waits rather than commits: an empty
-    /// block is not worth recording, and letting the blank lines ride along
-    /// with the paragraph after them keeps the commits a *partition* of the
-    /// stream — the law a printer counts on to retire exactly what it drew.
+    /// Accumulate one delta, recording every whole line it completes.
     ///
     /// # Errors
-    /// Propagates a failed commit of a completed paragraph.
-    pub(crate) fn push(&mut self, emitter: &Emitter, delta: &str) -> io::Result<()> {
+    /// Propagates a failed record of those lines.
+    fn push(&mut self, emitter: &Emitter, delta: &str) -> io::Result<()> {
         self.open.push_str(delta);
-        let Some(cut) = safe_paragraph_break(&self.open[self.committed..]) else {
-            return Ok(());
-        };
-        let end = self.committed + cut;
+        match self.open[self.committed..].rfind('\n') {
+            Some(nl) => self.commit(emitter, self.committed + nl + 1),
+            None => Ok(()),
+        }
+    }
+
+    /// Record whatever tail remains — the lane's end, where the prose after a
+    /// reasoning run begins, or the step's boundary.  Idempotent: a flushed
+    /// lane has no tail until its next delta.
+    ///
+    /// # Errors
+    /// Propagates a failed record of the tail.
+    fn flush(&mut self, emitter: &Emitter) -> io::Result<()> {
+        self.commit(emitter, self.open.len())
+    }
+
+    /// Record `open[committed..end]` and advance past it.  Text that is
+    /// whitespace alone waits instead: it costs nothing to carry, and it
+    /// would otherwise open a block holding no words.
+    ///
+    /// # Errors
+    /// Propagates a failed record.
+    fn commit(&mut self, emitter: &Emitter, end: usize) -> io::Result<()> {
         if self.open[self.committed..end].trim().is_empty() {
             return Ok(());
         }
-        let chunk = self.open[self.committed..end].to_string();
+        let text = self.open[self.committed..end].to_string();
         self.committed = end;
-        let _recorded = emitter
-            .emit(Display::Answer { text: chunk })
-            .map_err(|e| unrecorded("an answer paragraph", &e))?;
-        Ok(())
-    }
-
-    /// Commit whatever tail remains — the step's boundary, where the stream
-    /// is sealed whether it completed, stalled, or was cancelled.  A tail of
-    /// whitespace alone is the one thing the commits never cover; nothing
-    /// follows it to ride with, and the boundary that calls this is also what
-    /// retires it from the printer's edge.
-    ///
-    /// # Errors
-    /// Propagates a failed commit of the tail.
-    pub(crate) fn flush(&mut self, emitter: &Emitter) -> io::Result<()> {
-        let leftover = self.open[self.committed..].to_string();
-        self.committed = self.open.len();
-        if leftover.trim().is_empty() {
-            return Ok(());
-        }
-        let _recorded = emitter
-            .emit(Display::Answer { text: leftover })
-            .map_err(|e| unrecorded("the answer's tail", &e))?;
+        let (record, what) = match self.lane {
+            Lane::Answer => (Display::Answer { text }, "an answer"),
+            Lane::Thinking => (Display::Thinking { text }, "the step's reasoning"),
+        };
+        let _recorded = emitter.emit(record).map_err(|e| unrecorded(what, &e))?;
         Ok(())
     }
 }
@@ -128,53 +107,66 @@ fn unrecorded(what: &str, error: &io::Error) -> io::Error {
     io::Error::other(format!("{what} was not recorded in record.jsonl: {error}"))
 }
 
-/// The model's stream, committed: the prose [`Chopper`] and the open
-/// reasoning run under one roof, since the two share one order and only a
-/// producer holding both can see the seam between them.
+/// The model's stream, recorded: one [`Chopper`] per lane under one roof,
+/// since the two share one order and only a producer holding both can see
+/// the seam between them.
 ///
 /// The order is the whole point.  A reasoning run is complete the moment the
-/// first prose delta after it arrives — that is where it commits, ahead of
-/// every paragraph of the answer it deliberated into, rather than at the
-/// step's end, which falls *between* the paragraphs already committed and
-/// the tail not yet.  A run no prose follows seals at the boundary.
+/// first prose delta after it arrives — that is where its tail records,
+/// ahead of the answer it deliberated into, so a `∴` never lands mid-answer.
+/// A run no prose follows flushes at the boundary.
 ///
 /// A streaming callback has no error channel of its own, so the first failed
-/// commit is stashed and answered at [`Self::seal`]; nothing commits after
+/// record is stashed and answered at [`Self::seal`]; nothing records after
 /// it, a half-ordered scrollback being worse than a short one.
-#[derive(Default)]
 pub(crate) struct Stream {
     prose: Chopper,
-    trace: String,
+    trace: Chopper,
+}
+
+impl Default for Stream {
+    fn default() -> Self {
+        Self {
+            prose: Chopper {
+                lane: Lane::Answer,
+                open: String::new(),
+                committed: 0,
+            },
+            trace: Chopper {
+                lane: Lane::Thinking,
+                open: String::new(),
+                committed: 0,
+            },
+        }
+    }
 }
 
 impl Stream {
-    /// Absorb one delta.  Reasoning only accumulates — a run's extent is
-    /// known nowhere but where the prose resumes — and prose closes the run
-    /// before committing the paragraph it completes, if any.
+    /// Absorb one delta into its lane.  Prose closes the reasoning lane
+    /// first, which is where a run ends.
     ///
     /// # Errors
-    /// Propagates a failed commit of the run or of the paragraph.
+    /// Propagates a failed record of either lane.
     pub(crate) fn push(&mut self, emitter: &Emitter, delta: Delta<'_>) -> io::Result<()> {
         match delta {
-            Delta::Think(run) => {
-                self.trace.push_str(run);
-                Ok(())
-            }
+            Delta::Think(run) => self.trace.push(emitter, run),
             Delta::Say(text) => self
-                .seal_trace(emitter)
+                .trace
+                .flush(emitter)
                 .and_then(|()| self.prose.push(emitter, text)),
         }
     }
 
-    /// Seal the step: the reasoning run no prose followed, then the prose
-    /// tail — the same two commits in the same order as a prose delta makes,
+    /// Seal the step: the reasoning tail no prose followed, then the prose
+    /// tail — the same two lanes in the same order a prose delta takes them,
     /// at whichever boundary ends the stream, completed or stalled or
     /// cancelled.
     ///
     /// # Errors
-    /// Propagates the failed commit of either.
+    /// Propagates the failed record of either.
     pub(crate) fn seal(&mut self, emitter: &Emitter) -> io::Result<()> {
-        self.seal_trace(emitter)
+        self.trace
+            .flush(emitter)
             .and_then(|()| self.prose.flush(emitter))
     }
 
@@ -183,20 +175,6 @@ impl Stream {
     /// accumulator of the same stream.
     pub(crate) fn said(&self) -> &str {
         &self.prose.open
-    }
-
-    /// Commit the open reasoning run, if any.  Idempotent: a sealed run
-    /// leaves the buffer empty, so every later seal is a no-op until the
-    /// next run opens.
-    fn seal_trace(&mut self, emitter: &Emitter) -> io::Result<()> {
-        let run = std::mem::take(&mut self.trace);
-        if run.trim().is_empty() {
-            return Ok(());
-        }
-        let _recorded = emitter
-            .emit(Display::Thinking { text: run })
-            .map_err(|e| unrecorded("the step's reasoning run", &e))?;
-        Ok(())
     }
 }
 
@@ -506,12 +484,12 @@ mod tests {
         }
     }
 
-    /// Reasoning precedes the answer inside a step, so its commit precedes
-    /// every one of the answer's: the run seals at the first prose delta, not
-    /// at the step's end, which would strand it between the paragraphs the
-    /// chopper had already committed and the tail it had not.
+    /// Reasoning precedes the answer inside a step, so its records precede
+    /// every one of the answer's: the run flushes at the first prose delta,
+    /// not at the step's end, which would strand it between the lines the
+    /// chopper had already recorded and the tail it had not.
     #[test]
-    fn a_reasoning_run_commits_ahead_of_all_the_prose_that_follows_it() {
+    fn a_reasoning_run_records_ahead_of_all_the_prose_that_follows_it() {
         let (emit, rx) = emitter();
         let mut stream = Stream::default();
         stream
@@ -533,14 +511,13 @@ mod tests {
                     rest.iter().all(|c| matches!(c, Display::Answer { .. })),
                     "nothing but prose follows the run: {rest:?}"
                 );
-                assert_eq!(rest.len(), 3, "two paragraphs and the tail: {rest:?}");
             }
             other => panic!("expected the reasoning run first, got {other:?}"),
         }
     }
 
     /// A step that reasons and then calls a tool without a word has no prose
-    /// seam to seal at, so the boundary seals it.
+    /// seam to flush at, so the boundary flushes it.
     #[test]
     fn a_wordless_step_seals_its_reasoning_at_the_boundary() {
         let (emit, rx) = emitter();
@@ -556,61 +533,70 @@ mod tests {
         }
     }
 
-    /// The commits partition the stream: blank lines that arrive alone do
-    /// not vanish between two commits but ride with the paragraph after
-    /// them, so a printer that counts what it drew against what commits can
-    /// never strand a seat measuring nothing.
+    /// The records reassemble the stream exactly: a reader's block is every
+    /// record of the lane joined, so nothing may be dropped or duplicated
+    /// between two of them.
     #[test]
-    fn the_commits_reassemble_the_whole_stream() {
+    fn the_records_reassemble_the_whole_stream() {
         let (emit, rx) = emitter();
-        let mut chopper = Chopper::default();
+        let mut stream = Stream::default();
         let deltas = ["first\n\n", "\n\n", "second\n\n", "tail"];
         for delta in deltas {
-            chopper.push(&emit, delta).unwrap();
+            stream.push(&emit, Delta::Say(delta)).unwrap();
         }
-        chopper.flush(&emit).unwrap();
+        stream.seal(&emit).unwrap();
 
-        let committed: String = drain_display(&rx)
+        let recorded: String = drain_display(&rx)
             .into_iter()
             .map(|d| {
                 if let Display::Answer { text } = d {
                     text
                 } else {
-                    panic!("expected only answer commits, got {d:?}")
+                    panic!("expected only answer records, got {d:?}")
                 }
             })
             .collect();
-        assert_eq!(committed, deltas.concat());
+        assert_eq!(recorded, deltas.concat());
     }
 
-    /// The chopper commits each fence-safe paragraph as its own prefix and
-    /// never cuts inside an open fence; the boundary flush seals the tail.
+    /// The cut is the last newline and nothing more: a line records the
+    /// moment it completes, and the text still short of one waits.  A fence
+    /// needs no special case, since the block a reader sees joins the records
+    /// back together.
     #[test]
-    fn chopper_commits_fence_safe_prefixes_and_flushes_the_tail() {
+    fn a_line_records_where_it_completes_and_the_open_line_waits() {
         let (emit, rx) = emitter();
-        let mut chopper = Chopper::default();
-        chopper.push(&emit, "first paragraph\n\n```\ncode").unwrap();
-        chopper.push(&emit, "\n\nstill code\n```\n\ntail").unwrap();
-        chopper.flush(&emit).unwrap();
+        let mut stream = Stream::default();
+        stream.push(&emit, Delta::Say("```ral\nlet x = 1")).unwrap();
+        match drain_display(&rx).as_slice() {
+            [Display::Answer { text }] => assert_eq!(text, "```ral\n"),
+            other => panic!("expected the completed line alone, got {other:?}"),
+        }
 
-        let texts: Vec<String> = drain_display(&rx)
-            .into_iter()
-            .map(|d| {
-                if let Display::Answer { text } = d {
-                    text
-                } else {
-                    panic!("expected only answer commits, got {d:?}")
-                }
-            })
-            .collect();
-        assert_eq!(
-            texts,
-            vec![
-                "first paragraph\n\n".to_string(),
-                "```\ncode\n\nstill code\n```\n\n".to_string(),
-                "tail".to_string(),
-            ],
-            "the blank line inside the fence is not a cut point"
+        stream.push(&emit, Delta::Say("\n```\n")).unwrap();
+        stream.seal(&emit).unwrap();
+        match drain_display(&rx).as_slice() {
+            [Display::Answer { text }] => assert_eq!(text, "let x = 1\n```\n"),
+            other => panic!("expected both lines in one record, got {other:?}"),
+        }
+    }
+
+    /// Whitespace alone opens no block: it waits for the words after it, so a
+    /// reader never meets a block holding nothing.
+    #[test]
+    fn whitespace_alone_waits_for_the_words_after_it() {
+        let (emit, rx) = emitter();
+        let mut stream = Stream::default();
+        stream.push(&emit, Delta::Say("\n\n")).unwrap();
+        assert!(
+            drain_display(&rx).is_empty(),
+            "blank lines alone are not worth a block"
         );
+
+        stream.push(&emit, Delta::Say("a word\n")).unwrap();
+        match drain_display(&rx).as_slice() {
+            [Display::Answer { text }] => assert_eq!(text, "\n\na word\n"),
+            other => panic!("expected the blank lines to ride along, got {other:?}"),
+        }
     }
 }
