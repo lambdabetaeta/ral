@@ -22,22 +22,33 @@ check:
     cargo check --workspace --all-targets
 
 # Cross-check the workspace against the shipping Windows ABI (exarch/synod/guest-net excluded: their C deps can't cross-compile from Unix).
-check-windows:
-    CC_x86_64_pc_windows_msvc=cc-absent-use-blake3-pure-fallback RUSTFLAGS='-D warnings' cargo check --workspace --exclude exarch --exclude synod --exclude guest-net --all-targets --target x86_64-pc-windows-msvc
+check-windows $RUSTFLAGS='-D warnings' $CC_x86_64_pc_windows_msvc='cc-absent-use-blake3-pure-fallback':
+    cargo check --workspace --exclude exarch --exclude synod --exclude guest-net --all-targets --target x86_64-pc-windows-msvc
+
+# Builds first because the integration tests in ral/tests/ invoke the `ral`
+# binary as a subprocess, and `cargo test` alone does not reliably refresh it.
 
 # Run the workspace test suite.
-test:
+test: build
     cargo test --workspace --features ral-core/test-util
 
 # Format every crate in place.
 fmt:
     cargo fmt
 
-# Clippy across the workspace.
-lint:
+# No `-- -D warnings`: that would override the vendored ral-ripgrep-core's
+# `all = "allow"` opt-out.  The pedantry comes from RUSTFLAGS plus the
+# `[workspace.lints.clippy]` table (pedantic + nursery, deny on the I/O-door
+# denylist), which is where a lint decision belongs.
+
+# Clippy across the workspace, warnings as errors — exactly what CI lints with.
+lint $RUSTFLAGS='-D warnings':
     cargo clippy --workspace --all-targets
 
-# Replay CI on this host.
+# Lint and test the workspace: the gate before every commit.
+gate: lint test
+
+# Replay CI on this host: the gate plus the build, the Windows cross-check, the site, and the examples.
 ci:
     cargo run -p ral --quiet -- scripts/ci-local.ral
 
