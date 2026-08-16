@@ -989,17 +989,29 @@ fn refold(ledger: &Ledger) -> io::Result<(State, View, u64)> {
     Ok((state, view, max_exchange))
 }
 
-/// Replay the protocol sequencing law over a file before admitting it:
-/// interposing the stub records a live `quiesce` would have written wherever
-/// a record is inadmissible but repairable, and refusing outright wherever it
-/// is not — foreign data no live door could have produced.
-fn validate_resume(records: &[Recorded<Protocol>]) -> Result<(), Refusal> {
-    let mut state = State::default();
-    let mut view = View::default();
-    let mut max_exchange = 0u64;
-    for (index, recorded) in records.iter().enumerate() {
-        let protocol = recorded.value();
-        if !admissible(&state, protocol) {
+/// The protocol sequencing law, replayed record by record beside the fold that
+/// [`resume`] is building: interposing the stub records a live `quiesce` would
+/// have written wherever a record is inadmissible but repairable, and refusing
+/// outright wherever it is not — foreign data no live door could have produced.
+///
+/// Its `state` and `view` are its own, never the fold's, so admission stays an
+/// independent judgement on the file rather than a self-agreement of the memo.
+#[derive(Default)]
+struct Admission {
+    state: State,
+    view: View,
+    max_exchange: u64,
+    index: usize,
+}
+
+impl Admission {
+    /// # Errors
+    /// Returns [`Refusal::Foreign`] for a record no live session could have
+    /// written at this point in the log.
+    fn step(&mut self, protocol: &Protocol) -> Result<(), Refusal> {
+        let index = self.index;
+        self.index += 1;
+        if !admissible(&self.state, protocol) {
             if !stub_repairable(protocol) {
                 return Err(Refusal::Foreign {
                     record: Box::new(Record::Protocol(protocol.clone())),
@@ -1009,14 +1021,15 @@ fn validate_resume(records: &[Recorded<Protocol>]) -> Result<(), Refusal> {
                     ),
                 });
             }
-            for stub in stubs_to_ready(&state, QuiesceReason::Aborted) {
-                state = advance(&state, &stub);
+            for stub in stubs_to_ready(&self.state, QuiesceReason::Aborted) {
+                self.state = advance(&self.state, &stub);
             }
         }
-        state = advance(&state, protocol);
+        self.state = advance(&self.state, protocol);
         if let Some(id) = record_exchange(protocol) {
-            let joins = id > max_exchange
-                || view
+            let joins = id > self.max_exchange
+                || self
+                    .view
                     .spans
                     .iter()
                     .any(|span| span.id == id && span.events.end == index);
@@ -1030,12 +1043,12 @@ fn validate_resume(records: &[Recorded<Protocol>]) -> Result<(), Refusal> {
                 });
             }
         }
-        record_event_span(&mut view, &mut max_exchange, protocol, index);
+        record_event_span(&mut self.view, &mut self.max_exchange, protocol, index);
         if let Protocol::ContextEdited { op, .. } = protocol {
-            apply_context_op(&mut view, op);
+            apply_context_op(&mut self.view, op);
         }
+        Ok(())
     }
-    Ok(())
 }
 
 /// The bytes past the last complete JSONL line — a torn write from a session
@@ -1045,22 +1058,40 @@ struct CrashTail {
     complete_len: u64,
 }
 
+/// Scanned backwards from the end, a window at a time, rather than forwards
+/// through the whole file: the tail is one torn record long however long the
+/// log behind it is.
+const CRASH_SCAN_WINDOW: u64 = 8 * 1024;
+
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:model-fold-crash-scan] reads record.jsonl whole to find a torn trailing write before resume folds it; output infra, not turn-time data I/O"
+    reason = "[io-door:silent:model-fold-crash-scan] scans record.jsonl's tail for a torn trailing write before resume folds it; output infra, not turn-time data I/O"
 )]
 fn find_crash_tail(path: &Path) -> io::Result<Option<CrashTail>> {
-    let data = std::fs::read(path)?;
-    let mut complete_len = 0usize;
-    for fragment in data.split_inclusive(|byte| *byte == b'\n') {
-        if fragment.last() != Some(&b'\n') {
+    let mut file = File::open(path)?;
+    let len = file.metadata()?.len();
+    let mut complete_len = 0;
+    let mut cursor = len;
+    while cursor > 0 {
+        let window = cursor.saturating_sub(CRASH_SCAN_WINDOW);
+        let mut chunk = vec![0; usize::try_from(cursor - window).unwrap_or(usize::MAX)];
+        let _ = file.seek(SeekFrom::Start(window))?;
+        file.read_exact(&mut chunk)?;
+        if let Some(last) = chunk.iter().rposition(|byte| *byte == b'\n') {
+            complete_len = window + last as u64 + 1;
             break;
         }
-        complete_len += fragment.len();
+        cursor = window;
     }
-    Ok((complete_len < data.len()).then(|| CrashTail {
-        bytes: data[complete_len..].to_vec(),
-        complete_len: complete_len as u64,
+    if complete_len == len {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    let _ = file.seek(SeekFrom::Start(complete_len))?;
+    let _ = file.read_to_end(&mut bytes)?;
+    Ok(Some(CrashTail {
+        bytes,
+        complete_len,
     }))
 }
 
@@ -1095,10 +1126,15 @@ fn quarantine_tail(path: &Path, tail: &CrashTail) -> io::Result<()> {
     Ok(())
 }
 
-/// Fold `record.jsonl` into a fresh [`Memo`]: quarantine a torn tail,
-/// validate the protocol subsequence's sequencing, fold it, and check the
-/// fold against an independent from-scratch refold of the ledger it built —
-/// the `fold == memo` law, migrated whole from `AgentLog::resume`.
+/// Fold `record.jsonl` into a fresh [`Memo`]: quarantine a torn tail, then
+/// stream the log once — admitting each protocol record's sequencing and
+/// folding it in the same pass — and check the fold against an independent
+/// from-scratch refold of the ledger it built: the `fold == memo` law,
+/// migrated whole from `AgentLog::resume`.
+///
+/// The pass is a stream rather than a collection, so what a resume holds is
+/// the memo it is building — residency at the addressed view — and never the
+/// log it is building it from.
 ///
 /// Returns the folded memo alongside the `(model, provider)` pair the head
 /// record identifies the session by — `AgentLog::resume` reads its own
@@ -1113,58 +1149,58 @@ pub fn resume(path: &Path) -> io::Result<(Memo, String, String)> {
     if let Some(tail) = find_crash_tail(path)? {
         quarantine_tail(path, &tail)?;
     }
-    let records = Log::read(path)?;
-    let mut protocol_records = Vec::new();
-    for record in records {
+    let mut memo = Memo::default();
+    memo.attach_source(path.to_path_buf());
+    let mut admission = Admission::default();
+    let mut identity = None;
+    for record in Log::read(path)? {
         let record = record?;
-        if let Record::Protocol(p) = record.value() {
-            protocol_records.push(Recorded::new(record.stamp().clone(), p.clone()));
+        let Record::Protocol(protocol) = record.value() else {
+            continue;
+        };
+        if identity.is_none() {
+            identity = Some(match protocol {
+                Protocol::SessionStarted {
+                    session_id: 0,
+                    parent: None,
+                    model,
+                    provider,
+                    ..
+                } => (model.clone(), provider.clone()),
+                Protocol::SessionStarted {
+                    session_id, parent, ..
+                } => {
+                    return Err(io::Error::other(format!(
+                        "cannot resume {}: the first record starts session {session_id:?} with parent {parent:?}; expected SessionStarted {{ session_id: 0, parent: None }} — is this a child log?",
+                        path.display()
+                    )));
+                }
+                other @ (Protocol::SessionResumed { .. }
+                | Protocol::SessionEnded
+                | Protocol::UserPrompt { .. }
+                | Protocol::ContextMessage { .. }
+                | Protocol::StepStarted { .. }
+                | Protocol::AssistantMessage { .. }
+                | Protocol::ToolResults { .. }
+                | Protocol::ContextEdited { .. }) => {
+                    return Err(io::Error::other(format!(
+                        "cannot resume {}: the first record is {other:?}; expected SessionStarted {{ session_id: 0, parent: None }} — is this a copied child log?",
+                        path.display()
+                    )));
+                }
+            });
         }
+        admission
+            .step(protocol)
+            .map_err(|refusal| io::Error::other(refusal.to_string()))?;
+        step_protocol(&mut memo, record.stamp().clone(), protocol);
     }
-    let Some(first) = protocol_records.first() else {
+    let Some((model, provider)) = identity else {
         return Err(io::Error::other(format!(
             "cannot resume {}: no complete session records were found; is the file truncated?",
             path.display()
         )));
     };
-    let (model, provider) = match first.value() {
-        Protocol::SessionStarted {
-            session_id: 0,
-            parent: None,
-            model,
-            provider,
-            ..
-        } => (model.clone(), provider.clone()),
-        Protocol::SessionStarted {
-            session_id, parent, ..
-        } => {
-            return Err(io::Error::other(format!(
-                "cannot resume {}: the first record starts session {session_id:?} with parent {parent:?}; expected SessionStarted {{ session_id: 0, parent: None }} — is this a child log?",
-                path.display()
-            )));
-        }
-        other @ (Protocol::SessionResumed { .. }
-        | Protocol::SessionEnded
-        | Protocol::UserPrompt { .. }
-        | Protocol::ContextMessage { .. }
-        | Protocol::StepStarted { .. }
-        | Protocol::AssistantMessage { .. }
-        | Protocol::ToolResults { .. }
-        | Protocol::ContextEdited { .. }) => {
-            return Err(io::Error::other(format!(
-                "cannot resume {}: the first record is {other:?}; expected SessionStarted {{ session_id: 0, parent: None }} — is this a copied child log?",
-                path.display()
-            )));
-        }
-    };
-
-    validate_resume(&protocol_records).map_err(|refusal| io::Error::other(refusal.to_string()))?;
-
-    let mut memo = Memo::default();
-    memo.attach_source(path.to_path_buf());
-    for recorded in &protocol_records {
-        step_protocol(&mut memo, recorded.stamp().clone(), recorded.value());
-    }
 
     let (state, view, max_exchange) = refold(&memo.ledger)?;
     if (state, view, max_exchange) != (memo.state.clone(), memo.view.clone(), memo.max_exchange) {

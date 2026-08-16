@@ -168,7 +168,8 @@ log with no independent sibling.
 - Log growth rises as observations move in; 260812's unbounded-growth
   acceptance and deferred segment rotation carry over, with `/clear` as the
   rotation boundary. Resume still reads the whole ledger — the same O(file)
-  bill, now for space as well as time.
+  bill for time. (The space half of that bill was paid off in the 260816
+  correction below.)
 - "Recorded" means surrendered to the OS: per-record flush, never `fsync` —
   process-crash durable, not power-loss durable; the quarantined tail covers
   the torn write either way.
@@ -226,6 +227,25 @@ log with no independent sibling.
   size bars. The general lesson: if a producer's cut has to be
   meaningful, ask first whether the consumer could simply put the pieces back
   together.
+
+- **260816 — a fold reads its log as a stream.** The accepted loss above put
+  resume's space bill at O(file), and the implementation earned it four times
+  over: the log was read into one byte buffer, parsed into a `Vec` of every
+  record, filtered into a second `Vec` of the protocol subsequence, and only
+  then folded — with the torn-tail scan reading the file whole a second time
+  and the append cursor a third. None of that was needed. `Log::read` now
+  yields one `Recorded<Record>` at a time off a `BufReader`, `replay` and
+  `model::resume` `try_fold` that stream, the sequencing check became an
+  `Admission` stepper that runs in the same pass rather than a batch over a
+  collected slice, `find_crash_tail` scans backwards from the end in windows
+  (a torn tail is one record long however long the log behind it is), and
+  `Log::append_to` counts lines with `read_until` instead of reading the file
+  in. What a resume now holds is the memo it is building — residency at the
+  addressed view, exactly the 260812 bound — and never the log it is building
+  it from. Time stays O(file), which is irreducible: the fold must see every
+  record. The general lesson: a fold is a streaming operation by
+  construction, so collecting its input first is never the shape of the
+  computation, only of the code that spells it.
 
 ## See also
 

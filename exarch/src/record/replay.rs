@@ -46,12 +46,9 @@ impl From<io::Error> for Refusal {
 /// Returns [`Refusal`] if the file will not read back, or if `F::step`
 /// refuses one of its records.
 pub fn replay<F: Fold>(path: &Path) -> Result<F::Memo, Refusal> {
-    let records = Log::read(path)?;
-    records
-        .into_iter()
-        .try_fold(F::Memo::default(), |mut memo, record| {
-            let record: Recorded<Record> = record?;
-            F::step(&mut memo, &record)?;
-            Ok(memo)
-        })
+    Log::read(path)?.try_fold(F::Memo::default(), |mut memo, record| {
+        let record: Recorded<Record> = record?;
+        F::step(&mut memo, &record)?;
+        Ok(memo)
+    })
 }

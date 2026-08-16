@@ -528,12 +528,9 @@ pub trait Printer {
 /// Returns `Err` under exactly [`log::Log::read`]'s own conditions.
 #[cfg(test)]
 pub(crate) fn read_records(path: &std::path::Path) -> std::io::Result<Vec<Record>> {
-    Ok(log::Log::read(path)?
-        .into_iter()
-        .collect::<std::io::Result<Vec<_>>>()?
-        .into_iter()
-        .map(Recorded::into_value)
-        .collect())
+    log::Log::read(path)?
+        .map(|record| record.map(Recorded::into_value))
+        .collect()
 }
 
 /// The other half of [`read_records`]: a test that hand-writes or
