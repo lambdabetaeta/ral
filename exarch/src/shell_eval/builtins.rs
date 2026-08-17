@@ -1503,7 +1503,14 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("exarch-detach-clear-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let log = AgentLog::root(&dir, 0, "test-model", "test", 0).expect("session log");
+        let log = AgentLog::root(
+            &dir,
+            0,
+            "test-model",
+            &crate::agent::RecordedAccount::for_test("test"),
+            0,
+        )
+        .expect("session log");
         let scratch = std::sync::Arc::new(
             crate::bootstrap::Scratch::for_test(crate::bootstrap::EXARCH, "detach-clear")
                 .expect("scratch dir"),

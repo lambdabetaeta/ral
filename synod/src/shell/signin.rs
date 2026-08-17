@@ -33,9 +33,10 @@ pub struct SignIn(Mutex<Option<Arc<AtomicBool>>>);
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum SignInDone {
     /// The account is signed in, and already in the menu the
-    /// `models-refreshed` event alongside this one carries.
+    /// `models-refreshed` event alongside this one carries. `label` is its
+    /// display name, never an id to hand back.
     SignedIn {
-        account: String,
+        label: String,
         /// True when this refreshed an account already set up here.
         replaced: bool,
     },
@@ -109,7 +110,7 @@ pub fn sign_in(
                     synod::session::refresh_menu(store, catalog),
                 );
                 SignInDone::SignedIn {
-                    account: signed_in.account,
+                    label: signed_in.label,
                     replaced: signed_in.replaced,
                 }
             }

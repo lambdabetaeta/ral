@@ -12,7 +12,7 @@ use super::palette::{BANNER_GOLD, CYAN, OVERLAY_BG, RED, SLATE};
 use super::picker::{PAD_X, PAD_Y, centered, overlay_frame};
 use super::terminal::osc52_copy;
 use super::tui_loop::{CommandCtx, OverlayTick, Tui, overlay_tick};
-use crate::provider::ProviderId;
+use crate::provider::identity;
 use crate::provider::oauth::{self, LoginMethod, LoginPhase, OAuthToken};
 use ratatui::Frame;
 use ratatui::crossterm::event::KeyCode;
@@ -411,17 +411,11 @@ fn drive_login(tui: &mut Tui) -> Option<(OAuthToken, bool)> {
 /// built-in default model, so the user picks one through `/model`; and a
 /// re-login upserts the very cell the focused tab already reads through.
 fn apply_login(tui: &Tui, ctx: &mut CommandCtx<'_>, token: &OAuthToken, replaced: bool) {
+    let (account, credential) = ctx.store.add_oauth(token);
     let already_active = ctx
         .agents
         .provider(tui.app.tabs.focused())
-        .is_some_and(|provider| {
-            matches!(
-                provider.current().id(),
-                ProviderId::ChatGpt(account) if account.account_id == token.account_id
-            )
-        });
-    let (id, credential) = ctx.store.add_oauth(token);
-    ctx.catalog.add_credential(id, credential);
+        .is_some_and(|provider| provider.current().account().id == account.id);
     let action = if replaced {
         "Updated the login for"
     } else {
@@ -432,7 +426,12 @@ fn apply_login(tui: &Tui, ctx: &mut CommandCtx<'_>, token: &OAuthToken, replaced
     } else {
         " — run /model to use it"
     };
-    let text = format!("[{action} ChatGPT account {}{next}]", token.label());
+    // The store's name for it, which says which account when two share an email.
+    let text = format!(
+        "[{action} ChatGPT account {}{next}]",
+        identity::label(&account, &ctx.store.available())
+    );
+    ctx.catalog.add_credential(account, credential);
     if let Err(error) = ctx
         .recorder
         .emit(crate::record::Forensic::SystemNote { text })

@@ -56,20 +56,31 @@ exit code.
 
 ## Accounts
 
-Several ChatGPT subscriptions can be signed in at once; each is its own
-selectable provider, switched in the `/model` picker exactly like any API-keyed
-provider — there is no second account dimension.
+**One service may own many accounts.** `chatgpt` is a single service, and a
+login email can carry several accounts under it — a personal one and one per
+workspace, each with its own issued id. Each account is separately selectable
+in the `/model` picker, exactly like any API-keyed one, so there is no second
+account dimension; a key-bearing service is simply the case where the service
+owns exactly one account and lends it its name. The shape is
+[[map/exarch/provider#Services and accounts|`Service` × `Account`]].
 
 - `login` adds or refreshes one account (opening a browser, or `--device-auth`
   for a headless host).
 - `/login` performs the same sign-in inside a running TUI session, then admits
   the returned shared OAuth credential to both the live store and model
   catalog; a refresh of the selected account is visible to its next request.
-- `logout` removes one account by email or id, or `--all`.
-- `accounts` lists the signed-in set.
+- `logout` removes one account by email or id, or `--all`. An email two
+  accounts answer to names neither, so it is refused with both account ids
+  rather than taking whichever came first.
+- `accounts` lists the signed-in set, each named by
+  `identity::label` against the others present.
 
-The token store holds a list of logins keyed by account id; `run` resolves each
-into its own OAuth-backed provider, ordered after the API-key providers.
+The token store is an object keyed by the rendering of an `AccountId`, one
+entry per account, and so is every map above it. `run` resolves each login into
+its own account, ordered after the key-bearing ones. Because a key-bearing
+account's id *is* its service name, an existing `state.json`, model cache
+entry, or `--provider deepseek` keeps working untouched; only a ChatGPT
+selection changes key.
 
 ## Credentials and the env scrub
 
@@ -77,9 +88,9 @@ into its own OAuth-backed provider, ordered after the API-key providers.
 the key variables from the process environment, so no child a tool call spawns
 can inherit a live key.**
 
-- **`CredentialStore::resolve_and_scrub`** sweeps every known provider — the
-  famous `ProviderKind`s and the `custom` providers from `config.ral` — reading
-  each one's conventional key variable (`key_env`) into the in-memory store, then
+- **`CredentialStore::resolve_and_scrub`** sweeps every known account — the
+  built-in table and the endpoints declared in `config.ral` — reading each
+  `Auth::Env` service's conventional key variable into the in-memory store, then
   removing from the environment *every key variable that was present*, whether or
   not it yielded a usable key. A malformed value (a pasted newline) is still a
   live secret, so it is swept too.
@@ -88,8 +99,9 @@ can inherit a live key.**
   happen while the process is still single-threaded — before any session worker —
   so the env mutation cannot race.
 - A signed-in **ChatGPT account** never touches the environment: its login is
-  loaded from the OAuth token store into an `OAuth` credential cell ([[#Accounts]]),
-  a distinct identity from an `OPENAI_API_KEY` provider, so the two coexist.
+  loaded from the OAuth token store into its own `OAuth` credential cell
+  ([[#Accounts]]). `chatgpt` is a different service from `openai`, so a login
+  and an `OPENAI_API_KEY` coexist, and two logins never share a cell.
 - This is the subtractive half of exarch's env shaping; the additive half —
   `NO_COLOR`, `$EXARCH_SCRATCH`, and the redirected tool homes — is seeded onto the
   session shell ([[#Bootstrap]]). Per-spawn loader-variable hardening (stripping

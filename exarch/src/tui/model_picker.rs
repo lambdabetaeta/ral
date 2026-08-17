@@ -9,6 +9,7 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 use crate::provider::credential::CredentialStore;
+use crate::provider::identity::{self, Account};
 use crate::provider::listing::{Fetches, Listing};
 use crate::provider::models::{LiveSource, ModelCatalog, ModelSource, ProviderEndpoint};
 use crate::provider::state;
@@ -23,20 +24,6 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
     // so `ctx` stays whole for `apply_model_switch`.
     let store = &*ctx.store;
     let available = store.available();
-    // The picker's plan flavours; a provider absent from the map reads as metered.
-    let subscription = available
-        .iter()
-        .filter_map(|id| {
-            let kind = if store.is_subscription(id) {
-                crate::provider::Subscription::ChatGpt
-            } else if id.flat_rate() {
-                crate::provider::Subscription::FlatRate
-            } else {
-                return None;
-            };
-            Some((id.clone(), kind))
-        })
-        .collect();
     // Open on the focused agent's live tuning; a settled one falls back to the
     // defaults.
     let initial_tuning = ctx
@@ -46,13 +33,13 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
         .unwrap_or_default();
     let mut picker = Picker::new(
         available.clone(),
-        subscription,
         &initial_tuning,
         crate::provider::pricing::caps_or_default,
     );
     // `Picker::new` seeded every row `Loading`, so only the rows `Listing::open`
     // settled from cache need forwarding; the misses land as `drive_picker` pumps.
-    let listing = Listing::open(available, ctx.catalog);
+    let ids = available.iter().map(|account| account.id.clone()).collect();
+    let listing = Listing::open(ids, ctx.catalog);
     for (id, state) in listing.states() {
         match state {
             picker::ModelsState::Loaded(models) => {
@@ -67,8 +54,8 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
     tui.app.overlay = Some(Overlay::Picker(picker));
     let outcome = drive_picker(tui, store, ctx.catalog, listing);
     tui.app.overlay = None;
-    if let Some((id, model, tuning, route)) = outcome {
-        apply_model_switch(tui, ctx, &id, &model, &tuning, route.as_ref());
+    if let Some((account, model, tuning, route)) = outcome {
+        apply_model_switch(tui, ctx, &account, &model, &tuning, route.as_ref());
     }
 }
 
@@ -79,12 +66,7 @@ fn drive_picker(
     store: &CredentialStore,
     catalog: &mut ModelCatalog<LiveSource>,
     mut listing: Listing,
-) -> Option<(
-    provider::ProviderId,
-    String,
-    provider::Tuning,
-    Option<String>,
-)> {
+) -> Option<(Account, String, provider::Tuning, Option<String>)> {
     // Spawned from inside the loop, unlike `listing`, whose fetches are all away
     // before it.
     let mut endpoints: Fetches<String, Vec<ProviderEndpoint>> = Fetches::new();
@@ -133,15 +115,15 @@ fn drive_picker(
                 let action = tui.app.picker_mut()?.key(code);
                 match action {
                     picker::PickAction::None => {}
-                    picker::PickAction::Selected(id, model, tuning, route) => {
-                        return Some((id, model, tuning, route));
+                    picker::PickAction::Selected(account, model, tuning, route) => {
+                        return Some((account, model, tuning, route));
                     }
                     picker::PickAction::Manual(query, tuning) => {
                         let available = store.available();
                         match crate::provider::models::resolve_model_provider(
                             &query, &available, catalog,
                         ) {
-                            Ok(id) => return Some((id, query, tuning, None)),
+                            Ok(account) => return Some((account, query, tuning, None)),
                             Err(e) => {
                                 // The dialogue's own failure, not an action on an
                                 // agent, so it lands on root and not the tab a
@@ -168,7 +150,7 @@ fn drive_picker(
 fn apply_model_switch(
     tui: &mut Tui,
     ctx: &CommandCtx<'_>,
-    provider_id: &provider::ProviderId,
+    account: &Account,
     model: &str,
     tuning: &provider::Tuning,
     route: Option<&String>,
@@ -179,11 +161,11 @@ fn apply_model_switch(
     // Every failure below answers one gesture on this tab, so it lands here —
     // the persist too, whose file is project-wide but whose message is not.
     let focused = tui.app.tabs.focused();
-    let Some(cred) = store.get(provider_id).cloned() else {
-        tui.app.push_error(
-            focused,
-            &format!("{} has no resolved credential", provider_id.label()),
-        );
+    let available = store.available();
+    let label = identity::label(account, &available);
+    let Some(cred) = store.get(&account.id).cloned() else {
+        tui.app
+            .push_error(focused, &format!("{label} has no resolved credential"));
         return;
     };
     // A tab that settled while the picker was open has no handle to swap.
@@ -197,20 +179,25 @@ fn apply_model_switch(
     let engine = ctx.engine.clone();
     let new_provider = Arc::new(Provider::build(
         engine,
-        provider_id,
+        account,
         model.to_string(),
         &cred,
         current_override,
         tuning.clone(),
         route.cloned(),
     ));
-    let label = provider_id.label();
     provider.swap(new_provider);
-    tui.app.update_live_model(&provider.current());
+    tui.app.update_live_model(&provider.current(), &available);
     let state_dir = crate::bootstrap::EXARCH.project_dir(info.cwd);
     if let Err(e) = state::save(
         &state_dir,
-        &state::State::new(provider_id, model, tuning, route.map(String::as_str)),
+        &state::State::new(
+            account,
+            &available,
+            model,
+            tuning,
+            route.map(String::as_str),
+        ),
     ) {
         tui.app
             .push_error(focused, &format!("could not persist selection: {e}"));
@@ -224,7 +211,9 @@ fn apply_model_switch(
     }
     if let Err(error) = recorder.emit(crate::record::Forensic::ModelChanged {
         model: model.to_string(),
-        provider: label.to_string(),
+        label,
+        service: Some(account.service.name.as_str().to_string()),
+        account: Some(account.id.as_str().to_string()),
     }) {
         recorder.report_fault(&error);
     }

@@ -715,7 +715,6 @@ mod tests {
     fn provider() -> ProviderHandle {
         ProviderHandle::new(std::sync::Arc::new(crate::provider::Provider::scripted(
             "test",
-            crate::provider::ProviderKind::Openai,
             crate::provider::scripted::Script::new(),
         )))
     }

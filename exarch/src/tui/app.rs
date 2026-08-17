@@ -19,6 +19,7 @@ use super::viewport::Viewport;
 use crate::agent::resources::{BusFigures, ViewFigures, ViewportFigures};
 use crate::bus::{AgentId, AgentState, BusReceiver, Inbox};
 use crate::fleet::registry::{AGENT_DEMOTE_IDLE, AgentRegistry};
+use crate::provider::identity::Account;
 use crate::provider::{Provider, Usage};
 use crate::record::{Display, Forensic, Printer as _, Record, Recorded, Transient};
 
@@ -118,9 +119,11 @@ impl App {
 
     /// Set the status bar label and the ctx-gauge denominator from the focused
     /// agent's provider. Call at startup and after every focus or model change.
-    pub fn update_live_model(&mut self, p: &Provider) {
-        let status_provider = crate::provider::provider_label(p.subscription(), p.id().label());
-        // A custom provider can launch with no model at all.
+    /// `accounts` is the set the label is drawn relative to, so two logins on
+    /// one email still read apart on the status line.
+    pub fn update_live_model(&mut self, p: &Provider, accounts: &[Account]) {
+        let status_provider = crate::provider::identity::label(p.account(), accounts);
+        // A declared service can launch with no model at all.
         self.status_model = if p.model().is_empty() {
             format!("{status_provider} · no model — run /model")
         } else {

@@ -4,6 +4,12 @@ status: active
 
 # A shared transport beneath the per-agent providers
 
+> *2026-08-17.* What this page calls a provider id is now an `AccountId`, and
+> the `flat_rate` flag below is `Service::billing`, the sole authority on
+> metering. The identity a transport keys on is read in
+> [[map/exarch/provider#Services and accounts|map/exarch/provider]]; the
+> decision recorded here is otherwise unchanged.
+
 **The tokio runtime and genai clients belong to the *fleet*, not to each
 `Provider`. A `Provider` should be a cheap per-agent *selection* (provider id +
 model + max-tokens + tuning) that borrows one process-wide transport, so a

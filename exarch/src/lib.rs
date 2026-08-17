@@ -106,18 +106,12 @@ pub fn run() -> Result<(), String> {
             cli::Command::Login { device_auth } => provider::oauth::login(device_auth),
             cli::Command::Logout { account, all } => provider::oauth::logout(account, all),
             cli::Command::Accounts => {
-                let accounts = provider::oauth::load_all();
+                let accounts = provider::oauth::accounts();
                 if accounts.is_empty() {
                     eprintln!("No ChatGPT accounts signed in. Run `exarch login` to add one.");
                 } else {
-                    // The label is the login email when there is one, else the
-                    // account id itself — which printing twice would be noise.
-                    for token in accounts {
-                        if token.email.is_some() {
-                            println!("{} ({})", token.label(), token.account_id);
-                        } else {
-                            println!("{}", token.account_id);
-                        }
+                    for account in &accounts {
+                        println!("{}", provider::identity::label(account, &accounts));
                     }
                 }
                 Ok(())
@@ -159,7 +153,7 @@ pub fn run() -> Result<(), String> {
         provider::models::LiveSource::new(&store),
         bootstrap::EXARCH,
     );
-    let (id, model, mut tuning, route) = resolve_initial_selection(
+    let (account, model, mut tuning, route) = resolve_initial_selection(
         c.provider.as_deref(),
         c.model.as_deref(),
         &state_dir,
@@ -179,8 +173,8 @@ pub fn run() -> Result<(), String> {
     // no picker, so it must be told one.
     if model.is_empty() && c.headless {
         return Err(format!(
-            "custom provider '{}' has no default model — pass --model NAME for a headless run",
-            id.label()
+            "'{}' has no default model — pass --model NAME for a headless run",
+            provider::identity::label(&account, &available)
         ));
     }
     // A `--model` override is a deliberate choice, remembered like the picker's,
@@ -188,12 +182,16 @@ pub fn run() -> Result<(), String> {
     if c.model.is_some() && !model.is_empty() {
         let _ = provider::state::save(
             &state_dir,
-            &provider::state::State::new(&id, &model, &tuning, route.as_deref()),
+            &provider::state::State::new(&account, &available, &model, &tuning, route.as_deref()),
         );
     }
-    let label = id.label();
+    let recorded_account = agent::RecordedAccount {
+        label: provider::identity::label(&account, &available),
+        service: account.service.name.as_str().to_string(),
+        id: account.id.as_str().to_string(),
+    };
     let cred = store
-        .get(&id)
+        .get(&account.id)
         .expect("selected provider must be available")
         .clone();
 
@@ -242,7 +240,7 @@ pub fn run() -> Result<(), String> {
     let engine = Engine::new();
     let provider = Arc::new(Provider::build(
         engine.clone(),
-        &id,
+        &account,
         model.clone(),
         &cred,
         c.max_tokens,
@@ -258,7 +256,7 @@ pub fn run() -> Result<(), String> {
             no_logs: c.no_logs,
             run_lock,
             model,
-            provider_label: label.to_string(),
+            account: recorded_account,
             allow_schedule: c.allow_schedule,
             // An interactive trunk parks for the human; a headless one
             // terminates once its seeded work is idle.
@@ -388,53 +386,44 @@ fn resolve_initial_selection(
     provider_override: Option<&str>,
     model_override: Option<&str>,
     state_dir: &std::path::Path,
-    available: &[provider::ProviderId],
+    available: &[provider::Account],
     catalog: &mut provider::models::ModelCatalog<provider::models::LiveSource>,
-) -> Result<
-    (
-        provider::ProviderId,
-        String,
-        provider::Tuning,
-        Option<String>,
-    ),
-    String,
-> {
+) -> Result<(provider::Account, String, provider::Tuning, Option<String>), String> {
     if let Some(pname) = provider_override {
-        let id = provider::models::resolve_pinned_provider(pname, available)?;
+        let account = provider::models::resolve_pinned_provider(pname, available)?;
         let model = match model_override {
             Some(m) => m.to_string(),
-            None => match id.famous() {
-                Some(kind) => kind.info().1.to_string(),
+            None => match &account.service.default_model {
+                Some(m) => m.clone(),
                 None => {
                     return Err(format!(
-                        "provider '{pname}' has no default model — also pass --model NAME",
+                        "'{pname}' has no default model — also pass --model NAME",
                     ));
                 }
             },
         };
-        return Ok((id, model, provider::Tuning::initial(), None));
+        return Ok((account, model, provider::Tuning::initial(), None));
     }
     if let Some(name) = model_override {
-        let id = provider::models::resolve_model_provider(name, available, catalog)?;
-        return Ok((id, name.to_string(), provider::Tuning::initial(), None));
+        let account = provider::models::resolve_model_provider(name, available, catalog)?;
+        return Ok((account, name.to_string(), provider::Tuning::initial(), None));
     }
-    if let Some(saved) = provider::state::load(state_dir)
-        && let Some(id) = saved.provider_id(available)
-    {
-        let tuning = saved.tuning();
-        return Ok((id, saved.model, tuning, saved.route));
+    if let Some(saved) = provider::state::load(state_dir) {
+        match saved.account(available) {
+            Some(account) => {
+                let tuning = saved.tuning();
+                return Ok((account, saved.model, tuning, saved.route));
+            }
+            None => eprintln!(
+                "exarch: the saved provider '{}' is no longer available; using the default instead",
+                saved.provider_name
+            ),
+        }
     }
-    let id = available[0].clone();
-    match id.famous() {
-        Some(kind) => Ok((
-            id,
-            kind.info().1.to_string(),
-            provider::Tuning::initial(),
-            None,
-        )),
-        // No built-in default is no reason to refuse to launch: open with the
-        // model unset — the empty sentinel — so the interactive frontend lands
-        // on its `/model` hint.  `run` rejects that for a headless launch.
-        None => Ok((id, String::new(), provider::Tuning::initial(), None)),
-    }
+    let account = available[0].clone();
+    // No default model is no reason to refuse to launch: open with the model
+    // unset — the empty sentinel — so the interactive frontend lands on its
+    // `/model` hint. `run` rejects that for a headless launch.
+    let model = account.service.default_model.clone().unwrap_or_default();
+    Ok((account, model, provider::Tuning::initial(), None))
 }

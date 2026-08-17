@@ -4,6 +4,13 @@ status: proposed
 
 # Provider configuration: auto-discovery, live models, a searchable picker
 
+> *2026-08-17.* `ProviderKind::info` is now the `Service` table
+> `identity::built_in_services`, and a declared endpoint is the same `Service`
+> struct rather than a separate arm; what a credential is keyed on is an
+> `AccountId`, since one service may own many accounts. The DRY claim below
+> still holds — provider knowledge lives once, in that table. Current shape:
+> [[map/exarch/provider#Services and accounts|map/exarch/provider]].
+
 **Exarch declares almost nothing. A famous provider whose key is in the
 environment auto-populates, and its model list is fetched live from the
 provider; a hand-written config is needed only for *unusual* providers

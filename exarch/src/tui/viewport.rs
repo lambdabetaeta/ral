@@ -1102,9 +1102,12 @@ impl Printer for Viewport {
         let mut built = cache;
         for (i, row) in rows[floor..].iter().enumerate() {
             let id = row.id();
-            for mut block in
-                self.render_block(row.kind(), &rows[floor + i + 1..], blocks, &mut last_ral_cmd)
-            {
+            for mut block in self.render_block(
+                row.kind(),
+                &rows[floor + i + 1..],
+                blocks,
+                &mut last_ral_cmd,
+            ) {
                 if let Some(level) = self.reveal.get(&id) {
                     block.set_reveal(*level);
                 }
@@ -2068,7 +2071,10 @@ mod tests {
         for i in 0..(VIEWPORT_MAX_BLOCKS + 50) {
             vp.push_chrome(RailShape::Plain, vec![Line::from(format!("marker {i}"))]);
         }
-        let path = vp.flush_log().expect("the transcript flushes").to_path_buf();
+        let path = vp
+            .flush_log()
+            .expect("the transcript flushes")
+            .to_path_buf();
         let text = fs::read_to_string(&path).expect("the transcript reads back");
         let last = format!("marker {}", VIEWPORT_MAX_BLOCKS + 49);
         assert_eq!(logged(&path, "marker 0"), 1, "the evicted head is on disk");
@@ -2088,7 +2094,10 @@ mod tests {
         for i in 0..3 {
             vp.push_chrome(RailShape::Plain, vec![Line::from(format!("marker {i}"))]);
         }
-        let path = vp.flush_log().expect("the transcript flushes").to_path_buf();
+        let path = vp
+            .flush_log()
+            .expect("the transcript flushes")
+            .to_path_buf();
         let once = fs::read_to_string(&path).expect("the transcript reads back");
 
         vp.push_chrome(RailShape::Plain, vec![Line::from("marker 3")]);
@@ -2127,7 +2136,11 @@ mod tests {
         resumed.sync(&memo);
         resumed.flush_log().expect("the transcript flushes");
 
-        assert_eq!(logged(&path, "one"), 1, "the seeded window is not rewritten");
+        assert_eq!(
+            logged(&path, "one"),
+            1,
+            "the seeded window is not rewritten"
+        );
         assert_eq!(logged(&path, "two"), 1, "and the new row joins it");
     }
 

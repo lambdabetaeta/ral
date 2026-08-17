@@ -1136,7 +1136,7 @@ fn quarantine_tail(path: &Path, tail: &CrashTail) -> io::Result<()> {
 /// the memo it is building — residency at the addressed view — and never the
 /// log it is building it from.
 ///
-/// Returns the folded memo alongside the `(model, provider)` pair the head
+/// Returns the folded memo alongside the `(model, label)` pair the head
 /// record identifies the session by — `AgentLog::resume` reads its own
 /// identity from here rather than re-deriving it, since a session's identity
 /// is a fact about its first record, not a second thing to keep in step.
@@ -1164,9 +1164,9 @@ pub fn resume(path: &Path) -> io::Result<(Memo, String, String)> {
                     session_id: 0,
                     parent: None,
                     model,
-                    provider,
+                    label,
                     ..
-                } => (model.clone(), provider.clone()),
+                } => (model.clone(), label.clone()),
                 Protocol::SessionStarted {
                     session_id, parent, ..
                 } => {
@@ -1195,7 +1195,7 @@ pub fn resume(path: &Path) -> io::Result<(Memo, String, String)> {
             .map_err(|refusal| io::Error::other(refusal.to_string()))?;
         step_protocol(&mut memo, record.stamp().clone(), protocol);
     }
-    let Some((model, provider)) = identity else {
+    let Some((model, label)) = identity else {
         return Err(io::Error::other(format!(
             "cannot resume {}: no complete session records were found; is the file truncated?",
             path.display()
@@ -1208,5 +1208,5 @@ pub fn resume(path: &Path) -> io::Result<(Memo, String, String)> {
             "record.jsonl's from-scratch refold disagreed with the ledger's incremental projection",
         ));
     }
-    Ok((memo, model, provider))
+    Ok((memo, model, label))
 }

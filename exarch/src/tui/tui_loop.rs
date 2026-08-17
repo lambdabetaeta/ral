@@ -173,7 +173,7 @@ pub fn run(
         session.agents.clone(),
     )
     .map_err(|e| format!("ratatui init: {e}"))?;
-    tui.app.update_live_model(provider);
+    tui.app.update_live_model(provider, &store.available());
     // A *session*-lived bus, not per-exchange: a detached async child keeps
     // streaming to its tab after the exchange that spawned it ends.
     let fleet = Fleet {
@@ -466,7 +466,8 @@ fn ui_loop(
         if now_focus != prev_focus {
             dirty = true;
             if let Some(ph) = ctx.agents.provider(now_focus) {
-                tui.app.update_live_model(&ph.current());
+                tui.app
+                    .update_live_model(&ph.current(), &ctx.store.available());
             }
         }
     }

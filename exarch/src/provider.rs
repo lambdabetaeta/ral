@@ -5,9 +5,10 @@
 //! request shaping, retry, streaming, and usage each keep their own sibling
 //! module.
 
+pub mod accounts;
 pub mod credential;
 mod error;
-mod identity;
+pub mod identity;
 pub mod keychain;
 pub mod listing;
 pub mod models;
@@ -25,8 +26,8 @@ mod usage;
 
 pub use error::ProviderError;
 pub(crate) use error::{error_object, extract_url};
-pub(crate) use identity::provider_label;
-pub use identity::{ChatGptAccount, CustomProvider, ProviderId, ProviderKind, Subscription};
+pub use identity::{Account, AccountId, Auth, Billing, Service, ServiceName};
+pub use identity::{built_in, built_in_services, chatgpt_service, scripted_service};
 pub use request::{EFFORT_LADDER, Tuning, default_effort_label, effort_by_label, effort_label};
 #[allow(
     unused_imports,
@@ -49,7 +50,7 @@ use transport::Transport;
 /// requests run on.
 pub struct Provider {
     backend: Backend,
-    id: ProviderId,
+    account: Account,
     model: String,
     max_tokens_override: Option<u32>,
     tuning: Tuning,
@@ -70,17 +71,17 @@ impl Provider {
     /// Build a live provider selection on a shared engine.
     pub fn build(
         engine: Arc<Engine>,
-        id: &ProviderId,
+        account: &Account,
         model: String,
         credential: &Credential,
         max_tokens_override: Option<u32>,
         tuning: Tuning,
         route: Option<String>,
     ) -> Self {
-        let transport = engine.transport_for(id, &model, credential);
+        let transport = engine.transport_for(account, &model, credential);
         Self {
             backend: Backend::Live { engine, transport },
-            id: id.clone(),
+            account: account.clone(),
             model,
             max_tokens_override,
             tuning,
@@ -89,10 +90,10 @@ impl Provider {
     }
 
     /// Build a provider that replays scripted outcomes instead of dialling out.
-    pub fn scripted(model: &str, kind: ProviderKind, script: scripted::Script) -> Self {
+    pub fn scripted(model: &str, script: scripted::Script) -> Self {
         Self {
             backend: Backend::Scripted(script),
-            id: ProviderId::Famous(kind),
+            account: Account::of_service(scripted_service()),
             model: model.to_string(),
             max_tokens_override: None,
             tuning: Tuning::default(),
@@ -115,22 +116,14 @@ impl Provider {
         &self.model
     }
 
-    /// The provider identity.
-    pub fn id(&self) -> &ProviderId {
-        &self.id
+    /// The account this selection authenticates as.
+    pub fn account(&self) -> &Account {
+        &self.account
     }
 
     /// This model's context window when the pricing catalog knows it.
     pub fn context_window(&self) -> Option<u64> {
         pricing::context_window(&self.model)
-    }
-
-    /// Whether this selection is metered or subscription-backed.
-    pub fn subscription(&self) -> Subscription {
-        match &self.backend {
-            Backend::Live { transport, .. } => transport.subscription(),
-            Backend::Scripted(_) => Subscription::Metered,
-        }
     }
 
     /// Stream one assistant turn; `on_delta` fires per chunk, prose and
@@ -165,10 +158,14 @@ impl Provider {
         }
     }
 
+    /// The `OpenRouter` serving-provider pin, when this selection's service
+    /// actually routes — never sent to a service for which the string would
+    /// mean nothing.
     fn openrouter_route(&self) -> Option<&str> {
-        match self.id.famous() {
-            Some(ProviderKind::Openrouter) => self.route.as_deref(),
-            _ => None,
+        if self.account.service.routes {
+            self.route.as_deref()
+        } else {
+            None
         }
     }
 
@@ -198,12 +195,12 @@ mod tests {
 
     #[test]
     fn openrouter_route_is_ignored_by_other_providers() {
-        let mut provider =
-            Provider::scripted("gpt-5.5", ProviderKind::Openai, scripted::Script::new());
+        let mut provider = Provider::scripted("gpt-5.5", scripted::Script::new());
         provider.route = Some("deepinfra".into());
         assert_eq!(provider.openrouter_route(), None);
 
-        provider.id = ProviderId::Famous(ProviderKind::Openrouter);
+        provider.account =
+            Account::of_service(built_in(&ServiceName::declared("openrouter").unwrap()).unwrap());
         assert_eq!(provider.openrouter_route(), Some("deepinfra"));
     }
 }

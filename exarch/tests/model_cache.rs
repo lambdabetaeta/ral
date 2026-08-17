@@ -8,19 +8,25 @@
 //! stages share one file: fetch, serve from disk, upsert, expire.
 
 use exarch::bootstrap::App;
+use exarch::provider::identity::{AccountId, ServiceName, built_in};
 use exarch::provider::models::{ModelCatalog, ModelSource, ProviderEndpoint};
-use exarch::provider::{ProviderId, ProviderKind};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// One list for every provider, counting the fetches no cache could absorb.
+/// A key-bearing built-in service's account id is its own name.
+fn account_id(name: &str) -> AccountId {
+    let service = built_in(&ServiceName::declared(name).unwrap()).unwrap();
+    AccountId::of_service(&service.name)
+}
+
+/// One list for every account, counting the fetches no cache could absorb.
 struct FakeSource {
     fetches: Arc<AtomicUsize>,
 }
 
 impl ModelSource for FakeSource {
-    fn list(&self, _id: &ProviderId) -> Result<Vec<String>, String> {
+    fn list(&self, _account: &AccountId) -> Result<Vec<String>, String> {
         self.fetches.fetch_add(1, Ordering::Relaxed);
         Ok(vec!["claude-opus-4".into(), "claude-haiku-4".into()])
     }
@@ -58,7 +64,7 @@ fn disk_cache_serves_a_fresh_entry_and_refetches_a_stale_one() {
             App::new("exarch"),
         )
     };
-    let anthropic = ProviderId::Famous(ProviderKind::Anthropic);
+    let anthropic = account_id("anthropic");
     let models = vec!["claude-opus-4".to_string(), "claude-haiku-4".to_string()];
 
     // A cold catalog fetches once, and persists what it got.
@@ -70,11 +76,8 @@ fn disk_cache_serves_a_fresh_entry_and_refetches_a_stale_one() {
     assert_eq!(session.cached(&anthropic), Some(models.clone()));
     assert_eq!(fetches.load(Ordering::Relaxed), 1);
 
-    // A second provider lands beside the first rather than over it.
-    session.record(
-        &ProviderId::Famous(ProviderKind::Deepseek),
-        vec!["deepseek-chat".into()],
-    );
+    // A second account lands beside the first rather than over it.
+    session.record(&account_id("deepseek"), vec!["deepseek-chat".into()]);
     let mut file = read_cache(&path);
     assert_eq!(
         file["providers"]["anthropic"]["models"],

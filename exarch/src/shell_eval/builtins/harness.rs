@@ -1263,7 +1263,6 @@ mod tests {
         let mut session = crate::agent::Agent::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
-            crate::provider::ProviderKind::Openai,
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "reply-1",
@@ -1544,7 +1543,6 @@ mod tests {
         let mut session = crate::agent::Agent::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
-            crate::provider::ProviderKind::Openai,
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "c1",
@@ -1621,7 +1619,6 @@ mod tests {
         let mut session = crate::agent::Agent::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
-            crate::provider::ProviderKind::Openai,
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "c1",
@@ -1666,7 +1663,6 @@ mod tests {
         let mut session = crate::agent::Agent::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
-            crate::provider::ProviderKind::Openai,
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "c1",
@@ -1725,7 +1721,6 @@ mod tests {
         let mut session = crate::agent::Agent::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
-            crate::provider::ProviderKind::Openai,
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "c1",
@@ -1899,7 +1894,6 @@ mod tests {
 
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
-            crate::provider::ProviderKind::Openai,
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "c1",

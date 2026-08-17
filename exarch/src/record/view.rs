@@ -457,7 +457,7 @@ fn step_forensic(memo: &mut Blocks, seq: Seq, f: Forensic) {
         // shell boundary and is not restored — so neither is a scrollback
         // row this fold draws.
         Forensic::Pin { .. } | Forensic::Unpin { .. } => {}
-        Forensic::ModelChanged { model, provider } => memo.model = Some((model, provider)),
+        Forensic::ModelChanged { model, label, .. } => memo.model = Some((model, label)),
     }
 }
 

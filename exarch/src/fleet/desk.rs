@@ -1664,7 +1664,7 @@ mod tests {
     use crate::egress::Egress;
     use crate::fleet::registry::{AGENT_LEASE_IDLE, EvalReach, InterruptTarget, Registration};
     use crate::provider::{
-        Provider, ProviderKind,
+        Provider,
         scripted::{Reply, Script},
     };
     use crate::record::{Display, FleetSink, Record, Transient};
@@ -1673,15 +1673,12 @@ mod tests {
     use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 
     fn fresh_log() -> AgentLog {
-        AgentLog::for_test(0, "test", "test").expect("session log")
+        AgentLog::for_test(0, "test", &crate::agent::RecordedAccount::for_test("test"))
+            .expect("session log")
     }
 
     fn scripted_provider() -> Arc<Provider> {
-        Arc::new(Provider::scripted(
-            "test-model",
-            ProviderKind::Openai,
-            Script::new(),
-        ))
+        Arc::new(Provider::scripted("test-model", Script::new()))
     }
 
     /// The base capture every desk below builds on, so growing [`HostServices`]
@@ -2554,7 +2551,6 @@ mod tests {
         let (desk, _registry, parent_inbox) = spawnable_desk(3);
         let provider = Arc::new(Provider::scripted(
             "test-model",
-            ProviderKind::Openai,
             Script::new().then(Reply::tool_calls(vec![ral_call(
                 "r1",
                 "reply 'hi from child'",
@@ -2644,7 +2640,6 @@ mod tests {
         desk.services.search = false;
         let provider = Arc::new(Provider::scripted(
             "test-model",
-            ProviderKind::Openai,
             Script::new().then(Reply::tool_calls(vec![ral_call("r1", "reply 'done'")])),
         ));
         desk.services.provider.swap(provider);
@@ -2712,7 +2707,6 @@ mod tests {
         desk.services.system_template = template.clone();
         let provider = Arc::new(Provider::scripted(
             "test-model",
-            ProviderKind::Openai,
             Script::new().then(Reply::tool_calls(vec![ral_call(
                 "r1",
                 "reply 'hi from child'",
@@ -2851,7 +2845,6 @@ mod tests {
         let (desk, registry, _parent_inbox) = spawnable_desk(3);
         let provider = Arc::new(Provider::scripted(
             "test-model",
-            ProviderKind::Openai,
             Script::new().then(Reply::tool_calls(vec![ral_call("r1", "reply 'a'")])),
         ));
         desk.services.provider.swap(provider);
@@ -2938,7 +2931,6 @@ mod tests {
         let (desk, _registry, parent_inbox) = spawnable_desk(1);
         let provider = Arc::new(Provider::scripted(
             "test-model",
-            ProviderKind::Openai,
             Script::new()
                 .then(Reply::tool_calls(vec![ral_call("r1", "reply 'a'")]))
                 .then(Reply::tool_calls(vec![ral_call("r2", "reply 'b'")]))
@@ -3842,7 +3834,6 @@ mod tests {
         let child = parent.fork(parent.caps().clone()).expect("fork child");
         child.provider_handle().swap(Arc::new(Provider::scripted(
             "test-model",
-            ProviderKind::Openai,
             Script::new()
                 .then(Reply::text("first response, no reply yet"))
                 .then(Reply::tool_calls(vec![ral_call(
@@ -3911,11 +3902,9 @@ mod tests {
         for i in 0..2_000u32 {
             long_script = long_script.then(Reply::tool_calls(vec![ral_call(&i.to_string(), "1")]));
         }
-        child_a.provider_handle().swap(Arc::new(Provider::scripted(
-            "test-model",
-            ProviderKind::Openai,
-            long_script,
-        )));
+        child_a
+            .provider_handle()
+            .swap(Arc::new(Provider::scripted("test-model", long_script)));
         child_a.seed("go".into());
         let id_a = child_a.id;
         let registry = child_a.agents.clone();
@@ -3979,7 +3968,7 @@ mod wire_tests {
     use crate::fleet::hatch::PendingHatches;
     use crate::fleet::registry::{EvalReach, InterruptTarget, Registration};
     use crate::provider::{
-        Provider, ProviderKind,
+        Provider,
         scripted::{Reply, Script},
     };
     use std::io::Write;
@@ -3993,15 +3982,12 @@ mod wire_tests {
     fn fresh_log() -> AgentLog {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        AgentLog::for_test(n, "test", "test").expect("session log")
+        AgentLog::for_test(n, "test", &crate::agent::RecordedAccount::for_test("test"))
+            .expect("session log")
     }
 
     fn scripted_provider(script: Script) -> Arc<Provider> {
-        Arc::new(Provider::scripted(
-            "test-model",
-            ProviderKind::Openai,
-            script,
-        ))
+        Arc::new(Provider::scripted("test-model", script))
     }
 
     /// Poll `inbox` for the next exchange-boundary item — a spawned child's

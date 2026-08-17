@@ -32,7 +32,7 @@ pub(crate) mod testkit;
 pub(crate) use attend::quiesce_when_childless;
 pub use attend::{Control, NoControl, Verdict};
 pub(crate) use build::{Build, fresh_id};
-pub use build::{RootConfig, RootSeat};
+pub use build::{RecordedAccount, RootConfig, RootSeat};
 pub use hatchery::{DIAL_PATIENCE, Hatchery};
 pub(crate) use probe::ProbedWorker;
 pub(crate) use shell::{LogCell, ReplyCell};

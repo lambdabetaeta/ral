@@ -17,7 +17,7 @@ use exarch::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord};
 use exarch::agent::{Agent, deliberate};
 use exarch::bus::{AgentId, AgentState, Emitter, channel};
 use exarch::provider::scripted::{Reply, Script};
-use exarch::provider::{Provider, ProviderError, ProviderKind};
+use exarch::provider::{Provider, ProviderError};
 use exarch::record::{Display, Forensic, Protocol, Record, Transient};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use std::sync::Arc;
 /// shape the live driver holds so an async `agent` worker could capture a
 /// clone.
 fn scripted(model: &str, script: Script) -> Arc<Provider> {
-    Arc::new(Provider::scripted(model, ProviderKind::Openai, script))
+    Arc::new(Provider::scripted(model, script))
 }
 
 // Mirror the binary's pre-`main` re-exec dispatch — helper re-exec dispatch,

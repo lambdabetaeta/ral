@@ -1,9 +1,9 @@
 //! Live model lists, cached with a TTL, behind a network seam.
 //!
-//! A provider's model list is the provider's to know: API-key providers list
-//! through genai, `ChatGPT` subscriptions through the Codex backend. Fetching
-//! is lazy and never load-bearing — a list that fails, or that omits the
-//! wanted model, still leaves manual entry.
+//! An account's model list is that account's to know: API-key services list
+//! through genai, `ChatGPT` accounts through the Codex backend. Fetching is
+//! lazy and never load-bearing — a list that fails, or that omits the wanted
+//! model, still leaves manual entry.
 //!
 //! All network I/O sits behind [`ModelSource`], so tests drive the resolution
 //! logic against a fake; the unit tests here take [`ModelCatalog::memo_only`],
@@ -11,8 +11,8 @@
 //! against a real `XDG_CACHE_HOME`.
 
 use crate::provider::credential::{Credential, CredentialStore};
+use crate::provider::identity::{self, Account, AccountId};
 use crate::provider::oauth;
-use crate::provider::{ProviderId, ProviderKind};
 use crate::sync::LockExt;
 use genai::Client;
 use genai::resolver::{AuthData, Endpoint, ProviderConfig};
@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// How long a cached model list stays fresh — a provider's catalog moves on
+/// How long a cached model list stays fresh — an account's catalog moves on
 /// the order of weeks.
 const TTL: Duration = Duration::from_hours(24);
 
@@ -40,18 +40,18 @@ pub struct ProviderEndpoint {
     pub quantization: Option<String>,
 }
 
-/// The seam every fetch of a provider's model list goes through: live against
+/// The seam every fetch of an account's model list goes through: live against
 /// genai and `OpenRouter`'s REST API, an in-memory fake in tests.
 pub trait ModelSource {
-    /// `id`'s full model-name list.
+    /// `account`'s full model-name list.
     ///
     /// # Errors
     /// Returns `Err` with a message describing why the fetch failed; the
     /// caller degrades to manual entry.
-    fn list(&self, id: &ProviderId) -> Result<Vec<String>, String>;
+    fn list(&self, account: &AccountId) -> Result<Vec<String>, String>;
 
-    /// The upstream serving providers `OpenRouter` lists for `model`. Only
-    /// `OpenRouter` routes, so the picker calls this for nothing else.
+    /// The upstream serving providers `OpenRouter` lists for `model`. Only a
+    /// routing service reaches this, so the picker calls it for nothing else.
     ///
     /// # Errors
     /// Returns `Err` with a message describing why the fetch failed.
@@ -65,21 +65,30 @@ pub trait ModelSource {
 #[derive(Clone)]
 pub struct LiveSource {
     /// Cloned out of the store so a listing thread needs neither the store nor
-    /// the UI thread; OAuth cells stay shared, so a refreshed token is visible.
-    credentials: BTreeMap<ProviderId, Credential>,
-    /// One client for every provider's listing call — the endpoint and key ride
+    /// the UI thread — the one place a label naming an account in an error
+    /// message has the full set to disambiguate against.
+    accounts: Vec<Account>,
+    /// OAuth cells stay shared, so a refreshed token is visible.
+    credentials: BTreeMap<AccountId, Credential>,
+    /// One client for every account's listing call — the endpoint and key ride
     /// the per-call `ProviderConfig`.
     client: Client,
 }
 
 impl LiveSource {
     pub fn new(store: &CredentialStore) -> Self {
-        let credentials = store
-            .available()
-            .into_iter()
-            .filter_map(|id| store.get(&id).cloned().map(|credential| (id, credential)))
+        let accounts = store.available();
+        let credentials = accounts
+            .iter()
+            .filter_map(|account| {
+                store
+                    .get(&account.id)
+                    .cloned()
+                    .map(|credential| (account.id.clone(), credential))
+            })
             .collect();
         Self {
+            accounts,
             credentials,
             client: Client::builder()
                 .with_reqwest(crate::provider::tls::client())
@@ -88,9 +97,23 @@ impl LiveSource {
     }
 
     /// Admit a credential resolved after startup — a sign-in this session, say
-    /// — so its listing reads what the store now holds, with no rebuild.
-    pub fn add_credential(&mut self, id: ProviderId, credential: Credential) {
-        self.credentials.insert(id, credential);
+    /// — so its listing reads what the store now holds, with no rebuild. A
+    /// re-admission replaces the account record too, so a re-login that
+    /// learned a fresh handle is renamed here as it is in the store.
+    pub fn add_credential(&mut self, account: Account, credential: Credential) {
+        self.credentials.insert(account.id.clone(), credential);
+        match self.accounts.iter_mut().find(|known| known.id == account.id) {
+            Some(known) => *known = account,
+            None => self.accounts.push(account),
+        }
+    }
+
+    fn account(&self, id: &AccountId) -> Option<&Account> {
+        self.accounts.iter().find(|account| &account.id == id)
+    }
+
+    fn label(&self, account: &Account) -> String {
+        identity::label(account, &self.accounts)
     }
 }
 
@@ -105,27 +128,30 @@ fn blocking_runtime(what: &str) -> Result<tokio::runtime::Runtime, String> {
 }
 
 impl ModelSource for LiveSource {
-    fn list(&self, id: &ProviderId) -> Result<Vec<String>, String> {
+    fn list(&self, id: &AccountId) -> Result<Vec<String>, String> {
+        let account = self
+            .account(id)
+            .ok_or_else(|| format!("{id} is not a known account"))?;
         let credential = self
             .credentials
             .get(id)
-            .ok_or_else(|| format!("{} has no resolved credential", id.label()))?;
+            .ok_or_else(|| format!("{} has no resolved credential", self.label(account)))?;
         match credential {
-            Credential::ApiKey(key) => self.list_api_key(id, key),
-            Credential::OAuth(cell) => Self::list_chatgpt(id, cell),
+            Credential::ApiKey(key) => self.list_api_key(account, key),
+            Credential::OAuth(cell) => self.list_chatgpt(account, cell),
         }
     }
 
     fn endpoints(&self, model: &str) -> Result<Vec<ProviderEndpoint>, String> {
         let url = format!("https://openrouter.ai/api/v1/models/{model}/endpoints");
-        let key = self.credentials.iter().find_map(|(id, credential)| {
-            (id.famous() == Some(ProviderKind::Openrouter))
-                .then(|| match credential {
-                    Credential::ApiKey(key) => Some(key.clone()),
-                    Credential::OAuth(_) => None,
-                })
-                .flatten()
-        });
+        let key = self
+            .accounts
+            .iter()
+            .find(|account| account.service.routes)
+            .and_then(|account| match self.credentials.get(&account.id) {
+                Some(Credential::ApiKey(key)) => Some(key.clone()),
+                _ => None,
+            });
         let runtime = blocking_runtime("endpoints")?;
         runtime.block_on(async {
             let mut request = crate::provider::tls::client().get(&url);
@@ -155,21 +181,21 @@ impl ModelSource for LiveSource {
 }
 
 impl LiveSource {
-    fn list_api_key(&self, id: &ProviderId, key: &str) -> Result<Vec<String>, String> {
+    fn list_api_key(&self, account: &Account, key: &str) -> Result<Vec<String>, String> {
         // Endpoint and key passed explicitly, so a catalog request never leans
-        // on the client's auth resolver. Both come from the `ProviderId`, so a
-        // custom provider lists exactly as a famous one does.
+        // on the client's auth resolver. Both come from the account's
+        // service, so a declared endpoint lists exactly as a built-in one does.
         let provider_config = ProviderConfig {
-            endpoint: id.endpoint().map(Endpoint::from_owned),
+            endpoint: account.service.endpoint.clone().map(Endpoint::from_owned),
             auth: Some(AuthData::from_single(key.to_owned())),
         };
         let runtime = blocking_runtime("listing")?;
         runtime
             .block_on(
                 self.client
-                    .all_model_names(id.default_adapter(), provider_config),
+                    .all_model_names(account.service.adapter, provider_config),
             )
-            .map_err(|e| format!("list models for {}: {e}", id.label()))
+            .map_err(|e| format!("list models for {}: {e}", self.label(account)))
     }
 
     /// The subscription catalog. `client_version` must be a real Codex CLI
@@ -178,14 +204,15 @@ impl LiveSource {
     /// list. Authenticated from the live OAuth cell, so a token refreshed here
     /// needs no new source.
     fn list_chatgpt(
-        id: &ProviderId,
+        &self,
+        account: &Account,
         cell: &std::sync::Arc<std::sync::Mutex<oauth::OAuthToken>>,
     ) -> Result<Vec<String>, String> {
         let runtime = blocking_runtime("subscription model-list")?;
         runtime.block_on(async {
             oauth::refresh_cell_if_stale(cell)
                 .await
-                .map_err(|e| format!("refresh login for {}: {e}", id.label()))?;
+                .map_err(|e| format!("refresh login for {}: {e}", self.label(account)))?;
             let token = cell.lock_ignore_poison().clone();
             let url = format!(
                 "{CHATGPT_MODELS_URL}?client_version={}",
@@ -199,19 +226,19 @@ impl LiveSource {
             let response = request
                 .send()
                 .await
-                .map_err(|e| format!("list models for {}: {e}", id.label()))?;
+                .map_err(|e| format!("list models for {}: {e}", self.label(account)))?;
             let status = response.status();
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
                 return Err(format!(
                     "list models for {}: Codex backend returned HTTP {status}: {body}",
-                    id.label()
+                    self.label(account)
                 ));
             }
             let body: CodexModelsResponse = response
                 .json()
                 .await
-                .map_err(|e| format!("parse models for {}: {e}", id.label()))?;
+                .map_err(|e| format!("parse models for {}: {e}", self.label(account)))?;
             Ok(body.models.into_iter().map(|model| model.slug).collect())
         })
     }
@@ -278,18 +305,20 @@ struct CacheEntry {
 /// The on-disk cache, JSON under the XDG cache dir.
 #[derive(Serialize, Deserialize, Default)]
 struct CacheFile {
-    /// Keyed by [`ProviderId::label`], so the file stays readable and outlives
-    /// any reordering of [`ProviderKind`].
+    /// Keyed by [`AccountId::as_str`], so the file stays readable and outlives
+    /// any change to how an account is displayed. For every account but a
+    /// `ChatGPT` login the id *is* the account's own name, so an existing
+    /// entry keeps resolving unchanged.
     providers: BTreeMap<String, CacheEntry>,
 }
 
 /// A [`ModelSource`] in front of the XDG-cached, TTL'd lists, plus a
-/// per-process memo so a provider's list is fetched at most once a session.
+/// per-process memo so an account's list is fetched at most once a session.
 pub struct ModelCatalog<S: ModelSource> {
     source: S,
     /// `None` disables the disk cache; `Some` is `<xdg cache>/models.json`.
     cache_path: Option<PathBuf>,
-    memo: BTreeMap<ProviderId, Vec<String>>,
+    memo: BTreeMap<AccountId, Vec<String>>,
     /// Keyed by `OpenRouter` model id. Memo-only: serving-provider availability
     /// is volatile and the fetch cheap, so it is refetched, never persisted.
     endpoints_memo: BTreeMap<String, Vec<ProviderEndpoint>>,
@@ -329,38 +358,39 @@ impl<S: ModelSource> ModelCatalog<S> {
         self.endpoints_memo.insert(model.to_string(), endpoints);
     }
 
-    /// `id`'s model list: the memo, then a fresh disk entry, then a live fetch
-    /// that refreshes both. `None` on failure — callers degrade to manual entry.
-    pub fn list(&mut self, id: &ProviderId) -> Option<Vec<String>> {
-        if let Some(models) = self.memo.get(id) {
+    /// `account`'s model list: the memo, then a fresh disk entry, then a live
+    /// fetch that refreshes both. `None` on failure — callers degrade to
+    /// manual entry.
+    pub fn list(&mut self, account: &AccountId) -> Option<Vec<String>> {
+        if let Some(models) = self.memo.get(account) {
             return Some(models.clone());
         }
-        if let Some(models) = self.fresh_from_disk(id) {
-            self.memo.insert(id.clone(), models.clone());
+        if let Some(models) = self.fresh_from_disk(account) {
+            self.memo.insert(account.clone(), models.clone());
             return Some(models);
         }
-        let models = self.source.list(id).ok()?;
-        self.write_disk(id, &models);
-        self.memo.insert(id.clone(), models.clone());
+        let models = self.source.list(account).ok()?;
+        self.write_disk(account, &models);
+        self.memo.insert(account.clone(), models.clone());
         Some(models)
     }
 
-    /// `id`'s list if already cached, never fetching. `Listing::open` fills
-    /// from this on open and spawns a fetch only where it returns `None`.
-    pub fn cached(&mut self, id: &ProviderId) -> Option<Vec<String>> {
-        if let Some(models) = self.memo.get(id) {
+    /// `account`'s list if already cached, never fetching. `Listing::open`
+    /// fills from this on open and spawns a fetch only where it returns `None`.
+    pub fn cached(&mut self, account: &AccountId) -> Option<Vec<String>> {
+        if let Some(models) = self.memo.get(account) {
             return Some(models.clone());
         }
-        let models = self.fresh_from_disk(id)?;
-        self.memo.insert(id.clone(), models.clone());
+        let models = self.fresh_from_disk(account)?;
+        self.memo.insert(account.clone(), models.clone());
         Some(models)
     }
 
     /// Fold a freshly-fetched list into both caches. Fetches run on background
     /// threads and land here, on the main thread, so the disk write is serial.
-    pub fn record(&mut self, id: &ProviderId, models: Vec<String>) {
-        self.write_disk(id, &models);
-        self.memo.insert(id.clone(), models);
+    pub fn record(&mut self, account: &AccountId, models: Vec<String>) {
+        self.write_disk(account, &models);
+        self.memo.insert(account.clone(), models);
     }
 
     /// The seam, for a background thread to clone; it reports back through
@@ -369,11 +399,11 @@ impl<S: ModelSource> ModelCatalog<S> {
         &self.source
     }
 
-    /// `None` when the cache is absent, unreadable, missing `id`, or stale.
-    fn fresh_from_disk(&self, id: &ProviderId) -> Option<Vec<String>> {
+    /// `None` when the cache is absent, unreadable, missing `account`, or stale.
+    fn fresh_from_disk(&self, account: &AccountId) -> Option<Vec<String>> {
         let path = self.cache_path.as_ref()?;
         let file = read_cache(path)?;
-        let entry = file.providers.get(id.label())?;
+        let entry = file.providers.get(account.as_str())?;
         let age = crate::bootstrap::now_secs().saturating_sub(entry.fetched_at);
         (age < TTL.as_secs()).then(|| entry.models.clone())
     }
@@ -384,13 +414,13 @@ impl<S: ModelSource> ModelCatalog<S> {
         clippy::disallowed_methods,
         reason = "[io-door:silent:models-cache-write] persists the model catalog cache; registry infra, not turn-time data I/O"
     )]
-    fn write_disk(&self, id: &ProviderId, models: &[String]) {
+    fn write_disk(&self, account: &AccountId, models: &[String]) {
         let Some(path) = self.cache_path.as_ref() else {
             return;
         };
         let mut file = read_cache(path).unwrap_or_default();
         file.providers.insert(
-            id.label().to_string(),
+            account.as_str().to_string(),
             CacheEntry {
                 fetched_at: crate::bootstrap::now_secs(),
                 models: models.to_vec(),
@@ -407,8 +437,8 @@ impl<S: ModelSource> ModelCatalog<S> {
 
 impl ModelCatalog<LiveSource> {
     /// Admit a freshly signed-in account without exposing the generic source.
-    pub fn add_credential(&mut self, id: ProviderId, credential: Credential) {
-        self.source.add_credential(id, credential);
+    pub fn add_credential(&mut self, account: Account, credential: Credential) {
+        self.source.add_credential(account, credential);
     }
 }
 
@@ -428,113 +458,179 @@ fn read_cache(path: &PathBuf) -> Option<CacheFile> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Resolve a `--model` name to the provider that should serve it: the
-/// available provider whose live list holds it, failing that a name-shape
+fn no_provider_error() -> String {
+    "no provider available — set a provider API key (e.g. ANTHROPIC_API_KEY)".into()
+}
+
+/// Resolve a stored `AccountId` rendering against the accounts present.
+///
+/// `state.json`'s `provider`, or a wire selection. No name arm, ever: a
+/// rendering is compared only against other renderings, never parsed, so a
+/// stale selection can fall back to a default but never lands on a same-named
+/// stranger.
+pub fn resolve_account(id: &str, available: &[Account]) -> Option<Account> {
+    available
+        .iter()
+        .find(|account| account.id.as_str() == id)
+        .cloned()
+}
+
+/// Resolve a `--model` name to the account that should serve it: every
+/// available account whose live list holds it, failing that a name-shape
 /// match.
 ///
 /// Fetches on a cache miss, so it runs only for an explicit `--model`.
 ///
 /// # Errors
-/// Returns `Err` if no provider is available, or if no available provider
-/// lists or plausibly serves `name`.
+/// Returns `Err` if no account is available, if no available account lists
+/// or plausibly serves `name`, or if more than one account's catalog lists
+/// it — a silent arbitrary choice among credentials is exactly the bug this
+/// resolver exists to refuse, so it asks for `--provider` instead.
 pub fn resolve_model_provider<S: ModelSource>(
     name: &str,
-    available: &[ProviderId],
+    available: &[Account],
     catalog: &mut ModelCatalog<S>,
-) -> Result<ProviderId, String> {
+) -> Result<Account, String> {
     if available.is_empty() {
         return Err(no_provider_error());
     }
-    for id in available {
-        if let Some(models) = catalog.list(id)
-            && models.iter().any(|m| m == name)
-        {
-            return Ok(id.clone());
+    let listed: Vec<&Account> = available
+        .iter()
+        .filter(|account| {
+            catalog
+                .list(&account.id)
+                .is_some_and(|models| models.iter().any(|m| m == name))
+        })
+        .collect();
+    match listed.as_slice() {
+        [one] => return Ok((*one).clone()),
+        [] => {}
+        many => {
+            return Err(format!(
+                "model '{name}' is listed by more than one available account ({}) — \
+                 pass --provider to say which",
+                many.iter()
+                    .map(|account| identity::label(account, available))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
     }
-    // No listed match — fall back to the name's shape. `vendor/model` is an
-    // OpenRouter convention; a bare name goes to the sole available provider,
-    // so a scripted run with one key set need not name it.
+    // No listed match — fall back to the name's shape. `vendor/model` is a
+    // routing convention; a bare name goes to the sole available account, so
+    // a scripted run with one key set need not name it.
     if name.contains('/')
-        && let Some(id) = available
-            .iter()
-            .find(|id| id.famous() == Some(ProviderKind::Openrouter))
+        && let Some(account) = available.iter().find(|account| account.service.routes)
     {
-        return Ok(id.clone());
+        return Ok(account.clone());
     }
     if let [only] = available {
         return Ok(only.clone());
     }
     Err(format!(
-        "model '{name}' is not listed by any available provider ({}); \
+        "model '{name}' is not listed by any available account ({}); \
          pass a model that one of them serves",
-        available_labels(available)
+        identity::roster(available)
     ))
 }
 
-fn no_provider_error() -> String {
-    "no provider available — set a provider API key (e.g. ANTHROPIC_API_KEY)".into()
-}
-
-fn available_labels(available: &[ProviderId]) -> String {
-    available
-        .iter()
-        .map(ProviderId::label)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Resolve an explicit `--provider` label, pinning it verbatim. No listing
-/// lookup — that is the point of pinning, so the caller may then name a model
-/// the provider does not advertise.
+/// Resolve an explicit `--provider` name: an account id, then a service name,
+/// then a handle.
+///
+/// That is the order a human is likely to type, and the order that lets a bare
+/// service name still mean something once it names several `ChatGPT` accounts.
+/// No listing lookup — that is the point of pinning, so the caller may then
+/// name a model the account does not advertise.
 ///
 /// # Errors
-/// Returns `Err` if no provider is available, or if no available provider's
-/// label matches `name`.
-pub fn resolve_pinned_provider(name: &str, available: &[ProviderId]) -> Result<ProviderId, String> {
-    if let Some(id) = available.iter().find(|id| id.label() == name) {
-        return Ok(id.clone());
-    }
+/// Returns `Err` if no account is available, if `name` answers to none, or
+/// if it answers to more than one — naming the candidates rather than
+/// guessing among them.
+pub fn resolve_pinned_provider(name: &str, available: &[Account]) -> Result<Account, String> {
     if available.is_empty() {
         return Err(no_provider_error());
     }
-    Err(format!(
-        "provider '{name}' is not available ({}); set its API key or name one that is",
-        available_labels(available)
-    ))
+    if let Some(account) = available.iter().find(|account| account.id.as_str() == name) {
+        return Ok(account.clone());
+    }
+    let by_service: Vec<&Account> = available
+        .iter()
+        .filter(|account| account.service.name.as_str() == name)
+        .collect();
+    let candidates = if by_service.is_empty() {
+        available
+            .iter()
+            .filter(|account| account.handle == name)
+            .collect::<Vec<_>>()
+    } else {
+        by_service
+    };
+    match candidates.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => Err(format!(
+            "provider '{name}' is not available ({}); set its API key or name one that is",
+            identity::roster(available)
+        )),
+        many => Err(format!(
+            "'{name}' names {} signed-in accounts ({}) — pass the account id instead \
+             (`--provider <id>`) to say which",
+            many.len(),
+            many.iter()
+                .map(|account| identity::label(account, available))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::identity::{
+        Auth, Billing, Service, ServiceName, built_in, chatgpt_service,
+    };
     use genai::adapter::AdapterKind;
     use std::cell::Cell;
-    use std::sync::Arc;
 
-    fn fam(kind: ProviderKind) -> ProviderId {
-        ProviderId::Famous(kind)
+    /// A built-in, key-bearing account — the common case in these tests.
+    fn fam(name: &str) -> Account {
+        Account::of_service(built_in(&ServiceName::declared(name).unwrap()).unwrap())
     }
 
-    /// The facts besides `label` are immaterial: catalog and resolver key on
-    /// the label alone.
-    fn custom(label: &str) -> ProviderId {
-        ProviderId::Custom(Arc::new(crate::provider::CustomProvider {
-            label: label.into(),
-            key_env: Some(format!("{}_KEY", label.to_uppercase())),
-            endpoint: format!("https://{label}.example/v1/"),
+    /// The facts besides the name are immaterial: catalog and resolver key on
+    /// the account id alone, which for a key-bearing account is its name.
+    fn custom(name: &str) -> Account {
+        Account::of_service(Service {
+            name: ServiceName::declared(name).unwrap(),
+            endpoint: Some(format!("https://{name}.example/v1/")),
             adapter: AdapterKind::OpenAI,
-        }))
+            default_model: None,
+            auth: Auth::Env(format!("{}_KEY", name.to_uppercase())),
+            billing: Billing::Metered,
+            routes: false,
+        })
+    }
+
+    /// Two `ChatGPT` logins on one email — distinguished only by their ids,
+    /// since a bare handle is what this whole plan exists to stop confusing.
+    fn chatgpt_login(issued: &str, handle: &str) -> Account {
+        let service = chatgpt_service();
+        Account {
+            id: AccountId::of_login(&service.name, issued),
+            service,
+            handle: handle.into(),
+        }
     }
 
     /// Counts fetches, so a test can assert the memo prevents a second one.
     struct FakeSource {
-        lists: BTreeMap<ProviderId, Result<Vec<String>, String>>,
+        lists: BTreeMap<AccountId, Result<Vec<String>, String>>,
         endpoints: BTreeMap<String, Result<Vec<ProviderEndpoint>, String>>,
         calls: Cell<usize>,
     }
 
     impl FakeSource {
-        fn new(lists: BTreeMap<ProviderId, Result<Vec<String>, String>>) -> Self {
+        fn new(lists: BTreeMap<AccountId, Result<Vec<String>, String>>) -> Self {
             Self {
                 lists,
                 endpoints: BTreeMap::new(),
@@ -552,10 +648,10 @@ mod tests {
     }
 
     impl ModelSource for FakeSource {
-        fn list(&self, id: &ProviderId) -> Result<Vec<String>, String> {
+        fn list(&self, account: &AccountId) -> Result<Vec<String>, String> {
             self.calls.set(self.calls.get() + 1);
             self.lists
-                .get(id)
+                .get(account)
                 .cloned()
                 .unwrap_or_else(|| Err("no fake list".into()))
         }
@@ -568,24 +664,25 @@ mod tests {
         }
     }
 
-    fn one(id: ProviderId, models: &[&str]) -> BTreeMap<ProviderId, Result<Vec<String>, String>> {
+    fn one(account: &Account, models: &[&str]) -> BTreeMap<AccountId, Result<Vec<String>, String>> {
         let mut m = BTreeMap::new();
-        m.insert(id, Ok(models.iter().map(ToString::to_string).collect()));
+        m.insert(
+            account.id.clone(),
+            Ok(models.iter().map(ToString::to_string).collect()),
+        );
         m
     }
 
     #[test]
     fn lists_then_memoises() {
-        let source = FakeSource::new(one(
-            fam(ProviderKind::Anthropic),
-            &["claude-opus-4", "claude-haiku-4"],
-        ));
+        let anthropic = fam("anthropic");
+        let source = FakeSource::new(one(&anthropic, &["claude-opus-4", "claude-haiku-4"]));
         let mut cat = ModelCatalog::memo_only(source);
-        match cat.list(&fam(ProviderKind::Anthropic)) {
+        match cat.list(&anthropic.id) {
             Some(m) => assert_eq!(m, vec!["claude-opus-4", "claude-haiku-4"]),
             None => panic!("expected a list"),
         }
-        let _ = cat.list(&fam(ProviderKind::Anthropic));
+        let _ = cat.list(&anthropic.id);
         assert_eq!(
             cat.source.calls.get(),
             1,
@@ -636,13 +733,14 @@ mod tests {
     /// source seam instead, for the note beside its manual-entry row.
     #[test]
     fn failed_fetch_is_none_with_reason_at_the_source() {
+        let deepseek = fam("deepseek");
         let mut lists = BTreeMap::new();
-        lists.insert(fam(ProviderKind::Deepseek), Err("network down".to_string()));
+        lists.insert(deepseek.id.clone(), Err("network down".to_string()));
         let mut cat = ModelCatalog::memo_only(FakeSource::new(lists));
-        assert!(cat.list(&fam(ProviderKind::Deepseek)).is_none());
+        assert!(cat.list(&deepseek.id).is_none());
         assert!(
             cat.source()
-                .list(&fam(ProviderKind::Deepseek))
+                .list(&deepseek.id)
                 .unwrap_err()
                 .contains("network down")
         );
@@ -650,34 +748,28 @@ mod tests {
 
     #[test]
     fn resolve_prefers_listing_match() {
+        let anthropic = fam("anthropic");
+        let deepseek = fam("deepseek");
         let mut lists = BTreeMap::new();
-        lists.insert(
-            fam(ProviderKind::Anthropic),
-            Ok(vec!["claude-opus-4".into()]),
-        );
-        lists.insert(
-            fam(ProviderKind::Deepseek),
-            Ok(vec!["deepseek-chat".into()]),
-        );
+        lists.insert(anthropic.id.clone(), Ok(vec!["claude-opus-4".into()]));
+        lists.insert(deepseek.id.clone(), Ok(vec!["deepseek-chat".into()]));
         let mut cat = ModelCatalog::memo_only(FakeSource::new(lists));
-        let available = [fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)];
+        let available = [anthropic, deepseek.clone()];
         assert_eq!(
             resolve_model_provider("deepseek-chat", &available, &mut cat).unwrap(),
-            fam(ProviderKind::Deepseek)
+            deepseek
         );
     }
 
     #[test]
     fn resolve_prefers_custom_listing_match() {
+        let anthropic = fam("anthropic");
         let llama = custom("local-llama");
         let mut lists = BTreeMap::new();
-        lists.insert(
-            fam(ProviderKind::Anthropic),
-            Ok(vec!["claude-opus-4".into()]),
-        );
-        lists.insert(llama.clone(), Ok(vec!["llama-3".into()]));
+        lists.insert(anthropic.id.clone(), Ok(vec!["claude-opus-4".into()]));
+        lists.insert(llama.id.clone(), Ok(vec!["llama-3".into()]));
         let mut cat = ModelCatalog::memo_only(FakeSource::new(lists));
-        let available = [fam(ProviderKind::Anthropic), llama.clone()];
+        let available = [anthropic, llama.clone()];
         assert_eq!(
             resolve_model_provider("llama-3", &available, &mut cat).unwrap(),
             llama
@@ -685,12 +777,29 @@ mod tests {
     }
 
     #[test]
+    fn resolve_two_accounts_listing_one_model_is_refused_naming_both() {
+        let personal = chatgpt_login("acc-1", "alex@bristol.ac.uk");
+        let work = chatgpt_login("acc-2", "alex@work (Acme Ltd)");
+        let mut lists = BTreeMap::new();
+        lists.insert(personal.id.clone(), Ok(vec!["gpt-5.5".into()]));
+        lists.insert(work.id.clone(), Ok(vec!["gpt-5.5".into()]));
+        let mut cat = ModelCatalog::memo_only(FakeSource::new(lists));
+        let available = [personal, work];
+        let err = resolve_model_provider("gpt-5.5", &available, &mut cat).unwrap_err();
+        assert!(err.contains("--provider"), "{err}");
+        assert!(err.contains("alex@bristol.ac.uk"), "{err}");
+        assert!(err.contains("alex@work"), "{err}");
+    }
+
+    #[test]
     fn resolve_slug_falls_back_to_openrouter() {
+        let anthropic = fam("anthropic");
+        let openrouter = fam("openrouter");
         let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
-        let available = [fam(ProviderKind::Anthropic), fam(ProviderKind::Openrouter)];
+        let available = [anthropic, openrouter.clone()];
         assert_eq!(
             resolve_model_provider("x-ai/grok-9", &available, &mut cat).unwrap(),
-            fam(ProviderKind::Openrouter)
+            openrouter
         );
     }
 
@@ -698,18 +807,19 @@ mod tests {
     /// key set need not name the provider.
     #[test]
     fn resolve_bare_name_to_sole_provider() {
+        let anthropic = fam("anthropic");
         let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
-        let available = [fam(ProviderKind::Anthropic)];
+        let available = [anthropic.clone()];
         assert_eq!(
             resolve_model_provider("claude-future", &available, &mut cat).unwrap(),
-            fam(ProviderKind::Anthropic)
+            anthropic
         );
     }
 
     #[test]
     fn resolve_unknown_with_many_providers_errors() {
+        let available = [fam("anthropic"), fam("deepseek")];
         let mut cat = ModelCatalog::memo_only(FakeSource::new(BTreeMap::new()));
-        let available = [fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)];
         let err = resolve_model_provider("mystery", &available, &mut cat).unwrap_err();
         assert!(err.contains("not listed"), "got: {err}");
     }
@@ -723,28 +833,28 @@ mod tests {
 
     /// No catalog is even threaded through — pinning skips the lookup.
     #[test]
-    fn pin_provider_matches_by_label() {
-        let available = [fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)];
+    fn pin_provider_matches_by_service_name() {
+        let available = [fam("anthropic"), fam("deepseek")];
         assert_eq!(
             resolve_pinned_provider("deepseek", &available).unwrap(),
-            fam(ProviderKind::Deepseek)
+            fam("deepseek")
         );
     }
 
     #[test]
-    fn pin_provider_matches_custom_label() {
+    fn pin_provider_matches_custom_name() {
         let llama = custom("local-llama");
-        let available = [fam(ProviderKind::Anthropic), llama.clone()];
+        let available = [fam("anthropic"), llama.clone()];
         assert_eq!(
             resolve_pinned_provider("local-llama", &available).unwrap(),
             llama
         );
     }
 
-    /// The error names the available providers rather than falling back to one.
+    /// The error names the available accounts rather than falling back to one.
     #[test]
     fn pin_unavailable_provider_errors() {
-        let available = [fam(ProviderKind::Anthropic)];
+        let available = [fam("anthropic")];
         let err = resolve_pinned_provider("openai", &available).unwrap_err();
         assert!(err.contains("not available"), "got: {err}");
         assert!(err.contains("anthropic"), "got: {err}");
@@ -754,5 +864,20 @@ mod tests {
     fn pin_with_no_providers_errors() {
         let err = resolve_pinned_provider("anthropic", &[]).unwrap_err();
         assert!(err.contains("no provider available"), "got: {err}");
+    }
+
+    /// A bare service name naming two `ChatGPT` accounts is refused, naming
+    /// both, rather than picking whichever the store happened to list first.
+    #[test]
+    fn pin_a_service_name_naming_two_accounts_is_refused() {
+        let personal = chatgpt_login("acc-1", "alex@bristol.ac.uk");
+        let work = chatgpt_login("acc-2", "alex@work");
+        let available = [personal, work];
+        let err = resolve_pinned_provider("chatgpt", &available).unwrap_err();
+        assert!(err.contains("account id"), "{err}");
+        assert!(
+            err.contains("alex@bristol.ac.uk") && err.contains("alex@work"),
+            "{err}"
+        );
     }
 }

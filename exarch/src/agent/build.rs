@@ -13,7 +13,7 @@ use crate::bus::{AgentId, Emitter, Inbox};
 use crate::fleet::hatch::PendingHatches;
 use crate::fleet::registry::{AgentRegistry, Registration};
 use crate::prompt::Grants;
-use crate::provider::{Provider, ProviderKind};
+use crate::provider::Provider;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -99,6 +99,33 @@ pub(crate) struct Build {
     pub(crate) pending_hatches: PendingHatches,
 }
 
+/// A session's provider identity, snapshotted for the record.
+///
+/// What the account was called, and which service and account it was, at the
+/// moment the session began. `Clone` because [`AgentLog::fork`] carries it
+/// into every child's own `SessionStarted` bookend unchanged.
+#[derive(Clone, Debug)]
+pub struct RecordedAccount {
+    pub label: String,
+    pub service: String,
+    pub id: String,
+}
+
+impl RecordedAccount {
+    /// A snapshot for tests that only care that *something* is recorded.
+    /// Not `#[cfg(test)]`: integration test binaries link the library built
+    /// without it, so a fixture they share with the unit tests must be an
+    /// ordinary function, as [`crate::agent::Agent::for_test`] already is.
+    #[doc(hidden)]
+    pub fn for_test(name: &str) -> Self {
+        Self {
+            label: name.to_string(),
+            service: name.to_string(),
+            id: name.to_string(),
+        }
+    }
+}
+
 /// Everything [`Agent::root`] needs beyond the seat choice and the provider.
 #[allow(
     clippy::struct_excessive_bools,
@@ -112,7 +139,7 @@ pub struct RootConfig {
     pub no_logs: bool,
     pub run_lock: Option<crate::bootstrap::RunLock>,
     pub model: String,
-    pub provider_label: String,
+    pub account: RecordedAccount,
     pub allow_schedule: bool,
     pub interactive: bool,
     pub chat: bool,
@@ -262,7 +289,7 @@ impl Agent {
             no_logs,
             run_lock,
             model,
-            provider_label,
+            account,
             allow_schedule,
             interactive,
             chat,
@@ -347,7 +374,7 @@ impl Agent {
             let mut log = AgentLog::resume(&sessions_root, 0)?;
             let summary = log.resumed_summary();
             let at_unix_ms = crate::bootstrap::now_unix_ms();
-            log.record_resumed(&model, &provider_label, system_prompt.len(), at_unix_ms)?;
+            log.record_resumed(&model, &account, system_prompt.len(), at_unix_ms)?;
             (log, Some(summary))
         } else {
             let id = fresh_id();
@@ -356,17 +383,11 @@ impl Agent {
                     &sessions_root,
                     id,
                     &model,
-                    &provider_label,
+                    &account,
                     system_prompt.len(),
                 )?
             } else {
-                AgentLog::root(
-                    &sessions_root,
-                    id,
-                    &model,
-                    &provider_label,
-                    system_prompt.len(),
-                )?
+                AgentLog::root(&sessions_root, id, &model, &account, system_prompt.len())?
             };
             (log, None)
         };
@@ -606,12 +627,11 @@ impl Agent {
             &scratch.test_sibling("sessions")?,
             id,
             "test-model",
-            "test",
+            &RecordedAccount::for_test("test"),
             system_prompt.len(),
         )?;
         let provider = ProviderHandle::new(Arc::new(Provider::scripted(
             "test-model",
-            ProviderKind::Openai,
             crate::provider::scripted::Script::new(),
         )));
         let cwd = std::env::current_dir().expect("test process has a cwd");
@@ -846,7 +866,7 @@ mod tests {
                 no_logs: false,
                 run_lock: None,
                 model: "test-model".into(),
-                provider_label: "test".into(),
+                account: RecordedAccount::for_test("test"),
                 allow_schedule: false,
                 // interactive: withholds `reply`.
                 interactive: true,
@@ -1179,7 +1199,14 @@ mod tests {
     fn resumed_agent_adds_only_the_fresh_shell_note() {
         let dir = tmp("resume-agent");
         let sessions = dir.path().join("sessions");
-        let mut log = AgentLog::root(&sessions, 0, "old-model", "old-provider", 0).unwrap();
+        let mut log = AgentLog::root(
+            &sessions,
+            0,
+            "old-model",
+            &RecordedAccount::for_test("old-provider"),
+            0,
+        )
+        .unwrap();
         log.append_user("before the crash".into(), None).unwrap();
         log.append_assistant(ChatMessage::assistant("saved answer"), vec![], None)
             .unwrap();
@@ -1197,7 +1224,7 @@ mod tests {
                 no_logs: false,
                 run_lock: None,
                 model: "new-model".into(),
-                provider_label: "new-provider".into(),
+                account: RecordedAccount::for_test("new-provider"),
                 allow_schedule: false,
                 interactive: true,
                 chat: false,
@@ -1323,7 +1350,7 @@ mod tests {
                 no_logs: true,
                 run_lock: None,
                 model: "test-model".into(),
-                provider_label: "test".into(),
+                account: RecordedAccount::for_test("test"),
                 allow_schedule: false,
                 interactive: true,
                 chat: false,
@@ -1357,7 +1384,14 @@ mod tests {
     fn resume_seeds_child_ids_past_existing_session_directories() {
         let dir = tmp("resume-id-seed");
         let sessions = dir.path().join("sessions");
-        let log = AgentLog::root(&sessions, 0, "old-model", "old-provider", 0).unwrap();
+        let log = AgentLog::root(
+            &sessions,
+            0,
+            "old-model",
+            &RecordedAccount::for_test("old-provider"),
+            0,
+        )
+        .unwrap();
         fs::create_dir_all(sessions.join("1")).unwrap();
         fs::write(sessions.join("1/sentinel"), b"keep").unwrap();
         drop(log);
@@ -1373,7 +1407,7 @@ mod tests {
                 no_logs: false,
                 run_lock: None,
                 model: "new-model".into(),
-                provider_label: "new-provider".into(),
+                account: RecordedAccount::for_test("new-provider"),
                 allow_schedule: false,
                 interactive: true,
                 chat: false,

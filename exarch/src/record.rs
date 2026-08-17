@@ -111,14 +111,31 @@ pub enum Protocol {
         session_id: AgentId,
         parent: Option<AgentId>,
         model: String,
-        provider: String,
+        /// What the account was called when the session started — a
+        /// snapshot, the right thing for a log to hold even once a sibling
+        /// account arrives or a workspace is renamed.
+        #[serde(rename = "provider")]
+        label: String,
+        /// `service` and `account` join `label` once an account carries a
+        /// service name and an id of its own; both absent on a `record.jsonl`
+        /// written before this pair existed, which still resumes on `label`
+        /// alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
         system_prompt_bytes: usize,
         log_dir: PathBuf,
         at_unix_ms: u64,
     },
     SessionResumed {
         model: String,
-        provider: String,
+        #[serde(rename = "provider")]
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
         system_prompt_bytes: usize,
         at_unix_ms: u64,
     },
@@ -341,7 +358,12 @@ pub enum Forensic {
     /// from `SessionStarted` once the run outlives its first selection.
     ModelChanged {
         model: String,
-        provider: String,
+        #[serde(rename = "provider")]
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
     },
 }
 

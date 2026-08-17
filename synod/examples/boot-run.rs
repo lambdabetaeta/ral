@@ -41,12 +41,12 @@
 //!
 //! Usage: `boot-run <kernel> <initramfs> <rootfs> <folder>`
 
-use exarch::agent::{Agent, RootConfig, RootSeat, SPAWN_FUEL};
+use exarch::agent::{Agent, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL};
 use exarch::bus::{AgentId, Sink};
 use exarch::egress::Egress;
 use exarch::headless::converse_settled;
 use exarch::provider::scripted::{Reply, Script};
-use exarch::provider::{Engine, Provider, ProviderKind, ToolCall};
+use exarch::provider::{Engine, Provider, ToolCall};
 use exarch::record::{Display, Record, Transient};
 use ral_core::transport::{Liveness, WireTransport};
 use ral_core::types::Capabilities;
@@ -145,11 +145,7 @@ fn main() {
         .then(Reply::text("all set"));
 
     let engine = Engine::new();
-    let provider = Arc::new(Provider::scripted(
-        "test-model",
-        ProviderKind::Openai,
-        script,
-    ));
+    let provider = Arc::new(Provider::scripted("test-model", script));
     let mut agent = Agent::root(
         RootConfig {
             system: "you are a helpful office assistant".to_string(),
@@ -159,7 +155,11 @@ fn main() {
             no_logs: false,
             run_lock: None,
             model: "test-model".to_string(),
-            provider_label: "test".to_string(),
+            account: RecordedAccount {
+                label: "test".to_string(),
+                service: "scripted".to_string(),
+                id: "test".to_string(),
+            },
             allow_schedule: false,
             interactive: true,
             chat: false,

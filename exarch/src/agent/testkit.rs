@@ -7,12 +7,13 @@
 )]
 
 use crate::agent::{
-    Agent, NoControl, ProviderHandle, RootConfig, RootSeat, SPAWN_FUEL, render_reply,
+    Agent, NoControl, ProviderHandle, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL,
+    render_reply,
 };
 use crate::bootstrap::Scratch;
 use crate::bus::{AgentOutcome, Emitter};
 use crate::provider::scripted::Script;
-use crate::provider::{Provider, ProviderKind, ToolCall};
+use crate::provider::{Provider, ToolCall};
 use ral_core::Shell;
 use ral_core::Value;
 use ral_core::serial::FOValue;
@@ -23,7 +24,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 pub(crate) fn scripted(model: &str, script: Script) -> Arc<Provider> {
-    Arc::new(Provider::scripted(model, ProviderKind::Openai, script))
+    Arc::new(Provider::scripted(model, script))
 }
 
 /// A boundary read — unlike `scope_has` it ticks no epoch and no ledger.
@@ -111,7 +112,7 @@ fn root(interactive: bool, chat: bool) -> Agent {
             no_logs: false,
             run_lock: None,
             model: "test-model".into(),
-            provider_label: "test".into(),
+            account: RecordedAccount::for_test("test"),
             allow_schedule: false,
             interactive,
             chat,

@@ -105,7 +105,12 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   same guest, against the same folder, under the same safety net. The model
   picker lives here too: `menu`/`refresh_menu` list what the computer's
   credentials can reach (cached-instant and fetched-complete), and a
-  `Choice` names provider, model, and effort. `sign_in` drives exarch's
+  `Choice` names an `AccountId`, model, and effort — an id and never a
+  display name, because a name that happened to match another account's would
+  start a conversation on someone else's login. What flows the other way for
+  display — the opening's and a finished sign-in's account name — is spelled
+  `label` on the wire, so an id and a display string cannot be mistaken for
+  one another in either direction. `sign_in` drives exarch's
   browser login flow (`exarch::provider::oauth::login_flow`) and admits the
   fresh account to the live store and catalog, so a ChatGPT plan signed in
   from the window is usable without a restart — the credential store is
@@ -117,19 +122,30 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   because exarch is started from a shell; synod is double-clicked, inherits
   the desktop's environment, and faces someone with no `.zshrc` to export
   from. So there are two sources in one order: the computer's credential
-  manager (`exarch::provider::keychain`, entries named `(synod, label)`)
+  manager (`exarch::provider::keychain`, entries named `(synod, account-id)`)
   first, because it is the one a person can see and change from inside
   synod, and the environment underneath it — the same sweep and scrub as
   exarch, still run first because it is the step that must happen while the
-  process is single-threaded. Which services *exist* is a third thing and no
-  secret: the famous ones are `ProviderKind`'s list, and further endpoints
-  are declared in `$XDG_CONFIG_HOME/synod/providers.ral` — synod's file, in
-  synod's directory, holding addresses and protocols but never keys. An
-  `Account` row carries a label, a kind, where the credential in force came
-  from, and at most the key's last four characters; the `source` is read off
-  the store's own record of which door the key came through, so drawing the
-  list costs the vault nothing. A keyless local server is reported as
-  `no-key` outright rather than left to be inferred from a missing hint.
+  process is single-threaded. That order is now one call:
+  `CredentialStore::admit_from` over a `SecretVault`, which `Keychain`
+  implements, in place of the two-step synod used to perform by hand.
+  Which services *exist* is a third thing and no secret, and synod re-derives
+  none of it: the table is `exarch::provider::identity::built_in_services`,
+  and further endpoints are declared in
+  `$XDG_CONFIG_HOME/synod/providers.ral` — synod's file, in synod's directory,
+  holding addresses and protocols but never keys — read through
+  `exarch::provider::accounts`.
+
+  What stays synod's is what is about synod's *window*. A row carries the
+  account's `identity::label`, where the credential in force came from, the
+  hint naming this computer's vault, whether the row can be withdrawn, and at
+  most the key's last four characters; the `source` is read off the store's own
+  record of which door the key came through, so drawing the list costs the
+  vault nothing. A keyless local server is reported as `no-key` outright rather
+  than left to be inferred from a missing hint. The old three-way `kind` is
+  gone with the provenance it encoded — "is this a login" is `source ==
+  SignedIn` — and since one service may own several ChatGPT accounts, the
+  static sign-in card gives way to rows drawn from `store.available()`.
   See [[decisions/260807_synod-keeps-its-own-accounts|synod-keeps-its-own-accounts]].
 
 ## synod/src/workspace/ — the safety net

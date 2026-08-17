@@ -1,15 +1,15 @@
 //! Non-blocking model-list fetching for every front-end that opens a picker
 //! over a [`ModelCatalog`] — exarch's `/model` overlay and synod's window.
 //!
-//! No UI thread can spend a network round trip on a provider's list, so both
+//! No UI thread can spend a network round trip on an account's list, so both
 //! seed from cache and fetch the misses in the background — [`FetchState`]
 //! names the outcomes, [`Fetches`] pumps the threads, [`Listing`] joins them.
 
-use super::ProviderId;
+use super::identity::AccountId;
 use super::models::{ModelCatalog, ModelSource, ProviderEndpoint};
 use std::collections::BTreeMap;
 
-/// One background fetch's state, over a provider's model list
+/// One background fetch's state, over an account's model list
 /// ([`ModelsState`]) or a model's serving providers ([`EndpointsState`]).
 #[derive(Clone)]
 pub enum FetchState<T> {
@@ -18,7 +18,7 @@ pub enum FetchState<T> {
     Failed(String),
 }
 
-/// One provider's model-list fetch state; `Failed` still leaves manual entry.
+/// One account's model-list fetch state; `Failed` still leaves manual entry.
 pub type ModelsState = FetchState<Vec<String>>;
 
 /// One model's serving-provider (`OpenRouter` `/endpoints`) fetch state, keyed
@@ -75,50 +75,50 @@ impl<K, T> Fetches<K, T> {
     }
 }
 
-/// Every available provider's model list over a [`ModelCatalog`]: fetch state
+/// Every available account's model list over a [`ModelCatalog`]: fetch state
 /// seeded from the catalog's caches, completed by a [`Fetches`] pump.
 pub struct Listing {
-    states: BTreeMap<ProviderId, ModelsState>,
-    fetches: Fetches<ProviderId, Vec<String>>,
+    states: BTreeMap<AccountId, ModelsState>,
+    fetches: Fetches<AccountId, Vec<String>>,
 }
 
 impl Listing {
-    /// Open a listing over `providers`: a hit on `catalog`'s memo or fresh disk
+    /// Open a listing over `accounts`: a hit on `catalog`'s memo or fresh disk
     /// entry seeds `Loaded` untouched by the network, a miss seeds `Loading` and
     /// spawns a fetch through its [`ModelSource`] for [`Self::pump`] to drain.
-    pub fn open<S>(providers: Vec<ProviderId>, catalog: &mut ModelCatalog<S>) -> Self
+    pub fn open<S>(accounts: Vec<AccountId>, catalog: &mut ModelCatalog<S>) -> Self
     where
         S: ModelSource + Clone + Send + 'static,
     {
         let mut states = BTreeMap::new();
         let fetches = Fetches::new();
-        for id in providers {
-            if let Some(models) = catalog.cached(&id) {
-                states.insert(id, ModelsState::Loaded(models));
+        for account in accounts {
+            if let Some(models) = catalog.cached(&account) {
+                states.insert(account, ModelsState::Loaded(models));
             } else {
-                states.insert(id.clone(), ModelsState::Loading);
+                states.insert(account.clone(), ModelsState::Loading);
                 let source = catalog.source().clone();
-                fetches.spawn(id.clone(), move || source.list(&id));
+                fetches.spawn(account.clone(), move || source.list(&account));
             }
         }
         Self { states, fetches }
     }
 
     /// Fold every landed fetch into this listing, each success into `catalog`
-    /// too, and return the providers whose state changed. Folding on the
+    /// too, and return the accounts whose state changed. Folding on the
     /// caller's thread is what keeps the catalog's disk write serial.
-    pub fn pump<S: ModelSource>(&mut self, catalog: &mut ModelCatalog<S>) -> Vec<ProviderId> {
+    pub fn pump<S: ModelSource>(&mut self, catalog: &mut ModelCatalog<S>) -> Vec<AccountId> {
         let mut changed = Vec::new();
-        for (id, result) in self.fetches.landed() {
+        for (account, result) in self.fetches.landed() {
             let state = match result {
                 Ok(models) => {
-                    catalog.record(&id, models.clone());
+                    catalog.record(&account, models.clone());
                     ModelsState::Loaded(models)
                 }
                 Err(reason) => ModelsState::Failed(reason),
             };
-            self.states.insert(id.clone(), state);
-            changed.push(id);
+            self.states.insert(account.clone(), state);
+            changed.push(account);
         }
         changed
     }
@@ -127,16 +127,16 @@ impl Listing {
     /// Catalog-free by design: a caller holding the catalog behind a lock
     /// (synod's `refresh_menu`) folds the successes in afterward through
     /// [`ModelCatalog::record`], never holding it across the network.
-    pub fn settle(self) -> Vec<(ProviderId, Result<Vec<String>, String>)> {
+    pub fn settle(self) -> Vec<(AccountId, Result<Vec<String>, String>)> {
         self.fetches.settle()
     }
 
-    /// `id`'s current fetch state, if this listing opened it.
-    pub fn state(&self, id: &ProviderId) -> Option<&ModelsState> {
-        self.states.get(id)
+    /// `account`'s current fetch state, if this listing opened it.
+    pub fn state(&self, account: &AccountId) -> Option<&ModelsState> {
+        self.states.get(account)
     }
 
-    pub fn states(&self) -> impl Iterator<Item = (&ProviderId, &ModelsState)> {
+    pub fn states(&self) -> impl Iterator<Item = (&AccountId, &ModelsState)> {
         self.states.iter()
     }
 
@@ -150,17 +150,17 @@ impl Listing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::ProviderKind;
+    use crate::provider::identity::{Account, ServiceName, built_in};
     use crate::sync::LockExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    fn fam(kind: ProviderKind) -> ProviderId {
-        ProviderId::Famous(kind)
+    fn fam(name: &str) -> Account {
+        Account::of_service(built_in(&ServiceName::declared(name).unwrap()).unwrap())
     }
 
-    type Lists = BTreeMap<ProviderId, Result<Vec<String>, String>>;
+    type Lists = BTreeMap<AccountId, Result<Vec<String>, String>>;
 
     /// A fake [`ModelSource`] whose state is shared, not forked, across a clone
     /// — so a background thread's fetch is counted where the test can see it.
@@ -184,11 +184,11 @@ mod tests {
     }
 
     impl ModelSource for FakeSource {
-        fn list(&self, id: &ProviderId) -> Result<Vec<String>, String> {
+        fn list(&self, account: &AccountId) -> Result<Vec<String>, String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.lists
                 .lock_ignore_poison()
-                .get(id)
+                .get(account)
                 .cloned()
                 .unwrap_or_else(|| Err("no fake list".into()))
         }
@@ -198,9 +198,12 @@ mod tests {
         }
     }
 
-    fn one(id: ProviderId, models: &[&str]) -> Lists {
+    fn one(account: &AccountId, models: &[&str]) -> Lists {
         let mut m = BTreeMap::new();
-        m.insert(id, Ok(models.iter().map(ToString::to_string).collect()));
+        m.insert(
+            account.clone(),
+            Ok(models.iter().map(ToString::to_string).collect()),
+        );
         m
     }
 
@@ -219,13 +222,14 @@ mod tests {
 
     #[test]
     fn everything_cached_loads_with_no_fetch() {
-        let source = FakeSource::new(one(fam(ProviderKind::Anthropic), &["claude-opus-4"]));
+        let anthropic = fam("anthropic");
+        let source = FakeSource::new(one(&anthropic.id, &["claude-opus-4"]));
         let mut catalog = ModelCatalog::memo_only(source.clone());
-        catalog.record(&fam(ProviderKind::Anthropic), vec!["claude-opus-4".into()]);
+        catalog.record(&anthropic.id, vec!["claude-opus-4".into()]);
 
-        let listing = Listing::open(vec![fam(ProviderKind::Anthropic)], &mut catalog);
+        let listing = Listing::open(vec![anthropic.id.clone()], &mut catalog);
 
-        match listing.state(&fam(ProviderKind::Anthropic)) {
+        match listing.state(&anthropic.id) {
             Some(ModelsState::Loaded(models)) => {
                 assert_eq!(models, &vec!["claude-opus-4".to_string()]);
             }
@@ -234,23 +238,24 @@ mod tests {
             None => panic!("expected Loaded, got no state at all"),
         }
         assert!(!listing.is_loading());
-        assert_eq!(source.calls(), 0, "a cached provider must spawn no fetch");
+        assert_eq!(source.calls(), 0, "a cached account must spawn no fetch");
     }
 
     #[test]
     fn a_miss_loads_in_the_background_and_records_into_the_catalog() {
-        let source = FakeSource::new(one(fam(ProviderKind::Deepseek), &["deepseek-chat"]));
+        let deepseek = fam("deepseek");
+        let source = FakeSource::new(one(&deepseek.id, &["deepseek-chat"]));
         let mut catalog = ModelCatalog::memo_only(source);
 
-        let mut listing = Listing::open(vec![fam(ProviderKind::Deepseek)], &mut catalog);
+        let mut listing = Listing::open(vec![deepseek.id.clone()], &mut catalog);
         assert!(matches!(
-            listing.state(&fam(ProviderKind::Deepseek)),
+            listing.state(&deepseek.id),
             Some(ModelsState::Loading)
         ));
 
         wait_for_settled(&mut listing, &mut catalog);
 
-        match listing.state(&fam(ProviderKind::Deepseek)) {
+        match listing.state(&deepseek.id) {
             Some(ModelsState::Loaded(models)) => {
                 assert_eq!(models, &vec!["deepseek-chat".to_string()]);
             }
@@ -259,54 +264,48 @@ mod tests {
             None => panic!("expected Loaded, got no state at all"),
         }
         assert_eq!(
-            catalog.cached(&fam(ProviderKind::Deepseek)),
+            catalog.cached(&deepseek.id),
             Some(vec!["deepseek-chat".to_string()])
         );
     }
 
     #[test]
     fn a_failed_fetch_lands_failed_and_is_not_recorded() {
+        let openai = fam("openai");
         let mut lists = BTreeMap::new();
-        lists.insert(fam(ProviderKind::Openai), Err("network down".to_string()));
+        lists.insert(openai.id.clone(), Err("network down".to_string()));
         let mut catalog = ModelCatalog::memo_only(FakeSource::new(lists));
 
-        let mut listing = Listing::open(vec![fam(ProviderKind::Openai)], &mut catalog);
+        let mut listing = Listing::open(vec![openai.id.clone()], &mut catalog);
         wait_for_settled(&mut listing, &mut catalog);
 
-        match listing.state(&fam(ProviderKind::Openai)) {
+        match listing.state(&openai.id) {
             Some(ModelsState::Failed(reason)) => assert!(reason.contains("network down")),
             Some(ModelsState::Loaded(_)) => panic!("expected Failed, got Loaded"),
             Some(ModelsState::Loading) => panic!("expected Failed, got Loading"),
             None => panic!("expected Failed, got no state at all"),
         }
-        assert_eq!(catalog.cached(&fam(ProviderKind::Openai)), None);
+        assert_eq!(catalog.cached(&openai.id), None);
     }
 
     #[test]
     fn settle_returns_every_outstanding_result() {
-        let mut lists = one(fam(ProviderKind::Anthropic), &["claude-opus-4"]);
-        lists.insert(fam(ProviderKind::Openai), Err("no key".to_string()));
+        let anthropic = fam("anthropic");
+        let openai = fam("openai");
+        let mut lists = one(&anthropic.id, &["claude-opus-4"]);
+        lists.insert(openai.id.clone(), Err("no key".to_string()));
         let mut catalog = ModelCatalog::memo_only(FakeSource::new(lists));
 
-        let listing = Listing::open(
-            vec![fam(ProviderKind::Anthropic), fam(ProviderKind::Openai)],
-            &mut catalog,
-        );
+        let listing = Listing::open(vec![anthropic.id.clone(), openai.id.clone()], &mut catalog);
         let mut results = listing.settle();
-        results.sort_by_key(|(id, _)| id.label().to_string());
+        results.sort_by_key(|(account, _)| account.as_str().to_string());
 
         assert_eq!(results.len(), 2);
         assert_eq!(
             results[0],
-            (
-                fam(ProviderKind::Anthropic),
-                Ok(vec!["claude-opus-4".to_string()])
-            )
+            (anthropic.id, Ok(vec!["claude-opus-4".to_string()]))
         );
-        assert_eq!(
-            results[1],
-            (fam(ProviderKind::Openai), Err("no key".to_string()))
-        );
+        assert_eq!(results[1], (openai.id, Err("no key".to_string())));
     }
 
     #[test]

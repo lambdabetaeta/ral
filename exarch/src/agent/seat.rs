@@ -269,7 +269,7 @@ mod tests {
     use crate::bus::{Emitter, Inbox};
     use crate::fleet::desk::{ExarchDesk, HostServices};
     use crate::fleet::registry::AgentRegistry;
-    use crate::provider::{Provider, ProviderKind, scripted::Script};
+    use crate::provider::{Provider, scripted::Script};
     use ral_core::transport::{EnquiryError, Liveness, Program, Report, Run, WireTransport};
     use ral_core::types::{Capabilities, Nursery};
     use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
@@ -298,7 +298,8 @@ mod tests {
     fn test_log() -> AgentLog {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        AgentLog::for_test(n, "test", "test").expect("session log")
+        AgentLog::for_test(n, "test", &crate::agent::RecordedAccount::for_test("test"))
+            .expect("session log")
     }
 
     /// Hand-rolls `WireTransport::new`'s fd-3 handoff so the host end can
@@ -353,7 +354,6 @@ mod tests {
             emit: emit.clone(),
             provider: crate::agent::ProviderHandle::new(Arc::new(Provider::scripted(
                 "test-model",
-                ProviderKind::Openai,
                 Script::new(),
             ))),
             caps: Capabilities::root(),

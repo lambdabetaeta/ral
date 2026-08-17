@@ -29,9 +29,9 @@
 
 use super::line;
 use super::palette::{BANNER_GOLD, CYAN, OVERLAY_BG, RED, SLATE};
-use crate::provider::Subscription;
+use crate::provider::identity::{self, Account, AccountId};
 use crate::provider::models::ProviderEndpoint;
-use crate::provider::{EFFORT_LADDER, ProviderId, ProviderKind, Tuning};
+use crate::provider::{EFFORT_LADDER, Tuning};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use ratatui::Frame;
@@ -59,7 +59,7 @@ pub enum PickAction {
     None,
     /// A listed row, with the live tuning and the chosen serving-provider slug
     /// (`None` for auto, and for every provider that does not route).
-    Selected(ProviderId, String, Tuning, Option<String>),
+    Selected(Account, String, Tuning, Option<String>),
     /// The raw query as a model name, for `model_picker.rs` to resolve against
     /// the listings — the escape hatch when a fetch failed or the wanted model
     /// is unlisted. Such a model has no fetched endpoints, so it carries no route.
@@ -68,7 +68,7 @@ pub enum PickAction {
 
 /// A rendered list row: a listed model, or the synthetic manual-entry row.
 enum Row {
-    Model(ProviderId, String),
+    Model(Account, String),
     Manual(String),
 }
 
@@ -254,11 +254,10 @@ pub(super) fn overlay_frame(f: &mut Frame, area: Rect, title: &str, hint: &str) 
 
 pub struct Picker {
     query: String,
-    /// In declaration order; their lists fill in as fetches land.
-    providers: Vec<ProviderId>,
-    /// A provider absent from the map is metered and renders its bare name.
-    subscription: BTreeMap<ProviderId, Subscription>,
-    models: BTreeMap<ProviderId, ModelsState>,
+    /// In declaration order; their lists fill in as fetches land. Also the set
+    /// [`identity::label`] disambiguates a row's account within.
+    providers: Vec<Account>,
+    models: BTreeMap<AccountId, ModelsState>,
     /// Keyed by `OpenRouter` model id; absent until the provider control is
     /// first focused on that model.
     endpoints: BTreeMap<String, EndpointsState>,
@@ -284,14 +283,13 @@ impl Picker {
     /// in a cached or fetched one. `initial` seeds the tuning controls from the
     /// focused provider's live values, so reopening shows what is in force.
     pub fn new(
-        providers: Vec<ProviderId>,
-        subscription: BTreeMap<ProviderId, Subscription>,
+        providers: Vec<Account>,
         initial: &Tuning,
         caps: fn(&str) -> crate::provider::pricing::ModelCaps,
     ) -> Self {
         let models = providers
             .iter()
-            .map(|id| (id.clone(), ModelsState::Loading))
+            .map(|account| (account.id.clone(), ModelsState::Loading))
             .collect();
         let effort_idx = EFFORT_LADDER
             .iter()
@@ -304,7 +302,6 @@ impl Picker {
         Self {
             query: String::new(),
             providers,
-            subscription,
             models,
             endpoints: BTreeMap::new(),
             selected: 0,
@@ -317,19 +314,15 @@ impl Picker {
         }
     }
 
-    /// The plain provider name, or its subscription-decorated form on a plan.
-    fn label(&self, id: &ProviderId) -> String {
-        let subscription = self
-            .subscription
-            .get(id)
-            .copied()
-            .unwrap_or(Subscription::Metered);
-        crate::provider::provider_label(subscription, id.label())
+    /// The row's name, drawn relative to every account open in this picker —
+    /// the one place a label is computed, and it is not computed here.
+    fn label(&self, account: &Account) -> String {
+        identity::label(account, &self.providers)
     }
 
     /// Record a provider's resolved (or failed) list, clamping the selection in
     /// case the visible list shrank.
-    pub fn set_models(&mut self, id: &ProviderId, state: ModelsState) {
+    pub fn set_models(&mut self, id: &AccountId, state: ModelsState) {
         self.models.insert(id.clone(), state);
         self.clamp_selection();
     }
@@ -355,7 +348,7 @@ impl Picker {
     pub fn is_loading(&self) -> bool {
         self.providers
             .iter()
-            .any(|id| matches!(self.models.get(id), Some(ModelsState::Loading)))
+            .any(|account| matches!(self.models.get(&account.id), Some(ModelsState::Loading)))
     }
 
     /// The model on the highlighted row, if it is a listed one — the manual row
@@ -368,13 +361,11 @@ impl Picker {
         }
     }
 
-    /// The highlighted model iff `OpenRouter` serves it — the only provider
-    /// that routes, so the only one the provider control applies to.
+    /// The highlighted model iff its service routes — `OpenRouter` alone, so
+    /// the only one the provider control applies to.
     fn highlighted_or_model(&self, rows: &[Row]) -> Option<String> {
         match rows.get(self.selected) {
-            Some(Row::Model(id, model)) if id.famous() == Some(ProviderKind::Openrouter) => {
-                Some(model.clone())
-            }
+            Some(Row::Model(account, model)) if account.service.routes => Some(model.clone()),
             _ => None,
         }
     }
@@ -483,9 +474,9 @@ impl Picker {
     /// the route in force for that model.
     fn apply(&self, rows: &[Row]) -> PickAction {
         match rows.get(self.selected) {
-            Some(Row::Model(id, model)) => {
+            Some(Row::Model(account, model)) => {
                 let route = self.active_route(rows).map(str::to_string);
-                PickAction::Selected(id.clone(), model.clone(), self.tuning(rows), route)
+                PickAction::Selected(account.clone(), model.clone(), self.tuning(rows), route)
             }
             Some(Row::Manual(query)) => PickAction::Manual(query.clone(), self.tuning(rows)),
             None => PickAction::None,
@@ -575,18 +566,18 @@ impl Picker {
     /// The `(provider, model)` pairs matching the fuzzy query, best score
     /// first; the sort is stable, so ties keep listed order, as does an empty
     /// query.
-    fn query_matches(&self) -> Vec<(ProviderId, String)> {
+    fn query_matches(&self) -> Vec<(Account, String)> {
         let q = self.query.trim();
 
         // Candidates and haystacks are positionally paired.
-        let mut candidates: Vec<(ProviderId, String)> = Vec::new();
+        let mut candidates: Vec<(Account, String)> = Vec::new();
         let mut haystacks: Vec<String> = Vec::new();
-        for id in &self.providers {
-            if let Some(ModelsState::Loaded(models)) = self.models.get(id) {
-                let label = self.label(id);
+        for account in &self.providers {
+            if let Some(ModelsState::Loaded(models)) = self.models.get(&account.id) {
+                let label = self.label(account);
                 for model in models {
                     haystacks.push(format!("{label} / {model}"));
-                    candidates.push((id.clone(), model.clone()));
+                    candidates.push((account.clone(), model.clone()));
                 }
             }
         }
@@ -625,7 +616,7 @@ impl Picker {
         let mut rows: Vec<Row> = self
             .query_matches()
             .into_iter()
-            .map(|(id, model)| Row::Model(id, model))
+            .map(|(account, model)| Row::Model(account, model))
             .collect();
         let q = self.query.trim();
         if !q.is_empty() {
@@ -641,11 +632,11 @@ impl Picker {
 
     /// Providers whose fetch failed, with their reasons — rendered as notes so
     /// the absent models are explained and the manual fallback is obvious.
-    fn failures(&self) -> Vec<(&ProviderId, &str)> {
+    fn failures(&self) -> Vec<(&Account, &str)> {
         self.providers
             .iter()
-            .filter_map(|id| match self.models.get(id) {
-                Some(ModelsState::Failed(reason)) => Some((id, reason.as_str())),
+            .filter_map(|account| match self.models.get(&account.id) {
+                Some(ModelsState::Failed(reason)) => Some((account, reason.as_str())),
                 _ => None,
             })
             .collect()
@@ -794,7 +785,7 @@ impl Picker {
             .take(window)
             .map(|(i, row)| {
                 let text = match row {
-                    Row::Model(id, m) => format!("{} / {m}", self.label(id)),
+                    Row::Model(account, m) => format!("{} / {m}", self.label(account)),
                     Row::Manual(q) => format!("use “{q}” as a manual model"),
                 };
                 let mut style = match row {
@@ -1062,10 +1053,10 @@ impl Picker {
         // hanging indent can push a row past `width`.
         let body_w = (width as usize).saturating_sub(MARKER.chars().count());
         let mut out = Vec::new();
-        for (id, reason) in self.failures() {
+        for (account, reason) in self.failures() {
             let text = format!(
                 "{} — fetch failed: {reason} (type a model to enter manually)",
-                id.label()
+                self.label(account)
             );
             line::push_wrapped(&mut out, &text, body_w, |chunk, first| {
                 let lead = if first { MARKER } else { HANG };
@@ -1079,20 +1070,38 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{ProviderKind, ReasoningEffort};
+    use crate::provider::ReasoningEffort;
     use ratatui::crossterm::event::KeyCode;
 
-    fn fam(kind: ProviderKind) -> ProviderId {
-        ProviderId::Famous(kind)
+    /// A built-in service's sole account, named by the service alone.
+    fn account(name: &str) -> Account {
+        let service = identity::built_in(&identity::ServiceName::declared(name).unwrap())
+            .expect("a known built-in service name");
+        Account::of_service(service)
     }
 
-    fn custom(label: &str) -> ProviderId {
-        ProviderId::Custom(std::sync::Arc::new(crate::provider::CustomProvider {
-            label: label.into(),
-            key_env: Some(format!("{}_KEY", label.to_uppercase())),
-            endpoint: format!("https://{label}.example/v1/"),
+    /// A declared (non-built-in) service's sole account — the shape a
+    /// `config.ral` endpoint takes.
+    fn declared(name: &str) -> Account {
+        Account::of_service(identity::Service {
+            name: identity::ServiceName::declared(name).unwrap(),
+            endpoint: Some(format!("https://{name}.example/v1/")),
             adapter: genai::adapter::AdapterKind::OpenAI,
-        }))
+            default_model: None,
+            auth: identity::Auth::Env(format!("{}_KEY", name.to_uppercase())),
+            billing: identity::Billing::Metered,
+            routes: false,
+        })
+    }
+
+    /// A `ChatGPT` login — the one shape whose accounts can collide on handle.
+    fn login(handle: &str, issued: &str) -> Account {
+        let service = identity::chatgpt_service();
+        Account {
+            id: AccountId::of_login(&service.name, issued),
+            service,
+            handle: handle.to_string(),
+        }
     }
 
     /// A stub that knows nothing: an empty `supported_parameters` reads as
@@ -1102,18 +1111,19 @@ mod tests {
     }
 
     fn loaded_picker() -> Picker {
+        let anthropic = account("anthropic");
+        let deepseek = account("deepseek");
         let mut p = Picker::new(
-            vec![fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)],
-            BTreeMap::new(),
+            vec![anthropic.clone(), deepseek.clone()],
             &Tuning::default(),
             caps_unknown,
         );
         p.set_models(
-            &fam(ProviderKind::Anthropic),
+            &anthropic.id,
             ModelsState::Loaded(vec!["claude-opus-4".into(), "claude-haiku-4".into()]),
         );
         p.set_models(
-            &fam(ProviderKind::Deepseek),
+            &deepseek.id,
             ModelsState::Loaded(vec!["deepseek-chat".into()]),
         );
         p
@@ -1131,14 +1141,10 @@ mod tests {
 
     /// `vendor/model` ids — the case the serving-provider control exists for.
     fn openrouter_picker() -> Picker {
-        let mut p = Picker::new(
-            vec![fam(ProviderKind::Openrouter)],
-            BTreeMap::new(),
-            &Tuning::default(),
-            caps_unknown,
-        );
+        let openrouter = account("openrouter");
+        let mut p = Picker::new(vec![openrouter.clone()], &Tuning::default(), caps_unknown);
         p.set_models(
-            &fam(ProviderKind::Openrouter),
+            &openrouter.id,
             ModelsState::Loaded(vec![
                 "anthropic/claude-3".into(),
                 "deepseek/deepseek-chat".into(),
@@ -1149,19 +1155,22 @@ mod tests {
         p
     }
 
+    /// The `provider / model` labels of every listed row, in order.
+    fn row_labels(p: &Picker) -> Vec<String> {
+        p.rows()
+            .into_iter()
+            .filter_map(|r| match r {
+                Row::Model(account, m) => Some(format!("{} / {m}", p.label(&account))),
+                Row::Manual(_) => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn empty_query_shows_all_loaded_models() {
         let p = loaded_picker();
-        let labels: Vec<String> = p
-            .rows()
-            .into_iter()
-            .filter_map(|r| match r {
-                Row::Model(id, m) => Some(format!("{} / {m}", id.label())),
-                Row::Manual(_) => None,
-            })
-            .collect();
         assert_eq!(
-            labels,
+            row_labels(&p),
             vec![
                 "anthropic / claude-opus-4",
                 "anthropic / claude-haiku-4",
@@ -1170,64 +1179,63 @@ mod tests {
         );
     }
 
-    /// The row reads as the subscription while the haystack keeps the bare
-    /// provider name, so a plain `openai` search still finds it.
+    /// A lone `ChatGPT` account has nothing to collide with, so its row keeps
+    /// its email rather than falling back to the id.
     #[test]
-    fn subscription_provider_rows_carry_decorated_label() {
-        let mut p = Picker::new(
-            vec![fam(ProviderKind::Openai)],
-            BTreeMap::from([(fam(ProviderKind::Openai), Subscription::ChatGpt)]),
-            &Tuning::default(),
-            caps_unknown,
+    fn a_lone_chatgpt_account_row_keeps_its_email() {
+        let alex = login("alex@bristol.ac.uk", "acct-1");
+        let mut p = Picker::new(vec![alex.clone()], &Tuning::default(), caps_unknown);
+        p.set_models(&alex.id, ModelsState::Loaded(vec!["gpt-5.5".into()]));
+        assert_eq!(
+            row_labels(&p),
+            vec!["chatgpt (subscription) · alex@bristol.ac.uk / gpt-5.5"]
         );
-        p.set_models(
-            &fam(ProviderKind::Openai),
-            ModelsState::Loaded(vec!["gpt-5.5".into()]),
-        );
-        let labels: Vec<String> = p
-            .rows()
-            .into_iter()
-            .filter_map(|r| match r {
-                Row::Model(id, m) => Some(format!("{} / {m}", p.label(&id))),
-                Row::Manual(_) => None,
-            })
-            .collect();
-        assert_eq!(labels, vec!["openai (ChatGPT subscription) / gpt-5.5"]);
-        // The bare provider name still matches search.
-        for c in "openai".chars() {
+        // The bare service name still matches search.
+        for c in "chatgpt".chars() {
             p.key(KeyCode::Char(c));
         }
-        let model_rows = p
-            .rows()
-            .into_iter()
-            .filter(|r| matches!(r, Row::Model(..)))
-            .count();
-        assert_eq!(model_rows, 1);
+        assert_eq!(row_labels(&p).len(), 1);
     }
 
-    /// A flat rate earns the generic suffix, distinct from the `ChatGPT` plan's,
-    /// so the row never claims a login the provider does not have.
+    /// A flat rate earns the generic suffix, distinct from `ChatGPT`'s, so the
+    /// row never claims a login the provider does not have.
     #[test]
     fn flat_rate_provider_rows_carry_generic_subscription_label() {
+        let go = account("opencode-go");
+        let mut p = Picker::new(vec![go.clone()], &Tuning::default(), caps_unknown);
+        p.set_models(&go.id, ModelsState::Loaded(vec!["glm-5.2".into()]));
+        assert_eq!(row_labels(&p), vec!["opencode-go (subscription) / glm-5.2"]);
+    }
+
+    /// Two `ChatGPT` accounts signed in under the same email are two rows, not
+    /// one collapsed into the other — the bug this plan exists to kill.
+    #[test]
+    fn two_accounts_on_one_email_draw_two_distinguishable_rows() {
+        let personal = login("alex@bristol.ac.uk", "acct-1");
+        let work = login("alex@bristol.ac.uk (Acme Ltd)", "acct-2");
         let mut p = Picker::new(
-            vec![fam(ProviderKind::OpencodeGo)],
-            BTreeMap::from([(fam(ProviderKind::OpencodeGo), Subscription::FlatRate)]),
+            vec![personal.clone(), work.clone()],
             &Tuning::default(),
             caps_unknown,
         );
-        p.set_models(
-            &fam(ProviderKind::OpencodeGo),
-            ModelsState::Loaded(vec!["glm-5.2".into()]),
+        p.set_models(&personal.id, ModelsState::Loaded(vec!["gpt-5.5".into()]));
+        p.set_models(&work.id, ModelsState::Loaded(vec!["gpt-5.5".into()]));
+
+        let rows = row_labels(&p);
+        assert_eq!(rows.len(), 2);
+        assert_ne!(
+            rows[0], rows[1],
+            "two accounts on one email draw distinguishable rows"
         );
-        let labels: Vec<String> = p
-            .rows()
-            .into_iter()
-            .filter_map(|r| match r {
-                Row::Model(id, m) => Some(format!("{} / {m}", p.label(&id))),
-                Row::Manual(_) => None,
-            })
-            .collect();
-        assert_eq!(labels, vec!["opencode-go (subscription) / glm-5.2"]);
+
+        for c in "acme".chars() {
+            p.key(KeyCode::Char(c));
+        }
+        assert_eq!(
+            row_labels(&p).len(),
+            1,
+            "acme narrows to the one account it names"
+        );
     }
 
     #[test]
@@ -1257,7 +1265,7 @@ mod tests {
         assert_eq!(model_rows.len(), 1);
         assert!(matches!(
             &model_rows[0],
-            Row::Model(id, _) if id.famous() == Some(ProviderKind::Deepseek)
+            Row::Model(account, _) if account.service.name.as_str() == "deepseek"
         ));
     }
 
@@ -1267,29 +1275,26 @@ mod tests {
         // To the second row, anthropic / claude-haiku-4.
         p.key(KeyCode::Down);
         match p.key(KeyCode::Enter) {
-            PickAction::Selected(id, m, _, _) if id.famous() == Some(ProviderKind::Anthropic) => {
+            PickAction::Selected(account, m, _, _)
+                if account.service.name.as_str() == "anthropic" =>
+            {
                 assert_eq!(m, "claude-haiku-4");
             }
             _ => panic!("expected Selected(anthropic, claude-haiku-4)"),
         }
     }
 
-    /// A custom provider lists and selects exactly like a famous one.
+    /// A declared service lists and selects exactly like a built-in one.
     #[test]
-    fn custom_provider_lists_and_selects() {
-        let llama = custom("local-llama");
-        let mut p = Picker::new(
-            vec![llama.clone()],
-            BTreeMap::new(),
-            &Tuning::default(),
-            caps_unknown,
-        );
-        p.set_models(&llama, ModelsState::Loaded(vec!["llama-3".into()]));
+    fn declared_provider_lists_and_selects() {
+        let llama = declared("local-llama");
+        let mut p = Picker::new(vec![llama.clone()], &Tuning::default(), caps_unknown);
+        p.set_models(&llama.id, ModelsState::Loaded(vec!["llama-3".into()]));
         let rows = p.rows();
-        assert!(matches!(&rows[0], Row::Model(id, m) if id == &llama && m == "llama-3"));
+        assert!(matches!(&rows[0], Row::Model(account, m) if account == &llama && m == "llama-3"));
         match p.key(KeyCode::Enter) {
-            PickAction::Selected(id, m, _, _) => {
-                assert_eq!(id, llama);
+            PickAction::Selected(account, m, _, _) => {
+                assert_eq!(account, llama);
                 assert_eq!(m, "llama-3");
             }
             _ => panic!("expected Selected(local-llama, llama-3)"),
@@ -1419,8 +1424,7 @@ mod tests {
     #[test]
     fn opens_seeded_from_initial_tuning() {
         let p = Picker::new(
-            vec![fam(ProviderKind::Anthropic)],
-            BTreeMap::new(),
+            vec![account("anthropic")],
             &Tuning {
                 effort: Some(ReasoningEffort::Medium),
                 temperature: Some(0.5),
@@ -1450,14 +1454,10 @@ mod tests {
     /// go dead, yet the rung is still there when a reasoning model returns.
     #[test]
     fn unsupported_effort_is_masked_and_remembered() {
-        let mut p = Picker::new(
-            vec![fam(ProviderKind::Anthropic)],
-            BTreeMap::new(),
-            &Tuning::default(),
-            caps_split,
-        );
+        let anthropic = account("anthropic");
+        let mut p = Picker::new(vec![anthropic.clone()], &Tuning::default(), caps_split);
         p.set_models(
-            &fam(ProviderKind::Anthropic),
+            &anthropic.id,
             ModelsState::Loaded(vec!["reasoner".into(), "chat-only".into()]),
         );
 

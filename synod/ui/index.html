@@ -1589,11 +1589,13 @@
 
     // ---- Start screen ---------------------------------------------------
 
-    // The assistant picker: one option per provider×model, rebuilt every
+    // The assistant picker: one option per account×model, rebuilt every
     // time a menu arrives — the instant `list_models` reply, and the later
     // `models-refreshed` event once the live listing is in. Left hidden
     // when there is nothing to choose between, so `currentChoice()` can
-    // fall back to the backend's own default.
+    // fall back to the backend's own default. `key` is the account's id —
+    // what a `start_conversation` call names it by — and `label` is only
+    // ever shown, never sent back: two accounts can share a display label.
     let assistantOptions = [];  // [{ key, model, label, reasoning }]
     let defaultEffortLabel = "";
 
@@ -1622,7 +1624,7 @@
       assistantOptions = [];
       for (const p of providers) {
         for (const m of p.models || []) {
-          assistantOptions.push({ key: p.label, model: m.name, label: p.label + " — " + m.name, reasoning: m.reasoning });
+          assistantOptions.push({ key: p.account, model: m.name, label: p.label + " — " + m.name, reasoning: m.reasoning });
         }
       }
 
@@ -1644,7 +1646,7 @@
       } else {
         const first = providers[0];
         if (first && first.default_model) {
-          const idx = assistantOptions.findIndex((o) => o.key === first.label && o.model === first.default_model);
+          const idx = assistantOptions.findIndex((o) => o.key === first.account && o.model === first.default_model);
           if (idx >= 0) preselect = idx;
         }
       }
@@ -1726,7 +1728,7 @@
       const opt = assistantOptions[idx];
       if (!opt) return null;
       const effort = $("effort-field").style.display === "none" ? defaultEffortLabel : $("effort-select").value;
-      return { provider: opt.key, model: opt.model, effort };
+      return { account: opt.key, model: opt.model, effort };
     }
 
     // The start screen's one error line, shared by the folder picker and the
@@ -1828,8 +1830,8 @@
       if (done.outcome === "signed_in") {
         saySignIn(
           done.replaced
-            ? "Signed in again as " + done.account + "."
-            : "Signed in as " + done.account + "."
+            ? "Signed in again as " + done.label + "."
+            : "Signed in as " + done.label + "."
         );
         if (screens.accounts.classList.contains("active")) loadAccounts();
       } else {
@@ -1894,7 +1896,7 @@
 
       // The plan's card stands whether or not anyone is signed in; it says
       // which of the two rather than coming and going.
-      $("accounts-plan-note").textContent = accounts.some((a) => a.kind === "chatgpt")
+      $("accounts-plan-note").textContent = accounts.some((a) => a.source === "signed-in")
         ? "You are signed in with your ChatGPT plan. Signing in again replaces it."
         : "If you pay for ChatGPT, you can use that plan here instead of a key.";
 
@@ -1934,17 +1936,17 @@
         row.appendChild(note);
       }
 
-      // Every service that authenticates with a key gets the key input —
+      // Every account that authenticates with a key gets the key input —
       // a declared endpoint included, since a key rotated at the far end
       // has to be retypeable at this one.
-      if (account.kind !== "chatgpt" && account.source !== "no-key") {
+      if (account.source !== "signed-in" && account.source !== "no-key") {
         row.appendChild(keyForm(account, i));
       }
-      if (account.kind === "endpoint") {
+      if (account.withdrawable) {
         const actions = document.createElement("div");
         actions.className = "row-actions";
         actions.appendChild(actionButton("Remove", "btn-mini", () =>
-          accountCommand("forget_endpoint", { label: account.label })));
+          accountCommand("forget_endpoint", { account: account.id })));
         row.appendChild(actions);
       }
       return row;
@@ -1954,16 +1956,16 @@
     // inferred from a missing hint: a service that wants no key must not
     // be read as one still waiting for one.
     function keyState(account) {
-      if (account.kind === "chatgpt") return "Signed in";
+      if (account.source === "signed-in") return "Signed in";
       if (account.source === "no-key") return "Used without a key";
       return account.hint ? "•••• " + account.hint : "No key yet";
     }
 
     function accountNotes(account) {
-      if (account.kind === "chatgpt") {
+      if (account.source === "signed-in") {
         return ["You are signed in with your ChatGPT plan, so this one needs no key."];
       }
-      if (account.kind === "endpoint") {
+      if (account.withdrawable) {
         const notes = [];
         if (account.endpoint) notes.push("Address: " + account.endpoint);
         if (account.protocol) notes.push("Way of speaking: " + account.protocol);
@@ -2022,14 +2024,14 @@
       // Only a key this window put away can this window take back.
       if (account.source === "keychain") {
         actions.appendChild(actionButton("Forget", "btn-mini", () =>
-          accountCommand("forget_key", { label: account.label })));
+          accountCommand("forget_key", { account: account.id })));
       }
 
       form.append(label, input, actions);
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         save.disabled = true;
-        const saved = await accountCommand("save_key", { label: account.label, key: input.value });
+        const saved = await accountCommand("save_key", { account: account.id, key: input.value });
         // A save redraws the whole list, this card with it; a refusal leaves
         // the typed key where it is, to be corrected rather than retyped.
         if (!saved) save.disabled = false;
@@ -2042,7 +2044,7 @@
       const key = $("add-key").value.trim();
       $("add-save").disabled = true;
       const added = await accountCommand("save_endpoint", {
-        label: $("add-name").value,
+        name: $("add-name").value,
         endpoint: $("add-address").value,
         protocol: $("add-protocol").value,
         key: key === "" ? null : key,
@@ -2075,10 +2077,10 @@
     // between a restart and its opening.
     function setFacts(opening) {
       const model = opening ? opening.model || "" : "";
-      const account = opening ? opening.account || "" : "";
+      const label = opening ? opening.label || "" : "";
       $("convo-model").textContent = model;
       $("convo-effort").textContent = opening ? opening.effort || "" : "";
-      $("convo-model").title = account ? account + " · " + model : "";
+      $("convo-model").title = label ? label + " · " + model : "";
       $("convo-facts").classList.toggle("ready", Boolean(opening));
     }
 

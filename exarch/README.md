@@ -50,6 +50,7 @@ spawned child inherits them.
 | `openai`       | `OPENAI_API_KEY`     | `gpt-5.5`                 |
 | `openrouter`   | `OPENROUTER_API_KEY` | `anthropic/claude-opus-4` |
 | `deepseek`     | `DEEPSEEK_API_KEY`   | `deepseek-chat`           |
+| `gemini`       | `GEMINI_API_KEY`     | `gemini-2.5-pro`          |
 | `opencode-zen` | `OPENCODE_API_KEY`   | `glm-5.1`                 |
 | `opencode-go`  | `OPENCODE_API_KEY`   | `glm-5.2`                 |
 | `xai`          | `XAI_API_KEY`        | `grok-4.3`                |
@@ -64,9 +65,19 @@ A **custom or self-hosted endpoint** exarch has no built-in knowledge of is
 declared in `$XDG_CONFIG_HOME/exarch/config.ral` with its base URL, the *name*
 of the env var holding its key, and its wire protocol; the key itself still
 comes from the environment and is scrubbed like a famous provider's. See
-[`examples/config.ral`](examples/config.ral) for the format. A signed-in
-ChatGPT account is the one credential not read from the environment: it
-authorises over OAuth and appears as its own selectable provider.
+[`examples/config.ral`](examples/config.ral) for the format.
+
+A **signed-in ChatGPT account** is the one credential not read from the
+environment: it authorises over OAuth. `chatgpt` is a service like any other
+above, but unlike them it can own **several accounts** — a login email carries
+a personal account and one per workspace, and OpenAI issues each its own id.
+Sign in as many as you like with `exarch login`; each is separately selectable
+in the `/model` picker, listed by `exarch accounts`, and named by its email,
+qualified by its workspace when two would otherwise read alike. Every other
+service owns exactly one account and goes by its own name, which is why
+`--provider deepseek` names a credential unambiguously and `--provider
+alex@example.com` may not: if two accounts answer to a name, exarch refuses it
+and prints both rather than choosing for you.
 
 Type `/model` in the REPL for a searchable picker over every available
 provider's live model list (fetched from the provider and cached); the

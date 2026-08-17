@@ -110,7 +110,8 @@ mod tests {
     use super::*;
 
     fn fresh_log() -> AgentLog {
-        AgentLog::for_test(0, "test", "test").expect("session log")
+        AgentLog::for_test(0, "test", &crate::agent::RecordedAccount::for_test("test"))
+            .expect("session log")
     }
 
     fn pending(name: &str) -> PendingHatch {

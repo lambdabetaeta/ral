@@ -9,6 +9,12 @@
 //! Keys travel one way only: from the window into [`synod::accounts`] and
 //! the credential manager.  What comes back is a four-character tail and
 //! where it is kept, so a window left open holds no secret.
+//!
+//! Every command naming an *existing* account takes its id, never its
+//! label: two accounts can share a display label, and resolving one by name
+//! is exactly the ambiguity [`exarch::provider::identity::AccountId`] exists
+//! to rule out. Declaring a *new* endpoint is the one exception — there is
+//! no account yet, only the name it is to be given.
 
 use synod::accounts::{self, AccountList};
 use tauri::{AppHandle, Emitter as _, Manager, State};
@@ -24,36 +30,36 @@ pub fn list_accounts(accounts_state: State<'_, crate::Accounts>) -> Result<Accou
     Ok(accounts::list(store))
 }
 
-/// Keep `key` for the service called `label`.
+/// Keep `key` for the account named `account`.
 ///
 /// # Errors
-/// Returns a plain sentence if the service is unknown, the key is
+/// Returns a plain sentence if the account is unknown, the key is
 /// malformed, or the credential manager would not keep it.
 #[tauri::command]
 pub fn save_key(
     app: AppHandle,
     accounts_state: State<'_, crate::Accounts>,
-    label: String,
+    account: String,
     key: String,
 ) -> Result<AccountList, String> {
     let (store, catalog) = accounts_state.resolved()?;
-    accounts::set_key(store, catalog, &label, &key)?;
+    accounts::set_key(store, catalog, &account, &key)?;
     Ok(settled(&app, store))
 }
 
-/// Take back the key for `label`, leaving the service known but keyless.
+/// Take back the key for `account`, leaving it known but keyless.
 ///
 /// # Errors
-/// Returns a plain sentence if the service is unknown, or if the
+/// Returns a plain sentence if the account is unknown, or if the
 /// credential manager would not give the key up.
 #[tauri::command]
 pub fn forget_key(
     app: AppHandle,
     accounts_state: State<'_, crate::Accounts>,
-    label: String,
+    account: String,
 ) -> Result<AccountList, String> {
     let (store, _) = accounts_state.resolved()?;
-    accounts::forget_key(store, &label)?;
+    accounts::forget_key(store, &account)?;
     Ok(settled(&app, store))
 }
 
@@ -67,30 +73,30 @@ pub fn forget_key(
 pub fn save_endpoint(
     app: AppHandle,
     accounts_state: State<'_, crate::Accounts>,
-    label: String,
+    name: String,
     endpoint: String,
     protocol: String,
     key: Option<String>,
 ) -> Result<AccountList, String> {
     let (store, catalog) = accounts_state.resolved()?;
-    accounts::add_endpoint(store, catalog, &label, &endpoint, &protocol, key.as_deref())?;
+    accounts::add_endpoint(store, catalog, &name, &endpoint, &protocol, key.as_deref())?;
     Ok(settled(&app, store))
 }
 
 /// Withdraw a declared endpoint entirely.
 ///
 /// # Errors
-/// Returns a plain sentence if `label` names one of the services synod
-/// always knows, or if the settings file or credential manager refused the
-/// write.
+/// Returns a plain sentence if `account` names a built-in service rather
+/// than a declared endpoint, or if the settings file or credential manager
+/// refused the write.
 #[tauri::command]
 pub fn forget_endpoint(
     app: AppHandle,
     accounts_state: State<'_, crate::Accounts>,
-    label: String,
+    account: String,
 ) -> Result<AccountList, String> {
     let (store, _) = accounts_state.resolved()?;
-    accounts::forget_endpoint(store, &label)?;
+    accounts::forget_endpoint(store, &account)?;
     Ok(settled(&app, store))
 }
 

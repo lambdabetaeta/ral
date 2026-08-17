@@ -6,6 +6,7 @@
 //! `tui::viewport` folds the same log's `Display`/`Forensic` classes into the
 //! rendered `user.log`.
 
+use crate::agent::build::RecordedAccount;
 use crate::bus::AgentId;
 use crate::provider::{ProviderError, Tuning, Usage};
 use crate::record::model::{Memo, View};
@@ -243,10 +244,10 @@ pub struct AgentLog {
     id: AgentId,
     dir: PathBuf,
     durable: bool,
-    /// Held, with [`Self::provider`], so `clear` re-emits `SessionStarted`
+    /// Held, with [`Self::account`], so `clear` re-emits `SessionStarted`
     /// unchanged and `fork` passes both down to the child.
     model: String,
-    provider: String,
+    account: RecordedAccount,
     /// `<scratch>/sessions/`, under which `fork` makes each child's dir.
     sessions_root: PathBuf,
     /// The directory this log has to itself, when a test made it: dropped with
@@ -293,14 +294,14 @@ impl AgentLog {
         sessions_root: &Path,
         session_id: AgentId,
         model: &str,
-        provider: &str,
+        account: &RecordedAccount,
         system_prompt_bytes: usize,
     ) -> io::Result<Self> {
         let mut s = Self::open_fresh(
             sessions_root.to_path_buf(),
             session_id,
             model.to_string(),
-            provider.to_string(),
+            account.clone(),
             true,
         )?;
         s.record_started(None, system_prompt_bytes, crate::bootstrap::now_unix_ms())?;
@@ -315,11 +316,15 @@ impl AgentLog {
     /// # Errors
     /// Returns `Err` if the directory or the session log cannot be created.
     #[doc(hidden)]
-    pub fn for_test(session_id: AgentId, model: &str, provider: &str) -> io::Result<Self> {
+    pub fn for_test(
+        session_id: AgentId,
+        model: &str,
+        account: &RecordedAccount,
+    ) -> io::Result<Self> {
         let scratch = tempfile::Builder::new()
             .prefix("exarch-agent-log-test-")
             .tempdir()?;
-        let log = Self::root(scratch.path(), session_id, model, provider, 0)?;
+        let log = Self::root(scratch.path(), session_id, model, account, 0)?;
         Ok(Self {
             _scratch: Some(scratch),
             ..log
@@ -334,14 +339,14 @@ impl AgentLog {
         sessions_root: &Path,
         session_id: AgentId,
         model: &str,
-        provider: &str,
+        account: &RecordedAccount,
         system_prompt_bytes: usize,
     ) -> io::Result<Self> {
         let mut s = Self::open_fresh(
             sessions_root.to_path_buf(),
             session_id,
             model.to_string(),
-            provider.to_string(),
+            account.clone(),
             false,
         )?;
         s.record_started_lossy(None, system_prompt_bytes, crate::bootstrap::now_unix_ms());
@@ -349,7 +354,7 @@ impl AgentLog {
     }
 
     /// Build a forked child log, inheriting `sessions_root`, `model`, and
-    /// `provider` and recording this log's id as the child's parent.
+    /// `account` and recording this log's id as the child's parent.
     ///
     /// # Errors
     /// Creating the child's directory, or writing `SessionStarted`, failed.
@@ -358,7 +363,7 @@ impl AgentLog {
             self.sessions_root.clone(),
             child_id,
             self.model.clone(),
-            self.provider.clone(),
+            self.account.clone(),
             self.durable,
         )?;
         if self.durable {
@@ -404,20 +409,29 @@ impl AgentLog {
                 dir.display()
             )));
         }
-        let (model_memo, model, provider) =
+        let (model_memo, model, label) =
             crate::record::model::resume(&record_path).map_err(|error| {
                 io::Error::new(
                     error.kind(),
                     format!("cannot resume {}: {error}", record_path.display()),
                 )
             })?;
+        // Service and account are unknown from history alone — resume reads
+        // back only the label a record's first line names itself by — and
+        // `record_resumed` overwrites this with the live selection's full
+        // identity before anything else observes it.
+        let account = RecordedAccount {
+            label,
+            service: String::new(),
+            id: String::new(),
+        };
         let seam = crate::record::Emitter::append_to(&record_path)?;
         let mut resumed = Self {
             id: session_id,
             dir,
             durable: true,
             model,
-            provider,
+            account,
             sessions_root: sessions_root.to_path_buf(),
             _scratch: None,
             model_memo,
@@ -446,15 +460,17 @@ impl AgentLog {
     pub fn record_resumed(
         &mut self,
         model: &str,
-        provider: &str,
+        account: &RecordedAccount,
         system_prompt_bytes: usize,
         at_unix_ms: u64,
     ) -> io::Result<()> {
         self.model = model.to_string();
-        self.provider = provider.to_string();
+        self.account = account.clone();
         self.record_protocol(Protocol::SessionResumed {
             model: self.model.clone(),
-            provider: self.provider.clone(),
+            label: self.account.label.clone(),
+            service: Some(self.account.service.clone()),
+            account: Some(self.account.id.clone()),
             system_prompt_bytes,
             at_unix_ms,
         })
@@ -870,7 +886,7 @@ impl AgentLog {
         sessions_root: PathBuf,
         session_id: AgentId,
         model: String,
-        provider: String,
+        account: RecordedAccount,
         durable: bool,
     ) -> io::Result<Self> {
         let dir = sessions_root.join(session_id.to_string());
@@ -888,7 +904,7 @@ impl AgentLog {
             dir,
             durable,
             model,
-            provider,
+            account,
             sessions_root,
             _scratch: None,
             model_memo: Memo::default(),
@@ -927,7 +943,9 @@ impl AgentLog {
             session_id: self.id,
             parent,
             model: self.model.clone(),
-            provider: self.provider.clone(),
+            label: self.account.label.clone(),
+            service: Some(self.account.service.clone()),
+            account: Some(self.account.id.clone()),
             system_prompt_bytes,
             log_dir: self.dir.clone(),
             at_unix_ms,
@@ -1082,7 +1100,7 @@ mod tests {
     }
 
     fn fresh_root() -> AgentLog {
-        AgentLog::for_test(0, "model", "provider").expect("log")
+        AgentLog::for_test(0, "model", &RecordedAccount::for_test("provider")).expect("log")
     }
 
     fn assistant_with_tool(id: &str) -> ChatMessage {
@@ -1460,8 +1478,14 @@ mod tests {
     #[test]
     fn transient_eviction_keeps_no_resident_state() {
         let sessions = sessions_root("residency-no-logs");
-        let mut s =
-            AgentLog::root_without_logs(sessions.path(), 0, "model", "provider", 0).unwrap();
+        let mut s = AgentLog::root_without_logs(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
         complete_exchange(&mut s, "one", "one");
         s.apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::User)
             .unwrap();
@@ -1471,7 +1495,14 @@ mod tests {
     #[test]
     fn resume_replays_a_scripted_history_and_preserves_the_model_view() {
         let sessions = sessions_root("resume-round-trip");
-        let mut live = AgentLog::root(sessions.path(), 0, "model", "provider", 0).unwrap();
+        let mut live = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
         live.import_context(vec![ChatMessage::user("inherited")])
             .unwrap();
         complete_exchange(&mut live, "one", "answer one");
@@ -1498,7 +1529,14 @@ mod tests {
     #[test]
     fn resume_quiesces_a_torn_exchange_after_reopening_append_mode() {
         let sessions = sessions_root("resume-mid-exchange");
-        let mut live = AgentLog::root(sessions.path(), 0, "model", "provider", 0).unwrap();
+        let mut live = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
         live.append_user("run the tool".into(), None).unwrap();
         live.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
             .unwrap();
@@ -1530,7 +1568,14 @@ mod tests {
     #[test]
     fn resume_quarantines_only_an_unterminated_final_fragment() {
         let sessions = sessions_root("resume-tail");
-        let live = AgentLog::root(sessions.path(), 0, "model", "provider", 0).unwrap();
+        let live = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
         let path = sessions.path().join("0/record.jsonl");
         drop(live);
         let prefix = fs::read(&path).unwrap();
@@ -1551,7 +1596,14 @@ mod tests {
     #[test]
     fn resume_refuses_a_complete_garbage_line_without_mutating_the_file() {
         let sessions = sessions_root("resume-garbage");
-        let live = AgentLog::root(sessions.path(), 0, "model", "provider", 0).unwrap();
+        let live = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
         let path = sessions.path().join("0/record.jsonl");
         drop(live);
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
@@ -1569,7 +1621,14 @@ mod tests {
     #[test]
     fn resume_refuses_foreign_protocol_data_without_mutating_the_file() {
         let sessions = sessions_root("resume-foreign");
-        let live = AgentLog::root(sessions.path(), 0, "model", "provider", 0).unwrap();
+        let live = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
         let path = sessions.path().join("0/record.jsonl");
         drop(live);
         let foreign = Record::Protocol(Protocol::AssistantMessage {
@@ -1595,7 +1654,14 @@ mod tests {
     #[test]
     fn resume_refuses_a_stale_exchange_id_as_foreign_data() {
         let sessions = sessions_root("resume-stale-id");
-        let mut live = AgentLog::root(sessions.path(), 0, "model", "provider", 0).unwrap();
+        let mut live = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
         complete_exchange(&mut live, "one", "one");
         complete_exchange(&mut live, "two", "two");
         let path = sessions.path().join("0/record.jsonl");
@@ -1623,7 +1689,14 @@ mod tests {
     #[test]
     fn resume_refuses_nonzero_session_ids_as_transient_children() {
         let sessions = sessions_root("resume-child");
-        let child = AgentLog::root(sessions.path(), 1, "model", "provider", 0).unwrap();
+        let child = AgentLog::root(
+            sessions.path(),
+            1,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
         drop(child);
         let error = AgentLog::resume(sessions.path(), 1)
             .err()
@@ -1653,7 +1726,14 @@ mod tests {
     #[test]
     fn resume_repairs_an_interior_stub_lost_from_disk() {
         let sessions = sessions_root("resume-interior-seam");
-        let mut live = AgentLog::root(sessions.path(), 0, "model", "provider", 0).unwrap();
+        let mut live = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
         live.append_user("first".into(), None).unwrap();
         live.quiesce(QuiesceReason::Aborted);
         complete_exchange(&mut live, "second", "answer");
@@ -1689,7 +1769,14 @@ mod tests {
     fn resume_matches_live_after_a_small_edit_sequence_family() {
         for pattern in 0..8 {
             let sessions = sessions_root(&format!("resume-edits-{pattern}"));
-            let mut live = AgentLog::root(sessions.path(), 0, "model", "provider", 0).unwrap();
+            let mut live = AgentLog::root(
+                sessions.path(),
+                0,
+                "model",
+                &RecordedAccount::for_test("provider"),
+                0,
+            )
+            .unwrap();
             complete_exchange(&mut live, "one", "one");
             complete_exchange(&mut live, "two", "two");
             complete_exchange(&mut live, "three", "three");
@@ -1771,7 +1858,14 @@ mod tests {
     #[test]
     fn mirror_only_roots_have_no_durable_records() {
         let sessions = sessions_root("no-logs");
-        let log = AgentLog::root_without_logs(sessions.path(), 0, "model", "provider", 0).unwrap();
+        let log = AgentLog::root_without_logs(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
         assert!(!log.is_durable());
         assert!(!log.dir().join("record.jsonl").exists());
     }

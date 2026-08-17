@@ -1,12 +1,12 @@
 //! The unusual-provider config (`$XDG_CONFIG_HOME/exarch/config.ral`), plus one
 //! environment knob the binary reads at boot.
 //!
-//! Famous providers auto-populate from the environment
-//! ([`crate::provider::credential`]); a self-hosted or non-famous endpoint is the
-//! one thing exarch cannot know, so it is declared here. The file is source, not
-//! data: it runs through the same
+//! Built-in services auto-populate from the environment
+//! ([`crate::provider::credential`]); a self-hosted or non-built-in endpoint is
+//! the one thing exarch cannot know, so it is declared here. The file is
+//! source, not data: it runs through the same
 //! [`ral_core::builtins::modules::evaluate_source`] core as any other `.ral` load,
-//! and its terminal map decodes into [`CustomProvider`]s.
+//! and its terminal map decodes into [`Service`]s.
 //!
 //! A redirected `endpoint` aims the agent's own traffic at an arbitrary server, so
 //! the file is an exfiltration channel to whoever can write it. Hence two defences:
@@ -14,7 +14,7 @@
 //! write, and it evaluates under [`Capabilities::deny_all`] — with `exec` denied
 //! there is no route to the network, so the in-process gate suffices.
 
-use crate::provider::CustomProvider;
+use crate::provider::{Auth, Billing, Service, ServiceName, built_in};
 use genai::adapter::AdapterKind;
 use ral_core::Shell;
 use ral_core::types::{Break, Capabilities, Mooring, Value};
@@ -40,8 +40,8 @@ pub fn disk_warn_bytes() -> Result<Option<u64>, String> {
     }
 }
 
-/// Load the custom providers declared in `$XDG_CONFIG_HOME/exarch/config.ral`;
-/// an absent file is the empty list, so famous providers need no config at all.
+/// Load the services declared in `$XDG_CONFIG_HOME/exarch/config.ral`; an
+/// absent file is the empty list, so built-in services need no config at all.
 ///
 /// It evaluates in a throwaway shell, never the session shell: a value to compute,
 /// not bindings to leak into the agent's scope — as `crate::policy::base` does for
@@ -51,14 +51,14 @@ pub fn disk_warn_bytes() -> Result<Option<u64>, String> {
 /// A present file that is unreadable, that raises, or that fails to decode is a
 /// hard error: a mistyped endpoint is a misdirected agent, not a recoverable
 /// default.
-pub fn load() -> Result<Vec<CustomProvider>, String> {
+pub fn load() -> Result<Vec<Service>, String> {
     let path = crate::bootstrap::EXARCH
         .xdg_dir(ral_core::path::basedir::XdgKind::Config)
         .join(CONFIG_FILE);
     load_declared(&path, LABEL)
 }
 
-/// The provider declarations in `path`, an absent file being the empty list.
+/// The service declarations in `path`, an absent file being the empty list.
 ///
 /// [`load`]'s body over a path the caller names, so a second product's
 /// declarations parse through this one decoder.  `label` opens every
@@ -69,7 +69,7 @@ pub fn load() -> Result<Vec<CustomProvider>, String> {
 /// A present file that is unreadable, that raises, or that fails to decode is
 /// a hard error: a mistyped endpoint is a misdirected agent, not a recoverable
 /// default.
-pub fn load_declared(path: &std::path::Path, label: &str) -> Result<Vec<CustomProvider>, String> {
+pub fn load_declared(path: &std::path::Path, label: &str) -> Result<Vec<Service>, String> {
     let Some(source) = read_optional_file(path, label)? else {
         return Ok(Vec::new());
     };
@@ -83,16 +83,16 @@ pub fn load_declared(path: &std::path::Path, label: &str) -> Result<Vec<CustomPr
     )
 }
 
-/// Write `providers` back to `path` as the very source [`load_declared`]
+/// Write `services` back to `path` as the very source [`load_declared`]
 /// reads — a file a program wrote and a person can still edit.
 ///
-/// A `key` field is written only for a provider that names an environment
+/// A `key` field is written only for a service that names an environment
 /// variable; a key held in this computer's credential manager
 /// ([`crate::provider::keychain`]) is not written here at all, so this file
 /// carries no secret and needs no special permissions.
 ///
 /// # Errors
-/// Returns a plain sentence if a label or endpoint could not be written as a
+/// Returns a plain sentence if a name or endpoint could not be written as a
 /// quoted string without lying about its contents, or if the file could not
 /// be created.
 #[allow(
@@ -101,23 +101,30 @@ pub fn load_declared(path: &std::path::Path, label: &str) -> Result<Vec<CustomPr
 )]
 pub fn save_declared(
     path: &std::path::Path,
-    providers: &[CustomProvider],
+    services: &[Service],
     label: &str,
 ) -> Result<(), String> {
-    let declarations: String = providers
+    let declarations: String = services
         .iter()
-        .map(|provider| -> Result<String, String> {
-            let name = quoted(&provider.label, "name", label)?;
-            let endpoint = quoted(&provider.endpoint, "address", label)?;
-            let key = match &provider.key_env {
-                Some(key_env) => format!(", key: {}", quoted(key_env, "key", label)?),
-                None => String::new(),
+        .map(|service| -> Result<String, String> {
+            let name = quoted(service.name.as_str(), "name", label)?;
+            let endpoint = service.endpoint.as_deref().ok_or_else(|| {
+                format!(
+                    "{label}: '{}' names no address to write — a declared endpoint \
+                     always has one; is this really a declared service?",
+                    service.name
+                )
+            })?;
+            let endpoint = quoted(endpoint, "address", label)?;
+            let key = match &service.auth {
+                Auth::Env(var) => format!(", key: {}", quoted(var, "key", label)?),
+                Auth::Unnamed | Auth::OAuth => String::new(),
             };
-            let protocol = protocol_for_adapter(provider.adapter).ok_or_else(|| {
+            let protocol = protocol_for_adapter(service.adapter).ok_or_else(|| {
                 format!(
                     "{label}: '{}' speaks a protocol this file has no name for — \
                      it can only hold one of {}.",
-                    provider.label,
+                    service.name,
                     protocols().join(", ")
                 )
             })?;
@@ -202,9 +209,8 @@ pub(crate) fn evaluate_no_authority(
         })
 }
 
-/// Decode the config's terminal map of `name → declaration` into
-/// [`CustomProvider`]s.
-fn decode(value: Value, display: &str, label: &str) -> Result<Vec<CustomProvider>, String> {
+/// Decode the config's terminal map of `name → declaration` into [`Service`]s.
+fn decode(value: Value, display: &str, label: &str) -> Result<Vec<Service>, String> {
     let Value::Map(map) = value else {
         return Err(format!(
             "{label} {display}: expected a map of provider declarations \
@@ -212,19 +218,14 @@ fn decode(value: Value, display: &str, label: &str) -> Result<Vec<CustomProvider
             value.type_name()
         ));
     };
-    let mut providers = Vec::with_capacity(map.len());
+    let mut services = Vec::with_capacity(map.len());
     for (name, decl) in &map {
-        providers.push(decode_one(name, decl, display, label)?);
+        services.push(decode_one(name, decl, display, label)?);
     }
-    Ok(providers)
+    Ok(services)
 }
 
-fn decode_one(
-    name: &str,
-    decl: &Value,
-    display: &str,
-    label: &str,
-) -> Result<CustomProvider, String> {
+fn decode_one(name: &str, decl: &Value, display: &str, label: &str) -> Result<Service, String> {
     let where_ = format!("{label} {display}: provider '{name}'");
     let Value::Map(fields) = decl else {
         return Err(format!(
@@ -244,11 +245,23 @@ fn decode_one(
     // `provider::credential` resolves to an inert placeholder bearer.
     let key_env = optional_string_field(fields.get("key"), "key", &where_)?;
     let protocol = string_field(fields.get("protocol"), "protocol", &where_)?;
-    Ok(CustomProvider {
-        label: name.to_string(),
-        key_env,
-        endpoint,
+
+    let name = ServiceName::declared(name).map_err(|e| format!("{label} {display}: {e}"))?;
+    if built_in(&name).is_some() {
+        return Err(format!(
+            "{where_}: '{name}' is already a built-in service — a declared \
+             provider cannot reuse its name."
+        ));
+    }
+
+    Ok(Service {
+        name,
+        endpoint: Some(endpoint),
         adapter: adapter_for_protocol(&protocol, &where_)?,
+        default_model: None,
+        auth: key_env.map_or(Auth::Unnamed, Auth::Env),
+        billing: Billing::Metered,
+        routes: false,
     })
 }
 
@@ -335,7 +348,7 @@ mod tests {
     use super::*;
 
     /// Evaluate and decode a config source the way [`load`] does.
-    fn parse(source: &str) -> Result<Vec<CustomProvider>, String> {
+    fn parse(source: &str) -> Result<Vec<Service>, String> {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         let source = ral_core::source::normalize_source_text(source.to_string());
         decode(
@@ -358,17 +371,23 @@ mod tests {
         let path = dir.join("providers.ral");
 
         let written = vec![
-            CustomProvider {
-                label: "house-llm".into(),
-                key_env: Some("HOUSE_LLM_KEY".into()),
-                endpoint: "https://llm.house.example/v1/".into(),
+            Service {
+                name: ServiceName::declared("house-llm").unwrap(),
+                endpoint: Some("https://llm.house.example/v1/".into()),
                 adapter: AdapterKind::OpenAIResp,
+                default_model: None,
+                auth: Auth::Env("HOUSE_LLM_KEY".into()),
+                billing: Billing::Metered,
+                routes: false,
             },
-            CustomProvider {
-                label: "ollama".into(),
-                key_env: None,
-                endpoint: "http://localhost:11434/v1/".into(),
+            Service {
+                name: ServiceName::declared("ollama").unwrap(),
+                endpoint: Some("http://localhost:11434/v1/".into()),
                 adapter: AdapterKind::OpenAI,
+                default_model: None,
+                auth: Auth::Unnamed,
+                billing: Billing::Metered,
+                routes: false,
             },
         ];
         save_declared(&path, &written, LABEL).expect("write");
@@ -393,11 +412,14 @@ mod tests {
         let path = std::env::temp_dir().join("exarch-declared-quote.ral");
         let err = save_declared(
             &path,
-            &[CustomProvider {
-                label: "it's-llm".into(),
-                key_env: None,
-                endpoint: "https://x.example/v1/".into(),
+            &[Service {
+                name: ServiceName::declared("it's-llm").unwrap(),
+                endpoint: Some("https://x.example/v1/".into()),
                 adapter: AdapterKind::OpenAI,
+                default_model: None,
+                auth: Auth::Unnamed,
+                billing: Billing::Metered,
+                routes: false,
             }],
             LABEL,
         )
@@ -405,10 +427,10 @@ mod tests {
         assert!(err.contains("is that really part of it?"), "got: {err}");
     }
 
-    /// Map iteration is sorted by key, so the providers come back in label order.
+    /// Map iteration is sorted by key, so the providers come back in name order.
     #[test]
     fn three_protocols_map_to_adapters() {
-        let providers = parse(
+        let services = parse(
             "return [
                a-anthropic: [endpoint: 'https://a.example/', key: 'A_KEY', protocol: 'anthropic'],
                b-completions: [endpoint: 'https://b.example/v1/', key: 'B_KEY', protocol: 'completions'],
@@ -416,13 +438,13 @@ mod tests {
              ]",
         )
         .expect("valid config should parse");
-        assert_eq!(providers.len(), 3);
-        assert_eq!(providers[0].label, "a-anthropic");
-        assert_eq!(providers[0].adapter, AdapterKind::Anthropic);
-        assert_eq!(providers[0].key_env, Some("A_KEY".to_string()));
-        assert_eq!(providers[0].endpoint, "https://a.example/");
-        assert_eq!(providers[1].adapter, AdapterKind::OpenAI);
-        assert_eq!(providers[2].adapter, AdapterKind::OpenAIResp);
+        assert_eq!(services.len(), 3);
+        assert_eq!(services[0].name.as_str(), "a-anthropic");
+        assert_eq!(services[0].adapter, AdapterKind::Anthropic);
+        assert_eq!(services[0].auth, Auth::Env("A_KEY".to_string()));
+        assert_eq!(services[0].endpoint.as_deref(), Some("https://a.example/"));
+        assert_eq!(services[1].adapter, AdapterKind::OpenAI);
+        assert_eq!(services[2].adapter, AdapterKind::OpenAIResp);
     }
 
     #[test]
@@ -442,15 +464,29 @@ mod tests {
     /// `endpoint` and `protocol` stay required when `key` is dropped.
     #[test]
     fn missing_key_is_a_no_auth_provider() {
-        let providers = parse(
+        let services = parse(
             "return [ollama: [endpoint: 'http://localhost:11434/v1/', protocol: 'completions']]",
         )
-        .expect("a keyless custom provider should decode");
-        assert_eq!(providers.len(), 1);
-        assert_eq!(providers[0].label, "ollama");
-        assert_eq!(providers[0].key_env, None);
-        assert_eq!(providers[0].endpoint, "http://localhost:11434/v1/");
-        assert_eq!(providers[0].adapter, AdapterKind::OpenAI);
+        .expect("a keyless declared service should decode");
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].name.as_str(), "ollama");
+        assert_eq!(services[0].auth, Auth::Unnamed);
+        assert_eq!(
+            services[0].endpoint.as_deref(),
+            Some("http://localhost:11434/v1/")
+        );
+        assert_eq!(services[0].adapter, AdapterKind::OpenAI);
+    }
+
+    /// A declared name cannot shadow a built-in: once an account id is a
+    /// service name, a shadow would be an identity collision.
+    #[test]
+    fn a_declared_name_colliding_with_a_built_in_is_refused() {
+        let err =
+            parse("return [anthropic: [endpoint: 'https://x.example/', protocol: 'anthropic']]")
+                .unwrap_err();
+        assert!(err.contains("anthropic"), "{err}");
+        assert!(err.contains("built-in"), "{err}");
     }
 
     #[test]

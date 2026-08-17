@@ -2,8 +2,11 @@
 //!
 //! The macOS Keychain, the Windows Credential Manager, or the freedesktop
 //! Secret Service, reached through a [`keyring`] entry named
-//! `(app, provider-label)` — so synod's Anthropic key and exarch's are two
-//! entries, as their config directories are two directories ([`App`]).
+//! `(app, account-id)` — so synod's Anthropic key and exarch's are two
+//! entries, as their config directories are two directories ([`App`]).  A
+//! key-bearing service's account id *is* its service name, so `anthropic`,
+//! `deepseek` and every declared endpoint keep the entry name they have
+//! always had; a `ChatGPT` login holds no key and never reaches this store.
 //!
 //! A headless box has no credential manager, and asking it is an error,
 //! not a lie to paper over: [`Keychain::vault`] answers where secrets on
@@ -16,6 +19,8 @@
 //! this store; synod does.
 
 use crate::bootstrap::App;
+use crate::provider::credential::SecretVault;
+use crate::provider::identity::Account;
 use crate::provider::secret_file;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -60,45 +65,45 @@ impl Keychain {
         }
     }
 
-    /// The key stored for `label`, or `None` when none is.
+    /// The key stored for `id`, or `None` when none is.
     ///
     /// A blank or control-bearing entry reads as `None`: it authenticates
     /// nothing, and a provider bound to it would fail in the middle of a
     /// conversation rather than here.
-    pub fn read(self, label: &str) -> Option<String> {
-        let raw = match self.entry(label).ok()? {
+    pub fn read(self, id: &str) -> Option<String> {
+        let raw = match self.entry(id).ok()? {
             Some(entry) => entry.get_password().ok()?,
-            None => self.read_fallback().remove(label)?,
+            None => self.read_fallback().remove(id)?,
         };
         super::credential::well_formed_key(&raw)
     }
 
-    /// Keep `key` under `label`, replacing whatever was there.
+    /// Keep `key` under `id`, replacing whatever was there.
     ///
     /// # Errors
     /// Returns a plain sentence naming the vault that refused it — a locked
     /// keychain, a read-only config directory — never a bare error code.
-    pub fn store(self, label: &str, key: &str) -> Result<(), String> {
-        let Some(entry) = self.entry(label)? else {
+    pub fn store(self, id: &str, key: &str) -> Result<(), String> {
+        let Some(entry) = self.entry(id)? else {
             let mut keys = self.read_fallback();
-            keys.insert(label.to_string(), key.to_string());
+            keys.insert(id.to_string(), key.to_string());
             return self.write_fallback(&keys);
         };
         entry
             .set_password(key)
-            .map_err(|e| format!("could not keep the {label} key in {}: {e}", self.vault()))
+            .map_err(|e| format!("could not keep the {id} key in {}: {e}", self.vault()))
     }
 
-    /// Forget `label`'s key.  Forgetting one that was never kept is not an
+    /// Forget `id`'s key.  Forgetting one that was never kept is not an
     /// error: the user asked for it to be gone, and it is.
     ///
     /// # Errors
     /// Returns a plain sentence if the vault held the key and would not
     /// give it up.
-    pub fn forget(self, label: &str) -> Result<(), String> {
-        let Some(entry) = self.entry(label)? else {
+    pub fn forget(self, id: &str) -> Result<(), String> {
+        let Some(entry) = self.entry(id)? else {
             let mut keys = self.read_fallback();
-            if keys.remove(label).is_none() {
+            if keys.remove(id).is_none() {
                 return Ok(());
             }
             return self.write_fallback(&keys);
@@ -106,13 +111,13 @@ impl Keychain {
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(format!(
-                "could not forget the {label} key in {}: {e}",
+                "could not forget the {id} key in {}: {e}",
                 self.vault()
             )),
         }
     }
 
-    /// This app's entry for `label`, or `None` on a computer with no
+    /// This app's entry for `id`, or `None` on a computer with no
     /// credential manager — the one place the fallback branch is decided,
     /// and decided by the same question [`Self::vault`] answers.
     ///
@@ -120,13 +125,13 @@ impl Keychain {
     /// A computer that *has* a credential manager but will not open this
     /// entry is a failure to report, not a reason to demote the secret to a
     /// file while the window goes on claiming the keychain has it.
-    fn entry(self, label: &str) -> Result<Option<keyring::Entry>, String> {
+    fn entry(self, id: &str) -> Result<Option<keyring::Entry>, String> {
         if !Self::has_credential_manager() {
             return Ok(None);
         }
-        keyring::Entry::new(self.app.name(), label)
+        keyring::Entry::new(self.app.name(), id)
             .map(Some)
-            .map_err(|e| format!("could not reach {} for the {label} key: {e}", self.vault()))
+            .map_err(|e| format!("could not reach {} for the {id} key: {e}", self.vault()))
     }
 
     fn has_credential_manager() -> bool {
@@ -168,6 +173,17 @@ impl Keychain {
             .map_err(|e| format!("could not write out the keys: {e}"))?;
         secret_file::write_private(&path, json.as_bytes())
             .map_err(|e| format!("could not write {}: {e}", path.display()))
+    }
+}
+
+impl SecretVault for Keychain {
+    /// Read `account`'s key by its id — a key-bearing service's id *is* its
+    /// service name, so this is the same entry [`Keychain::store`] filed a
+    /// typed key under. A `ChatGPT` account holds no key and is never asked:
+    /// [`super::credential::CredentialStore::admit_from`] offers this vault
+    /// only the accounts that authenticate with one.
+    fn read(&self, account: &Account) -> Option<String> {
+        Self::read(*self, account.id.as_str())
     }
 }
 

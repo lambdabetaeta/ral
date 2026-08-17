@@ -554,10 +554,12 @@ pub fn run(
         .ok_or("--headless requires a seed prompt: --prompt, --file, or trailing words after --")?;
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
+    // The account id, not a label: a label is relative to a set this banner
+    // does not have, and the id is what `--provider` takes to reproduce the run.
     let _ = writeln!(
         stderr,
         "exarch: provider={} model={} base={}",
-        p.id().label(),
+        p.account().id,
         p.model(),
         info.base
     );
@@ -770,7 +772,7 @@ pub fn converse_settled<S: Sink>(
 )]
 mod tests {
     use super::*;
-    use crate::agent::{RootConfig, RootSeat, SPAWN_FUEL};
+    use crate::agent::{RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL};
     use crate::bus::{AgentResult, AgentState, Post};
     use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
     use crate::provider::scripted::{Reply, Script};
@@ -794,7 +796,7 @@ mod tests {
                 no_logs: false,
                 run_lock: None,
                 model: "test-model".into(),
-                provider_label: "test".into(),
+                account: RecordedAccount::for_test("test"),
                 allow_schedule: false,
                 interactive: true,
                 chat: false,
@@ -808,11 +810,7 @@ mod tests {
                 cwd: std::env::current_dir().expect("test process has a cwd"),
                 detach: false,
             },
-            Arc::new(Provider::scripted(
-                "test-model",
-                crate::provider::ProviderKind::Openai,
-                script,
-            )),
+            Arc::new(Provider::scripted("test-model", script)),
         )
         .expect("root trunk")
     }
@@ -1100,11 +1098,7 @@ mod tests {
                 scratch: std::path::Path::new("/tmp/scratch"),
                 cwd: "/tmp",
             },
-            &Provider::scripted(
-                "test-model",
-                crate::provider::ProviderKind::Openai,
-                Script::new(),
-            ),
+            &Provider::scripted("test-model", Script::new()),
             seed,
             OutputFormat::Text,
             Engine::new(),
@@ -1166,7 +1160,7 @@ mod tests {
                 no_logs: false,
                 run_lock: None,
                 model: "test-model".into(),
-                provider_label: "test".into(),
+                account: RecordedAccount::for_test("test"),
                 allow_schedule,
                 interactive: true,
                 chat: false,
@@ -1180,11 +1174,7 @@ mod tests {
                 cwd: std::env::current_dir().expect("test process has a cwd"),
                 detach: false,
             },
-            Arc::new(Provider::scripted(
-                "test-model",
-                crate::provider::ProviderKind::Openai,
-                script,
-            )),
+            Arc::new(Provider::scripted("test-model", script)),
         )
         .expect("root trunk")
     }

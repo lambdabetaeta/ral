@@ -250,7 +250,8 @@ mod tests {
     use ral_core::serial::FOValue;
 
     fn fresh_log() -> AgentLog {
-        AgentLog::for_test(0, "test", "test").expect("session log")
+        AgentLog::for_test(0, "test", &crate::agent::RecordedAccount::for_test("test"))
+            .expect("session log")
     }
 
     /// The transient exhausted the provider loop before the model produced output;

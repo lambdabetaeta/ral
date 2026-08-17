@@ -18,43 +18,106 @@ model-list fetch orchestration. The public facade
 re-exports their established types; sibling modules meet through narrow
 methods on `Engine` and `Transport`, not visible fields.
 
-## Provider identity
+## Services and accounts
 
-A *`ProviderId`* is the single abstraction credential resolution, model
-listing, and transport building consume, so every kind of provider flows
-through the same machinery. **Identity is keyed on the label alone** — a
-provider's label is its unique key in the credential store, the model catalog,
-and the `/model` picker — and three arms supply it:
+Selectable identity is a **product of two things**, not a sum over provenance.
+A *`Service`* is where bytes go — endpoint, wire adapter, billing, model list.
+An *`Account`* is who is asking — an id, a credential, and a name for itself.
+One service may own many accounts: a ChatGPT login email carries a personal
+account and one per workspace, and OpenAI issues each its own id against the
+same `email` claim. A key-bearing service is the degenerate case — one service
+with exactly one account, which borrows the service's name — and that is why
+the flattened design never went wrong there.
 
-- `Famous(ProviderKind)` — a built-in provider auto-discovered from its
-  conventional key env var (`ProviderKind::info` gives `(label, default_model,
-  key_env)`; `endpoint`, `default_adapter`, and `flat_rate` give the rest).
-  Nine kinds: Anthropic, OpenAI, OpenRouter, DeepSeek, Gemini, opencode Zen,
-  opencode Go, xAI, Qwen. See [[decisions/260613_provider-config-ral-script|provider-config-ral-script]].
-- `Custom(Arc<CustomProvider>)` — an *unusual provider* declared in a
-  hand-written `config.ral`: a custom endpoint exarch has no built-in
-  knowledge of. It carries the same facts as a famous kind — label, endpoint,
-  wire adapter, and an *optional* key env (`None` for a no-auth local
-  endpoint, which resolves to an inert placeholder bearer) — but as owned
-  runtime data rather than the
-  `'static` table baked into the enum, with the protocol mapped onto genai's
-  `AdapterKind` at decode time. Slice 3 of [[decisions/260613_provider-config-ral-script|provider-config-ral-script]].
-- `ChatGpt(Arc<ChatGptAccount>)` — a signed-in ChatGPT account, authorising
-  over OAuth. **Each account is its own selectable identity**, so switching
-  accounts *is* switching the selected provider — no second selection
-  dimension. It holds only the account label and id; the live tokens live in
-  the [[map/exarch/agent|credential]] store's `OAuth` cell, not here. On disk
-  the login store is persisted through one door, `write_private`
-  (`provider/secret_file.rs`), and the file is *born* owner-private: the Unix arm opens
-  it mode `0600`; the Windows arm passes an owner-only, inheritance-protected
-  DACL in the `SECURITY_ATTRIBUTES` of `CreateFileW` itself, so at no instant
-  does the token file wear the parent directory's inherited ACL.
+`provider/identity.rs` owns both, and the two newtypes that keep them apart:
 
-**The flat-rate vs OAuth split is two distinct unmetered axes.** A subscription
-turn carries no per-token price, and a provider reaches that state two ways:
-opencode Go is a flat $10/mo gateway flagged by `ProviderKind::flat_rate`,
-while a ChatGPT plan rides its OAuth login cell instead — so a ChatGPT account
-is *not* `flat_rate`. `Transport::metered` is false when either holds.
+- `ServiceName` has two doors, because its sources differ in trust: the
+  built-in table is known good, a declaration is input. `declared` refuses an
+  empty, colon-bearing, or control-bearing name, each with its own sentence.
+  A declared name equal to a built-in's is refused at load, naming it — once
+  an account id is a service name, a shadow is an identity collision rather
+  than the silent shadowing it used to be.
+- `AccountId` renders a key-bearing account as its service's name, and a login
+  as `"{service}:{issued}"`. Service names carry no colon, so the first colon
+  separates the halves and the rendering is injective. **Nothing ever parses
+  one.** `state.json`, the model cache, the record log, synod's wire and
+  `--provider` all compare a rendering against the renderings of the accounts
+  actually present; there is no `from_str`, and adding one would reintroduce
+  the ambiguity the type exists to prevent.
+
+`built_in_services()` is the table — nine key-bearing services (Anthropic,
+OpenAI, OpenRouter, DeepSeek, Gemini, opencode Zen, opencode Go, xAI, Qwen)
+plus chatgpt — as struct literals rather than a value enum. A declared
+endpoint is the *same struct* parsed from a hand-written `config.ral`, with
+the protocol mapped onto genai's `AdapterKind` at decode time; provenance is
+not a type. See [[decisions/260613_provider-config-ral-script|provider-config-ral-script]].
+`Service::routes` is true for OpenRouter alone, and carries both route pinning
+and the `vendor/model` fallback, so no code compares a service name against
+the string `"openrouter"`. `Service::auth` says what a *declaration* knows
+about the bearer token — `Env(var)`, `OAuth`, or `Unnamed` — and never where
+the secret is kept, which is the one thing exarch and synod disagree about.
+
+**Every map keys on an `AccountId`.** Accounts are owned once, in
+`CredentialStore::all: Vec<Account>`; the store's `ready`, `admitted` and
+`environment` layers, the model catalog's memo and its disk cache, the
+listing's states and in-flight fetches, the transport cache's key, and the
+picker's model states are all keyed by id. `available()` filters `all` by
+membership in `ready`, so no view holds a copy that can go stale.
+
+### A handle is local; a label is set-relative
+
+An `Account::handle` is derived from that account's own credential alone: the
+`id_token`'s email claim, else the issued account id, qualified by the
+workspace title or the plan type when the token carries one. For a key-bearing
+service it is simply the service's name. Being local is the point — admitting
+one account is complete and correct on its own, so `add_oauth` needs no set,
+and a refresh that rewrites claims into the token cell leaves nothing stale.
+
+`identity::label(account, among)` computes the **set-relative** name, and is
+the one place in either product that names an account. It takes the set
+because the answer depends on it, and it is never stored: a name that is a
+function of the whole set cannot be cached in a single record, because there
+is then no reconciliation path when a sibling arrives or leaves. The service
+alone when the handle is the service's name, the service and the handle both
+otherwise, the id to separate a tie, and `(subscription)` on a flat-rate
+service — nothing else is decorated. The tie check also compares against the
+other accounts' id-qualified forms, so a handle that happens to spell one out
+(the claims are issuer- and workspace-supplied) cannot impersonate a sibling's
+label.
+
+```
+anthropic
+opencode-go (subscription)
+chatgpt (subscription) · alex@bristol.ac.uk
+chatgpt (subscription) · alex@work (Acme Ltd)
+```
+
+The honest limit: a live session's status line keeps the handle it started
+with, because a mid-session refresh does not re-derive it. A renamed workspace
+appears at the next launch.
+
+The one place the log may hold a label is `record.jsonl`, where it is a
+*snapshot* of what the account was called when the session began — which is
+what a log is for.
+
+### One authority on metering
+
+`Service::billing` is the sole authority on whether a turn costs money, and
+`Transport::metered` is `billing == Billing::Metered` — the whole derivation.
+chatgpt and opencode Go are both `FlatRate`; a subscription turn reports
+tokens and never a cost. The fact was previously derivable two ways that could
+disagree, and the second derivation would have reported a future *metered*
+OAuth service as free.
+
+On disk the login store is persisted through one door, `write_private`
+(`provider/secret_file.rs`), and the file is *born* owner-private: the Unix arm
+opens it mode `0600`; the Windows arm passes an owner-only,
+inheritance-protected DACL in the `SECURITY_ATTRIBUTES` of `CreateFileW`
+itself, so at no instant does the token file wear the parent directory's
+inherited ACL. The document is an object keyed by the rendering of an
+`AccountId`, one entry per account; an entry whose key disagrees with its own
+fields is dropped with a warning rather than trusted, the key being an index
+and the fields the truth.
 
 ## Two sources for a key, and one door to each
 
@@ -69,9 +132,12 @@ for [[map/synod|synod]]'s sake — **exarch calls none of it**:
 
 - `provider/keychain.rs` — `Keychain::for_app(App)` reaches the macOS
   Keychain, the Windows Credential Manager, or a Linux desktop's Secret
-  Service through one `keyring` entry named `(app, provider-label)`, so two
+  Service through one `keyring` entry named `(app, account-id)`, so two
   products' keys are two entries exactly as their config directories are two
-  directories. `Entry::store_status()` is asked first; a computer with no
+  directories. Only key-bearing accounts reach the vault, and their ids *are*
+  their service names, so an entry name stays short printable ASCII and no
+  `chatgpt:<issued>` ever becomes a Credential Manager target.
+  `Entry::store_status()` is asked first; a computer with no
   credential manager falls back to an owner-only file beside the app's
   configuration, and `vault()` answers where secrets actually land in a
   sentence a window prints verbatim rather than implying a protection that is
@@ -83,15 +149,24 @@ for [[map/synod|synod]]'s sake — **exarch calls none of it**:
   two copies.
 
 `credential.rs` carries four mid-session mutators that exist for a *window*,
-not for exarch: `known` (every provider, bound or not — the list an accounts
+not for exarch: `known` (every account, bound or not — the list an accounts
 screen is drawn from, since one with no key is precisely the one a user has
 come to give a key to), `admit_key` (bind a key now, `add_oauth`'s sibling for
-the un-repeatable sweep), `forget` (unbind, leaving the provider known), and
+the un-repeatable sweep), `forget` (unbind, leaving the account known), and
 `retire` (drop it entirely — what withdrawing a declaration means). The store
 also remembers which door each key came through (`was_admitted`), because only
 it knows, and an application re-deriving that by interrogating its vault would
-pay a round trip per provider every time it drew a list. See
+pay a round trip per account every time it drew a list. See
 [[decisions/260807_synod-keeps-its-own-accounts|synod-keeps-its-own-accounts]].
+
+The vault itself reaches the store through one seam: `SecretVault::read` by
+account, and `CredentialStore::admit_from`, an ordinary second call after the
+sweep that lays the vault over the top — so a key typed into an accounts screen
+outranks a stale environment variable. It scrubs nothing, which is why
+`resolve_and_scrub`'s single-threaded contract is untouched by its existence.
+`provider/accounts.rs` holds the rest of what a window needs and exarch knows:
+`declared_endpoints`, `declare_endpoint`, `withdraw_endpoint`, `checked_key`,
+and a `find` that resolves by `AccountId` alone.
 
 `config.rs` is likewise generalised without changing exarch's path: `load()`
 is now `load_declared(path, label)` over exarch's own file, and `save_declared`
@@ -118,7 +193,10 @@ genai `Client`:
   backend with the login's bearer and account headers, read live from the
   shared cell so a mid-session refresh is picked up without rebuilding.
   `refresh_cell_if_stale` is the common renewal door for inference and catalog
-  requests, upserting just that account's entry.
+  requests, upserting just that account's entry. A refresh may rename the
+  account — fresh claims update the handle's ingredients — but never re-keys
+  it: the issued id is pinned to the current token's, since every map keys on
+  it.
 
 ## Model catalogs
 
@@ -131,8 +209,9 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
 - `/login` admits an account mid-session through
   `CredentialStore::add_oauth`; that operation returns the id and the exact
   shared `Credential`, which `ModelCatalog::add_credential` admits through
-  its narrow live-source seam. Re-login updates the cell in place, including
-  when a changed account label rekeys its `ProviderId`.
+  its narrow live-source seam. Re-login updates the cell in place; a login
+  that has since learnt its email is renamed where it stands, its identity
+  being the account id throughout.
 - OpenRouter serving endpoints remain a separate, intent-driven request after
   a model is selected.
 - `listing.rs` states the picker-side orchestration once for every front-end

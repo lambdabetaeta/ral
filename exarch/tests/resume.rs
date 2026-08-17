@@ -3,11 +3,11 @@
 //! Process-boundary resume coverage: a scripted child leaves a mid-exchange
 //! ledger, the parent terminates it, and a fresh root continues the session.
 
-use exarch::agent::{Agent, RootConfig, RootSeat, deliberate};
+use exarch::agent::{Agent, RecordedAccount, RootConfig, RootSeat, deliberate};
 use exarch::bootstrap::{EXARCH, Scratch};
 use exarch::bus::{Emitter, channel};
+use exarch::provider::Provider;
 use exarch::provider::scripted::{Reply, Script};
-use exarch::provider::{Provider, ProviderKind};
 use exarch::record::{self, Refusal, View};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -18,7 +18,7 @@ use std::time::Duration;
 exarch::pre_main_ctor!();
 
 fn scripted(model: &str, script: Script) -> Arc<Provider> {
-    Arc::new(Provider::scripted(model, ProviderKind::Openai, script))
+    Arc::new(Provider::scripted(model, script))
 }
 
 /// A hand-written `record.jsonl` line needs the `Entry` envelope too, since
@@ -45,7 +45,7 @@ fn root_config(run_dir: &Path, resume: bool) -> RootConfig {
         no_logs: false,
         run_lock: None,
         model: "test-model".into(),
-        provider_label: "test".into(),
+        account: RecordedAccount::for_test("test"),
         allow_schedule: false,
         interactive: true,
         chat: false,
@@ -226,6 +226,43 @@ fn replay_refuses_a_ledger_line_it_does_not_recognise() {
             "a record the fold cannot parse must refuse the whole replay, not silently succeed"
         ),
     }
+}
+
+/// A `record.jsonl` written before this change carries a bare `"provider"`
+/// field and no `"service"`/`"account"` — the wire shape the rename-not-remove
+/// on `record.rs`'s three identity fields exists to keep resumable.
+#[test]
+fn a_pre_change_record_log_still_resumes() {
+    let root = tempfile::tempdir().expect("run root");
+    let run_dir = root.path().to_path_buf();
+    let sessions = run_dir.join("sessions/0");
+    std::fs::create_dir_all(&sessions).expect("session dir");
+    let path = sessions.join("record.jsonl");
+    let line = serde_json::json!({
+        "at_unix_ms": 0,
+        "record": {
+            "Protocol": {
+                "kind": "session_started",
+                "session_id": 0,
+                "parent": null,
+                "model": "old-model",
+                "provider": "old-label",
+                "system_prompt_bytes": 0,
+                "log_dir": sessions,
+                "at_unix_ms": 0,
+            }
+        }
+    })
+    .to_string();
+    std::fs::write(&path, format!("{line}\n")).expect("write pre-change record.jsonl");
+
+    let resumed = Agent::root(
+        root_config(&run_dir, true),
+        identity_seat("pre-change-resume"),
+        scripted("test-model", Script::new()),
+    )
+    .expect("a pre-change record.jsonl must still resume");
+    assert!(resumed.is_ready());
 }
 
 #[test]

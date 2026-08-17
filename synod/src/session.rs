@@ -27,13 +27,14 @@
 
 use crate::grant::Grant;
 use crate::workspace;
-use exarch::agent::Agent;
+use exarch::agent::{Agent, RecordedAccount};
 use exarch::bootstrap;
 use exarch::provider::{
-    self, Engine, Provider, ProviderId,
+    self, Engine, Provider,
     credential::{Credential, CredentialStore},
+    identity::{self, Account},
     listing::Listing,
-    models::{LiveSource, ModelCatalog, ModelSource, resolve_pinned_provider},
+    models::{LiveSource, ModelCatalog, ModelSource, resolve_account},
     oauth, pricing,
 };
 use std::path::Path;
@@ -81,12 +82,16 @@ pub struct ModelChoice {
     pub reasoning: bool,
 }
 
-/// One provider the window can offer, and the models known for it.
+/// One account the window can offer, and the models known for it.
 #[derive(serde::Serialize, Clone)]
 pub struct ProviderChoice {
-    /// [`ProviderId::label`] — the identifier that round-trips as
-    /// [`Choice::provider`] through [`Conversation::begin`], which resolves
-    /// it back to a [`ProviderId`] via [`resolve_pinned_provider`].
+    /// The [`AccountId`](exarch::provider::identity::AccountId) rendering —
+    /// the identifier that round-trips as [`Choice::account`] through
+    /// [`Conversation::begin`], which resolves it back to an [`Account`] via
+    /// [`resolve_account`]. Never displayed; [`Self::label`] is.
+    pub account: String,
+    /// What the window shows for this entry — [`identity::label`],
+    /// set-relative to every account [`menu`] or [`refresh_menu`] offers.
     pub label: String,
     pub default_model: Option<String>,
     /// Whatever the catalog honestly knows for this provider — at minimum
@@ -151,13 +156,14 @@ where
     clippy::significant_drop_tightening,
     reason = "the guard is deliberately held from the fold-in loop through menu_from's read of the same catalog — one lock for both, not one per use"
 )]
-fn refresh_menu_for<S>(available: &[ProviderId], catalog: &Mutex<ModelCatalog<S>>) -> ModelMenu
+fn refresh_menu_for<S>(available: &[Account], catalog: &Mutex<ModelCatalog<S>>) -> ModelMenu
 where
     S: ModelSource + Clone + Send + 'static,
 {
     let listing = {
         let mut catalog = lock(catalog);
-        Listing::open(available.to_owned(), &mut catalog)
+        let ids = available.iter().map(|account| account.id.clone()).collect();
+        Listing::open(ids, &mut catalog)
     };
     let results = listing.settle();
 
@@ -179,13 +185,13 @@ where
 /// list from `catalog` without ever fetching — the part [`menu`] and
 /// [`refresh_menu_for`] share once each has decided what belongs in the
 /// catalog.
-fn menu_from<S>(available: &[ProviderId], catalog: &mut ModelCatalog<S>) -> ModelMenu
+fn menu_from<S>(available: &[Account], catalog: &mut ModelCatalog<S>) -> ModelMenu
 where
     S: ModelSource,
 {
     let providers = available
         .iter()
-        .map(|id| provider_choice(id, catalog))
+        .map(|account| provider_choice(account, available, catalog))
         .collect();
     ModelMenu {
         providers,
@@ -197,20 +203,26 @@ where
     }
 }
 
-/// One provider's entry: its cached models (if any) merged with its famous
-/// default, each carrying whether the pricing catalog knows it reasons.
-fn provider_choice<S>(id: &ProviderId, catalog: &mut ModelCatalog<S>) -> ProviderChoice
+/// One account's entry: its cached models (if any) merged with its
+/// service's default, each carrying whether the pricing catalog knows it
+/// reasons.
+fn provider_choice<S>(
+    account: &Account,
+    available: &[Account],
+    catalog: &mut ModelCatalog<S>,
+) -> ProviderChoice
 where
     S: ModelSource,
 {
-    let default_model = id.famous().map(|kind| kind.info().1.to_string());
-    let cached = catalog.cached(id).unwrap_or_default();
+    let default_model = account.service.default_model.clone();
+    let cached = catalog.cached(&account.id).unwrap_or_default();
     let models = merged_models(default_model.as_deref(), cached)
         .into_iter()
         .map(to_model_choice)
         .collect();
     ProviderChoice {
-        label: id.label().to_string(),
+        account: account.id.as_str().to_string(),
+        label: identity::label(account, available),
         default_model,
         models,
     }
@@ -276,8 +288,10 @@ impl From<oauth::LoginPhase> for SignInStep {
 /// A finished sign-in, as the window reports it.
 #[derive(Clone, serde::Serialize)]
 pub struct SignedIn {
-    /// The account now signed in — the label [`menu`] lists it under.
-    pub account: String,
+    /// The signed-in account's [`identity::label`], the name [`menu`] lists
+    /// it under. A display string — the wire says so, so no window is ever
+    /// tempted to hand it back as a [`Choice::account`].
+    pub label: String,
     /// Whether this refreshed the login for an account already set up here,
     /// rather than adding a new one.
     pub replaced: bool,
@@ -315,10 +329,11 @@ pub fn sign_in(
         |phase| on_phase(SignInStep::from(phase)),
         cancel,
     )?;
-    let (id, credential) = lock(store).add_oauth(&token);
-    let account = id.label().to_string();
-    lock(catalog).add_credential(id, credential);
-    Ok(SignedIn { account, replaced })
+    let (admitted, credential) = lock(store).add_oauth(&token);
+    // The store's name for it, which says which account when two share an email.
+    let label = identity::label(&admitted, &lock(store).available());
+    lock(catalog).add_credential(admitted, credential);
+    Ok(SignedIn { label, replaced })
 }
 
 /// Lock `m`, recovering the guard even if a prior holder panicked — the
@@ -361,7 +376,12 @@ fn ensure_pricing_loaded() {
 /// defaulted.
 #[derive(serde::Deserialize)]
 pub struct Choice {
-    pub provider: String,
+    /// An [`AccountId`](exarch::provider::identity::AccountId) rendering, as
+    /// handed out in a [`ProviderChoice::account`] — resolved back to an
+    /// [`Account`] by [`resolve_account`], id only, never a name: two
+    /// accounts can share a display label, and starting the wrong one's
+    /// conversation is exactly the bug this type exists to prevent.
+    pub account: String,
     pub model: String,
     pub effort: Option<String>,
 }
@@ -371,8 +391,10 @@ pub struct Choice {
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Opening {
-    /// The account answering — the credential's label.
-    pub account: String,
+    /// The answering account's [`identity::label`], set-relative to every
+    /// account available when the conversation began. A display string, and
+    /// named as one on the wire, unlike [`Choice::account`]'s id.
+    pub label: String,
     /// The model that account is driving.
     pub model: String,
     /// The [`provider::EFFORT_LADDER`] label of the effort actually in
@@ -580,12 +602,11 @@ impl Conversation {
     /// its failure instead.
     ///
     /// # Panics
-    /// Panics if the chosen provider is absent from `store` — an invariant
+    /// Panics if the chosen account is absent from `store` — an invariant
     /// [`choose`] upholds by choosing only among available ones, and
-    /// [`resolve_pinned_provider`] upholds by resolving only against the
-    /// same list — or if the resolved tuning's effort is one
-    /// [`provider::EFFORT_LADDER`] does not name, which
-    /// [`resolve_tuning`] cannot produce.
+    /// [`resolve_account`] upholds by resolving only against the same list —
+    /// or if the resolved tuning's effort is one [`provider::EFFORT_LADDER`]
+    /// does not name, which [`resolve_tuning`] cannot produce.
     pub fn begin(
         folder: &Path,
         store: &Mutex<CredentialStore>,
@@ -608,8 +629,13 @@ impl Conversation {
         // file regardless of which front-end is running, opened once here.
         let egress = exarch::egress::Egress::open(SYNOD)?;
 
-        let (id, model, effort, cred) = resolve_account(store, choice)?;
-        let account = id.label().to_string();
+        let Selected {
+            account,
+            label,
+            model,
+            effort,
+            credential,
+        } = select_account(store, choice)?;
         let announced_model = model.clone();
         let tuning = resolve_tuning(effort, &model)?;
         let announced_effort = provider::effort_label(&tuning.effort)
@@ -680,9 +706,9 @@ impl Conversation {
             let engine = Engine::new();
             let provider = Arc::new(Provider::build(
                 engine.clone(),
-                &id,
+                &account,
                 model.clone(),
-                &cred,
+                &credential,
                 None,
                 tuning,
                 None,
@@ -696,7 +722,11 @@ impl Conversation {
                     no_logs: false,
                     run_lock: None,
                     model,
-                    provider_label: id.label().to_string(),
+                    account: RecordedAccount {
+                        label: label.clone(),
+                        service: account.service.name.as_str().to_string(),
+                        id: account.id.as_str().to_string(),
+                    },
                     // Synod's agent may not schedule its own wakeups: a
                     // conversing office assistant still runs on nothing but
                     // the messages it is handed, never on its own authority.
@@ -745,7 +775,7 @@ impl Conversation {
                     net,
                 },
                 Opening {
-                    account,
+                    label,
                     model: announced_model,
                     effort: announced_effort,
                     large_folder_line,
@@ -863,9 +893,17 @@ impl Conversation {
 }
 
 /// The whole of what a conversation needs from the credential store — the
-/// account it runs on, the model, the effort asked for, and the credential
-/// it authenticates with — read under one brief lock.
-///
+/// account it runs on, the label it goes by among its fellows, the model,
+/// the effort asked for, and the credential it authenticates with — read
+/// under one brief lock.
+struct Selected {
+    account: Account,
+    label: String,
+    model: String,
+    effort: Option<String>,
+    credential: Credential,
+}
+
 /// Everything slow in [`Conversation::begin`] (the machine's boot, the
 /// folder's safety copy) happens after this returns, so a sign-in in the
 /// window is never held up behind a conversation opening, nor the other way
@@ -874,13 +912,18 @@ impl Conversation {
 /// cell, so a token refreshed later is still the one this conversation
 /// sends.
 ///
+/// `choice.account` resolves by id alone, through [`resolve_account`] —
+/// never by the label a human reads, which two accounts can share; naming
+/// one by its display label is the CLI's business (`--provider`), not the
+/// window's, whose menu only ever hands back what it was given.
+///
 /// # Errors
 /// Returns `Err` if this computer has no account set up, if `choice` names
 /// one that has since gone, or if the sole account names no default model.
-fn resolve_account(
+fn select_account(
     store: &Mutex<CredentialStore>,
     choice: Option<Choice>,
-) -> Result<(ProviderId, String, Option<String>, Credential), String> {
+) -> Result<Selected, String> {
     let store = lock(store);
     let available = store.available();
     if available.is_empty() {
@@ -891,29 +934,34 @@ fn resolve_account(
                 .into(),
         );
     }
-    let (id, model, effort) = if let Some(Choice {
-        provider,
+    let (account, model, effort) = if let Some(Choice {
+        account,
         model,
         effort,
     }) = choice
     {
-        (
-            resolve_pinned_provider(&provider, &available)?,
-            model,
-            effort,
-        )
+        let account = resolve_account(&account, &available)
+            .ok_or("the chosen account is no longer available on this computer")?;
+        (account, model, effort)
     } else {
-        let (id, model) = choose(&available)?;
-        (id, model, None)
+        let (account, model) = choose(&available)?;
+        (account, model, None)
     };
-    let cred = store
-        .get(&id)
-        .expect("the chosen provider is one of the available ones")
+    let label = identity::label(&account, &available);
+    let credential = store
+        .get(&account.id)
+        .expect("the chosen account is one of the available ones")
         .clone();
     // Everything the caller does next is slow, and none of it is the
     // store's business.
     drop(store);
-    Ok((id, model, effort, cred))
+    Ok(Selected {
+        account,
+        label,
+        model,
+        effort,
+        credential,
+    })
 }
 
 /// The seat the trunk drives the guest's engine from: `control`, the
@@ -978,20 +1026,23 @@ fn net_seat(
     .map_err(|e| format!("could not start guest networking: {e}"))
 }
 
-/// The provider and model for a run whose [`Choice`] left both unnamed:
+/// The account and model for a run whose [`Choice`] left both unnamed:
 /// whichever one account is set up on this computer, and its default
 /// model. An account that names no default model is a question for the
 /// user, refused in the same plain register as having no account at all —
 /// there is no menu entry left to answer it with.
-fn choose(available: &[ProviderId]) -> Result<(ProviderId, String), String> {
-    let id = &available[0];
-    id.famous()
-        .map(|kind| (id.clone(), kind.info().1.to_string()))
+fn choose(available: &[Account]) -> Result<(Account, String), String> {
+    let account = &available[0];
+    account
+        .service
+        .default_model
+        .clone()
+        .map(|model| (account.clone(), model))
         .ok_or_else(|| {
             format!(
                 "the account set up on this computer ('{}') does not say which model to \
                  use — ask your IT department to set one up.",
-                id.label()
+                identity::label(account, available)
             )
         })
 }
@@ -1045,26 +1096,32 @@ fn mask_unsupported_effort(mut tuning: provider::Tuning, reasoning: bool) -> pro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exarch::provider::ReasoningEffort;
+    use exarch::provider::identity::AccountId;
     use exarch::provider::models::ProviderEndpoint;
-    use exarch::provider::{ChatGptAccount, ProviderKind, ReasoningEffort};
     use std::collections::BTreeMap;
 
-    /// A famous provider's id — the common case in these tests.
-    fn fam(kind: ProviderKind) -> ProviderId {
-        ProviderId::Famous(kind)
+    /// A built-in service's sole account — the common case in these tests.
+    fn fam(name: &str) -> Account {
+        let service = identity::built_in_services()
+            .into_iter()
+            .find(|service| service.name.as_str() == name)
+            .unwrap_or_else(|| panic!("no built-in service named {name}"));
+        Account::of_service(service)
     }
 
-    /// A signed-in `ChatGPT` account's id — [`ProviderId::famous`] reads
-    /// `None` for it, so it names no famous default and stands in for
-    /// every provider kind [`menu_from`] cannot fall back on.
-    fn chatgpt(label: &str) -> ProviderId {
-        ProviderId::ChatGpt(Arc::new(ChatGptAccount {
-            account_id: label.to_string(),
-            label: label.to_string(),
-        }))
+    /// A signed-in `ChatGPT` account, whose service names no default model
+    /// and so stands in for every service [`menu_from`] cannot fall back on.
+    fn chatgpt(handle: &str) -> Account {
+        let service = identity::chatgpt_service();
+        Account {
+            id: AccountId::of_login(&service.name, handle),
+            service,
+            handle: handle.to_string(),
+        }
     }
 
-    type Lists = BTreeMap<ProviderId, Result<Vec<String>, String>>;
+    type Lists = BTreeMap<AccountId, Result<Vec<String>, String>>;
 
     /// A fake [`ModelSource`] whose list is shared (not forked) across a
     /// clone, so a background-fetch thread run by [`Listing::open`] serves
@@ -1083,7 +1140,7 @@ mod tests {
     }
 
     impl ModelSource for FakeSource {
-        fn list(&self, id: &ProviderId) -> Result<Vec<String>, String> {
+        fn list(&self, id: &AccountId) -> Result<Vec<String>, String> {
             lock(&self.lists)
                 .get(id)
                 .cloned()
@@ -1095,7 +1152,7 @@ mod tests {
         }
     }
 
-    fn one(id: ProviderId, models: &[&str]) -> Lists {
+    fn one(id: AccountId, models: &[&str]) -> Lists {
         let mut m = BTreeMap::new();
         m.insert(id, Ok(models.iter().map(ToString::to_string).collect()));
         m
@@ -1106,16 +1163,16 @@ mod tests {
     }
 
     #[test]
-    fn menu_with_nothing_cached_offers_the_famous_default_alone() {
+    fn menu_with_nothing_cached_offers_the_service_default_alone() {
         let mut catalog = ModelCatalog::memo_only(FakeSource::new(Lists::new()));
-        let available = [fam(ProviderKind::Anthropic)];
+        let available = [fam("anthropic")];
 
         let menu = menu_from(&available, &mut catalog);
 
         assert_eq!(menu.providers.len(), 1);
         assert_eq!(
             model_names(&menu.providers[0]),
-            vec![ProviderKind::Anthropic.info().1.to_string()]
+            vec![fam("anthropic").service.default_model.unwrap()]
         );
         assert_eq!(menu.efforts.first().map(String::as_str), Some("auto"));
         assert_eq!(menu.default_effort, "med");
@@ -1124,13 +1181,14 @@ mod tests {
     #[test]
     fn menu_with_a_cached_list_puts_the_default_first_and_dedupes_it() {
         let mut catalog = ModelCatalog::memo_only(FakeSource::new(Lists::new()));
-        let default = ProviderKind::Anthropic.info().1.to_string();
+        let anthropic = fam("anthropic");
+        let default = anthropic.service.default_model.clone().unwrap();
         catalog.record(
-            &fam(ProviderKind::Anthropic),
+            &anthropic.id,
             vec!["claude-haiku-4".to_string(), default.clone()],
         );
 
-        let menu = menu_from(&[fam(ProviderKind::Anthropic)], &mut catalog);
+        let menu = menu_from(std::slice::from_ref(&anthropic), &mut catalog);
 
         assert_eq!(
             model_names(&menu.providers[0]),
@@ -1139,11 +1197,11 @@ mod tests {
     }
 
     #[test]
-    fn a_chatgpt_style_provider_with_no_famous_default_starts_empty() {
+    fn a_chatgpt_style_account_with_no_service_default_starts_empty() {
         let mut catalog = ModelCatalog::memo_only(FakeSource::new(Lists::new()));
-        let id = chatgpt("work-account");
+        let account = chatgpt("work-account");
 
-        let menu = menu_from(std::slice::from_ref(&id), &mut catalog);
+        let menu = menu_from(std::slice::from_ref(&account), &mut catalog);
 
         assert!(menu.providers[0].default_model.is_none());
         assert!(model_names(&menu.providers[0]).is_empty());
@@ -1151,35 +1209,36 @@ mod tests {
 
     #[test]
     fn refresh_menu_folds_fetched_lists_in_and_serves_them() {
-        let id = chatgpt("work-account");
-        let source = FakeSource::new(one(id.clone(), &["gpt-5.5-codex"]));
+        let account = chatgpt("work-account");
+        let source = FakeSource::new(one(account.id.clone(), &["gpt-5.5-codex"]));
         let catalog = Mutex::new(ModelCatalog::memo_only(source));
 
-        let menu = refresh_menu_for(std::slice::from_ref(&id), &catalog);
+        let menu = refresh_menu_for(std::slice::from_ref(&account), &catalog);
 
         assert_eq!(
             model_names(&menu.providers[0]),
             vec!["gpt-5.5-codex".to_string()]
         );
         assert_eq!(
-            lock(&catalog).cached(&id),
+            lock(&catalog).cached(&account.id),
             Some(vec!["gpt-5.5-codex".to_string()])
         );
     }
 
     #[test]
     fn refresh_menu_leaves_a_failed_fetch_uncached_but_still_shows_the_default() {
+        let deepseek = fam("deepseek");
         let mut lists = Lists::new();
-        lists.insert(fam(ProviderKind::Deepseek), Err("network down".to_string()));
+        lists.insert(deepseek.id.clone(), Err("network down".to_string()));
         let catalog = Mutex::new(ModelCatalog::memo_only(FakeSource::new(lists)));
 
-        let menu = refresh_menu_for(&[fam(ProviderKind::Deepseek)], &catalog);
+        let menu = refresh_menu_for(std::slice::from_ref(&deepseek), &catalog);
 
         assert_eq!(
             model_names(&menu.providers[0]),
-            vec![ProviderKind::Deepseek.info().1.to_string()]
+            vec![deepseek.service.default_model.clone().unwrap()]
         );
-        assert_eq!(lock(&catalog).cached(&fam(ProviderKind::Deepseek)), None);
+        assert_eq!(lock(&catalog).cached(&deepseek.id), None);
     }
 
     /// The window dereferences `menu.default_effort` (`synod/ui/index.html`
@@ -1191,20 +1250,22 @@ mod tests {
     #[test]
     fn the_window_reads_these_exact_json_keys() {
         let mut catalog = ModelCatalog::memo_only(FakeSource::new(Lists::new()));
-        let menu = serde_json::to_value(menu_from(&[fam(ProviderKind::Anthropic)], &mut catalog))
+        let menu = serde_json::to_value(menu_from(&[fam("anthropic")], &mut catalog))
             .expect("the menu serialises");
         assert!(menu["default_effort"].is_string());
         assert!(menu["efforts"].is_array());
+        assert!(menu["providers"][0]["account"].is_string());
         assert!(menu["providers"][0]["default_model"].is_string());
         assert!(menu["providers"][0]["models"][0]["reasoning"].is_boolean());
 
         let opening = serde_json::to_value(Opening {
-            account: "work".to_string(),
-            model: ProviderKind::Anthropic.info().1.to_string(),
+            label: "work".to_string(),
+            model: fam("anthropic").service.default_model.unwrap(),
             effort: "med".to_string(),
             large_folder_line: Some("This folder is very large.".to_string()),
         })
         .expect("the opening serialises");
+        assert_eq!(opening["label"], "work");
         assert_eq!(opening["largeFolderLine"], "This folder is very large.");
         assert!(opening.get("large_folder_line").is_none());
     }

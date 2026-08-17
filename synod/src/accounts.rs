@@ -3,23 +3,33 @@
 //!
 //! Synod is a desktop application, so keys are typed into a window and
 //! kept in this computer's credential manager
-//! ([`exarch::provider::keychain`]).  Per provider, the credential manager
+//! ([`exarch::provider::keychain`]).  Per account, the credential manager
 //! wins — it is the one source a person can see and change from inside
 //! synod — with the environment as fallback, resolved and scrubbed by
 //! [`CredentialStore::resolve_and_scrub`] exactly as in exarch.  A key
 //! from the environment is never silently written into the vault.
 //!
-//! Which services *exist* is a third thing, and not a secret: the famous
-//! ones are [`exarch::provider::ProviderKind`]'s own list, and any further
-//! endpoint is declared in `$XDG_CONFIG_HOME/synod/providers.ral`, written
-//! by the accounts screen and read by exarch's one declaration decoder
-//! ([`exarch::config`]).  It holds addresses, never keys.
+//! Which services *exist* is a third thing, and not a secret: the built-in
+//! ones are [`exarch::provider::identity::built_in_services`]'s own list,
+//! and any further endpoint is declared in
+//! `$XDG_CONFIG_HOME/synod/providers.ral`, written by the accounts screen
+//! and read by exarch's one declaration decoder ([`exarch::config`]). It
+//! holds addresses, never keys.
+//!
+//! What is provider knowledge — a service's identity, an account's id, the
+//! built-in table — lives in [`exarch::provider::accounts`] and
+//! [`exarch::provider::identity`]; this module holds only what is about
+//! synod's own window: the row a screen draws, where a key is kept, and
+//! whether a service can be withdrawn outright.
 
 use exarch::config;
-use exarch::provider::credential::{self, Credential, CredentialStore, NO_AUTH_PLACEHOLDER};
+use exarch::provider::accounts::{
+    checked_key, declare_endpoint, declared_endpoints, find, withdraw_endpoint,
+};
+use exarch::provider::credential::{Credential, CredentialStore, NO_AUTH_PLACEHOLDER};
+use exarch::provider::identity::{self, Auth, Service};
 use exarch::provider::keychain::Keychain;
 use exarch::provider::models::{LiveSource, ModelCatalog};
-use exarch::provider::{CustomProvider, ProviderId};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -41,8 +51,8 @@ fn declarations_path() -> PathBuf {
 /// Resolve every account this computer offers, once, at startup.
 ///
 /// The environment sweep first, then the credential manager laid over the
-/// top, so a key typed into the accounts screen outranks a stale variable in
-/// the launching environment.
+/// top ([`CredentialStore::admit_from`]), so a key typed into the accounts
+/// screen outranks a stale variable in the launching environment.
 ///
 /// # Errors
 /// Returns `Err` if the declarations file is present but cannot be read or
@@ -55,36 +65,56 @@ fn declarations_path() -> PathBuf {
 pub fn prepare() -> Result<CredentialStore, String> {
     let declared = config::load_declared(&declarations_path(), LABEL)?;
     let mut store = CredentialStore::resolve_and_scrub(declared);
-    for id in store.known().to_vec() {
-        if let Some(key) = KEYCHAIN.read(id.label()) {
-            store.admit_key(&id, key);
-        }
-    }
+    store.admit_from(&KEYCHAIN);
     Ok(store)
+}
+
+/// Where a row's credential in force actually came from.
+///
+/// The one fact the screen needs that the shared [`CredentialStore`] does not
+/// already carry on its face, since only the store knows which of its doors a
+/// key came through.
+#[derive(serde::Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Source {
+    /// No credential at all — the row is known but keyless.
+    None,
+    /// A `ChatGPT` login: the one case a key is never typed, and the sign-in
+    /// affordance replaces the key form.
+    SignedIn,
+    /// The inert bearer a keyless local server is bound to — a state, not a
+    /// key anyone typed, so its tail must never be shown as one.
+    NoKey,
+    Keychain,
+    Environment,
 }
 
 /// One row of the accounts screen.
 #[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
-    /// The provider's label — its name in the picker, and its name in the
-    /// credential manager.
+    /// The identifier command payloads name this row by — an `AccountId`
+    /// rendering, resolved back through [`exarch::provider::accounts::find`].
+    /// Never shown; [`Self::label`] is what the screen draws.
+    pub id: String,
+    /// This account's name among every account currently known —
+    /// [`identity::label`], set-relative, so a shared login email still
+    /// tells two accounts apart.
     pub label: String,
-    /// `service` for a famous provider, `endpoint` for one declared here,
-    /// `chatgpt` for a signed-in plan.
-    pub kind: &'static str,
-    /// `keychain`, `environment`, `signed-in`, `no-key`, or `none` — where
-    /// the credential in force actually came from.
-    pub source: &'static str,
+    pub source: Source,
     /// The last four characters of the key in force, never more.
     pub hint: Option<String>,
-    /// The environment variable this provider would read from, for the
+    /// The environment variable this account would read from, for the
     /// screen to name when there is no key yet.
     pub env_var: Option<String>,
-    /// A declared endpoint's address and protocol; `None` for the famous
-    /// providers, whose addresses are not the user's business.
+    /// A declared endpoint's address and protocol; `None` for a built-in
+    /// service, whose address is not the user's business.
     pub endpoint: Option<String>,
     pub protocol: Option<String>,
+    /// Whether this row's service can be withdrawn outright, rather than
+    /// merely having its key taken back — true for a declared endpoint,
+    /// never for a built-in one.
+    pub withdrawable: bool,
 }
 
 /// The accounts screen: every service, whether or not it has a key, and a
@@ -100,12 +130,17 @@ pub struct AccountList {
     pub protocols: Vec<String>,
 }
 
-/// Every account, in the store's own order: famous services first, then
-/// signed-in plans, then declared endpoints.
+/// Every account, in the store's own order: built-in services first, then
+/// signed-in `ChatGPT` accounts, then declared endpoints.
 pub fn list(store: &Mutex<CredentialStore>) -> AccountList {
     let accounts = {
         let store = lock(store);
-        store.known().iter().map(|id| row(&store, id)).collect()
+        let available = store.available();
+        store
+            .known()
+            .iter()
+            .map(|account| row(&store, account, &available))
+            .collect()
     };
     AccountList {
         accounts,
@@ -117,36 +152,53 @@ pub fn list(store: &Mutex<CredentialStore>) -> AccountList {
     }
 }
 
-fn row(store: &CredentialStore, id: &ProviderId) -> Account {
-    let credential = store.get(id);
+fn row(
+    store: &CredentialStore,
+    account: &identity::Account,
+    available: &[identity::Account],
+) -> Account {
+    let credential = store.get(&account.id);
     let source = match credential {
-        None => "none",
-        Some(Credential::OAuth(_)) => "signed-in",
+        None => Source::None,
+        Some(Credential::OAuth(_)) => Source::SignedIn,
         // The inert bearer a keyless local server is bound to is a state,
         // not a key anyone typed; showing its tail would read as one.
-        Some(Credential::ApiKey(key)) if key == NO_AUTH_PLACEHOLDER => "no-key",
+        Some(Credential::ApiKey(key)) if key == NO_AUTH_PLACEHOLDER => Source::NoKey,
         // The store remembers which door each key came through, so drawing
         // this list costs the vault no round trip and no unlock prompt.
-        Some(Credential::ApiKey(_)) if store.was_admitted(id) => "keychain",
-        Some(Credential::ApiKey(_)) => "environment",
+        Some(Credential::ApiKey(_)) if store.was_admitted(&account.id) => Source::Keychain,
+        Some(Credential::ApiKey(_)) => Source::Environment,
     };
-    let (kind, endpoint, protocol) = match id {
-        ProviderId::Famous(_) => ("service", None, None),
-        ProviderId::ChatGpt(_) => ("chatgpt", None, None),
-        ProviderId::Custom(custom) => (
-            "endpoint",
-            Some(custom.endpoint.clone()),
-            config::protocol_for_adapter(custom.adapter).map(str::to_string),
-        ),
+    // A built-in service's address is baked in and not the user's business;
+    // only a declared endpoint's is shown.
+    let withdrawable = identity::built_in(&account.service.name).is_none();
+    let (endpoint, protocol) = if withdrawable {
+        (
+            account.service.endpoint.clone(),
+            config::protocol_for_adapter(account.service.adapter).map(str::to_string),
+        )
+    } else {
+        (None, None)
     };
     Account {
-        label: id.label().to_string(),
-        kind,
+        id: account.id.as_str().to_string(),
+        label: identity::label(account, available),
         source,
         hint: credential.and_then(hint),
-        env_var: id.key_env().map(str::to_string),
+        env_var: env_var_of(&account.service),
         endpoint,
         protocol,
+        withdrawable,
+    }
+}
+
+/// The environment variable an account would read a key from, for the
+/// screen to name when there is no key yet — `None` for a `ChatGPT` login
+/// and for a declaration that names no variable of its own.
+fn env_var_of(service: &Service) -> Option<String> {
+    match &service.auth {
+        Auth::Env(var) => Some(var.clone()),
+        Auth::OAuth | Auth::Unnamed => None,
     }
 }
 
@@ -167,62 +219,50 @@ fn hint(credential: &Credential) -> Option<String> {
     Some(key[tail..].to_string())
 }
 
-/// Keep `key` for the service called `label`, and put it to work at once,
-/// with no restart.
+/// Keep `key` for the account named `id`, and put it to work at once, with
+/// no restart.
 ///
 /// # Errors
-/// Returns a plain sentence if no such service is known, if the key is
+/// Returns a plain sentence if no such account is known, if the key is
 /// blank, or if this computer's credential manager would not keep it.
 pub fn set_key(
     store: &Mutex<CredentialStore>,
     catalog: &Mutex<ModelCatalog<LiveSource>>,
-    label: &str,
+    id: &str,
     key: &str,
 ) -> Result<(), String> {
-    let key = checked_key(label, key)?;
-    let id = find(store, label)?;
-    KEYCHAIN.store(id.label(), &key)?;
-    let credential = lock(store).admit_key(&id, key);
-    lock(catalog).add_credential(id, credential);
+    let (account, display) = {
+        let store = lock(store);
+        let account = find(&store, id)?;
+        let available = store.available();
+        drop(store);
+        let display = identity::label(&account, &available);
+        (account, display)
+    };
+    let key = checked_key(&display, key)?;
+    KEYCHAIN.store(account.id.as_str(), &key)?;
+    let credential = lock(store).admit_key(&account, key);
+    lock(catalog).add_credential(account, credential);
     Ok(())
 }
 
-/// A typed-in key as it will be kept, or a question about what was pasted.
-///
-/// Every door a key is typed at asks this — one screen, one rule — and it is
-/// exarch's own well-formedness rule ([`credential::well_formed_key`]), so a
-/// key refused here is not one that would have been accepted from the
-/// environment.
-///
-/// # Errors
-/// Returns a plain sentence, phrased as a question, naming what is wrong with
-/// what was pasted.
-fn checked_key(label: &str, key: &str) -> Result<String, String> {
-    if key.trim().is_empty() {
-        return Err(format!("No key was typed for {label} — paste it first?"));
-    }
-    credential::well_formed_key(key).ok_or_else(|| {
-        format!("That {label} key carries a line break — was more than the key copied?")
-    })
-}
-
-/// Take back the key this window put away for `label`.
+/// Take back the key this window put away for the account named `id`.
 ///
 /// The account does not disappear: it is left known but keyless, or bound
 /// again to the key the launching environment supplied all along, which the
 /// store kept underneath rather than letting the admission destroy.
 ///
-/// Total in every state, so no caller has to ask first: a label the vault
+/// Total in every state, so no caller has to ask first: an id the vault
 /// never held is not an error, and revealing the environment's key is the
 /// same act as unbinding when there is none to reveal.
 ///
 /// # Errors
-/// Returns a plain sentence if no such service is known, or if the
+/// Returns a plain sentence if no such account is known, or if the
 /// credential manager would not give the key up.
-pub fn forget_key(store: &Mutex<CredentialStore>, label: &str) -> Result<(), String> {
-    let id = find(store, label)?;
-    KEYCHAIN.forget(id.label())?;
-    lock(store).forget(&id);
+pub fn forget_key(store: &Mutex<CredentialStore>, id: &str) -> Result<(), String> {
+    let account = find(&lock(store), id)?;
+    KEYCHAIN.forget(account.id.as_str())?;
+    lock(store).forget(&account.id);
     Ok(())
 }
 
@@ -236,119 +276,58 @@ pub fn forget_key(store: &Mutex<CredentialStore>, label: &str) -> Result<(), Str
 pub fn add_endpoint(
     store: &Mutex<CredentialStore>,
     catalog: &Mutex<ModelCatalog<LiveSource>>,
-    label: &str,
+    name: &str,
     endpoint: &str,
     protocol: &str,
     key: Option<&str>,
 ) -> Result<(), String> {
-    let label = label.trim();
-    let endpoint = endpoint.trim();
-    if label.is_empty() {
-        return Err("What should this service be called?".to_string());
-    }
-    if find(store, label).is_ok() {
-        return Err(format!("There is already a service called {label}."));
-    }
-    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
-        return Err(format!(
-            "'{endpoint}' does not look like an address — should it begin with https://?"
-        ));
-    }
-    let endpoint = if endpoint.ends_with('/') {
-        endpoint.to_string()
-    } else {
-        // genai joins the service path onto the base, so the trailing
-        // slash is not decoration; supplying it is kinder than refusing.
-        format!("{endpoint}/")
-    };
-    let adapter = config::adapter_for_protocol(protocol, LABEL)?;
+    let service = declare_endpoint(&lock(store), name, endpoint, protocol, LABEL)?;
 
     // Checked before a line is written: a key refused after the declaration
     // was saved would leave the service in the file and unusable.
     let typed = match key.map(str::trim).filter(|k| !k.is_empty()) {
-        Some(key) => Some(checked_key(label, key)?),
+        Some(key) => Some(checked_key(service.name.as_str(), key)?),
         None => None,
     };
 
-    let custom = CustomProvider {
-        label: label.to_string(),
-        // The key lives in the credential manager; a file synod wrote
-        // never names an environment variable.
-        key_env: None,
-        endpoint,
-        adapter,
-    };
-    let mut declared = declared_endpoints(store);
-    declared.push(custom.clone());
-    declared.sort_by(|a, b| a.label.cmp(&b.label));
+    let mut declared = declared_endpoints(&lock(store));
+    declared.push(service.clone());
+    declared.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
     config::save_declared(&declarations_path(), &declared, LABEL)?;
 
-    let id = ProviderId::Custom(std::sync::Arc::new(custom));
+    let account = identity::Account::of_service(service);
     // No key at all is a local server that wants none, admitted with the
     // inert bearer exarch already keeps for exactly that.
     let secret = match typed {
         Some(key) => {
-            KEYCHAIN.store(label, &key)?;
+            KEYCHAIN.store(account.id.as_str(), &key)?;
             key
         }
         None => NO_AUTH_PLACEHOLDER.to_string(),
     };
-    let credential = lock(store).admit_key(&id, secret);
-    lock(catalog).add_credential(id, credential);
+    let credential = lock(store).admit_key(&account, secret);
+    lock(catalog).add_credential(account, credential);
     Ok(())
 }
 
-/// Withdraw a declared endpoint: out of the file, out of the credential
-/// manager, out of the picker.
+/// Withdraw a declared endpoint: out of the live store, out of the file, out
+/// of the credential manager.
 ///
 /// # Errors
-/// Returns a plain sentence if `label` names no declared endpoint (a famous
-/// service cannot be withdrawn — only its key taken back), or if the file
-/// or credential manager refused the write.
-pub fn forget_endpoint(store: &Mutex<CredentialStore>, label: &str) -> Result<(), String> {
-    let id = find(store, label)?;
-    if !matches!(id, ProviderId::Custom(_)) {
-        return Err(format!(
-            "{label} is one of the services synod always knows — its key can be taken \
-             back, but the service itself cannot be removed."
-        ));
-    }
-    let declared: Vec<CustomProvider> = declared_endpoints(store)
-        .into_iter()
-        .filter(|custom| custom.label != label)
-        .collect();
+/// Returns a plain sentence if `id` names no known account, if it names a
+/// built-in service rather than a declared endpoint (its key can be taken
+/// back, but the service itself cannot be removed), or if the file or
+/// credential manager refused the write.
+pub fn forget_endpoint(store: &Mutex<CredentialStore>, id: &str) -> Result<(), String> {
+    let declared = {
+        let mut store = lock(store);
+        withdraw_endpoint(&mut store, id)?;
+        declared_endpoints(&store)
+    };
     config::save_declared(&declarations_path(), &declared, LABEL)?;
-    KEYCHAIN.forget(label)?;
-    lock(store).retire(&id);
-    Ok(())
-}
-
-/// The endpoints currently declared, read back off the live store rather
-/// than off the file — the store is what the running session believes, and
-/// a file edited by hand behind synod's back should not be silently
-/// re-adopted by an unrelated save.
-fn declared_endpoints(store: &Mutex<CredentialStore>) -> Vec<CustomProvider> {
-    lock(store)
-        .known()
-        .iter()
-        .filter_map(|id| {
-            if let ProviderId::Custom(custom) = id {
-                Some(CustomProvider::clone(custom))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-/// The provider called `label`, whether or not it has a credential.
-fn find(store: &Mutex<CredentialStore>, label: &str) -> Result<ProviderId, String> {
-    lock(store)
-        .known()
-        .iter()
-        .find(|id| id.label() == label)
-        .cloned()
-        .ok_or_else(|| format!("There is no service called {label} on this computer."))
+    // `id` is the account id's own rendering — `withdraw_endpoint` resolved
+    // it — and the vault entry is named by exactly that string.
+    KEYCHAIN.forget(id)
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

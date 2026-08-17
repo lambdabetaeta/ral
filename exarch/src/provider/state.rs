@@ -6,7 +6,9 @@
 //! cwd, so the sandboxed agent has no path to it and needs no deny-list
 //! entry.
 
-use crate::provider::{ProviderId, ReasoningEffort, Tuning};
+use crate::provider::identity::{self, Account};
+use crate::provider::models::resolve_account;
+use crate::provider::{ReasoningEffort, Tuning};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -16,9 +18,16 @@ const STATE_FILE: &str = "state.json";
 /// ignored, so a file written by another version of exarch still loads.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct State {
-    /// The provider's stable label ([`ProviderId::label`]), which
-    /// [`State::provider_id`] matches on.
+    /// The selected account's [`identity::AccountId::as_str`] rendering,
+    /// which [`State::account`] matches against the live accounts. For a
+    /// `ChatGPT` login that is the account id, not the login email two
+    /// accounts can share.
     pub provider: String,
+    /// The account's name at save time — a snapshot, defaulted empty for a
+    /// file written before this field existed. The one thing a stale
+    /// selection can still say about itself once its account is gone.
+    #[serde(default)]
+    pub provider_name: String,
     pub model: String,
     /// A [`ReasoningEffort::as_keyword`] spelling, so the file stays readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -34,11 +43,22 @@ pub struct State {
 }
 
 impl State {
-    /// Build state from a live selection. An effort with no keyword — genai's
-    /// `Budget`, absent from the effort ladder — is stored as auto.
-    pub fn new(provider: &ProviderId, model: &str, tuning: &Tuning, route: Option<&str>) -> Self {
+    /// Build state from a live selection. `available` is the set `account`
+    /// was chosen from — needed only to compute [`Self::provider_name`]'s
+    /// snapshot, per [`identity::label`]'s own rule that a label is always
+    /// computed against the set in hand, never cached on the account itself.
+    /// An effort with no keyword — genai's `Budget`, absent from the effort
+    /// ladder — is stored as auto.
+    pub fn new(
+        account: &Account,
+        available: &[Account],
+        model: &str,
+        tuning: &Tuning,
+        route: Option<&str>,
+    ) -> Self {
         Self {
-            provider: provider.label().to_string(),
+            provider: account.id.as_str().to_string(),
+            provider_name: identity::label(account, available),
             model: model.to_string(),
             effort: tuning
                 .effort
@@ -63,14 +83,12 @@ impl State {
         }
     }
 
-    /// The stored label matched against the live `available` providers. `None`
-    /// — an unset key, a dropped `config.ral` entry, a signed-out account —
-    /// leaves the caller to pick a default.
-    pub fn provider_id(&self, available: &[ProviderId]) -> Option<ProviderId> {
-        available
-            .iter()
-            .find(|id| id.label() == self.provider)
-            .cloned()
+    /// The stored account-id rendering matched against the live `available`
+    /// accounts. `None` — an unset key, a dropped `config.ral` entry, a
+    /// signed-out account — leaves the caller to fall back to a default and
+    /// say so; [`Self::provider_name`] is what that message names.
+    pub fn account(&self, available: &[Account]) -> Option<Account> {
+        resolve_account(&self.provider, available)
     }
 }
 
@@ -114,6 +132,7 @@ pub fn save(dir: &Path, state: &State) -> Result<(), String> {
 )]
 mod tests {
     use super::*;
+    use crate::provider::identity::{ServiceName, built_in};
 
     fn tmp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -125,16 +144,18 @@ mod tests {
         dir
     }
 
-    fn fam(kind: crate::provider::ProviderKind) -> ProviderId {
-        ProviderId::Famous(kind)
+    fn fam(name: &str) -> Account {
+        Account::of_service(built_in(&ServiceName::declared(name).unwrap()).unwrap())
     }
 
     #[test]
     fn save_load_round_trip() {
-        use crate::provider::ProviderKind;
         let dir = tmp_dir();
+        let deepseek = fam("deepseek");
+        let available = [fam("anthropic"), deepseek.clone()];
         let state = State::new(
-            &fam(ProviderKind::Deepseek),
+            &deepseek,
+            &available,
             "deepseek-reasoner",
             &Tuning::default(),
             None,
@@ -142,29 +163,28 @@ mod tests {
         save(&dir, &state).unwrap();
         let loaded = load(&dir).expect("state should load");
         assert_eq!(loaded, state);
-        let available = [fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)];
-        assert_eq!(
-            loaded.provider_id(&available),
-            Some(fam(ProviderKind::Deepseek))
-        );
+        assert_eq!(loaded.account(&available), Some(deepseek));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn custom_provider_round_trips_by_label() {
+    fn custom_provider_round_trips_by_service_name() {
         let dir = tmp_dir();
-        let custom = ProviderId::Custom(std::sync::Arc::new(crate::provider::CustomProvider {
-            label: "local-llama".into(),
-            key_env: Some("LOCAL_LLAMA_KEY".into()),
-            endpoint: "https://llama.example/v1/".into(),
+        let llama = Account::of_service(crate::provider::identity::Service {
+            name: ServiceName::declared("local-llama").unwrap(),
+            endpoint: Some("https://llama.example/v1/".into()),
             adapter: genai::adapter::AdapterKind::OpenAI,
-        }));
-        let state = State::new(&custom, "llama-3", &Tuning::default(), None);
+            default_model: None,
+            auth: crate::provider::identity::Auth::Env("LOCAL_LLAMA_KEY".into()),
+            billing: crate::provider::identity::Billing::Metered,
+            routes: false,
+        });
+        let available = [llama.clone()];
+        let state = State::new(&llama, &available, "llama-3", &Tuning::default(), None);
         save(&dir, &state).unwrap();
         let loaded = load(&dir).expect("state should load");
         assert_eq!(loaded.provider, "local-llama");
-        let available = [custom.clone()];
-        assert_eq!(loaded.provider_id(&available), Some(custom));
+        assert_eq!(loaded.account(&available), Some(llama));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -184,31 +204,33 @@ mod tests {
     }
 
     #[test]
-    fn unknown_provider_label_is_none() {
-        use crate::provider::ProviderKind;
+    fn unknown_account_is_none() {
         let state = State {
             provider: "mistral".into(),
+            provider_name: "mistral".into(),
             model: "m".into(),
             effort: None,
             temperature: None,
             top_p: None,
             route: None,
         };
-        let available = [fam(ProviderKind::Anthropic)];
-        assert!(state.provider_id(&available).is_none());
+        let available = [fam("anthropic")];
+        assert!(state.account(&available).is_none());
     }
 
     #[test]
     fn tuning_round_trips() {
-        use crate::provider::ProviderKind;
         let dir = tmp_dir();
+        let anthropic = fam("anthropic");
+        let available = [anthropic.clone()];
         let tuning = Tuning {
             effort: Some(ReasoningEffort::High),
             temperature: Some(0.7),
             top_p: Some(0.95),
         };
         let state = State::new(
-            &fam(ProviderKind::Anthropic),
+            &anthropic,
+            &available,
             "claude-opus-4",
             &tuning,
             Some("deepinfra"),
@@ -232,6 +254,25 @@ mod tests {
         .unwrap();
         let loaded = load(&dir).expect("state should load");
         assert_eq!(loaded.tuning(), Tuning::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `state.json` written before this change carries no `provider_name`
+    /// and its `provider` is already a key-bearing service's own name — the
+    /// one case the pre-change file and the new rendering coincide, so
+    /// resolution must still succeed unchanged.
+    #[test]
+    fn a_pre_change_state_file_still_resolves() {
+        let dir = tmp_dir();
+        std::fs::write(
+            path_in(&dir),
+            br#"{"provider":"anthropic","model":"claude-opus-4","effort":"high"}"#,
+        )
+        .unwrap();
+        let loaded = load(&dir).expect("a pre-change file must still load");
+        assert_eq!(loaded.provider_name, "", "defaulted, not fabricated");
+        let available = [fam("anthropic")];
+        assert_eq!(loaded.account(&available), Some(fam("anthropic")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
