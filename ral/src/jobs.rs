@@ -305,6 +305,9 @@ impl JobTable {
                             self.settle(id, leader_completed);
                             break;
                         }
+                        // The trace is the error's only reader, and a release
+                        // build has no trace.
+                        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
                         Err(err) => {
                             ral_core::dbg_trace!(
                                 "jobs",

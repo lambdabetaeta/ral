@@ -32,6 +32,7 @@ pub(crate) fn sandbox_projection(
     // `PrefixSet::resolve` canonicalises against the filesystem and every
     // literal exec key walks `PATH`, so its cost tracks the host's fs latency
     // and is paid again on each rebuild.
+    #[cfg(debug_assertions)]
     let t_fold = std::time::Instant::now();
     // Zipped because the two allow regions are `Some` on the same condition —
     // some layer held an `fs` opinion — so there is no mixed case to weigh.
@@ -167,12 +168,17 @@ fn admitted_literal_paths(
     resolver: &Resolver,
     path_env: &str,
 ) -> Vec<String> {
+    #[cfg(debug_assertions)]
     let t_resolve = std::time::Instant::now();
+    #[cfg(debug_assertions)]
     let mut unresolved = 0usize;
     let mut allowed = BTreeSet::new();
     for name in names {
         let Some(resolved) = resolve_literal(name, resolver, path_env) else {
-            unresolved += 1;
+            #[cfg(debug_assertions)]
+            {
+                unresolved += 1;
+            }
             crate::dbg_trace!(
                 "sandbox-exec",
                 "exec '{}' not on PATH at projection time; OS gate cannot pin it",

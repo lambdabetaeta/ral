@@ -247,6 +247,9 @@ impl Tabs {
         &mut self.viewports
     }
 
+    /// The ids a viewport event can legitimately name — read only by the
+    /// trace that reports a dropped one.
+    #[cfg(debug_assertions)]
     pub(super) fn viewport_keys(&self) -> Vec<AgentId> {
         self.viewports.keys().copied().collect()
     }

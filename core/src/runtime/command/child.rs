@@ -301,9 +301,13 @@ impl RunningChild {
             // Snappy for short-lived children, gentle on CPU for long ones.
             let mut interval = std::time::Duration::from_millis(5);
             let cap = std::time::Duration::from_millis(100);
+            #[cfg(debug_assertions)]
             let mut polls: u32 = 0;
             loop {
-                polls += 1;
+                #[cfg(debug_assertions)]
+                {
+                    polls += 1;
+                }
                 match child.try_wait_handling_stop(self.pgid, self.park_on_stop) {
                     Ok(Some(o)) => {
                         crate::dbg_trace!(
