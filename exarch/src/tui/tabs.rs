@@ -9,7 +9,7 @@ use ratatui::text::Line;
 
 use crate::bus::AgentId;
 
-use super::block::AgentSlot;
+use super::block::{AgentSlot, Reveal};
 use super::viewport::Viewport;
 use super::{LINGER, ROOT_NAME};
 
@@ -40,6 +40,10 @@ pub(super) struct Tabs {
     /// Tabs born as a `/branch` — a conversing fork `/close` may kill, unlike a
     /// returning sub-agent's tab.
     branches: HashSet<AgentId>,
+    /// The rung thinking traces read at across every view — `/thinking`'s
+    /// datum, kept here because it outlives any one viewport: a tab born after
+    /// the command was typed inherits it.
+    traces: Reveal,
     title_frame: u64,
 }
 
@@ -62,6 +66,7 @@ impl Tabs {
             focus: root_id,
             parents: HashMap::new(),
             branches: HashSet::new(),
+            traces: Reveal::Full,
             title_frame: 0,
         }
     }
@@ -129,7 +134,8 @@ impl Tabs {
         agent_slot: AgentSlot,
     ) {
         if let std::collections::hash_map::Entry::Vacant(slot) = self.viewports.entry(id) {
-            slot.insert(Viewport::new(log_dir.join("user.log"), agent_slot, false));
+            let vp = slot.insert(Viewport::new(log_dir.join("user.log"), agent_slot, false));
+            vp.set_traces_level(self.traces);
             self.dispatch_order.push(id);
         }
         self.names.insert(id, name);
@@ -140,6 +146,20 @@ impl Tabs {
         if !self.tabs.contains(&id) {
             self.tabs.push(id);
         }
+    }
+
+    /// Flip the standing rung for thinking traces and apply it to every view at
+    /// once — every trace on screen and every one still to arrive.  Reports the
+    /// rung now in force, which `/thinking` names back to the user.
+    pub(super) fn toggle_traces(&mut self) -> Reveal {
+        self.traces = match self.traces {
+            Reveal::Full => Reveal::Summary,
+            _ => Reveal::Full,
+        };
+        for vp in self.viewports.values_mut() {
+            vp.set_traces_level(self.traces);
+        }
+        self.traces
     }
 
     /// Whether `id` is a `/branch` tab — the only kind `/close` may kill.

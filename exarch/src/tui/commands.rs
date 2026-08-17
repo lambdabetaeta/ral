@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use super::App;
 use super::banner::{self, SessionInfo};
-use super::block::RailShape;
+use super::block::{RailShape, Reveal};
 use super::login;
 use super::model_picker::pick_model;
 use super::terminal::{YANK_CAP, osc52_copy, tail_bytes};
@@ -38,6 +38,12 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         aliases: &[],
         arg: None,
         help: "Decode the rail, bars, grain, and fidelity treatments.",
+    },
+    SlashCommand {
+        name: "/thinking",
+        aliases: &[],
+        arg: None,
+        help: "Collapse or expand every thinking trace, on screen and to come.",
     },
     SlashCommand {
         name: "/clear",
@@ -196,6 +202,17 @@ pub(super) fn cmd_legend(app: &mut App) {
     app.push_chrome(app.tabs.root(), RailShape::Plain, banner::legend_panel());
 }
 
+/// Flip the disclosure of thinking traces everywhere at once: one setting, so a
+/// trace already on screen and one that arrives an hour from now read alike.
+pub(super) fn cmd_thinking(app: &mut App) {
+    let id = app.tabs.focused();
+    let note = match app.tabs.toggle_traces() {
+        Reveal::Full => "[thinking traces expanded]",
+        _ => "[thinking traces collapsed to their headers]",
+    };
+    app.push_note(id, note);
+}
+
 /// Copy the latest reply, as raw markdown, to the clipboard via OSC 52.  A reply
 /// past the terminal's per-sequence limit is copied tail-first and announced,
 /// since the terminal would otherwise drop the sequence and copy nothing.
@@ -274,12 +291,12 @@ fn push_command(tui: &mut Tui, mailbox: &Mailbox, cmd: String) {
 
 /// The one submit path for every tab: parse once, then act on the parse and the
 /// focused tab.  A view command (`/help`, `/legend`, `/copy`, `/export`,
-/// `/model`, `/login`) touches only the App, clipboard, file, or picker, so it
+/// `/model`, `/login`, `/thinking`) touches only the App, clipboard, file, or picker, so it
 /// runs here on the UI thread; the rest ride the session inbox to the worker's
 /// `ReplControl`, which owns the trunk's context.  A command typed on a sub-agent
 /// tab is therefore refused rather than misfired — a sub-agent attends under
 /// `NoControl`, and the trunk's inbox would act on the wrong session — save
-/// `/close` and `/focus`, which touch no inbox.  A plain line steers the focused
+/// `/close`, `/focus` and `/thinking`, which touch no inbox.  A plain line steers the focused
 /// tab instead.  Errors land on the focused tab, where the user typed.
 pub(super) fn route_submit(
     text: String,
@@ -307,6 +324,9 @@ pub(super) fn route_submit(
             }
         }
         Some((cmd, arg)) if cmd.name == "/focus" => cmd_focus(&mut tui.app, arg, ctx.agents),
+        // A disclosure setting is the whole view's, not the trunk's, so it is
+        // matched here too rather than refused wherever the user happens to be.
+        Some((cmd, _)) if cmd.name == "/thinking" => cmd_thinking(&mut tui.app),
         Some((cmd, _)) if focused != root => {
             tui.app.push_error(
                 focused,

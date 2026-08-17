@@ -214,6 +214,12 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    reads the unbroken answer run that follows each `∴` row. A thinking block has two rungs only — its
    grain header, or the whole trace — the dial hopping over `Context`
    (`Block::rung_up`/`rung_down`), which for a trace would be a dead detent.
+   Traces also answer to one standing rung, `/thinking`'s datum: `Tabs::traces`
+   holds it because it outlives any one view, `Viewport::set_traces_level`
+   moves the traces on screen through the same seam a wheel dials (so the rung
+   is remembered against a resync), and every later `sync` and live seat is
+   born there. A per-block dial still wins — `Viewport::reveal` is consulted
+   after the standing rung.
  - **a surfaced general card as a bounded object.** A diff-less
    `CardOrigin::Surfaced` card — the model's deliberate "look at this" —
    renders through `line::render_card_framed` as an indented framed box, its
@@ -303,13 +309,13 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  Slash-prefixed prompts
  stay on the REPL command path (`tui/commands.rs`, parsed uniformly on every
  tab). View commands (`/help`, `/legend`, `/copy`,
- `/export`, `/model`, `/login`, `/resources`) run on the UI thread; session commands
+ `/export`, `/model`, `/login`, `/thinking`, `/resources`) run on the UI thread; session commands
  (`/clear`, `/compact`, `/branch`, `/context`, `/rewind`, `/quit`) enter the focused
  agent's inbox as `Command` items and run in `ReplControl`. `/branch`
  forks a *conversing* tab from the focused context — a peer conversation
  under [[decisions/260705_branch-minimal|branch-minimal]] — and `/close`,
- the one command admitted off the trunk, kills the focused branch and its
- subtree. The idle wait
+ admitted off the trunk like `/focus` and `/thinking`, kills the focused branch
+ and its subtree. The idle wait
  selects over input, inbox (`bus/inbox.rs`), and the session bus (`bus/channel.rs`)
  ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
  [[decisions/260617_scheduled-wakeups|scheduled-wakeups]]).

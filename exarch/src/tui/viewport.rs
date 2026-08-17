@@ -133,6 +133,11 @@ pub(super) struct Viewport {
     /// survive a rebuild, so a printer keeps it here, keyed by the commit
     /// that produced the block.
     reveal: HashMap<BlockId, Reveal>,
+    /// The rung a thinking trace is born at — `/thinking`'s standing datum,
+    /// which [`Self::set_traces_level`] moves and every later sync and live
+    /// seat reads, so a trace still to arrive obeys the setting too.  A
+    /// per-block dial outlives it: [`Self::reveal`] is consulted after.
+    traces: Reveal,
     /// The model's context window, for the fidelity a synced [`Block::markdown`]
     /// stamps — set by `App::update_live_model`, since the fold's own memo
     /// carries usage but not the provider's cap.
@@ -360,6 +365,7 @@ impl Viewport {
             state: StateSpan::new(crate::bus::AgentState::Ready),
             pins: Vec::new(),
             reveal: HashMap::new(),
+            traces: Reveal::Full,
             context_window: None,
             chrome: Vec::new(),
             last_seq: None,
@@ -649,6 +655,23 @@ impl Viewport {
         self.mutate_block(idx, Block::cycle)
     }
 
+    /// Set the rung every thinking trace reads at: the traces on screen move
+    /// now — through the same seam a wheel dials, so the rung is remembered
+    /// against a resync — and the ones still to come are born there.
+    pub(super) fn set_traces_level(&mut self, level: Reveal) {
+        self.traces = level;
+        let traces: Vec<usize> = self
+            .blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.block.is_thinking())
+            .map(|(i, _)| i)
+            .collect();
+        for idx in traces {
+            self.mutate_block(idx, |b| b.set_reveal(level));
+        }
+    }
+
     /// Apply `f` to the dialable block at `idx`, staling the flatten if the
     /// level moved, and — for a block a fold commit named — remembering the
     /// new rung in [`Self::reveal`] so the next [`Self::sync`] restores it.
@@ -792,7 +815,9 @@ impl Viewport {
             Block::markdown(text, ink)
         } else {
             // No prose has followed the run yet — that is what makes it live.
-            Block::thinking(text, 0)
+            let mut trace = Block::thinking(text, 0);
+            trace.set_reveal(self.traces);
+            trace
         };
         // The absorbed block's own rows come off the flattened tail: it is
         // about to be drawn again, whole.
@@ -1108,6 +1133,9 @@ impl Printer for Viewport {
                 blocks,
                 &mut last_ral_cmd,
             ) {
+                if block.is_thinking() {
+                    block.set_reveal(self.traces);
+                }
                 if let Some(level) = self.reveal.get(&id) {
                     block.set_reveal(*level);
                 }
@@ -1999,6 +2027,55 @@ mod tests {
             opened,
             "the rebuilt block keeps the dial a prior sync set"
         );
+    }
+
+    /// `/thinking`'s two obligations: the traces already synced move, and a
+    /// trace that arrives afterwards is born at the rung then in force.
+    #[test]
+    fn the_standing_trace_rung_reaches_past_and_future_traces() {
+        let mut memo = Blocks::default();
+        step(
+            &mut memo,
+            [Record::Display(Display::Thinking {
+                text: "weighing the shape".into(),
+            })],
+        )
+        .expect("a display-only fold never refuses");
+
+        let mut vp = viewport();
+        vp.sync(&memo);
+        vp.set_traces_level(Reveal::Summary);
+        assert_eq!(vp.blocks[0].block.level(), Reveal::Summary);
+
+        step(
+            &mut memo,
+            [
+                Record::Display(Display::Answer {
+                    text: "the answer".into(),
+                }),
+                Record::Display(Display::Thinking {
+                    text: "and again".into(),
+                }),
+            ],
+        )
+        .expect("a display-only fold never refuses");
+        vp.sync(&memo);
+        let traces: Vec<Reveal> = vp
+            .blocks
+            .iter()
+            .filter(|e| e.block.is_thinking())
+            .map(|e| e.block.level())
+            .collect();
+        assert_eq!(traces, vec![Reveal::Summary, Reveal::Summary]);
+
+        vp.set_traces_level(Reveal::Full);
+        let traces: Vec<Reveal> = vp
+            .blocks
+            .iter()
+            .filter(|e| e.block.is_thinking())
+            .map(|e| e.block.level())
+            .collect();
+        assert_eq!(traces, vec![Reveal::Full, Reveal::Full]);
     }
 
     /// A running counter's worth of `View::step`, so a test can interleave
