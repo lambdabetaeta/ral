@@ -1858,6 +1858,26 @@ return !{{length $hits}}"
         }
     }
 
+    /// `check_fs_read` is a prefix gate, not an existence test, so a root that
+    /// simply lacks the skill passes the gate for a missing file. The loop must
+    /// keep walking to later roots rather than reporting the first `ENOENT` as
+    /// "could not read" — otherwise a skill living only in the config root is
+    /// shadowed by the empty local root.
+    #[test]
+    fn absent_skill_is_not_found_not_unreadable() {
+        let mut shell = fresh_shell();
+        let tmp = scratch_dir("skill-absent");
+        let root = display_no_trailing_sep(tmp.path());
+        // `root` has no `.exarch/skills`, so the local root lacks `nowhere`;
+        // the config root must still be consulted before declaring it missing.
+        let r = run_once(&mut shell, &format!("cd '{root}'; skill 'nowhere'"));
+        assert_eq!(
+            r.value.as_deref(),
+            Some("skill not found: nowhere"),
+            "a skill missing from every root is not-found, never could-not-read"
+        );
+    }
+
     /// One tool call through `run_shell`, over a real record-seam channel,
     /// returning the result and every [`crate::record::Record`] the run
     /// witnessed — the whole `core surface → decode_surface → Surface →

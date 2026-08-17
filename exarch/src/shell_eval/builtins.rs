@@ -826,8 +826,17 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
         let sk_md = dir.join("SKILL.md");
         let rp = shell.resolve(&sk_md.to_string_lossy());
         if shell.check_fs_read(&rp).is_ok() {
-            let Ok(body) = skill::read_skill_body(&dir) else {
-                return Settled::Ok(Value::String(format!("could not read skill: {name}")));
+            // `check_fs_read` is a prefix gate, not an existence test: a path
+            // under a readable prefix can still be a skill this root lacks.
+            // Missing here is not a miss for the name — walk to the next root.
+            if !sk_md.is_file() {
+                continue;
+            }
+            let body = match skill::read_skill_body(&dir) {
+                Ok(body) => body,
+                Err(why) => {
+                    return Settled::Ok(Value::String(format!("could not read skill {name}: {why}")));
+                }
             };
             // Only once the body is in hand, so the card never claims a load
             // that did not happen.
