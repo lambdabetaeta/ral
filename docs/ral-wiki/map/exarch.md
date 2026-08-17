@@ -1,7 +1,7 @@
 ---
-generated_at_commit: dae7e71d
-generated_at_date: 2026-08-12
-covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs, exarch/data/system.md, exarch/data/agent.md, exarch/data/agent-spawn.md, exarch/data/ral.md, exarch/data/script-style.md]
+generated_at_commit: cbeb5457
+generated_at_date: 2026-08-17
+covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs, exarch/data/system.md, exarch/data/agent.md, exarch/data/agent-spawn.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
 # Map: exarch
@@ -182,8 +182,9 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   → [[map/exarch/cards|cards]]). Per-agent resolution then appends
   **`Spawning agents`** (`data/agent-spawn.md`) iff `fuel > 0`, followed by
   **`Agent`** (`data/agent.md`) iff `returns`; returning interactive children
-  therefore keep both obligations, while a returning headless root gets only
-  `Agent`.
+  therefore keep both obligations. A headless root is returning too, so with
+  the normal positive spawn fuel it gets both late sections; only a zero-fuel
+  returning agent gets `Agent` alone.
 
 `--system FILE...` replaces *only* the persona slot with the user-supplied files;
 the per-agent index and optional sections still resolve from the stored base.

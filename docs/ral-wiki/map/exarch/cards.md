@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
-covers_paths: [exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/record/commit.rs, exarch/src/tui/viewport.rs, exarch/data/agent.ral]
+generated_at_commit: cbeb5457
+generated_at_date: 2026-08-17
+covers_paths: [exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/viewport.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / cards
@@ -89,8 +89,10 @@ into a `DoneOutcome` and recorded as `Display::Done { outcome }` — as one
 sentence, `background block settled (exit n)`, with a failure's message
 appended. The outcome alone carries a level, roled `ok`/`bad` exactly as the
 `$ cmd → status` exec row roles an exit code, which is what a settled block's
-is: `╳` stays reserved for the turn's own failures (a provider error, a stall),
-never a nonzero exit. `settled_text` flattens the spans for the two sinks with
+is: a non-settled `╳` rail marks a turn error (provider, stall, or forensic
+fault) or a cancelled turn, while a nonzero worker exit remains the settled
+outcome rather than a turn error.
+`settled_text` flattens the spans for the two sinks with
 no ink to spend — the headless tee and the model's wake-up notice
 (`surface_notice`, [[map/exarch/agent|agent]]) — so none of the three can drift;
 only `record::view`'s ledger keeps its own `[done: …]`, the bracketed register

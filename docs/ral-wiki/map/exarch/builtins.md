@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7d9410f0
-generated_at_date: 2026-08-13
+generated_at_commit: cbeb5457
+generated_at_date: 2026-08-17
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 
@@ -201,7 +201,8 @@ queryable store.
   identity — the tab-bar contract (`valid_name`), and unique among live
   agents or the call is refused; `type` is `` `amnemon `` (blank context) or
   `` `mnemon `` (imports the parent's model-visible context before the fresh
-  final prompt); `grant` is one of the six [[map/exarch/policy|base]] names;
+  final prompt); `grant` is one of the five spawnable [[map/exarch/policy|base]]
+  names (`confined`, `read-only`, `edit-only`, `reasonable`, `dangerous`);
   `search` is a `Bool` admitting the provider's own hosted web search,
   clamped at the desk to at most the caller's own bit, which the trunk takes
   from the IT network policy's `search` verdict

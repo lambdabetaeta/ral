@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: cbeb5457
+generated_at_date: 2026-08-17
 covers_paths: [exarch/src/shell_eval/tools.rs, exarch/src/shell_eval/tools/]
 ---
 
@@ -28,6 +28,12 @@ through. `shell_eval/tools.rs` shrinks to:
   of what already stands, and the `defer`red workers still running past the wall
   with nothing left to `await` them by
   ([[map/exarch/shell-eval|shell-eval]]).
+  Every accepted or malformed call emits a `Display::ToolCall` followed by a
+  `Display::Result` addressed by the call's `BlockId`, so a result never has to
+  search backward for its tool row. Malformed JSON uses `<invalid input>` as the
+  call label but still gets a paired diagnostic result; if the call row itself
+  cannot be appended, the seam reports a transient fault and cannot invent a
+  result target.
 - **`shell_eval/tools/agent.rs`** — no longer a tool module, but the
   fork-detach-register spine every launch shares: `spawn_async`, `AsyncSpawn`,
   `SpawnedChild`. Both `/branch`'s `spawn_branch` and the desk's `agent-start`

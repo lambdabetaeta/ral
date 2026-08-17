@@ -8,7 +8,7 @@ every session-lived thing must say what bounds it — into a checkable
 convention: a budget that cannot be inspected will be debugged by restarting
 the process.
 
-A probe is a `ProbeRow` (`exarch/src/resources.rs`): `name`, `current`,
+A probe is a `ProbeRow` (`exarch/src/agent/resources.rs`): `name`, `current`,
 `cap: Option<u64>`, a `policy` from the closed pressure vocabulary
 (`coalesce` / `reject` / `evict` / `reap` / `warn` / `none (unbounded)`),
 and an optional note. Multi-figure accumulators emit one row per figure
@@ -20,7 +20,8 @@ silence.
 `/resources` is a **fold over the registered probes**, not a bespoke report.
 It has two halves, split by who may legally read what: the agent assembles
 its own rows on its attend thread (the shell's worker registry and bindings,
-its inbox, event log, and disk) and emits them as one `Transient::Resources` —
+its inbox, model projection, record log, and disk) and emits them as one
+`Transient::Resources` —
 raw rows beside the rendered card — and the frontend appends the rows for the
 accumulators *it* owns (viewports, views, the bus) at render time. Neither
 half reaches across a thread for the other's figures, and the fold is never

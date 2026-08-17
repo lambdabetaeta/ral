@@ -9,15 +9,17 @@ agent must not be able to forge.
 
 ## The XDG split
 
-Every exarch directory resolves through one helper, `bootstrap::xdg_app_dir(kind)`
-(`exarch/src/bootstrap.rs`) — `$XDG_<kind>_HOME/exarch/` over the shared
+Every exarch directory resolves through `bootstrap::App::xdg_dir(kind)`
+(`exarch/src/bootstrap.rs`), with `bootstrap::EXARCH` supplying the `exarch`
+component — `$XDG_<kind>_HOME/exarch/` over the shared
 [[decisions/260601_xdg-resolver-consolidation|xdg-resolver-consolidation]]
 resolver (`core/src/path/basedir.rs`, `XdgKind`). Three roles, three relationships
 to trust:
 
 - **config home** — `$XDG_CONFIG_HOME/exarch/` — hand-authored, trusted files. The
   one directory the operator writes and the agent never can.
-- **state home** — `$XDG_STATE_HOME/exarch/<project-slug>/` via `bootstrap::project_dir`
+- **state home** — `$XDG_STATE_HOME/exarch/<project-slug>/` via
+  `bootstrap::EXARCH.project_dir(cwd)`
   — the persisted model selection (`state.json`) and the per-run session logs,
   keyed by a slug of the launch `cwd` so a project's exarch state is one findable
   directory, never scattered into the working tree.

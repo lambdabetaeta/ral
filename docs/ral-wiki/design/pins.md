@@ -58,7 +58,8 @@ already safe:
 - **Decode.** `value_to_pin` is tried first on the surface channel, ahead of the
   `io` and `card` arms ([[map/exarch/shell-eval|shell-eval]]); they cannot collide
   — `io` is a `Map`, the rest distinct `Variant` labels. It resolves to
-  `Kind::Pin { key, card }` or `Kind::Unpin { key }`.
+  `Surface::Pin { key, card }` or `Surface::Unpin { key }`; the applier records
+  a forensic breadcrumb and publishes the corresponding live `Transient`.
 - **Register.** The slots live on the [[map/exarch/frontend|`Viewport`]] as an
   *ordered* `key → Card` map; a pin is `set_pin` (overwrite or insert, first-seen
   order), an unpin is `drop_pin` — the in-place analogue of `push_card`, touching
@@ -77,7 +78,7 @@ already safe:
   it collapses to a one-row **pin band** beside the matrix. The frame reads
   symmetrically: the **rail owns the left edge** (what happened), the **register
   the right** (what is).
-- **Headless.** There is no register to overwrite, so a pin renders nothing.
+- **Headless.** There is no drawn register to overwrite, so a pin renders nothing.
   The record log retains `Pin`/`Unpin` as forensic breadcrumbs
   ([[decisions/260814_one-seam-one-log|one-seam-one-log]]) that no fold
   draws — the live register follows the shell boundary and is not restored

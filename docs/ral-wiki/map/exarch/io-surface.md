@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 7d9410f0
-generated_at_date: 2026-08-13
-covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
+generated_at_commit: cbeb5457
+generated_at_date: 2026-08-17
+covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/runtime/command/redirect.rs, core/src/runtime/command/detach.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
 ---
 
 # Map: exarch / io surface
@@ -62,6 +62,7 @@ dispatch, builtins included.
     the `RedirectFrame` and `settle_writes` emits when the **frame settles**,
     with the outcome the door alone can know — `committed` (body ok, an atomic
     `>` only once its commit succeeds), `aborted` (body failed before commit),
+    `deferred` (body stopped before commit, leaving staged bytes pending), or
     `failed` (open or commit failed).
   - *An external command* fuses its redirects into the spawn instead
     (`wire_stdout_file` / `wire_stderr`, `runtime/command/stdio.rs`). A
@@ -70,7 +71,8 @@ dispatch, builtins included.
     emits **eagerly at the open**, `committed`, no snapshots; a failed open
     surfaces nothing at all. Only an atomic `>` defers, settling post-`wait()`
     in `command::run`: `committed` with snapshots, `failed` on a broken rename,
-    `aborted` when the child did not succeed and the staged temp is discarded.
+    `aborted` when the child did not succeed and the staged temp is discarded,
+    or `deferred` when a stop parks the child with the staged temp intact.
 
   Mode is `write` / `append` / `stream`. No byte count — path, mode, outcome,
   plus the bounded content snapshots the write card previews and diffs from.
@@ -118,10 +120,11 @@ Every observation carries a common envelope — `kind`, `script`, `line`, `col`,
 
 ```
 {kind:"read",             path, …envelope}
-{kind:"write",            path, mode:"write"|"append"|"stream", outcome:"committed"|"aborted"|"failed", new_bytes?, old_bytes?, …envelope}
+{kind:"write",            path, mode:"write"|"append"|"stream", outcome:"committed"|"aborted"|"deferred"|"failed", new_bytes?, old_bytes?, …envelope}
 {kind:"command",          argv:[prog, …args], status, origin:"builtin"|"external"|"detached", stdout, stderr, error, value, …envelope}
 {kind:"grep",             scope, pattern, …envelope}                      # emitted by the grep builtin
-{kind:"capability-check", resource, decision:"allowed"|"denied", …fields, …envelope}
+{kind:"capability-check", resource, decision:"allowed"|"denied"|"flagged", …fields, …envelope}
+{kind:"worker",           id, cmd, class, …envelope}
 ```
 
 `argv` replaces a separate `cmd`/`args` split; a capability check's `resource`
@@ -152,7 +155,8 @@ the same graceful degradation as before.
 The operation is a *nominal category*, so it is carried by a word, not a
 mirror-orientation glyph: read is a `muted` `read` verb + a `path` span; write
 reads `write <path> <outcome>` whatever its mode (the mode rides the recorded
-observation), the outcome roled `ok`/`warn`/`bad` for committed/aborted/failed
+observation): `committed` uses the `ok` role, `aborted` and `deferred` use
+`warn`, and `failed` uses `bad`
 — and a *committed* write previews its content below the heading
 (`write_preview`): a whole-file `diff` mark against the prior snapshot when
 core supplied one (an atomic write over an existing file, both sides UTF-8
@@ -175,8 +179,9 @@ as `read…`, `$…`, `read…`, `$…` — noisy clutter at the rail. An
 buckets a consecutive run — even *interleaved*, order-independent — into deduped
 buckets (reads by path, execs by argv, greps by `(scope, pattern)`), flushed at
 natural boundaries through per-kind group helpers into **one card per
-non-empty kind** in a fixed Read → Exec → Grep order. A capability check never
-joins the buffer — rare and high-signal enough to earn its own line. A **write**
+non-empty kind** in a fixed Read → Exec → Grep order. A capability check or
+worker birth never joins the buffer — rare and high-signal enough to earn its
+own line. A **write**
 joins it but no group: its diff/listing preview is a barrier, not a foldable
 observation, so it flushes as its own card, *last*, after the read/exec/grep
 groups. That last position is the point. A redirect writes at the *seam*,

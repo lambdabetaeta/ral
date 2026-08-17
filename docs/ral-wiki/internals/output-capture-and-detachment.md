@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 1e9fea4
-verified_at_date: 2026-08-06
+verified_at_commit: cbeb5457
+verified_at_date: 2026-08-17
 anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::reaper, WorkerLease, WorkerRegistry, lease_fire, Resident, spawn_detached, DetachPolicy, Capture, decode_utf8_strict, eval_seq]
 ---
 

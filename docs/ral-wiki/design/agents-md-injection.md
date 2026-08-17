@@ -25,9 +25,9 @@ dominates:
 ## Placement and semantics
 
 - **One `Workspace` section, present whenever any `AGENTS.md` is found.** It is
-  ordered after the tool reference (`Ral`) and before the headless return-channel
-  note, and is loaded *regardless of* `--system` — orthogonal to the persona, the
-  same orthogonality the headless note relies on.
+  ordered after the `Host` section and before optional `Skills`/`Surfacing`
+  sections, and is loaded *regardless of* `--system` — orthogonal to the
+  persona and to interactive surfacing.
 - **Existence is the only gate**, checked through `ral_core::path::exists`; the
   reads reuse `read_files`'s `[io-door:silent:system-prompt-files]` door — no new
   I/O door is opened for `AGENTS.md`.

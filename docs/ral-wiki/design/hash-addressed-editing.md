@@ -98,8 +98,8 @@ This shape is forced, and it is what makes the witness trustworthy:
   against nothing — a quiet, confusing footgun. Path-based reads close it: there
   is no slice to get wrong.
 - **Each tool is one logical surface.** The reads sink below the ral line;
-  `view-text` and `witnesses` raise exactly one `read` card, and `edit-hash` raises
-  exactly one diff card — never a separate read or write card. This is why `edit-hash`
+  `view-text` and `view-text-around` raise exactly one `read` card, and
+  `edit-hash` raises exactly one diff card — never a separate read or write card. This is why `edit-hash`
   is a path builtin and not a `< file > file` stream filter: a filter's read and
   write would each ride the redirect frame and surface their own card, fracturing
   one conceptual edit into three rail surfaces, and `edit-hash` would lose the path it

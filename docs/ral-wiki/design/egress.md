@@ -74,8 +74,9 @@ Three limits this page keeps stated, not implied:
 
 The audit ledger is what makes a narrow `hosts` list reviewable rather than
 merely narrow: `exarch::egress::AuditLog` ([[map/exarch/agent|agent]])
-records one `Tunnel` per attempt — its final vetted address, and on close
-the byte count each direction carried. Telemetry, not policy: it narrows
+records a `Tunnel` verdict for each attempt and, for an admitted tunnel, a
+second close record carrying the final vetted address and byte count each
+direction carried. Telemetry, not policy: it narrows
 nothing this page has not already narrowed, and it is bounded with rotation.
 A record that cannot be written closes the gate, because an unauditable
 proxy does not proxy.

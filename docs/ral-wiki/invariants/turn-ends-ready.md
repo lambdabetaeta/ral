@@ -1,7 +1,8 @@
 # An exchange ends ready
 
 The session protocol is a state machine over the
-[[map/exarch/frontend|event log]] (`AgentLog`) with two kinds of phase:
+[[internals/session-record|record-backed model projection]] (`AgentLog`) with
+two kinds of phase:
 
 - `ReadyForUser` admits a fresh prompt;
 - the intermediate phases (`AwaitingAssistantAfterUser`, `AwaitingToolResults`,
@@ -35,5 +36,6 @@ The hard rule: a path that ends an exchange must leave the session
 mid-protocol. `is_ready` is the single predicate for "a fresh prompt is
 admissible"; compaction reads it too ([[map/exarch/agent|agent]] `can_compact`).
 
-See also [[map/exarch/frontend|frontend]] (the state machine and `AgentLog`),
+See also [[internals/session-record|session-record]] (the durable protocol and
+its model fold),
 [[map/exarch/agent|agent]] (`attend`, `take_up`, `deliberate`).

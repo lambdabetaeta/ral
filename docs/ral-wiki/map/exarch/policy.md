@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: cbeb5457
+generated_at_date: 2026-08-17
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
@@ -75,7 +75,8 @@ via `include_str!`, ordered from most to least authority:
 - `read-only` — reasonable's reads/exec, writes only to scratch;
 - `minimal` — system binaries + cwd + scratch + net + chdir; a deliberately
   narrow base for additive `--extend-base`;
-- `confined` — offline build jail; host binaries by subpath, no per-name lattice.
+- `confined` — offline build jail; host binaries by subpath, with explicit
+  bare-name entries for core's bundled tools (which have no path to match).
 
 **Every profile that restricts exec must name the bundled tools** (`core/src/uutils.rs`
 — coreutils, and diffutils/ripgrep under their features). `command::vet` routes
@@ -132,8 +133,8 @@ can't silently widen a jail:
 - every exec-declaring base carries an `Allow` for each live system tool root
   (`minimal`'s Homebrew deny the one documented exception);
 - `read-only` reads but does not write `cwd:`;
-- `confined` is net-off, exec-by-subpath-only (no bare-name admits), no
-  home-reaching prefixes;
+- `confined` is net-off, admits host execs by subpath and only bundled tools by
+  bare name, and has no home-reaching prefixes;
 - `cwd:`/`tempdir:` sigils freeze into the per-invocation working and temp dirs
   without exarch injecting them dynamically.
 

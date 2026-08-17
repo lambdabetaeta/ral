@@ -1,14 +1,14 @@
 ---
-generated_at_commit: 7d9410f0
-generated_at_date: 2026-08-13
+generated_at_commit: cbeb5457
+generated_at_date: 2026-08-17
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/registry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
 # Map: exarch / agent
 
 `agent.rs` defines the node every fleet member shares. An `Agent` is the
-**uniform node** of the fleet: the
-canonical [[map/exarch/frontend|event log]] (`AgentLog`), a **seat**
+**uniform node** of the fleet: the canonical
+[[internals/session-record|model projection]] (`AgentLog`), a **seat**
 (`agent/seat.rs`) carrying the transport each run drives through —
 `Seat::Identity`, the persistent in-process [[map/core/shell-state|`Shell`]]
 behind an `IdentityTransport` (plus the session `Scratch`, the re-seed cwd,
@@ -158,6 +158,12 @@ Three nested loops, the same for trunk and child alike:
   ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]]). A
   sub-agent has no human writer, so its inbox holds no steering and this is always
   empty.
+
+  A streamed step closes through one `close_step` door: it seals the answer and
+  reasoning choppers, then publishes `Transient::Boundary`, even when the
+  provider or cancellation path already carries an error. `abandon_step` uses
+  the same ordering best-effort, so a live display edge cannot survive into the
+  next step ([[map/exarch/frontend|frontend]]).
 
 Worker-reap and large-binding notices need no drain at `attend`'s top:
 core's own engine pushes both as `` `notice `` surface classes at the ready
@@ -375,7 +381,9 @@ so the child inherits the model in force at spawn and may diverge afterward.
 ## Lifecycle: clear, compact, resume, fork
 
 `clear` rebuilds the focused agent without carrying cancellation residue forward:
-it re-runs the seat's ceremony (`Seat::clear`) — the identity seat reboots a
+it drops the waiting inbox before the reboot, so a prompt typed during that
+reboot belongs to the new context, then re-runs the seat's ceremony
+(`Seat::clear`) — the identity seat reboots a
 fresh shell from `boot_root_shell` (`agent/seat.rs`, the cwd- and
 scratch-seeding wrapper over `bootstrap::boot_shell`) onto the *same*
 interrupt target; a wire session instead clears by killing its engine
@@ -389,13 +397,7 @@ surface buffer's, the frontend's coupled channel — writes into the new
 segment and keeps publishing. Swapping the `Emitter` instead stranded them
 on the rotated-away file, and the frontend, whose clear-drain gate opens on
 the `Transient::Cleared` that seam publishes, stayed dark for the whole first
-exchange of the cleared session. The rotation
-swaps the *file* behind the seam and never the seam itself (`Emitter::rotate`):
-the seam is the session's, so the attached bus and every `Emitter` clone
-already handed out follow the new segment. Minting a fresh `Emitter` instead
-would strand them on the rotated-away file, and the frontend — whose
-`Transient::Cleared` and next `Display::Prompt` both cross that seam — would
-go dark for the whole first exchange of the cleared session. Clear also
+exchange of the cleared session. Clear also
 clears the schedule registry and cascades cancel to its subtree. Replacing the
 transport drops the outgoing shell, whose `LocalState` teardown cancels
 every worker still registered on it — explicit destruction outranks every
@@ -414,9 +416,10 @@ shell is fresh and receives a note describing the bindings, workers, cwd,
 scratch, pins, and schedules that were not durable. Wire seats and child logs
 are refused rather than half-resumed.
 
-`--no-logs` chooses the mirror-only path at birth: no event ledger, transcript,
-or run lock is created, children inherit the choice, and there is consequently
-nothing for `--resume` to reopen.
+`--no-logs` chooses the mirror-only path at birth: no durable event ledger or
+transcript, and no run lock, is created. The in-memory model view and live bus
+still operate, children inherit the choice, and there is consequently nothing
+for `--resume` to reopen.
 
 `compact` runs `provider.summarize` over the closed prefix when context pressure
 crosses the window's reserve (`digest.rs`'s `compaction_due` — used tokens

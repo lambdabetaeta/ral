@@ -1,6 +1,6 @@
 ---
-verified_at_commit: f7cf93a
-verified_at_date: 2026-07-25
+verified_at_commit: cbeb5457
+verified_at_date: 2026-08-17
 anchors: [BindingLedger, arm_binding_lease, install_scope_binding, referenced_names, prune_idle_bindings, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS, renew_one]
 ---
 
@@ -47,7 +47,7 @@ enumeration) renews nothing either — enumeration is not observation.
 
 ## What pruning does — and deliberately does not do
 
-At each ready boundary — the tail of every `Shell::run` —
+At each ready boundary — the tail of every run door —
 `Shell::emit_ready_boundary_notices` calls `Shell::prune_idle_bindings`
 beside the worker-reap drain (`take_worker_reap_notices`). Every entry idle
 past the bound is examined: a name whose value still structurally reaches a

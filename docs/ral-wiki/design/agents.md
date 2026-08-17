@@ -27,7 +27,7 @@ the trunk's session is minted facing the ambient causes,
 [[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]) — but it does
 not decide who returns.
 
-- **A returning agent holds `reply`.** A peer at any depth, *and* a headless trunk
+- **A returning agent holds `reply`.** A returning node at any depth, *and* a headless trunk
   (`parent = None`, `interactive = false`) seeded once to produce one result, both
   advertise it and terminate at quiescence. This is
   [[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]'s
@@ -212,8 +212,8 @@ pins the law: fork a scope in memory, seed the same scope through
 the same absence.
 
 The hatchery is where the seat asymmetry ends and the fleet's uniformity
-resumes: peer `message`, `agent-cancel`, and the idle-lease reaper all
-address a child by name through the registry, whatever seat it sits on, and
+resumes: `message`, `agent-cancel`, and the idle-lease reaper all address a
+descendant by name through the registry, whatever seat it sits on, and
 a wire helper's `message` crosses as an enquiry on its own connection exactly
 as an identity peer's does — sender and recipient never learn each other's
 transport.
@@ -266,12 +266,12 @@ itself runs out, the reaper cancels the whole subtree at the bound whether or
 not a human happens to be looking at it — mere focus was never immunity, and
 there is no `TAB`-driven reap to begin with.
 
-## Peer messages: marked notes, not shared memory
+## Descendant messages: marked notes, not shared memory
 
-Live agents may send one another a **marked message** by **name** through the
-`message` builtin. The registry resolves the name to the recipient's inbox and
-posts an `AgentMessage`; the recipient sees it at the next tool boundary as a
-marked note naming the sender, not as human input. This is
+An agent may send a **marked message** by **name** to a proper descendant
+through the `message` builtin. The registry resolves the name to the
+recipient's inbox and posts an `AgentMessage`; the recipient sees it at the
+next tool boundary as a marked note naming the sender, not as human input. This is
 coordination, not a return edge: it does not share shell state, does not grant
 authority, and does not wait for an answer. The durable result path remains
 `reply`; the durable cancellation path remains `agent-cancel`, addressed by name
@@ -294,9 +294,13 @@ registered beneath a settled node. This refines
 token now interrupts one exchange in place, while the subtree cascade is the
 terminators' alone.
 
+In the TUI, that break is a distinct cancelled rail shape: it wears the `╳`
+marker used for errors, while the matrix's failure cell remains reserved for
+actual failures.
+
 ## Self-scheduling is inherited
 
-A peer may arm its own wakeups (a cron expression or `after <dur>`) into its own
+An agent may arm its own wakeups (a cron expression or `after <dur>`) into its own
 inbox when the trunk was launched `--allow-schedule`: the grant is
 **inherited by a fork**, so it flows down the spawn tree. Scheduling is
 gated by that authority — refused at the desk without it, and the schedule
@@ -348,7 +352,7 @@ child's `Capabilities` as an argument rather than cloning the parent's.
 ## See also
 
 [[design/exarch-architecture|exarch-architecture]] (the agent as a provider loop
-over one shell tool),
+over one `ral` tool),
 [[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]
 (the one record-spec `agent` verb, names as fleet-unique identity, schedule
 labels, commitments retired),

@@ -1,12 +1,13 @@
 # The transcript admits only sendable messages
 
-Every message committed to a session's [[map/exarch/frontend|event log]]
-serialises to a request **every supported provider accepts.** The event log is
-the single source of truth for the next request; once a malformed or empty
-message is committed, it is re-serialised on every subsequent round-trip, so a
+Every message committed to a session's
+[[internals/session-record|record-backed model projection]] serialises to a
+request **every supported provider accepts.** That projection is the single
+source of truth for the next request; once a malformed or empty message is
+committed, it is re-serialised on every subsequent round-trip, so a
 single bad commit can wedge the whole run on a strict backend (Anthropic 400s,
 the run dies — misclassified as fatal). The protocol state machine
-([[map/exarch/frontend|`event.rs`]]) enforces *role alternation*; this invariant
+([[map/exarch/agent|`agent/event.rs`]]) enforces *role alternation*; this invariant
 enforces *per-message admissibility* at the one place messages enter the log:
 the `deliberate` commit boundary in [[map/exarch/agent|agent]].
 
@@ -35,8 +36,8 @@ Two adjacent obligations keep the invariant whole:
 - **Auto-compaction runs where it can (X1).** Compaction needs `ReadyForUser`
   (`can_compact`), which holds at the top of `deliberate`, never mid-loop in
   `AwaitingAssistantAfterToolResults` — the prior placement was dead code.
-- **A JSON-body 4xx is classified, not lost (X3).** `parse_4xx_status` matches
-  both the `status: <code>` token and a JSON `"code": <code>` body, so an
+- **A JSON-body 4xx is classified, not lost (X3).** `json_status_code` reads
+  a JSON `"code": <code>` from the nested or flat error body, so an
   OpenRouter-shaped `{"code":400,…}` becomes a structured `Api` error rather
   than an opaque `Other`.
 
@@ -49,4 +50,4 @@ complete values.
 
 See also [[invariants/turn-ends-ready|exchange-ends-ready]] (the role-alternation
 half), [[map/exarch/agent|agent]] (`deliberate`, `admit_assistant`, `compact`),
-[[map/exarch/provider|provider]] (`from_genai`, `parse_4xx_status`).
+[[map/exarch/provider|provider]] (`from_genai`, `json_status_code`).

@@ -45,12 +45,13 @@ cancelled, and leased. A viewport has no capability, and pretending it does
 to buy uniformity would buy it at the price of a lie.
 
 The accumulator's contents have a second characterisation, exact in scope:
-**on resume a viewport is a fold's memo** — seeded once from the session's
-record log before the worker spawns
-([[decisions/260814_one-seam-one-log|one-seam-one-log]]) — **while for the
-running session it remains its own live accumulator** over the event stream.
-Neither posture grants it a capability; the split only says where its state
-comes from, never who may reach it.
+**a viewport is always a fold's memo.** Resume seeds that memo from the session
+record before the worker spawns; live `Signal::Fact`s step the same fold, while
+`Signal::Transient`s touch only its provisional edge
+([[internals/session-record|session-record]]). The viewport owns presentation
+state around the memo — scroll, disclosure, the open line, the bounded window —
+but no independent account of what happened. None of that grants it a
+capability; the distinction says where state comes from, never who may reach it.
 
 ## The residency order
 

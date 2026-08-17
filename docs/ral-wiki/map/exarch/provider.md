@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: cbeb5457
+generated_at_date: 2026-08-17
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -156,12 +156,14 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
   are captured in the `End` frame and replayed by `step_out_from_end`, so they
   are dropped by a *named* arm, never a wildcard, and a new genai stream variant
   fails the build (X10).
-- A **pre-stream idle timeout** bounds request open and time-to-response; once a
-  streaming response is open, exarch does **not** time out the gap between
-  decoded `ChatStreamEvent`s. Liveness is raw transport progress: reqwest's
-  per-read `STREAM_IDLE_TIMEOUT` (180s, `provider/tls.rs`) turns true byte-level silence into a
-  retryable stream error, while provider heartbeats or SSE pings that genai
-  consumes below the semantic event layer can keep a long-thinking model alive.
+- A **per-attempt idle timeout** bounds request open and every gap between
+  decoded `ChatStreamEvent`s. The first attempt uses `STREAM_IDLE_TIMEOUT`
+  (180s, `provider/tls.rs`); retries use a one-minute bound. Each event,
+  including a provider heartbeat, re-arms the semantic watchdog, while
+  reqwest's per-read timeout turns true byte-level silence into a retryable
+  stream error. A ping genai consumes below the semantic event layer may keep
+  the transport read alive, but cannot re-arm exarch's event watchdog; only a
+  decoded event can do that.
   This lands the first local slice of
   [[decisions/260702_provider-heartbeats-and-retry-boundaries|provider-heartbeats-and-retry-boundaries]].
 - `summarize` — one non-streamed call producing a compaction summary; used by
@@ -212,8 +214,8 @@ shape surfaces raw rather than being retried on a `Display`-string guess. The fu
 tutorial is [[internals/provider-fault-recovery|provider-fault-recovery]]
 ([[invariants/transcript-admission|transcript-admission]]).
 
-Each retryable and 4xx variant carries the parsed body as
-`Option<serde_json::Value>` to the boundary, so the renderer can print a
+Each retryable and 4xx variant carries the parsed body (boxed at the error
+boundary) as an optional JSON value, so the renderer can print a
 labelled, structured error from the JSON rather than scraping the cause text;
 the chrome lives in [[map/exarch/cards|cards]] / [[map/exarch/frontend|frontend]].
 `parse_retry_after` slices the *lowercased* copy it searches, never indexing
@@ -234,10 +236,11 @@ cannot land mid-character and panic (X8).
 - `provider/pricing.rs` fetches OpenRouter's `/api/v1/models` catalog once per process
   and caches it; `ModelPricing::dollars` strips the cache counts out of `input`
   and bills uncached/cache-creation/cache-read/output each at its rate, falling
-  back to the base input rate when no separate cache rate is published. The
-  catalog backs every provider (OR republishes upstream cards) and also
-  supplies `ModelCaps` (context window, canonical slug) for the startup banner.
-  Offline starts degrade to `—`.
+  back to the base input rate when no separate cache rate is published. Native
+  DeepSeek models use the local rate table (including its UTC peak windows)
+  before any OpenRouter alias; other providers use the catalog. The catalog
+  also supplies `ModelCaps` (context window and supported request parameters)
+  for startup and picker decisions. Offline starts degrade to `—`.
 
 `provider/request.rs::build_cached_request` sets two `cache_control: ephemeral`
 breakpoints (system + tools, growing transcript) for the message-based adapters,

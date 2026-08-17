@@ -1,14 +1,15 @@
 ---
-verified_at_commit: 19d53bb
-verified_at_date: 2026-07-28
-anchors: [run, run_nested, enter, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, eval_top_level, Mobile, compile_and_typecheck]
+verified_at_commit: cbeb5457
+verified_at_date: 2026-08-17
+anchors: [run, run_under, run_nested, enter, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, eval_top_level, Mobile, compile_and_typecheck]
 ---
 
 # A run, end to end
 
 **A *run* is one top-level evaluation against a persistent `Shell`, and every
-host starts it through one synchronous, runtime-agnostic door** —
-`Shell::run(RunRequest) -> RunReport` in
+host starts it through a synchronous, runtime-agnostic run door** —
+`Shell::run(RunRequest) -> RunReport` (or `Shell::run_under` when the host
+already holds a foreground scope) in
 [`core/src/run.rs`](../../../core/src/run.rs). The request's `Run`
 carries a `Program` sum naming what runs: source text, or a *registered hook*
 applied to first-order arguments — a `Block`/`Lambda` the host stored by name
@@ -25,13 +26,16 @@ reduction primitive behind the door is crate-private, so a host cannot start an
 unframed evaluation against a stale frame
 ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]).
 
-**There are two doors, and which one you use is decided by what you hold.**
+**There are three doors, and which one you use is decided by what you hold.**
 `Shell::run` is for a host with no run in hand: its frame is minted under
-`SessionState::anchor`. Code *already inside* a run — a builtin body, a
-lifecycle hook — uses `Shell::run_nested(&mooring, req)`, handing it the
-`Mooring` it was given, so the nested frame is a child of the enclosing run's
-cancel scope: the outer run's interrupt unwinds the nest, and the outer wall
-reaches into it ([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]).
+`SessionState::anchor`. A host that already holds a pre-minted
+`ForegroundScope` uses `Shell::run_under(&scope, req)`; the identity and wire
+transports use this form so cancellation can land before a frame exists. Code
+*already inside* a run — a builtin body, a lifecycle hook — uses
+`Shell::run_nested(&mooring, req)`, handing it the `Mooring` it was given, so
+the nested frame is a child of the enclosing run's cancel scope: the outer
+run's interrupt unwinds the nest, and the outer wall reaches into it
+([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]).
 
 **The request carries the policy axes as types, never flags.** A `RunRequest`
 is exactly the places hosts differ:
@@ -59,9 +63,9 @@ is exactly the places hosts differ:
   delimits this dispatch's own extent as an audit scope and carries it home on
   `RunReport::Ran`; `None` neither opens a scope nor collects one.
 
-**The spine the door orchestrates is one straight line**, owning resources
+**The spine the run doors orchestrate is one straight line**, owning resources
 (`Sink`, `Source`, the run's frame, guards, buffers) while the request describes
-policy. `Shell::run` dispatches on the `Program` sum, and the arms differ only
+policy. The run doors dispatch on the `Program` sum, and the arms differ only
 in *how the program resolves* — the source arm compiles first, the hook arm
 looks up the hook table; both then converge on `run_built` and the run
 module's framed scaffold:
@@ -109,8 +113,11 @@ module's framed scaffold:
 - `eval_top_level` installs the post-run `Mobile` on **every** outcome, so a
   `let`, `cd`, or env change persists to the next run — the run is a resume
   point regardless of completion, error, or `exit`
-  ([[invariants/turn-ends-ready|exchange-ends-ready]]). `run_framed` computes
-  the transport status, fires the post-exec hook, and the guard drops.
+  ([[invariants/turn-ends-ready|exchange-ends-ready]]). Before the status is
+  read, `run_framed` polls `process::check(mooring)` once more so a sticky
+  cancellation cannot be absorbed by `try`; it then computes the transport
+  status, fires the post-exec hook, and emits ready-boundary notices while the
+  run frame and sinks are still installed. Only then does the IO guard drop.
 - Back in `run_built`, the wall is **disarmed before the cause is read**, so a
   reaper tripping in the gap between eval returning and classification cannot
   misread a run that finished inside its budget as timed out. `classify_ending`
@@ -121,8 +128,8 @@ module's framed scaffold:
   hold. `RunReport::Ran { ending, captured, trail }` carries it home; `trail`
   starts `Vec::new()` here — `run_built` has no view of the dispatch's own
   scope, only of what a body opened and closed on its own account.
-- One level up, at `Shell::enter` — the durability wrapper both `run` and
-  `run_nested` funnel through — a `Run.trail: Some` holds a `TrailScope`
+- One level up, at `Shell::enter` — the durability wrapper all three run doors
+  funnel through — a `Run.trail: Some` holds a `TrailScope`
   *outside* the `catch_unwind` that recovers a mid-run panic, opened before
   `dispatch` runs and closed once it returns, on every exit. That placement is
   load-bearing: the `Mobile` checkpoint the panic arm rolls back does not

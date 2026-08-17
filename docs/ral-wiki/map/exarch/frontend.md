@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 99bcdf39
-generated_at_date: 2026-08-14
+generated_at_commit: cbeb5457
+generated_at_date: 2026-08-17
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -60,27 +60,31 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   channel, so the TUI's single per-fleet dispatch loop routes both by
   `AgentId` without restructuring.
 
-`record.rs` + `record/` is the one-seam-one-log module tree: the sealed
+`record.rs` + `record/` is the one-seam-one-log module tree
+([[internals/session-record|session-record]]): the sealed
 `Record { Protocol, Display, Forensic }` vocabulary and the disjoint
 `Transient`; `record/seam.rs` (`Emitter::emit`, the only publisher —
 append-then-publish under the log's own mutex, so channel order is log
 order); `record/log.rs` (the `record.jsonl` io-door, with the attachable
 `FleetSink` inside the writer's mutex); `record/replay.rs` (the generic
-`fold == memo` driver and `Refusal`); `record/commit.rs` (the worker-side
+`fold == memo` driver and `Refusal`, with `Log::read` streaming one entry at a
+time); `record/commit.rs` (the worker-side
 commit producer: one `Chopper` per lane of the model's stream, and
-`SurfaceBuffer`, moved whole from `tui/surface.rs`); `record/model.rs` (the model fold, `Protocol` alone);
-`record/view.rs` (the view fold into `Blocks`; `Block`'s constructor is
-private). `Viewport` and `Headless` both implement `record::Printer`
+`SurfaceBuffer`, moved whole from `tui/surface.rs`); `record/model.rs` (the model fold, `Protocol` alone, with
+streaming resume/admission);
+`record/view.rs` (the view fold into `Blocks`; block construction is private).
+`Viewport` and `Headless` both implement `record::Printer`
 (`transient`/`sync`): a live `Signal::Fact` steps the view fold beside the
-printer and re-syncs it wholesale (`Viewport::commit_fact`, `Headless::absorb`),
+printer and re-syncs it (`Viewport::commit_fact`, `Headless::absorb`),
 the same fold resume seeds with one `Printer::sync` call from a `record.jsonl`
 replay — so the live path and resume draw through the identical fold.
 
 The TUI mints one **session-lived** bus, so a detached async agent clones its
 sender and streams a live tab through the same id-routed draw path a sync child
 uses ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]);
-headless and test sinks build a **per-exchange** bus that closes when the worker
-finishes, keeping async children muted to their own log.
+the one-shot/headless conversational drivers use a **per-exchange** bus with
+muted children, while `converse_settled` uses `per_exchange_live` so fleet work
+stays visible until quiescence.
 
 `agent/event.rs` is the canonical per-session record. `AgentLog` owns two things:
 
@@ -95,7 +99,9 @@ finishes, keeping async children muted to their own log.
   beside it ([[decisions/260814_one-seam-one-log|one-seam-one-log]]).
   Oversize tool-result sections are elided head+tail at the [[map/exarch/agent|digest]]
   caps before they ever enter the log. A directory with no `record.jsonl`
-  refuses to resume, with a named error.
+  refuses to resume, with a named error. `/clear` rotates the record segment
+  behind the same seam, so existing emitters and the attached bus continue
+  into the fresh file (and `--no-logs` keeps the mirror-only seam).
 
 The TUI renders a sibling `user.log` — the "user view" — as a stream the
 viewport is a window over: a block is written once, when eviction drops it
@@ -214,6 +220,9 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    heading lifted into the top rule, no marginal rail glyph (the frame is its
    mark). A file mutation — a diff card or a write card — wears the
    patch-shape change-bar `▎`; an observation card folds into its ral group.
+   A cancelled turn is `RailShape::Cancelled`: it wears the error rail `╳`
+   while remaining distinct from `RailShape::Error`, so `Block::is_error` and
+   the matrix failure cell report actual failures only.
 
  The frame's terminal writes are bracketed in a synchronized update
  (`BeginSynchronizedUpdate` / `EndSynchronizedUpdate`) so the emulator swaps

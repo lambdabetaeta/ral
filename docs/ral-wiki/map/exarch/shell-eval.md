@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: cbeb5457
+generated_at_date: 2026-08-17
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -184,8 +184,9 @@ regimes share: the live foreground sink `run_shell` hands `dispatch_to_report`
 emits now, and the deferred sink (`deferred_sink`, installed on the transport
 before each dispatch) mints identical events when a detached worker's batch
 flushes. `accepted_surface` wraps it with the protected-pin guard. The
-codomain is `Surface`, the shell's own closed vocabulary, five shapes wide and
-tried pin-first, which carries only the structured value each shape names —
+codomain is `Surface`, the shell's own closed vocabulary: five channels (the
+`Pin`/`Unpin` variants are one pin channel), tried pin-first. It carries only
+the structured value each channel names —
 no `Card` mark tree, since that is built by whoever renders (a printer's fold
 over the recorded `Display` commit) or whoever records (the commit producer's
 `SurfaceBuffer`, [[map/exarch/frontend|frontend]]), never by the decoder:
@@ -216,8 +217,11 @@ over the recorded `Display` commit) or whoever records (the commit producer's
 
 The producer is a direct `surface` call at each kit site, with no cross-language
 sentinel constant. Same-thread children inherit the sink; detached workers do
-not — core buffers their `surface` calls and replays them once on `await`, so a
-bus `Emitter` clone can never outlive the tool run. Across the OS-sandbox
+not inherit the live sink. Core buffers their `surface` calls and flushes a
+settled batch to exarch's deferred sink (the inbox path); without that host
+sink, the ordinary `await`/`race` path replays it into the awaiting run. Either
+path keeps a bus `Emitter` clone from outliving the tool run. Across the
+OS-sandbox
 boundary the events are buffered in the confined child and replayed through the
 parent's sink ([[map/core/capabilities|carried on the IPC response]]), so they
 are batched rather than live under the sandbox.
