@@ -801,8 +801,7 @@ impl Block {
             BlockKind::Chrome { shape, .. } => match shape {
                 RailShape::Step => Some(RailKind::Step),
                 RailShape::Settled => Some(RailKind::Subagent),
-                RailShape::Error => Some(RailKind::Error),
-                RailShape::Cancelled => Some(RailKind::Error),
+                RailShape::Error | RailShape::Cancelled => Some(RailKind::Error),
                 RailShape::Plain => Some(RailKind::Note),
                 RailShape::Prompt => Some(RailKind::Prompt),
             },
