@@ -79,17 +79,17 @@ because the answer depends on it, and it is never stored: a name that is a
 function of the whole set cannot be cached in a single record, because there
 is then no reconciliation path when a sibling arrives or leaves. The service
 alone when the handle is the service's name, the service and the handle both
-otherwise, the id to separate a tie, and `(subscription)` on a flat-rate
-service — nothing else is decorated. The tie check also compares against the
+otherwise, and the id to separate a tie — nothing is decorated, because how an
+account bills is `Billing`'s business, not its name's. The tie check also compares against the
 other accounts' id-qualified forms, so a handle that happens to spell one out
 (the claims are issuer- and workspace-supplied) cannot impersonate a sibling's
 label.
 
 ```
 anthropic
-opencode-go (subscription)
-chatgpt (subscription) · alex@bristol.ac.uk
-chatgpt (subscription) · alex@work (Acme Ltd)
+opencode-go
+chatgpt · alex@bristol.ac.uk
+chatgpt · alex@work (Acme Ltd)
 ```
 
 The honest limit: a live session's status line keeps the handle it started

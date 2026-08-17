@@ -178,8 +178,8 @@ const HANDLE_SEPARATOR: &str = " · ";
 /// login never loses its email. Two accounts left indistinguishable by their
 /// handles are separated by their ids, which are unique by construction — and
 /// an account whose handle merely *reads* as another's id-qualified form is
-/// qualified too, so a handle cannot impersonate a sibling's label. A
-/// flat-rate service is marked; nothing else is decorated.
+/// qualified too, so a handle cannot impersonate a sibling's label. Nothing is
+/// decorated: how an account bills is [`Billing`]'s business, not its name's.
 ///
 /// This is the one place anything in either product names an account, and it
 /// takes the set because the answer depends on it. That is precisely why the
@@ -187,9 +187,9 @@ const HANDLE_SEPARATOR: &str = " · ";
 ///
 /// ```text
 /// anthropic
-/// opencode-go (subscription)
-/// chatgpt (subscription) · alex@bristol.ac.uk
-/// chatgpt (subscription) · alex@work (Acme Ltd)
+/// opencode-go
+/// chatgpt · alex@bristol.ac.uk
+/// chatgpt · alex@work (Acme Ltd)
 /// ```
 pub fn label(account: &Account, among: &[Account]) -> String {
     let named = unqualified(account);
@@ -217,10 +217,7 @@ fn qualified(account: &Account) -> String {
 /// The label before the id is called on to separate a tie.
 fn unqualified(account: &Account) -> String {
     let service = account.service.name.as_str();
-    let mut named = match account.service.billing {
-        Billing::Metered => service.to_string(),
-        Billing::FlatRate => format!("{service} (subscription)"),
-    };
+    let mut named = service.to_string();
     if account.handle != service {
         named.push_str(HANDLE_SEPARATOR);
         named.push_str(&account.handle);
@@ -425,7 +422,7 @@ mod tests {
         let go = Account::of_service(service("opencode-go"));
         let among = [anthropic.clone(), go.clone()];
         assert_eq!(label(&anthropic, &among), "anthropic");
-        assert_eq!(label(&go, &among), "opencode-go (subscription)");
+        assert_eq!(label(&go, &among), "opencode-go");
         assert_eq!(anthropic.id.as_str(), "anthropic");
     }
 
@@ -434,7 +431,7 @@ mod tests {
         let one = login("alex@bristol.ac.uk", "acct-1");
         assert_eq!(
             label(&one, std::slice::from_ref(&one)),
-            "chatgpt (subscription) · alex@bristol.ac.uk"
+            "chatgpt · alex@bristol.ac.uk"
         );
     }
 

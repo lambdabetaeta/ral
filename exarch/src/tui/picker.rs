@@ -4,7 +4,7 @@
 //! [`Clear`]ed centre of the frame and is modal in behaviour too — `App::key`
 //! returns early while an overlay is open, and `model_picker.rs` drives the
 //! keys instead. It edits a model selection together with today's tuning: a
-//! fuzzy-filtered `provider / model` list, the [`EFFORT_LADDER`] rung
+//! fuzzy-filtered `model · provider` list, the [`EFFORT_LADDER`] rung
 //! `auto · zero · low · med · high · xhigh · max`, temperature, and top-p.
 //!
 //! For an `OpenRouter` `vendor/model` a fifth control appears, listing the
@@ -784,18 +784,26 @@ impl Picker {
             .skip(start)
             .take(window)
             .map(|(i, row)| {
-                let text = match row {
-                    Row::Model(account, m) => format!("{} / {m}", self.label(account)),
-                    Row::Manual(q) => format!("use “{q}” as a manual model"),
+                let reversed = |style: Style| {
+                    if i == self.selected {
+                        style.add_modifier(Modifier::REVERSED)
+                    } else {
+                        style
+                    }
                 };
-                let mut style = match row {
-                    Row::Manual(_) => Style::default().fg(SLATE).add_modifier(Modifier::ITALIC),
-                    Row::Model(..) => Style::default().fg(CYAN),
-                };
-                if i == self.selected {
-                    style = style.add_modifier(Modifier::REVERSED);
+                match row {
+                    Row::Model(account, m) => Line::from(vec![
+                        Span::styled(m.clone(), reversed(Style::default().fg(CYAN))),
+                        Span::styled(
+                            format!(" · {}", self.label(account)),
+                            reversed(Style::default().fg(SLATE)),
+                        ),
+                    ]),
+                    Row::Manual(q) => Line::from(Span::styled(
+                        format!("use “{q}” as a manual model"),
+                        reversed(Style::default().fg(SLATE).add_modifier(Modifier::ITALIC)),
+                    )),
                 }
-                Line::from(Span::styled(text, style))
             })
             .collect();
         f.render_widget(Paragraph::new(lines).style(plane), list_area);
@@ -1155,12 +1163,12 @@ mod tests {
         p
     }
 
-    /// The `provider / model` labels of every listed row, in order.
+    /// The `model · provider` labels of every listed row, in order.
     fn row_labels(p: &Picker) -> Vec<String> {
         p.rows()
             .into_iter()
             .filter_map(|r| match r {
-                Row::Model(account, m) => Some(format!("{} / {m}", p.label(&account))),
+                Row::Model(account, m) => Some(format!("{m} · {}", p.label(&account))),
                 Row::Manual(_) => None,
             })
             .collect()
@@ -1172,9 +1180,9 @@ mod tests {
         assert_eq!(
             row_labels(&p),
             vec![
-                "anthropic / claude-opus-4",
-                "anthropic / claude-haiku-4",
-                "deepseek / deepseek-chat",
+                "claude-opus-4 · anthropic",
+                "claude-haiku-4 · anthropic",
+                "deepseek-chat · deepseek",
             ]
         );
     }
@@ -1188,7 +1196,7 @@ mod tests {
         p.set_models(&alex.id, ModelsState::Loaded(vec!["gpt-5.5".into()]));
         assert_eq!(
             row_labels(&p),
-            vec!["chatgpt (subscription) · alex@bristol.ac.uk / gpt-5.5"]
+            vec!["gpt-5.5 · chatgpt · alex@bristol.ac.uk"]
         );
         // The bare service name still matches search.
         for c in "chatgpt".chars() {
@@ -1197,14 +1205,14 @@ mod tests {
         assert_eq!(row_labels(&p).len(), 1);
     }
 
-    /// A flat rate earns the generic suffix, distinct from `ChatGPT`'s, so the
-    /// row never claims a login the provider does not have.
+    /// A key-bearing provider has no login to name, so its row is the model
+    /// and the service alone — it never claims a handle it does not have.
     #[test]
-    fn flat_rate_provider_rows_carry_generic_subscription_label() {
+    fn flat_rate_provider_rows_are_named_by_their_service_alone() {
         let go = account("opencode-go");
         let mut p = Picker::new(vec![go.clone()], &Tuning::default(), caps_unknown);
         p.set_models(&go.id, ModelsState::Loaded(vec!["glm-5.2".into()]));
-        assert_eq!(row_labels(&p), vec!["opencode-go (subscription) / glm-5.2"]);
+        assert_eq!(row_labels(&p), vec!["glm-5.2 · opencode-go"]);
     }
 
     /// Two `ChatGPT` accounts signed in under the same email are two rows, not

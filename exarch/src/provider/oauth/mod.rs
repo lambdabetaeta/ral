@@ -786,7 +786,7 @@ mod tests {
         let alone = [token("acc_1", Some("alex@work"))];
         assert_eq!(
             identity::label(&to_account(&alone[0]), &accounts_of(&alone)),
-            "chatgpt (subscription) · alex@work"
+            "chatgpt · alex@work"
         );
 
         let shared = [
