@@ -64,8 +64,8 @@ impl AgentState {
     }
 
     /// Whether work is outstanding.  [`Self::Ready`] is the one settled state,
-    /// so this is what a frontend keys a spinner, a repaint tick, or an
-    /// ellipsis on.
+    /// so this is what a frontend keys a spinner, a repaint tick, or an elapsed
+    /// clock on.
     #[must_use]
     pub fn pending(self) -> bool {
         self != Self::Ready

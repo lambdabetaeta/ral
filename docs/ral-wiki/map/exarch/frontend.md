@@ -231,7 +231,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  arithmetic: `Viewport::render_window` computes `offset` (first visible row,
  topping at `total - height`) over a memoised whole-buffer flatten, and
  reports scroll position as a fixed-position magnitude on the rule line
- (`RenderWindow::scroll_pct`, rendered `⇣ 72%` / `⇣ bot`) rather than an
+ (`RenderWindow::scroll_pct`, rendered `⇣ 72%` / `⇣ end`) rather than an
  animated right-margin scrollbar.
 
  The `rule_line` carries a value-ramp `ctx%` bar, the agent's state in a
@@ -240,8 +240,18 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  streamed-character count that has stopped growing under a rising `Ns` is a
  stalled stream and reads as one. `AwaitingModel` is named by that count
  alone rather than by its label, the count being the datum the elapsed bar
- gives meaning to; `Ready` waits on nothing and so is drawn with the wait
- slot blank — no bar, no clock. The `StateSpan` (state, entry instant,
+ gives meaning to. Two adjacent magnitudes need telling apart, so the clock
+ holds three columns and its unit (`  12s`, then whole minutes past `999s`),
+ the count carries its own (`1.2k chars`) and the wait bar's purple, and the
+ rule's ` · ` separates them — separation and units, never a hue that means
+ one thing this frame and another the next. Every field on the rule takes that
+ same separator, the right-aligned usage block included, since the elastic
+ space before it collapses on a narrow terminal; the state slot is padded to
+ `STATE_SLOT_W`, so the separator after it stands in one column whatever the
+ state. `Ready` waits on nothing, so it draws the bar's empty track and no
+ clock: the track is the scale the filled cells are read against and stays put
+ between turns, while the readout goes blank, nothing being timed. The width is
+ the same either way, so no field shifts. The `StateSpan` (state, entry instant,
  characters streamed since) lives on `Viewport`, not `App`, so each tab times
  its own.
  Sub-agent sessions get matrix rows/tabs that linger for 90 seconds

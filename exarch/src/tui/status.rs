@@ -27,23 +27,28 @@ pub(super) fn rule_line(
     // The `Ns` digit ticks once a second, and the clock runs from the state's
     // own start: a streamed count that freezes under a wait reading minutes is
     // a stalled stream, which a per-event reset could never show.  `Ready` is
-    // settled — nothing is outstanding to time — so it gets no clock at all.
+    // settled, so it reads as a clock at rest rather than a clock removed: the
+    // empty track stands — it is the scale the filled cells are read against,
+    // and a scale that disappears between turns takes the row's left edge with
+    // it — while the readout and its separator go blank, nothing being timed.
     if state.state.pending() {
         spans.extend(wait_bar(state.elapsed()));
+        // The clock and the streamed count are both magnitudes: without the
+        // rule's own separator between them they read as one field, or worse as
+        // two clocks.
+        spans.push(Span::styled(" · ", Style::default().fg(SLATE)));
     } else {
-        // Blank, not absent: the bar plus its four-column ` 0s ` readout is the
-        // width the fields after it are aligned against, in every state.
+        spans.extend(bar_cells(0, WAIT_BAR_W, SLATE));
         spans.push(Span::styled(
-            " ".repeat(WAIT_BAR_W + 4),
+            " ".repeat(WAIT_READOUT_W + 3),
             Style::default().fg(SLATE),
         ));
     }
-    let mut label = state_label(state);
-    // Pad by display width: `…` is three bytes and one column, so `label.len()`
-    // would leave the slot short and shift every field after it.
-    let label_w = UnicodeWidthStr::width(label.as_str());
-    label.push_str(&" ".repeat(STATE_SLOT_W.saturating_sub(label_w)));
-    spans.push(Span::styled(label, Style::default().fg(SLATE)));
+    spans.push(state_label(state));
+    // The state slot is padded to a fixed width, so this separator stands in one
+    // column whatever the state — the eye finds the model name at the same place
+    // every frame.
+    spans.push(Span::styled(" · ", Style::default().fg(SLATE)));
     spans.push(Span::styled(
         if status_model.is_empty() {
             "…".to_owned()
@@ -75,15 +80,19 @@ pub(super) fn rule_line(
     // absent when the whole buffer fits, which is what `None` means here.
     if let Some(pct) = scroll_pct {
         let text = if pct >= 100 {
-            " · ⇣ end ".to_string()
+            " · ⇣ end".to_string()
         } else {
-            format!(" · ⇣ {pct}% ")
+            format!(" · ⇣ {pct}%")
         };
         spans.push(Span::styled(text, Style::default().fg(SLATE)));
     }
 
     let left_w: usize = spans.iter().map(Span::width).sum();
-    let right = usage_text(usage);
+    // The usage block is right-aligned, so the space before it is elastic.  It
+    // still takes the separator every other field takes, or a narrow terminal
+    // that squeezes that space to nothing runs the scroll reading into the counts.
+    let mut right = vec![Span::styled(" · ", Style::default().fg(SLATE))];
+    right.extend(usage_text(usage));
     let rw: usize = right.iter().map(Span::width).sum();
     let gap = width.saturating_sub(left_w + rw);
     if gap > 0 {
@@ -93,40 +102,45 @@ pub(super) fn rule_line(
     Line::from(spans)
 }
 
-/// The state's name — except [`AgentState::AwaitingModel`], which is named by
-/// the text arrived in it instead: beside the elapsed bar, a count that has
-/// stopped growing is the whole datum, and the state's own name says nothing
-/// the bar does not.  Only [`AgentState::Ready`] goes unpunctuated: nothing is
-/// outstanding, so nothing is awaited.
-fn state_label(span: StateSpan) -> String {
-    let mut label = if span.state == AgentState::AwaitingModel {
+/// The state's name in slate — except [`AgentState::AwaitingModel`], which is
+/// named by the text arrived in it instead: beside the elapsed bar, a count that
+/// has stopped growing is the whole datum, and the state's own name says nothing
+/// the bar does not.  That count wears the wait bar's [`PURPLE`], marking it as
+/// the pair's other magnitude rather than a second clock.  Unpunctuated in every
+/// state: the elapsed bar beside it already says whether anything is
+/// outstanding, and an ellipsis would only say it again.
+fn state_label(span: StateSpan) -> Span<'static> {
+    let streaming = span.state == AgentState::AwaitingModel;
+    let mut label = if streaming {
         streamed_count(span.streamed)
     } else {
         span.state.label().to_owned()
     };
-    if span.state.pending() {
-        label.push('…');
-    }
-    // One column of gutter even at the slot's full width, so the longest label
-    // never butts against the model name.
-    label.push(' ');
-    label
+    // Pad by display width, not by `len`: a multi-byte glyph would otherwise
+    // leave the slot short and shift every field after it.
+    let label_w = UnicodeWidthStr::width(label.as_str());
+    label.push_str(&" ".repeat(STATE_SLOT_W.saturating_sub(label_w)));
+    let ink = if streaming { PURPLE } else { SLATE };
+    Span::styled(label, Style::default().fg(ink))
 }
 
-/// A character count in at most four columns: `938`, `1.2k`, `47k`, `1.4M`.
-/// Coarse on purpose — the datum is whether it is still moving, not its value.
+/// A character count in at most four columns, carrying its unit: `938 chars`,
+/// `1.2k chars`, `47k chars`, `1.4M chars`.  Coarse on purpose — the datum is
+/// whether it is still moving, not its value — and named, because an unlabelled
+/// number beside an elapsed clock reads as one too.
 fn streamed_count(chars: usize) -> String {
     #[allow(
         clippy::cast_precision_loss,
         reason = "a streamed-character count never approaches f64's exact range"
     )]
     let n = chars as f64;
-    match chars {
+    let magnitude = match chars {
         0..=999 => chars.to_string(),
         1_000..=9_999 => format!("{:.1}k", n / 1_000.0),
         10_000..=999_999 => format!("{:.0}k", n / 1_000.0),
         _ => format!("{:.1}M", n / 1_000_000.0),
-    }
+    };
+    format!("{magnitude} chars")
 }
 
 /// Width of the ctx% value-ramp bar, in cells.
@@ -171,9 +185,13 @@ pub(super) fn ctx_ramp(pct: u64) -> Vec<Span<'static>> {
 
 /// Width of the elapsed-wait bar, in cells.
 pub(super) const WAIT_BAR_W: usize = 10;
+/// Width of the ` NNNs` readout that follows the bar — see [`clock_text`], whose
+/// three columns are what keeps it fixed.
+const WAIT_READOUT_W: usize = 5;
 /// Fixed state-label slot, wide enough for the longest label (`waiting on
-/// agents… `): a state change never shifts the fields after it.
-pub(super) const STATE_SLOT_W: usize = 19;
+/// agents`): a state change never shifts the fields after it, and the separator
+/// that follows stands in one column always.
+pub(super) const STATE_SLOT_W: usize = 17;
 /// Elapsed seconds to a `0..=3` lightness step. Not [`rail::value_step`], whose
 /// 4/20/80 thresholds are calibrated for line counts and would burn this bar
 /// white on nearly every turn.
@@ -202,8 +220,20 @@ pub(super) fn wait_bar(elapsed: Duration) -> Vec<Span<'static>> {
     let fill_col = rail::lighten(PURPLE, wait_step(secs));
     let mut spans = bar_cells(filled, WAIT_BAR_W, fill_col);
     spans.push(Span::styled(
-        format!(" {secs}s "),
+        format!(" {}", clock_text(secs)),
         Style::default().fg(SLATE),
     ));
     spans
+}
+
+/// The elapsed reading, right-aligned in three columns so that no field after it
+/// shifts as the wait grows: seconds up to `999s`, then whole minutes — the only
+/// resolution that still fits, and past a quarter hour the only one that still
+/// says anything.
+fn clock_text(secs: u64) -> String {
+    if secs < 1_000 {
+        format!("{secs:>3}s")
+    } else {
+        format!("{:>3}m", (secs / 60).min(999))
+    }
 }
