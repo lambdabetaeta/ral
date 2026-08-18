@@ -17,11 +17,16 @@ Commands are sequenced by newlines or `;` (there is no `&&`). An uncaught failur
     let n      = line-count notes.txt
     echo "$branch has $n lines of notes"
 
-The variables `branch`, `body`, and `n` are then **AVAILABLE IN EVERY TURN, FOR THE REST OF THE SESSION**. **YOU DO NOT NEED TO RE-DEFINE THEM IN THE NEXT TURN, JUST USE THEM AGAIN.**
+<critical>
+Bound variables are **AVAILABLE IN EVERY TURN, FOR THE REST OF THE SESSION**. **YOU DO NOT NEED TO RE-DEFINE THEM IN THE NEXT TURN, JUST USE THEM AGAIN.** In the following turn do NOT re-bind `n`, just use it again:
+
+    echo "notes.txt now has !{line-count notes.txt} while it had $n before"
+</critical>
 
 Captured output is a `String`: split it with `lines`, parse it with `int`/`float`, or decode it by putting it back on the byte channel (`to-string $s | from-json`).
 
 A turn ending in `let` returns nothing; end with what you mean to see as `VALUE`.
+
 
 ## Blocks
 
@@ -110,7 +115,7 @@ In summary: `;` sequences, `attempt` tolerates a failure, `?` supplies a fallbac
   `$(name)` delimits variables from post-fixes that do not belong to them. A composite path must be one quoted word: `echo hi > "$dir/file"`.
 
 * Escapes are a fixed set (`\n`, `\r`, `\t`, `\\`, `\"`, `\$`, `\!`, `\0`, `\e`, `\xNN` for ASCII, `\u{…}`, and backslash-newline continuation).
-- Raw strings `#'…'#` are the verbatim string form: no escapes, no interpolation. They can contain any character including apostrophes. If the content itself contains `'#`, add more hashes (`##'…'##`). A hash not followed by a single-quote starts a comment to end of line.
+- Raw strings `#'…'#` are the verbatim string form; they need NO escapes and carry NO interpolation. They can contain any character including apostrophes. If the content itself contains `'#`, add more hashes, e.g. `#####'…'#####`. A hash not followed by a single-quote starts a comment to end of line.
 
   A raw string is also how an argument thick with metacharacters reaches an external tool: ral passes it through as one word, untouched, so a `sed` script needs no escaping at all and there is never a reason to hand it to a shell instead.
 
@@ -176,6 +181,8 @@ A nullary tag still binds a value (`unit`) — ignore it with `_`. An arm's body
 
 ## Failure
 
+A failed call ends a `ral` script, much like `set -euo pipefail` in `bash`.
+
 `try` catches a failed command; without it, a non-zero exit aborts the entire script. Its handler receives an error record with fields `status`, `cmd`, `message`, `line`, `col`:
 
     let log =
@@ -183,13 +190,13 @@ A nullary tag still binds a value (`unit`) — ignore it with `_`. An arm's body
         "make failed: exited $err[status], $err[message]"
       }
 
-The handler block must start on the same line as the body's closing brace — `} { |err| … }`. `err[message]` is synthetic status text, not the failing command's stderr; wrap in `audit` when output is the data you need.
+The handler block must start on the same line as the body's closing brace — `} { |err| … }`. `$err[message]` is synthetic status text, not the failing command's stderr; wrap a failing call in `audit` when you need to see stdout.
 
-Do NOT use `try` for tools that report through their exit codes (`grep`, `diff`, `test`, `valgrind --error-exitcode`): wrap them in `audit` to read its output as data instead of raising.
+Do NOT use `try` for tools that report through their exit codes (`grep`, `diff`, `test`, `valgrind --error-exitcode`): wrap them in `audit` to read its output as data instead of raising, or `attempt { …  }` to merely suppress the error.
 
 Prelude functions cover common cases:
 
-    if !{succeeds { cargo check -q }} { echo #'clean'# } else { echo #'broken'# }
+    if !{succeeds { cargo check -q }} { echo #'clean'# } else { echo ###'broken'### }
     attempt { rm stale.lock }          # suppress any failure
     retry 3 { curl -s $url }           # up to 3 attempts
 
@@ -204,7 +211,7 @@ An error may be raised deliberately using e.g. `fail [status: 2, message: #'fail
 
     let b = { make } 
     let h = defer $b        # keep the handle!
-    #'build started'#
+    ##'build started'##
 
 If you truly have nothing else to do, `await` the handle with a long timeout.
 
@@ -232,13 +239,13 @@ Should you wish for a service that runs *after* the session is over, use `detach
 
     let d = within [dir: #'/app'#] { detach #'gRPC KV store on port 5328'# python server.py }
 
-`detach` takes a description of the task, a binary to call (not a block!), and some arguments. It then asks the OS to run this binary with these arguments, returning a receipt `[pid, desc]`. Stdin, stdout and stderr are `/dev/null`, so you will not receive any updates. Polling that process can only happen using its own logs. Killing this process can only be done with OS primitives, e.g. `kill`. If you detach inside a `grant`, that grant's limits stay on the process for as long as it runs, and nothing later can lift them; a grant may also refuse the call outright with `detach: false`.
+`detach` takes a description of the task, a binary to call (not a block!), and some arguments. It then asks the OS to run this binary with these arguments, returning a receipt `[pid, desc]`. Stdin, stdout and stderr are `/dev/null`, so you will not receive any updates. Polling and killing can happen only through the OS. 
 
 ## Within
 
 `within` is an effect handler that runs a block with a changed directory, environment, or handling of a command call:
 
-    within [dir: #'src'#] { grep-files #'TODO'# }
+    within [dir: #'src'#] { grep-files ##'#TODO'## }
     let h = defer { within [env: [RUST_LOG: #'debug'#]] { cargo run } }
     within [ env : [ API_KEY : #''# ], handlers: [curl: { |args| #'offline stub'# }]] { fetch-all }
     let all_blocked = { |name args| echo "blocked: $name ...$args" }
@@ -260,14 +267,16 @@ Read with `from-X < PATH`, write with `to-X $v > PATH`:
     to-string $report >> $file         # append
     to-json   $cfg    >  $file         # JSON write
 
-Multi-line text with awkward quotes should go through a raw string:
+<critical>
+Writing a multi-line file must use a raw string, ideally with many hashes:
 
-    to-string #'first line
-    second 'quoted' line'# > $file
+    to-string #####'first line
+    second 'quoted' line'##### > $file
+</critical>
 
 ## Exploring
 
-Use the following to search for files; all are `.gitignore` sensitive. Use these instead of `rg`/`find`/`ls`.
+Use the following instead of `rg`/`find`/`ls` to search for files; all are `.gitignore` sensitive. 
 
 - `glob #'src/**/*.rs'#` — matching paths as a ral list; skips dot files. Spread into a command: `mv ...!{glob …} out/`.
 - `explore-dir n` — entries of the current directory to depth `n` as a `ral` list; `.gitignore`-aware
@@ -277,7 +286,9 @@ Use the following to search for files; all are `.gitignore` sensitive. Use these
 
 Scope any of these with `within [dir: …]`.
 
-For dot/ignored files you also have `rg` bundled.
+<critical>
+For dot files and gitignored files you must use `rg` bundled.
+</critical>
 
 ## Help
 
