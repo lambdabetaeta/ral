@@ -19,9 +19,10 @@
 //! that arrives.
 //!
 //! Ranking is fuzzy — the `nucleo` matcher, the Helix team's — for every
-//! surface; [`rank`] is its single home.
+//! surface; [`ral_core::text::rank`] is its single home.
 
 use ral_core::Shell;
+use ral_core::text::rank;
 use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -64,7 +65,7 @@ impl Sources<'_> {
     /// halves as well as within them: a binding name is also a command-position
     /// name, and [`ral_core::path::commands_on_path`] repeats a name once per
     /// directory holding it.  Only the references are sorted, and that order is
-    /// not load-bearing — [`rank::matches`] re-sorts by score.
+    /// not load-bearing — [`rank`] re-sorts by score.
     fn command_names(&self) -> Vec<&String> {
         let mut names: Vec<&String> = self
             .path_commands
@@ -272,7 +273,7 @@ pub(super) fn complete(line: &str, pos: usize, sources: &Sources<'_>) -> (usize,
 /// can be ranked as `&String`s gathered from two backing vectors, cloning
 /// nothing until a name survives the match.
 fn rank_names<T: AsRef<str>>(names: Vec<T>, needle: &str) -> Vec<Candidate> {
-    rank::matches(needle, names, false)
+    rank(needle, names, false)
         .into_iter()
         .map(|name| Candidate {
             display: name.as_ref().to_owned(),
@@ -458,7 +459,7 @@ fn ranked_entries(
     replacement_prefix: &str,
     quote: bool,
 ) -> Vec<Candidate> {
-    rank::matches(name_needle, dir_entries(dir, name_needle), true)
+    rank(name_needle, dir_entries(dir, name_needle), true)
         .into_iter()
         .map(|e| {
             let display = if e.is_dir {
@@ -478,40 +479,6 @@ fn ranked_entries(
             }
         })
         .collect()
-}
-
-// ── Ranking ────────────────────────────────────────────────────────────────
-//
-// Fuzzy ranking via `nucleo`.  An empty needle returns every item (sorted), so
-// an empty prefix lists everything.
-
-mod rank {
-    use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
-    use nucleo_matcher::{Config, Matcher};
-
-    /// Fuzzy-rank `items` against `needle`, best first, dropping non-matches.
-    /// `paths` tunes the matcher for path-like haystacks (a `/`-aware boundary
-    /// bonus).  Ties break alphabetically so the order is deterministic.
-    pub(super) fn matches<T: AsRef<str>>(needle: &str, items: Vec<T>, paths: bool) -> Vec<T> {
-        let config = if paths {
-            Config::DEFAULT.match_paths()
-        } else {
-            Config::DEFAULT
-        };
-        let mut matcher = Matcher::new(config);
-        let atom = Atom::new(
-            needle,
-            CaseMatching::Smart,
-            Normalization::Smart,
-            AtomKind::Fuzzy,
-            false,
-        );
-        let mut scored = atom.match_list(items, &mut matcher);
-        // `match_list` already orders by score descending (stable in input
-        // order on ties); re-break ties alphabetically for a deterministic order.
-        scored.sort_by(|(a, sa), (b, sb)| sb.cmp(sa).then_with(|| a.as_ref().cmp(b.as_ref())));
-        scored.into_iter().map(|(item, _)| item).collect()
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

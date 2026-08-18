@@ -32,7 +32,6 @@ rustyline  = "=18.0.1"
 ratatui    = { version = "0.30", optional = true }
 ansi-to-tui = { version = "8.0.1", optional = true }
 prompt-editor = { path = "../prompt-editor", optional = true }
-nucleo-matcher = "0.3"
 serde_json = { workspace = true }
 clap       = { workspace = true }
 base64     = { workspace = true }

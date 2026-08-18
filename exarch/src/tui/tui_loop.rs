@@ -410,7 +410,14 @@ fn ui_loop(
                     dirty = true;
                     let focused = tui.app.tabs.focused();
                     let steerable = tui.app.is_steerable();
+                    // An open slash-command popup owns its own keys — Enter
+                    // takes the highlighted command instead of submitting the
+                    // line under it, Tab walks the list instead of the tabs.
+                    // Ctrl-C is offered to nothing: the interrupt outranks
+                    // every overlay.
+                    let consumed = !ctrl_key(&k, 'c') && tui.app.prompt_state.menu_key(k.code);
                     match key_action(&k, steerable) {
+                        _ if consumed => {}
                         // Every tab interrupts through the registry, which
                         // cancels the focused entry's token and its current
                         // dispatch scope by handle — published ahead of the

@@ -319,6 +319,22 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  selects over input, inbox (`bus/inbox.rs`), and the session bus (`bus/channel.rs`)
  ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
  [[decisions/260617_scheduled-wakeups|scheduled-wakeups]]).
+- The command token completes **as it is typed**, not on request: while the
+  first row is a bare `/` and command characters, `commands::command_candidates`
+  fuzzy-ranks every name and alias (`ral_core::text::rank`) and `PromptState`
+  holds the result in a `prompt_editor::completion::Menu`, floated out of the
+  top of the prompt box over the transcript — a transient overlay that reserves
+  no row, so the frame never shifts under the reader. A live popup owns ↓/Tab,
+  ↑/⇧Tab, Enter and Esc: Enter takes the highlighted command *into the line* and
+  closes rather than submitting, since the line under an open popup is not yet
+  what the user has chosen, and a second Enter sends it. Ctrl-C is never
+  offered to it: the interrupt outranks every overlay. This is deliberately
+  unlike ral's structural frontend, which opens its menu only on Tab and splices
+  a lone match without showing one — typing here must never move the buffer on
+  its own. Each row also carries the registry's own `SlashCommand.help` line —
+  the same sentence `/help` lists — in a dimmer second column, so the popup
+  never says less than the listing does; `Menu` drops that column first when
+  the terminal is too narrow to hold it.
 - `/model` and `/login` share `picker::overlay_frame`: one centred double-line
   bezel, shadow, palette, padding, title, and hint frame around distinct
   bodies. The login body drives browser or device OAuth on a background thread,
@@ -390,11 +406,11 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/tabs.rs` — session/view lifecycle: `Tabs`, viewports, dispatch order, tabs, titles, dying linger, parent chain, focus management, `tick`'s tombstone eviction past `LINGER`
         - `tui/viewport.rs` — per-session scrollback: `Viewport`, block push/flatten/render, incremental `Printer::sync` (`rebuild_floor`, `evicted_through`), the `VIEWPORT_MAX_BLOCKS`/`VIEWPORT_MAX_ROWS` window caps (oldest evicted first, retired to `user.log` on the way out), the `Log` transcript writer, `Tombstone`
         - `record/commit.rs` — event coalescing, worker-side: `Stream`/`Chopper`, `SurfaceBuffer`, `PatchBuf`, `ObservationBuf`, absorb/flush into `Display` commits
-        - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input
+        - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`)
         - `tui/gesture.rs` — mouse/selection: `GestureState`, `Press`, frame geometry, selection, copy toast, hover, scroll
         - `tui/render.rs` — frame layout: `draw`, `FrameGeom`, `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`
         - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card` (including the compile-time package version), `legend_panel`, ART/EAGLE constants
-        - `tui/commands.rs` — slash command registry: `SlashCommand`, `lookup_command`, `route_submit`, handler functions
+        - `tui/commands.rs` — slash command registry: `SlashCommand`, `lookup_command`, `command_candidates`, `route_submit`, handler functions
         - `tui/status.rs` — status line: `rule_line`, `ctx_ramp`, `wait_bar`, `wait_step`
         - `tui/matrix.rs` — agent matrix and tab bar: `MatrixSort`, `matrix_bar`, justified row projection, `step_cells`
         - `tui/palette.rs` — the TUI colour constants (`CODE_BG`, `SLATE`, `PROMPT_INK`, the agent hues)

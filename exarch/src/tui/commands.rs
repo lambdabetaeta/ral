@@ -14,6 +14,7 @@ use super::tui_loop::Tui;
 use super::viewport;
 use crate::bus::{Mailbox, Post};
 use crate::fleet::registry::AgentRegistry;
+use prompt_editor::completion::Candidate;
 use ral_core::path::sigil::expand_path_prefix;
 pub(super) struct SlashCommand {
     pub(super) name: &'static str,
@@ -125,18 +126,64 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
     },
 ];
 
+/// The command a token names, by its own name or by one of its aliases.
+fn by_token(token: &str) -> Option<&'static SlashCommand> {
+    SLASH_COMMANDS
+        .iter()
+        .find(|c| c.name == token || c.aliases.contains(&token))
+}
+
 /// The command named by `trimmed`'s first token, with the trimmed remainder as
 /// its argument.  An argument-less command matches only when typed alone, so
 /// `/copy this` declines and the line proceeds to the model as a prompt.
 pub(super) fn lookup_command(trimmed: &str) -> Option<(&'static SlashCommand, &str)> {
     let (head, rest) = split_head(trimmed);
-    let cmd = SLASH_COMMANDS
-        .iter()
-        .find(|c| c.name == head || c.aliases.contains(&head))?;
+    let cmd = by_token(head)?;
     if cmd.arg.is_none() && !rest.is_empty() {
         return None;
     }
     Some((cmd, rest))
+}
+
+/// Whether `line` is still a bare command token: a `/` and the characters a
+/// command name is spelled with.  A space ends the token, and with it the
+/// popup — what follows is an argument, which the registry cannot complete.
+fn composing_command(line: &str) -> bool {
+    line.strip_prefix('/').is_some_and(|rest| {
+        rest.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    })
+}
+
+/// What `line` could still become, best first: every command name and every
+/// alias that fuzzy-matches it, the bare `/` matching all of them.
+///
+/// An alias stands for itself — accepting one from `/ex` yields `/exit`, not
+/// the `/quit` it routes to — and the trailing argument rides the display
+/// alone, so the user types the space that separates it from the command.
+/// The registry's `help` line rides the detail column, likewise never spliced.
+pub(super) fn command_candidates(line: &str) -> Vec<Candidate> {
+    if !composing_command(line) {
+        return Vec::new();
+    }
+    let tokens: Vec<&'static str> = SLASH_COMMANDS
+        .iter()
+        .flat_map(|c| std::iter::once(c.name).chain(c.aliases.iter().copied()))
+        .collect();
+    ral_core::text::rank(line, tokens, false)
+        .into_iter()
+        .map(|token| {
+            let cmd = by_token(token);
+            Candidate {
+                display: match cmd.and_then(|c| c.arg) {
+                    Some(arg) => format!("{token} {arg}"),
+                    None => token.to_string(),
+                },
+                detail: cmd.map(|c| c.help.to_string()),
+                replacement: token.to_string(),
+            }
+        })
+        .collect()
 }
 
 /// Whether `text` names a command — the prompt-box highlight, run through
@@ -159,10 +206,7 @@ pub(super) fn split_head(trimmed: &str) -> (&str, &str) {
 /// fall-through to the model.
 pub(super) fn unrecognized_command(trimmed: &str) -> Option<&str> {
     let head = trimmed.split_whitespace().next()?;
-    let known = SLASH_COMMANDS
-        .iter()
-        .any(|c| c.name == head || c.aliases.contains(&head));
-    (head.starts_with('/') && !known).then_some(head)
+    (head.starts_with('/') && by_token(head).is_none()).then_some(head)
 }
 
 /// Resolve a typed `/export` path: expand a `~`/`xdg:` head, then anchor a
@@ -391,7 +435,17 @@ pub(super) fn route_submit(
 
 #[cfg(test)]
 mod tests {
-    use super::{lookup_command, resolve_export_path, unrecognized_command};
+    use super::{
+        SLASH_COMMANDS, command_candidates, lookup_command, resolve_export_path,
+        unrecognized_command,
+    };
+
+    fn replacements(line: &str) -> Vec<String> {
+        command_candidates(line)
+            .into_iter()
+            .map(|c| c.replacement)
+            .collect()
+    }
 
     fn dispatch(input: &str) -> Option<(&'static str, String)> {
         lookup_command(input).map(|(c, arg)| (c.name, arg.to_string()))
@@ -456,6 +510,35 @@ mod tests {
         // to the model, not a typo.
         assert_eq!(unrecognized_command("/copy this"), None);
         assert_eq!(unrecognized_command("just a prompt"), None);
+    }
+
+    #[test]
+    fn a_bare_slash_offers_every_command_and_alias() {
+        let all: usize = SLASH_COMMANDS.iter().map(|c| c.aliases.len() + 1).sum();
+        assert_eq!(replacements("/").len(), all);
+    }
+
+    #[test]
+    fn a_prefix_narrows_and_an_alias_stands_for_itself() {
+        assert_eq!(replacements("/thin"), ["/thinking"]);
+        assert!(replacements("/ex").contains(&"/exit".to_string()));
+    }
+
+    #[test]
+    fn a_typed_space_or_a_plain_line_ends_the_completion() {
+        assert!(replacements("/export ").is_empty());
+        assert!(replacements("/export ~/notes.md").is_empty());
+        assert!(replacements("what is a monad").is_empty());
+    }
+
+    #[test]
+    fn the_argument_hint_shows_but_is_never_spliced() {
+        let export = command_candidates("/export")
+            .into_iter()
+            .find(|c| c.replacement == "/export")
+            .expect("/export completes itself");
+        assert_eq!(export.display, "/export <path>");
+        assert_eq!(export.detail.as_deref(), Some("Write the user view to a file."));
     }
 
     // Twins rather than one genericised test: absoluteness is host-defined

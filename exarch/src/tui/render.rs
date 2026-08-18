@@ -232,13 +232,14 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
             )),
             status_rect,
         );
+        // One geometry for the box's interior: the editor draws inside it, and
+        // the completion popup aligns its left edge with the text.
+        let inner = prompt_block(Style::default()).inner(prompt_row);
         if let Some(line) = prompt_hint {
             let block = prompt_block(Style::default().fg(SLATE).add_modifier(Modifier::DIM));
             f.render_widget(Paragraph::new(line).block(block), prompt_row);
         } else {
-            let block = prompt_block(Style::default().fg(PINK));
-            let inner = block.inner(prompt_row);
-            f.render_widget(block, prompt_row);
+            f.render_widget(prompt_block(Style::default().fg(PINK)), prompt_row);
             app.prompt_state.render(f, inner);
             // No native cursor while an overlay owns the keyboard, or it
             // peeks out from beneath it.
@@ -249,6 +250,22 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
                 let y = inner.y + pos.1.min(inner.height.saturating_sub(1));
                 f.set_cursor_position(Position::new(x, y));
             }
+        }
+        // The slash-command popup rises out of the prompt box over the
+        // transcript, reserving no row of its own: nothing below the prompt
+        // is free, and a layout that grew and shrank with the typing would
+        // shift the whole frame under the reader.
+        if let Some(menu) = app.prompt_state.menu() {
+            let h = menu.height().min(prompt_row.y);
+            menu.render(
+                f,
+                Rect {
+                    x: inner.x,
+                    y: prompt_row.y - h,
+                    width: inner.width,
+                    height: h,
+                },
+            );
         }
         f.render_widget(Paragraph::new(footer_hint()), footer_row);
         if let Some((n, ts)) = app.gesture.copy_toast()

@@ -1,6 +1,9 @@
 use super::commands;
+use super::palette::SLATE;
 use crate::bus::Inbox;
+use prompt_editor::completion::Menu;
 use prompt_editor::{EditMode, PromptEditor};
+use ratatui::crossterm::event::KeyCode;
 use ratatui::style::{Color, Modifier, Style};
 /// The prompt line: editor, history, and the draft stashed while browsing it.
 pub(super) struct PromptState {
@@ -10,6 +13,9 @@ pub(super) struct PromptState {
     draft: String,
     cx_pending: bool,
     editor_request: bool,
+    /// The live slash-command popup, re-derived from the line by every path
+    /// that moves the cursor or touches the buffer.
+    menu: Option<Menu>,
 }
 
 impl PromptState {
@@ -24,6 +30,7 @@ impl PromptState {
             draft: String::new(),
             cx_pending: false,
             editor_request: false,
+            menu: None,
         }
     }
 
@@ -35,6 +42,7 @@ impl PromptState {
         self.history.push(prompt.clone());
         self.hist_pos = None;
         self.editor.clear();
+        self.refresh_menu();
         Some(prompt)
     }
 
@@ -55,6 +63,7 @@ impl PromptState {
     pub(super) fn paste(&mut self, s: &str) {
         self.cx_pending = false;
         self.editor.insert_str(s);
+        self.refresh_menu();
     }
 
     /// Adopt the external editor's `text` as the live draft, ending any history
@@ -110,6 +119,52 @@ impl PromptState {
     pub(super) fn set_prompt(&mut self, s: &str) {
         self.editor.clear();
         self.editor.insert_str(s);
+        self.refresh_menu();
+    }
+
+    /// The open slash-command popup, for the frame to float above the box.
+    pub(super) fn menu(&self) -> Option<&Menu> {
+        self.menu.as_ref()
+    }
+
+    /// Re-derive the popup from the line as it now stands, so it can never
+    /// describe a line that is no longer there.  It is live only while the
+    /// cursor is still composing a command token on the first row; the token
+    /// starts at that row's first byte, and the area the frame hands
+    /// [`Menu::render`] is the box's interior, so neither offset is the
+    /// popup's to carry.
+    fn refresh_menu(&mut self) {
+        let candidates = match self.editor.line(0) {
+            Some(line) if self.editor.row() == 0 => commands::command_candidates(&line),
+            _ => Vec::new(),
+        };
+        self.menu = Menu::open(candidates, 0, 0, 0).map(|m| {
+            m.style(Style::default().fg(Color::Cyan), Style::default().fg(SLATE))
+                .detail_style(Style::default().fg(SLATE))
+        });
+    }
+
+    /// Offer `code` to an open popup, which owns ↓/Tab, ↑/⇧Tab, Enter and Esc
+    /// for as long as it is up, and reports whether it took the key.
+    ///
+    /// Enter takes the highlighted command into the line and closes rather
+    /// than submitting: the line under an open popup is not yet what the user
+    /// has chosen.  A second Enter, with the popup gone, sends it.
+    pub(super) fn menu_key(&mut self, code: KeyCode) -> bool {
+        let Some(menu) = self.menu.as_mut() else {
+            return false;
+        };
+        match code {
+            KeyCode::Down | KeyCode::Tab => menu.select_next(),
+            KeyCode::Up | KeyCode::BackTab => menu.select_prev(),
+            KeyCode::Enter => {
+                let menu = self.menu.take().expect("the popup is open");
+                menu.accept(&mut self.editor);
+            }
+            KeyCode::Esc => self.menu = None,
+            _ => return false,
+        }
+        true
     }
 
     /// Recall the previous prompt; the live draft is stashed on entry.
@@ -148,6 +203,7 @@ impl PromptState {
     /// and the shell line-edit chords itself.
     pub(super) fn edit_input(&mut self, k: ratatui::crossterm::event::KeyEvent) {
         self.editor.handle_key(k);
+        self.refresh_menu();
     }
     pub(super) fn height_hint(&self, text_width: u16, area_height: u16) -> u16 {
         self.editor.height_hint(text_width, area_height)

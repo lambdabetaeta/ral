@@ -48,7 +48,7 @@ prompt-editor = { path = "../prompt-editor" }
 # Fuzzy matcher for the `/model` picker surface; already compiled
 # transitively via `fff-search`, so this resolves to the same crate at no
 # extra cost.
-nucleo-matcher = "0.3"
+nucleo-matcher = { workspace = true }
 grep       = "0.4"
 ignore     = "0.4"
 tempfile   = "3.27"

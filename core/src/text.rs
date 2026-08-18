@@ -1,6 +1,11 @@
-//! Snapping byte offsets to UTF-8 char boundaries, and byte↔char conversion.
-//! std's `str::floor_char_boundary` / `ceil_char_boundary` are still unstable,
-//! hence these.
+//! Text primitives the whole tree shares.
+//!
+//! Snapping byte offsets to UTF-8 char boundaries, byte↔char conversion, and
+//! fuzzy ranking.  std's `str::floor_char_boundary` / `ceil_char_boundary` are
+//! still unstable, hence the first of those.
+
+use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
+use nucleo_matcher::{Config, Matcher};
 
 /// Snap `offset` to the nearest char boundary at or before it, clamped into `s`.
 pub fn floor_char_boundary(s: &str, offset: usize) -> usize {
@@ -33,6 +38,35 @@ pub fn char_to_byte(text: &str, cursor: usize) -> usize {
     text.char_indices()
         .nth(cursor)
         .map_or(text.len(), |(i, _)| i)
+}
+
+/// Fuzzy-rank `items` against `needle`, best first, dropping non-matches.
+///
+/// The matcher is `nucleo`, the Helix team's, and this is its single home: every
+/// surface that offers a user a filtered list — completion menus, pickers —
+/// matches the same way.  An empty needle matches everything, so an empty prefix
+/// lists the whole pool.  `paths` tunes the matcher for path-like haystacks (a
+/// `/`-aware boundary bonus).  Ties break alphabetically so the order is
+/// deterministic.
+pub fn rank<T: AsRef<str>>(needle: &str, items: Vec<T>, paths: bool) -> Vec<T> {
+    let config = if paths {
+        Config::DEFAULT.match_paths()
+    } else {
+        Config::DEFAULT
+    };
+    let mut matcher = Matcher::new(config);
+    let atom = Atom::new(
+        needle,
+        CaseMatching::Smart,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+        false,
+    );
+    let mut scored = atom.match_list(items, &mut matcher);
+    // `match_list` already orders by score descending (stable in input order on
+    // ties); re-break ties alphabetically for a deterministic order.
+    scored.sort_by(|(a, sa), (b, sb)| sb.cmp(sa).then_with(|| a.as_ref().cmp(b.as_ref())));
+    scored.into_iter().map(|(item, _)| item).collect()
 }
 
 #[cfg(test)]

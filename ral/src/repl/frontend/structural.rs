@@ -28,6 +28,7 @@ use ral_core::types::HandleState;
 use ral_core::{CompileOutcome, Value};
 
 use ansi_to_tui::IntoText;
+use prompt_editor::completion::{Candidate as MenuCandidate, MENU_MAX_ROWS, Menu};
 use prompt_editor::{EditMode, PromptEditor};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -60,9 +61,6 @@ use crate::repl::plugin::{
 use crate::repl::worksheet::Worksheet;
 use ral_core::text::char_to_byte;
 
-mod menu;
-use menu::Menu;
-
 // ── Palette ───────────────────────────────────────────────────────────────
 
 const TYPE_HUE: Color = Color::Rgb(135, 200, 215); // cyan — types
@@ -79,12 +77,6 @@ const TICK: Duration = Duration::from_millis(120);
 /// Upper bound on the inline viewport's height, so a session with many
 /// bindings never swallows the whole screen — scrollback must stay visible.
 const MAX_VIEWPORT: u16 = 18;
-
-/// The completion menu shows at most this many candidate rows at once,
-/// scrolling within them.  The lower band reserves room for this many rows so
-/// a menu opened on a fresh session (empty worksheet) still has space to drop
-/// down rather than being clipped to a two-row projection band.
-const MENU_MAX_ROWS: u16 = 6;
 
 /// What [`StructuralFrontend::compose`]'s edit loop breaks with.  `Done` is a
 /// finished read; `Keybinding` is a plugin key that fired and must be
@@ -296,6 +288,8 @@ impl StructuralFrontend {
                         continue;
                     }
                     KeyCode::Enter => {
+                        // Whether the splice landed or the cursor had wandered
+                        // off the trigger row, the menu is spent either way.
                         menu.take().unwrap().accept(&mut prompt);
                         continue;
                     }
@@ -402,7 +396,22 @@ impl StructuralFrontend {
                                     )]
                                     let anchor_col =
                                         prompt_lines.last_w + line[..start].chars().count() as u16;
-                                    menu = Some(Menu::open(candidates, start, row, anchor_col));
+                                    // The popup keeps its own candidate shape;
+                                    // here is the one seam the engine's crosses.
+                                    let rows = candidates
+                                        .into_iter()
+                                        .map(|c| MenuCandidate {
+                                            display: c.display,
+                                            detail: None,
+                                            replacement: c.replacement,
+                                        })
+                                        .collect();
+                                    menu = Menu::open(rows, start, row, anchor_col).map(|m| {
+                                        m.style(
+                                            Style::default().fg(NAME_HUE),
+                                            Style::default().fg(SLATE),
+                                        )
+                                    });
                                 }
                             }
                         }

@@ -1,3 +1,5 @@
+pub mod completion;
+
 use crossterm::event::KeyEvent;
 use edtui::{EditorEventHandler, EditorMode, EditorState, EditorTheme, EditorView, Index2, Lines};
 use edtui_jagged::index::RowIndex;
@@ -359,7 +361,7 @@ fn key_to_edtui(key: crossterm::event::KeyEvent) -> Option<edtui::events::KeyInp
     }
 }
 
-fn char_to_byte(text: &str, cursor: usize) -> usize {
+pub(crate) fn char_to_byte(text: &str, cursor: usize) -> usize {
     text.char_indices()
         .nth(cursor)
         .map_or(text.len(), |(i, _)| i)

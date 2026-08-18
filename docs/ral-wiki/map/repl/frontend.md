@@ -1,7 +1,7 @@
 ---
 generated_at_commit: 19d53bb
 generated_at_date: 2026-07-28
-covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/completion.rs, ral/src/repl/complete.rs, ral/src/repl/highlight_style.rs]
+covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/completion.rs, ral/src/repl/complete.rs, ral/src/repl/highlight_style.rs, prompt-editor/src/completion.rs, core/src/text.rs]
 ---
 
 # Map: repl / frontend
@@ -76,7 +76,9 @@ builtins + handlers + bindings; cwd-anchored path entries), and ranks them.
 `completion::complete(line, pos, &Sources) -> (replace_from, Vec<Candidate>)`
 is the single entry point both surfaces call. Ranking is `nucleo` fuzzy
 matching for every surface — path-tuned for path entries, ties broken
-alphabetically.
+alphabetically — and lives in `ral_core::text::rank`, a generic `AsRef<str>`
+function with no UI in it, so exarch's pickers match the same way ral's menus
+do. `Candidate` is the engine's own type and stays here.
 
 - `complete.rs::RalHelper` is the **rustyline adapter**: it holds the `Sources`
   snapshot (rebuilt each prompt via `refresh`), delegates `Completer::complete`
@@ -88,10 +90,16 @@ alphabetically.
   table of legal highlight styles — each row gives the name, its ANSI escape
   (`style_ansi`, which `_ed-highlight` validates against), and its ratatui cell
   style (`style_ratatui`) — so the two surfaces cannot drift.
-- `structural.rs` drives the engine as a **drop-down menu band**
-  (`structural/menu.rs`): Tab completes the token under the cursor — a unique
-  match is spliced in place, several open a bordered popup rendered over the
-  top of the projection band, anchored under the token. Tab/↓ and ⇧Tab/↑ cycle
-  the selection, Enter accepts, Esc (or any editing key) dismisses. The lower
-  band reserves room for the menu so a fresh session still has space to drop it
-  down.
+- `structural.rs` drives the engine as a **drop-down menu band**: Tab completes
+  the token under the cursor — a unique match is spliced in place, several open
+  a bordered popup rendered over the top of the projection band, anchored under
+  the token. Tab/↓ and ⇧Tab/↑ cycle the selection, Enter accepts, Esc (or any
+  editing key) dismisses. The lower band reserves room for the menu so a fresh
+  session still has space to drop it down. The popup itself is
+  `prompt_editor::completion::Menu`, shared with exarch and painted in the
+  host's palette; it takes its own `Candidate` (`display`, `detail`,
+  `replacement`), which the engine's candidates convert into at the one call
+  to `Menu::open` — always with `detail: None`, since a filename or a binding
+  name is its own whole story and carries no gloss. exarch's slash commands
+  are the one caller that fills `detail`, from the registry's own `help` line;
+  see [[map/exarch/frontend]].

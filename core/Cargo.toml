@@ -64,6 +64,7 @@ csv           = { workspace = true }
 postcard      = { version = "1", features = ["alloc"] }
 anstyle-query = "1"
 ariadne       = "0.6"
+nucleo-matcher = { workspace = true }
 ral-ripgrep-core = { path = "../vendor/ripgrep-core", optional = true }
 uucore        = { version = "0.10", optional = true }
 uu_ls         = { version = "0.10", optional = true }
