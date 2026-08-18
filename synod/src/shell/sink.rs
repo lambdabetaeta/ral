@@ -25,8 +25,8 @@ use exarch::bus::{AgentId, Sink};
 use exarch::record::{Display, Forensic, Protocol, Record, Transient};
 use serde::Serialize;
 
-/// A shadow of [`Mark`] whose byte-carrying variants (`Listing`, `Raw`) hold
-/// lossy text instead of raw bytes.
+/// A shadow of [`Mark`] whose byte-carrying variant (`Raw`) holds lossy text
+/// instead of raw bytes.
 ///
 /// A JSON array of small-integer bytes is pure waste over the wire — the
 /// window only ever renders the text, never re-decodes the bytes — so the
@@ -38,7 +38,6 @@ pub enum MarkDto {
     Measure(Measure),
     Fields { rows: Vec<Field> },
     Diff { path: String, hunks: Vec<Hunk> },
-    Listing { text: String, more: bool },
     Raw { text: String },
 }
 
@@ -51,10 +50,6 @@ fn marks_dto(card: Card) -> Vec<MarkDto> {
             Mark::Measure(m) => MarkDto::Measure(m),
             Mark::Fields { rows } => MarkDto::Fields { rows },
             Mark::Diff { path, hunks } => MarkDto::Diff { path, hunks },
-            Mark::Listing { bytes, more } => MarkDto::Listing {
-                text: String::from_utf8_lossy(&bytes).into_owned(),
-                more,
-            },
             Mark::Raw { bytes } => MarkDto::Raw {
                 text: String::from_utf8_lossy(&bytes).into_owned(),
             },
@@ -601,23 +596,6 @@ mod tests {
             panic!("a helper's own deliberate card still stays inside the dial");
         };
         assert!(marks.is_empty());
-    }
-
-    #[test]
-    fn listing_with_invalid_utf8_projects_to_lossy_text() {
-        let bytes = vec![0xff, 0xfe];
-        let expected = String::from_utf8_lossy(&bytes).into_owned();
-        let card = Card(vec![Mark::Listing { bytes, more: false }]);
-        let marks = serde_json::to_value(&card).expect("Card's derived Serialize cannot fail");
-        let Some(SynodEvent::Card { marks }) = project(&Record::Display(Display::Card { marks }))
-        else {
-            panic!("expected a Card event");
-        };
-        let [MarkDto::Listing { text, more }] = marks.as_slice() else {
-            panic!("expected exactly one Listing mark");
-        };
-        assert_eq!(*text, expected);
-        assert!(!more);
     }
 
     #[test]

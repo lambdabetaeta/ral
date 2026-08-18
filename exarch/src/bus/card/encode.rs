@@ -146,7 +146,7 @@ fn encode_mark(mark: &Mark) -> RalValue {
                 ),
             ]))),
         },
-        Mark::Raw { bytes } | Mark::Listing { bytes, .. } => RalValue::Variant {
+        Mark::Raw { bytes } => RalValue::Variant {
             label: "raw".into(),
             payload: Some(Box::new(RalValue::map(vec![(
                 "bytes".into(),
@@ -215,10 +215,6 @@ mod tests {
             Mark::Raw {
                 bytes: b"hi".to_vec(),
             },
-            Mark::Listing {
-                bytes: b"lst".to_vec(),
-                more: true,
-            },
         ]);
         let got = round_trip(&full);
         assert_eq!(got.marks().len(), full.marks().len());
@@ -235,8 +231,6 @@ mod tests {
                 && matches!(hunks[0].rows.as_slice(), [Row::Del(_), Row::Add(_), Row::Context(_)])
                 && matches!(hunks[0].rows[0].segs(), [Seg { emph: true, .. }])));
         assert!(matches!(&got.marks()[4], Mark::Raw { bytes } if bytes == b"hi"));
-        // `Listing` is outside the decoder's image; it collapses to `raw`.
-        assert!(matches!(&got.marks()[5], Mark::Raw { bytes } if bytes == b"lst"));
 
         let bare = Card(vec![
             Mark::Text {

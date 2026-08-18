@@ -191,7 +191,7 @@ pub(crate) fn run(
             .expect("atomic_commit is only Some when plan.stdout_file is Some");
         if outcome.is_success() {
             let old_bytes = commit.old_snapshot_for_diff();
-            let preview = commit.temp_preview();
+            let preview = commit.new_snapshot_for_diff();
             match commit.commit() {
                 Ok(()) => {
                     observe(

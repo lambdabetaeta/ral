@@ -162,9 +162,8 @@ pub struct Field {
 /// One mark on the plane — closed and small so the renderer is total, stacked
 /// openly into a [`Card`] in ral.
 ///
-/// A kit may surface every variant but `Listing`, the host-composed
-/// gutter-numbered head of a freshly-written file; `Raw` is pre-formed bytes
-/// appended verbatim.
+/// A kit may surface every variant; `Raw` is pre-formed bytes appended
+/// verbatim.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "mark", rename_all = "snake_case")]
 pub enum Mark {
@@ -172,7 +171,6 @@ pub enum Mark {
     Measure(Measure),
     Fields { rows: Vec<Field> },
     Diff { path: String, hunks: Vec<Hunk> },
-    Listing { bytes: Vec<u8>, more: bool },
     Raw { bytes: Vec<u8> },
 }
 
@@ -380,9 +378,7 @@ pub(crate) fn summary_line(card: &Card) -> String {
                 .collect::<Vec<_>>()
                 .join(", "),
             Mark::Diff { path, .. } => format!("diff {path}"),
-            Mark::Listing { bytes, .. } | Mark::Raw { bytes } => {
-                collapse(&String::from_utf8_lossy(bytes))
-            }
+            Mark::Raw { bytes } => collapse(&String::from_utf8_lossy(bytes)),
         };
         if !part.is_empty() {
             parts.push(part);

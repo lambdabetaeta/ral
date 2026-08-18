@@ -49,9 +49,14 @@ pub enum Observed {
         path: String,
         mode: RedirectMode,
         outcome: WriteOutcome,
-        /// A bounded head of what landed, on commit only.
+        /// The whole content that landed, on an atomic commit small enough to
+        /// carry it.  Never a prefix: a card reads a write as the change it
+        /// made, and half a side is not a change.
         new_bytes: Option<Vec<u8>>,
-        /// The target's whole prior content, atomic overwrites only.
+        /// The target's whole prior content, empty for a file that did not yet
+        /// exist.  `None` means the before-image is *unknown* — a target too
+        /// large to read whole — which is not the same fact and must not read
+        /// as a creation.
         old_bytes: Option<Vec<u8>>,
     },
     Read {

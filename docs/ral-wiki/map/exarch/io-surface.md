@@ -75,11 +75,14 @@ dispatch, builtins included.
     or `deferred` when a stop parks the child with the staged temp intact.
 
   Mode is `write` / `append` / `stream`. No byte count — path, mode, outcome,
-  plus the bounded content snapshots the write card previews and diffs from.
-  Bounded at 64 KiB a side (`PREVIEW_CAP`): the redirect never holds either
-  side in memory otherwise, and a diff of truncated prefixes would describe a
-  change that never landed, so past the cap the card falls back to listing the
-  head of what was written. This governs `>` alone — an edit diffs at the edit.
+  plus the two content snapshots the write card diffs. Each is whole or absent,
+  never a prefix, and each is read only within 64 KiB (`PREVIEW_CAP`): the
+  redirect holds neither side in memory otherwise, and half a side is not a
+  change. `old_bytes` is *empty* for a file that did not yet exist — a known
+  before-image — and absent only when the target could not be read whole, which
+  is an unknown one; the card diffs the first and shows nothing for the second,
+  so an overwrite can never read as a creation. This governs `>` alone: an edit
+  holds both texts already and diffs at the edit, under no cap.
 - **Commands** are hooked *after* resolution, at the completion doors, never
   at the call site (where the head may still resolve to a closure or
   builtin). Every command — builtin, external, or detached — is one
@@ -124,7 +127,7 @@ Every observation carries a common envelope — `kind`, `script`, `line`, `col`,
 
 ```
 {kind:"read",             path, …envelope}
-{kind:"write",            path, mode:"write"|"append"|"stream", outcome:"committed"|"aborted"|"deferred"|"failed", new_bytes?, old_bytes?, …envelope}
+{kind:"write",            path, mode:"write"|"append"|"stream", outcome:"committed"|"aborted"|"deferred"|"failed", new_bytes?, old_bytes?, …envelope}   # each snapshot whole or absent
 {kind:"command",          argv:[prog, …args], status, origin:"builtin"|"external"|"detached", stdout, stderr, error, value, …envelope}
 {kind:"grep",             scope, pattern, …envelope}                      # emitted by the grep builtin
 {kind:"capability-check", resource, decision:"allowed"|"denied"|"flagged", …fields, …envelope}
@@ -162,10 +165,11 @@ reads `write <path> <outcome>` whatever its mode (the mode rides the recorded
 observation): `committed` uses the `ok` role, `aborted` and `deferred` use
 `warn`, and `failed` uses `bad`
 — and a *committed* write previews its content below the heading
-(`write_preview`): a whole-file `diff` mark against the prior snapshot when
-core supplied one (an atomic write over an existing file, both sides UTF-8
-and under the read cap), else the first lines of the new content as one
-`listing` mark; a command keeps the conventional `$` prompt, the program as
+(`write_preview`): a whole-file `diff` mark against the prior snapshot, which
+for a file the write created is the empty one, so a creation reads as every
+line added rather than as a shape of its own — and no mark at all when the
+door could not read a side whole or either side is not text, leaving the
+heading to report a write it cannot show; a command keeps the conventional `$` prompt, the program as
 `path`, each arg as plain ink, and a `→ status` tail roled `ok`/`bad` off the
 observation's own `status`; grep is the pattern as `code` `in` the cwd scope
 as `path`; a capability check reads `check <resource> <decision> <fields…>`,
@@ -186,7 +190,7 @@ natural boundaries through per-kind group helpers into **one card per
 non-empty kind** in a fixed Read → Exec → Grep order. A capability check or
 worker birth never joins the buffer — rare and high-signal enough to earn its
 own line. A **write**
-joins it but no group: its diff/listing preview is a barrier, not a foldable
+joins it but no group: its diff is a barrier, not a foldable
 observation, so it flushes as its own card, *last*, after the read/exec/grep
 groups. That last position is the point. A redirect writes at the *seam*,
 mid-call, so a write landed eagerly would sit between a call and the reads it

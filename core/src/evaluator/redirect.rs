@@ -297,7 +297,7 @@ impl<'a> RedirectFrame<'a> {
                 WriteFate::Commit => {
                     if let Some(commit) = intent.commit {
                         old_bytes = commit.old_snapshot_for_diff();
-                        new_bytes = commit.temp_preview();
+                        new_bytes = commit.new_snapshot_for_diff();
                         match commit.commit() {
                             Ok(()) => outcome = WriteOutcome::Committed,
                             Err(e) => {

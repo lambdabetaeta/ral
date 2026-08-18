@@ -262,41 +262,38 @@ fn capability_fields(fields: &Map) -> String {
         .join(" ")
 }
 
-/// Leading lines a write card lists when it cannot diff.
-const WRITE_PREVIEW_LINES: usize = 10;
-
-/// Preview a committed write: a whole-file [`Mark::Diff`] when `old` is present
-/// and both sides are valid UTF-8, else the head of `new` as a
-/// [`Mark::Listing`] — the fallback for a new file, binary content, or a side
-/// too large for core to have read a pre-image of.  A redirect's write reaches
-/// here and nothing else does: an edit holds both its texts already and diffs
-/// at the edit itself (`shell_eval::builtins`'s `surface_edit`), under no cap.
+/// What a committed write shows of itself: the change it made, as a whole-file
+/// [`Mark::Diff`], or nothing.
+///
+/// A write has one thing to say and one way to say it. Creating a file is not a
+/// separate kind of event needing a separate kind of preview — it is a change
+/// against the empty before-image, and reads as one, every line an addition.
+/// The door hands that empty side over as `Some(&[])`, so `old` being `Some`
+/// means the before-image is *known*, not that the file existed.
+///
+/// Nothing is shown when no diff can be read off: `old` absent (a target the
+/// door could not read whole, whose prior content is unknown — diffing against
+/// nothing there would claim the file was created), `new` absent (the staged
+/// side likewise), either side not being text, or the two agreeing. The card is
+/// then its heading alone: a write reported and not shown.
+///
+/// A redirect's write reaches here and nothing else does: an edit holds both
+/// its texts already and diffs at the edit itself
+/// (`shell_eval::builtins`'s `surface_edit`), under no cap at all.
 fn write_preview(path: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> Vec<Mark> {
-    let new = match new {
-        Some(b) if !b.is_empty() => b,
-        _ => return Vec::new(),
-    };
-    if let Some(old) = old
-        && let (Ok(old_text), Ok(new_text)) = (std::str::from_utf8(old), std::str::from_utf8(new))
-    {
-        let hunks = whole_file_hunks(old_text, new_text);
-        if !hunks.is_empty() {
-            return vec![Mark::Diff {
-                path: path.to_string(),
-                hunks,
-            }];
-        }
-    }
-    let text = String::from_utf8_lossy(new);
-    let mut lines = text.lines();
-    let head: Vec<&str> = lines.by_ref().take(WRITE_PREVIEW_LINES).collect();
-    if head.is_empty() {
+    let (Some(old), Some(new)) = (old, new.filter(|b| !b.is_empty())) else {
         return Vec::new();
+    };
+    let (Ok(old_text), Ok(new_text)) = (std::str::from_utf8(old), std::str::from_utf8(new)) else {
+        return Vec::new();
+    };
+    match whole_file_hunks(old_text, new_text) {
+        hunks if hunks.is_empty() => Vec::new(),
+        hunks => vec![Mark::Diff {
+            path: path.to_string(),
+            hunks,
+        }],
     }
-    vec![Mark::Listing {
-        bytes: head.join("\n").into_bytes(),
-        more: lines.next().is_some(),
-    }]
 }
 
 // ── Observation groups: a run of buffered surfaces of one kind → one card ────

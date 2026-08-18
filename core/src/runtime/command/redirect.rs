@@ -92,40 +92,43 @@ impl PendingWrite {
         let _ = std::fs::remove_file(&self.tmp);
     }
 
-    /// The head of the staged file: what will land at `target` if `commit`
-    /// succeeds.
+    /// The whole staged file: what will land at `target` if `commit` succeeds.
+    ///
+    /// `None` past [`PREVIEW_CAP`], never a prefix. A card shows a write as the
+    /// change it made, and a change cannot be read off part of one side — a
+    /// truncated preview would describe a file that never existed. Past the cap
+    /// the write is reported and not shown.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:surface:atomic-temp-read] Sub-step of the atomic `>` write door's preview surface: read the head of the tmp file before the rename commits it. The write card surfaces when the redirect frame settles; this read is not a separate model operation."
+        reason = "[io-door:surface:atomic-temp-read] Sub-step of the atomic `>` write door's preview surface: stat and read the tmp file before the rename commits it. The write card surfaces when the redirect frame settles; this read is not a separate model operation."
     )]
-    pub(crate) fn temp_preview(&self) -> Option<Vec<u8>> {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        std::fs::File::open(&self.tmp)
-            .ok()?
-            .take(PREVIEW_CAP)
-            .read_to_end(&mut buf)
-            .ok()?;
-        Some(buf)
-    }
-
-    /// The target's content before the rename — untouched until `commit`, so
-    /// the write card can diff against it.  `None` for a new file, and when
-    /// either side exceeds [`PREVIEW_CAP`]: a diff of truncated prefixes would
-    /// describe a change that never landed.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[io-door:surface:atomic-old-read] Sub-step of the atomic `>` write door's diff-eligibility check: stat and read the target's pre-existing content before the rename commits it, exactly mirroring temp_preview's read of the new side. Not a separate model operation — the write/diff card surfaces when the redirect frame settles."
-    )]
-    pub(crate) fn old_snapshot_for_diff(&self) -> Option<Vec<u8>> {
-        let old_meta = std::fs::metadata(&self.target).ok()?;
-        if old_meta.len() > PREVIEW_CAP {
-            return None;
-        }
+    pub(crate) fn new_snapshot_for_diff(&self) -> Option<Vec<u8>> {
         if std::fs::metadata(&self.tmp).ok()?.len() > PREVIEW_CAP {
             return None;
         }
-        std::fs::read(&self.target).ok()
+        std::fs::read(&self.tmp).ok()
+    }
+
+    /// The target's content before the rename — untouched until `commit`, so
+    /// the write card can diff against it.
+    ///
+    /// `Some` means the before-image is *known*, and a file that does not yet
+    /// exist has a known before-image: the empty one, against which the write
+    /// reads as every line added. `None` is reserved for a target that exists
+    /// and cannot be read whole — past [`PREVIEW_CAP`], on the same ground as
+    /// [`Self::new_snapshot_for_diff`], or unreadable. Keeping the two apart is
+    /// what stops a card diffing an overwrite against nothing and claiming the
+    /// file was created.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:surface:atomic-old-read] Sub-step of the atomic `>` write door's diff-eligibility check: stat and read the target's pre-existing content before the rename commits it, exactly mirroring new_snapshot_for_diff's read of the new side. Not a separate model operation — the write/diff card surfaces when the redirect frame settles."
+    )]
+    pub(crate) fn old_snapshot_for_diff(&self) -> Option<Vec<u8>> {
+        match std::fs::metadata(&self.target) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
+            Ok(m) if m.len() <= PREVIEW_CAP => std::fs::read(&self.target).ok(),
+            _ => None,
+        }
     }
 
     #[allow(

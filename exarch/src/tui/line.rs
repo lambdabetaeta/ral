@@ -489,9 +489,9 @@ fn diff_capped(path: &str, hunks: &[Hunk], cap: Option<usize>) -> Vec<Line<'stat
     ls
 }
 
-/// The "there is more below" row: a bare `⋮` right-aligned in `gutter`, shared
-/// by [`diff_capped`]'s inter-hunk separator and [`render_listing`]'s cap
-/// marker, so a write and a diff speak one vocabulary.
+/// The "there is more below" row: a bare `⋮` right-aligned in `gutter`, drawn
+/// by [`diff_capped`] both between hunks and at its cap, so a break in the
+/// middle of a diff and a diff cut short read alike.
 fn elision_row(gutter: usize) -> Line<'static> {
     Line::from(vec![
         Span::raw("  "),
@@ -626,7 +626,6 @@ fn render_mark(mark: &Mark, level: u8) -> Vec<Line<'static>> {
         Mark::Measure(m) => vec![render_measure(m)],
         Mark::Fields { rows } => render_fields(rows),
         Mark::Diff { path, hunks } => diff_body(path, hunks, level),
-        Mark::Listing { bytes, more } => render_listing(bytes, *more),
         Mark::Raw { bytes } => render_raw(bytes),
     }
 }
@@ -950,39 +949,6 @@ fn render_raw(bytes: &[u8]) -> Vec<Line<'static>> {
         .lines()
         .map(|l| Line::from(Span::raw(l.to_string())))
         .collect()
-}
-
-/// A [`Mark::Listing`] — the head of a freshly-written file as a numbered,
-/// ral-highlighted listing folded to [`READ_W`]; `more` appends the
-/// [`elision_row`].  Kin to [`push_hunk`] without the sign column: a write is
-/// not a diff, it is a listing of what now stands in the file.
-fn render_listing(bytes: &[u8], more: bool) -> Vec<Line<'static>> {
-    let text = String::from_utf8_lossy(bytes);
-    let rows = highlight_ral(&text);
-    let gutter = rows.len().to_string().len().max(3);
-    // READ_W less the indent, the gutter and its space, floored so a
-    // pathological width still wraps.
-    let body_w = (READ_W as usize).saturating_sub(2 + gutter + 1).max(8);
-    let mut ls: Vec<Line<'static>> = Vec::new();
-    for (i, line) in rows.into_iter().enumerate() {
-        for (j, wrapped) in wrap_line(&line, body_w).into_iter().enumerate() {
-            let num = if j == 0 {
-                format!("{:>gutter$}", i + 1)
-            } else {
-                " ".repeat(gutter)
-            };
-            let mut spans = vec![
-                Span::raw("  "),
-                Span::styled(format!("{num} "), Style::default().fg(SLATE)),
-            ];
-            spans.extend(wrapped.spans);
-            ls.push(Line::from(spans));
-        }
-    }
-    if more {
-        ls.push(elision_row(gutter));
-    }
-    ls
 }
 
 /// Slate text for system notes — model switches, stream stalls, compaction.

@@ -22,7 +22,7 @@ owns the binding to visual variables. See
 ## The marks
 
 A `` `card `` is a `List` of marks rendered top-to-bottom on one scrollback
-[[map/exarch/frontend|block]]. Six marks, closed (`exarch/src/bus/card.rs`):
+[[map/exarch/frontend|block]]. Five marks, closed (`exarch/src/bus/card.rs`):
 
 - **`text`** — the qualitative mark: a run of spans. A span carries an optional
   nominal **`Role`** (`path`/`code`/`ok`/`warn`/`bad`/`muted`/`strong`) mapped to
@@ -37,9 +37,6 @@ A `` `card `` is a `List` of marks rendered top-to-bottom on one scrollback
   already computes: size (magnitude bar), grain (add/del texture), value (rail
   lightness), shape (`▎`). The one mark that earns graded disclosure and
   cross-emit aggregation.
-- **`listing`** — a numbered source listing: the head of a written file,
-  gutter-numbered and syntax-lit but one-sided (no `+`/`-`) — the write card's
-  preview of *what was written* when there is no old side to diff against.
 - **`raw`** — un-encoded ink: pre-formed bytes appended verbatim, for output
   outside the grammar. Honest about being an image, not an encoding.
 
@@ -75,10 +72,7 @@ through the tagged form (`` `text [spans: […]] ``), and an unknown mark comes
 back as the plain text it already degraded to on the way in. Canonical
 read-back is what makes storage and display one thing: a kit cannot smuggle
 state through a payload the decoder discards, because the only card
-`pin-read` can ever return is the one the rail already showed. `Mark::Listing`
-is host-composed and sits outside the decoder's image, so it encodes as
-`` `raw `` of its bytes — the encoder's one deliberate lossy corner, matching
-where the inverse law is stated.
+`pin-read` can ever return is the one the rail already showed.
 
 ## Host-composed one-liners — `done`, notices
 
@@ -150,7 +144,7 @@ a `CardOrigin` (`Observation`/`Write`/`Surfaced`) telling the coalescing
 projection whether the card is a foldable effect or a barrier. Disclosure is
 **derived**, not named: a card holding a `diff` is dialable (`dialable()` →
 `Card::has_diff()`) and renders L1 header / L2 first-hunk / L3 full; a card of
-only `text`/`fields`/`measure`/`listing`/`raw` is chrome-level (L3-only, inert). The rail
+only `text`/`fields`/`measure`/`raw` is chrome-level (L3-only, inert). The rail
 shape is `▎` for a file mutation — a diff card or a write card alike — and
 none for a framed surfaced card; an observation card folds into its ral group
 rather than carrying its own rail. `magnitude()` is the summed diff
@@ -199,7 +193,9 @@ and `edit-hash`/`edit-replace` are Rust host builtins
 frame so each is one logical surface. An edit builds its own whole-file diff
 card (one canonical original-vs-final diff grouped into hunks by `similar`) at
 the edit, where both texts are already in hand; a committed `>` cannot, and is
-diffed at the write card from the snapshots its event carries. The read
+diffed at the write card from the two snapshots its event carries — including
+for a file it created, whose before-image is simply the empty one, so a
+creation reads as an all-adds diff rather than a shape of its own. The read
 redirect and exec cards are likewise composed from core's I/O events. `agent.ral` now carries
 only the `view-text-around` reader, the tasks kit, and the goal pins
 ([[map/exarch/builtins|builtins]]).

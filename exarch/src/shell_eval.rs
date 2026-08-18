@@ -2013,11 +2013,41 @@ return !{{length $hits}}"
                 mode: RedirectMode::Write,
                 outcome: WriteOutcome::Committed,
                 new_bytes: Some(b"x".to_vec()),
-                // A fresh path: nothing existed to diff against.
-                old_bytes: None,
+                // A fresh path's before-image is the empty one, known
+                // exactly — not an unknown one, which `None` is reserved for.
+                old_bytes: Some(Vec::new()),
             },
             "the one observation is a committed write of the redirect path"
         );
+    }
+
+    /// A created file reads as the change it is: every line an addition against
+    /// the empty before-image, not a listing of what now stands there.  One
+    /// preview shape for every write the door can show.
+    #[test]
+    fn creating_a_file_by_redirect_reads_as_an_all_adds_diff() {
+        let mut shell = fresh_shell();
+        let dir = scratch_dir("cov-write-create");
+        let path = display_no_trailing_sep(&dir.path().join("fresh.txt"));
+
+        let (r, records) = run_capturing(&mut shell, &format!("to-string 'one\ntwo' > '{path}'"));
+        assert_eq!(r.exit, 0, "the write redirect must succeed");
+
+        let obs = observations(&records);
+        let card = crate::bus::card::observation_card(&obs[0]);
+        let Some((diffed, hunks)) = card.single_diff() else {
+            panic!("a created file's card is its diff, got {card:?}")
+        };
+        assert_eq!(diffed, path);
+        let rows: Vec<String> = hunks
+            .iter()
+            .flat_map(|h| &h.rows)
+            .map(|r| match r {
+                Row::Add(_) => format!("+{}", r.text()),
+                _ => format!("?{}", r.text()),
+            })
+            .collect();
+        assert_eq!(rows, ["+one", "+two"], "every line of a new file is an add");
     }
 
     /// Overwriting an *existing* file: the atomic recipe leaves the target
@@ -2067,11 +2097,12 @@ return !{{length $hits}}"
         );
     }
 
-    /// Overwriting a file too large to diff safely: `old_snapshot_for_diff`
-    /// gates on both sides fitting its 64KiB read cap, so rather than carry a
-    /// partial and misleading pre-image it withholds `old_bytes` entirely.
+    /// Overwriting a file too large to read whole: rather than carry a partial
+    /// and misleading pre-image, the door withholds `old_bytes` entirely — and
+    /// the card then shows nothing, since a diff against a *missing*
+    /// before-image would read as a file created rather than replaced.
     #[test]
-    fn bare_write_redirect_over_oversized_existing_file_withholds_old_bytes() {
+    fn bare_write_redirect_over_oversized_existing_file_shows_no_diff() {
         use ral_core::types::WriteOutcome;
         let mut shell = fresh_shell();
         // Comfortably past the 64KiB read cap.
@@ -2110,6 +2141,11 @@ return !{{length $hits}}"
             }
             other => panic!("expected a Write observation, got {other:?}"),
         }
+        let card = crate::bus::card::observation_card(&obs[0]);
+        assert!(
+            card.single_diff().is_none(),
+            "an unknown before-image must not be diffed against, got {card:?}"
+        );
     }
 
     /// The EXEC door end to end: a bare external raises exactly one `Command`

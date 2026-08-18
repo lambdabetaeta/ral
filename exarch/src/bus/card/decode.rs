@@ -57,7 +57,7 @@ pub(crate) fn value_to_pin(v: &RalValue) -> Option<(String, Option<Card>)> {
 }
 
 /// The mark labels a bare surface lifts into a one-mark card: [`decode_mark`]'s
-/// arms, less [`Mark::Listing`], which only the host composes.
+/// arms.
 fn is_mark_label(label: &str) -> bool {
     matches!(label, "text" | "measure" | "fields" | "diff" | "raw")
 }
