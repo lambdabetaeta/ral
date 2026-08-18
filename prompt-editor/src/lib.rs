@@ -349,14 +349,23 @@ fn shell_line_edit_edtui(state: &mut EditorState, key: &KeyEvent) -> bool {
 /// supported variants here and drop the rest, so the conversion is total and the
 /// panicking `From` is only ever reached for codes it accepts. An unmatched key
 /// is one the editor has no binding for; ignoring it is the correct behaviour.
-fn key_to_edtui(key: crossterm::event::KeyEvent) -> Option<edtui::events::KeyInput> {
+fn key_to_edtui(mut key: crossterm::event::KeyEvent) -> Option<edtui::events::KeyInput> {
     use crossterm::event::KeyCode::{
         Backspace, Char, Delete, Down, End, Enter, Esc, Home, Left, PageDown, PageUp, Right, Tab,
         Up,
     };
     match key.code {
-        Char(_) | Enter | Esc | Backspace | Delete | Tab | Left | Right | Up | Down | Home
-        | End | PageUp | PageDown => Some(edtui::events::KeyInput::from(key)),
+        Char(_) | Esc | Backspace | Delete | Tab | Left | Right | Up | Down | Home | End
+        | PageUp | PageDown => Some(edtui::events::KeyInput::from(key)),
+        // A key reaches here at all only once the caller has already decided
+        // it means "insert a line break, don't submit" (Shift/Alt+Enter — see
+        // `tui_loop::key_action`); edtui's insert-mode register binds only a
+        // bare `Enter` to that action, so the modifier is spent information by
+        // the time it lands here and is dropped rather than left to mismatch.
+        Enter => {
+            key.modifiers = crossterm::event::KeyModifiers::NONE;
+            Some(edtui::events::KeyInput::from(key))
+        }
         _ => None,
     }
 }
@@ -473,6 +482,24 @@ mod tests {
             ));
         }
         assert_eq!(editor.lines(), ["abc"]);
+    }
+
+    #[test]
+    fn shift_and_alt_enter_insert_a_line_break() {
+        // edtui's insert-mode register binds only a bare Enter to the
+        // line-break action; Shift/Alt+Enter must fold down to it rather than
+        // miss the binding and do nothing.
+        for modifiers in [KeyModifiers::SHIFT, KeyModifiers::ALT] {
+            let mut editor = PromptEditor::new(EditMode::Emacs);
+            for c in "ab".chars() {
+                editor.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            editor.handle_key(KeyEvent::new(KeyCode::Enter, modifiers));
+            for c in "cd".chars() {
+                editor.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            assert_eq!(editor.lines(), ["ab", "cd"], "modifiers: {modifiers:?}");
+        }
     }
 
     #[test]

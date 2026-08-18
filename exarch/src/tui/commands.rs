@@ -22,6 +22,12 @@ pub(super) struct SlashCommand {
     /// The trailing argument, e.g. `Some("<path>")` for `/export`; `None` marks
     /// a command that matches only when typed alone.
     pub(super) arg: Option<&'static str>,
+    /// Whether the command runs wherever it is typed.  A command that reaches
+    /// the session inbox belongs to the trunk's context and is refused off
+    /// it; one that touches only the view runs on any tab.  Declared here
+    /// rather than hand-listed in [`route_submit`], so a command cannot be
+    /// added without saying which it is.
+    pub(super) any_tab: bool,
     pub(super) help: &'static str,
 }
 
@@ -32,96 +38,112 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/help",
         aliases: &[],
         arg: None,
+        any_tab: false,
         help: "List the available commands.",
     },
     SlashCommand {
         name: "/legend",
         aliases: &[],
         arg: None,
+        any_tab: false,
         help: "Decode the rail, bars, grain, and fidelity treatments.",
     },
     SlashCommand {
         name: "/thinking",
         aliases: &[],
         arg: None,
+        any_tab: true,
         help: "Collapse or expand every thinking trace, on screen and to come.",
     },
     SlashCommand {
         name: "/clear",
         aliases: &[],
         arg: None,
+        any_tab: false,
         help: "Forget the conversation and clear the screen.",
     },
     SlashCommand {
         name: "/copy",
         aliases: &[],
         arg: None,
+        any_tab: false,
         help: "Copy the latest reply to the clipboard.",
     },
     SlashCommand {
         name: "/export",
         aliases: &[],
         arg: Some("<path>"),
+        any_tab: false,
         help: "Write the user view to a file.",
     },
     SlashCommand {
         name: "/model",
         aliases: &[],
         arg: None,
+        any_tab: false,
         help: "Switch the model or provider.",
     },
     SlashCommand {
         name: "/login",
         aliases: &[],
         arg: None,
+        any_tab: false,
         help: "Sign in with ChatGPT — adds a plan-backed provider.",
     },
     SlashCommand {
         name: "/branch",
         aliases: &[],
         arg: Some("[prompt]"),
+        any_tab: false,
         help: "Fork this conversation into a new tab (same context).",
     },
     SlashCommand {
         name: "/close",
         aliases: &[],
         arg: None,
+        any_tab: true,
         help: "Close this branch (its tab and any agents it spawned).",
     },
     SlashCommand {
         name: "/focus",
         aliases: &[],
         arg: Some("<name>"),
+        any_tab: true,
         help: "Jump focus to a tab by name — reaches one TAB skips (demoted).",
     },
     SlashCommand {
         name: "/compact",
         aliases: &[],
         arg: None,
+        any_tab: false,
         help: "Summarize the conversation to reclaim context.",
     },
     SlashCommand {
         name: "/context",
         aliases: &[],
         arg: None,
+        any_tab: false,
         help: "Survey the model context without changing it.",
     },
     SlashCommand {
         name: "/rewind",
         aliases: &[],
         arg: Some("<exchange>"),
+        any_tab: false,
         help: "Drop context from an exchange; descendants and the shell are untouched.",
     },
     SlashCommand {
         name: "/resources",
         aliases: &[],
         arg: None,
+        any_tab: false,
         help: "Show the agent's resource probes: workers, inbox, log, disk.",
     },
     SlashCommand {
         name: "/quit",
         aliases: &["/exit"],
         arg: None,
+        any_tab: false,
         help: "Leave exarch.",
     },
 ];
@@ -340,8 +362,9 @@ fn push_command(tui: &mut Tui, mailbox: &Mailbox, cmd: String) {
 /// `ReplControl`, which owns the trunk's context.  A command typed on a sub-agent
 /// tab is therefore refused rather than misfired — a sub-agent attends under
 /// `NoControl`, and the trunk's inbox would act on the wrong session — save
-/// `/close`, `/focus` and `/thinking`, which touch no inbox.  A plain line steers the focused
-/// tab instead.  Errors land on the focused tab, where the user typed.
+/// those the registry marks `any_tab`, which touch no inbox.  A plain line
+/// steers the focused tab instead.  Errors land on the focused tab, where the
+/// user typed.
 pub(super) fn route_submit(
     text: String,
     tui: &mut Tui,
@@ -354,30 +377,26 @@ pub(super) fn route_submit(
     let focused = tui.app.tabs.focused();
     let unrecognized = unrecognized_command(trimmed);
     match lookup_command(trimmed) {
-        // `/close` and `/focus` are matched ahead of the off-trunk refusal
-        // below, which would otherwise swallow both.
-        Some((cmd, _)) if cmd.name == "/close" => {
-            if focused == root {
-                tui.app
-                    .push_error(root, "nothing to close here; /quit ends the session");
-            } else if !tui.app.tabs.is_branch(focused) {
-                tui.app
-                    .push_error(focused, "/close closes a branch, not this tab");
-            } else {
-                ctx.agents.remove_subtree(focused);
-            }
-        }
-        Some((cmd, arg)) if cmd.name == "/focus" => cmd_focus(&mut tui.app, arg, ctx.agents),
-        // A disclosure setting is the whole view's, not the trunk's, so it is
-        // matched here too rather than refused wherever the user happens to be.
-        Some((cmd, _)) if cmd.name == "/thinking" => cmd_thinking(&mut tui.app),
-        Some((cmd, _)) if focused != root => {
+        Some((cmd, _)) if focused != root && !cmd.any_tab => {
             tui.app.push_error(
                 focused,
                 &format!("{} is not available on this tab", cmd.name),
             );
         }
         Some((cmd, arg)) => match cmd.name {
+            "/close" => {
+                if focused == root {
+                    tui.app
+                        .push_error(root, "nothing to close here; /quit ends the session");
+                } else if !tui.app.tabs.is_branch(focused) {
+                    tui.app
+                        .push_error(focused, "/close closes a branch, not this tab");
+                } else {
+                    ctx.agents.remove_subtree(focused);
+                }
+            }
+            "/focus" => cmd_focus(&mut tui.app, arg, ctx.agents),
+            "/thinking" => cmd_thinking(&mut tui.app),
             "/help" => cmd_help(&mut tui.app),
             "/legend" => cmd_legend(&mut tui.app),
             "/copy" => cmd_copy(&mut tui.app),

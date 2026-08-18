@@ -1986,7 +1986,6 @@ dependencies = [
  "jiff",
  "keyring",
  "libc",
- "nucleo-matcher",
  "os_info",
  "prompt-editor",
  "pulldown-cmark",

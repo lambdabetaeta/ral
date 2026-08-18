@@ -49,10 +49,16 @@ pub(super) struct Tabs {
 
 impl Tabs {
     pub fn new(root_id: AgentId, root_log_dir: &Path, append: bool) -> Self {
+        let traces = Reveal::Full;
         let mut viewports = HashMap::new();
         viewports.insert(
             root_id,
-            Viewport::new(root_log_dir.join("user.log"), AgentSlot::default(), append),
+            Viewport::new(
+                root_log_dir.join("user.log"),
+                AgentSlot::default(),
+                append,
+                traces,
+            ),
         );
         let mut names = HashMap::new();
         names.insert(root_id, ROOT_NAME.to_string());
@@ -66,7 +72,7 @@ impl Tabs {
             focus: root_id,
             parents: HashMap::new(),
             branches: HashSet::new(),
-            traces: Reveal::Full,
+            traces,
             title_frame: 0,
         }
     }
@@ -134,8 +140,12 @@ impl Tabs {
         agent_slot: AgentSlot,
     ) {
         if let std::collections::hash_map::Entry::Vacant(slot) = self.viewports.entry(id) {
-            let vp = slot.insert(Viewport::new(log_dir.join("user.log"), agent_slot, false));
-            vp.set_traces_level(self.traces);
+            slot.insert(Viewport::new(
+                log_dir.join("user.log"),
+                agent_slot,
+                false,
+                self.traces,
+            ));
             self.dispatch_order.push(id);
         }
         self.names.insert(id, name);

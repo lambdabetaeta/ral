@@ -345,8 +345,11 @@ impl Viewport {
     /// `append` continues a resumed session's `user.log` where the run that
     /// recorded it left off; a fresh session starts the file empty.  The
     /// resumed window itself is seeded by [`Self::seed`], which is what keeps
-    /// the continuation from repeating what the file already holds.
-    pub(super) fn new(log_path: PathBuf, agent: AgentSlot, append: bool) -> Self {
+    /// the continuation from repeating what the file already holds.  `traces`
+    /// is the standing rung a view is born at — owned by the caller
+    /// ([`super::tabs::Tabs`]'s own), so a new view is never told twice, nor
+    /// left disagreeing.
+    pub(super) fn new(log_path: PathBuf, agent: AgentSlot, append: bool, traces: Reveal) -> Self {
         Self {
             log: Log::open(&log_path, append),
             evicted_through: None,
@@ -365,7 +368,7 @@ impl Viewport {
             state: StateSpan::new(crate::bus::AgentState::Ready),
             pins: Vec::new(),
             reveal: HashMap::new(),
-            traces: Reveal::Full,
+            traces,
             context_window: None,
             chrome: Vec::new(),
             last_seq: None,
@@ -476,7 +479,7 @@ impl Viewport {
         let log_path = self.log_path.clone();
         let agent = self.agent;
         let context_window = self.context_window;
-        *self = Self::new(log_path, agent, false);
+        *self = Self::new(log_path, agent, false, self.traces);
         self.context_window = context_window;
     }
 
@@ -1116,6 +1119,10 @@ impl Printer for Viewport {
                 low.is_some_and(|l| id.seq() >= l) && high.is_none_or(|h| id.seq() < h)
             })
         });
+        // One bound, one place: a block the window can never show again takes
+        // its dial memory with it, so no third eviction path can drop one
+        // table and keep the other.
+        self.reveal.retain(|id, _| low.is_some_and(|l| id.seq() >= l));
         let rebuilt = floor < rows.len() || cache.len() < held;
 
         // The most recent `ral` script an answer's echo signal reads against
@@ -1496,7 +1503,7 @@ mod tests {
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed),
         ));
-        Viewport::new(path, AgentSlot(0), false)
+        Viewport::new(path, AgentSlot(0), false, Reveal::Full)
     }
 
     fn rail_rows(lines: &[Line<'static>], glyph: &str) -> Vec<usize> {
@@ -2029,6 +2036,55 @@ mod tests {
         );
     }
 
+    /// The dial table is bounded by the same floor the block cache is: a block
+    /// the window has let go for good takes its remembered dial with it, so a
+    /// long session does not pay for every rung it ever turned.
+    #[test]
+    fn the_dial_table_is_evicted_with_the_block_it_names() {
+        let mut memo = Blocks::default();
+        let mut seq = 0u64;
+        advance(
+            &mut memo,
+            &mut seq,
+            Record::Display(Display::ToolCall {
+                tool: "ral".into(),
+                cmd: "read 'x'".into(),
+                summary: Some("look at x".into()),
+            }),
+        );
+
+        let mut vp = viewport();
+        vp.sync(&memo);
+        assert!(vp.dial_block(0, 1), "a tool call dials open");
+        let dialed = vp.blocks[0].id.expect("a synced block is named by the fold");
+        assert!(vp.reveal.contains_key(&dialed), "the dial is remembered");
+
+        for i in 0..(VIEWPORT_MAX_BLOCKS + 50) {
+            advance(
+                &mut memo,
+                &mut seq,
+                Record::Display(Display::Prompt {
+                    text: format!("prompt {i}"),
+                }),
+            );
+        }
+        // The floor a sync prunes against is the one it opened with, so the
+        // dial goes on the sync after the one that evicted its block.
+        vp.sync(&memo);
+        vp.sync(&memo);
+
+        assert!(
+            !vp.reveal.contains_key(&dialed),
+            "the evicted block's dial goes with it"
+        );
+        assert!(
+            vp.reveal.len() <= vp.blocks.len(),
+            "the dial table never outgrows the window it is keyed against: {} dials, {} blocks",
+            vp.reveal.len(),
+            vp.blocks.len()
+        );
+    }
+
     /// `/thinking`'s two obligations: the traces already synced move, and a
     /// trace that arrives afterwards is born at the rung then in force.
     #[test]
@@ -2203,7 +2259,7 @@ mod tests {
         first.flush_log().expect("the transcript flushes");
         assert_eq!(logged(&path, "one"), 1);
 
-        let mut resumed = Viewport::new(path.clone(), AgentSlot(0), true);
+        let mut resumed = Viewport::new(path.clone(), AgentSlot(0), true, Reveal::Full);
         resumed.seed(&memo);
         advance(
             &mut memo,

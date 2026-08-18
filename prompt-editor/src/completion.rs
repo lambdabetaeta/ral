@@ -54,6 +54,11 @@ pub struct Menu {
     /// Non-empty: [`Menu::open`] refuses an empty list, so a selection always
     /// names a candidate.
     candidates: Vec<Candidate>,
+    /// Widest `display` and widest `detail`, in columns — derived from
+    /// `candidates`, which never changes after [`Menu::open`], so measured once
+    /// there rather than rescanned every frame.
+    name_w: u16,
+    detail_w: u16,
     selected: usize,
     /// Byte offset into the trigger row where the chosen replacement starts.
     replace_from: usize,
@@ -80,8 +85,21 @@ impl Menu {
         if candidates.is_empty() {
             return None;
         }
+        let name_w = candidates
+            .iter()
+            .map(|c| u16::try_from(c.display.chars().count()).unwrap_or(u16::MAX))
+            .max()
+            .unwrap_or(0);
+        let detail_w = candidates
+            .iter()
+            .filter_map(|c| c.detail.as_deref())
+            .map(|d| u16::try_from(d.chars().count()).unwrap_or(u16::MAX))
+            .max()
+            .unwrap_or(0);
         Some(Self {
             candidates,
+            name_w,
+            detail_w,
             selected: 0,
             replace_from,
             row,
@@ -176,28 +194,17 @@ impl Menu {
         // visible rows plus borders.  Both clamp to the area — the floor
         // first, so an area narrower than the floor yields the area rather
         // than an empty range.
-        let name_w = self
-            .candidates
-            .iter()
-            .map(|c| u16::try_from(c.display.chars().count()).unwrap_or(u16::MAX))
-            .max()
-            .unwrap_or(0);
-        let detail_w = self
-            .candidates
-            .iter()
-            .filter_map(|c| c.detail.as_deref())
-            .map(|d| u16::try_from(d.chars().count()).unwrap_or(u16::MAX))
-            .max()
-            .unwrap_or(0);
-        // With no details at all this is `None` and the popup is exactly as
-        // wide as its names — the detail column is the first thing a narrow
+        //
+        // With no details at all `detail_col` is `None` and the popup is exactly
+        // as wide as its names — the detail column is the first thing a narrow
         // area gives up.
         let room = area
             .width
-            .saturating_sub(name_w.saturating_add(DETAIL_GAP).saturating_add(2))
-            .min(detail_w);
+            .saturating_sub(self.name_w.saturating_add(DETAIL_GAP).saturating_add(2))
+            .min(self.detail_w);
         let detail_col = (room >= MIN_DETAIL_WIDTH).then_some(room);
-        let pop_w = name_w
+        let pop_w = self
+            .name_w
             .saturating_add(2)
             .saturating_add(detail_col.map_or(0, |w| w.saturating_add(DETAIL_GAP)))
             .clamp(MIN_WIDTH.min(area.width), area.width);
@@ -229,7 +236,7 @@ impl Menu {
                         // Both columns are padded to a fixed width, so the
                         // reversed selection is a clean rectangle rather than
                         // a ragged one.
-                        let pad = usize::from(name_w + DETAIL_GAP);
+                        let pad = usize::from(self.name_w + DETAIL_GAP);
                         let w = usize::from(w);
                         Line::from(vec![
                             Span::styled(format!("{:pad$}", c.display), item),

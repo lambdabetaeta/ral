@@ -413,10 +413,13 @@ fn ui_loop(
                     // An open slash-command popup owns its own keys — Enter
                     // takes the highlighted command instead of submitting the
                     // line under it, Tab walks the list instead of the tabs.
-                    // Ctrl-C is offered to nothing: the interrupt outranks
-                    // every overlay.
-                    let consumed = !ctrl_key(&k, 'c') && tui.app.prompt_state.menu_key(k.code);
-                    match key_action(&k, steerable) {
+                    // The interrupt is the one key no overlay is offered;
+                    // everything else, Esc included, the popup may claim —
+                    // Esc dismisses it.
+                    let action = key_action(&k, steerable);
+                    let consumed =
+                        action != KeyAction::Interrupt && tui.app.prompt_state.menu_key(k.code);
+                    match action {
                         _ if consumed => {}
                         // Every tab interrupts through the registry, which
                         // cancels the focused entry's token and its current
@@ -430,7 +433,7 @@ fn ui_loop(
                         // slot; that path alone re-creates the SIGINT for a
                         // foreground external child and stamps the ambient
                         // foreground cause, which needs no dispatch to name.
-                        KeyAction::Cancel => {
+                        KeyAction::Cancel | KeyAction::Interrupt => {
                             ctx.agents.interrupt(focused);
                             if focused == tui.app.tabs.root() {
                                 cancel::raise_interrupt();
@@ -520,16 +523,19 @@ pub(super) fn overlay_tick(tui: &mut Tui) -> OverlayTick {
 pub enum KeyAction {
     Edit,
     Submit,
+    /// Esc — cancels, but an open overlay may claim it first to dismiss itself.
     Cancel,
+    /// Ctrl-C — the interrupt, offered to no overlay: it outranks every one.
+    Interrupt,
 }
 
-/// Classify one key press in the running UI loop: Ctrl-C and Esc cancel, a
-/// bare Enter submits when the focused tab is steerable, everything else
-/// edits.  The modal overlays bypass this and read their chord from
+/// Classify one key press in the running UI loop: Ctrl-C interrupts, Esc
+/// cancels, a bare Enter submits when the focused tab is steerable, everything
+/// else edits.  The modal overlays bypass this and read their chord from
 /// [`overlay_tick`].
-pub fn key_action(k: &KeyEvent, enter_submits: bool) -> KeyAction {
+pub(super) fn key_action(k: &KeyEvent, enter_submits: bool) -> KeyAction {
     if ctrl_key(k, 'c') {
-        return KeyAction::Cancel;
+        return KeyAction::Interrupt;
     }
     if k.code == KeyCode::Esc {
         return KeyAction::Cancel;

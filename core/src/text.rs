@@ -4,8 +4,8 @@
 //! fuzzy ranking.  std's `str::floor_char_boundary` / `ceil_char_boundary` are
 //! still unstable, hence the first of those.
 
-use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
-use nucleo_matcher::{Config, Matcher};
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 /// Snap `offset` to the nearest char boundary at or before it, clamped into `s`.
 pub fn floor_char_boundary(s: &str, offset: usize) -> usize {
@@ -44,28 +44,51 @@ pub fn char_to_byte(text: &str, cursor: usize) -> usize {
 ///
 /// The matcher is `nucleo`, the Helix team's, and this is its single home: every
 /// surface that offers a user a filtered list — completion menus, pickers —
-/// matches the same way.  An empty needle matches everything, so an empty prefix
+/// matches the same way, through this or through [`rank_by`] where an item is
+/// not its own haystack.  An empty needle matches everything, so an empty prefix
 /// lists the whole pool.  `paths` tunes the matcher for path-like haystacks (a
 /// `/`-aware boundary bonus).  Ties break alphabetically so the order is
 /// deterministic.
 pub fn rank<T: AsRef<str>>(needle: &str, items: Vec<T>, paths: bool) -> Vec<T> {
+    rank_by(needle, items, |item: &T| item.as_ref(), paths)
+}
+
+/// As [`rank`], for items that are not their own haystack.
+///
+/// `haystack` names the text each item matches by, borrowed from the item, so a
+/// row and the string it is ranked by cannot come apart into parallel vectors.
+pub fn rank_by<T>(
+    needle: &str,
+    items: Vec<T>,
+    haystack: impl Fn(&T) -> &str,
+    paths: bool,
+) -> Vec<T> {
     let config = if paths {
         Config::DEFAULT.match_paths()
     } else {
         Config::DEFAULT
     };
     let mut matcher = Matcher::new(config);
-    let atom = Atom::new(
+    // `Pattern::new`, not `Pattern::parse`: no operator syntax, so a needle like
+    // `'notes` or `^tmp` stays literal rather than being reinterpreted — the one
+    // variant fit for both a path name and a free-text query.  Whitespace still
+    // splits into atoms, so `claude 4` narrows by both words.
+    let pattern = Pattern::new(
         needle,
         CaseMatching::Smart,
         Normalization::Smart,
         AtomKind::Fuzzy,
-        false,
     );
-    let mut scored = atom.match_list(items, &mut matcher);
-    // `match_list` already orders by score descending (stable in input order on
-    // ties); re-break ties alphabetically for a deterministic order.
-    scored.sort_by(|(a, sa), (b, sb)| sb.cmp(sa).then_with(|| a.as_ref().cmp(b.as_ref())));
+    let mut buf = Vec::new();
+    let mut scored: Vec<(T, u32)> = items
+        .into_iter()
+        .filter_map(|item| {
+            let score = pattern.score(Utf32Str::new(haystack(&item), &mut buf), &mut matcher)?;
+            Some((item, score))
+        })
+        .collect();
+    // A stable sort, so items sharing a haystack keep the order they came in.
+    scored.sort_by(|(a, sa), (b, sb)| sb.cmp(sa).then_with(|| haystack(a).cmp(haystack(b))));
     scored.into_iter().map(|(item, _)| item).collect()
 }
 
@@ -106,6 +129,20 @@ mod tests {
     fn ceil_snaps_forward_into_a_codepoint() {
         assert_eq!(ceil_char_boundary("λx", 1), 2);
         assert_eq!(ceil_char_boundary("λx", 0), 0);
+    }
+
+    /// Two items may share a haystack — two providers listing one model name.
+    /// Both survive, in the order they came in: the sort is stable, so the
+    /// alphabetical tie-break cannot collapse them onto one another.
+    #[test]
+    fn identical_haystacks_both_survive_in_input_order() {
+        let ranked = rank_by(
+            "x",
+            vec![(1, "x"), (2, "x")],
+            |item: &(i32, &str)| item.1,
+            false,
+        );
+        assert_eq!(ranked, vec![(1, "x"), (2, "x")]);
     }
 
     #[test]

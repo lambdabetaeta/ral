@@ -335,6 +335,11 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   the same sentence `/help` lists — in a dimmer second column, so the popup
   never says less than the listing does; `Menu` drops that column first when
   the terminal is too narrow to hold it.
+- `/model`'s model list ranks through `ral_core::text::rank_by` — the same
+  `nucleo` matcher the command popup uses, given the `label / model` line each
+  row matches by rather than the row itself, so a row and its haystack travel
+  together and two providers listing one model name stay two rows. Rows read
+  best-match first and, an empty query included, alphabetically within a score.
 - `/model` and `/login` share `picker::overlay_frame`: one centred double-line
   bezel, shadow, palette, padding, title, and hint frame around distinct
   bodies. The login body drives browser or device OAuth on a background thread,

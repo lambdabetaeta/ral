@@ -78,7 +78,12 @@ is the single entry point both surfaces call. Ranking is `nucleo` fuzzy
 matching for every surface — path-tuned for path entries, ties broken
 alphabetically — and lives in `ral_core::text::rank`, a generic `AsRef<str>`
 function with no UI in it, so exarch's pickers match the same way ral's menus
-do. `Candidate` is the engine's own type and stays here.
+do. A surface whose rows are not their own haystack — exarch's `/model` picker,
+matching an `(account, model)` pair by the `label / model` line it draws —
+calls `ral_core::text::rank_by`, which takes the haystack as a projection out
+of the item; `rank` is that same function under `AsRef::as_ref`. Ranking a row
+together with its haystack is what keeps the two from drifting apart into
+parallel vectors. `Candidate` is the engine's own type and stays here.
 
 - `complete.rs::RalHelper` is the **rustyline adapter**: it holds the `Sources`
   snapshot (rebuilt each prompt via `refresh`), delegates `Completer::complete`

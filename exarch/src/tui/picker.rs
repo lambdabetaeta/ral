@@ -32,14 +32,11 @@ use super::palette::{BANNER_GOLD, CYAN, OVERLAY_BG, RED, SLATE};
 use crate::provider::identity::{self, Account, AccountId};
 use crate::provider::models::ProviderEndpoint;
 use crate::provider::{EFFORT_LADDER, Tuning};
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Config, Matcher, Utf32Str};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
-use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
 pub use crate::provider::listing::{EndpointsState, ModelsState};
@@ -563,50 +560,32 @@ impl Picker {
         }
     }
 
-    /// The `(provider, model)` pairs matching the fuzzy query, best score
-    /// first; the sort is stable, so ties keep listed order, as does an empty
-    /// query.
+    /// The `(provider, model)` pairs matching the fuzzy query, best score first,
+    /// ties broken alphabetically on the `label / model` line they matched by.
     fn query_matches(&self) -> Vec<(Account, String)> {
-        let q = self.query.trim();
-
-        // Candidates and haystacks are positionally paired.
-        let mut candidates: Vec<(Account, String)> = Vec::new();
-        let mut haystacks: Vec<String> = Vec::new();
+        // Each row carries its own haystack, so no index can pair a row with
+        // another's label — two providers may list the very same model name.
+        let mut rows: Vec<(String, (Account, String))> = Vec::new();
         for account in &self.providers {
             if let Some(ModelsState::Loaded(models)) = self.models.get(&account.id) {
                 let label = self.label(account);
                 for model in models {
-                    haystacks.push(format!("{label} / {model}"));
-                    candidates.push((account.clone(), model.clone()));
+                    rows.push((
+                        format!("{label} / {model}"),
+                        (account.clone(), model.clone()),
+                    ));
                 }
             }
         }
-
-        if q.is_empty() {
-            return candidates;
-        }
-
-        // Score by index, so a row survives even when two providers list the
-        // same model name.
-        let pattern = Pattern::parse(q, CaseMatching::Smart, Normalization::Smart);
-        let mut buf = Vec::new();
-        // A matcher per call: `&self` cannot lend a stored one mutably, and one
-        // keystroke is one pass over a small list.
-        let mut matcher = Matcher::new(Config::DEFAULT);
-        let mut scored: Vec<(usize, u32)> = haystacks
-            .iter()
-            .enumerate()
-            .filter_map(|(i, hay)| {
-                pattern
-                    .score(Utf32Str::new(hay, &mut buf), &mut matcher)
-                    .map(|score| (i, score))
-            })
-            .collect();
-        scored.sort_by_key(|(_, score)| Reverse(*score));
-        scored
-            .into_iter()
-            .map(|(i, _)| candidates[i].clone())
-            .collect()
+        ral_core::text::rank_by(
+            self.query.trim(),
+            rows,
+            |r: &(String, _)| r.0.as_str(),
+            false,
+        )
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect()
     }
 
     /// The query matches, plus a synthetic manual-entry row while the query is
@@ -1174,16 +1153,33 @@ mod tests {
             .collect()
     }
 
+    /// Ranking orders every row, empty query included, by the `label / model`
+    /// line it matched by — so the list reads alphabetically rather than in
+    /// whatever order the fetches happened to land.
     #[test]
     fn empty_query_shows_all_loaded_models() {
         let p = loaded_picker();
         assert_eq!(
             row_labels(&p),
             vec![
-                "claude-opus-4 · anthropic",
                 "claude-haiku-4 · anthropic",
+                "claude-opus-4 · anthropic",
                 "deepseek-chat · deepseek",
             ]
+        );
+    }
+
+    /// A query's words each narrow the list: `claude 4` keeps only the rows
+    /// whose `label / model` line carries both.
+    #[test]
+    fn a_two_word_query_narrows_by_both_words() {
+        let mut p = loaded_picker();
+        for c in "claude 4".chars() {
+            p.key(KeyCode::Char(c));
+        }
+        assert_eq!(
+            row_labels(&p),
+            vec!["claude-haiku-4 · anthropic", "claude-opus-4 · anthropic"]
         );
     }
 
@@ -1280,15 +1276,15 @@ mod tests {
     #[test]
     fn enter_selects_highlighted_model() {
         let mut p = loaded_picker();
-        // To the second row, anthropic / claude-haiku-4.
+        // To the second row, anthropic / claude-opus-4.
         p.key(KeyCode::Down);
         match p.key(KeyCode::Enter) {
             PickAction::Selected(account, m, _, _)
                 if account.service.name.as_str() == "anthropic" =>
             {
-                assert_eq!(m, "claude-haiku-4");
+                assert_eq!(m, "claude-opus-4");
             }
-            _ => panic!("expected Selected(anthropic, claude-haiku-4)"),
+            _ => panic!("expected Selected(anthropic, claude-opus-4)"),
         }
     }
 
@@ -1469,6 +1465,8 @@ mod tests {
             ModelsState::Loaded(vec!["reasoner".into(), "chat-only".into()]),
         );
 
+        // Rows read alphabetically: chat-only, then reasoner.
+        p.key(KeyCode::Down); // → reasoner
         // On the reasoning-capable row, set effort=high and temp=0.1.
         p.key(KeyCode::Tab); // Effort
         for _ in 0..4 {
@@ -1487,7 +1485,7 @@ mod tests {
         // Highlight the chat-only model: effort masked out, temperature kept.
         p.key(KeyCode::Tab); // TopP
         p.key(KeyCode::Tab); // Search
-        p.key(KeyCode::Down); // → chat-only
+        p.key(KeyCode::Up); // → chat-only
         let masked = p.tuning(&p.rows());
         assert!(masked.effort.is_none(), "reasoning masked for chat-only");
         assert_eq!(masked.temperature, Some(0.1));
@@ -1501,7 +1499,7 @@ mod tests {
         p.key(KeyCode::Tab); // Temperature
         p.key(KeyCode::Tab); // TopP
         p.key(KeyCode::Tab); // Search
-        p.key(KeyCode::Up); // → reasoner
+        p.key(KeyCode::Down); // → reasoner
         assert_eq!(
             p.tuning(&p.rows())
                 .effort
