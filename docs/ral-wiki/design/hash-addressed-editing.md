@@ -104,6 +104,14 @@ This shape is forced, and it is what makes the witness trustworthy:
   write would each ride the redirect frame and surface their own card, fracturing
   one conceptual edit into three rail surfaces, and `edit-hash` would lose the path it
   needs to label its diff.
+- **The diff is taken at the edit, not at the card.** Having read the original
+  and built the final text, the builtin holds both sides, so it diffs them there
+  and surfaces the hunks. Only the hunks then cross the surface, the wire, and
+  the record — never the two whole files, whose size therefore bounds nothing.
+  This is what separates an edit from a committed `>`, which never holds both
+  sides: that path surfaces snapshots and is diffed at the card, and so reads as
+  a diff only for a file small enough to have been snapshotted
+  ([[map/exarch/io-surface|io-surface]]).
 
 ## Properties
 

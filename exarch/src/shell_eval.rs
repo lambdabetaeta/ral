@@ -482,7 +482,7 @@ mod tests {
     //! pin that `run_shell`'s wrapping does not perturb it.
 
     use super::*;
-    use crate::bus::card::observation_from_wire;
+    use crate::bus::card::{Row, observation_from_wire};
     use crate::bus::{Emitter, Inbox, channel};
     use crate::shell_eval::builtins;
     use ral_core::Shell;
@@ -1688,14 +1688,11 @@ return !{{length $hits}}"
         );
     }
 
-    /// `edit-replace` goes through core's atomic write door, so it raises the
-    /// same structural `write` event a committed `>` does — old and new
-    /// snapshots riding along on the observation — and inherits that door's
-    /// mode, symlink, and durability preservation.
+    /// `edit-replace` goes through core's atomic write door — inheriting its
+    /// mode, symlink, and durability preservation — and speaks one surface of
+    /// its own: the whole-file diff, and no `write` observation beside it.
     #[test]
-    fn edit_replace_surfaces_a_write_observation_with_old_and_new_snapshots() {
-        use ral_core::syntax::ast::RedirectMode;
-        use ral_core::types::WriteOutcome;
+    fn edit_replace_surfaces_one_whole_file_diff_card() {
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("edit-replace-io", "b", "hello\nworld\n");
 
@@ -1717,72 +1714,83 @@ return !{{length $hits}}"
         );
 
         let obs = observations(&records);
+        assert!(
+            obs.is_empty(),
+            "an edit is one logical surface — its diff — never a write observation too, got {obs:?}"
+        );
+        let cards = cards(&records);
+        assert_eq!(cards.len(), 1, "exactly one card, got {cards:?}");
+        let Some((diffed, hunks)) = cards[0].single_diff() else {
+            panic!("expected a lone diff mark, got {:?}", cards[0])
+        };
+        assert_eq!(diffed, path, "the diff is labelled with the edited path");
+        let rows: Vec<String> = hunks
+            .iter()
+            .flat_map(|h| &h.rows)
+            .map(|r| match r {
+                Row::Context(_) => format!(" {}", r.text()),
+                Row::Del(_) => format!("-{}", r.text()),
+                Row::Add(_) => format!("+{}", r.text()),
+            })
+            .collect();
+        assert_eq!(rows, [" hello", "-world", "+friend"]);
+    }
+
+    /// An edit diffs the two texts it already holds, so no file is too large to
+    /// read as the edit it was — the 64 KiB pre-image cap a committed `>` lives
+    /// under (`old_snapshot_for_diff`) governs a read this path never makes.
+    #[test]
+    fn edit_over_an_oversized_file_still_diffs() {
+        let mut shell = fresh_shell();
+        let tail = "x".repeat(70_000);
+        let (dir, path) = scratch_file("edit-oversized", "big.txt", &format!("HEAD\n{tail}"));
+
+        let (r, records) =
+            run_capturing(&mut shell, &format!("edit-replace '{path}' 'HEAD' 'TAIL'"));
+        let wrote = std::fs::read_to_string(dir.path().join("big.txt")).ok();
         assert_eq!(
-            obs.len(),
-            1,
-            "edit-replace raises exactly one write observation, got {obs:?}"
+            r.exit,
+            0,
+            "edit-replace must succeed; stderr was {:?}",
+            String::from_utf8_lossy(&r.stderr)
         );
         assert_eq!(
-            obs[0],
-            Observed::Write {
-                path,
-                mode: RedirectMode::Write,
-                outcome: WriteOutcome::Committed,
-                new_bytes: Some(b"hello\nfriend\n".to_vec()),
-                old_bytes: Some(b"hello\nworld\n".to_vec()),
-            },
-            "old/new snapshots ride the write observation so the card can diff them"
+            wrote.as_deref(),
+            Some(format!("TAIL\n{tail}").as_str()),
+            "the edit committed to disk"
+        );
+
+        let cards = cards(&records);
+        assert_eq!(cards.len(), 1, "exactly one card, got {cards:?}");
+        let Some((_, hunks)) = cards[0].single_diff() else {
+            panic!("expected a lone diff mark, got {:?}", cards[0])
+        };
+        let changed: Vec<String> = hunks
+            .iter()
+            .flat_map(|h| &h.rows)
+            .filter(|r| !matches!(r, Row::Context(_)))
+            .map(Row::text)
+            .collect();
+        assert_eq!(
+            changed,
+            ["HEAD", "TAIL"],
+            "the one changed line reads as a diff however large the file around it"
         );
     }
 
-    /// An edit makes the same pre-image cap decision a committed `>` makes:
-    /// the old snapshot rides along only when both snapshots fit
-    /// `DIFF_SNAPSHOT_CAP`, and is withheld otherwise. Both sides of the gate,
-    /// so a cap drifted to either extreme fails one.
+    /// An edit that rebuilds the file byte-for-byte says nothing: a card with
+    /// no hunks would draw an empty block under a path that did not change.
     #[test]
-    fn edit_over_an_oversized_file_withholds_the_pre_image() {
-        use ral_core::types::WriteOutcome;
-        for (tag, tail, diffed) in [
-            ("edit-oversized", "x".repeat(70_000), false),
-            ("edit-small", "x".repeat(10), true),
-        ] {
-            let mut shell = fresh_shell();
-            let (dir, path) = scratch_file(tag, "big.txt", &format!("HEAD\n{tail}"));
+    fn edit_changing_nothing_surfaces_nothing() {
+        let mut shell = fresh_shell();
+        let (_dir, path) = scratch_file("edit-noop", "same.txt", "one\ntwo\n");
 
-            let (r, records) =
-                run_capturing(&mut shell, &format!("edit-replace '{path}' 'HEAD' 'TAIL'"));
-            let wrote = std::fs::read_to_string(dir.path().join("big.txt")).ok();
-            assert_eq!(
-                r.exit,
-                0,
-                "edit-replace must succeed; stderr was {:?}",
-                String::from_utf8_lossy(&r.stderr)
-            );
-            assert_eq!(
-                wrote.as_deref(),
-                Some(format!("TAIL\n{tail}").as_str()),
-                "the edit committed to disk"
-            );
-
-            let obs = observations(&records);
-            assert_eq!(
-                obs.len(),
-                1,
-                "edit-replace raises exactly one write observation, got {obs:?}"
-            );
-            let Observed::Write {
-                outcome, old_bytes, ..
-            } = &obs[0]
-            else {
-                panic!("expected a Write observation, got {:?}", obs[0])
-            };
-            assert_eq!(*outcome, WriteOutcome::Committed);
-            assert_eq!(
-                old_bytes.is_some(),
-                diffed,
-                "only a file within the cap carries its pre-image ({tag})"
-            );
-        }
+        let (r, records) = run_capturing(&mut shell, &format!("edit-replace '{path}' 'two' 'two'"));
+        assert_eq!(r.exit, 0, "a no-op edit still succeeds");
+        assert!(
+            cards(&records).is_empty() && observations(&records).is_empty(),
+            "an edit that changed no line raises no surface"
+        );
     }
 
     /// Editing an executable leaves its `0o755` intact: a plain
@@ -1903,6 +1911,21 @@ return !{{length $hits}}"
             .filter_map(|r| match r {
                 crate::record::Record::Display(crate::record::Display::Observation { value }) => {
                     observation_from_wire(value.clone()).map(|o| o.what)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The [`Card`] carried by each captured [`Display::Card`], in order — the
+    /// surface half [`observations`] drops, for the tools that speak a card
+    /// rather than an observation.
+    fn cards(records: &[crate::record::Record]) -> Vec<crate::bus::card::Card> {
+        records
+            .iter()
+            .filter_map(|r| match r {
+                crate::record::Record::Display(crate::record::Display::Card { marks }) => {
+                    serde_json::from_value(marks.clone()).ok()
                 }
                 _ => None,
             })

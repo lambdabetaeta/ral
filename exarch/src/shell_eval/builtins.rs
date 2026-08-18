@@ -2,18 +2,18 @@
 //! `ral-core` before any user or model source compiles — the resident agent
 //! surface core itself should not own.
 
+use crate::bus::card::{Card, Mark, encode_card, whole_file_hunks};
 use crate::shell_eval::skill;
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ignore::WalkBuilder;
 use ral_core::builtins::util::regex_err;
-use ral_core::syntax::ast::RedirectMode;
 use ral_core::typecheck::builtins::{
     BuiltinTypeRule, closed_record, fun, mk_scheme as scheme, pure, thunk,
 };
 use ral_core::typecheck::{Scheme, Ty, Unifier};
 use ral_core::types::{
-    Break, BuiltinBody, BuiltinEntry, Mooring, Observation, Observed, Settled, WriteOutcome, sig,
+    Break, BuiltinBody, BuiltinEntry, Mooring, Observation, Observed, Settled, sig,
 };
 use ral_core::{HostSurface, Shell, Value};
 use std::borrow::Cow;
@@ -424,8 +424,8 @@ fn note_edit(shell: &mut Shell, path: &str, lines: &str, plural: bool, any_escap
 /// line and no two records name the same one.
 ///
 /// The read raises no card; the write goes through [`Shell::atomic_write`] below
-/// the redirect frame, so `edit-hash` owns its surface — one committed `write`
-/// event the card layer renders as a whole-file diff, as a committed `>` would.
+/// the redirect frame, which observes nothing. So `edit-hash` owns its surface
+/// entirely, and speaks it as one whole-file diff card ([`surface_edit`]).
 fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let path = args[0].to_string();
     let edits = match &args[1] {
@@ -518,7 +518,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     }
     let final_text = out.join("\n");
     shell.atomic_write(&path, final_text.as_bytes())?;
-    surface_write(shell, mooring, &path, &body, &final_text);
+    surface_edit(mooring, &path, &body, &final_text);
 
     let mut line_nums: Vec<usize> = resolved.iter().map(|r| r.at + 1).collect();
     line_nums.sort_unstable();
@@ -533,33 +533,29 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     Ok(Value::Unit)
 }
 
-/// The largest either snapshot of an edit may reach before its `write` card falls
-/// back to a plain listing — mirrors `PREVIEW_CAP` in
-/// `core/src/runtime/command/redirect.rs`, so an edit and a committed `>` over the
-/// same file make the identical diff-vs-listing choice.
-const DIFF_SNAPSHOT_CAP: usize = 64 * 1024;
-
-/// Raise the `write` observation an edit commits — the very fact a committed
-/// `>` observes, so the card renders `old` against `new` as a whole-file diff.
-/// `old_bytes` is withheld once either side exceeds [`DIFF_SNAPSHOT_CAP`], the
-/// gate core's `old_snapshot_for_diff` applies to the redirect path.
-fn surface_write(shell: &Shell, mooring: &Mooring, path: &str, old: &str, new: &str) {
-    let fits = old.len() <= DIFF_SNAPSHOT_CAP && new.len() <= DIFF_SNAPSHOT_CAP;
-    let new_prefix = new.as_bytes()[..new.len().min(DIFF_SNAPSHOT_CAP)].to_vec();
-    mooring.surface(
-        &Observation::instant(
-            shell.call_site(),
-            shell.principal(),
-            Observed::Write {
-                path: path.to_string(),
-                mode: RedirectMode::Write,
-                outcome: WriteOutcome::Committed,
-                new_bytes: Some(new_prefix),
-                old_bytes: fits.then(|| old.as_bytes().to_vec()),
-            },
-        )
-        .to_value(),
-    );
+/// Raise the one card an edit surfaces: the whole-file diff of `old` against
+/// `new`, labelled by `path`.
+///
+/// The diff is taken here, at the edit, rather than left to the card layer:
+/// the builtin already holds both texts — it read one and built the other — so
+/// hunks cost nothing to compute and are all that need cross the surface.  A
+/// committed `>` cannot do the same, since it never holds both sides; it
+/// surfaces its two snapshots and is diffed at render, under the read cap
+/// `old_snapshot_for_diff` applies.  An edit is under no such cap, and so
+/// reads as a diff whatever the file's size.
+///
+/// One logical surface per tool: the read sinks silently and `atomic_write`
+/// observes nothing, so this diff is the whole of what an edit says.  Nothing
+/// is raised when the rebuild changed no line — there is no edit to show.
+fn surface_edit(mooring: &Mooring, path: &str, old: &str, new: &str) {
+    let hunks = whole_file_hunks(old, new);
+    if hunks.is_empty() {
+        return;
+    }
+    mooring.surface(&encode_card(&Card(vec![Mark::Diff {
+        path: path.to_string(),
+        hunks,
+    }])));
 }
 
 /// The witness layer's shared read door, gating on the live grant as a `< path`
@@ -584,7 +580,7 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> 
 /// `edit-replace PATH FROM TO` — replace the one literal occurrence of `FROM`,
 /// borrowing `string-replace`'s match/error logic, so 0 or >1 matches errors and
 /// leaves the file untouched.  Composed over the same doors as `edit-hash`: a
-/// silent read, then [`Shell::atomic_write`], surfacing one committed `write`.
+/// silent read, then [`Shell::atomic_write`], surfacing one whole-file diff.
 fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let path = args[0].to_string();
     let from = args[1].to_string();
@@ -598,7 +594,7 @@ fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
     .map_err(relabel_string_replace)?;
     let final_text = replaced.to_string();
     shell.atomic_write(&path, final_text.as_bytes())?;
-    surface_write(shell, mooring, &path, &body, &final_text);
+    surface_edit(mooring, &path, &body, &final_text);
 
     // `string_replace` above already proved `from` matches exactly once, so this
     // relocation for the line-range note needs no second uniqueness check.

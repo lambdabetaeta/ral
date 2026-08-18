@@ -76,9 +76,10 @@ impl Row {
 /// The whole-file line diff of `old` vs `new`, grouped into hunks with ±2
 /// lines of context.
 ///
-/// Called only from `write_preview` in the sibling `io` module, so every
-/// committed write — a `>` redirect, `edit-hash`, `edit-replace` — is diffed
-/// here and nowhere else.
+/// The one place a pair of texts becomes hunks: `write_preview` in the sibling
+/// `observation` module diffs a committed `>`'s two snapshots at render time,
+/// and `surface_edit` in `shell_eval::builtins` diffs an edit's two texts at
+/// the edit itself, where both are already resident.
 pub(crate) fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
     use similar::{ChangeTag, TextDiff};
     let diff = TextDiff::from_lines(old, new);

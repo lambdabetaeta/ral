@@ -76,6 +76,10 @@ dispatch, builtins included.
 
   Mode is `write` / `append` / `stream`. No byte count — path, mode, outcome,
   plus the bounded content snapshots the write card previews and diffs from.
+  Bounded at 64 KiB a side (`PREVIEW_CAP`): the redirect never holds either
+  side in memory otherwise, and a diff of truncated prefixes would describe a
+  change that never landed, so past the cap the card falls back to listing the
+  head of what was written. This governs `>` alone — an edit diffs at the edit.
 - **Commands** are hooked *after* resolution, at the completion doors, never
   at the call site (where the head may still resolve to a closure or
   builtin). Every command — builtin, external, or detached — is one
@@ -221,10 +225,13 @@ frame:
   ([[design/hash-addressed-editing|hash-addressed editing]]) read, resolve,
   atomically rebuild, and write entirely in Rust through core's atomic write
   door (`Shell::atomic_write`) — the read is silent (a sub-step of one logical
-  operation) and the door's single committed `Observed::Write` observation,
-  carrying the old/new snapshots, is what renders as the whole-file diff card.
-  With the editors below the line, **no** ral helper does internal I/O and no
-  suppression mechanism exists anywhere.
+  operation) and the door observes nothing, so the editor owns its whole
+  surface and speaks it as one `` `card [`diff …] ``. It diffs its own two
+  texts, both already resident, so unlike a committed `>` it is under no
+  pre-image cap and reads as a diff whatever the file's size; an edit that
+  rebuilt the file unchanged surfaces nothing. With the editors below the line,
+  **no** ral helper does internal I/O and no suppression mechanism exists
+  anywhere.
 
 The residual on the record: `source` / `use` read ral *code* via `read_to_string`
 outside the redirect frame — code-loading, visible as its own statement, not

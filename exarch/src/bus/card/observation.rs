@@ -132,7 +132,8 @@ pub fn observation_card(what: &Observed) -> Card {
 /// A write's card: its [`write_preview`] under a `write <path> <outcome>`
 /// heading — save when that preview is a diff, which names the file and shows
 /// the change itself.  A heading above it would only say the same twice, so the
-/// diff stands as the whole card and an `edit` reads as the edit it is.
+/// diff stands as the whole card and a `>` over an existing file reads as the
+/// change it made.
 fn write_card(path: &str, outcome: WriteOutcome, old: Option<&[u8]>, new: Option<&[u8]>) -> Card {
     let body = if outcome == WriteOutcome::Committed {
         write_preview(path, old, new)
@@ -267,8 +268,9 @@ const WRITE_PREVIEW_LINES: usize = 10;
 /// Preview a committed write: a whole-file [`Mark::Diff`] when `old` is present
 /// and both sides are valid UTF-8, else the head of `new` as a
 /// [`Mark::Listing`] — the fallback for a new file, binary content, or a side
-/// too large. Every committed write lands here whatever wrote it (a `>`
-/// redirect, `edit-hash`, `edit-replace`), so the choice is made in one place.
+/// too large for core to have read a pre-image of.  A redirect's write reaches
+/// here and nothing else does: an edit holds both its texts already and diffs
+/// at the edit itself (`shell_eval::builtins`'s `surface_edit`), under no cap.
 fn write_preview(path: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> Vec<Mark> {
     let new = match new {
         Some(b) if !b.is_empty() => b,

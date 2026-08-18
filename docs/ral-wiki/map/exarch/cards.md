@@ -196,10 +196,11 @@ from what's pinned.
 The agent library's surfacing constructors are gone: `view-text`, `grep-files`,
 and `edit-hash`/`edit-replace` are Rust host builtins
 ([[map/exarch/io-surface|io-surface]]), their file I/O sunk below the redirect
-frame so each is one logical surface. An edit's whole-file diff is built at the
-write card from the committed write event's old/new snapshots (one canonical
-original-vs-final diff grouped into hunks by `similar`); the read redirect and
-exec cards are likewise composed from core's I/O events. `agent.ral` now carries
+frame so each is one logical surface. An edit builds its own whole-file diff
+card (one canonical original-vs-final diff grouped into hunks by `similar`) at
+the edit, where both texts are already in hand; a committed `>` cannot, and is
+diffed at the write card from the snapshots its event carries. The read
+redirect and exec cards are likewise composed from core's I/O events. `agent.ral` now carries
 only the `view-text-around` reader, the tasks kit, and the goal pins
 ([[map/exarch/builtins|builtins]]).
 

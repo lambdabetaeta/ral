@@ -57,14 +57,14 @@ logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
   a single pass over the original rows (a real newline in the replacement splits
   the line, an empty string deletes it), and write back through core's atomic
   write door (`Shell::atomic_write`). Resolving against one snapshot makes the
-  batch atomic and non-interfering. The Rust read raises no read card; the atomic
-  write surfaces one committed `Observed::Write` observation whose old/new
-  snapshots the write card renders as a whole-file diff
-  ([[map/exarch/cards|cards]]). A stderr note names the replaced lines and
+  batch atomic and non-interfering. The Rust read raises no read card and the
+  atomic write observes nothing; the builtin surfaces one whole-file diff card
+  of the original against the final text ([[map/exarch/cards|cards]]), and
+  nothing at all if the two agree. A stderr note names the replaced lines and
   warns on suspicious `\n`-style escapes (the replacement text is verbatim).
 - `edit-replace <path> <from> <to>` → `Unit`. The string-replace sibling:
   replace the one literal occurrence of `from`, erroring (file untouched) on
-  zero or several matches; same silent read, same atomic write, same write card.
+  zero or several matches; same silent read, same atomic write, same diff card.
 - `explore-dir <n>` → `[String]`. List directory entries to depth `n`,
   ignore-aware, skipping the root and any denied path.
 - `skill-list` / `skill <name>` — Agent Skills with progressive disclosure: list
