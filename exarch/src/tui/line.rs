@@ -425,15 +425,15 @@ pub(super) fn error(msg: &str) -> Vec<Line<'static>> {
     ]
 }
 
-/// A [`Mark::Diff`]'s body, graded by disclosure `level`: L1 the header alone,
-/// L2 the header plus the first hunk, L3 every hunk.  No leading blank —
+/// A [`Mark::Diff`]'s body: L1 the header alone, anything above it the header
+/// and every hunk.  There is no middle rung to draw, the mark itself being cut
+/// to `DIFF_ROWS` where it was composed.  No leading blank —
 /// [`render_card`] owns the one blank that opens the card.  The densest object
 /// on screen: size in the header bar, grain in the addition ratio, value in the
 /// rail's lightness, shape in its `▎` glyph.
 fn diff_body(path: &str, hunks: &[Hunk], level: u8) -> Vec<Line<'static>> {
     match level {
         1 => vec![patch_header(path, hunks)],
-        2 => diff_capped(path, hunks, Some(1)),
         _ => diff_capped(path, hunks, None),
     }
 }

@@ -2,7 +2,7 @@
 //! `ral-core` before any user or model source compiles — the resident agent
 //! surface core itself should not own.
 
-use crate::bus::card::{Card, Mark, encode_card, whole_file_hunks};
+use crate::bus::card::{Card, Mark, clip_hunks, encode_card, whole_file_hunks};
 use crate::shell_eval::skill;
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
@@ -548,7 +548,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
 /// observes nothing, so this diff is the whole of what an edit says.  Nothing
 /// is raised when the rebuild changed no line — there is no edit to show.
 fn surface_edit(mooring: &Mooring, path: &str, old: &str, new: &str) {
-    let hunks = whole_file_hunks(old, new);
+    let hunks = clip_hunks(whole_file_hunks(old, new));
     if hunks.is_empty() {
         return;
     }

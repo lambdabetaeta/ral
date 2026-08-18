@@ -75,14 +75,11 @@ dispatch, builtins included.
     or `deferred` when a stop parks the child with the staged temp intact.
 
   Mode is `write` / `append` / `stream`. No byte count — path, mode, outcome,
-  plus the two content snapshots the write card diffs. Each is whole or absent,
-  never a prefix, and each is read only within 64 KiB (`PREVIEW_CAP`): the
-  redirect holds neither side in memory otherwise, and half a side is not a
-  change. `old_bytes` is *empty* for a file that did not yet exist — a known
-  before-image — and absent only when the target could not be read whole, which
-  is an unknown one; the card diffs the first and shows nothing for the second,
-  so an overwrite can never read as a creation. This governs `>` alone: an edit
-  holds both texts already and diffs at the edit, under no cap.
+  plus the content snapshots, each whole or absent and never a prefix, read
+  only within 64 KiB (`PREVIEW_CAP`) since the redirect holds neither side in
+  memory otherwise. `new_bytes` is what the card opens; `old_bytes` reaches the
+  [[design/audit|audit trail]] and no card, a redirect saying what now stands
+  in the file rather than what it replaced.
 - **Commands** are hooked *after* resolution, at the completion doors, never
   at the call site (where the head may still resolve to a closure or
   builtin). Every command — builtin, external, or detached — is one
@@ -165,11 +162,12 @@ reads `write <path> <outcome>` whatever its mode (the mode rides the recorded
 observation): `committed` uses the `ok` role, `aborted` and `deferred` use
 `warn`, and `failed` uses `bad`
 — and a *committed* write previews its content below the heading
-(`write_preview`): a whole-file `diff` mark against the prior snapshot, which
-for a file the write created is the empty one, so a creation reads as every
-line added rather than as a shape of its own — and no mark at all when the
-door could not read a side whole or either side is not text, leaving the
-heading to report a write it cannot show; a command keeps the conventional `$` prompt, the program as
+(`write_preview`): a `diff` mark of the opening of what landed, read against
+the empty side so every row is an addition, and cut by `clip_hunks` to ten
+rows closed by an `…` — the header's size bar and grain run carry the
+magnitude, the body is a sample. No mark at all when the door could not read
+the staged side whole or it is not text, leaving the heading to report a write
+it cannot open; a command keeps the conventional `$` prompt, the program as
 `path`, each arg as plain ink, and a `→ status` tail roled `ok`/`bad` off the
 observation's own `status`; grep is the pattern as `code` `in` the cwd scope
 as `path`; a capability check reads `check <resource> <decision> <fields…>`,

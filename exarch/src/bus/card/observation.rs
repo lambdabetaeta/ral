@@ -13,7 +13,7 @@ use ral_core::types::{
     CommandOrigin, Decision, LeaseClass, Map, Observation, Observed, WorkerId, WriteOutcome,
 };
 
-use super::diff::whole_file_hunks;
+use super::diff::{clip_hunks, whole_file_hunks};
 use super::{Card, Mark, Role, Span};
 
 /// `committed`/`aborted`/`stopped`/`failed`, styled
@@ -98,10 +98,9 @@ pub fn observation_card(what: &Observed) -> Card {
             path,
             outcome,
             new_bytes,
-            old_bytes,
             ..
         } => {
-            return write_card(path, *outcome, old_bytes.as_deref(), new_bytes.as_deref());
+            return write_card(path, *outcome, new_bytes.as_deref());
         }
         Observed::Command { argv, status, .. } => {
             let mut spans = vec![Span::plain("$ ")];
@@ -134,9 +133,9 @@ pub fn observation_card(what: &Observed) -> Card {
 /// the change itself.  A heading above it would only say the same twice, so the
 /// diff stands as the whole card and a `>` over an existing file reads as the
 /// change it made.
-fn write_card(path: &str, outcome: WriteOutcome, old: Option<&[u8]>, new: Option<&[u8]>) -> Card {
+fn write_card(path: &str, outcome: WriteOutcome, new: Option<&[u8]>) -> Card {
     let body = if outcome == WriteOutcome::Committed {
-        write_preview(path, old, new)
+        write_preview(path, new)
     } else {
         Vec::new()
     };
@@ -262,32 +261,24 @@ fn capability_fields(fields: &Map) -> String {
         .join(" ")
 }
 
-/// What a committed write shows of itself: the change it made, as a whole-file
-/// [`Mark::Diff`], or nothing.
+/// What a committed write shows of itself: the opening of what landed, read as
+/// a change against the empty side and cut to ten lines.
 ///
-/// A write has one thing to say and one way to say it. Creating a file is not a
-/// separate kind of event needing a separate kind of preview — it is a change
-/// against the empty before-image, and reads as one, every line an addition.
-/// The door hands that empty side over as `Some(&[])`, so `old` being `Some`
-/// means the before-image is *known*, not that the file existed.
+/// A write is *reported*, not reproduced. It is shown against nothing rather
+/// than against the file it replaced, because a redirect says what now stands
+/// there — and the head of that is the whole of what a card owes a reader.
+/// [`clip_hunks`] closes it with the `…` that says there is more.
 ///
-/// Nothing is shown when no diff can be read off: `old` absent (a target the
-/// door could not read whole, whose prior content is unknown — diffing against
-/// nothing there would claim the file was created), `new` absent (the staged
-/// side likewise), either side not being text, or the two agreeing. The card is
-/// then its heading alone: a write reported and not shown.
-///
-/// A redirect's write reaches here and nothing else does: an edit holds both
-/// its texts already and diffs at the edit itself
-/// (`shell_eval::builtins`'s `surface_edit`), under no cap at all.
-fn write_preview(path: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> Vec<Mark> {
-    let (Some(old), Some(new)) = (old, new.filter(|b| !b.is_empty())) else {
+/// Nothing at all when there is nothing to open: no bytes (a write past the
+/// door's read cap), empty bytes, or content that is not text.
+fn write_preview(path: &str, new: Option<&[u8]>) -> Vec<Mark> {
+    let Some(new) = new.filter(|b| !b.is_empty()) else {
         return Vec::new();
     };
-    let (Ok(old_text), Ok(new_text)) = (std::str::from_utf8(old), std::str::from_utf8(new)) else {
+    let Ok(text) = std::str::from_utf8(new) else {
         return Vec::new();
     };
-    match whole_file_hunks(old_text, new_text) {
+    match clip_hunks(whole_file_hunks("", text)) {
         hunks if hunks.is_empty() => Vec::new(),
         hunks => vec![Mark::Diff {
             path: path.to_string(),

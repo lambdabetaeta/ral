@@ -2097,12 +2097,11 @@ return !{{length $hits}}"
         );
     }
 
-    /// Overwriting a file too large to read whole: rather than carry a partial
-    /// and misleading pre-image, the door withholds `old_bytes` entirely — and
-    /// the card then shows nothing, since a diff against a *missing*
-    /// before-image would read as a file created rather than replaced.
+    /// Overwriting a file too large to read whole: the door withholds
+    /// `old_bytes` rather than carry a partial pre-image, and the card is
+    /// unaffected — it opens what landed, never what it replaced.
     #[test]
-    fn bare_write_redirect_over_oversized_existing_file_shows_no_diff() {
+    fn bare_write_redirect_over_oversized_existing_file_still_opens_what_landed() {
         use ral_core::types::WriteOutcome;
         let mut shell = fresh_shell();
         // Comfortably past the 64KiB read cap.
@@ -2142,10 +2141,44 @@ return !{{length $hits}}"
             other => panic!("expected a Write observation, got {other:?}"),
         }
         let card = crate::bus::card::observation_card(&obs[0]);
-        assert!(
-            card.single_diff().is_none(),
-            "an unknown before-image must not be diffed against, got {card:?}"
+        let Some((_, hunks)) = card.single_diff() else {
+            panic!("a committed write opens what landed, got {card:?}")
+        };
+        let rows: Vec<String> = hunks.iter().flat_map(|h| &h.rows).map(Row::text).collect();
+        assert_eq!(
+            rows, ["short"],
+            "the card shows the new content, needing no before-image to do it"
         );
+    }
+
+    /// A write shows its opening ten lines and an `…`, never the file. The
+    /// header's size bar is the magnitude; the body is a sample.
+    #[test]
+    fn a_long_write_is_cut_to_ten_lines_and_an_ellipsis() {
+        let mut shell = fresh_shell();
+        let dir = scratch_dir("cov-write-long");
+        let path = display_no_trailing_sep(&dir.path().join("long.txt"));
+        let body = (1..=25)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let (r, records) = run_capturing(
+            &mut shell,
+            &format!("to-string '{body}' > '{path}'"),
+        );
+        assert_eq!(r.exit, 0, "the write redirect must succeed");
+
+        let obs = observations(&records);
+        let card = crate::bus::card::observation_card(&obs[0]);
+        let Some((_, hunks)) = card.single_diff() else {
+            panic!("a committed write opens what landed, got {card:?}")
+        };
+        let rows: Vec<String> = hunks.iter().flat_map(|h| &h.rows).map(Row::text).collect();
+        assert_eq!(rows.len(), 11, "ten lines and the ellipsis, got {rows:?}");
+        assert_eq!(rows[0], "line 1");
+        assert_eq!(rows[9], "line 10");
+        assert_eq!(rows[10], "…", "the cut says it is a cut");
     }
 
     /// The EXEC door end to end: a bare external raises exactly one `Command`

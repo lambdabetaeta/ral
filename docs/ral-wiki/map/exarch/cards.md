@@ -192,10 +192,12 @@ and `edit-hash`/`edit-replace` are Rust host builtins
 ([[map/exarch/io-surface|io-surface]]), their file I/O sunk below the redirect
 frame so each is one logical surface. An edit builds its own whole-file diff
 card (one canonical original-vs-final diff grouped into hunks by `similar`) at
-the edit, where both texts are already in hand; a committed `>` cannot, and is
-diffed at the write card from the two snapshots its event carries — including
-for a file it created, whose before-image is simply the empty one, so a
-creation reads as an all-adds diff rather than a shape of its own. The read
+the edit, where both texts are already in hand; a committed `>` opens the head of what
+landed against the empty side instead, an all-adds sample rather than a shape
+of its own. Both are cut to ten rows and an `…` by `clip_hunks` where they are
+composed, so a card is a report of a change and never a copy of the file — and
+the renderer stays dumb: L1 is the header alone, every rung above it draws
+what the mark holds. The read
 redirect and exec cards are likewise composed from core's I/O events. `agent.ral` now carries
 only the `view-text-around` reader, the tasks kit, and the goal pins
 ([[map/exarch/builtins|builtins]]).
