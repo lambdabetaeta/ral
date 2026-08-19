@@ -159,9 +159,12 @@ fn quote_string(body: &str, params: &PrintParams) -> String {
 }
 
 /// Elide the middle of `s` to a `budget`-char head and tail around an
-/// `[…elided N characters…]` marker. Each stops at its nearest newline too, so
-/// no embedded newline survives; `s` returns whole when nothing was cut, and
-/// when `budget` is `0`.
+/// `[…elided N characters…]` marker. Each stops at its nearest newline too, so a
+/// long multi-line string keeps its first and last physical line. A cut that
+/// does not shorten is not a cut: `s` returns whole when the marker would cost
+/// more than the text it hides — the marker being 25 characters wide, nothing
+/// within 26 characters of `budget` is touched at all — and when `budget` is
+/// `0`.
 fn elide(s: &str, budget: usize) -> String {
     if budget == 0 {
         return s.to_string();
@@ -186,10 +189,12 @@ fn elide(s: &str, budget: usize) -> String {
     let elided = total
         .saturating_sub(head.chars().count())
         .saturating_sub(tail.chars().count());
-    if elided == 0 {
-        return s.to_string();
+    let marked = format!("{head} […elided {elided} characters…] {tail}");
+    if marked.chars().count() < total {
+        marked
+    } else {
+        s.to_string()
     }
-    format!("{head} […elided {elided} characters…] {tail}")
 }
 
 fn bracketed(

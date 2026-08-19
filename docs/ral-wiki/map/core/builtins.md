@@ -175,8 +175,13 @@ Bodies are grouped by concern, one submodule each:
   builtin). One printer, one policy, per-reader numbers: truncation preserves
   identity — the depth limit summarises (keys and heads) and only the floor
   beneath it counts, a string elides unless it *is* the whole value, and a byte
-  budget is spent inside each container, which closes with `…N more`. The two
-  readers differ only in window, quote fence, and absorbable bytes;
+  budget is spent inside each container, which closes with `…N more`. An elision
+  must earn its marker: a string prints whole unless cutting it actually
+  shortens the rendering, so nothing is mutilated to save a character. The two
+  readers differ in window, quote fence, and absorbable bytes — and in whether a
+  nested string is capped at all: the REPL cuts at a terminal row, exarch's
+  `VALUE` section cuts nothing, since a payload's text is the identity a later
+  `edit-hash` matches;
 - `util.rs` — shared helpers, JSON coercion.
 
 The capability `Value`-map decoder is *not* a builtin: it lives beside the

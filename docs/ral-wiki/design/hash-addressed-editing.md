@@ -82,10 +82,12 @@ surface. All three are **path-based**: each takes a path and reads the *whole*
 file in Rust, through one grant-checked read door, and computes witnesses with
 the same `window_hashes`. Nothing in the surface takes a line list or a stream.
 
-- `view-text PATH START END` — show `[START, END)`, each line tagged
-  `<line-no>\t<hash>\t<text>`. The human read.
+- `view-text PATH START END` — show `[START, END)` as one record per line,
+  `[line: Int, hash: Str, text: Str]`. Records rather than tagged text, so one
+  read serves both eyes and script: the rows a sweep means to change go straight
+  into `edit-hash`, which is why no programmatic twin stands beside it.
 - `view-text-around PATH LINE PEEK` — the `2*PEEK + 1` lines centred on `LINE`,
-  tagged the same way. A thin ral helper over `view-text`.
+  in the same records. A thin ral helper over `view-text`.
 - `edit-hash PATH EDITS` — apply the batch.
 
 This shape is forced, and it is what makes the witness trustworthy:

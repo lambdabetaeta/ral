@@ -4,7 +4,7 @@
     let tui-end    = view-text #'src/tui.rs'# 300 350
     [ #'src/tui.rs-100-150'# : $tui-start, #'src/tui.rs-300-350'# : $tui-end ]
 
-`view-text-around PATH LINE PEEK` shows the `2*PEEK + 1` lines centred on `LINE`, tagged the same way.
+`view-text-around PATH LINE PEEK` shows the `2*PEEK + 1` lines centred on `LINE`, in the same records.
 
 `edit-hash PATH EDITS` applies a batch of `EDITS`, a list of records `[hash: HASH, line: NEWTEXT]`. Each edit replaces ONLY the line identified by `HASH` verbatim with `NEWTEXT`. It is atomic: every hash is resolved against lines before editing; and a batch either applies whole or fails whole. Use raw strings `#'…'#` for `NEWTEXT` without any escapes.
 

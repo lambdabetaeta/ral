@@ -387,9 +387,19 @@ pub(crate) fn run_shell(
 /// Print settings for the `VALUE` section: structured values print in ral
 /// surface syntax rather than detouring through JSON, so variants stay variants
 /// and records stay records.
+///
+/// `max_string: 0` — no per-string cap here, where the REPL keeps one. A
+/// terminal's scarcity is the row, and 72 characters is a row; this reader's
+/// scarcity is context, which `max_bytes` already bounds in its own unit, so a
+/// second cap in a second unit buys only damage. And the damage is not cosmetic:
+/// a nested string here is usually a payload whose *text is its identity* — a
+/// `view-text` row's line, a `grep-files` hit — which `edit-hash` and
+/// `edit-replace` both match verbatim, so a line rendered in part is a line that
+/// cannot be edited. Spending the byte budget instead costs whole rows, and each
+/// container says how many it dropped.
 const VALUE_PRINT_PARAMS: ral_core::builtins::PrintParams = ral_core::builtins::PrintParams {
     max_width: 120,
-    max_string: 72,
+    max_string: 0,
     max_depth: 3,
     min_quote_hashes: 1,
     quote_bytes: true,

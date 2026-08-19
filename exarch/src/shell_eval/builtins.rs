@@ -76,7 +76,7 @@ pub fn install_agent_library(mooring: &Mooring, shell: &mut Shell) -> Settled<Va
 /// [`install_agent_library`] plants these in the sourcing shell's session.
 pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
     [
-        ("view-text-around", "view-text-around PATH LINE PEEK  — show the 2*PEEK+1 lines of PATH centred on LINE, tagged like `view-text`, clamped at the top of the file."),
+        ("view-text-around", "view-text-around PATH LINE PEEK  — show the 2*PEEK+1 lines of PATH centred on LINE, in `view-text`'s records, clamped at the top of the file."),
         ("pin-set", "pin-set <key> <card>  — overwrite the register slot under key with card."),
         ("pin-clear", "pin-clear <key>  — empty the register slot under key."),
         ("clear-tasks", "clear-tasks  — empty the task list."),
@@ -944,7 +944,7 @@ static EXARCH_BUILTINS_ARR: [BuiltinEntry; 9] = [
     BuiltinEntry::new(
         Cow::Borrowed("view-text"),
         BuiltinTypeRule::Scheme(scheme_view_text),
-        "view-text <path> <start> <end>  — show the half-open line range [start, end) of PATH, each line tagged `<line-no>\\t<hash>\\t<text>`. Returns a list of records [{line: Int, hash: String, text: String}]. The hash is the witness `edit-hash` checks; copy it, never recompute it. Reads the whole file (the witness depends on file-wide uniqueness).",
+        "view-text <path> <start> <end>  — show the half-open line range [start, end) of PATH as one record per line, [{line: Int, hash: String, text: String}]. The hash is the witness `edit-hash` checks; copy it, never recompute it. Reads the whole file (the witness depends on file-wide uniqueness).",
         BuiltinBody::Static(builtin_view_text),
     ),
     BuiltinEntry::new(
