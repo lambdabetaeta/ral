@@ -23,6 +23,10 @@ use std::sync::Arc;
 pub(super) struct StageHandle {
     pub(super) kind: StageKind,
     pub(super) held_edge: Option<os_pipe::PipeReader>,
+    /// Mirrors `StageSpec::feeds_pipe`: whether this stage's stdout can
+    /// still reach the interior edge, so the collector knows when a dead
+    /// reader downstream is none of this stage's business at all.
+    pub(super) feeds_pipe: bool,
 }
 
 pub(super) enum StageKind {
@@ -191,6 +195,7 @@ fn spawn_stage(
                 handle: StageHandle {
                     kind: StageKind::External(handle),
                     held_edge,
+                    feeds_pipe: spec.feeds_pipe,
                 },
                 gate: None,
             });
@@ -223,6 +228,7 @@ fn spawn_stage(
         handle: StageHandle {
             kind: StageKind::Helper(handle),
             held_edge,
+            feeds_pipe: spec.feeds_pipe,
         },
         gate: Some(deferred),
     })

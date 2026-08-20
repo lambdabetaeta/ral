@@ -286,6 +286,57 @@ fn pipeline_stage_redirect_to_file_is_honored() {
     );
 }
 
+/// A redirect stage's fd 1 is owed to a file, not to the reader beside it —
+/// the reader-gone kill (SPEC §7.6) must never fire on it just because a
+/// stdin-ignoring reader settles first.  Regression: the kill used to land
+/// mid-rename on the stage's own atomic write, before this fact was static
+/// at resolve time (`resolve::diverts_stdout`), and the pipeline reported
+/// success over a file that was never created — reproduces 5/5 without the
+/// fix.
+#[test]
+fn a_redirect_stage_survives_a_reader_that_never_looks_at_stdin() {
+    let path = fresh_tmp_path("ral_pipe_redir_fast_reader", "txt");
+    let path_str = path.display().to_string();
+    let _ = std::fs::remove_file(&path);
+
+    let o = run(&format!(
+        "/bin/echo redirected > '{path_str}' | /usr/bin/true\n"
+    ));
+    let body = std::fs::read_to_string(&path).ok();
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(
+        body.as_deref().map(str::trim_end),
+        Some("redirected"),
+        "file did not receive redirected bytes — the stage was killed before its own \
+         redirect committed"
+    );
+}
+
+/// The same exemption through a `Scope(Redirect)` frame — the carrier a
+/// closure call wraps its trailing redirect in, since it cannot fuse the
+/// redirect onto itself the way an `Exec` node does.
+#[test]
+fn a_redirected_closure_stage_survives_a_reader_that_never_looks_at_stdin() {
+    let path = fresh_tmp_path("ral_pipe_redir_closure", "txt");
+    let path_str = path.display().to_string();
+    let _ = std::fs::remove_file(&path);
+
+    let o = run(&format!(
+        "let f = {{ |x| /bin/echo $x }}\n$f hello > '{path_str}' | /usr/bin/true\n"
+    ));
+    let body = std::fs::read_to_string(&path).ok();
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(
+        body.as_deref().map(str::trim_end),
+        Some("hello"),
+        "file did not receive redirected bytes"
+    );
+}
+
 // ── Redirects on handler-resolved heads ────────────────────────────────────
 //
 // A trailing fd redirect on a command whose head resolves to a handler frame

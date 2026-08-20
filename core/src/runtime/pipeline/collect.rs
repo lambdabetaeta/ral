@@ -335,6 +335,7 @@ impl RunningPipeline {
                     continue;
                 };
                 if kills[ix] == StageKill::NotSent
+                    && handle.feeds_pipe
                     && observed.get(ix + 1).is_some_and(Option::is_some)
                 {
                     match &mut handle.kind {
@@ -351,7 +352,9 @@ impl RunningPipeline {
                 if !ready {
                     continue;
                 }
-                let StageHandle { kind, held_edge } = stages[ix].take().expect("probed above");
+                let StageHandle {
+                    kind, held_edge, ..
+                } = stages[ix].take().expect("probed above");
                 let is_pipeline_final = ix + 1 == n;
                 let result = match kind {
                     StageKind::External(h) => observe_external_stage(h, kills[ix], shell, started),

@@ -60,6 +60,14 @@ disposition toward that signal never again decides its pipeline's verdict.
   stage handles and reverts to raw OS pipe behaviour; its verdict was already
   only its leader's exit, so no forgiveness question arises for a job that
   never finishes collecting.
+- The kill is conditioned on a stage's stdout being able to reach the
+  interior edge at all. A stage whose own redirect statically diverts every
+  fd-1 byte to a file (`cmd > file | next`) is exempt: its reader's death
+  bears on nothing it produces, so "owed to nobody" was never true of it in
+  the reader-gone sense — it was never owed to that reader in the first
+  place. This is a fact resolve already has statically (the same fact that
+  routes such a stage to a helper rather than a direct spawn), not a runtime
+  guess.
 
 ## Rejected shapes
 
@@ -122,6 +130,14 @@ closed, but the same shape of problem.
   and a producer that writes, sleeps 50ms past its reader's exit, then exits
   4, is forgiven 120/120 — the `exit 4` never occurs, the sleep dwarfing the
   kill's latency.
+- The redirect exemption above closed a real regression, found via Windows
+  CI and reproduced on Unix once suspected: `cmd > file | next`, with `next`
+  a stage that never reads its stdin (Windows' `cmd /c rem`; Unix's
+  `/usr/bin/true`), let `next` settle before `cmd`'s own atomic write
+  committed its rename. The kill landed mid-rename, was forgiven as intended,
+  and the pipeline reported success over a file that was never created —
+  correct forgiveness of the wrong kill. `cat` as the reader had hidden this
+  for years, since a reader that blocks on stdin can never settle first.
 
 See [[design/pipelines|pipelines]], [[design/failure|failure]],
 [[decisions/260816_a-producer-that-outlived-its-reader|a-producer-that-outlived-its-reader]]

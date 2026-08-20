@@ -6,8 +6,9 @@
 use super::super::command::CommandIdentity;
 use super::super::command_call;
 use crate::evaluator::call;
-use crate::ir::{Comp, CompKind};
+use crate::ir::{Comp, CompKind, RedirectV, ScopeOp, ValRedirectTarget};
 use crate::source::Span;
+use crate::syntax::ast::RedirectMode;
 use crate::types::{Mooring, Settled, Shell, TerminalAccess, Value};
 use std::sync::Arc;
 
@@ -64,6 +65,47 @@ pub(super) struct StageSpec {
     pub(super) launch: StageLaunch,
     /// So a parent-side error points at this stage, not the whole pipeline.
     pub(super) span: Option<Span>,
+    /// Whether this stage's stdout can still reach the interior edge to its
+    /// reader.  `false` for an `Exec` whose own redirects divert fd 1 away
+    /// entirely — nothing it produces is owed to that reader, so the
+    /// collector's reader-gone kill (SPEC §7.6) must never fire on it: the
+    /// kill would be forgiven as "nothing was owed," but the stage may still
+    /// be mid-flight on its own redirect (e.g. an unrenamed atomic write),
+    /// which the reader's death has no bearing on at all.
+    pub(super) feeds_pipe: bool,
+}
+
+/// Whether a stage's redirects send every fd-1 byte to a file instead of its
+/// stdout — the interior pipe a downstream stage would read.  ral's two
+/// redirect carriers are an `Exec`'s own list and a `Scope(Redirect)` frame
+/// wrapped around a body that cannot fuse its redirects (an `App`, or a
+/// nested `Scope`), so both are read, the latter recursively.
+///
+/// A `Read`/`HereString` redirect targets stdin and never diverts stdout, so
+/// only a write-mode redirect counts; and only a `File` target actually
+/// diverts the byte stream — `>&1` parses as `{fd: 1, target: Fd(1)}`, a
+/// self-aliasing no-op that leaves the pipe live, so an `Fd` target is
+/// never a diversion (`1>&N` for any other `N` is rejected by the lexer, and
+/// `2>&1` cannot alias fd 1 back onto anything).
+fn diverts_stdout(stage: &Comp) -> bool {
+    match &stage.item {
+        CompKind::Exec(e) => redirects_divert_stdout(&e.redirects),
+        CompKind::Scope(ScopeOp::Redirect { body, redirects }) => {
+            redirects_divert_stdout(redirects) || diverts_stdout(body)
+        }
+        _ => false,
+    }
+}
+
+fn redirects_divert_stdout(redirects: &[RedirectV]) -> bool {
+    redirects.iter().any(|r| {
+        r.fd == 1
+            && matches!(
+                r.mode,
+                RedirectMode::Write | RedirectMode::StreamWrite | RedirectMode::Append
+            )
+            && matches!(r.target, ValRedirectTarget::File(_))
+    })
 }
 
 /// A bundled tool is not distinguished from a host binary — both become
@@ -134,6 +176,7 @@ fn analyze_stage(stage: &Comp, terminal: TerminalPlan, shell: &mut Shell) -> Set
     Ok(StageSpec {
         launch,
         span: stage.span,
+        feeds_pipe: !diverts_stdout(stage),
     })
 }
 
