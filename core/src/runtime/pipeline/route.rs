@@ -3,6 +3,14 @@
 //! Every edge is allocated before any stage spawns, and each end lives in
 //! exactly one [`StageRoute`] the launcher consumes whole — so a doubly-wired
 //! end is unrepresentable, and an aborted launch closes what it never spawned.
+//!
+//! Each non-final stage's route also carries a second, parent-held duplicate
+//! of its outbound edge's read end ([`StageRoute::held`]).  While the parent
+//! holds it, the stage writing to that edge can never observe its reader's
+//! death — no SIGPIPE, no EPIPE — so the pipeline collector's kill is the only
+//! channel through which a dead reader reaches its producer.  The duplicate
+//! is dropped once the writer's own observation completes, releasing any of
+//! the writer's descendants still blocked on the edge.
 
 use super::protocol::pipe_error;
 use super::resolve::PipelinePlan;
@@ -38,6 +46,9 @@ pub(super) struct StageRoute {
     pub(super) stdin: ByteIn,
     pub(super) stdout: ByteOut,
     pub(super) final_value: FinalValue,
+    /// The parent's duplicate of this stage's outbound edge's read end;
+    /// `None` for the final stage, which has no outbound edge.
+    pub(super) held: Option<os_pipe::PipeReader>,
 }
 
 /// Allocate every interior edge as a byte pipe, purely from stage position —
@@ -51,12 +62,13 @@ pub(super) fn open_stage_routes(plan: &PipelinePlan) -> Settled<Vec<StageRoute>>
             Some(reader) => ByteIn::Upstream(reader),
             None => ByteIn::Parent,
         };
-        let stdout = if i + 1 < n {
+        let (stdout, held) = if i + 1 < n {
             let (r, w) = os_pipe::pipe().map_err(pipe_error)?;
+            let held = r.try_clone().map_err(pipe_error)?;
             inbound = Some(r);
-            ByteOut::Downstream(w)
+            (ByteOut::Downstream(w), Some(held))
         } else {
-            ByteOut::Parent
+            (ByteOut::Parent, None)
         };
         let final_value = if i + 1 == n && plan.yields == crate::ir::PipeYield::Last {
             FinalValue::Report
@@ -67,6 +79,7 @@ pub(super) fn open_stage_routes(plan: &PipelinePlan) -> Settled<Vec<StageRoute>>
             stdin,
             stdout,
             final_value,
+            held,
         });
     }
     Ok(routes)

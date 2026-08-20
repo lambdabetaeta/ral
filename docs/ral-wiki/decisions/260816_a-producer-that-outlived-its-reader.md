@@ -1,5 +1,6 @@
 ---
-status: active
+status: superseded
+superseded_by: decisions/260820_a-stage-ral-stopped-has-no-failure
 ---
 
 # A producer that outlived its reader
@@ -9,6 +10,8 @@ word: a non-final stage that the broken pipe itself ended keeps no failure.
 Unix hears that cause as SIGPIPE. Windows, which has no such signal and no
 status that means it, approximates the cause by the order the two stages ended
 in, and so forgives the more of the two.**
+
+> Superseded by [[decisions/260820_a-stage-ral-stopped-has-no-failure|a-stage-ral-stopped-has-no-failure]]: ral now holds each interior edge's read end open, so no producer ever hears SIGPIPE, and kills the stage itself once its reader is gone — no cause to read, no clock anywhere.
 
 ## Decision
 

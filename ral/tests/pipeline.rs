@@ -403,7 +403,19 @@ fn pipeline_stage_handler_redirect_to_file_is_honored() {
     assert!(o.stdout.contains("done"), "stdout: {}", o.stdout);
 }
 
-// ── Broken pipe ──────────────────────────────────────────────────────────────
+// ── Reader-gone forgiveness ──────────────────────────────────────────────────
+//
+// ral holds a duplicate of each interior edge's read end until that edge's
+// writer stage is reaped, so no interior edge can ever deliver a broken-pipe
+// signal or a write error to the stage that writes it.  The collector kills
+// a non-final stage once its reader stage is gone and forgives exactly that
+// kill — SPEC §7.6.  The tests below exercise that boundary: a producer's
+// signal disposition cannot change the verdict, a producer that exits on
+// its own account keeps that status, a killed producer's own post-write
+// work is truncated, forgiveness is scoped per edge through a middle stage,
+// and a producer that never writes at all is still killed once its reader
+// is done — the pipeline's extent is its final stage's, not its slowest
+// producer's.
 
 #[test]
 fn broken_pipe_very_large_count() {
@@ -423,17 +435,106 @@ fn broken_pipe_very_large_count() {
 fn a_firehose_into_a_non_reading_consumer_terminates() {
     // Neither side of a `|` promises traffic, and the producer's side of
     // that symmetry is the one with teeth: `yes` never stops writing, and
-    // `!{ return 5 }` returns without ever touching stdin.  The consumer
-    // finishing must close its read end promptly, so the producer takes
-    // EPIPE rather than blocking forever on a pipe nobody will drain.
-    // The pipeline's value is the consumer's own `5`; not one byte of the
-    // firehose is in it.
+    // `!{ return 5 }` returns without ever touching stdin.  ral holds a
+    // duplicate of the interior edge's read end until `yes` is reaped, so
+    // `yes` never sees a broken-pipe signal — it blocks once the pipe
+    // fills, and once the consumer finishes and is reaped, ral kills
+    // `yes` and forgives that kill.  The pipeline's value is the
+    // consumer's own `5`; not one byte of the firehose is in it.
     let o = run_with_timeout(
         &[],
         "let n = !{ /usr/bin/yes | !{ return 5 } }\necho $n\n",
         Duration::from_secs(10),
     )
     .expect("firehose hung — the consumer's read end outlived the consumer");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "5", "stdout: {}", o.stdout);
+}
+
+#[test]
+fn sigpipe_ignoring_producer_is_still_forgiven() {
+    // A producer that traps SIGPIPE has no broken-pipe signal to take in
+    // the first place: ral holds the interior edge's read end open past
+    // `head`'s exit, so the producer only ever blocks on a full pipe.
+    // Once `head` is reaped, ral kills the producer and forgives that
+    // kill — the same verdict as an ordinary producer, because the
+    // forgiveness rule never reads the producer's signal disposition.
+    let o = run_with_timeout(
+        &[],
+        r#"sh -c 'trap "" PIPE; while :; do echo x; done' | head -1"#,
+        Duration::from_secs(10),
+    )
+    .expect("sigpipe-ignoring producer hung");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "x", "stdout: {}", o.stdout);
+}
+
+#[test]
+fn producer_own_exit_status_survives_early_reader_exit() {
+    // Only a kill ral itself sent is forgiven.  `sh` exits on its own
+    // account before ral ever needs to send one, so its status is the
+    // pipeline's, exactly as an ordinary command's would be.
+    let o = run_with_timeout(&[], "sh -c 'exit 7' | head -1", Duration::from_secs(5))
+        .expect("producer-exit pipeline hung");
+    assert_eq!(o.status, 7, "stderr: {}", o.stderr);
+}
+
+#[test]
+fn escape_inside_a_killed_producer_never_fires() {
+    // ral's kill lands mid-`yes`, before the block's `exit 5` statement
+    // is ever reached: the escape never occurs, and the pipeline's
+    // status is decided by `head`'s own (successful) exit, not by a
+    // statement the killed stage never ran.
+    let o = run_with_timeout(&[], "!{ yes ; exit 5 } | head -1", Duration::from_secs(10))
+        .expect("escape-flip pipeline hung");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+}
+
+#[test]
+fn producer_side_effect_after_reader_exit_is_truncated() {
+    // The producer writes one line, then does work that would leave a
+    // trace on disk.  `head -1` is done and reaped well within the
+    // sleep, so ral's kill lands before the marker file is created —
+    // the producer's post-write work never happens.
+    let path = fresh_tmp_path("ral_pipe_truncate_marker", "txt");
+    let path_str = path.display().to_string();
+    let _ = std::fs::remove_file(&path);
+
+    let script = format!("sh -c 'echo a; sleep 0.3; : > {path_str}; exit 4' | head -1");
+    let o = run_with_timeout(&[], &script, Duration::from_secs(5))
+        .expect("truncation pipeline hung");
+    let marker_exists = path.exists();
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert!(
+        !marker_exists,
+        "producer's post-write side effect ran after its reader exited"
+    );
+}
+
+#[test]
+fn middle_stage_forgiveness_is_per_edge() {
+    // Forgiveness is scoped per interior edge: `cat`'s edge to `yes` and
+    // its edge to `head` are each held open independently, so both `yes`
+    // and `cat` are killed and forgiven once `head` is done.
+    let o = run_with_timeout(&[], "yes | cat | head -1", Duration::from_secs(10))
+        .expect("middle-stage forgiveness pipeline hung");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+}
+
+#[test]
+fn producer_that_only_computes_is_killed_once_reader_exits() {
+    // ral's kill is keyed on the reader being reaped, not on a write
+    // attempt: a producer that only computes, never writing a byte, is
+    // killed exactly like one that writes.  The pipeline's extent is its
+    // final stage's, not its slowest producer's.
+    let o = run_with_timeout(
+        &[],
+        "let n = !{ sh -c 'while :; do :; done' | !{ return 5 } }\necho $n\n",
+        Duration::from_secs(10),
+    )
+    .expect("compute-only producer hung — the collector's kill did not fire");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "5", "stdout: {}", o.stdout);
 }

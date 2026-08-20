@@ -65,16 +65,11 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   variant (`Cancelled`, carrying the `CancelCause` and the signal we sent), so a
   torn-down child reports the cause — an expired time limit, a `cancel`, an
   interrupt, a shutdown — while a signal from outside ral still reports its
-  number. Same status either way. `Reader` is the second argument every status
-  is read against — `Caller`, or `Stage { outlived }` for a byte-pipe producer
-  — and carries the one forgiveness: a stage the broken pipe itself ended keeps
-  no failure. SIGPIPE is that cause on Unix; `outlived` is Windows'
-  approximation of it, there being no such signal to hear, and it forgives the
-  more of the two
-  ([[decisions/260816_a-producer-that-outlived-its-reader|a-producer-that-outlived-its-reader]]).
-  `ChildHandle::exited_at` supplies the instants `outlived` is computed from —
-  `GetProcessTimes` on Windows, `None` on Unix, which hears the cause itself and
-  needs no clock.
+  number. Same status either way, and it carries the one forgiveness: a
+  non-final stage the collector itself killed (`StageKill`, sent once that
+  stage's reader is reaped) keeps no failure; every other status is kept,
+  because the kill precedes the wait and cannot rewrite a recorded status
+  ([[decisions/260820_a-stage-ral-stopped-has-no-failure|a-stage-ral-stopped-has-no-failure]]).
 - `lease.rs` — `TerminalLease`, the unforgeable authority to hand the
   controlling terminal to a child via `tcsetpgrp`. No public constructor,
   neither `Clone` nor `Copy`: a host cannot forge or duplicate it. Minted at

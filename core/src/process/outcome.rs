@@ -3,6 +3,13 @@
 
 use super::cancel::CancelCause;
 
+/// The exit code the collector's `TerminateProcess` uses — ASCII "RALK" —
+/// the only signature a terminated Windows process carries.  A stage exiting
+/// with this exact code inside the kill window would be forgiven too; Unix
+/// has no such residue, a SIGKILL death being uncounterfeitable by an exit.
+#[cfg(windows)]
+pub(crate) const STAGE_KILL_EXIT_CODE: i32 = 0x5241_4c4b;
+
 /// The escalation ladder ral's own teardown sends, and the whole of it: SIGINT
 /// for an interrupt, SIGTERM for every other cause, SIGKILL to finish.
 /// `terminate_group` in `runtime/command/child.rs` sends exactly these, so a
@@ -80,17 +87,6 @@ impl Signal {
         match self.name() {
             Some(name) => format!("{} ({name})", self.number),
             None => self.number.to_string(),
-        }
-    }
-
-    pub fn is_sigpipe(self) -> bool {
-        #[cfg(unix)]
-        {
-            self.number == libc::SIGPIPE
-        }
-        #[cfg(not(unix))]
-        {
-            false
         }
     }
 
@@ -236,12 +232,18 @@ impl WaitOutcome {
         matches!(self, Self::Exited(0) | Self::NativeCode(0))
     }
 
-    /// Death by SIGPIPE: the child wrote where nobody was reading, and the
-    /// kernel said so.  Windows arranges no such death — a producer there
-    /// merely fails at its own write and exits however its author chose — so
-    /// this is a Unix fact, and [`Reader::Stage`] carries the Windows one.
-    pub fn is_broken_pipe(self) -> bool {
-        matches!(self, Self::Signaled(sig) if sig.is_sigpipe())
+    /// Whether this death reads as the pipeline collector's own kill.
+    /// `Cancelled` is deliberately excluded even when its signal is SIGKILL:
+    /// a cancellation in force outranks forgiveness.
+    pub fn is_stage_kill(self) -> bool {
+        #[cfg(unix)]
+        {
+            matches!(self, Self::Signaled(sig) if sig.is_sigkill())
+        }
+        #[cfg(windows)]
+        {
+            matches!(self, Self::Exited(code) if code == STAGE_KILL_EXIT_CODE)
+        }
     }
 }
 
@@ -272,25 +274,22 @@ pub enum CommandFailure {
     Spawn(SpawnFailure),
 }
 
-/// Who was reading a child's stdout when it died — the question its exit
-/// status has to be read against.
+/// Whether the pipeline collector itself ended this stage because its reader
+/// had already been reaped — the one death [`CommandFailure::from_outcome`]
+/// forgives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Reader {
-    /// The caller.  Every nonzero status is the child's own.
-    Caller,
-    /// The next byte-pipe stage.  `outlived` says this child was still running
-    /// when that stage ended, so the rest of its output was owed to nobody and
-    /// however it died is no failure.  Unix hears that same fact from the
-    /// kernel as SIGPIPE and leaves `outlived` false; Windows, which has no
-    /// such signal, reads it off the order the two ended in.
-    Stage { outlived: bool },
+pub enum StageKill {
+    NotSent,
+    Sent,
 }
 
 impl CommandFailure {
-    /// The failure an outcome amounts to, or `None` for success: a stage that
-    /// owed its reader nothing more keeps none.
-    pub fn from_outcome(outcome: WaitOutcome, reader: Reader) -> Option<Self> {
-        if matches!(reader, Reader::Stage { outlived } if outlived || outcome.is_broken_pipe()) {
+    /// The failure an outcome amounts to, or `None` for success.  Forgiveness
+    /// reaches only the collector's own kill, and never an exit status:
+    /// killing a zombie cannot rewrite its recorded status, so a real failure
+    /// cannot be silently forgiven.
+    pub fn from_outcome(outcome: WaitOutcome, kill: StageKill) -> Option<Self> {
+        if kill == StageKill::Sent && outcome.is_stage_kill() {
             return None;
         }
         match outcome {
@@ -403,17 +402,16 @@ mod tests {
     fn signal_names_follow_platform_constants() {
         assert_eq!(Signal::new(libc::SIGKILL).display(), "9 (SIGKILL)");
         assert_eq!(Signal::new(libc::SIGTTOU).name(), Some("SIGTTOU"));
-        assert!(Signal::new(libc::SIGPIPE).is_sigpipe());
     }
 
     #[test]
     fn ordinary_exit_and_signal_death_stay_distinct() {
         assert_eq!(
-            CommandFailure::from_outcome(WaitOutcome::Exited(137), Reader::Caller),
+            CommandFailure::from_outcome(WaitOutcome::Exited(137), StageKill::NotSent),
             Some(CommandFailure::ExitCode(137))
         );
         assert_eq!(
-            CommandFailure::from_outcome(WaitOutcome::Signaled(Signal::new(9)), Reader::Caller),
+            CommandFailure::from_outcome(WaitOutcome::Signaled(Signal::new(9)), StageKill::NotSent),
             Some(CommandFailure::Signal(Signal::new(9)))
         );
     }
@@ -426,7 +424,7 @@ mod tests {
             killed_by: Signal::new(libc::SIGKILL),
         };
         assert_eq!(outcome.to_user_exit_code(), 128 + libc::SIGSTOP);
-        let failure = CommandFailure::from_outcome(outcome, Reader::Caller).unwrap();
+        let failure = CommandFailure::from_outcome(outcome, StageKill::NotSent).unwrap();
         assert!(failure.message("cmd").contains("stopped by signal"));
         assert_eq!(failure.to_user_exit_code(), 128 + libc::SIGSTOP);
     }
@@ -450,7 +448,7 @@ mod tests {
                 outcome.to_user_exit_code(),
                 WaitOutcome::Signaled(term).to_user_exit_code()
             );
-            let failure = CommandFailure::from_outcome(outcome, Reader::Caller).unwrap();
+            let failure = CommandFailure::from_outcome(outcome, StageKill::NotSent).unwrap();
             assert_eq!(failure.to_user_exit_code(), 128 + libc::SIGTERM);
             assert_eq!(
                 failure.message("sleep"),
@@ -478,31 +476,12 @@ mod tests {
         let segv = Signal::new(libc::SIGSEGV);
         let outcome = WaitOutcome::Signaled(segv).attribute_to(CancelCause::Deadline);
         assert_eq!(outcome, WaitOutcome::Signaled(segv));
-        let failure = CommandFailure::from_outcome(outcome, Reader::Caller).unwrap();
+        let failure = CommandFailure::from_outcome(outcome, StageKill::NotSent).unwrap();
         assert_eq!(failure.message("sh"), "sh: killed by signal 11 (SIGSEGV)");
         assert_eq!(
             failure.default_hint("sh").as_deref(),
             Some("the process crashed with a segmentation fault")
         );
-    }
-
-    /// A non-final stage's broken pipe is forgiven, and no cancellation in force
-    /// at the time revokes that: SIGPIPE is off the ladder, so the stage stays a
-    /// success instead of becoming a failure carrying status 141.
-    #[cfg(unix)]
-    #[test]
-    fn a_non_final_sigpipe_is_forgiven_under_a_cancelled_scope() {
-        let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGPIPE));
-        for cause in [CancelCause::Interrupt, CancelCause::Terminate] {
-            assert_eq!(
-                CommandFailure::from_outcome(
-                    outcome.attribute_to(cause),
-                    Reader::Stage { outlived: false }
-                ),
-                None,
-                "{cause:?} must not turn a forgiven broken pipe into a failure"
-            );
-        }
     }
 
     /// A signal nobody in ral sent stays a signal: only a teardown we performed
@@ -512,7 +491,7 @@ mod tests {
     fn a_foreign_signal_is_still_reported_as_a_signal() {
         let failure = CommandFailure::from_outcome(
             WaitOutcome::Signaled(Signal::new(libc::SIGKILL)),
-            Reader::Caller,
+            StageKill::NotSent,
         )
         .unwrap();
         assert_eq!(failure.message("sh"), "sh: killed by signal 9 (SIGKILL)");
@@ -522,33 +501,65 @@ mod tests {
         );
     }
 
+    /// The kill the collector itself sent is the one death forgiven: the
+    /// stage's reader was already reaped, so a SIGKILL is not a failure but
+    /// the collector reclaiming a producer nobody was reading from anymore.
     #[cfg(unix)]
     #[test]
-    fn non_final_sigpipe_is_success() {
-        let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGPIPE));
-        assert_eq!(
-            CommandFailure::from_outcome(outcome, Reader::Stage { outlived: false }),
-            None
-        );
-        assert!(CommandFailure::from_outcome(outcome, Reader::Caller).is_some());
+    fn a_stage_kill_is_forgiven() {
+        let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGKILL));
+        assert_eq!(CommandFailure::from_outcome(outcome, StageKill::Sent), None);
     }
 
-    /// The Windows half of the same law, and the only half Windows has: a
-    /// producer still running when its reader ended was keeping nothing from
-    /// anyone, so whatever status it chose is not the pipeline's failure.  The
-    /// statuses here are deliberately arbitrary — the rule is the order the
-    /// two ended in, never a number.
+    /// The very same death, unsent, is an ordinary SIGKILL failure: nothing
+    /// about the signal itself carries forgiveness, only the collector's
+    /// bookkeeping that it was the one who sent it.
+    #[cfg(unix)]
     #[test]
-    fn a_stage_that_outlived_its_reader_is_success() {
-        for outcome in [WaitOutcome::Exited(3328), WaitOutcome::NativeCode(1)] {
+    fn the_same_death_unsent_is_kept() {
+        let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGKILL));
+        assert_eq!(
+            CommandFailure::from_outcome(outcome, StageKill::NotSent),
+            Some(CommandFailure::Signal(Signal::new(libc::SIGKILL)))
+        );
+    }
+
+    /// A zombie's exit status cannot be overwritten by a kill that arrives
+    /// too late: an exit is always kept, sent or not, which is exactly what
+    /// makes a real failure impossible to launder through forgiveness.
+    #[test]
+    fn an_exit_status_is_kept_even_when_sent() {
+        assert_eq!(
+            CommandFailure::from_outcome(WaitOutcome::Exited(3), StageKill::Sent),
+            Some(CommandFailure::ExitCode(3))
+        );
+    }
+
+    /// SIGPIPE is no longer special: with no interior edge left to deliver
+    /// it, a pipe of the stage's own making that breaks is its own failure,
+    /// sent or not.
+    #[cfg(unix)]
+    #[test]
+    fn a_sigpipe_death_is_kept_regardless_of_the_kill_fact() {
+        let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGPIPE));
+        for kill in [StageKill::Sent, StageKill::NotSent] {
             assert_eq!(
-                CommandFailure::from_outcome(outcome, Reader::Stage { outlived: true }),
-                None
+                CommandFailure::from_outcome(outcome, kill),
+                Some(CommandFailure::Signal(Signal::new(libc::SIGPIPE)))
             );
-            assert!(
-                CommandFailure::from_outcome(outcome, Reader::Stage { outlived: false }).is_some()
-            );
-            assert!(CommandFailure::from_outcome(outcome, Reader::Caller).is_some());
         }
+    }
+
+    /// A cancellation in force outranks forgiveness, deliberately: even a
+    /// `Cancelled` outcome whose signal is SIGKILL is kept, because
+    /// `is_stage_kill` only ever reads a bare `Signaled`.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancelled_sigkill_outranks_forgiveness() {
+        let outcome = WaitOutcome::Cancelled {
+            cause: CancelCause::RootAbort,
+            signal: Signal::new(libc::SIGKILL),
+        };
+        assert!(CommandFailure::from_outcome(outcome, StageKill::Sent).is_some());
     }
 }

@@ -12,8 +12,9 @@
 //!   * stage redirect inside a pipeline (`cmd > file`),
 //!   * missing-command diagnostic surfaces the user's command name,
 //!   * an unforced block cannot fail, because it never runs,
-//!   * a consumer that never reads closes its read end, so an unbounded
-//!     producer dies of a broken pipe instead of filling one forever,
+//!   * a consumer that never reads exits promptly, and ral terminates an
+//!     unbounded producer once that reader is gone instead of letting it
+//!     fill a pipe forever,
 //!   * a leader exiting before later stages does not reap the pipeline
 //!     prematurely (whole-job completion),
 //!
@@ -33,8 +34,11 @@ const FIREHOSE_ENV: &str = "RAL_WINDOWS_PIPE_FIREHOSE";
 
 /// Child mode for the firehose integration test below. The test executable is
 /// a convenient Windows-native producer whose contract we control: absent the
-/// marker it is inert in the ordinary suite; with the marker it writes until
-/// the pipe reports that its reader has gone away, then exits successfully.
+/// marker it is inert in the ordinary suite; with the marker it writes
+/// forever. ral holds the pipe's read end open past the consumer's exit, so
+/// under the pipeline's forgiveness rule this producer is terminated by
+/// ral's collector rather than ever observing its own write fail; the error
+/// branch below is a defensive fallback, not the expected path.
 #[test]
 fn firehose_writer_helper() {
     if std::env::var_os(FIREHOSE_ENV).is_none() {
@@ -45,7 +49,7 @@ fn firehose_writer_helper() {
     loop {
         if out.write_all(b"DATA\n").is_err() {
             // Bypass libtest: its success report would target the same closed
-            // pipe and could turn the intended broken pipe into a test panic.
+            // pipe and could turn a stray write failure into a test panic.
             std::process::exit(0);
         }
     }
@@ -239,10 +243,12 @@ fn a_failing_block_in_stage_position_never_fires() {
 }
 
 /// Neither side of a `|` promises traffic, and the producer's side of that
-/// symmetry is the one with teeth: a controlled helper never stops writing
-/// until Windows reports a broken pipe, while the consumer returns without
-/// touching stdin. Finishing must close the consumer's read end promptly, or the
-/// producer blocks on a full pipe nobody will ever drain.  The pipeline's
+/// symmetry is the one with teeth: a controlled helper never stops writing,
+/// while the consumer returns without ever touching stdin.  ral holds a
+/// duplicate of the pipe's read end until the producer is reaped, so the
+/// producer never observes the reader's exit as a write failure: it blocks
+/// on a full pipe, and once the consumer finishes and is reaped, ral
+/// terminates the producer and forgives that termination.  The pipeline's
 /// value is the consumer's own `5`; not one byte of the firehose is in it.
 #[test]
 fn a_firehose_into_a_non_reading_consumer_terminates() {

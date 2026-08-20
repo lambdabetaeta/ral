@@ -42,6 +42,7 @@ pub use windows::{
 #[cfg(windows)]
 pub(crate) use windows::{
     PreparedGroup, close_prepared_group, prepare_group, prepared_job, register_prepared_group,
+    terminate_for_stage_kill,
 };
 
 // ── Child handle ───────────────────────────────────────────────────────────
@@ -119,23 +120,6 @@ impl ChildHandle {
                 child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE
             }
             ChildRepr::RawWindows(child) => child.raw_process_handle(),
-        }
-    }
-
-    /// When the OS recorded this child's exit — `None` while it still runs,
-    /// and `None` on Unix, which needs no clock here: there a broken pipe
-    /// announces itself as SIGPIPE.  Windows has no such announcement, so a
-    /// pipeline tells a producer cut short by its reader from one that failed
-    /// on its own by the order the two ended in
-    /// ([`Reader`](crate::process::Reader)).
-    pub fn exited_at(&self) -> Option<std::time::SystemTime> {
-        #[cfg(unix)]
-        {
-            None
-        }
-        #[cfg(windows)]
-        {
-            windows::exit_time(self.raw_process_handle())
         }
     }
 

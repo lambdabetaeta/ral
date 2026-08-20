@@ -16,7 +16,7 @@ pub mod signal;
 pub mod slot;
 
 pub(crate) use outcome::not_found_hint;
-pub use outcome::{CommandFailure, Reader, Signal, SpawnFailure, WaitOutcome};
+pub use outcome::{CommandFailure, Signal, SpawnFailure, StageKill, WaitOutcome};
 
 pub use launch::{Launch, StdioSpec};
 pub use lease::TerminalLease;

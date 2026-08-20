@@ -15,6 +15,7 @@ use super::protocol::{DeferredFrame, FrameReader, HelperProtocol, pipe_error};
 use super::resolve::StageSpec;
 use super::route::StageRoute;
 use crate::child_eval::{ChildEvalRequest, ChildEvalResponse, DecodedResponse, decode_response};
+use crate::process::StageKill;
 use crate::types::{AuditFragment, Break, Error, Mooring, Settled, Shell};
 
 /// A running ral helper stage: one process and one report-reader thread.
@@ -36,19 +37,21 @@ impl HelperStageHandle {
 
     /// Reduce one helper stage to a [`StageObservation`], the peer of
     /// `collect::observe_external_stage` for directly spawned externals.
+    /// `is_last` is whether this is the pipeline's final stage — the one
+    /// whose value, if any, rides home.
     pub(super) fn observe(
         self,
         shell: &Shell,
-        reader: Option<&command::RunningChild>,
+        kill: StageKill,
+        is_last: bool,
         started: std::time::Instant,
     ) -> Settled<StageObservation> {
-        let is_last = reader.is_none();
         let Self {
             running,
             span,
             report,
         } = self;
-        let (helper_exit, failure) = match running.observe(reader) {
+        let (helper_exit, failure) = match running.observe(kill) {
             Ok(pair) => pair,
             Err(br) => return Ok(StageObservation::from_break(br)),
         };
@@ -89,8 +92,9 @@ impl HelperStageHandle {
         }
 
         // No report: the helper died before writing one, so the OS outcome is
-        // all there is.  A SIGPIPE forgiven on a non-final stage leaves no
-        // failure and lands on the status-0 tail.
+        // all there is.  A helper the collector killed because its reader
+        // was already gone leaves no failure here and lands on the
+        // status-0 tail; anything else is a real failure.
         if let Some(failure) = failure {
             let mut err = Error::from_command_failure("ral pipeline stage", failure, shell);
             err.span = span;

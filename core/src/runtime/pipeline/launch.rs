@@ -17,7 +17,15 @@ use crate::types::{Break, Mooring, Settled, Shell};
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-pub(super) enum StageHandle {
+/// One stage's process — external or ral-helper — paired with the parent's
+/// duplicate of its outbound edge's read end, in the collector's care until
+/// this stage's observation completes.
+pub(super) struct StageHandle {
+    pub(super) kind: StageKind,
+    pub(super) held_edge: Option<os_pipe::PipeReader>,
+}
+
+pub(super) enum StageKind {
     External(command::RunningChild),
     Helper(HelperStageHandle),
 }
@@ -165,9 +173,10 @@ struct SpawnedStage {
 fn spawn_stage(
     stage: &Arc<crate::ir::Comp>,
     spec: &StageSpec,
-    route: StageRoute,
+    mut route: StageRoute,
     cx: LaunchCx<'_>,
 ) -> Settled<SpawnedStage> {
+    let held_edge = route.held.take();
     let request = match &spec.launch {
         StageLaunch::Direct(ext) => {
             let handle = launch_external_stage_direct(
@@ -179,7 +188,10 @@ fn spawn_stage(
                 cx.park_on_stop,
             )?;
             return Ok(SpawnedStage {
-                handle: StageHandle::External(handle),
+                handle: StageHandle {
+                    kind: StageKind::External(handle),
+                    held_edge,
+                },
                 gate: None,
             });
         }
@@ -208,7 +220,10 @@ fn spawn_stage(
         cx.park_on_stop,
     )?;
     Ok(SpawnedStage {
-        handle: StageHandle::Helper(handle),
+        handle: StageHandle {
+            kind: StageKind::Helper(handle),
+            held_edge,
+        },
         gate: Some(deferred),
     })
 }

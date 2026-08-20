@@ -45,10 +45,15 @@ The final-value bit is derived **once**, from two facts in one place:
 `FinalValue::Report` iff `i + 1 == n` and `plan.yields` is `PipeYield::Last`.
 Everything else is `FinalValue::Ignore`.
 
-**A consumer that stops reading must close promptly.** `yes | !{ return 5 }`
-terminates because the non-reader's read end closes and the firehose takes
-EPIPE, on Unix and on the Windows-supported paths alike. Neither endpoint of a
-pipe promises traffic, so this is the ordinary case, not an error path.
+**A non-final stage cannot observe its reader's death by EPIPE.** The parent
+holds a duplicate of each interior edge's read end until that edge's writer
+stage is reaped, so no interior edge ever delivers a broken-pipe signal or a
+write error to the stage that writes it. Instead the collector kills a
+producer once its reader stage is reaped: `yes | !{ return 5 }` terminates by
+that kill, on Unix and on the Windows-supported paths alike. Neither endpoint
+of a pipe promises traffic, so a producer with nothing left to write for is
+the ordinary case, not an error path — only the mechanism that ends it moved
+from the wire to the collector.
 
 **The final value report remains helper-staged for now.**
 When the pipeline yields its last stage's value, `FinalValue::Report` selects
@@ -116,6 +121,22 @@ assigned to the known job, then resumed; registration records a child already in
 the job. Collection therefore waits on the process tree ral actually launched,
 not on a post-spawn approximation
 ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).
+
+**Collection is an event loop over a non-blocking probe.** The collector polls
+every unsettled stage with `try_settle` — the same `try_wait_handling_stop`
+the single-child wait already polls — so stages settle in whatever order they
+actually end, and no stage's blocking wait can starve another's news. A stage
+whose reader has settled is killed (`kill_for_dead_reader`), so the cascade
+runs tail-ward; a stage that stops parks the group at once, wherever it sits —
+a self-stopping producer parks the pipeline rather than wedging a collector
+blocked on the final stage. Each interior edge's held-open read end is dropped
+once that edge's writer's observation completes, which also releases any
+descendant of that edge still blocked writing into it. Verdicts fold in launch
+order regardless of settle order, so which stage the collector kills when
+never changes which failure the fold reports. A parked pipeline abandons its
+held read ends along with its stage handles and reverts to raw OS pipe
+behaviour; its verdict was already only its leader's exit, so nothing here
+changes for it.
 
 **Abort is gate-first.** A mid-launch failure SIGTERMs the pgid so whoever honours
 it can leave before the drop order reaches SIGKILL, and a `PipelineBuild`

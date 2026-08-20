@@ -61,6 +61,8 @@ pub(crate) struct RunningChild {
     /// timeout, a signal the platform handler translated into a cause) could
     /// not preempt a child that never exits on its own.
     pub cancel: crate::process::CancelScope,
+    /// An outcome a collector probe already collected, consumed by `wait`.
+    settled: Option<crate::process::WaitOutcome>,
 }
 
 /// A child observed dead, holding its outcome and its not-yet-joined drainers.
@@ -68,9 +70,6 @@ pub(crate) struct RunningChild {
 /// status interpretation carry a borrow-check proof that the child has exited.
 pub(crate) struct WaitedChild {
     pub outcome: crate::process::WaitOutcome,
-    /// When the OS recorded the exit, where the OS records it; `None` on Unix,
-    /// which reads a broken pipe off SIGPIPE instead.
-    exited_at: Option<std::time::SystemTime>,
     pump: Option<std::thread::JoinHandle<()>>,
     stderr_pump: Option<std::thread::JoinHandle<()>>,
     /// Trace context carried from the `RunningChild` so `drain`'s pump-join
@@ -126,6 +125,7 @@ impl RunningChild {
             park_on_stop,
             group_owner,
             cancel,
+            settled: None,
         }
     }
 
@@ -297,7 +297,14 @@ impl RunningChild {
         // Set exactly when the poll leaves through the cancel branch below, so
         // whatever status comes back after that is our teardown's doing.
         let mut torn_down_by: Option<crate::process::CancelCause> = None;
-        let early_outcome: Option<crate::process::WaitOutcome> = {
+        let early_outcome: Option<crate::process::WaitOutcome> = if let Some(o) =
+            self.settled.take()
+        {
+            // A collector probe already took this child's event — an exit is
+            // consumed, a stop leaves it alive but noted — so the poll must
+            // not run `try_wait_handling_stop` again.
+            Some(o)
+        } else {
             // Snappy for short-lived children, gentle on CPU for long ones.
             let mut interval = std::time::Duration::from_millis(5);
             let cap = std::time::Duration::from_millis(100);
@@ -457,7 +464,6 @@ impl RunningChild {
         );
         Ok(WaitedChild {
             outcome,
-            exited_at: child.exited_at(),
             pump: self.pump.take(),
             stderr_pump: self.stderr_pump.take(),
             name: self.name.clone(),
@@ -468,38 +474,61 @@ impl RunningChild {
 }
 
 impl RunningChild {
-    /// Wait, classify, and join the drainers: the user-visible exit code paired
-    /// with whatever failure the outcome maps to.  `reader` is the stage that
-    /// reads this child's stdout, `None` when the caller does — a producer that
-    /// was still running when its reader ended is forgiven whatever status it
-    /// went out with.  The pipeline collector and the helper stage in
+    /// Wait, classify, and join the drainers: the user-visible exit code
+    /// paired with whatever failure the outcome maps to.  `kill` says whether
+    /// the pipeline collector itself sent this stage its kill because its
+    /// reader was already reaped — the one death `CommandFailure::from_outcome`
+    /// forgives.  The pipeline collector and the helper stage in
     /// `runtime::pipeline` both reduce a child this way, so it lives here once.
     pub(crate) fn observe(
         self,
-        reader: Option<&Self>,
+        kill: crate::process::StageKill,
     ) -> Settled<(i32, Option<crate::process::CommandFailure>)> {
         let waited = self.wait()?;
         let outcome = waited.outcome;
-        // Asked only now: a reader still running while this child lived has
-        // ended by the time this child's own wait returns, if it ever will.
-        let reader = match reader.map(Self::exited_at) {
-            None => crate::process::Reader::Caller,
-            Some(reader_exit) => crate::process::Reader::Stage {
-                outlived: matches!(
-                    (reader_exit, waited.exited_at),
-                    (Some(reader), Some(child)) if reader < child
-                ),
-            },
-        };
         let code = outcome.to_user_exit_code();
-        let failure = crate::process::CommandFailure::from_outcome(outcome, reader);
+        let failure = crate::process::CommandFailure::from_outcome(outcome, kill);
         waited.drain();
         Ok((code, failure))
     }
 
-    /// When the OS recorded this child's exit, or `None` while it still runs.
-    pub(crate) fn exited_at(&self) -> Option<std::time::SystemTime> {
-        self.child.as_ref()?.exited_at()
+    /// One non-blocking probe: note the child's end or stop if it has one,
+    /// caching the outcome for the eventual `wait`.  Returns whether this
+    /// child is ready to observe.
+    pub(crate) fn try_settle(&mut self) -> bool {
+        if self.settled.is_some() {
+            return true;
+        }
+        let Some(child) = self.child.as_mut() else {
+            return true;
+        };
+        match child.try_wait_handling_stop(self.pgid, self.park_on_stop) {
+            Ok(Some(outcome)) => {
+                self.settled = Some(outcome);
+                true
+            }
+            Ok(None) => false,
+            // `wait` retries and surfaces the same error with its context.
+            Err(_) => true,
+        }
+    }
+
+    /// The pipeline collector's own kill, for a stage whose reader is reaped.
+    /// It addresses the pid alone — the anchor and unrelated group members
+    /// still live — and lands harmlessly on an already-exited child, which is
+    /// what keeps a recorded exit status from ever being overwritten.
+    pub(crate) fn kill_for_dead_reader(&mut self) {
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
+        #[cfg(unix)]
+        {
+            let _ = child.kill();
+        }
+        #[cfg(windows)]
+        {
+            crate::process::signal::terminate_for_stage_kill(child.raw_process_handle());
+        }
     }
 
     /// Release the OS child without killing or reaping it, for when a sibling
@@ -626,7 +655,9 @@ mod tests {
             scope.cancel(CancelCause::Deadline);
         });
 
-        let (code, failure) = running.observe(None).expect("wait should not error");
+        let (code, failure) = running
+            .observe(crate::process::StageKill::NotSent)
+            .expect("wait should not error");
         canceller.join().expect("canceller thread");
 
         assert_eq!(code, 128 + libc::SIGTERM, "the status must not shift");

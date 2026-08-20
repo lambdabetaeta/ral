@@ -27,7 +27,7 @@ not write, and an empty stream is still a byte stream:
 !{ echo hi; return unit } | cat   # cat reads "hi"; the Unit goes nowhere
 cat f | from-bytes | grep x       # the returned Bytes is discarded; grep reads EOF
 echo hi | !{ return 5 }           # the consumer ignores stdin; the pipeline returns 5
-yes | !{ return 5 }               # terminates: the non-reader closes, the firehose gets EPIPE
+yes | !{ return 5 }               # terminates: ral kills yes once !{ return 5 } is reaped
 ```
 
 **Two static rules, each about one stage.** A stage must have shape `F[ρ] A` — a
@@ -36,7 +36,7 @@ computation ready to run, not a function still waiting for an argument;
 than pipe into it. And a stage after a `|` may not bind standard input at its
 own root: `a | b < f` and `a | b << w` are refused, because the feed answers
 every read `b` makes for the stage's whole run and leaves `a` writing for
-nobody — a producer that, concurrently, blocks or dies by `EPIPE` for nothing.
+nobody — a producer that, concurrently, blocks for nothing until ral kills it.
 Each rewrite keeps every command already written: drop the pipe, run the
 producer as its own statement, or `spawn` it. No rule relates a stage's *type*
 to its neighbour's.
@@ -89,14 +89,16 @@ parent's session.
 Failure is a separate axis. A pipeline propagates a stage's failure, but the
 pipe never reacts to it: recovering from failure is `?`'s and `try`'s job, and
 branching is on `Bool`, never on command success
-([[design/failure|failure]]). One stage is exempt, and the exemption is stated
-about what ended it rather than about its status: a producer the broken pipe
-itself ended was keeping nothing from anyone, so `yes | head` succeeds. SIGPIPE
-is that cause, delivered; Windows, having no such signal to hear, approximates
-it by the order the two stages ended in and forgives the more of the two
-([[decisions/260816_a-producer-that-outlived-its-reader|a-producer-that-outlived-its-reader]]).
-A producer that ignores the signal, takes a write error instead, and exits on
-its own account is reporting a failure of its own, and keeps it.
+([[design/failure|failure]]). **One stage is exempt, and the exemption is the
+dynamic completion of the stage-feed refusal above:** a stage feed that would
+leave a producer writing for nobody is refused before the pipeline runs; a
+producer whose reader has already ended is ended while the pipeline runs. ral
+itself kills a non-final stage once its reader stage is gone, and that kill is
+the pipeline's only forgiven death — every other exit status, whatever it is,
+is kept. Every semantic arrow in a pipeline already points tail-ward — value,
+route, report — and lifetime now points the same way: past a `|`, a stage
+lives exactly as long as its reader needs it
+([[decisions/260820_a-stage-ral-stopped-has-no-failure|a-stage-ral-stopped-has-no-failure]]).
 
 The terminal-handoff and process-containment machinery is transport detail, not
 surface semantics. Unix uses process groups, a foreground guard, and helper

@@ -1292,8 +1292,8 @@ decoder ends it.
 
 Neither side of a `|` promises traffic. A stage that writes nothing leaves the
 next stage an ordinary end of input, and a stage that never reads leaves the
-offered bytes unread; ral closes such a read end promptly, so a blocked
-producer receives `EPIPE` instead of hanging.
+offered bytes unread; once that non-reader ends, ral ends the blocked producer
+itself (§7.6), so nothing hangs.
 
 Each stage must be a command ready to run. A stage still waiting for an
 argument is a type error, reported before anything starts, and the diagnostic
@@ -1474,17 +1474,17 @@ Large here strings are written concurrently with the reader, so filling an opera
 
 In a process-staged pipeline, ral launches all stages and waits for all of them. A failure in any stage fails the whole pipeline. If several stages fail, the first failing stage in launch order supplies the reported failure. A control escape such as `return` or `exit` takes precedence over an ordinary stage failure.
 
-A producer often receives a broken-pipe signal when a downstream command intentionally stops reading, as in:
+A downstream command often stops reading before an upstream producer is done writing, as in:
 
 ```ral
 large-producer | head
 ```
 
-ral treats that signal as success for a non-final stage. The same condition in the final stage remains a failure.
+ral itself ends a non-final stage once its reader stage is gone — SIGKILL on Unix, a distinctive-code `TerminateProcess` on Windows — and that kill is the pipeline's one forgiven death: a non-final stage ral itself stopped keeps no failure, because the rest of its output was owed to nobody. The same condition in the final stage remains its own failure: the final stage's output crosses the pipeline's outer boundary, not an interior edge, so a caller that stops reading the pipeline's own output is a failure that stage reports for itself.
 
-The rule ral states is about what ended the producer, not about its status: a non-final stage that the broken pipe itself ended keeps no failure, because the rest of its output was owed to nobody. Unix delivers that cause as the broken-pipe signal, and ral forgives exactly that death. Windows delivers no such signal, and no Windows exit status means "broken pipe" — a cut-short producer there exits however its author chose — so ral reads the fact off the order the two stages ended in and forgives a producer that ended after its reader, whatever status it chose. The Windows rule is therefore the broader of the two: it also forgives a producer that failed on its own account once its reader was gone.
+The kill is exact rather than a race because a non-final stage has no other way to observe its reader's death: ral holds a duplicate of each interior edge's read end until that edge's writer stage is reaped, so no interior edge ever delivers a broken-pipe signal or a write error to the stage that writes it. Collection observes stages as they end, in whatever order that happens; a stage whose reader has been reaped is killed, so the kill cascades tail-ward, and a stage that stops parks the whole pipeline at once. An exit status, once recorded, is never overwritten: the kill precedes the wait, and a kill landing on an already-exited stage changes nothing. This is one rule, stated once, true on both platforms.
 
-A producer that survives the broken pipe keeps its status. A program that ignores the signal, gets a write error in its place, and exits on its own account is reporting its own failure, and ral reports it: on Unix, `python … | head -1` fails with Python's status where `yes | head -1` succeeds.
+A producer that exits on its own account keeps that status, whatever the cause: on Unix, `python … | head -1` still fails with Python's status where `yes | head -1` still succeeds, now for the same reason on both platforms rather than a broken-pipe signal on one and an exit-order reading on the other. A producer that must run to completion regardless of whether anything reads it can no longer lean on a broken pipe being survivable — run it as its own statement, or `spawn` it, so it is never a pipeline stage whose reader can disappear.
 
 On Unix, an interactive process-staged pipeline receives the foreground terminal as one process group only when the session owns a terminal lease and final standard output is attached to that terminal. A captured pipeline normally writes to a buffer, so the parent keeps terminal ownership. Ordinary application and bind do not create a pipeline process group.
 
@@ -4303,8 +4303,8 @@ Operationally, `M | N`:
 4. takes its route and return type from `N`.
 
 Neither side promises traffic. A producer that writes nothing yields an
-ordinary end of input; a consumer that never reads leaves the bytes unread and
-closes its end, so a blocked producer receives `EPIPE` rather than hanging. No
+ordinary end of input; a consumer that never reads leaves the bytes unread,
+and once it ends, ral ends the blocked producer itself (§7.6). No
 returned value is ever placed on a wire: no implicit codec is inserted at an
 edge, and a returned value in non-final position is simply unused, exactly as
 bytes written to an unread pipe are simply unread. Value-style composition

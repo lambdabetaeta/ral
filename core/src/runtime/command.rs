@@ -247,16 +247,11 @@ pub(crate) fn run(
     let code = outcome.to_user_exit_code();
     shell.mobile.control.last_status = code;
     commit_result?;
-    // A `PipelineStage` writes into the pipeline's byte pipe, so its reader is
-    // the next stage — a process this shell holds no handle on, and so cannot
-    // ask when it ended.  SIGPIPE still says so on Unix; on Windows the stage
-    // keeps its status, the ordering test being the collector's to make.
-    let reader = if shell.io.launch_role.is_top_level() {
-        crate::process::Reader::Caller
-    } else {
-        crate::process::Reader::Stage { outlived: false }
-    };
-    match crate::process::CommandFailure::from_outcome(outcome, reader) {
+    // A command inside a helper stage can no longer take SIGPIPE from an
+    // interior edge — the parent holds that edge's read end — so any SIGPIPE
+    // it suffers is from a pipe of its own making and is its own failure.
+    match crate::process::CommandFailure::from_outcome(outcome, crate::process::StageKill::NotSent)
+    {
         None => Ok(Value::Unit),
         Some(failure) => {
             let err = Error::from_command_failure(&cmd_name, failure, shell);

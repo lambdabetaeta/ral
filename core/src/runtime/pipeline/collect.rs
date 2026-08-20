@@ -1,12 +1,19 @@
 //! Collect phase: fold a process-staged pipeline's per-stage observations
 //! into one result.
 //!
-//! Stages are observed in launch order; the whole break policy lives in
-//! `PipelineCollector`'s three `note_*` methods.
+//! Observation order is the order stages actually end, not launch order: a
+//! non-final stage may outlive its reader (a child that stops itself, or one
+//! that keeps writing after the reader is long gone), so collection probes
+//! every still-running stage rather than blocking on one at a time. The kill
+//! cascade is tail-driven — a stage is killed once its reader has settled —
+//! and that kill is the one death forgiven. Verdict precedence — first
+//! failure wins, control outranks failure, a stop parks — folds in launch
+//! order, over observations buffered during the walk.
 
 use super::super::command;
-use super::launch::StageHandle;
+use super::launch::{StageHandle, StageKind};
 use crate::evaluator::audit::observe_stamped;
+use crate::process::StageKill;
 use crate::types::{
     AuditFragment, AuditIo, Break, CommandOrigin, Error, Escape, Mooring, Observation, Observed,
     Settled, Shell, Value, epoch_us,
@@ -18,16 +25,16 @@ use crate::types::{
 /// node is synthesised here to keep it level with helper-routed stages.
 #[allow(
     clippy::unnecessary_wraps,
-    reason = "sibling of `StageHandle::observe` in the collect match; both arms must yield the same `Settled<StageObservation>` so the fold can `unwrap_or_else` uniformly."
+    reason = "sibling of `HelperStageHandle::observe` in the collect match; both arms must yield the same `Settled<StageObservation>` so the fold can `unwrap_or_else` uniformly."
 )]
 fn observe_external_stage(
     running: command::RunningChild,
-    reader: Option<&command::RunningChild>,
+    kill: StageKill,
     shell: &Shell,
     started: std::time::Instant,
 ) -> Settled<StageObservation> {
     let name = running.name.clone();
-    let (code, failure) = match running.observe(reader) {
+    let (code, failure) = match running.observe(kill) {
         Ok(pair) => pair,
         Err(br) => return Ok(StageObservation::from_break(br)),
     };
@@ -156,9 +163,8 @@ enum PipelineBreak {
 pub(super) struct PipelineCollector {
     break_: Option<PipelineBreak>,
     final_value: Option<Value>,
-    /// Set when a stage parks the pipeline pgid.  While set, `collect`
-    /// abandons the remaining handles rather than let their `Drop` SIGKILL
-    /// the parked pgid out from under us.
+    /// Set when a stage's stop wins launch-order precedence; the physical
+    /// park happened eagerly in `RunningPipeline::collect`.
     #[cfg(unix)]
     stopped_pgid: Option<crate::process::Pgid>,
 }
@@ -171,11 +177,6 @@ impl PipelineCollector {
             #[cfg(unix)]
             stopped_pgid: None,
         }
-    }
-
-    #[cfg(unix)]
-    fn parked(&self) -> bool {
-        self.stopped_pgid.is_some()
     }
 
     /// First failure wins.  A prior control blocks this one too, harmlessly:
@@ -281,6 +282,14 @@ impl RunningPipeline {
         self.handles.push(handle);
     }
 
+    /// The event loop.  Stages are observed as they end, in whatever order
+    /// that happens — a non-blocking probe per still-running stage, not a
+    /// blocking wait on one at a time — so a stage stuck reading from a dead
+    /// writer never wedges the collector against a producer that has merely
+    /// stopped itself.  A stage whose reader has settled is killed, and that
+    /// kill is the one death forgiven.  A stop parks the group at once.
+    /// Verdicts fold in launch order, over observations buffered during the
+    /// walk.
     pub(super) fn collect(
         mut self,
         mooring: &Mooring,
@@ -288,34 +297,96 @@ impl RunningPipeline {
         started: std::time::Instant,
     ) -> PipelineCollector {
         let handles = std::mem::take(&mut self.handles);
-        let mut collector = PipelineCollector::new();
-        let mut stages = handles.into_iter().peekable();
-        while let Some(handle) = stages.next() {
-            // `wait` on a stopped child would block, and `Drop` would SIGKILL
-            // the parked pgid, so abandon what is left instead.
+        let n = handles.len();
+        let mut stages: Vec<Option<StageHandle>> = handles.into_iter().map(Some).collect();
+        let mut kills = vec![StageKill::NotSent; n];
+        let mut observed: Vec<Option<StageObservation>> = (0..n).map(|_| None).collect();
+        #[cfg(unix)]
+        let mut parked = false;
+        let mut interval = std::time::Duration::from_millis(5);
+        let cap = std::time::Duration::from_millis(100);
+
+        while stages.iter().any(Option::is_some) {
             #[cfg(unix)]
-            if collector.parked() {
-                match handle {
-                    StageHandle::External(h) => {
-                        h.abandon();
+            if parked {
+                // `wait` on a stopped child would block, and `Drop` would SIGKILL
+                // the parked pgid, so abandon everything still pending.  `held_edge`
+                // drops with each handle: a resumed producer whose reader has died
+                // must take an ordinary EPIPE, since resume reaps only the leader
+                // and sends no reader-gone kill.
+                for slot in &mut stages {
+                    if let Some(handle) = slot.take() {
+                        let StageHandle { kind, .. } = handle;
+                        match kind {
+                            StageKind::External(h) => h.abandon(),
+                            StageKind::Helper(h) => h.abandon(),
+                        }
                     }
-                    StageHandle::Helper(h) => h.abandon(),
                 }
-                continue;
+                break;
             }
-            // The next stage is this one's reader, and the last stage's reader
-            // is the caller — which is what being final means.
-            let reader = stages.peek().map(|next| match next {
-                StageHandle::External(running) => running,
-                StageHandle::Helper(helper) => &helper.running,
-            });
-            let is_pipeline_final = reader.is_none();
-            let result = match handle {
-                StageHandle::External(h) => observe_external_stage(h, reader, shell, started),
-                StageHandle::Helper(h) => h.observe(shell, reader, started),
-            };
-            let obs = result.unwrap_or_else(StageObservation::from_break);
-            collector.fold(mooring, shell, is_pipeline_final, obs);
+            // On cancellation, stop probing and observe everything blocking,
+            // tail-first: the first `wait` performs the group teardown and
+            // attribution, and the rest reap what it felled.
+            let cancelled = crate::process::check(mooring).is_err();
+            let mut progress = false;
+            for ix in (0..n).rev() {
+                let Some(handle) = stages[ix].as_mut() else {
+                    continue;
+                };
+                if kills[ix] == StageKill::NotSent
+                    && observed.get(ix + 1).is_some_and(Option::is_some)
+                {
+                    match &mut handle.kind {
+                        StageKind::External(h) => h.kill_for_dead_reader(),
+                        StageKind::Helper(h) => h.running.kill_for_dead_reader(),
+                    }
+                    kills[ix] = StageKill::Sent;
+                }
+                let ready = cancelled
+                    || match &mut handle.kind {
+                        StageKind::External(h) => h.try_settle(),
+                        StageKind::Helper(h) => h.running.try_settle(),
+                    };
+                if !ready {
+                    continue;
+                }
+                let StageHandle { kind, held_edge } = stages[ix].take().expect("probed above");
+                let is_pipeline_final = ix + 1 == n;
+                let result = match kind {
+                    StageKind::External(h) => observe_external_stage(h, kills[ix], shell, started),
+                    StageKind::Helper(h) => h.observe(shell, kills[ix], is_pipeline_final, started),
+                };
+                let obs = result.unwrap_or_else(StageObservation::from_break);
+                // Only now that the writer is reaped: releasing the edge frees any
+                // of its descendants still blocked writing to it.
+                drop(held_edge);
+                #[cfg(unix)]
+                if let StageOutcome::Control(Escape::Stopped { pgid, .. }) = &obs.outcome {
+                    parked = true;
+                    // `note_stop` repeats this on replay; both sends are idempotent.
+                    pgid.signal_group(crate::process::Signal::new(libc::SIGSTOP));
+                }
+                observed[ix] = Some(obs);
+                progress = true;
+                #[cfg(unix)]
+                if parked {
+                    break;
+                }
+            }
+            if progress {
+                interval = std::time::Duration::from_millis(5);
+            } else if !cancelled {
+                std::thread::sleep(interval);
+                interval = (interval * 2).min(cap);
+            }
+        }
+
+        let mut collector = PipelineCollector::new();
+        for (ix, obs) in observed.into_iter().enumerate() {
+            if let Some(obs) = obs {
+                collector.fold(mooring, shell, ix + 1 == n, obs);
+            }
         }
         collector
     }
