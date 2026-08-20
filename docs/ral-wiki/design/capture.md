@@ -76,10 +76,55 @@ step the checker writes into a program cannot be a name the program's session
 resolves ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
 [[design/types|types]]).
 
+**Exactness is kept by refusal.** The buffer behind a capture is capped at
+16 MiB (`SINK_BUFFER_CAP`), and a bounded buffer is what keeps a detached
+worker from growing without end ([[internals/output-capture-and-detachment|output-capture-and-detachment]]).
+Past the cap it appends a truncation marker and drops the rest — bytes the
+program could not tell from the command's own. So a capture that reaches the
+cap *fails*: `eval_capture` reads the buffer's overflow flag once every writer
+has joined, and refuses rather than bind a prefix. Nothing on the write path
+can raise it — a pump hands back `()` from its own thread — which is why the
+flag rides on the buffer and is read where the bytes become a value.
+
+Nothing is destroyed by the refusal. It is a failure like any other, so the
+prefix takes the road the next clause describes — out to the visible stream —
+and the error, which names the cap and asks whether a file was meant, is
+catchable by `try`. The human keeps the bytes; the binding does not happen.
+
 **Failure flushes.** If a captured computation fails, bytes it produced before
 failing are flushed visibly rather than lost — a partial write from
 `echo half; exit 3` stays on the terminal. That is handler semantics rather
 than decoding, so it is the node's clause, not the composed step's.
+
+The kernel model proves the clause as of 2026-08-19. `βflush` in `dev/agda`
+pops the capture frame and writes the buffer *as chatter*, so the flush goes
+where a discarded statement's bytes go — past every enclosing capture, into the
+nearest wire, or out. Writing it as a payload instead would feed one buffer into
+the next, which is the nearest-sink reading this page warns against; nested
+captures cascade, inner buffer first, each under its own remaining stack. The
+theorem is `flush-payload`, the counterpart to the model's tail-scoping one: a
+run that fails escapes whole, so a capture over it reads the same stdin, writes
+the same bytes and reports the same failure as the body alone — nothing is
+retained, because the payload the buffer was collecting is what the failure says
+will not be delivered.
+
+Where "visibly" points is the enclosing scope's business, and a sink redirect
+moves it. Under `!{ … } > f` the file is the visible stream, so a flush inside
+that scope lands in `f` and not on the terminal — the same entry that sends a
+discarded statement's bytes there, since a redirect's frame takes a word under
+either claim. The model runs that composite: the buffer fills, the flush hands
+it outward as chatter, the redirect takes it, and the word appears in the file
+event the pop fires rather than in what an observer saw.
+
+Both theorems hold of bodies with no handler in them, and that premise is a real
+limit rather than a modelling convenience.
+`let x = !{ guard { cmd } { echo clean } }` buffers `cmd`'s payload, then runs
+the cleanup, which prints `clean` — visibly, after the buffer already has
+content — and then binds the payload. Standalone the two words appear in the
+order `payload`, `clean`; captured, `clean` appears and the payload is kept. So
+what a capture retains is a *suffix* of what the same body writes alone exactly
+when no handler resumes the run mid-flight, and that is the shape both theorems
+state. `dev/agda` records the two runs beside the theorems.
 
 See also [[design/types|types]], [[design/cbpv|cbpv]],
 [[design/pipelines|pipelines]], [[design/codecs|codecs]].

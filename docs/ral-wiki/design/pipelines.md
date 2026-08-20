@@ -30,14 +30,26 @@ echo hi | !{ return 5 }           # the consumer ignores stdin; the pipeline ret
 yes | !{ return 5 }               # terminates: the non-reader closes, the firehose gets EPIPE
 ```
 
-**The one static rule about a stage constrains that stage alone.** A stage must
-have shape `F[ρ] A` — a computation ready to run, not a function still waiting
-for an argument. `echo hi | !{ |x| echo $x }` is a type error whose help says to
-apply it rather than pipe into it. Nothing constrains a stage relative to its
-neighbours.
+**Two static rules, each about one stage.** A stage must have shape `F[ρ] A` — a
+computation ready to run, not a function still waiting for an argument;
+`echo hi | !{ |x| echo $x }` is a type error whose help says to apply it rather
+than pipe into it. And a stage after a `|` may not bind standard input at its
+own root: `a | b < f` and `a | b << w` are refused, because the feed answers
+every read `b` makes for the stage's whole run and leaves `a` writing for
+nobody — a producer that, concurrently, blocks or dies by `EPIPE` for nothing.
+Each rewrite keeps every command already written: drop the pipe, run the
+producer as its own statement, or `spawn` it. No rule relates a stage's *type*
+to its neighbour's.
 
-That rule reads type formers, not spellings, so a stage that *returns* a thunk
-is accepted: `cat f | { from-line }` typechecks, runs nothing, leaves `f`
+**The refusal reads the stage's root and nothing deeper**, which is the whole of
+what the pipeline rule can see, and the whole of what answers a stage's reads
+for its entire run. A read one level in — inside a block, or on one command
+among several — supplies that command alone, is not statically dead, and stays
+legal. Redirect composition *within* a stage is untouched:
+`from-string < /dev/null << #'won'#` takes the last feed (`docs/SPEC.md` §7.4).
+
+The shape rule reads type formers, not spellings, so a stage that *returns* a
+thunk is accepted: `cat f | { from-line }` typechecks, runs nothing, leaves `f`
 unread, and discards the thunk. This footgun is admitted deliberately — a
 syntax-directed rejection is not stable under naming the subterm, and rejecting
 on the type needs a negative premise no sound decidable rule can state

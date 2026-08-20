@@ -32,7 +32,7 @@ rm -rf $tmpdir
 # elem — list membership
 let assert_eq = { |name expected actual|
     if $[not !{equal $expected $actual}] {
-        echo "FAIL:" $name 1>&2
+        warn "FAIL: $name"
         fail [status: 1]
     }
 }

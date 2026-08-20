@@ -59,8 +59,14 @@ pub enum Reason {
     HandlerRoutePin,
     IfCond,
     IfBranches,
+    /// The `if` branches' values, where both branches already route `Value`.
+    IfBranchValues,
     ChainBranches,
+    /// The `?` chain's arm values, where every arm already routes `Value`.
+    ChainBranchValues,
     TryArms,
+    /// The `try` outcomes' values, where both already route `Value`.
+    TryArmValues,
     /// A `try` handler against the one-argument function shape it must have.
     TryHandler,
     /// A scope form's body against the thunk shape every control wrapper expects.
@@ -71,6 +77,8 @@ pub enum Reason {
     CaseArmHandler,
     /// The `case` arms against one another, where exactly one of them runs.
     CaseArms,
+    /// The `case` arms' values, where every arm already routes `Value`.
+    CaseArmValues,
     CaseScrutinee,
     ListElem,
     ListSpread,
@@ -84,6 +92,12 @@ pub enum Reason {
     },
     /// The `!` operator's operand against the block shape it forces.
     ForceOperand,
+    /// `Capture`'s operand against the `Unit` value WF-2 demands, at
+    /// whichever route the operand's own boundary chose.
+    CaptureOperand,
+    /// `Decode`'s operand against the `Value`-routed `Bytes` shape it reads —
+    /// always a `Capture`, whose own rule already guarantees it.
+    DecodeOperand,
     NotOperand,
     BinaryOperands(BinaryOpKind),
     ListIndexKey,
@@ -100,6 +114,27 @@ pub enum Reason {
     /// join's byte or value side) so a later grounding becomes an honest
     /// mismatch rather than silent divergence.
     RoutePin,
+}
+
+/// Which stage-root redirect answers a stage's reads, and so leaves nothing
+/// for the wire feeding it.  Only these two forms bind standard input; the
+/// writing modes cannot appear here.
+#[derive(Debug, Clone, Copy)]
+pub enum StdinFeed {
+    /// `< f` — a file supplies the stage's standard input.
+    File,
+    /// `<< w` — a word supplies it.
+    HereString,
+}
+
+impl StdinFeed {
+    /// How the user spelled it.
+    pub fn spelling(self) -> &'static str {
+        match self {
+            Self::File => "<",
+            Self::HereString => "<<",
+        }
+    }
 }
 
 /// What a refused spread was aimed at — as much of the head as the refusing
@@ -220,6 +255,12 @@ pub enum TypeErrorKind {
     DynamicIndexOnScalar {
         ty: Ty,
     },
+    /// A pipe edge into a stage whose own root binds standard input.  The feed
+    /// answers every read the stage makes, for the stage's whole run, so the
+    /// producer on the other side of the `|` works for nobody.
+    DeadPipeEdge {
+        feed: StdinFeed,
+    },
 }
 
 impl TypeErrorKind {
@@ -249,6 +290,7 @@ impl TypeErrorKind {
             Self::IndexIntoThunk => "T0060",
             Self::FieldOnNonRecord { .. } => "T0061",
             Self::DynamicIndexOnScalar { .. } => "T0062",
+            Self::DeadPipeEdge { .. } => "T0070",
         }
     }
 }

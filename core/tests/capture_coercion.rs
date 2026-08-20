@@ -28,10 +28,11 @@ fn fresh_shell() -> Shell {
     )
 }
 
-/// One top-level run through the public door. A static diagnostic and a
-/// runtime failure both come back as `Err(message)`, so a test can insist on
-/// *an error the session survives* without caring which layer refused.
-fn run(shell: &mut Shell, source: &str) -> Result<Value, String> {
+/// One top-level run through the public door, with the bytes it wrote where
+/// they could be seen. A static diagnostic and a runtime failure both come
+/// back as `Err(message)`, so a test can insist on *an error the session
+/// survives* without caring which layer refused.
+fn run_seen(shell: &mut Shell, source: &str) -> (Result<Value, String>, Vec<u8>) {
     match shell.run(RunRequest {
         run: Run {
             program: Program::Source(source.into()),
@@ -51,13 +52,25 @@ fn run(shell: &mut Shell, source: &str) -> Result<Value, String> {
         nursery: None,
         lifecycle: Box::new(()),
     }) {
-        RunReport::Ran { ending, .. } => ending.into_result().map_err(|e| format!("{e:?}")),
-        RunReport::Static { diagnostics, .. } => Err(match diagnostics {
-            StaticDiagnostics::Parse(e) => format!("parse: {e:?}"),
-            StaticDiagnostics::Types(errs) => format!("types: {} diagnostic(s)", errs.len()),
-            StaticDiagnostics::Host(e) => format!("host: {e:?}"),
-        }),
+        RunReport::Ran {
+            ending, captured, ..
+        } => (
+            ending.into_result().map_err(|e| format!("{e:?}")),
+            captured.map(|c| c.stdout).unwrap_or_default(),
+        ),
+        RunReport::Static { diagnostics, .. } => (
+            Err(match diagnostics {
+                StaticDiagnostics::Parse(e) => format!("parse: {e:?}"),
+                StaticDiagnostics::Types(errs) => format!("types: {} diagnostic(s)", errs.len()),
+                StaticDiagnostics::Host(e) => format!("host: {e:?}"),
+            }),
+            Vec::new(),
+        ),
     }
+}
+
+fn run(shell: &mut Shell, source: &str) -> Result<Value, String> {
+    run_seen(shell, source).0
 }
 
 fn ok(shell: &mut Shell, source: &str) -> Value {
@@ -180,5 +193,34 @@ fn the_coercion_is_not_a_command_a_program_can_call() {
         ok(&mut shell, "let captured = echo hi\nreturn $captured"),
         Value::String("hi".into()),
         "the session must still be alive after refusing the call"
+    );
+}
+
+/// The capture is exact or it is nothing. A body that outruns the 16 MiB
+/// buffer refuses rather than binding the prefix that fit — a truncated
+/// capture would hand the program bytes, the truncation marker among them,
+/// that it could not tell from what the command wrote. Nothing is destroyed
+/// by refusing: the prefix goes out to the visible stream, where any failing
+/// capture's bytes go, and only the binding does not happen.
+#[cfg(unix)]
+#[test]
+fn a_capture_past_the_buffer_cap_refuses_rather_than_truncating() {
+    let mut shell = fresh_shell();
+    let source = "let big = head -c 17000000 /dev/zero\nreturn $big";
+    let (bound, seen) = run_seen(&mut shell, source);
+    let refused = bound.expect_err("a 17 MiB capture must not bind a value");
+    assert!(
+        refused.contains("16 MiB"),
+        "the refusal must name the cap it hit, but read {refused}"
+    );
+    assert!(
+        seen.len() > 16 * 1024 * 1024,
+        "the buffered prefix must reach the visible stream, but {} bytes did",
+        seen.len()
+    );
+    assert_eq!(
+        ok(&mut shell, "let captured = echo hi\nreturn $captured"),
+        Value::String("hi".into()),
+        "the session must still be alive after refusing the capture"
     );
 }

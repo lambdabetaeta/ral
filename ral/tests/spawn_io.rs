@@ -149,7 +149,7 @@ fn redirect_bypasses_record() {
 fn record_carries_block_stderr() {
     let out = run_io(
         r"
-        let h = spawn { echo diag 1>&2 }
+        let h = spawn { warn 'diag' }
         let res = await $h
         echo !{to-bytes $res[stderr] | from-string}
         ",

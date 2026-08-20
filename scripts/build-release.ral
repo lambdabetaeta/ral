@@ -80,7 +80,7 @@ if $[!{has '-h' $ARGS} || !{has '--help' $ARGS}] {
 }
 
 for $ARGS { |a|
-    if $[not !{has $a $known}] { echo "!{styled $ansi-red "unknown argument: $a"}" 1>&2; fail [status: 2, message: "unknown argument: $a"] }
+    if $[not !{has $a $known}] { warn "!{styled $ansi-red "unknown argument: $a"}"; fail [status: 2, message: "unknown argument: $a"] }
 }
 
 let dry_run      = has '--dry-run'      $ARGS
@@ -246,7 +246,7 @@ let main = {
             # Only warn when the user explicitly asked for macOS; otherwise
             # (--all / bare default on a non-Darwin host) silently skip.
             if $want_macos {
-                echo "!{styled $ansi-red "  --macos requested but host is $kernel; skipping"}" 1>&2
+                warn "!{styled $ansi-red "  --macos requested but host is $kernel; skipping"}"
             }
         }
     }

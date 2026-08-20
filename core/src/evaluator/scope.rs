@@ -288,18 +288,13 @@ pub(crate) fn eval_guard(
     let body_val = eval_val(body, shell)?;
     let cleanup_val = eval_val(cleanup, shell)?;
     let body_result = apply(body_val, vec![], mooring, shell);
-    // A cleanup error is logged and the body's result stands; a cleanup
-    // escape takes priority and propagates — dropping `Stopped` orphans
-    // a stopped process group, pgid lost, never resumable or reapable.
-    match apply(cleanup_val, vec![], mooring, shell) {
-        Ok(_) => body_result,
-        Err(Break::Error(err)) => {
-            crate::diagnostic::cmd_error("guard", &format!("cleanup failed: {err}"));
-            body_result
-        }
-        Err(escape @ Break::Escape(_)) => Err(escape),
-    }
-    .map_err(Into::into)
+    // One rule for both signals: any halt of the cleanup pre-empts the body's
+    // outcome, error exactly as escape.  A cleanup that cannot fail the
+    // computation is a cleanup whose failures are unreportable; whoever wants
+    // log-and-continue writes `guard { … } { try { … } { |e| … } }`.
+    apply(cleanup_val, vec![], mooring, shell)
+        .and(body_result)
+        .map_err(Into::into)
 }
 
 pub(crate) fn eval_audit(body: &Val, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {

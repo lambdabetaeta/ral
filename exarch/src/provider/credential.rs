@@ -561,7 +561,10 @@ mod tests {
         );
 
         let (team, team_credential) = store.add_oauth(&oauth_token("acc_team", Some("alex@work")));
-        assert_ne!(personal.id, team.id, "distinct accounts, distinct identities");
+        assert_ne!(
+            personal.id, team.id,
+            "distinct accounts, distinct identities"
+        );
         assert_eq!(store.all.len(), 2, "neither shadows the other");
 
         let Credential::OAuth(team_cell) = team_credential else {

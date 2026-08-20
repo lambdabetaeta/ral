@@ -1304,6 +1304,18 @@ impl Lexer {
                 return Err(Self::error(span, "expected file descriptor after '>&'"));
             }
             let n = Self::parse_fd(&target_digits, span)?;
+            // A bare `>` writes fd 1, so `>&2` is `1>&2` spelled short.  Both
+            // are the bash idiom for a diagnostic, and a diagnostic is a
+            // builtin here rather than a second name for the byte channel.
+            if fd.unwrap_or(1) == 1 && n == 2 {
+                return Err(Self::error(
+                    self.finish(span),
+                    "ral has no `1>&2` — to write a diagnostic, use \
+                     `warn \"…\"`, which puts one line on standard error. \
+                     Did you mean `2>&1`, folding a command's standard error \
+                     into its standard output?",
+                ));
+            }
             return Ok(self.finish_redirect(fd, RedirectMode::Write, Some(n), span));
         }
         Ok(self.finish_redirect(fd, RedirectMode::Write, None, span))
@@ -2222,6 +2234,20 @@ mod tests {
             err.message()
                 .contains("expected file descriptor after '>&'")
         );
+    }
+
+    /// Diagnostics are `warn`'s job, so fd 1 onto fd 2 is refused — under both
+    /// spellings, since a bare `>` already means fd 1.  The refusal must point
+    /// at the verb, and at `2>&1` for a program holding it backwards.
+    #[test]
+    fn stdout_onto_stderr_is_refused_for_warn() {
+        for src in ["cmd 1>&2", "cmd >&2"] {
+            let err = lex(src).expect_err("`1>&2` must not lex");
+            let msg = err.message();
+            assert!(msg.contains("warn"), "for {src:?} got: {msg}");
+            assert!(msg.contains("2>&1"), "for {src:?} got: {msg}");
+        }
+        lex("cmd 2>&1").expect("`2>&1` is the direction that stays");
     }
 
     // ── hash-bumped single-quoted strings ────────────────────────────────────

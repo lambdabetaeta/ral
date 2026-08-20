@@ -307,7 +307,8 @@ stand in for an exit status, or an exit status to stand in for a proposition.
 - `if` branches on a `Bool`;
 - `?` tries the next command only when the preceding command fails;
 - `try` turns a failure into an error record and chooses recovery;
-- `guard` runs cleanup and preserves the original failure;
+- `guard` runs cleanup and preserves the original failure, unless the cleanup
+  halts in turn and pre-empts it;
 - `audit` turns execution, including failure, into structured data.
 
 A predicate returning `false` succeeds with the value `false`. Conversely, an

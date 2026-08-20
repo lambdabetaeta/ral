@@ -178,7 +178,7 @@ let transition = { |id new-status|
   if !{elem $new-status $valid-statuses} {
     sync-tasks !{map { |t| if $[$t[id] == $id] { set-status $t $new-status } else { $t } } !{decode-tasks !{pin-read "tasks"}}}
   } else {
-    echo "transition: invalid status -- !{to-string $new-status | from-string} (expected open|doing|blocked|done)" 1>&2
+    warn "transition: invalid status -- !{to-string $new-status | from-string} (expected open|doing|blocked|done)"
   }
 }
 

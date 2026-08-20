@@ -321,7 +321,9 @@ module.exports = grammar({
     // fd-aware redirect: the source fd's digits are baked into the operator
     // token to avoid colliding with `integer` (`2>` vs the value `2`).
     redirect: $ => choice(
-      // fd-to-fd: `2>&1`, `1>&2`
+      // fd-to-fd: `2>&1`.  Deliberately wider than the surface, which admits
+      // that direction only — highlighting a refused `1>&2` beats not
+      // highlighting it.
       seq($.redir_fd, $.fd_target),
       // file targets
       seq($.redir_append, $._value),

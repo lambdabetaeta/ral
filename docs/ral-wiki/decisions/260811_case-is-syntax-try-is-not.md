@@ -93,8 +93,8 @@ An arm was a lambda applied to the payload; it is an `if`-like branch: fresh
 lexical scope for the pattern, body inline, tail position inherited. That is the
 CBPV reading, and each consequence is taken deliberately.
 
-- **`$STATUS` is inherited** at arm entry rather than reset by a lambda frame:
-  `false`, then an arm reading `$STATUS`, sees `1`.
+- **The recorded status is inherited** at arm entry rather than reset by a
+  lambda frame, and the status the arm leaves is the `case`'s own.
 - **Every context mutation persists.** The lambda frame folded back
   `{last_status, cwd}` and discarded the rest of `mobile.context`; an arm now
   leaves all of it in place, as an `if` body does.

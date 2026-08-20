@@ -40,6 +40,20 @@ pub(super) struct ArmResults {
     why: Reason,
 }
 
+/// The value-side twin of an arm join's reason: the same form, but explained
+/// as a disagreement about what the payload *is* rather than about where it
+/// lives. Each of the four join sites has one; any other reason, having no
+/// route side to be mistaken for, stands as it is.
+fn value_side(why: &Reason) -> Reason {
+    match why {
+        Reason::IfBranches => Reason::IfBranchValues,
+        Reason::ChainBranches => Reason::ChainBranchValues,
+        Reason::CaseArms => Reason::CaseArmValues,
+        Reason::TryArms => Reason::TryArmValues,
+        other => other.clone(),
+    }
+}
+
 impl InferCtx {
     /// The payload join at the heart of every arm merge: which side carries
     /// the arms' payload, under the one subsumption instance `Value Unit ⊑
@@ -209,6 +223,11 @@ impl InferCtx {
 
     /// The value side of an arm join: open routes pin `Value` and the values
     /// unify into one payload type.
+    ///
+    /// Those values unify under the join's *value-side* reason. Every arm
+    /// lands here already routed `Value`, so nothing about where the payload
+    /// lives is in dispute, and the route-side reason — which counsels a
+    /// decoder — would name a fault the program does not have.
     fn conclude_value_side(
         &mut self,
         arms: &[(PayloadRoute, Ty)],
@@ -219,10 +238,11 @@ impl InferCtx {
                 self.unify_route(route, &PayloadRoute::Value, Reason::RoutePin);
             }
         }
+        let values_agree = value_side(why);
         let mut values = arms.iter().map(|(_, ty)| ty.clone());
         let first = values.next().expect("a join always has at least one arm");
         for ty in values {
-            self.unify_ty(&first, &ty, why.clone());
+            self.unify_ty(&first, &ty, values_agree.clone());
         }
         (PayloadRoute::Value, first)
     }

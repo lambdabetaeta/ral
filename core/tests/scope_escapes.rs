@@ -430,20 +430,17 @@ fn audit_survives_a_spawn() {
     );
 }
 
-// ── (6) `guard` cleanup must not swallow `exit` / `Stopped` (finding E3) ──
+// ── (6) a halting `guard` cleanup pre-empts the body (finding E3) ────────
 //
-// Pre-fix, an `Err` from the `guard` cleanup thunk — every `Break`
-// variant, including `Escape::Exit` and `Escape::Stopped` — was turned
-// into a `cmd_error` log and dropped, and the body result was returned
-// regardless.  An `exit 5` in cleanup left the shell at status 0;
-// dropping a `Stopped` orphaned a stopped process group (pgid lost,
-// never resumable or reapable).  This is the same channel-conflation
-// that finding `try_does_not_swallow_exit` (test 1) pins for `try`.
-//
-// The fix: a cleanup *escape* takes priority over the body result and
-// propagates; a cleanup *error* is still logged and the body result
-// stands (cleanup is a best-effort finalizer whose ordinary failures
-// must not mask the body's outcome).
+// One rule for both of the cleanup's signals: a cleanup that halts —
+// ordinary error or control escape — is the `guard`'s outcome, and the
+// body's own outcome is pre-empted.  E3 pinned the escape half, the same
+// channel-conflation `try_does_not_swallow_exit` (test 1) pins for `try`:
+// dropping an `exit` left the shell at status 0, and dropping a `Stopped`
+// orphaned a stopped process group, pgid lost, never resumable or
+// reapable.  The error half is that rule read once more — a cleanup that
+// cannot fail the computation is a cleanup whose failures are
+// unreportable.  Log-and-continue is `guard { … } { try { … } { |e| … } }`.
 
 /// E3 — an `exit` raised by the `guard` cleanup thunk must propagate as
 /// `Escape::Exit`, not be swallowed into a successful body result.
@@ -463,6 +460,38 @@ fn guard_cleanup_does_not_swallow_exit() {
              returned with status 0."
         ),
         Err(other) => panic!("expected Escape::Exit(5) from guard cleanup; got {other:?}"),
+    }
+}
+
+/// A cleanup that *raises* pre-empts a returning body exactly as an escaping
+/// one does: the `guard` fails, carrying the cleanup's own status and message
+/// rather than the body's value `7`.
+#[test]
+fn guard_cleanup_error_pre_empts_the_body() {
+    let mut shell = fresh_shell();
+    let result = top_level(
+        &mut shell,
+        "guard { return 7 } { fail [status: 3, message: 'release failed'] }",
+    );
+    match result {
+        Err(Break::Error(e)) => {
+            assert_eq!(
+                e.exit_code(),
+                3,
+                "the cleanup's own status must be the `guard`'s: {e:?}"
+            );
+            assert!(
+                e.message.contains("release failed"),
+                "the cleanup's own message must reach the caller; got {:?}",
+                e.message
+            );
+        }
+        Ok(v) => panic!(
+            "a failing cleanup must fail the computation; got Ok({v:?}).  \
+             A cleanup whose failures cannot fail the computation is a \
+             cleanup whose failures are unreportable."
+        ),
+        Err(other) => panic!("expected the cleanup's own error from `guard`; got {other:?}"),
     }
 }
 

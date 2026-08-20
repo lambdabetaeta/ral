@@ -8,10 +8,10 @@ mod sink;
 mod source;
 mod terminal;
 
-pub use sink::{ByteBuffer, ChildStdioPlan, ExternalWrite, Sink};
+pub use sink::{ByteBuffer, CapturedBytes, ChildStdioPlan, ExternalWrite, Sink};
 pub(crate) use sink::{
-    new_buffer, peek_buffer, str_strip_one_terminator, strip_trailing_newline, take_buffer,
-    tee_into, tee_with_buffer,
+    SINK_BUFFER_CAP, buffer_overflowed, new_buffer, peek_buffer, str_strip_one_terminator,
+    strip_trailing_newline, take_buffer, tee_into, tee_with_buffer,
 };
 pub use source::{Source, SourceReader};
 pub use terminal::{InteractiveMode, TerminalState};

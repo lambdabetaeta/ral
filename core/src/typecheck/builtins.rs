@@ -326,6 +326,14 @@ pub mod sig {
         result: CompTemplate::Never,
         diagnostic: BuiltinDiagnostic::FailStatusNonzero,
     };
+
+    /// `exit`/`quit`: a status, and no return.
+    ///
+    /// Divergent like [`FAIL`] — the escape it raises unwinds past every
+    /// binding — so it joins whatever its context needs rather than forcing
+    /// `Unit` on the other arm of an `if`.  The status is fixed-1: the
+    /// elaborator sugars bare `exit` into `exit 0`.
+    pub const EXIT: BuiltinSig = command(ONE_INT, CompTemplate::Never);
 }
 
 /// A record type over a closed row: the tail is `Empty`, so no extension.
@@ -813,10 +821,6 @@ pub mod scheme {
             thunk(fun(Ty::Handle(Box::new(Ty::Var(av))), pure(Ty::Unit))),
         )
     }
-
-    // ── Exit / fail ──────────────────────────────────────────────────────
-
-    scheme!(exit_op: [Ty::Int] -> Ty::Unit);
 
     // ── Base frames ──────────────────────────────────────────────────────
 

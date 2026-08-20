@@ -37,7 +37,7 @@ representable state.
   reads the last stage's ground route once and writes the answer down, and no
   route survives into the node. There is nothing per-stage to annotate, because
   every interior edge is an operating-system byte pipe allocated from stage
-  position and no rule relates one stage to its neighbour
+  position and no rule relates one stage's type to its neighbour's
   ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]],
   [[map/core/typecheck|typecheck]]).
 - `CompKind::Case { scrutinee, arms: Vec<CaseArm> }` is Levy's sum eliminator:

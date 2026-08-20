@@ -18,7 +18,7 @@ let alarm = spawn { sleep !{int $secs} ; return `late }
 case !{race [$waiter, $alarm]}[value] [
     `up:   { |_| echo "$target:$port is up" },
     `late: { |_|
-        echo "$target:$port never came up within $(secs)s" 1>&2
+        warn "$target:$port never came up within $(secs)s"
         exit 1
     },
 ]

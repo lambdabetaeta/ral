@@ -586,6 +586,45 @@ fn a_stage_still_wanting_an_argument_is_rejected() {
     );
 }
 
+/// A stage-root `< f` or `<< w` answers every read the stage makes, for the
+/// stage's whole run, so the producer across the `|` writes for nobody.  The
+/// refusal names both rewrites that keep every command already written.
+#[test]
+fn a_pipe_into_a_stage_that_binds_its_own_stdin_is_refused() {
+    has_error(
+        "echo hi | cat < notes.txt",
+        "the pipe writes into a stdin this `<` replaces",
+    );
+    has_error(
+        "echo hi | from-string << #'body'#",
+        "the pipe writes into a stdin this `<<` replaces",
+    );
+    assert!(
+        has_hint(
+            &raw_errors("echo hi | cat < notes.txt"),
+            "run the stage's producer as its own statement",
+        ),
+        "the refusal must name the rewrite that keeps the producer"
+    );
+}
+
+/// The rule is about the stage's root, which is the whole of what the pipeline
+/// rule can see.  A first stage's stdin is nobody's output, and a read one
+/// level in answers its own command's reads alone — not statically dead.
+#[test]
+fn stdin_bound_off_the_stage_root_is_left_alone() {
+    ok("cat < notes.txt | from-string");
+    ok("echo hi | !{ cat < notes.txt ; from-string }");
+}
+
+/// Each rewrite the refusal names keeps every command the program wrote.
+#[test]
+fn the_dead_edges_remedies_are_well_typed() {
+    ok("cat < notes.txt");
+    ok("echo hi ; cat < notes.txt");
+    ok("let h = spawn { echo hi }; cat < notes.txt");
+}
+
 #[test]
 fn pipeline_var_tail_stays_shape_forcing_not_pinned() {
     // A forced variable can still become a byte-reading stage at the edge;

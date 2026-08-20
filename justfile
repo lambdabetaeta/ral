@@ -9,17 +9,23 @@
 # Windows has no `sh`; PowerShell is the shell it always has.
 set windows-shell := ['powershell.exe', '-NoLogo', '-NoProfile', '-Command']
 
+# synod ships on macOS and Windows only, and its tauri dependency links GTK,
+# which a Linux host is not expected to carry.  CI's Linux job excludes it for
+# exactly this reason; this is the same exclusion, written once so that no
+# recipe below hand-rolls it and no Linux developer has to.
+gui := if os() == "linux" { "--exclude synod" } else { "" }
+
 # Show the recipe list.
 default:
     @just --list
 
 # Build the whole workspace, including tests and examples.
 build:
-    cargo build --workspace --all-targets
+    cargo build --workspace {{gui}} --all-targets
 
 # Type-check the workspace without producing binaries — the fast dev loop.
 check:
-    cargo check --workspace --all-targets
+    cargo check --workspace {{gui}} --all-targets
 
 # Cross-check the workspace against the shipping Windows ABI (exarch/synod/guest-net excluded: their C deps can't cross-compile from Unix).
 check-windows $RUSTFLAGS='-D warnings' $CC_x86_64_pc_windows_msvc='cc-absent-use-blake3-pure-fallback':
@@ -30,7 +36,7 @@ check-windows $RUSTFLAGS='-D warnings' $CC_x86_64_pc_windows_msvc='cc-absent-use
 
 # Run the workspace test suite.
 test: build
-    cargo test --workspace --features ral-core/test-util
+    cargo test --workspace {{gui}} --features ral-core/test-util
 
 # Format every crate in place.
 fmt:
@@ -43,7 +49,7 @@ fmt:
 
 # Clippy across the workspace, warnings as errors — exactly what CI lints with.
 lint $RUSTFLAGS='-D warnings':
-    cargo clippy --workspace --all-targets
+    cargo clippy --workspace {{gui}} --all-targets
 
 # Lint and test the workspace: the gate before every commit.
 gate: lint test

@@ -37,7 +37,12 @@ between parent and child shells.
   terminal, stderr, redirect file, in-memory `ByteBuffer` capture, tee,
   frontend printer, line-framing adapter. `child_stdout` / `child_stderr`
   centralise the (stdio, pump) decision so no caller computes inherit-vs-pipe by
-  hand.
+  hand. A `ByteBuffer` is `Arc<CapturedBytes>`: the bytes under a mutex, and
+  beside them the `overflowed` flag `write_capped` raises at
+  `SINK_BUFFER_CAP`. The flag exists because the write path cannot report the
+  cap — a pump returns `()` from its own thread — so `buffer_overflowed` is
+  read once the writers have joined, by whoever means to make the bytes a
+  value ([[design/capture|capture]]).
 - `terminal.rs` — `TerminalState`: cached startup isatty / ANSI / NO_COLOR /
   mode bits. `startup_foreground` records whether ral's group owned the
   controlling terminal's foreground at entry; it is no longer a per-handoff

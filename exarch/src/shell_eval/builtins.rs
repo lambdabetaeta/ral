@@ -831,7 +831,9 @@ fn builtin_skill(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settle
             let body = match skill::read_skill_body(&dir) {
                 Ok(body) => body,
                 Err(why) => {
-                    return Settled::Ok(Value::String(format!("could not read skill {name}: {why}")));
+                    return Settled::Ok(Value::String(format!(
+                        "could not read skill {name}: {why}"
+                    )));
                 }
             };
             // Only once the body is in hand, so the card never claims a load

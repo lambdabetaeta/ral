@@ -838,7 +838,10 @@ mod tests {
     }
 
     fn fake_id_token(payload: &serde_json::Value) -> String {
-        format!("header.{}.signature", URL_SAFE_NO_PAD.encode(payload.to_string()))
+        format!(
+            "header.{}.signature",
+            URL_SAFE_NO_PAD.encode(payload.to_string())
+        )
     }
 
     /// A refresh renews the credential and the name's ingredients, never the
@@ -857,7 +860,10 @@ mod tests {
 
         let fresh = renewed(&current, "fresh-at".into(), None, Some(&id_token));
 
-        assert_eq!(fresh.issued, "acct-1", "identity is pinned across a refresh");
+        assert_eq!(
+            fresh.issued, "acct-1",
+            "identity is pinned across a refresh"
+        );
         assert_eq!(fresh.email.as_deref(), Some("new@work"));
         assert_eq!(fresh.plan.as_deref(), Some("pro"));
         assert_eq!(

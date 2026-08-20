@@ -1461,6 +1461,23 @@ fn nproc_is_positive_int() {
     }
 }
 
+// ── the retired status register ─────────────────────────────────────────
+
+/// `$STATUS` is not a name any longer: a failure carries its status in the
+/// `Err` record `try` binds, so reading the register fails like any other
+/// undefined name — and the hint says where the status went.
+#[test]
+fn status_is_an_undefined_variable_that_names_its_replacement() {
+    let Err(Break::Error(e)) = eval("return $STATUS") else {
+        panic!("$STATUS must not resolve");
+    };
+    assert_eq!(e.message, "undefined variable: $STATUS");
+    let hint = e
+        .hint
+        .expect("the miss must say what replaced the register");
+    assert!(hint.contains("try"), "hint should point at `try`: {hint}");
+}
+
 // ── echo returns its string ─────────────────────────────────────────────
 
 #[test]
@@ -1526,7 +1543,7 @@ fn session_scope_let_may_not_shadow_a_path_command() {
 const ASSERT_EQ_DEF: &str = "
 let assert_eq = { |name expected actual|
     if !{equal $expected $actual} {} else {
-        echo 'assert_eq mismatch' 1>&2
+        warn 'assert_eq mismatch'
         fail [status: 1]
     }
 }";

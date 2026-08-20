@@ -17,7 +17,7 @@ use crate::types::{Mooring, Raw, Shell, Tail, Value};
 ///
 /// The body is a branch, not a function the runtime applies: it inherits the
 /// `case`'s own tail position, so a tail call in an arm still escapes to the
-/// trampoline, and it inherits the ambient control state — `$STATUS` at arm
+/// trampoline, and it inherits the ambient control state — the status at arm
 /// entry is the one evaluating the scrutinee left, and every mutation the body
 /// makes outlives the `case`, as an `if` branch's does.  Only the lexical scope
 /// the pattern binds into is fresh.

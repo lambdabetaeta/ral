@@ -1,8 +1,8 @@
 //! Prompt construction.
 //!
 //! The prompt body is a registered hook at `Session/"prompt"`,
-//! dispatched via [`Shell::run`].  CWD, STATUS, and USER are
-//! ambient pseudo-variables read by the prompt body directly.
+//! dispatched via [`Shell::run`].  CWD and USER are ambient
+//! pseudo-variables read by the prompt body directly.
 //! Plugins may transform the result via the `prompt` lifecycle hook.
 
 use ral_core::transport::{Program, Run};
@@ -125,17 +125,12 @@ pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell) -> String {
         ral_core::source::Span::synthetic(),
     );
 
-    let (result, captured) =
-        shell.with_preserved_status(
-            |shell| match shell.run(prompt_run("__eval_prompt_test__")) {
-                RunReport::Ran {
-                    ending, captured, ..
-                } => (ending.into_result(), captured),
-                RunReport::Static { .. } => {
-                    unreachable!("a thunk prompt body never compiles source")
-                }
-            },
-        );
+    let (result, captured) = match shell.run(prompt_run("__eval_prompt_test__")) {
+        RunReport::Ran {
+            ending, captured, ..
+        } => (ending.into_result(), captured),
+        RunReport::Static { .. } => unreachable!("a thunk prompt body never compiles source"),
+    };
 
     prompt_text_from(result, captured)
 }
@@ -263,29 +258,21 @@ mod tests {
         assert_eq!(eval_prompt(&prompt, &mut shell), "[ ok ]");
     }
 
-    // ambient pseudo-variables ($CWD, $STATUS, $USER) are live.
+    // ambient pseudo-variables ($CWD, $USER) are live.
 
     #[test]
     fn prompt_block_sees_pseudo_vars() {
-        let source = "return { return \"$USER:$CWD:$STATUS\" }";
+        let source = "return { return \"$USER:$CWD\" }";
         let (mut shell, prompt) = evaluate_prompt_src(source);
         let result = eval_prompt(&prompt, &mut shell);
-        // Cut from the ends: a Windows `$CWD` carries a drive colon of
-        // its own, so the middle field is whatever is left between the
-        // first separator and the last.
-        let (user, rest) = result
+        // Split at the first colon: a Windows `$CWD` carries a drive
+        // colon of its own, and it lies to the right of this one.
+        let (user, cwd) = result
             .split_once(':')
-            .unwrap_or_else(|| panic!("expected user:cwd:status, got {result:?}"));
-        let (cwd, status) = rest
-            .rsplit_once(':')
-            .unwrap_or_else(|| panic!("expected user:cwd:status, got {result:?}"));
+            .unwrap_or_else(|| panic!("expected user:cwd, got {result:?}"));
 
         assert!(!user.is_empty(), "USER must be non-empty, got {result:?}");
         assert!(!cwd.is_empty(), "CWD must be non-empty, got {result:?}");
-        assert_eq!(
-            status, "0",
-            "STATUS must be 0 after successful eval, got {result:?}"
-        );
     }
 
     #[test]

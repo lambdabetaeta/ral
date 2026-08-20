@@ -123,28 +123,17 @@ fn case_arm_naming_a_handler_is_captured_like_an_inline_one() {
 }
 
 /// An arm is a branch, not a function the runtime applies: it runs in the
-/// ambient control context rather than a frame of its own.  So `$STATUS` at
-/// arm entry is the one the preceding statement left — evaluating a variant
-/// scrutinee sets no status, where an `if` would first record its condition —
-/// and the status the arm leaves is the `case`'s own.
+/// ambient control context rather than a frame of its own, so the status the
+/// arm leaves is the `case`'s own — and, at the end of a script, the
+/// process's.  A lambda's status would stay inside its frame.
 #[test]
-fn case_arm_runs_in_the_ambient_status() {
-    let inherited = common::run(
-        "case_arm_inherits_status",
-        "false\n\
-         case `go unit [`go: { |_| echo \"in [$STATUS]\" }]\n",
-    );
-    assert_eq!(inherited.status, 0, "stderr: {}", inherited.stderr);
-    assert_eq!(inherited.stdout.trim(), "in [1]");
-
-    let left = common::run(
+fn case_arm_leaves_its_status_as_the_cases_own() {
+    let out = common::run(
         "case_arm_leaves_status",
         "true\n\
-         case `go unit [`go: { |_| false }]\n\
-         echo \"out [$STATUS]\"\n",
+         case `go unit [`go: { |_| false }]\n",
     );
-    assert_eq!(left.status, 0, "stderr: {}", left.stderr);
-    assert_eq!(left.stdout.trim(), "out [1]");
+    assert_eq!(out.status, 1, "stderr: {}", out.stderr);
 }
 
 // ─── Stream (demand-driven streams, Stream) ────────────────────────────────────

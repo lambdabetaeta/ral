@@ -140,10 +140,11 @@ pub fn hatch(host_port: u32, token: u64, shell: &Shell, grant: String) -> Result
 }
 
 /// [`hatch`], reading its own seed straight out of `mooring`'s nursery
-/// instead of taking an already-adopted `Shell` — the whole other half of
-/// `Shell::fork_into_nursery`, wrapped in one call because a nursery slot is
-/// this crate's own private field and a host builtin cannot reach it any
-/// other way.
+/// instead of taking an already-adopted `Shell`.
+///
+/// The whole other half of `Shell::fork_into_nursery`, wrapped in one call
+/// because a nursery slot is this crate's own private field and a host
+/// builtin cannot reach it any other way.
 ///
 /// # Errors
 /// Returns a sentence if `id` names no parked fork, or [`hatch`] itself

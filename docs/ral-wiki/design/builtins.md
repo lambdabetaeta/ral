@@ -19,7 +19,7 @@ irreducibility:
 - **It reaches outside the value language** — a syscall or structured OS query
   (the filesystem family), or the shell's own runtime state a spawned process
   could never touch (`cd`, the `spawn` family, `source` / `use`, `surface`,
-  `ask`). The query case is *a syscall bridge, not text parsing*: records and
+  `warn`, `ask`). The query case is *a syscall bridge, not text parsing*: records and
   lists in place of a shell-out to `stat` / `ls` / `dirname` and a re-parse, so
   the bytes→text→structured round-trip never arises.
 - **It is a base computation** — an operation the prelude has no smaller pieces to
@@ -63,6 +63,12 @@ The core entries group by what they compute:
   `List String -> Return(Bytes, Unit)` so a value boundary reads the bytes it
   wrote. Mixed argument types coexist because the argv boundary renders each
   element before the list is formed.
+- **Diagnostics** — `warn`: one `String` and a newline to standard error,
+  typed `String -> F[Value] Unit`. Deliberately *not* a byte write — the route
+  stays `Value`, so a caller binding the computation's payload never picks the
+  message up. ral has no redirect pointing standard output at standard error,
+  and this verb is what stands where the bash idiom did
+  ([[decisions/260819_diagnostics-are-a-builtin|diagnostics-are-a-builtin]]).
 - **Session & terminal** — `cd` `cwd` `alias` / `unalias` `source` / `use`
   `exit` / `quit` `ask` `clear` `reset` `surface` `help` / `explain`, with the
   underscore probe `_ansi-ok`.
@@ -87,8 +93,11 @@ whose shape follows from whether its surface is a curried function:
   result computation read directly, without falling through to command-name
   classification. This is for builtins whose surface is not a curried function —
   *nullary* (`clear`, `reset`, `help`, and the `from-X` codecs, which read
-  stdin) or *divergent* (`fail`, result `Never`, carrying the nonzero-status
-  diagnostic — [[design/failure|failure]]).
+  stdin) or *divergent* (result `Never`: `fail`, which also carries the
+  nonzero-status diagnostic — [[design/failure|failure]] — and `exit`/`quit`,
+  whose escape unwinds past every binding).  A divergent result is a fresh
+  variable in both route and value, so `if $c { exit 1 } else { return "x" }`
+  takes its type from the arm that returns.
 
 A `Sig`'s first-class form is *derived* from it, and derivation is its only
 source — the argument templates become the curry spine and the result template

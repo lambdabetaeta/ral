@@ -162,10 +162,7 @@ fn install_sink_redirects(
                 stdout = clone_redirect_sink(&stdout, "redirect: duplicate stdout")?;
                 stdout_changed = true;
             }
-            (1, EvalRedirect::Fd(2)) => {
-                stdout = clone_redirect_sink(&stderr, "redirect: duplicate stderr as stdout")?;
-                stdout_changed = true;
-            }
+            // Only 2→1: `1>&2` is not in the surface, so nothing can build it.
             (2, EvalRedirect::Fd(1)) => {
                 stderr = clone_redirect_sink(&stdout, "redirect: duplicate stdout as stderr")?;
                 stderr_changed = true;

@@ -3,14 +3,17 @@
 //! [`Sink`] is the single shape every writer routes through; [`ChildStdioPlan`]
 //! is its companion for children, pairing the stdio to hand `process::Launch`
 //! with the sink the caller must pump after spawn.  The buffer helpers below own
-//! the `Arc<Mutex<Vec<u8>>>` idiom for captured bytes.
+//! the [`ByteBuffer`] idiom for captured bytes.
 
 use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Cap on `Sink::Buffer` growth: past it bytes are dropped after a truncation
-/// marker, so a high-volume capture has to become an explicit redirect.
-const SINK_BUFFER_CAP: usize = 16 * 1024 * 1024;
+/// marker, so a high-volume capture has to become an explicit redirect.  Two
+/// readings of the one event: a detached worker keeps the marked prefix, and a
+/// capture whose bytes are about to become a value refuses it (`eval_capture`).
+pub(crate) const SINK_BUFFER_CAP: usize = 16 * 1024 * 1024;
 const SINK_BUFFER_TRUNC_MARKER: &[u8] =
     b"\n[ral: buffer exceeded 16 MiB; remaining output dropped]\n";
 
@@ -29,9 +32,21 @@ pub trait ExternalWrite: Send + Sync {
     fn write(&self, bytes: &[u8]) -> io::Result<()>;
 }
 
-/// Captured bytes shared between writers and their eventual reader: writers run
-/// on pump and worker threads, the reader on the eval thread after they join.
-pub type ByteBuffer = Arc<Mutex<Vec<u8>>>;
+/// Captured bytes, and the one thing about them the write path cannot say:
+/// that [`SINK_BUFFER_CAP`] cut the stream short.
+///
+/// `Sink::pump` hands back `()` from a thread and every writer's `Ok(())` is
+/// honest about the write, so truncation is recorded here and read out of
+/// band, once the buffer is complete.
+#[derive(Debug, Default)]
+pub struct CapturedBytes {
+    bytes: Mutex<Vec<u8>>,
+    overflowed: AtomicBool,
+}
+
+/// Shared between writers and their eventual reader: writers run on pump and
+/// worker threads, the reader on the eval thread after they join.
+pub type ByteBuffer = Arc<CapturedBytes>;
 
 /// One child stream's routing, stdout or stderr.
 ///
@@ -189,7 +204,7 @@ impl Sink {
 /// are recorded and still seen.  `with_audit_capture` in `evaluator::capture` is
 /// the caller; it drains the buffer once every writer has closed.
 pub(crate) fn tee_with_buffer(base: Sink) -> (Sink, ByteBuffer) {
-    let buf: ByteBuffer = Arc::new(Mutex::new(Vec::new()));
+    let buf = ByteBuffer::default();
     let sink = tee_into(base, &buf);
     (sink, buf)
 }
@@ -202,10 +217,11 @@ pub(crate) fn tee_into(base: Sink, buf: &ByteBuffer) -> Sink {
 }
 
 /// A fresh [`ByteBuffer`] and the sink that writes into it: callers wire the
-/// sink onto `shell.io` and keep the arc to drain later.  Every `ByteBuffer` in
-/// the crate is minted here.
+/// sink onto `shell.io` and keep the arc to drain later.  Every `Sink::Buffer`
+/// is minted here or in [`tee_into`], so nothing writes into a capture buffer
+/// past [`write_capped`].
 pub(crate) fn new_buffer() -> (Sink, ByteBuffer) {
-    let buf: ByteBuffer = Arc::new(Mutex::new(Vec::new()));
+    let buf = ByteBuffer::default();
     (Sink::Buffer(buf.clone()), buf)
 }
 
@@ -213,9 +229,18 @@ pub(crate) fn new_buffer() -> (Sink, ByteBuffer) {
 /// joined, so there is nothing to recover, and no capture is worth a panic torn
 /// through `await` result construction.
 pub(crate) fn take_buffer(buf: &ByteBuffer) -> Vec<u8> {
-    buf.lock()
+    buf.bytes
+        .lock()
         .map(|mut g| std::mem::take(&mut *g))
         .unwrap_or_default()
+}
+
+/// Whether [`SINK_BUFFER_CAP`] truncated what [`take_buffer`] hands back — so
+/// a caller for whom the bytes *are* a value can refuse them instead of binding
+/// a prefix.  Only meaningful once every writer has joined; `join` is what
+/// orders their stores against this load.
+pub(crate) fn buffer_overflowed(buf: &ByteBuffer) -> bool {
+    buf.overflowed.load(Ordering::Relaxed)
 }
 
 /// Copy a [`ByteBuffer`] without draining it, so `poll` can sample a worker
@@ -223,7 +248,7 @@ pub(crate) fn take_buffer(buf: &ByteBuffer) -> Vec<u8> {
 /// The price is that successive peeks overlap: each is a snapshot of everything
 /// so far, not a delta.  Empty on a poisoned lock, as [`take_buffer`] is.
 pub(crate) fn peek_buffer(buf: &ByteBuffer) -> Vec<u8> {
-    buf.lock().map(|g| g.clone()).unwrap_or_default()
+    buf.bytes.lock().map(|g| g.clone()).unwrap_or_default()
 }
 
 /// Drop one trailing line terminator, as POSIX `$()` does, so `let x = echo hi`
@@ -249,10 +274,10 @@ pub(crate) fn str_strip_one_terminator(s: &str) -> &str {
 }
 
 /// Append under `SINK_BUFFER_CAP`, emitting the truncation marker once at the
-/// boundary.  Sole enforcement point, so shell writes and pump-thread appends
-/// cannot disagree about the cap.
-fn write_capped(buf: &Mutex<Vec<u8>>, bytes: &[u8]) {
-    if let Ok(mut g) = buf.lock() {
+/// boundary and raising `overflowed` with it.  Sole enforcement point, so shell
+/// writes and pump-thread appends cannot disagree about the cap.
+fn write_capped(buf: &CapturedBytes, bytes: &[u8]) {
+    if let Ok(mut g) = buf.bytes.lock() {
         let cur = g.len();
         if cur < SINK_BUFFER_CAP + SINK_BUFFER_TRUNC_MARKER.len() {
             if cur + bytes.len() <= SINK_BUFFER_CAP {
@@ -260,6 +285,7 @@ fn write_capped(buf: &Mutex<Vec<u8>>, bytes: &[u8]) {
             } else {
                 g.extend_from_slice(&bytes[..SINK_BUFFER_CAP.saturating_sub(cur)]);
                 g.extend_from_slice(SINK_BUFFER_TRUNC_MARKER);
+                buf.overflowed.store(true, Ordering::Relaxed);
             }
         }
     }

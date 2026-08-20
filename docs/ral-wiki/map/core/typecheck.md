@@ -138,7 +138,7 @@ to `Value` at annotation time, the only defaulting site.
 A builtin's route is the projection of its declared signature, read once:
 `typecheck::builtins::sig_route` maps a `CompTemplate` onto a `PayloadRoute` —
 `Pure` and `LinesStep` to `Value`, `Return { route, .. }` to its declared ground
-route, and `Never` (`fail` alone) to a fresh variable, since a divergent
+route, and `Never` (`fail`, `exit`/`quit`) to a fresh variable, since a divergent
 computation joins either side of a byte/value split. `ret_bytes()` builds the
 byte shape and pairs it with `TyTemplate::Unit` at construction, so WF-2 holds
 structurally for every encoder, `help`, `explain`, and the terminal controls.
@@ -205,10 +205,17 @@ forces it to `Return` shape with `force_return_shape` under
 `Reason::PipelineStageShape`, records the stage's value type, and returns the
 final stage's `CompTy` unchanged. A stage typed `Fun` is a function still
 waiting for an argument; the hint says to apply it rather than pipe into it, or
-to read the incoming bytes with a decoder. Nothing else about a stage is
-checked, and nothing inspects an `Ast` node to decide whether a pipeline is well
-formed — so an unforced block literal in stage position is an ordinary
-value-returning stage, accepted.
+to read the incoming bytes with a decoder.
+
+One further premise, about a stage's redirects rather than its type: past the
+first position, `stage_root_stdin_feed` reads the stage's root — an `Exec`'s
+fused redirects, a `ScopeOp::Redirect` frame, or the same past the binders
+elaboration hoists out of a redirect target — and a `< f` or `<< w` on fd 0
+there is `TypeErrorKind::DeadPipeEdge` (T0070), whose `StdinFeed` names which
+of the two the message spells. Nothing else about a stage is checked, and
+nothing inspects an `Ast` node to decide whether a pipeline is well formed — so
+an unforced block literal in stage position is an ordinary value-returning
+stage, accepted, and a read nested inside a stage is left alone.
 
 ## The arm-result join
 
@@ -227,6 +234,15 @@ value to `Unit`; no byte arm and every arm ground `Value` pulls it onto the
 value side; any arm still open defers, even beside a ground
 `Value`-at-non-`Unit` arm, because that open arm may yet ground `Bytes` and the
 resulting conduit mismatch must be the join's own verdict.
+
+The two sides fail differently, so each speaks in its own words. The four join
+reasons — `IfBranches`, `ChainBranches`, `CaseArms`, `TryArms` — belong to the
+byte side, where a route really is in dispute and the remedy is a decoder tail.
+`conclude_value_side` unifies the arms' values under the value-side twin
+(`IfBranchValues`, `ChainBranchValues`, `CaseArmValues`, `TryArmValues`, mapped
+by `route_solver.rs`'s `value_side`), whose text says the arms agree on where
+the payload lives and disagree on its type — and counsels no decoder, since
+there is no route there for one to move.
 
 The store drains through two entry points, and ownership is the difference.
 `InferCtx::solve_at_boundary` runs at every in-inference point that produces a
@@ -264,8 +280,14 @@ the two computations disagree about where their payload lives.
 ## Capture insertion
 
 `CompKind::Capture(body)` types through `Inferencer::infer_comp`: its own route
-grounds `Value`, its value type is `Bytes`. `CompKind::Decode(body)` is the
-reading step over it, and its value type is `String`. Both rules fire only when
+grounds `Value`, its value type is `Bytes` — and `body`'s extracted value
+unifies with `Unit`, WF-2 as a rule rather than the `eval_capture` assert it
+used to be. `body`'s route is left free: a join arm subsumed at `Value Unit`
+reaches `Capture` too (`Wrap`, below), and constraining the route would refuse
+it. `CompKind::Decode(body)` is the reading step over it, and its value type is
+`String`; `body` is always a `Capture`, so its extracted value and route unify
+with `Bytes` and `Value` respectively — the shape `Capture`'s own rule already
+guarantees, demanded rather than assumed. Both rules fire only when
 re-inferring a tree that already carries `annotate`-inserted nodes — a stored
 handler or thunk re-checked at a later install.
 

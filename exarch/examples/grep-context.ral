@@ -13,7 +13,7 @@
 # parsing — and tags each line with the witness `edit` checks.
 
 if !{is-empty $ARGS} {
-    echo 'usage: grep-context.ral PATTERN [DIR]' 1>&2
+    warn 'usage: grep-context.ral PATTERN [DIR]'
     exit 2
 }
 

@@ -2156,7 +2156,8 @@ return !{{length $hits}}"
         };
         let rows: Vec<String> = hunks.iter().flat_map(|h| &h.rows).map(Row::text).collect();
         assert_eq!(
-            rows, ["short"],
+            rows,
+            ["short"],
             "the card shows the new content, needing no before-image to do it"
         );
     }
@@ -2173,10 +2174,7 @@ return !{{length $hits}}"
             .collect::<Vec<_>>()
             .join("\n");
 
-        let (r, records) = run_capturing(
-            &mut shell,
-            &format!("to-string '{body}' > '{path}'"),
-        );
+        let (r, records) = run_capturing(&mut shell, &format!("to-string '{body}' > '{path}'"));
         assert_eq!(r.exit, 0, "the write redirect must succeed");
 
         let obs = observations(&records);

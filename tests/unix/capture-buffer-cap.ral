@@ -1,13 +1,28 @@
-# Test: a capture stops at 16 MiB and says so exactly once
+# Test: the 16 MiB buffer cap — a capture refuses, a detached worker truncates
 
-# 20 MB down the capture sink. The buffer keeps the first 16 MiB, appends the
-# truncation marker once, and drops everything after — so the length is the
-# cap plus the marker (57 bytes, less the trailing newline every capture
-# strips), whatever chunk sizes the pump thread happened to read.
-let big = yes ral | head -c 20000000
-echo !{length $big}
+# 20 MB down a capture sink. The bytes captured *are* the value, so a prefix
+# is not a smaller answer but a wrong one, and the truncation marker would be
+# bytes the program could not tell from the command's own: the capture fails
+# instead of binding either, and `try` catches that like any other failure.
+# The refusal flushes what it holds to the visible stream — 16 MiB of it,
+# which is why the visible stream here is `/dev/null` and not this file.
+let refusal = try {
+    let big = yes ral | head -c 20000000
+    return "bound"
+} { |e|
+    return $e[message]
+} > /dev/null
+echo $refusal
 
-# The control below the cap: nothing is dropped and no marker appears, so the
-# length is just the bytes produced, less that same trailing newline.
+# The control below the cap: nothing is dropped and nothing is refused, so the
+# length is just the bytes produced, less the trailing newline every capture
+# strips.
 let small = yes ral | head -c 1000
 echo !{length $small}
+
+# A detached worker is the other side of the same cap: its bytes arrive with
+# nobody to refuse them, so the buffer stays bounded and says where it stopped
+# — the first 16 MiB, then the truncation marker once, then nothing.
+let h = spawn { yes ral | head -c 20000000 }
+let res = await $h
+echo !{length $res[stdout]}

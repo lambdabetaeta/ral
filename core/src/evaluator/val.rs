@@ -36,11 +36,15 @@ pub(crate) fn eval_val(val: &Val, shell: &mut Shell) -> Result<Value, Error> {
         Val::Bool(b) => Ok(Value::Bool(*b)),
         Val::String(s) => Ok(Value::String(s.clone())),
         Val::Variable(name) => shell.lookup_value_name(name).ok_or_else(|| {
-            shell.err_hint(
-                format!("undefined variable: ${name}"),
-                "check spelling, or ensure the variable is defined before this line",
-                1,
-            )
+            let hint = match name.as_str() {
+                "STATUS" => {
+                    "there is no status register: a failure raises an error \
+                     record that carries its own status — catch it with `try` \
+                     and read `$err[status]` from the handler's argument"
+                }
+                _ => "check spelling, or ensure the variable is defined before this line",
+            };
+            shell.err_hint(format!("undefined variable: ${name}"), hint, 1)
         }),
         Val::Thunk(body) => Ok(close_lam(body, shell).unwrap_or_else(|| Value::Block {
             body: body.clone(),

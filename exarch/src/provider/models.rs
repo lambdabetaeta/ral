@@ -102,7 +102,11 @@ impl LiveSource {
     /// learned a fresh handle is renamed here as it is in the store.
     pub fn add_credential(&mut self, account: Account, credential: Credential) {
         self.credentials.insert(account.id.clone(), credential);
-        match self.accounts.iter_mut().find(|known| known.id == account.id) {
+        match self
+            .accounts
+            .iter_mut()
+            .find(|known| known.id == account.id)
+        {
             Some(known) => *known = account,
             None => self.accounts.push(account),
         }

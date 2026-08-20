@@ -141,9 +141,9 @@ the structural worksheet projection, and completion live in
 - `prompt.rs` — runs the registered `Session/"prompt"` hook through a
   capture-into-string run (`Program::Hook`, `RunIo::Capture`, `Denied`
   terminal): its return value is the prompt, a returned unit falls back to
-  its captured stdout. USER, CWD, and STATUS are ambient pseudo-variables
-  the prompt body reads directly. Plugin `prompt` hooks may transform the
-  result; the terminal title is written separately. A failing prompt body
+  its captured stdout. USER and CWD are ambient pseudo-variables the prompt
+  body reads directly. Plugin `prompt` hooks may transform the result; the
+  terminal title is written separately. A failing prompt body
   falls back to the default `❯ ` beside its per-render diagnostic, and the
   session survives so the user can rebind it.
 - `config.rs` — rc is ral source returning a map; recognised keys (`env`,

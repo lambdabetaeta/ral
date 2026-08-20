@@ -348,10 +348,10 @@ impl Shell {
             .register_at(file, Source::from_text(name, text));
     }
 
-    /// Resolve the six pseudo-variables (`$ENV`, `$ARGS`, `$NPROC`, `$CWD`,
-    /// `$STATUS`, `$USER`); any other name is `None`.  `$SCRIPT` is not among
-    /// them: the elaborator bakes it to a literal from the file it compiles, so
-    /// no runtime reader exists.  These are computed, never stored in scope,
+    /// Resolve the five pseudo-variables (`$ENV`, `$ARGS`, `$NPROC`, `$CWD`,
+    /// `$USER`); any other name is `None`.  `$SCRIPT` is not among them: the
+    /// elaborator bakes it to a literal from the file it compiles, so no
+    /// runtime reader exists.  These are computed, never stored in scope,
     /// hence [`Self::lookup_value_name`] reaching them only after lexical
     /// scope (natives included) misses.
     pub fn pseudo_var(&self, name: &str) -> Option<Value> {
@@ -407,7 +407,6 @@ impl Shell {
                 };
                 Some(Value::String(cwd_str))
             }
-            "STATUS" => Some(Value::Int(i64::from(self.mobile.control.last_status))),
             "USER" => Some(Value::String(crate::path::user_name(
                 self.mobile.context.env_overrides(),
             ))),
@@ -436,17 +435,30 @@ impl Shell {
 
     /// Write `bytes` to the current stdout sink.
     ///
+    /// # Errors
+    /// Returns `Err` if the underlying write fails with anything other than
+    /// `BrokenPipe`, which is a clean shutdown rather than a fault.
+    pub fn write_stdout(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        Self::write_sink(&mut self.io.stdout, bytes)
+    }
+
+    /// Write `bytes` to the current stderr sink — where `warn` and the shell's
+    /// own diagnostics land, and what `2> f` rebinds.
+    ///
+    /// # Errors
+    /// Returns `Err` if the underlying write fails with anything other than
+    /// `BrokenPipe`, which is a clean shutdown rather than a fault.
+    pub fn write_stderr(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        Self::write_sink(&mut self.io.stderr, bytes)
+    }
+
     /// `BrokenPipe` is a clean shutdown, as it is for a Unix tool dying
     /// silently on `SIGPIPE`: the reader has closed its end (`fzf` took a
     /// selection, `head` its quota).  Report it and the pipeline supervisor
     /// tears the pgid down with `SIGKILL`, surfacing status 137 on sibling
     /// stages that had themselves exited cleanly.
-    ///
-    /// # Errors
-    /// Returns `Err` if the underlying write fails with anything other than
-    /// `BrokenPipe`.
-    pub fn write_stdout(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        match self.io.stdout.write_all(bytes) {
+    fn write_sink(sink: &mut crate::io::Sink, bytes: &[u8]) -> std::io::Result<()> {
+        match sink.write_all(bytes) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
             Err(e) => Err(e),
@@ -484,17 +496,6 @@ mod tests {
     }
 
     #[test]
-    fn pseudo_var_status_reflects_last_status() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell.set_status_from_bool(false);
-        let val = shell.pseudo_var("STATUS").expect("$STATUS must resolve");
-        assert_eq!(val, Value::Int(1));
-        shell.set_status_from_bool(true);
-        let val = shell.pseudo_var("STATUS").expect("$STATUS must resolve");
-        assert_eq!(val, Value::Int(0));
-    }
-
-    #[test]
     fn pseudo_var_user_is_live() {
         let shell = Shell::new(crate::io::TerminalState::default());
         let val = shell.pseudo_var("USER").expect("$USER must resolve");
@@ -514,7 +515,6 @@ mod tests {
     fn lookup_value_name_sees_pseudo_vars() {
         let shell = Shell::new(crate::io::TerminalState::default());
         assert!(shell.lookup_value_name("CWD").is_some());
-        assert!(shell.lookup_value_name("STATUS").is_some());
         assert!(shell.lookup_value_name("USER").is_some());
     }
 

@@ -76,7 +76,7 @@ fn watch_stderr_is_prefixed_err() {
     let out = run(
         "ral_spawn_watch",
         r#"
-        let h = watch "job" { echo out; echo err 1>&2 }
+        let h = watch "job" { echo out; warn "err" }
         await $h
         "#,
     );

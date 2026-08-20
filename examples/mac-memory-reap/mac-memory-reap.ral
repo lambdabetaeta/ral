@@ -6,7 +6,7 @@
 # awk, killed by pid, recalled every time; ral counts and kills one typed list.
 
 if !{is-empty $ARGS} {
-    echo 'usage: mac-memory-reap.ral APP...' 1>&2
+    warn 'usage: mac-memory-reap.ral APP...'
     exit 2
 }
 

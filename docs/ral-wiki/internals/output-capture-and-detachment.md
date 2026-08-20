@@ -112,6 +112,15 @@ The escape is detachment — the *handle* is its evidence
   stdout never fills the kernel pipe — it never blocks on a full pipe — and the
   worker's memory stays bounded at ~16 MiB. The detached path has no unbounded-growth
   failure mode, and no undrained-pipe stall.
+- Truncation with a marker is *this* path's contract, and only this one. A
+  worker's bytes arrive with nobody to refuse them: the pump is a thread whose
+  failure has no one to raise it to, and the buffer has to stay bounded whether
+  or not the handle is ever awaited — so the report travels in band, and
+  `await` hands on a prefix that says where it stopped. Where the bytes *are*
+  the value — `capture` — the buffer is drained by the very step that would
+  bind them, so `eval_capture` reads `buffer_overflowed` once the writers have
+  joined and fails, flushing the prefix visibly rather than binding it
+  ([[design/capture|capture]]). One flag on the buffer, two readings of it.
 
 ## Detachment decays by neglect, not by age
 

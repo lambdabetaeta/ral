@@ -557,7 +557,10 @@ mod tests {
             .find(|c| c.replacement == "/export")
             .expect("/export completes itself");
         assert_eq!(export.display, "/export <path>");
-        assert_eq!(export.detail.as_deref(), Some("Write the user view to a file."));
+        assert_eq!(
+            export.detail.as_deref(),
+            Some("Write the user view to a file.")
+        );
     }
 
     // Twins rather than one genericised test: absoluteness is host-defined

@@ -703,7 +703,6 @@ pub(crate) fn run_framed<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::ByteBuffer;
     use std::sync::{Arc, Mutex};
 
     /// The minimal request, shaped like exarch's tool run: ⊤ ceiling, no
@@ -1332,8 +1331,8 @@ mod tests {
     fn inherit_leaves_session_streams_untouched() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        let marker: ByteBuffer = Arc::new(Mutex::new(Vec::new()));
-        shell.io.stdout = Sink::Buffer(marker.clone());
+        let (marker_sink, marker) = crate::io::new_buffer();
+        shell.io.stdout = marker_sink;
 
         let req = capture_req("echo hi");
         let _ = shell.run(RunRequest {
@@ -1348,7 +1347,7 @@ mod tests {
             matches!(&shell.io.stdout, Sink::Buffer(b) if Arc::ptr_eq(b, &marker)),
             "Inherit must restore the session's stdout sink after the run"
         );
-        let written = marker.lock().unwrap().clone();
+        let written = crate::io::peek_buffer(&marker);
         assert!(
             !written.is_empty(),
             "the run's stdout must land in the inherited sink"

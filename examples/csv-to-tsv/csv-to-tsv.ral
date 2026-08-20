@@ -6,7 +6,7 @@
 # leaves no half TSV — every time.  Here from-csv reads; the check runs first.
 
 if $[!{length $ARGS} != 1] {
-    echo 'usage: csv-to-tsv.ral FILE' 1>&2
+    warn 'usage: csv-to-tsv.ral FILE'
     exit 2
 }
 let [path] = $ARGS

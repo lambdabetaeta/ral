@@ -129,6 +129,10 @@ impl TypeErrorKind {
                     fmt_ty_ctx(ty, &ctx)
                 )
             }
+            Self::DeadPipeEdge { feed } => format!(
+                "the pipe writes into a stdin this `{}` replaces",
+                feed.spelling()
+            ),
         }
     }
 
@@ -171,6 +175,7 @@ impl TypeErrorKind {
             Self::ExecArgNotText { .. } => {
                 "an external's arguments are words, and this is not one".into()
             }
+            Self::DeadPipeEdge { .. } => "this stage reads here, not from the pipe".into(),
             Self::CaseOnNonVariant { .. }
             | Self::ControlOperatorAsValue { .. }
             | Self::HandlerNotFirstClass { .. }
@@ -363,6 +368,13 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         TypeErrorKind::CaseOnNonVariant { .. } => {
             Some("construct the value with a tag (`name payload) before scrutinising it".to_string())
         }
+        // Both remedies keep every command the program already names: one drops
+        // the wire, the other keeps the producer and gives it somewhere to run.
+        TypeErrorKind::DeadPipeEdge { .. } => Some(
+            "drop the pipe, or run the stage's producer as its own statement \
+             (`spawn` it, if the two were meant to run at once)?"
+                .to_string(),
+        ),
         _ => None,
     };
     if from_kind.is_some() {
@@ -425,6 +437,13 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
              bring it onto the value side"
                 .to_string(),
         ),
+        Reason::CaseArmValues => Some(
+            "every arm of a `case` returns a value and exactly one arm runs, \
+             so the `case` has a single type that every arm must produce — \
+             convert the odd arm to that type, or have every arm return a \
+             tagged value and `case` on it downstream"
+                .to_string(),
+        ),
         Reason::ForceOperand => Some(
             "the `!` operator runs a block — its operand must be a \
              block value (something built with `{ ... }`), not data"
@@ -443,6 +462,13 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
              bring it onto the value side"
                 .to_string(),
         ),
+        Reason::IfBranchValues => Some(
+            "both branches of an `if` return a value and exactly one of them \
+             runs, so the `if` has a single type that both branches must \
+             produce — convert one branch to the other's type, or have both \
+             return a tagged value and `case` on it downstream"
+                .to_string(),
+        ),
         Reason::ChainBranches => Some(
             "every arm of a `?` chain must agree on where their payload lives: \
              either every arm returns a value of the same type, or every arm \
@@ -451,12 +477,26 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
              bring it onto the value side"
                 .to_string(),
         ),
+        Reason::ChainBranchValues => Some(
+            "every arm of a `?` chain returns a value and the chain yields \
+             whichever arm succeeds, so the chain has a single type that every \
+             arm must produce — convert the odd arm to that type, or have every \
+             arm return a tagged value and `case` on it downstream"
+                .to_string(),
+        ),
         Reason::TryArms => Some(
             "both outcomes of a `try` must agree on where their payload lives: \
              either both return a value of the same type, or both are \
              captured from stdout — a mix of the two cannot join, so pipe \
              the stdout-routed outcome through a decoder (`| from-string`) to \
              bring it onto the value side"
+                .to_string(),
+        ),
+        Reason::TryArmValues => Some(
+            "both outcomes of a `try` return a value and exactly one of them \
+             happens, so the `try` has a single type that the body and the \
+             handler must both produce — convert one to the other's type, or \
+             have both return a tagged value and `case` on it downstream"
                 .to_string(),
         ),
         Reason::RoutePin => Some(
@@ -526,6 +566,8 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         | Reason::DynamicIndexTarget
         | Reason::AutoderefHead
         | Reason::LetRecSelf
-        | Reason::LinesStepSelf => None,
+        | Reason::LinesStepSelf
+        | Reason::CaptureOperand
+        | Reason::DecodeOperand => None,
     }
 }

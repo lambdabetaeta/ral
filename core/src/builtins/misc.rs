@@ -1,5 +1,5 @@
 //! Small builtins with no cluster of their own: `clear`, `reset`, `fail`,
-//! `exit`, `surface`, and `ask`.
+//! `exit`, `surface`, `warn`, and `ask`.
 
 use crate::types::{Break, Error, Escape, Mooring, Settled, Shell, Value, sig};
 
@@ -83,6 +83,23 @@ pub(super) fn builtin_surface(args: &[Value], mooring: &Mooring, _shell: &Shell)
     if let Some(event) = args.first() {
         mooring.surface(event);
     }
+    Ok(Value::Unit)
+}
+
+/// `surface`'s plain-text sibling: one diagnostic line to the stderr sink,
+/// which `2> f` rebinds and a capture keeps apart from the byte channel.
+///
+/// A builtin rather than fd plumbing — ral has no `1>&2` for a diagnostic to
+/// borrow the byte channel through, and a diagnostic never was a payload.
+pub(super) fn builtin_warn(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    let mut line = super::util::arg0_str(args);
+    line.push('\n');
+    shell
+        .write_stderr(line.as_bytes())
+        .map_err(|e| sig(format!("warn: {e}")))?;
+    // A writer sets its own exit status rather than leaving whatever the
+    // previous command left.
+    shell.mobile.control.last_status = 0;
     Ok(Value::Unit)
 }
 

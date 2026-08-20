@@ -12,7 +12,6 @@
 # The following variables are available inside a prompt block:
 #   $USER    — current username
 #   $CWD     — current working directory (~ substituted for home)
-#   $STATUS  — numeric exit status of the last command
 
 # ANSI escape sequences for prompt colouring.
 let red   = "\e[31m"
@@ -35,8 +34,7 @@ return [
         proj: ~/src/project,
     ],
 
-    # Prompt block.  Return a string; $USER, $CWD, and $STATUS are in scope.
-    # $STATUS is 0 on success, non-zero on failure — useful for a colour cue.
+    # Prompt block.  Return a string; $USER and $CWD are in scope.
     prompt: {
         let lbracket = '['
         let rbracket = ']'

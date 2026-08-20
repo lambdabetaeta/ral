@@ -3,7 +3,7 @@
 
 use super::builtins::{FieldSchema, plugin_entry_field_ty};
 use super::env::{InferCtx, TyEnv};
-use super::error::{CompDiff, PinFailure, Reason, TypeErrorKind};
+use super::error::{CompDiff, PinFailure, Reason, StdinFeed, TypeErrorKind};
 use super::generalize::{generalize, instantiate};
 use super::scheme::Scheme;
 use super::ty::{CompTy, GroundRoute, PayloadRoute, Row, Ty};
@@ -13,7 +13,7 @@ use crate::ir::{
 };
 use crate::source::Span;
 use crate::source::WithSpan;
-use crate::syntax::ast::{BinaryOp, BinaryOpKind};
+use crate::syntax::ast::{BinaryOp, BinaryOpKind, RedirectMode};
 use crate::syntax::tag::tag_row_label;
 use crate::types::RefusedArg;
 use std::sync::Arc;
@@ -64,6 +64,29 @@ fn looks_like_nested_quote_mistake(head: &Comp, args: &[&Val]) -> bool {
     let any_string_arg = args.iter().any(|a| matches!(a, Val::String(_)));
     let any_non_string_arg = args.iter().any(|a| !matches!(a, Val::String(_)));
     head_from_quoted && any_string_arg && any_non_string_arg
+}
+
+/// The redirect binding standard input at a stage's own root, if it has one.
+///
+/// The root is where a feed answers the stage's reads for its whole run: an
+/// [`Exec`](CompKind::Exec) fuses its redirects into the spawn, anything else
+/// wears them as a [`ScopeOp::Redirect`] frame, and the `Bind` arm walks past
+/// the binders elaboration hoists out of a redirect's own target
+/// (`b < $[locate f]`), whose innermost continuation is the stage as written.
+/// A read redirected deeper answers one command's reads and no others, which
+/// is that command's business alone, so this walk never sees it.
+fn stage_root_stdin_feed(stage: &Comp) -> Option<StdinFeed> {
+    let redirects = match &stage.item {
+        CompKind::Exec(exec) => &exec.redirects,
+        CompKind::Scope(ScopeOp::Redirect { redirects, .. }) => redirects,
+        CompKind::Bind { rest, .. } => return stage_root_stdin_feed(rest),
+        _ => return None,
+    };
+    redirects.iter().find_map(|r| match (r.fd, r.mode) {
+        (0, RedirectMode::Read) => Some(StdinFeed::File),
+        (0, RedirectMode::HereString) => Some(StdinFeed::HereString),
+        _ => None,
+    })
 }
 
 /// The elaborator's IR shape for `alias name { body }`.  `Ok(None)` means the
@@ -971,21 +994,31 @@ impl Inferencer<'_> {
 
     /// A `|` is a positional operating-system byte wire: the runtime
     /// connects stdout to stdin and discards every non-final return, so no
-    /// adjacency obligation links a stage to its neighbour.  The one static
-    /// premise a stage still carries is its own: it must be a
+    /// type of one stage constrains its neighbour's.  Two premises remain,
+    /// and each is about a single stage.  Its shape is its own: it must be a
     /// computation ready to run, not a `Fun` still waiting for its argument,
     /// forced under its own [`Reason::PipelineStageShape`] rather than
     /// [`Self::extract_return`]'s generic one, to earn the shape's own hint
-    /// text.  The pipeline's own route and value type are then one
-    /// projection of the *final* stage's forced shape — never `comp_route`
-    /// peering past an arrow into a lambda body.
+    /// text.  Its stdin belongs to the wire: a stage after a `|` may not bind
+    /// standard input at its own root, since the feed would answer every read
+    /// it makes and leave the producer working for nobody
+    /// ([`stage_root_stdin_feed`]).  The pipeline's own route and value type
+    /// are then one projection of the *final* stage's forced shape — never
+    /// `comp_route` peering past an arrow into a lambda body.
     fn infer_pipeline(&mut self, comp: &Comp, stages: &[Arc<Comp>]) -> CompTy {
         // The parser unwraps a single-stage pipeline to the bare stage and the
         // elaborator preserves that shape, so a `Pipeline` node always has two.
         debug_assert!(stages.len() >= 2, "Pipeline carries ≥2 stages");
 
         let mut final_shape = None;
-        for stage in stages {
+        for (position, stage) in stages.iter().enumerate() {
+            if position > 0
+                && let Some(feed) = stage_root_stdin_feed(stage)
+            {
+                self.with_span(stage.span, |this| {
+                    this.ctx.diagnose(TypeErrorKind::DeadPipeEdge { feed });
+                });
+            }
             let cty = self.infer_comp(stage);
             let (value, route) = self.with_span(stage.span, |this| {
                 this.force_return_shape(&cty, Reason::PipelineStageShape)
@@ -1462,19 +1495,32 @@ impl Inferencer<'_> {
             // is the composed `Decode` node's job, so a capture over an opaque
             // force still says what it has always said — `!{ !$fa }` lets
             // `fa`'s statements be seen.
+            //
+            // The route is deliberately left free: a capture installs a
+            // buffer and keeps whatever the body wrote, and where the body's
+            // own boundary looks is the body's business — the checker builds
+            // `Capture` over a `Value`-routed join arm too (the empty arm of
+            // `if c { echo one } else { }`). Only the `Unit` is WF-2's, so
+            // only the value unifies.
             CompKind::Capture(body) => {
                 let body_ty = self.infer_comp(body);
-                let _ = self.extract_return(&body_ty);
+                let (value, _route) = self.extract_return(&body_ty);
+                self.ctx.unify_ty(&value, &Ty::Unit, Reason::CaptureOperand);
                 CompTy::pure(Ty::Bytes)
             }
             // The reading half of the same boundary, written by `annotate`
             // directly over that `Capture`: bytes in, text out.  It is syntax
             // rather than a command exactly so that this type is the whole
             // story — nothing a session installs can make the value anything
-            // but a `String`.
+            // but a `String`.  The operand is always a `Capture`, whose own
+            // rule already fixes its shape to `Value`-routed `Bytes`, so both
+            // halves of that shape are demanded here rather than assumed.
             CompKind::Decode(body) => {
                 let body_ty = self.infer_comp(body);
-                let _ = self.extract_return(&body_ty);
+                let (value, route) = self.extract_return(&body_ty);
+                self.ctx.unify_ty(&value, &Ty::Bytes, Reason::DecodeOperand);
+                self.ctx
+                    .unify_route(&route, &PayloadRoute::Value, Reason::DecodeOperand);
                 CompTy::pure(Ty::String)
             }
         };

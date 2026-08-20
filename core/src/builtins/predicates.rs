@@ -1,9 +1,10 @@
 //! Map and value predicates: `keys`, `has`, `is-empty`, `equal`, `lt`, `gt`.
 //! The filesystem probes (`exists`, `is-file`, …) live in [`super::fs`].
 //!
-//! Each Bool also lands in `$STATUS` (true → 0), so a bare predicate reads like
-//! POSIX `test`.  Comparison belongs to [`super::util`], shared with the `$[…]`
-//! operators in [`crate::evaluator::expr`], so the two cannot drift.
+//! Each Bool also lands in the shell's `last_status` (true → 0), which is what
+//! a bare predicate at the end of a script exits with.  Comparison belongs to
+//! [`super::util`], shared with the `$[…]` operators in
+//! [`crate::evaluator::expr`], so the two cannot drift.
 
 use crate::types::{Break, Error, Settled, Shell, Value, as_map_ref};
 

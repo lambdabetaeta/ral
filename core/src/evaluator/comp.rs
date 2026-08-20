@@ -254,10 +254,16 @@ fn eval_index(target: &Val, keys: &[Spanned<Val>], shell: &mut Shell) -> Raw<Val
 /// exactly where a discarded statement's bytes are — the nearest visible
 /// stream, not the buffer one bracket out. A partial write (`echo half; exit
 /// 3`) stays visible however deep the brackets nest.
+///
+/// "Exactly and entirely" is kept by refusal, not by an unbounded buffer: a
+/// body that outruns the 16 MiB cap fails here rather than binding the prefix
+/// the buffer kept. A truncated capture would be bytes the program could not
+/// tell from the command's own. Being a failure, it takes the road above: the
+/// prefix is flushed where it can be seen, and only then does the error go up.
 fn eval_capture(body: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
-    let (result, bytes) =
+    let (result, bytes, overflowed) =
         super::capture::with_capture(shell, |shell| eval_comp(body, mooring, shell, Tail::No));
-    if result.is_err() && !bytes.is_empty() {
+    if (result.is_err() || overflowed) && !bytes.is_empty() {
         super::capture::with_ambient_stdout(shell, |shell| shell.write_stdout(&bytes))
             .and_then(std::convert::identity)
             .map_err(|e| shell.err(format!("capture flush: {e}"), 1))?;
@@ -271,7 +277,22 @@ fn eval_capture(body: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Raw<V
         matches!(&result, Err(_) | Ok(Value::Unit)),
         "capture's operand is result: Bytes, so WF-2 makes its value Unit"
     );
+    // The body's own failure first: it is the earlier event, and it explains
+    // more than the cap the flood happened to reach on the way.
     result?;
+    if overflowed {
+        return Err(shell
+            .err_hint(
+                format!(
+                    "capture exceeded {} MiB — the bytes that fit went out to the visible stream \
+                     rather than into the value, because a prefix is not what the command wrote",
+                    crate::io::SINK_BUFFER_CAP / (1024 * 1024)
+                ),
+                "did you mean to write this to a file? `cmd > out.txt` keeps every byte",
+                1,
+            )
+            .into());
+    }
     Ok(Value::Bytes(bytes))
 }
 

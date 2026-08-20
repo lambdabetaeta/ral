@@ -35,8 +35,30 @@ operands and never inspects command success.
 The cleanup forms differ only in what they do with the original failure:
 
 - `try` suppresses it;
-- `guard B C` runs cleanup `C` and lets the failure keep propagating;
+- `guard B C` runs cleanup `C` whether or not `B` failed, and lets `B`'s failure
+  keep propagating — unless `C` halts as well, because **any halt of the cleanup
+  pre-empts the body's outcome**, an error exactly as an escape. So: `B` returns
+  and `C` halts, the halt is the outcome; both halt, `C`'s signal wins, whichever
+  kinds the two are; `B` halts and `C` returns, `B`'s signal survives.
+  Log-and-continue is one keystroke away — `guard B { try C { |e| … } }` — and
+  the primitive stays strict
+  ([[decisions/260819_a-failing-cleanup-pre-empts|a-failing-cleanup-pre-empts]]);
 - the prelude's `attempt` discards both result and failure.
+
+The kernel model carries both forms as of 2026-08-19. In `dev/agda` a failure is
+a term — `halt`, spelled `fail` when it carries an error and `exit` when it
+carries an escape — and every stack frame answers one. `try` and `guard` are the
+two frames that answer with more than a pop, and the pair of rules `βtry-err` /
+`βtry-esc` is the whole of "catches recoverable runtime errors and nothing
+else": one pattern match on the signal, catching the error and letting the
+escape walk past. `guard` is not sugar for `try` there either — it reduces to
+its cleanup resumed in front of the body's outcome (`βguard-halt`, the detour
+through `؛`), so a cleanup that halts pre-empts that outcome, which is the rule
+above read on the other side: one rule for both signals, and the shell and the
+calculus now say it in the same words. `?` needs no form of its own there: it is
+`try` with a handler that drops the error it binds, and the model proves the
+equation that makes that a definition rather than a resemblance — `fail W ? N`
+is `N`.
 
 Failure propagates predictably through the rest of the grammar:
 

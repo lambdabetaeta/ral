@@ -944,8 +944,8 @@ fn wrap_binds(span: Option<Span>, binds: Vec<(IrPattern, Comp)>, inner: Comp) ->
 }
 
 /// Sugar bare `exit` / `quit` into `exit 0` / `quit 0`.  The builtin tolerates
-/// zero args, but ral's fixed-arity rule makes its *scheme* `Int → F Unit`;
-/// supplying the status here spares the typechecker a zero-arg special case.
+/// zero args, but ral's fixed-arity rule gives it one `Int` slot; supplying the
+/// status here spares the typechecker a zero-arg special case.
 fn desugar_zero_arg_exit(name: &str, args: Args) -> Args {
     if args.is_empty() && (name == "exit" || name == "quit") {
         vec![Spanned::synthetic(ValListElem::Single(Val::Int(0)))]

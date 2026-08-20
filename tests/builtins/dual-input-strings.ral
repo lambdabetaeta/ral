@@ -2,7 +2,7 @@
 
 let assert_eq = { |name expected actual|
     if $[not !{equal $expected $actual}] {
-        echo "FAIL:" $name "expected:" $expected "actual:" $actual 1>&2
+        warn "FAIL: $name expected: $expected actual: $actual"
         fail [status: 1]
     }
 }

@@ -26,7 +26,14 @@ every entry in the table, so the arity the checker enforces is the arity the
 body assumes with nothing to keep in agreement
 ([[invariants/fixed-arity|fixed-arity]]). Bodies are grouped by concern
 (`strings.rs`, `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs`,
-`concurrency.rs` for `spawn` / `watch`, `modules.rs` for `use`, …).
+`concurrency.rs` for `spawn` / `watch`, `modules.rs` for `use`, `misc.rs` for
+the ones with no cluster — `fail`, `exit`, `surface`, `warn`, `ask` — …).
+
+**The two halves are the two argument conventions, and the choice is visible in
+the surface.** `echo` is a base frame because a diagnostic-or-payload line takes
+an argv; `warn` is a table entry because it takes one `String`. So `$warn` is a
+value and `$echo` is not, and `warn` curries where `echo` spreads
+([[decisions/260819_diagnostics-are-a-builtin|diagnostics-are-a-builtin]]).
 
 **The manifest is a boot manifest; it is not a resolution layer.** It is
 authored as two, so installing a set is two installs rather than one sorting

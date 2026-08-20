@@ -16,11 +16,11 @@ case $outcome [
     `finished: { |_| echo "tests passed" },
     `expired:  { |_|
         cancel $job
-        echo "tests exceeded the $(secs)s deadline" 1>&2
+        warn "tests exceeded the $(secs)s deadline"
         exit 1
     },
     `failed: { |st|
-        echo "tests failed (exit $st)" 1>&2
+        warn "tests failed (exit $st)"
         exit 1
     },
 ]

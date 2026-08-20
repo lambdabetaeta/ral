@@ -520,6 +520,7 @@ const REACHABLE: &[Reachable] = &[
     r("lex_dollar_paren_no_ident", "echo $(123)", "identifier"),
     r("lex_dollar_paren_unclosed_inline", "echo $(name 42", "')'"),
     r("lex_redirect_amp_no_fd", "cmd >& foo", "file descriptor"),
+    r("lex_stdout_onto_stderr", "cmd 1>&2", "warn"),
     // ─── Lexer: escape errors ────────────────────────────────────────
     r("lex_x_too_short", "return \"\\x4\"", "two hex digits"),
     r("lex_x_non_hex", "return \"\\xZZ\"", "two hex digits"),

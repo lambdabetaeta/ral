@@ -552,6 +552,24 @@ fn try_handler_final_stdout_can_be_recovery_value() {
     assert_eq!(o.stdout.trim(), "x=caught", "full stdout: {:?}", o.stdout);
 }
 
+// ── Diagnostics stand apart from the byte channel ───────────────────────────
+
+#[test]
+fn warn_writes_stderr_and_stays_out_of_the_capture() {
+    // `warn` is the whole diagnostic surface, and its route is Value: the line
+    // reaches standard error while the capture binds the byte channel alone.
+    // The retired `1>&2` could not do this — it worked by making the two
+    // streams one, so the message went wherever the payload went.
+    let o = run_pipe("let payload = !{ warn 'note'; echo carried }\necho \"[$payload]\"");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "[carried]", "full stdout: {:?}", o.stdout);
+    assert!(
+        o.stderr.contains("note"),
+        "warn must reach standard error: {:?}",
+        o.stderr
+    );
+}
+
 // ── Pipeline failure reporting ──────────────────────────────────────────────
 
 #[test]

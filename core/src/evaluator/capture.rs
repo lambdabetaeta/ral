@@ -7,7 +7,7 @@
 //! None of them touches `shell.io.ambient`.  A write's destination is settled
 //! where the writer stands, so no byte is ever moved after the fact and nesting
 //! has no rule to get wrong.
-use crate::io::{Sink, new_buffer, take_buffer, tee_into, tee_with_buffer};
+use crate::io::{Sink, buffer_overflowed, new_buffer, take_buffer, tee_into, tee_with_buffer};
 use crate::types::Shell;
 
 /// Restores `shell.io.stdout` on `Drop`, panic included.
@@ -34,12 +34,18 @@ impl Drop for StdoutScope<'_> {
     }
 }
 
-/// Swap stdout for an in-memory buffer, run `f`, restore, return `(result, bytes)`.
+/// Swap stdout for an in-memory buffer, run `f`, restore, return
+/// `(result, bytes, overflowed)`.
 ///
 /// What drains here is the tail's bytes alone: a sequence's non-final parts ran
 /// under [`with_ambient_stdout`] and never wrote to this buffer in the first
 /// place.  `try` deliberately captures nothing; `audit` uses the tee below.
-pub fn with_capture<R, F>(shell: &mut Shell, f: F) -> (R, Vec<u8>)
+///
+/// `overflowed` says the buffer's cap truncated those bytes.  It is the only
+/// report there is: writers reach the buffer from pump threads whose join
+/// discards their value, so nothing on the write path can raise it, and a
+/// caller that means to turn the bytes into a value must consult it here.
+pub fn with_capture<R, F>(shell: &mut Shell, f: F) -> (R, Vec<u8>, bool)
 where
     F: FnOnce(&mut Shell) -> R,
 {
@@ -47,7 +53,7 @@ where
     let scope = StdoutScope::enter(shell, sink);
     let result = f(scope.shell);
     drop(scope);
-    (result, take_buffer(&buf))
+    (result, take_buffer(&buf), buffer_overflowed(&buf))
 }
 
 /// Run `f` with the payload sink replaced by the visible one, for a computation

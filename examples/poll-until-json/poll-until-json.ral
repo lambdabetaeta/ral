@@ -10,7 +10,7 @@ let probe = { |left|
     if !{equal !{str $doc[$field]} $target} {
         echo "$field reached $target"
     } elsif $[$left <= 0] {
-        echo "gave up waiting for $field=$target" 1>&2
+        warn "gave up waiting for $field=$target"
         exit 1
     } else {
         sleep 2

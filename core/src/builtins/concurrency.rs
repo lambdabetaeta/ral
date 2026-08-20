@@ -843,14 +843,20 @@ mod tests {
     }
 
     /// A handle whose worker dropped its `Sender` unsent, modelling a panic.
-    /// The buffers are pre-seeded so a settled outcome can be checked for them.
+    /// The buffers are pre-seeded so a settled outcome can be checked for them
+    /// — through their sinks, as a real worker fills them.
     fn handle_with_disconnected_worker(stdout: &[u8], stderr: &[u8]) -> HandleInner {
+        use std::io::Write;
         let (tx, rx) = mpsc::channel::<Settled<Value>>();
         drop(tx);
-        let (_sink, stdout_buf) = new_buffer();
-        let (_sink, stderr_buf) = new_buffer();
-        stdout_buf.lock().unwrap().extend_from_slice(stdout);
-        stderr_buf.lock().unwrap().extend_from_slice(stderr);
+        let (mut out_sink, stdout_buf) = new_buffer();
+        let (mut err_sink, stderr_buf) = new_buffer();
+        out_sink
+            .write_all(stdout)
+            .expect("a buffer sink cannot fail");
+        err_sink
+            .write_all(stderr)
+            .expect("a buffer sink cannot fail");
         HandleInner {
             result: Arc::new(Mutex::new(Some(rx))),
             cached: Arc::new(Mutex::new(None)),

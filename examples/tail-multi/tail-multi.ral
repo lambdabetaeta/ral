@@ -5,7 +5,7 @@
 # line-frames each stream, so every line emerges whole and prefixed.
 
 if !{is-empty $ARGS} {
-    echo 'usage: tail-multi.ral FILE...' 1>&2
+    warn 'usage: tail-multi.ral FILE...'
     exit 2
 }
 

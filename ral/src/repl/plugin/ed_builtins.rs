@@ -271,7 +271,9 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
         }
     }
     let loaned = mooring.lend_terminal();
-    let (result, bytes) = ral_core::evaluator::with_capture(shell, |shell| {
+    // A TUI plugin's own screen output, not a value the program binds: the
+    // truncation marker is the whole report a 16 MiB draw deserves.
+    let (result, bytes, _overflowed) = ral_core::evaluator::with_capture(shell, |shell| {
         ral_core::builtins::apply(&args[0], &[], &loaned, shell)
     });
     match result {

@@ -1109,7 +1109,7 @@ handler, a base handler, a catch-all handler, or an external command:
 
 ```ral
 within [handlers: [git: { |args|
-    echo 'running git' 1>&2
+    warn 'running git'
     git ...$args
 }]] {
     git status
@@ -1380,7 +1380,7 @@ let answer = !{ echo visible; echo captured }
 
 Captures nest. Earlier output goes to the nearest enclosing visible stream. If a captured computation fails, bytes produced before the failure are flushed visibly rather than silently lost.
 
-An in-memory capture keeps at most 16 MiB and marks truncated output. Redirect output to a file when it may be larger.
+An in-memory capture keeps at most 16 MiB. A capture that reaches the cap fails rather than bind a truncated value — the bytes captured *are* the value, so a prefix would be the wrong one. The failure is ordinary: the buffered bytes are flushed visibly by the rule above, and `try` catches the error. Redirect output to a file when it may be larger.
 
 ### 7.3. Explicit codecs
 
@@ -1439,13 +1439,16 @@ Redirects attach input or output to one command or compound command:
 | `>> path` | Append output. |
 | `2> path` | Stream standard error into a truncated file. |
 | `2>&1` | Send standard error to standard output’s current destination. |
-| `1>&2` | Send standard output to standard error’s current destination. |
 | `< path` | Read standard input from a file. |
 | `<< value` | Read standard input from a string value. |
 
 The default descriptor is 0 for input redirects and 1 for output redirects. Redirects are applied from left to right, so descriptor duplication uses the destination established so far. Redirect targets are evaluated before their files are opened. Relative paths use the scoped logical working directory.
 
-A redirect on a stage overrides the route the pipeline would otherwise use. In `cmd > file | next`, `cmd` writes to `file` and `next` sees end of input. If more than one redirect supplies standard input, the last one wins.
+Descriptor duplication runs in that one direction only. `1>&2`, and its short spelling `>&2`, are rejected: their only honest use is the shell idiom for writing a diagnostic, and a diagnostic is what `warn` is for. The message names `warn`, and names `2>&1` too, since a program holding the exchange backwards means that one.
+
+A redirect on a stage overrides the route the pipeline would otherwise use. In `cmd > file | next`, `cmd` writes to `file` and `next` sees end of input. Within one stage, if more than one redirect supplies standard input, the last one wins.
+
+Across a `|` the same collision is refused rather than resolved. A stage after a pipe may not bind standard input at its own root: `a | b < f` and `a | b << value` are type errors, because the feed answers every read `b` makes for the stage's whole run and leaves `a` writing for nobody. Drop the pipe, run the producer as its own statement, or `spawn` it if the two were meant to run at once. A read redirected deeper inside the stage — within a block, or on one command among several — supplies that command alone and stays legal.
 
 For a regular file, `>` writes a temporary file beside the destination, flushes it, then renames it over the destination. If the command fails, ral discards the temporary file and leaves the old destination unchanged. It preserves an existing file’s mode and follows a symbolic link to update its target rather than replacing the link.
 
@@ -1521,8 +1524,9 @@ return
 ```
 
 `return` is not a process exit and does not turn a false Boolean into failure.
-A returned `Bool` does update `$STATUS` in the shell convention: `true` records
-0 and `false` records 1. The computation itself succeeded in both cases.
+A returned `Bool` does record a status in the shell convention: `true` records
+0 and `false` records 1. No program can read that status — it is what the
+process exits with — and the computation itself succeeded in both cases.
 
 ### 8.2. Conditional choice
 
@@ -1563,8 +1567,8 @@ The scrutinee must be a variant. `case` runs the arm whose tag matches it,
 binding the variant's payload to that arm's pattern; a nullary variant binds
 `unit`. The arm has a fresh lexical scope for that binding, but it is a branch
 and not a function applied to the payload: it runs in the surrounding shell
-context, so `$STATUS` enters the arm as evaluating the scrutinee left it, and
-the arm's own changes remain in place after the `case`, as an `if` body's do.
+context, so the arm's own changes — the recorded status among them — remain in
+place after the `case`, as an `if` body's do.
 
 An arm's body is an ordinary computation, and either spelling reaches it. A
 block with one binder writes the branch out. Any other atom names the
@@ -1682,14 +1686,16 @@ guard {
 }
 ```
 
-The cleanup runs after the body whether the body succeeds or fails. Under
-normal completion, `guard` returns the body's value. If the body fails, its
-failure remains the result after cleanup.
+The cleanup runs after the body whether the body succeeds or fails. When the
+cleanup completes, the body's own outcome stands: `guard` returns the body's
+value, or its failure remains the result after cleanup.
 
-An ordinary cleanup failure is reported as `guard: cleanup failed: ...` but
-does not replace the body's outcome. A cleanup control escape, such as `exit`
-or a stopped job, does take priority and propagates; discarding a stopped-job
-escape would lose the process group needed to resume or reap it.
+A cleanup that does not complete pre-empts that outcome, an ordinary failure
+exactly as a control escape such as `exit` or a stopped job. If both the body
+and the cleanup halt, the cleanup's signal is the result. A cleanup whose own
+failure is not to fail the computation says so: `guard { … } { attempt { … } }`
+suppresses it, and `guard { … } { try { … } { |err| … } }` reports it and
+carries on.
 
 `guard` takes its payload and value type from the body alone; the cleanup
 contributes neither. Output from cleanup is real output and is not silently
@@ -1909,7 +1915,7 @@ Redirects apply to handler dispatch just as they do to other command calls. Byte
 
 ### 9.7. State flow and containment
 
-The body of `within` is a block. It runs with a fresh lexical frame and discards its mobile program state when it closes. Bindings, aliases, module registrations, handler changes, cwd changes, and similar mutations made inside do not escape. The final command status does escape and becomes the caller’s `$STATUS`.
+The body of `within` is a block. It runs with a fresh lexical frame and discards its mobile program state when it closes. Bindings, aliases, module registrations, handler changes, cwd changes, and similar mutations made inside do not escape. The final command status does escape and becomes the caller’s recorded status.
 
 Boundary rules are deliberately specific:
 
@@ -1971,12 +1977,16 @@ The following names describe the live shell:
 |---|---|
 | `$ENV` | Environment variables as a map of `String` to `String`. |
 | `$CWD` | The logical working directory, abbreviated with `~` when it lies under the current home directory. |
-| `$STATUS` | The most recently recorded command status as an `Int`. |
 | `$USER` | `USER`, or `USERNAME` where appropriate, from the effective environment. |
 | `$NPROC` | Available processor parallelism as an `Int`, never less than 1. |
 | `$ARGS` | The current program’s argument strings. |
 
 These values are computed when read. They are not mutable shell variables.
+
+The recorded command status is not among them: there is no status register a
+program can read. A failure is an `Err` that carries its own status, and `try`
+binds that record, so the status is in hand exactly where a program is deciding
+what to do about it. Elsewhere it is only what the process exits with.
 
 `$ENV` combines the host process environment with any active ral overrides. An inner override wins:
 
@@ -3038,7 +3048,7 @@ observation.
 
 `audit` handles an ordinary runtime error as data. Its returned report carries
 the failure status and message, and evaluating the `audit` expression itself
-succeeds with that record. It also sets `$STATUS` to the recorded status.
+succeeds with that record. It also records that status as the shell's.
 Control escapes are different: `exit` and a stopped computation propagate out
 instead of being converted into a returned audit report.
 
@@ -3356,8 +3366,8 @@ JSON value per line.
 ### 14.6. Failure, session control, and concurrency
 
 The core session family includes `fail`, `exit` and `quit`, `cd`, `alias` and
-`unalias`, `source` and `use`, `ask`, `echo`, `surface`, `clear`, `reset`,
-`help`, and `explain`. All of them are builtins except `echo`, which is a base
+`unalias`, `source` and `use`, `ask`, `echo`, `warn`, `surface`, `clear`,
+`reset`, `help`, and `explain`. All of them are builtins except `echo`, which is a base
 handler: it takes an argument list, writes each argument's text conversion
 separated by single spaces, and ends with one newline.
 
@@ -3374,6 +3384,12 @@ which lets `fail $err` re-raise the record supplied by `try`. Passing a bare
 integer, string, bytes value, a record without an integer `status`, or status 0
 is an error. `exit` and `quit` leave the current program rather than producing
 a recoverable failure.
+
+`warn message` takes one `String` and writes it, followed by one newline, to
+standard error. It returns `Unit` and puts nothing on the byte channel, so a
+caller binding the computation's payload never sees it. This is the whole of
+ral's diagnostic surface: there is no redirect that sends standard output to
+standard error.
 
 `surface value` sends a first-order structured event to a host that installed a
 surface sink; without one, it safely produces no visible event. `ask` reads from
@@ -4052,7 +4068,9 @@ redirect      ::= fd? ">" word-value
                 | fd? "<<" word-value
 ```
 
-For `<<`, an explicit descriptor, if present, must be 0. `[]` is the empty
+For `<<`, an explicit descriptor, if present, must be 0. For `>&`, the source
+descriptor must not be 1 when the target is 2: `1>&2` and its short spelling
+`>&2` are rejected in favour of `warn` (§7.4). `[]` is the empty
 list and `[:]` the empty map. Otherwise the first
 non-spread entry determines whether a bracketed collection is a list or a map.
 A literal or pattern may use bare keys or tag keys, but may not mix the two
@@ -4121,7 +4139,21 @@ M ::= return v
     | M1 ; ... ; Mn
     | letrec {xi = vi}
     | scope op
+    | capture M
+    | decode M
+
+op ::= try v1 v2 | guard v1 v2 | within v1 v2 | grant v1 v2 | audit v
+     | redirect M redirects
 ```
+
+Every scope op but the last takes its body as a thunk, because a scope installs
+an effect before the body runs and a value is what can be held unrun. `redirect`
+takes the computation itself: its body is an application or a nested scope,
+neither of which can fuse its own redirects the way `exec` does.
+
+`capture` and `decode` are the two forms no program can name: the checker
+writes them and nothing else does (§17.5). They are core terms all the same,
+because they survive elaboration and the evaluator matches on them.
 
 Command calls elaborate either to `exec`, which enters command dispatch, or to
 application when the head resolves to a bound value. A trailing redirect on an
@@ -4242,12 +4274,13 @@ m     ~ μ       binds m to μ
 `value` and `bytes` do not unify.
 
 A `|` is an operating-system byte wire fixed by stage position. It relates no
-two stages' types. The single static premise it imposes falls on each stage
-alone: a stage is a computation that runs, so its type is `F[μ] A`.
+two stages' types. The two static premises it imposes fall on each stage alone:
+a stage is a computation that runs, so its type is `F[μ] A`; and a stage after
+a pipe binds no standard input at its own root.
 
 ```text
-Γ ⊢c M : F[μ] A       Γ ⊢c N : F[ν] B
--------------------------------------- Pipe
+Γ ⊢c M : F[μ] A    Γ ⊢c N : F[ν] B    N binds no stdin at its root
+------------------------------------------------------------------- Pipe
 Γ ⊢c M | N : F[ν] B
 ```
 
@@ -4255,8 +4288,10 @@ An `n`-ary pipeline forces every stage to that shape and takes its route and
 return type from the final stage. A stage whose type is `A -> C` is still
 waiting for an argument and is rejected: there is no computation there to
 start, and the diagnostic says to apply it to its argument rather than pipe
-into it. This is the whole of pipeline typing; it constrains one stage at a
-time, never a pair.
+into it. A stage whose root carries `< f` or `<< value` is rejected as well:
+the feed answers that stage's reads for its whole run, so the producer before
+it writes for nobody (§7.4). This is the whole of pipeline typing; each premise
+reads one stage, never a pair, and neither reads the other stage's type.
 
 Operationally, `M | N`:
 
@@ -4314,6 +4349,12 @@ the join is:
   that one leaves it alone. A diverging arm determines nothing and waits for
   another arm to decide the route.
 
+The diverging forms are `fail` and `exit`/`quit`. Neither returns, so each takes
+whatever route and return type its context asks of it: in `if c { exit 1 } else
+{ return 'hello' }` the conditional is `F[value] String`, decided by the arm that
+returns. Divergence is a typing fact only; `exit` remains a control escape that
+`?` and `try` do not catch (§8.8).
+
 The `value`/`Unit` case is the one subsumption in the system, `F[value] Unit ⊑
 F[bytes] Unit`, and it is local to a join: an `if` with a silent empty arm
 beside a byte-writing one is a byte-routed computation. The join is decided by
@@ -4344,7 +4385,7 @@ of the two operations that turn a byte payload into a returned value. Both are
 syntax the checker writes, never a command a program can name:
 
 ```text
-Γ ⊢c M : F[bytes] Unit
+Γ ⊢c M : F[μ] Unit
 ------------------------------------ Capture
 Γ ⊢c capture M : F[value] Bytes
 
@@ -4352,6 +4393,17 @@ syntax the checker writes, never a command a program can name:
 ------------------------------------ Decode
 Γ ⊢c decode M : F[value] String
 ```
+
+`Capture` asks nothing of its operand's route, and the `Unit` is what carries
+the restriction: a capture installs a buffer and keeps whatever the body wrote,
+so where that body's own boundary looks is the body's business, and the `Unit`
+is what leaves the capture nothing to discard.
+
+The width is not slack, and §17.4's subsumption does not supply it. That
+subsumption is local to a join, while capture insertion pushes the wrap down to
+the payload leaf — so for `if c { echo one } else { }` the capture lands on the
+silent arm, which is `F[value] Unit`, and not on the byte-routed join above it.
+A `bytes`-only premise would reject the term the elaborator actually builds.
 
 A right-hand side whose route is still open at the binding is pinned `value`:
 nothing has made it byte-routed, so there is nothing to capture. A right-hand
@@ -4516,8 +4568,9 @@ selects the arm carrying its tag, binds the payload — `unit` for a nullary tag
 — to that arm's pattern in a fresh lexical scope, and runs that arm's body
 there. The body is a branch and not an applied function: it runs in the
 `case`'s own tail position and in the ambient shell context, so a tail call in
-an arm escapes as it would from an `if` body, `$STATUS` enters the arm as the
-scrutinee left it, and the arm's own effects on the shell outlive the `case`.
+an arm escapes as it would from an `if` body, the recorded status enters the
+arm as the scrutinee left it, and the arm's own effects on the shell outlive
+the `case`.
 
 For `M ? N`, a value from `M` wins; an ordinary error from `M` evaluates `N`;
 an escape from `M` propagates. A longer chain repeats this rule and reports the
@@ -4528,9 +4581,8 @@ converted to `E` and passed to the handler. An escape bypasses the handler.
 Standard output and standard error remain live; `try` does not capture them.
 
 For `guard body cleanup`, cleanup runs after every body value or ordinary body
-error. A cleanup value leaves the body outcome intact. An ordinary cleanup
-error is diagnosed and discarded. A cleanup escape takes priority and
-propagates.
+error. A cleanup value leaves the body outcome intact. A cleanup error and a
+cleanup escape alike take priority over that outcome and propagate.
 
 `audit body` creates the structural audit root and evaluates `body` with that
 trail active. Beneath the root, command observations are recorded only for

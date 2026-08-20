@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 5afa1c81
 verified_at_date: 2026-08-12
-anchors: [Inferencer, Unifier, Pairs, unify_row, unify_route, generalize, instantiate, annotate, SessionSchemes, PayloadRoute, extract_return, force_return_shape, pin_arm_to_head, InferCtx, join_arm_results, solve_at_boundary, solve_and_finalize, ArmResults]
+anchors: [Inferencer, Unifier, Pairs, unify_row, unify_route, generalize, instantiate, annotate, SessionSchemes, PayloadRoute, extract_return, force_return_shape, stage_root_stdin_feed, pin_arm_to_head, InferCtx, join_arm_results, solve_at_boundary, solve_and_finalize, ArmResults]
 ---
 
 # Type inference: the algorithm
@@ -56,7 +56,11 @@ how every value boundary reads a computation's two facts at once, and
 for an argument, and the diagnostic says to apply it rather than pipe into it.
 The pipeline then takes its route and value type from one projection of the
 final stage — never from peering past an arrow — and records the stage types for
-the structural REPL along the way.
+the structural REPL along the way. The rule's one other premise reads no type at
+all: `stage_root_stdin_feed` looks at a non-first stage's root redirects, and a
+`< f` or `<< w` binding fd 0 there is `DeadPipeEdge` (T0070) — the feed answers
+the stage's reads for its whole run, so the wire's producer writes for nobody
+([[design/pipelines|pipelines]]).
 
 **WF-2 is structural: the byte side is one computation.** `ρ = Bytes` implies
 a `Unit` return type, and the checker cannot assume it: `PayloadRoute` and the
@@ -99,6 +103,11 @@ and `infer_try` for `try` — under the one subsumption instance
 A byte-routed arm alongside a `Value` arm at a non-`Unit` type is a type error:
 the two disagree about where their payload lives. The fix is an explicit decoder
 tail, `echo hi | from-string`, not an inserted coercion.
+
+Two `Value` arms disagreeing on the payload's *type* is a different error, and
+the diagnostic says so. The value side carries its own `Reason` — every arm is
+already value-routed there, nothing about where the payload lives is in dispute,
+and a decoder could not move an arm that is already on the value side.
 
 **Conclude, store, solve-what-you-own.** `join_arm_results` applies whatever
 conclusion is already determined and defers the rest as a stored `ArmResults` —

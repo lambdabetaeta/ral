@@ -1122,7 +1122,8 @@ impl Printer for Viewport {
         // One bound, one place: a block the window can never show again takes
         // its dial memory with it, so no third eviction path can drop one
         // table and keep the other.
-        self.reveal.retain(|id, _| low.is_some_and(|l| id.seq() >= l));
+        self.reveal
+            .retain(|id, _| low.is_some_and(|l| id.seq() >= l));
         let rebuilt = floor < rows.len() || cache.len() < held;
 
         // The most recent `ral` script an answer's echo signal reads against
@@ -2056,7 +2057,9 @@ mod tests {
         let mut vp = viewport();
         vp.sync(&memo);
         assert!(vp.dial_block(0, 1), "a tool call dials open");
-        let dialed = vp.blocks[0].id.expect("a synced block is named by the fold");
+        let dialed = vp.blocks[0]
+            .id
+            .expect("a synced block is named by the fold");
         assert!(vp.reveal.contains_key(&dialed), "the dial is remembered");
 
         for i in 0..(VIEWPORT_MAX_BLOCKS + 50) {

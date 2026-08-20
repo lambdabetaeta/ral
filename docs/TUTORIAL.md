@@ -51,6 +51,11 @@ Redirects look familiar:
 file, never a half-written file. `>~` is the streaming form for live logs and
 FIFOs.
 
+There is no `1>&2`. To tell the human something without putting it on the byte
+channel a caller may be binding, say it:
+
+    warn "no matches under $dir"
+
 ## 2  Values and bindings
 
 `let` gives a value a name. Use `$name` to retrieve it:
@@ -485,7 +490,9 @@ Raise and re-raise with an error record:
     fail [status: 2, message: 'usage: deploy HOST']
     try { risky-work } { |error| fail $error }
 
-`guard` always runs cleanup, then lets the original failure continue:
+`guard` always runs cleanup, then lets the original failure continue — and a
+cleanup that fails in turn pre-empts it, since a cleanup that could not fail
+the run would have nowhere to report from:
 
     let temporary = temp-file
     guard {

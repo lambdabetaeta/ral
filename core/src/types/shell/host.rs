@@ -393,28 +393,19 @@ impl Shell {
         }
     }
 
-    /// Exit status of the last command (`$?`) — a host's own exit code, or a
-    /// prompt's status segment.
+    /// Status of the last command.  No program can read it — the register has
+    /// no surface spelling, since a failure is an `Err` carrying its own
+    /// status — so this is a host's own exit code and nothing else.
     pub fn last_status(&self) -> i32 {
         self.mobile.control.last_status
     }
 
-    /// Plant `$?` explicitly.  `$?` is the run's own result, so core writes it
-    /// directly and a host only reads: this exists for the integration tests,
-    /// which prime a sentinel to prove what evaluation resets and cannot reach
-    /// a `#[cfg(test)]` item to do it.
+    /// Plant the status explicitly.  It is the run's own result, so core writes
+    /// it directly and a host only reads: this exists for the integration
+    /// tests, which prime a sentinel to prove what evaluation resets and cannot
+    /// reach a `#[cfg(test)]` item to do it.
     pub fn set_last_status(&mut self, status: i32) {
         self.mobile.control.last_status = status;
-    }
-
-    /// Run `f` with `last_status` saved across it and restored after — the
-    /// prompt cycle's need, since rendering `RAL_PROMPT` is itself a run and
-    /// must not clobber the exit code a later prompt segment still reads.
-    pub fn with_preserved_status<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-        let saved = self.mobile.control.last_status;
-        let r = f(self);
-        self.mobile.control.last_status = saved;
-        r
     }
 
     /// The active non-tail call-depth ceiling.

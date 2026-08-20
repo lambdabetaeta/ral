@@ -73,6 +73,18 @@ The kernel's term formers are now `_to_`, `_؛_`, `_∣_`, `exec`, `capture`,
 `decode`, `rec`. `decode : F[Value] Bytes → F[Value] String` is the one partial
 former, and it is where the Agda model carries the failure clause.
 
+> **Superseded in its facts, not its decision (2026-08-19).** The decision above
+> stands: the coercion is syntax, and `Decode(Capture(M))` is what the checker
+> writes. What has moved is everything this page says about the *model* below.
+> `dev/agda` has since gained the failure layer and the encoder, so the former
+> list also carries `halt`, `try`, `guard` and `encode`; the decoder answers
+> `Str ⊎ Err` rather than `Maybe Str`, because a decoder says *why* a word does
+> not read; and failure is no longer stuckness. `decode-stuck` is deleted, the
+> kernel has handlers, and a decode that cannot read raises a signal that climbs
+> the stack until a `try` catches it or the run ends at the `abort` leaf. The
+> paragraph below records what was true on 2026-08-12 and is kept for the
+> record; `dev/agda/README.md` is the current account.
+
 The model carries it as of 2026-08-12. `dev/agda` gained a `String` base type
 with `str` as its introduction form, a `decode` former over a *computation* —
 the shape of `CompKind::Decode`, so the decomposition is a theorem rather than
