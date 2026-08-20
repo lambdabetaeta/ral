@@ -137,6 +137,23 @@ it:
   it has one;
 - divergence is neutral until another arm determines the route.
 
+The kernel does not have this instance, and the difference is elaboration
+rather than disagreement. Its two routes have two terminals — `return V` and
+`skip` — so a `Value Unit` arm joined against a `Bytes` one is *coerced* where
+ral widens it: an empty arm elaborates to `skip`, and an arm with a body `M`
+elaborates to `M ؛ skip` — run `M`, drop its value, be a byte-route
+computation that is finished. Both coercions are silent, so the two accounts
+separate no run, and the kernel's own state needs no widening at all
+(`dev/agda`, `Core.Syntax`). Whether ral's checker keeps its judgment or emits
+the boundary node is therefore a question about the checker's economy and not
+about meaning.
+
+The kernel names the byte side once, as `Cmd = F[Bytes] Unit` (`Core.TyCtx`),
+which is what `CompTy::bytes()` names on this side. The two spellings agree
+deliberately: the byte route is one computation type, and a run that reaches it
+has already sent its payload down the conduit, so it has nothing left to
+promise.
+
 The join is decided by the arms' *types*, never by how an arm was written, so an
 arm extracted into a `let` and forced back joins identically. `guard`, `within`,
 and `grant` pass their body's route and value type through and need no arm rule.

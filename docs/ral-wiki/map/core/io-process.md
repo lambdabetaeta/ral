@@ -67,11 +67,14 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   interrupt, a shutdown — while a signal from outside ral still reports its
   number. Same status either way. `Reader` is the second argument every status
   is read against — `Caller`, or `Stage { outlived }` for a byte-pipe producer
-  — and carries the one forgiveness: a stage that outlived its reader keeps no
-  failure, `outlived` being how Windows says what Unix says with SIGPIPE
+  — and carries the one forgiveness: a stage the broken pipe itself ended keeps
+  no failure. SIGPIPE is that cause on Unix; `outlived` is Windows'
+  approximation of it, there being no such signal to hear, and it forgives the
+  more of the two
   ([[decisions/260816_a-producer-that-outlived-its-reader|a-producer-that-outlived-its-reader]]).
-  `ChildHandle::exited_at` supplies the instants it is computed from —
-  `GetProcessTimes` on Windows, `None` on Unix, which needs no clock here.
+  `ChildHandle::exited_at` supplies the instants `outlived` is computed from —
+  `GetProcessTimes` on Windows, `None` on Unix, which hears the cause itself and
+  needs no clock.
 - `lease.rs` — `TerminalLease`, the unforgeable authority to hand the
   controlling terminal to a child via `tcsetpgrp`. No public constructor,
   neither `Clone` nor `Copy`: a host cannot forge or duplicate it. Minted at

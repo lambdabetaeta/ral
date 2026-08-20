@@ -90,10 +90,13 @@ Failure is a separate axis. A pipeline propagates a stage's failure, but the
 pipe never reacts to it: recovering from failure is `?`'s and `try`'s job, and
 branching is on `Bool`, never on command success
 ([[design/failure|failure]]). One stage is exempt, and the exemption is stated
-about the pair rather than about a status: a producer still running when the
-stage reading it ended was keeping nothing from anyone, so `yes | head`
-succeeds. Unix hears that as SIGPIPE, Windows as the order the two ended in
+about what ended it rather than about its status: a producer the broken pipe
+itself ended was keeping nothing from anyone, so `yes | head` succeeds. SIGPIPE
+is that cause, delivered; Windows, having no such signal to hear, approximates
+it by the order the two stages ended in and forgives the more of the two
 ([[decisions/260816_a-producer-that-outlived-its-reader|a-producer-that-outlived-its-reader]]).
+A producer that ignores the signal, takes a write error instead, and exits on
+its own account is reporting a failure of its own, and keeps it.
 
 The terminal-handoff and process-containment machinery is transport detail, not
 surface semantics. Unix uses process groups, a foreground guard, and helper

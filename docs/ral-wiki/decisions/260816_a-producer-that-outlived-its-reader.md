@@ -4,11 +4,11 @@ status: active
 
 # A producer that outlived its reader
 
-**The pipeline exemption is a fact about the two stages, not about the
-producer's status word: a non-final stage still running when the stage reading
-it ended keeps no failure, whatever it exited with. Unix says that with
-SIGPIPE; Windows, which has no such signal and no status that means it, says it
-with the order the two ended in.**
+**The pipeline exemption is about what ended the producer, not about its status
+word: a non-final stage that the broken pipe itself ended keeps no failure.
+Unix hears that cause as SIGPIPE. Windows, which has no such signal and no
+status that means it, approximates the cause by the order the two stages ended
+in, and so forgives the more of the two.**
 
 ## Decision
 
@@ -30,7 +30,7 @@ with the order the two ended in.**
   it passes `Stage { outlived: false }`: SIGPIPE still speaks for it on Unix,
   and on Windows it keeps its status.
 
-## Rejected shape
+## Rejected shapes
 
 `STATUS_PIPE_CLOSING` (NTSTATUS `0xC000_00B1`), which the tree carried as
 "Windows' SIGPIPE analogue". No process exits with it: an NTSTATUS reaches an
@@ -43,17 +43,43 @@ encoding. Any constant here is a guess at a foreign convention, and three
 conventions already disagree. The status cannot carry the fact, so the fact had
 to come from elsewhere.
 
+The exit-order test *on Unix* — giving the Unix path the clock the Windows path
+has, so that one rule served both platforms and SIGPIPE left the forgiveness
+question entirely. It is not soundly implementable. Unix records no exit
+instant: `waitpid` returns no timestamp, and `pidfd`/`kqueue` exit events
+deliver readiness without one, so the only witness is when a reaping thread
+wakes. Measured against the two cases that matter, that witness fails both
+ways. `yes | head -1`'s two deaths are one teardown cascade — the median gap
+between them is microseconds, 5µs and 17µs in two runs — and the reaping stamps
+invert their order on a double-digit percentage of runs, forgiving nothing and
+reporting 141. `sh -c 'exit 1' | head -1` is protected only by `head`'s EOF-to-exit
+latency, a median of tens of microseconds, and inverts the other way, turning a
+genuine failure into a silent success. Both gap distributions straddle zero, so
+no threshold and no tie-break policy separates them; a tighter implementation
+shrinks the error rate without removing it, and a probabilistic verdict is not
+a verdict. Windows' `GetProcessTimes` is exact where this is not, which is why
+the platforms read the same fact by different means rather than by one.
+
 ## Consequences
 
 - `yes | head` succeeds on Windows for any producer, not only for one of ral's
   own bundled tools that happens to special-case a broken pipe.
 - Unix behaviour is unchanged by construction: `exited_at` is `None` there, so
   `outlived` is never set and SIGPIPE remains the whole rule.
-- Windows forgiveness is very slightly broader than Unix's. A producer that
-  fails on its own account in the sub-millisecond window *after* its reader
-  ended is forgiven, where Unix — the producer never having written again —
-  would report it. The window is the pipe's EOF propagation, and the reading is
-  defensible in it: nobody was left to receive the output.
+- Windows forgiveness is broader than Unix's, and not by the sub-millisecond
+  margin first recorded here. A producer that fails on its own account at *any*
+  time after its reader ended is forgiven there, where Unix — the producer
+  never having written to the dead wire — reports it. Measured on Linux: a
+  producer that wrote nothing for a full second after its reader ended, then
+  exited 4, kept its 4. The reading remains defensible where the window is the
+  pipe's EOF propagation, and is an approximation beyond it.
+- A producer that ignores SIGPIPE keeps its status on Unix. It takes a write
+  error rather than a death, exits on its own account, and that is a failure of
+  its own to report: `python … | head -1` fails where `yes | head -1` succeeds,
+  and Rust's `std`, which also ignores the signal by default, puts its
+  producers in the same class. This is the price of reading a cause, and it is
+  paid deliberately — both alternatives are rejected above, one as a guess at a
+  foreign convention and the other as unsound.
 
 See [[design/pipelines|pipelines]], [[design/failure|failure]] and
 [[map/core/io-process|core IO/process]].

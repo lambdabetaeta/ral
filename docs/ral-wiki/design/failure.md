@@ -67,7 +67,7 @@ Failure propagates predictably through the rest of the grammar:
   `children` list in an enclosing `audit`, which reads the same as a sequence
   that had fewer parts;
 - a [[design/pipelines|pipeline]] fails whole on any stage failure, bar a stage
-  that outlived the stage reading it;
+  the broken pipe itself ended;
 - `for` / `map` stop iterating on a failing body;
 - `spawn` captures failure in the handle and surfaces it on `await`;
 - an unhandled failure at top level exits the process with that status.
