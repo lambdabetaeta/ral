@@ -146,11 +146,33 @@ mod tests {
         )
     }
 
+    /// `None` for exactly the one failure these tests treat as nothing to
+    /// test rather than something to report: `/run/ral/jail.seq` needs a
+    /// real guest boot's root, absent on an unprivileged CI runner or dev
+    /// container. Any other error is still a bug and still panics.
+    fn unwrap_or_skip<T>(result: io::Result<T>) -> Option<T> {
+        match result {
+            Ok(v) => Some(v),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "skipping: {e} — /run/ral/jail.seq needs a real guest boot's \
+                     root, absent on this host"
+                );
+                None
+            }
+            Err(e) => panic!("plan: {e}"),
+        }
+    }
+
     /// The property concurrent spawns from sibling shells depend on.
     #[test]
     fn plan_yields_pairwise_distinct_uids_and_cgroups() {
         let jail = jail();
-        let plans: Vec<_> = (0..8).map(|_| jail.plan().expect("plan")).collect();
+        let Some(plans) =
+            unwrap_or_skip((0..8).map(|_| jail.plan()).collect::<io::Result<Vec<_>>>())
+        else {
+            return;
+        };
         let mut uids: Vec<_> = plans.iter().map(|p| p.uid).collect();
         uids.sort_unstable();
         uids.dedup();
@@ -164,8 +186,9 @@ mod tests {
     #[test]
     fn plan_uids_strictly_increase_and_never_yield_root() {
         let jail = jail();
-        let a = jail.plan().expect("plan");
-        let b = jail.plan().expect("plan");
+        let Some((a, b)) = unwrap_or_skip(jail.plan().and_then(|a| Ok((a, jail.plan()?)))) else {
+            return;
+        };
         assert!(b.uid > a.uid);
         assert_ne!(a.uid, 0);
         assert_ne!(a.gid, 0);
@@ -174,7 +197,9 @@ mod tests {
 
     #[test]
     fn plan_roots_the_cgroup_and_carries_the_jails_limits() {
-        let plan = jail().plan().expect("plan");
+        let Some(plan) = unwrap_or_skip(jail().plan()) else {
+            return;
+        };
         assert!(plan.cgroup.starts_with("/sys/fs/cgroup/ral-exec"));
         assert_eq!(plan.limits, JailLimits::default());
     }
