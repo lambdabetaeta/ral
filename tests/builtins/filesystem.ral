@@ -20,10 +20,10 @@ echo $count
 # Expected: 3
 
 # file-info returns a record; mtime is an Int
-let info = file-info "$tmpdir/test.txt"
-if $[$info[mtime] > 0] { echo 'mtime ok' }
+let finfo = file-info "$tmpdir/test.txt"
+if $[$finfo[mtime] > 0] { echo 'mtime ok' }
 # Expected: mtime ok
-echo $info[type]
+echo $finfo[type]
 # Expected: file
 
 # Cleanup

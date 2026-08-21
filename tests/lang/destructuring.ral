@@ -5,8 +5,8 @@ let [first, second, third] = [a, b, c]
 echo $first $second $third
 
 # Rest params
-let [hd, ...tl] = [1, 2, 3, 4, 5]
-echo $hd
+let [head-el, ...tl] = [1, 2, 3, 4, 5]
+echo $head-el
 echo !{length $tl}
 
 # Map destructuring
