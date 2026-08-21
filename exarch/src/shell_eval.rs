@@ -812,8 +812,8 @@ target
         let edited = run_once(
             &mut shell,
             &format!(
-                "let n = line-count '{repeated_str}'\n\
-                 let rows = view-text '{repeated_str}' 1 $[$n + 1]\n\
+                "let nlines = line-count '{repeated_str}'\n\
+                 let rows = view-text '{repeated_str}' 1 $[$nlines + 1]\n\
                  edit-hash '{repeated_str}' [[hash: $rows[1][hash], line: 'FIRST']]"
             ),
         );
@@ -844,8 +844,8 @@ target
         let buried = run_once(
             &mut shell,
             &format!(
-                "let n = line-count '{run_str}'\n\
-                 let rows = view-text '{run_str}' 1 $[$n + 1]\n\
+                "let nlines = line-count '{run_str}'\n\
+                 let rows = view-text '{run_str}' 1 $[$nlines + 1]\n\
                  edit-hash '{run_str}' [[hash: $rows[5][hash], line: 'Z']]"
             ),
         );
@@ -885,8 +885,8 @@ keep-bottom
         let poisoned = run_once(
             &mut shell,
             &format!(
-                "let n = line-count '{path_str}'\n\
-                 let rows = view-text '{path_str}' 1 $[$n + 1]\n\
+                "let nlines = line-count '{path_str}'\n\
+                 let rows = view-text '{path_str}' 1 $[$nlines + 1]\n\
                  edit-hash '{path_str}' [[hash: $rows[1][hash], line: 'X'], [hash: 'hzzzzzz', line: 'Y']]"
             ),
         );
@@ -900,8 +900,8 @@ keep-bottom
         let ok = run_once(
             &mut shell,
             &format!(
-                "let n = line-count '{path_str}'\n\
-                 let rows = view-text '{path_str}' 1 $[$n + 1]\n\
+                "let nlines = line-count '{path_str}'\n\
+                 let rows = view-text '{path_str}' 1 $[$nlines + 1]\n\
                  edit-hash '{path_str}' [[hash: $rows[1][hash], line: 'REPLACED'], [hash: $rows[2][hash], line: ''], [hash: $rows[3][hash], line: 'X\nY']]"
             ),
         );
