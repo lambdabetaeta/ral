@@ -49,8 +49,9 @@ pub fn ral_bin() -> PathBuf {
 /// untouched, since nothing here has needed hardening against them yet.
 pub fn ral_command() -> Command {
     let mut cmd = Command::new(ral_bin());
-    #[cfg(unix)]
-    cmd.env("PATH", "/usr/bin:/bin");
+    if cfg!(unix) {
+        cmd.env("PATH", "/usr/bin:/bin");
+    }
     cmd
 }
 
