@@ -584,7 +584,7 @@ pub(crate) fn apply_redirects(
 /// redirected body succeeded.  Taking them is also what disarms the guard's
 /// own abandon: settling them is now the caller's to do.
 pub(crate) fn restore_redirects(mut guard: RedirectGuard) -> Vec<PendingWrite> {
-    guard.commits.drain(..).collect()
+    std::mem::take(&mut guard.commits)
 }
 
 /// Finish each staged write, stopping at the first failure.
