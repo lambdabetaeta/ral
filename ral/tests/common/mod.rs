@@ -35,6 +35,25 @@ pub fn ral_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ral"))
 }
 
+/// A fresh `Command` for the `ral` binary, its `PATH` pinned to the
+/// platform's own binaries rather than inherited from the runner.
+///
+/// Script fixtures bind short names (`let n = …`, `let x = …`) that ral's
+/// value/command disjointness rule checks against the live `PATH`; inheriting
+/// the ambient one makes every such test a hostage to whatever the host
+/// happens to have installed — a Node version manager's `n`, X11's `x`, and
+/// so on, different on every machine and every runner image. Pinning it here
+/// makes the whole suite deterministic. Unix only: every bare command these
+/// tests invoke (`grep`, `cat`, `head`, `sh`, …) lives in `/usr/bin` or
+/// `/bin` on both Linux and macOS; Windows' own `PATH` conventions are left
+/// untouched, since nothing here has needed hardening against them yet.
+pub fn ral_command() -> Command {
+    let mut cmd = Command::new(ral_bin());
+    #[cfg(unix)]
+    cmd.env("PATH", "/usr/bin:/bin");
+    cmd
+}
+
 static NEXT_TMP_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Build a unique temp file path of the form `<prefix>_<pid>_<id>.<ext>`.
@@ -52,7 +71,7 @@ pub fn run(prefix: &str, script: &str) -> Output {
     let tmp = fresh_tmp_path(prefix, "ral");
     std::fs::write(&tmp, script).unwrap();
 
-    let child = Command::new(ral_bin())
+    let child = ral_command()
         .arg(&tmp)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -77,7 +96,7 @@ pub fn run_with_env(prefix: &str, envs: &[(&str, &str)], script: &str) -> Output
     let tmp = fresh_tmp_path(prefix, "ral");
     std::fs::write(&tmp, script).unwrap();
 
-    let mut cmd = Command::new(ral_bin());
+    let mut cmd = ral_command();
     cmd.arg(&tmp)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -102,7 +121,7 @@ pub fn run_with_stdin(prefix: &str, script: &str, stdin_data: &[u8]) -> Output {
     let tmp = fresh_tmp_path(prefix, "ral");
     std::fs::write(&tmp, script).unwrap();
 
-    let mut child = Command::new(ral_bin())
+    let mut child = ral_command()
         .arg(&tmp)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -139,7 +158,7 @@ pub fn run_with_timeout(
     let tmp = fresh_tmp_path(prefix, "ral");
     std::fs::write(&tmp, script).unwrap();
 
-    let mut child = Command::new(ral_bin());
+    let mut child = ral_command();
     child
         .args(args)
         .arg(&tmp)

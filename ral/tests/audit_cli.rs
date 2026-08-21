@@ -8,12 +8,11 @@
 
 mod common;
 
-use common::{Output, ral_bin};
+use common::{Output, ral_command};
 use serde_json::Value;
-use std::process::Command;
 
 fn run_c(args: &[&str], code: &str) -> Output {
-    let out = Command::new(ral_bin())
+    let out = ral_command()
         .args(args)
         .arg("-c")
         .arg(code)

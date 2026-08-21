@@ -11,8 +11,8 @@ let _handler = { |ctx|
         let hits = _ed-history $buf 1
         if $[not !{is-empty $hits}] {
             let suggestion = $hits[0]
-            let n = !{length $buf}
-            _ed-ghost !{slice $suggestion $n $[!{length $suggestion} - $n]}
+            let buf_len = !{length $buf}
+            _ed-ghost !{slice $suggestion $buf_len $[!{length $suggestion} - $buf_len]}
         } else {
             _ed-ghost ""
         }

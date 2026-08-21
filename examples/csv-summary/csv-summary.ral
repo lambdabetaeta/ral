@@ -18,7 +18,7 @@ let buckets = fold { |acc r|
 echo "$group_col\tavg($value_col)\tn"
 for !{keys $buckets} { |k|
     let b = $buckets[$k]
-    let n = float $b[count]
-    let avg = $[$b[total] / $n]
+    let count = float $b[count]
+    let avg = $[$b[total] / $count]
     echo "$k\t$avg\t$b[count]"
 }

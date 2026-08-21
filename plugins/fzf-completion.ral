@@ -39,9 +39,9 @@ return { |options|
     # ── path / dir completion (upstream __fzf_generic_path_completion) ──
 
     let _expand = { |p|
-        let n = length $p
+        let plen = length $p
         if !{re-match '^~/' $p} {
-            let rest = slice $p 1 $[$n - 1]
+            let rest = slice $p 1 $[$plen - 1]
             return "$ENV[HOME]$rest"
         } elsif !{equal $p '~'} { return $ENV[HOME] } else { return $p }
     }

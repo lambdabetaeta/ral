@@ -229,9 +229,9 @@ fn pattern_binds_carry_no_scheme() {
         "a pattern-bound name must carry no scheme"
     );
     // A plain `let` binding does carry a scheme.
-    run(&mut sh, "let n = 3").unwrap();
+    run(&mut sh, "let cnt = 3").unwrap();
     assert!(
-        scheme_of(&sh, "n").is_some(),
+        scheme_of(&sh, "cnt").is_some(),
         "a plain let binding must carry a scheme"
     );
 }

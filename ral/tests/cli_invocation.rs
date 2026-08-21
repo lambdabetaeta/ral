@@ -7,14 +7,14 @@
 
 mod common;
 
-use common::{Output, fresh_tmp_path, ral_bin};
+use common::{Output, fresh_tmp_path, ral_command};
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Run `ral <path> [args…]` with an empty stdin.
 fn run_script(path: &Path, args: &[&str]) -> Output {
-    let out = Command::new(ral_bin())
+    let out = ral_command()
         .arg(path)
         .args(args)
         .stdin(Stdio::null())
@@ -29,7 +29,7 @@ fn run_script(path: &Path, args: &[&str]) -> Output {
 
 /// Run `ral [args…]` with `script` piped on stdin and no script positional.
 fn run_stdin(args: &[&str], script: &str) -> Output {
-    let mut child = Command::new(ral_bin())
+    let mut child = ral_command()
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -81,7 +81,7 @@ fn piped_stdin_runs_as_one_script() {
     // whole stdin as one script — not line by line at a prompt, and not
     // dropping its last line.
     for args in [&[][..], &["-s"][..]] {
-        let o = run_stdin(args, "let n = 2\necho $[$n + 1]\n");
+        let o = run_stdin(args, "let x = 2\necho $[$x + 1]\n");
         assert_eq!(o.status, 0, "args {args:?}, stderr: {}", o.stderr);
         assert_eq!(o.stdout, "3\n", "args {args:?}");
     }

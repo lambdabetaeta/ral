@@ -11,16 +11,16 @@
 
 mod common;
 
-use common::{Output, ral_bin};
+use common::{Output, ral_command};
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use tempfile::TempDir;
 
 /// Run `ral <args>` with `input` piped on stdin and `envs` overlaid on the
 /// inherited environment.  Closing stdin ends the REPL loop.
 fn repl(args: &[&str], envs: &[(&str, PathBuf)], input: &str) -> Output {
-    let mut cmd = Command::new(ral_bin());
+    let mut cmd = ral_command();
     cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -62,7 +62,7 @@ fn discover(dir: &Path) -> Vec<PathBuf> {
 /// Run a `.ral` script through the `ral` binary and return its captured output.
 fn run_capture(path: &Path) -> std::process::Output {
     // Run as a subprocess to avoid dup2 redirect interference between tests.
-    std::process::Command::new(common::ral_bin())
+    common::ral_command()
         .arg(path)
         .output()
         .unwrap_or_else(|e| panic!("failed to run {}: {e}", path.display()))

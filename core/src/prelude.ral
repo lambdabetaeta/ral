@@ -325,8 +325,8 @@ let option-or = { |default opt|
 
 ## Zip items with their indices: enumerate $xs → [[index: 0, item: x0], ...].
 let enumerate = { |items|
-    let n = !{length $items}
-    map { |i| return [index: $i, item: $items[$i]] } !{range 0 $n}
+    let count = !{length $items}
+    map { |i| return [index: $i, item: $items[$i]] } !{range 0 $count}
 }
 
 ## Flatten a list of lists one level (tail-recursive).

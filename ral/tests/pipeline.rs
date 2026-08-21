@@ -15,9 +15,9 @@
 
 mod common;
 
-use common::{Output, fresh_tmp_path, ral_bin};
+use common::{Output, fresh_tmp_path, ral_bin, ral_command};
 use std::os::unix::fs::PermissionsExt;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 fn run(script: &str) -> Output {
@@ -785,7 +785,7 @@ fn sigint_kills_external_child_in_pipeline() {
 
     // Put ral in its own process group so kill(-pid) reaches exactly
     // ral without affecting the cargo test runner's group.
-    let mut cmd = Command::new(ral_bin());
+    let mut cmd = ral_command();
     cmd.arg(&tmp)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -993,7 +993,7 @@ fn macos_sandbox_functional() -> bool {
     // Entering Seatbelt is what may be unavailable, and a failed entry aborts
     // the confined child — so run the smallest real grant through the public
     // surface and require both a clean exit and the body's own output.
-    Command::new(ral_bin())
+    ral_command()
         .args([
             "--norc",
             "-c",
@@ -1418,7 +1418,7 @@ fn run_pty_repl_until(
     let pty = pty_helper::open().ok()?;
     let slave_path = pty.slave_path.clone();
 
-    let mut cmd = Command::new(ral_bin());
+    let mut cmd = ral_command();
     cmd.arg("-i").arg("--norc");
     cmd.env("RAL_INTERACTIVE_MODE", "minimal");
     let slave_path_for_child = slave_path;
