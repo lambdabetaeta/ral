@@ -22,6 +22,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # bubblewrap is the Linux sandbox backend itself.  Absent, every test
+      # that spawns an envelope *skips* — which reads exactly like a pass,
+      # and is how a `deny` rendering that could not even launch went
+      # unnoticed. scripts/linux-box.Dockerfile carries the same install
+      # for the local podman gate; keep both in step.
+      - name: Install bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+
       # The ref names the channel and overrides rust-toolchain.toml; keep it in
       # step with what that file tracks.
       - name: Install toolchain
