@@ -12,6 +12,7 @@ use pulldown_cmark::{
 };
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::iter::once;
 use std::sync::LazyLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SynColor, FontStyle, Style as SynStyle, Theme};
@@ -686,11 +687,11 @@ fn render_table<'a, I: Iterator<Item = Event<'a>>>(
     };
     let mut widths: Vec<usize> = (0..n_cols)
         .map(|i| {
-            let mut w = nat_w(&head_cells, i);
-            for r in &body_rows {
-                w = w.max(nat_w(r, i));
-            }
-            w.max(1)
+            once(nat_w(&head_cells, i))
+                .chain(body_rows.iter().map(|r| nat_w(r, i)))
+                .max()
+                .unwrap_or(0)
+                .max(1)
         })
         .collect();
     // Chrome: "│ " + cell + (" │ " + cell) * (n-1) + " │"  =  3n + 1 columns.
@@ -711,7 +712,7 @@ fn render_table<'a, I: Iterator<Item = Event<'a>>>(
         }
     }
 
-    let mut out = Vec::with_capacity(2 + body_rows.len());
+    let mut out = Vec::new();
     if !head_cells.is_empty() {
         out.extend(render_table_row(&head_cells, &widths, aligns));
     }
@@ -728,19 +729,18 @@ fn render_table_row(
     widths: &[usize],
     aligns: &[Alignment],
 ) -> Vec<Line<'static>> {
-    let empty = Vec::new();
     let wrapped: Vec<Vec<Line<'static>>> = widths
         .iter()
         .enumerate()
-        .map(|(i, &w)| wrap_line(&Line::from(row.get(i).unwrap_or(&empty).clone()), w))
+        .map(|(i, &w)| wrap_line(&Line::from(row.get(i).cloned().unwrap_or_default()), w))
         .collect();
     let height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
 
     let bar = |s: &'static str| Span::styled(s, Style::default().fg(SLATE));
     let blank = Line::default();
-    let mut out = Vec::with_capacity(height);
+    let mut out = Vec::new();
     for li in 0..height {
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(widths.len() * 4 + 2);
+        let mut spans: Vec<Span<'static>> = Vec::new();
         spans.push(bar("│ "));
         for (i, &w) in widths.iter().enumerate() {
             if i > 0 {
@@ -769,15 +769,11 @@ fn render_table_row(
 }
 
 fn render_table_rule(widths: &[usize]) -> Line<'static> {
-    let mut s = String::from("├");
-    for (i, &w) in widths.iter().enumerate() {
-        if i > 0 {
-            s.push('┼');
-        }
-        s.push_str(&"─".repeat(w + 2));
-    }
-    s.push('┤');
-    Line::from(Span::styled(s, Style::default().fg(SLATE)))
+    let cells: Vec<String> = widths.iter().map(|w| "─".repeat(w + 2)).collect();
+    Line::from(Span::styled(
+        format!("├{}┤", cells.join("┼")),
+        Style::default().fg(SLATE),
+    ))
 }
 
 // ── syntax highlighting ──────────────────────────────────────────────────
@@ -961,6 +957,28 @@ mod tests {
         assert!(
             rows.iter().any(|r| r.contains("x²")),
             "the cell is typeset, not dropped: {rows:?}"
+        );
+    }
+
+    /// The frame is pinned: one space of padding either side of the widest
+    /// cell in each column, and a rule that spans exactly that padded width.
+    #[test]
+    fn table_frame_is_drawn_exactly() {
+        let rows = rows(&render_md(
+            "| a | bb |\n| --- | --- |\n| ccc | d |\n",
+            80,
+            MD_INDENT,
+            Fidelity::default(),
+        ));
+        let frame: Vec<&str> = rows
+            .iter()
+            .map(|r| r.trim_start())
+            .filter(|r| !r.is_empty())
+            .collect();
+        assert_eq!(
+            frame,
+            ["│ a   │ bb │", "├─────┼────┤", "│ ccc │ d  │"],
+            "the drawn frame: {rows:?}"
         );
     }
 
