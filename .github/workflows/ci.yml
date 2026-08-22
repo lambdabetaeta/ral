@@ -31,13 +31,23 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
 
       # Ubuntu 24.04's AppArmor policy denies unprivileged user-namespace
-      # creation by default (the 2023 CVE-2023-32629-class hardening) —
-      # exactly what bwrap needs to build its sandbox, so every launch
-      # otherwise dies with "setting up uid map: Permission denied" before
-      # it can even enforce a deny. The runner is ephemeral and torn down
-      # after this job, so relaxing the restriction here costs nothing.
-      - name: Allow unprivileged user namespaces for bwrap
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # creation by default — exactly what bwrap needs to build its sandbox
+      # without being setuid-root — so every launch otherwise dies with
+      # "setting up uid map: Permission denied" before it can even enforce
+      # a deny. Scope the exemption to bwrap alone (Ubuntu's own documented
+      # pattern for legitimate unprivileged-userns tools) rather than
+      # flipping the restriction off for the whole runner.
+      - name: Allow bwrap to create unprivileged user namespaces
+        run: |
+          cat <<'EOF' | sudo tee /etc/apparmor.d/bwrap-userns >/dev/null
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          profile bwrap /usr/bin/bwrap flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns
 
       # The ref names the channel and overrides rust-toolchain.toml; keep it in
       # step with what that file tracks.
