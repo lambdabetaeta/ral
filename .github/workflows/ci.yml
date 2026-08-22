@@ -34,18 +34,24 @@ jobs:
       # creation by default — exactly what bwrap needs to build its sandbox
       # without being setuid-root — so every launch otherwise dies with
       # "setting up uid map: Permission denied" before it can even enforce
-      # a deny. Ubuntu ships its own answer to this rather than leaving it to
-      # ad-hoc profiles: apparmor-profiles' bwrap-userns-restrict, the exact
-      # profile 25.04+ preinstalls with bubblewrap itself. Installing the
-      # real package tracks whatever that profile does release to release,
-      # rather than a hand-rolled guess drifting out of step with it.
-      - name: Allow bwrap to create unprivileged user namespaces
-        run: |
-          sudo apt-get install -y apparmor-profiles apparmor-utils
-          sudo install -m 0644 \
-            /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
-            /etc/apparmor.d/bwrap-userns-restrict
-          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+      # a deny.
+      #
+      # Tried first: loading a profile that grants bwrap `userns,` alone
+      # (both a hand-rolled `unconfined` stub and Ubuntu's own shipped
+      # `bwrap-userns-restrict`, structurally opposite profiles) — both got
+      # past the uid-map error and both then broke device access inside the
+      # sandbox (`/bin/sh: cannot open /dev/null: Permission denied`) on a
+      # test that passes clean with no AppArmor step at all. Two profiles
+      # with opposite rule sets producing the identical downstream failure
+      # means the profile's *content* isn't the variable — the restriction
+      # being enforced at all is. There is no principal on a GitHub-hosted
+      # runner for it to protect: the job already has passwordless root, the
+      # runner is single-tenant and destroyed after the job, and AppArmor
+      # plays no role in what this suite tests (bwrap's own mount/seccomp
+      # confinement does) — so disable it here rather than fight a profile
+      # that has no rule left to add.
+      - name: Allow unprivileged user namespaces (CI runner only)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       # The ref names the channel and overrides rust-toolchain.toml; keep it in
       # step with what that file tracks.
