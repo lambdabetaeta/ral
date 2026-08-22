@@ -17,7 +17,7 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SynColor, FontStyle, Style as SynStyle, Theme};
 use syntect::parsing::SyntaxSet;
 use tui_math::MathRenderer;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use super::fidelity::Fidelity;
 use super::highlight::highlight_ral;
@@ -138,31 +138,14 @@ fn trim_trailing_blanks(lines: &mut Vec<Line<'static>>) {
     }
 }
 
-/// Split an over-wide `word` between characters into `budget`-wide pieces.  All
-/// but the last go to `emit`; the last is returned for the caller to place inline.
-fn char_break(word: &str, budget: usize, mut emit: impl FnMut(String, usize)) -> (String, usize) {
-    let mut buf = String::new();
-    let mut bw = 0;
-    for ch in word.chars() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if bw + cw > budget && !buf.is_empty() {
-            emit(std::mem::take(&mut buf), bw);
-            bw = 0;
-        }
-        buf.push(ch);
-        bw += cw;
-    }
-    (buf, bw)
-}
-
 // ── composer ─────────────────────────────────────────────────────────────
 
 /// Walks pulldown-cmark events into lines, holding wrap width, style stack, lists
 /// and rails.  Fences and tables render apart, rejoining via [`Self::append_rendered`].
 struct Composer {
     out: Vec<Line<'static>>,
+    /// The open line, unwrapped: [`Self::flush_line`] folds it to the budget.
     cur: Vec<Span<'static>>,
-    cur_w: usize,
     body_w: usize,
     indent: usize,
     style: Style,
@@ -173,8 +156,6 @@ struct Composer {
     rail_depth: usize,
     /// Open inline links — pop on `TagEnd::Link` to maybe emit `(url)`.
     links: Vec<(LinkType, String)>,
-    /// True while the on-screen word is still open; cleared by whitespace and breaks.
-    mid_word: bool,
 }
 
 struct ListCtx {
@@ -191,7 +172,6 @@ impl Composer {
         Self {
             out: Vec::new(),
             cur: Vec::new(),
-            cur_w: 0,
             body_w,
             indent,
             style: Style::default(),
@@ -199,7 +179,6 @@ impl Composer {
             list_stack: Vec::new(),
             rail_depth: 0,
             links: Vec::new(),
-            mid_word: false,
         }
     }
 
@@ -224,7 +203,8 @@ impl Composer {
             Event::Code(t) => {
                 self.push_span(Span::styled(t.into_string(), Style::default().fg(LIME)));
             }
-            Event::SoftBreak => self.push_space(),
+            // A source line break is one space of prose, nothing more.
+            Event::SoftBreak => self.text(" "),
             Event::HardBreak => self.flush_line(),
             Event::Rule => self.rule(),
             Event::FootnoteReference(name) => self.push_span(Span::styled(
@@ -397,14 +377,16 @@ impl Composer {
 
     // ── inline ──
 
+    /// Inline prose, word runs and their separating gaps kept apart as spans so
+    /// the fold downstream can tell one from the other.
     fn text(&mut self, t: &str) {
         for part in t.split_inclusive(char::is_whitespace) {
             let trimmed = part.trim_end_matches(char::is_whitespace);
             if !trimmed.is_empty() {
-                self.push_word(trimmed);
+                self.push_span(Span::styled(trimmed.to_string(), self.style));
             }
             if part.len() != trimmed.len() {
-                self.push_space();
+                self.push_span(Span::styled(" ".to_string(), self.style));
             }
         }
     }
@@ -445,59 +427,23 @@ impl Composer {
         self.pop_style();
     }
 
-    /// Soft-wrap before appending `w` columns, unless mid-word: a styled span and
-    /// the punctuation fused to it (`` `code`. ``) must break as one, not at the seam.
-    fn wrap_before(&mut self, w: usize) {
-        if !self.mid_word && self.cur_w + w > self.budget() && !self.cur.is_empty() {
-            self.flush_line();
-        }
-    }
-
-    fn push_word(&mut self, word: &str) {
-        self.push_span(Span::styled(word.to_string(), self.style));
-    }
-
-    fn push_space(&mut self) {
-        self.mid_word = false;
-        if self.cur.is_empty() || self.cur_w >= self.budget() {
-            return;
-        }
-        self.cur.push(Span::styled(" ".to_string(), self.style));
-        self.cur_w += 1;
-    }
-
-    /// Append a span, breaking it between characters when it alone overruns the
-    /// budget: an over-wide word, a long inline literal or a trailing `(url)`
-    /// keeps its tail that way instead of running off the row and being clipped.
+    /// Append a span to the open line, measuring nothing: where the columns
+    /// fall is [`Self::flush_line`]'s business, and it alone sees the whole
+    /// paragraph.  Whitespace at the head of a line is dropped, so a soft break
+    /// across a block boundary never inks a leading column.
     fn push_span(&mut self, span: Span<'static>) {
-        let w = UnicodeWidthStr::width(span.content.as_ref());
-        let budget = self.budget();
-        self.wrap_before(w);
-        if w <= budget {
-            self.cur.push(span);
-            self.cur_w += w;
-            self.mid_word = true;
+        if self.cur.is_empty() && span.content.trim().is_empty() {
             return;
         }
-        let style = span.style;
-        let (last, lw) = char_break(span.content.as_ref(), budget, |chunk, cw| {
-            self.cur.push(Span::styled(chunk, style));
-            self.cur_w += cw;
-            self.flush_line();
-        });
-        if !last.is_empty() {
-            self.cur.push(Span::styled(last, style));
-            self.cur_w += lw;
-        }
-        self.mid_word = true;
+        self.cur.push(span);
     }
 
     fn rule(&mut self) {
         self.block_break();
-        let w = self.budget();
-        self.cur
-            .push(Span::styled("─".repeat(w), Style::default().fg(SLATE)));
-        self.cur_w = w;
+        self.push_span(Span::styled(
+            "─".repeat(self.budget()),
+            Style::default().fg(SLATE),
+        ));
         self.block_break();
     }
 
@@ -519,15 +465,22 @@ impl Composer {
         self.blank_separator();
     }
 
+    /// Fold the open line to the content budget and seat every row under the
+    /// margin — the first row wearing the list marker, the rest the pad that
+    /// holds their text under it.  [`wrap_line`] owns the fold: its word runs
+    /// cross span seams, so a styled span and the punctuation fused to it
+    /// (`` `code`. ``) break as one unit, and a span wider than the column
+    /// breaks between characters instead of running off the row.
     fn flush_line(&mut self) {
-        self.mid_word = false;
         if self.cur.is_empty() {
             return;
         }
-        let mut spans = self.left_margin();
-        spans.append(&mut self.cur);
-        self.out.push(Line::from(spans));
-        self.cur_w = 0;
+        let line = Line::from(std::mem::take(&mut self.cur));
+        for row in wrap_line(&line, self.budget()) {
+            let mut spans = self.left_margin();
+            spans.extend(row.spans);
+            self.out.push(Line::from(spans));
+        }
     }
 
     /// Build the next line's left margin: chrome indent, one `│ ` per rail, then
@@ -994,6 +947,29 @@ mod tests {
         }
         let kept: usize = rows.iter().map(|r| r.matches('a').count()).sum();
         assert_eq!(kept, 200, "every character survives: {rows:?}");
+    }
+
+    /// A styled span and the punctuation fused to it are one word: the fold
+    /// falls before the pair, never at the seam, so no row opens on a lone `,`.
+    #[test]
+    fn fused_punctuation_breaks_as_one_word() {
+        let rows = rows(&render_md(
+            "alpha beta `gamma`, delta",
+            MD_INDENT + 14,
+            MD_INDENT,
+            Fidelity::default(),
+        ));
+        assert!(rows.len() > 1, "expected a fold: {rows:?}");
+        assert!(
+            rows.iter().any(|r| r.contains("gamma,")),
+            "the span and its punctuation stayed whole: {rows:?}"
+        );
+        for r in &rows {
+            assert!(
+                !r.trim_start().starts_with(','),
+                "punctuation orphaned onto its own row: {rows:?}"
+            );
+        }
     }
 
     /// A sound block is left alone: no wash, no carried-over `DIM`.
