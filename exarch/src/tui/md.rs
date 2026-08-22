@@ -16,6 +16,7 @@ use std::sync::OnceLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SynColor, FontStyle, Style as SynStyle, Theme};
 use syntect::parsing::SyntaxSet;
+use tui_math::MathRenderer;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::fidelity::Fidelity;
@@ -29,6 +30,9 @@ pub(super) const MD_INDENT: u16 = 4;
 
 /// The foreground assumed for uncoloured spans — the drain needs a hue to take.
 const BASE_FG: Color = Color::Rgb(208, 213, 224);
+
+/// Left inset for a display formula, setting the notation off from the prose.
+const MATH_INSET: usize = 2;
 
 /// The flat wash behind an echoed paragraph, one step deeper per echo level.
 /// Static across rows, so it reads as a flagged passage, not a render glitch.
@@ -119,6 +123,7 @@ fn gfm() -> Options {
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
         | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_MATH
 }
 
 /// True when the input already signals a paragraph break, so one blank survives.
@@ -213,11 +218,9 @@ impl Composer {
         match ev {
             Event::Start(t) => self.start(t, p),
             Event::End(e) => self.end(e),
-            Event::Text(t)
-            | Event::Html(t)
-            | Event::InlineHtml(t)
-            | Event::InlineMath(t)
-            | Event::DisplayMath(t) => self.text(&t),
+            Event::Text(t) | Event::Html(t) | Event::InlineHtml(t) => self.text(&t),
+            Event::InlineMath(t) => self.inline_math(&t),
+            Event::DisplayMath(t) => self.display_math(&t),
             Event::Code(t) => {
                 self.push_span(Span::styled(t.into_string(), Style::default().fg(LIME)));
             }
@@ -406,6 +409,42 @@ impl Composer {
         }
     }
 
+    /// Inline `$…$`.  A one-row grid is notation and joins the sentence; a taller
+    /// one would have to break the paragraph to draw itself, so the source
+    /// stands in instead.
+    fn inline_math(&mut self, latex: &str) {
+        match math_rows(latex, self.budget()).as_deref() {
+            Some([row]) => self.push_span(Span::styled(row.clone(), self.style)),
+            _ => self.literal_math(latex),
+        }
+    }
+
+    /// Display `$$…$$`: a block of its own, inset so it reads as set apart from
+    /// the paragraph even where the grid comes out one row tall.
+    fn display_math(&mut self, latex: &str) {
+        self.block_break();
+        match math_rows(latex, self.budget().saturating_sub(MATH_INSET)) {
+            Some(rows) => {
+                let (style, inset) = (self.style, Span::raw(" ".repeat(MATH_INSET)));
+                self.append_rendered(
+                    rows.into_iter()
+                        .map(|row| Line::from(vec![inset.clone(), Span::styled(row, style)]))
+                        .collect(),
+                );
+            }
+            None => self.literal_math(latex),
+        }
+        self.block_break();
+    }
+
+    /// The LaTeX itself, inked as the literal it is — the rendering of a
+    /// formula this pass will not draw.
+    fn literal_math(&mut self, latex: &str) {
+        self.push_style(Style::default().fg(LIME));
+        self.text(latex);
+        self.pop_style();
+    }
+
     /// Soft-wrap before appending `w` columns, unless mid-word: a styled span and
     /// the punctuation fused to it (`` `code`. ``) must break as one, not at the seam.
     fn wrap_before(&mut self, w: usize) {
@@ -415,26 +454,7 @@ impl Composer {
     }
 
     fn push_word(&mut self, word: &str) {
-        let w = UnicodeWidthStr::width(word);
-        let budget = self.budget();
-        self.wrap_before(w);
-        if w <= budget {
-            self.cur.push(Span::styled(word.to_string(), self.style));
-            self.cur_w += w;
-            self.mid_word = true;
-            return;
-        }
-        let style = self.style;
-        let (last, lw) = char_break(word, budget, |chunk, cw| {
-            self.cur.push(Span::styled(chunk, style));
-            self.cur_w += cw;
-            self.flush_line();
-        });
-        if !last.is_empty() {
-            self.cur.push(Span::styled(last, style));
-            self.cur_w += lw;
-        }
-        self.mid_word = true;
+        self.push_span(Span::styled(word.to_string(), self.style));
     }
 
     fn push_space(&mut self) {
@@ -446,11 +466,29 @@ impl Composer {
         self.cur_w += 1;
     }
 
+    /// Append a span, breaking it between characters when it alone overruns the
+    /// budget: an over-wide word, a long inline literal or a trailing `(url)`
+    /// keeps its tail that way instead of running off the row and being clipped.
     fn push_span(&mut self, span: Span<'static>) {
         let w = UnicodeWidthStr::width(span.content.as_ref());
+        let budget = self.budget();
         self.wrap_before(w);
-        self.cur.push(span);
-        self.cur_w += w;
+        if w <= budget {
+            self.cur.push(span);
+            self.cur_w += w;
+            self.mid_word = true;
+            return;
+        }
+        let style = span.style;
+        let (last, lw) = char_break(span.content.as_ref(), budget, |chunk, cw| {
+            self.cur.push(Span::styled(chunk, style));
+            self.cur_w += cw;
+            self.flush_line();
+        });
+        if !last.is_empty() {
+            self.cur.push(Span::styled(last, style));
+            self.cur_w += lw;
+        }
         self.mid_word = true;
     }
 
@@ -629,6 +667,14 @@ fn render_table<'a, I: Iterator<Item = Event<'a>>>(
             Event::Code(t) => {
                 cur_cell.push(Span::styled(t.into_string(), Style::default().fg(LIME)));
             }
+            // A cell is one row, so a grid taller than one cannot live in it:
+            // the same flat-or-literal rule the prose walker applies inline.
+            Event::InlineMath(t) | Event::DisplayMath(t) => {
+                cur_cell.push(match math_rows(&t, budget).as_deref() {
+                    Some([row]) => Span::styled(row.clone(), style),
+                    _ => Span::styled(t.into_string(), Style::default().fg(LIME)),
+                });
+            }
             Event::SoftBreak | Event::HardBreak => cur_cell.push(Span::raw(" ".to_string())),
             _ => {}
         }
@@ -770,6 +816,21 @@ fn is_ral_block(lang: Option<&str>) -> bool {
     }
 }
 
+/// Lay `latex` out on a character grid, rows in reading order: fractions stacked
+/// over a vinculum, roots under one, big operators carrying their limits.
+/// `None` when the parser refuses the source or the grid overruns `budget` —
+/// the LaTeX the model wrote is the honest rendering then, and it wraps.
+fn math_rows(latex: &str, budget: usize) -> Option<Vec<String>> {
+    let grid = MathRenderer::new().render_to_box(latex).ok()?;
+    (1..=budget).contains(&grid.width).then(|| {
+        grid.to_string()
+            .lines()
+            .map(str::trim_end)
+            .map(String::from)
+            .collect()
+    })
+}
+
 fn highlight_block(body: &str, lang: Option<&str>) -> Vec<Line<'static>> {
     if is_ral_block(lang) {
         let mut out = highlight_ral(body);
@@ -839,6 +900,100 @@ mod tests {
             .flat_map(|l| l.spans.iter())
             .filter(|s| !s.content.trim().is_empty())
             .collect()
+    }
+
+    /// Rendered text of a block, one string per row.
+    fn rows(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    /// A display formula is typeset, not quoted: numerator over vinculum over
+    /// denominator, each row its own line.
+    #[test]
+    fn display_math_stacks() {
+        let rows = rows(&render_md(
+            "$$\\frac{x^2 + 1}{y}$$",
+            80,
+            MD_INDENT,
+            Fidelity::default(),
+        ));
+        let body: Vec<&String> = rows.iter().filter(|r| !r.trim().is_empty()).collect();
+        assert_eq!(body.len(), 3, "numerator, vinculum, denominator: {rows:?}");
+        assert!(body[0].contains("x²"), "superscript typeset: {body:?}");
+        assert!(body[1].contains('─'), "a vinculum divides them: {body:?}");
+    }
+
+    /// Inline notation joins the sentence it belongs to, on one row.
+    #[test]
+    fn inline_math_joins_the_prose() {
+        let rows = rows(&render_md(
+            "the bound $x^2 + y_1$ holds",
+            80,
+            MD_INDENT,
+            Fidelity::default(),
+        ));
+        assert_eq!(rows.len(), 1, "one row: {rows:?}");
+        assert!(
+            rows[0].contains("the bound x² + y₁ holds"),
+            "typeset in place: {rows:?}"
+        );
+    }
+
+    /// A formula that cannot be flattened keeps its source, inked as the literal
+    /// it is — a stacked fraction would have to break the paragraph to draw.
+    #[test]
+    fn unflattenable_inline_math_keeps_its_source() {
+        let lines = render_md(
+            "the ratio $\\frac{a}{b}$ holds",
+            80,
+            MD_INDENT,
+            Fidelity::default(),
+        );
+        let rows = rows(&lines);
+        assert_eq!(rows.len(), 1, "the paragraph is intact: {rows:?}");
+        assert!(
+            rows[0].contains("\\frac{a}{b}"),
+            "source stands in: {rows:?}"
+        );
+        let latex = ink(&lines)
+            .into_iter()
+            .find(|s| s.content.contains("frac"))
+            .expect("the source is inked");
+        assert_eq!(latex.style.fg, Some(LIME), "inked as a literal");
+    }
+
+    /// A table cell is one row, so a formula in one obeys the inline rule.
+    #[test]
+    fn table_cell_typesets_math() {
+        let rows = rows(&render_md(
+            "| bound |\n| --- |\n| $x^2$ |\n",
+            80,
+            MD_INDENT,
+            Fidelity::default(),
+        ));
+        assert!(
+            rows.iter().any(|r| r.contains("x²")),
+            "the cell is typeset, not dropped: {rows:?}"
+        );
+    }
+
+    /// A span wider than the budget breaks between characters.  Wrapping only
+    /// *before* it would run the tail off the row, where the terminal clips it.
+    #[test]
+    fn over_wide_span_keeps_its_tail() {
+        let src = format!("prose `{}` more", "a".repeat(200));
+        let rows = rows(&render_md(&src, 40, MD_INDENT, Fidelity::default()));
+        for r in &rows {
+            assert!(
+                UnicodeWidthStr::width(r.as_str()) <= 40,
+                "no row overruns the terminal: {r:?}"
+            );
+        }
+        let kept: usize = rows.iter().map(|r| r.matches('a').count()).sum();
+        assert_eq!(kept, 200, "every character survives: {rows:?}");
     }
 
     /// A sound block is left alone: no wash, no carried-over `DIM`.

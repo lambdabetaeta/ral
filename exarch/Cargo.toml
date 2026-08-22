@@ -38,6 +38,11 @@ shlex      = { workspace = true }
 ratatui      = { version = "0.30", features = ["unstable-rendered-line-info"] }
 crossterm    = { version = "0.29", features = ["bracketed-paste"] }
 pulldown-cmark = { version = "0.13", default-features = false }
+# LaTeX laid out on a character grid ([`tui::md`]'s `math_rows`).
+# `default-features = false` takes the renderer alone, leaving the crate's own
+# ratatui behind so this tree keeps one; the fork carries that feature split,
+# offered upstream to decisiongraph/tui-math. Drop the fork once it lands.
+tui-math = { git = "https://github.com/lambdabetaeta/tui-math", rev = "96ec5fe3cc0fd03298e75534dc69dcb6d57636fb", default-features = false }
 syntect      = { version = "5.3", default-features = false, features = ["default-fancy"] }
 two-face     = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 os_info    = { version = "3", default-features = false }

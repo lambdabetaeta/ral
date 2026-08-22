@@ -147,8 +147,15 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  indented blocks of `data/ral.md` teach) goes to `tui/highlight.rs`, the same
  lexer-backed colouring the tool-call panels use, so the language reads the
  same wherever it appears, and only a foreign language falls to syntect and
- the `two-face` set; `tui/group.rs`
- the coalescing projection that folds an observation run into one dialable
+ the `two-face` set. `$…$` and `$$…$$` are typeset rather than quoted: the
+ LaTeX goes to `tui-math`, which lays it out on a character grid — fractions
+ stacked over a vinculum, big operators carrying their limits — and one
+ distinction decides where the grid goes. A one-row grid is notation and joins
+ the sentence; a taller one owns its rows, so it renders only for display
+ math, inset from the prose. A grid too wide for the wrap budget, or a formula
+ the parser refuses, falls back to the LaTeX the model wrote, inked as the
+ literal it is. `tui/group.rs` is the
+ coalescing projection that folds an observation run into one dialable
  object; `tui/viewport.rs` the per-session block buffer, scroll position, and
  `user.log` writer; `tui/rail.rs` the data-encoding marginal rail. The
  transcript is laid out as a graphic on two orthogonal planes
