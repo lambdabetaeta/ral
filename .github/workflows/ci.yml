@@ -34,20 +34,18 @@ jobs:
       # creation by default — exactly what bwrap needs to build its sandbox
       # without being setuid-root — so every launch otherwise dies with
       # "setting up uid map: Permission denied" before it can even enforce
-      # a deny. Scope the exemption to bwrap alone (Ubuntu's own documented
-      # pattern for legitimate unprivileged-userns tools) rather than
-      # flipping the restriction off for the whole runner.
+      # a deny. Ubuntu ships its own answer to this rather than leaving it to
+      # ad-hoc profiles: apparmor-profiles' bwrap-userns-restrict, the exact
+      # profile 25.04+ preinstalls with bubblewrap itself. Installing the
+      # real package tracks whatever that profile does release to release,
+      # rather than a hand-rolled guess drifting out of step with it.
       - name: Allow bwrap to create unprivileged user namespaces
         run: |
-          cat <<'EOF' | sudo tee /etc/apparmor.d/bwrap-userns >/dev/null
-          abi <abi/4.0>,
-          include <tunables/global>
-
-          profile bwrap /usr/bin/bwrap flags=(unconfined) {
-            userns,
-          }
-          EOF
-          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns
+          sudo apt-get install -y apparmor-profiles apparmor-utils
+          sudo install -m 0644 \
+            /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+            /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
 
       # The ref names the channel and overrides rust-toolchain.toml; keep it in
       # step with what that file tracks.
