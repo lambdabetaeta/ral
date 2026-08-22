@@ -12,7 +12,7 @@ use pulldown_cmark::{
 };
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SynColor, FontStyle, Style as SynStyle, Theme};
 use syntect::parsing::SyntaxSet;
@@ -49,7 +49,8 @@ pub(super) fn render_md(text: &str, w: u16, indent: u16, fidelity: Fidelity) -> 
     while let Some(ev) = p.next() {
         comp.event(ev, &mut p);
     }
-    let mut lines = comp.finish(ends_with_blank_line(text));
+    // A paragraph break in the input keeps one blank at the tail.
+    let mut lines = comp.finish(text.ends_with("\n\n"));
     modulate(&mut lines, fidelity);
     lines
 }
@@ -85,14 +86,8 @@ fn modulate(lines: &mut [Line<'static>], f: Fidelity) {
 }
 
 /// Saturation drained per context level, toward luma-grey so legibility lives.
-fn drain(context: u8) -> f32 {
-    match context {
-        0 => 0.0,
-        1 => 0.45,
-        2 => 0.70,
-        _ => 0.90,
-    }
-}
+/// The deepest step stands for every level past it: distress saturates.
+const DRAIN: [f32; 4] = [0.0, 0.45, 0.70, 0.90];
 
 /// Drain a span's foreground and, when the block echoes, wash the field behind
 /// it.  Shared by [`modulate`] and [`apply_context`]: prose and intent degrade alike.
@@ -100,7 +95,7 @@ fn drain_span(span: &mut Span<'static>, context: u8, echo: u8) {
     if span.content.trim().is_empty() {
         return;
     }
-    let drain = drain(context);
+    let drain = DRAIN[usize::from(context).min(DRAIN.len() - 1)];
     if drain > 0.0 {
         let fg = span.style.fg.unwrap_or(BASE_FG);
         span.style.fg = Some(desaturate(fg, drain));
@@ -124,11 +119,6 @@ fn gfm() -> Options {
         | Options::ENABLE_TASKLISTS
         | Options::ENABLE_FOOTNOTES
         | Options::ENABLE_MATH
-}
-
-/// True when the input already signals a paragraph break, so one blank survives.
-fn ends_with_blank_line(s: &str) -> bool {
-    s.ends_with("\n\n") || s == "\n"
 }
 
 /// Drop trailing blanks, so prose and fenced code share one spacing baseline.
@@ -533,21 +523,23 @@ impl Composer {
     /// Build the next line's left margin: chrome indent, one `│ ` per rail, then
     /// pad spaces and the innermost list's pending marker, which this consumes.
     fn left_margin(&mut self) -> Vec<Span<'static>> {
-        let mut sp: Vec<Span<'static>> = Vec::with_capacity(self.rail_depth + 3);
+        let mut sp: Vec<Span<'static>> = Vec::new();
         if self.indent > 0 {
             sp.push(Span::raw(" ".repeat(self.indent)));
         }
         for _ in 0..self.rail_depth {
             sp.push(Span::styled("│ ", Style::default().fg(SLATE)));
         }
-        let (marker, marker_w) = match self.list_stack.last_mut() {
-            Some(c) => (c.pending.take(), c.marker_w),
-            None => (None, 0),
-        };
-        let used = if marker.is_some() { marker_w } else { 0 };
-        let pad_spaces = self.pad().saturating_sub(used);
-        if pad_spaces > 0 {
-            sp.push(Span::raw(" ".repeat(pad_spaces)));
+        let (marker, mw) = self
+            .list_stack
+            .last_mut()
+            .map_or((None, 0), |c| (c.pending.take(), c.marker_w));
+        // The marker occupies its own column width; only the rest is padding.
+        let pad = self
+            .pad()
+            .saturating_sub(if marker.is_some() { mw } else { 0 });
+        if pad > 0 {
+            sp.push(Span::raw(" ".repeat(pad)));
         }
         if let Some(m) = marker {
             sp.push(m);
@@ -629,11 +621,13 @@ fn render_table<'a, I: Iterator<Item = Event<'a>>>(
 
     for ev in p.by_ref() {
         match ev {
+            // Every tag inside a table is balanced — cells carry inline content
+            // only — so pushing on each `Start` and popping on each `End` keeps
+            // the stack in step without naming which tags bear a style.
             Event::Start(t) => {
+                stack.push(style);
                 if let Some(d) = style_delta(&t) {
-                    stack.push(style);
                     style = style.patch(d);
-                    continue;
                 }
                 match t {
                     Tag::TableHead => in_head = true,
@@ -642,27 +636,23 @@ fn render_table<'a, I: Iterator<Item = Event<'a>>>(
                     _ => {}
                 }
             }
-            Event::End(e) => match e {
-                TagEnd::Emphasis
-                | TagEnd::Strong
-                | TagEnd::Strikethrough
-                | TagEnd::Superscript
-                | TagEnd::Subscript
-                | TagEnd::Link
-                | TagEnd::Image => style = stack.pop().unwrap_or_default(),
-                TagEnd::TableHead => in_head = false,
-                TagEnd::TableRow => body_rows.push(std::mem::take(&mut cur_row)),
-                TagEnd::TableCell => {
-                    let cell = std::mem::take(&mut cur_cell);
-                    if in_head {
-                        head_cells.push(cell);
-                    } else {
-                        cur_row.push(cell);
+            Event::End(e) => {
+                style = stack.pop().unwrap_or_default();
+                match e {
+                    TagEnd::TableHead => in_head = false,
+                    TagEnd::TableRow => body_rows.push(std::mem::take(&mut cur_row)),
+                    TagEnd::TableCell => {
+                        let cell = std::mem::take(&mut cur_cell);
+                        if in_head {
+                            head_cells.push(cell);
+                        } else {
+                            cur_row.push(cell);
+                        }
                     }
+                    TagEnd::Table => break,
+                    _ => {}
                 }
-                TagEnd::Table => break,
-                _ => {}
-            },
+            }
             Event::Text(t) => cur_cell.push(Span::styled(t.into_string(), style)),
             Event::Code(t) => {
                 cur_cell.push(Span::styled(t.into_string(), Style::default().fg(LIME)));
@@ -792,28 +782,22 @@ fn render_table_rule(widths: &[usize]) -> Line<'static> {
 
 // ── syntax highlighting ──────────────────────────────────────────────────
 
-fn syntax_set() -> &'static SyntaxSet {
-    static S: OnceLock<SyntaxSet> = OnceLock::new();
-    S.get_or_init(two_face::syntax::extra_newlines)
-}
+/// Every syntax `two-face` ships, parsed once: the set is large and a fence is
+/// rare, so it is built on the first non-ral block and never again.
+static SYNTAX: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
 
-fn theme() -> &'static Theme {
-    static T: OnceLock<Theme> = OnceLock::new();
-    T.get_or_init(|| {
-        two_face::theme::extra()
-            .get(two_face::theme::EmbeddedThemeName::Nord)
-            .clone()
-    })
-}
+/// Nord, for its muted palette: a fence must not outshout the prose around it.
+static THEME: LazyLock<Theme> = LazyLock::new(|| {
+    two_face::theme::extra()
+        .get(two_face::theme::EmbeddedThemeName::Nord)
+        .clone()
+});
 
 /// Fence tags that mean ral, plus the untagged case: the agent's only tool is
 /// the shell, so a bare block in its prose is ral until it says otherwise, and
 /// `ral.md` teaches the language in indented blocks, which carry no tag at all.
 fn is_ral_block(lang: Option<&str>) -> bool {
-    match lang {
-        None => true,
-        Some(l) => matches!(l.to_ascii_lowercase().as_str(), "ral" | "ral-sh"),
-    }
+    lang.is_none_or(|l| matches!(l.to_ascii_lowercase().as_str(), "ral" | "ral-sh"))
 }
 
 /// Lay `latex` out on a character grid, rows in reading order: fractions stacked
@@ -837,14 +821,14 @@ fn highlight_block(body: &str, lang: Option<&str>) -> Vec<Line<'static>> {
         trim_trailing_blanks(&mut out);
         return out;
     }
-    let ss = syntax_set();
+    let ss = &*SYNTAX;
     let syntax = lang
         .and_then(|l| {
             ss.find_syntax_by_token(l)
                 .or_else(|| ss.find_syntax_by_name(l))
         })
         .unwrap_or_else(|| ss.find_syntax_plain_text());
-    let mut hl = HighlightLines::new(syntax, theme());
+    let mut hl = HighlightLines::new(syntax, &THEME);
     let mut out = Vec::new();
     for line in body.split_inclusive('\n') {
         let regions = hl.highlight_line(line, ss).unwrap_or_default();
