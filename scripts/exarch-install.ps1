@@ -3,7 +3,15 @@
 $ErrorActionPreference = "Stop"
 
 $Repo = "lambdabetaeta/ral"
-$Tag  = "latest"
+
+# github.com/$Repo/releases/latest redirects to .../releases/tag/<Tag> —
+# the newest *versioned* release, distinct from any release whose tag name
+# is literally "latest" (build-binaries.yml's workflow_dispatch channel).
+$latestResponse = Invoke-WebRequest -Uri "https://github.com/$Repo/releases/latest"
+$Tag = ($latestResponse.BaseResponse.ResponseUri.ToString() -split "/tag/")[1]
+if (-not $Tag) {
+    Write-Error "Could not resolve the latest release tag for $Repo."
+}
 
 # ── Platform detection ────────────────────────────────────────────────────────
 

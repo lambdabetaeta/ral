@@ -4,7 +4,15 @@
 set -e
 
 REPO="lambdabetaeta/ral"
-TAG="latest"
+
+# github.com/$REPO/releases/latest 302s to .../releases/tag/<TAG> — that's
+# the newest *versioned* release, distinct from any release whose tag name
+# is literally "latest" (build-binaries.yml's workflow_dispatch channel).
+TAG="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" | sed 's#.*/tag/##')"
+if [ -z "$TAG" ]; then
+    echo "Could not resolve the latest release tag for ${REPO}." >&2
+    exit 1
+fi
 
 # ── Platform detection ────────────────────────────────────────────────────────
 
