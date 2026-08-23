@@ -21,8 +21,8 @@ pub struct Observation {
     /// door.
     pub start: i64,
     pub end: i64,
-    /// `$USER` at the time of observing.
-    pub principal: String,
+    /// `$USER` at the time of observing; `None` where nothing named one.
+    pub principal: Option<String>,
     pub what: Observed,
 }
 
@@ -239,7 +239,7 @@ const CAPABILITY_KEYS: [&str; 2] = ["resource", "decision"];
 impl Observation {
     /// An instantaneous door: the observation is stamped now, and its window
     /// has no width.
-    pub fn instant(site: CallSite, principal: String, what: Observed) -> Self {
+    pub fn instant(site: CallSite, principal: Option<String>, what: Observed) -> Self {
         let now = epoch_us();
         Self {
             site,
@@ -256,7 +256,7 @@ impl Observation {
         site: CallSite,
         start: i64,
         end: i64,
-        principal: String,
+        principal: Option<String>,
         what: Observed,
     ) -> Self {
         Self {
@@ -269,10 +269,11 @@ impl Observation {
     }
 
     /// The one map shape, shared by the sink broadcast, `audit { }`'s
-    /// children, and `--audit`'s JSON.  `error` renders as a string, empty
-    /// when the command did not fail — a record field is always present, and
-    /// a runtime error message is never empty.  A write's byte fields are
-    /// omitted keys rather than nulls when absent.
+    /// children, and `--audit`'s JSON.  `error` and `principal` render as
+    /// strings, empty when the command did not fail and when nothing named a
+    /// principal — a record field is always present, and neither a runtime
+    /// error message nor a user name is ever legitimately empty.  A write's
+    /// byte fields are omitted keys rather than nulls when absent.
     pub fn to_value(&self) -> Value {
         #[allow(
             clippy::cast_possible_wrap,
@@ -285,7 +286,10 @@ impl Observation {
             ("col".into(), Value::Int(self.site.col as i64)),
             ("start".into(), Value::Int(self.start)),
             ("end".into(), Value::Int(self.end)),
-            ("principal".into(), Value::String(self.principal.clone())),
+            (
+                "principal".into(),
+                Value::String(self.principal.clone().unwrap_or_default()),
+            ),
         ];
         match &self.what {
             Observed::Command {
@@ -410,7 +414,7 @@ impl Observation {
             site,
             start: int_at(m, "start")?,
             end: int_at(m, "end")?,
-            principal: str_at(m, "principal")?,
+            principal: Some(str_at(m, "principal")?).filter(|p| !p.is_empty()),
             what,
         })
     }
@@ -548,7 +552,7 @@ mod tests {
     }
 
     fn round_trips(what: Observed) {
-        let obs = Observation::spanning(site(), 100, 250, "alex".into(), what);
+        let obs = Observation::spanning(site(), 100, 250, Some("alex".into()), what);
         let back = Observation::from_value(&obs.to_value());
         assert_eq!(back.as_ref(), Some(&obs));
     }
@@ -668,7 +672,7 @@ mod tests {
     fn to_wire_scrubs_a_handle_and_the_placeholder_round_trips() {
         let obs = Observation::instant(
             site(),
-            "alex".into(),
+            Some("alex".into()),
             Observed::Command {
                 argv: vec!["spawn".into()],
                 status: 0,
@@ -713,7 +717,7 @@ mod tests {
             site(),
             10,
             20,
-            "alex".into(),
+            Some("alex".into()),
             Observed::Command {
                 argv: vec!["spawn".into()],
                 status: 0,
@@ -765,7 +769,7 @@ mod tests {
     fn a_genuine_string_cannot_impersonate_the_placeholder() {
         let obs = Observation::instant(
             site(),
-            "alex".into(),
+            Some("alex".into()),
             Observed::Command {
                 argv: vec!["echo".into()],
                 status: 0,
@@ -787,7 +791,7 @@ mod tests {
     fn a_capability_decision_projects_as_itself() {
         let obs = Observation::instant(
             site(),
-            "alex".into(),
+            Some("alex".into()),
             Observed::Capability {
                 resource: "exec".into(),
                 decision: Decision::of_allowed(false),

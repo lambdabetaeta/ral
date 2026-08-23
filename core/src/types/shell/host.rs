@@ -425,8 +425,8 @@ impl Shell {
     }
 
     /// The acting principal: `$USER` from the dynamic env, with no host-env
-    /// fallback, so it stays empty until a front end seeds it.
-    pub fn principal(&self) -> String {
+    /// fallback, so it names nobody until a front end seeds it.
+    pub fn principal(&self) -> Option<String> {
         self.mobile.context.principal()
     }
 

@@ -1159,7 +1159,7 @@ keep-bottom
                         line: 1,
                         col: 1,
                     },
-                    "alex".into(),
+                    Some("alex".into()),
                     Observed::Read {
                         path: "a.rs".into()
                     },

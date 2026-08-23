@@ -53,10 +53,14 @@ impl Context {
     }
 
     /// The `$USER` stamped on observations.  Overrides only, with no
-    /// host-env fallback, so it stays empty until a front end has run
+    /// host-env fallback, so it names nobody until a front end has run
     /// [`Shell::seed_default_env_vars`](super::Shell::seed_default_env_vars).
-    pub fn principal(&self) -> String {
-        self.env_overrides.get("USER").cloned().unwrap_or_default()
+    /// An empty binding names nobody either.
+    pub fn principal(&self) -> Option<String> {
+        self.env_overrides
+            .get("USER")
+            .filter(|u| !u.is_empty())
+            .cloned()
     }
 
     /// Effective cwd: the `within [dir: …]` override, else the `cd`-mutated

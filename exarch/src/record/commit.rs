@@ -408,7 +408,7 @@ mod tests {
             site: site(),
             start: 0,
             end: 0,
-            principal: "alex".into(),
+            principal: Some("alex".into()),
             what,
         }
     }

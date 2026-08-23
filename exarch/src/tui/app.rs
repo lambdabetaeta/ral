@@ -666,7 +666,7 @@ mod tests {
         let read_at = |path: &str| {
             Observation::instant(
                 CallSite::default(),
-                String::new(),
+                None,
                 Observed::Read { path: path.into() },
             )
         };

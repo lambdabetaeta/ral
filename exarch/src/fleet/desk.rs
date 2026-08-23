@@ -225,9 +225,9 @@ pub(crate) struct HostServices {
     pub acts: ActFragment,
     /// Who the acts are committed on behalf of, read once at install: the
     /// desk holds no `Shell` to ask, and a host act's principal is the host's.
-    /// Empty where the host names nobody, the spelling `Context::principal`
-    /// already gives an unbound `$USER` in the same record.
-    pub principal: String,
+    /// `None` where the host names nobody, the same fact `Context::principal`
+    /// reports for an unbound `$USER` in the same record.
+    pub principal: Option<String>,
     /// The agent's own pin register, shared verbatim so `pin-read`/`pin-list`
     /// answer from the same mirror the nudge already reads. `None` on a seat
     /// with no mirror of its own — the wire test seat above all.
@@ -1719,7 +1719,7 @@ mod tests {
             disk_warn_bytes: None,
             egress: Egress::for_test(),
             acts: ActFragment::default(),
-            principal: ral_core::host::user().unwrap_or_default(),
+            principal: ral_core::host::user(),
             pins: None,
             wire_seat: false,
             hatchery: None,
@@ -2422,7 +2422,7 @@ mod tests {
 
         let read = ral_core::types::Observation::instant(
             ral_core::types::CallSite::default(),
-            String::new(),
+            None,
             ral_core::types::Observed::Read {
                 path: "a.rs".into(),
             },
@@ -4153,7 +4153,7 @@ mod wire_tests {
                 disk_warn_bytes: None,
                 egress: Egress::for_test(),
                 acts: ActFragment::default(),
-                principal: ral_core::host::user().unwrap_or_default(),
+                principal: ral_core::host::user(),
                 pins: None,
                 wire_seat: true,
                 hatchery: Some(hatchery),
@@ -4461,7 +4461,7 @@ mod wire_tests {
                 disk_warn_bytes: None,
                 egress: Egress::for_test(),
                 acts: ActFragment::default(),
-                principal: ral_core::host::user().unwrap_or_default(),
+                principal: ral_core::host::user(),
                 pins: None,
                 wire_seat: false,
                 hatchery: None,

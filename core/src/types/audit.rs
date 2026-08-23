@@ -241,7 +241,7 @@ mod tests {
     fn dummy(pattern: &str) -> Observation {
         Observation::instant(
             CallSite::default(),
-            String::new(),
+            None,
             Observed::Grep {
                 scope: String::new(),
                 pattern: pattern.into(),

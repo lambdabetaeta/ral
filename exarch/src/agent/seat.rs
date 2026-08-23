@@ -375,7 +375,7 @@ mod tests {
             disk_warn_bytes: None,
             egress: crate::egress::Egress::for_test(),
             acts: crate::fleet::desk::ActFragment::default(),
-            principal: ral_core::host::user().unwrap_or_default(),
+            principal: ral_core::host::user(),
             pins: None,
             wire_seat: true,
             hatchery: None,

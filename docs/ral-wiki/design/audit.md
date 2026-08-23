@@ -44,7 +44,8 @@ Each observation is self-describing about who and how it happened:
 
 - every observation carries the `principal` in force where it was recorded, so
   the trail records *who* as well as *what*, and a transported fragment still
-  names its actor;
+  names its actor — `None` in Rust, the empty string in the projection, where
+  no `$USER` is bound and there is nobody to name;
 - an observation carries only its own kind's fields — a command's `argv`, a
   capability check's `resource` / `decision` — never a handler frame or
   capability map, and never another observation's fields;

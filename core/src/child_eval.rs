@@ -554,7 +554,7 @@ mod tests {
             },
             0,
             0,
-            String::new(),
+            None,
             crate::types::Observed::Command {
                 argv: vec!["/bin/echo".into(), "hi".into()],
                 status: 0,
@@ -645,7 +645,7 @@ mod tests {
                 line: 1,
                 col: 1,
             },
-            String::new(),
+            None,
             crate::types::Observed::Capability {
                 resource: "net".into(),
                 decision: crate::types::Decision::Denied,
@@ -697,7 +697,7 @@ mod tests {
                 line: 1,
                 col: 1,
             },
-            String::new(),
+            None,
             crate::types::Observed::Command {
                 argv: vec!["spawn".into()],
                 status: 0,
@@ -736,7 +736,7 @@ mod tests {
                 line: 1,
                 col: 1,
             },
-            String::new(),
+            None,
             crate::types::Observed::Command {
                 argv: vec!["alias".into()],
                 status: 0,

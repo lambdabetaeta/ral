@@ -540,7 +540,7 @@ mod tests {
     /// the seam itself, rebuilt here without pulling the private conversion
     /// into this crate.
     fn observation_wire(what: Observed) -> ral_core::serial::FOValue {
-        let observation = Observation::instant(CallSite::default(), String::new(), what);
+        let observation = Observation::instant(CallSite::default(), None, what);
         ral_core::serial::FOValue::try_from(&observation.to_wire())
             .expect("a test observation always scrubs to a valid FOValue")
     }

@@ -152,7 +152,7 @@ mod tests {
     fn worker_birth(id: u64, cmd: &str) -> FOValue {
         let obs = Observation::instant(
             CallSite::default(),
-            "test".into(),
+            Some("test".into()),
             Observed::Worker {
                 id: WorkerId(id),
                 cmd: cmd.into(),
@@ -177,7 +177,7 @@ mod tests {
     fn committed_act(verb: &str, subject: Option<&str>) -> Observation {
         Observation::instant(
             CallSite::default(),
-            "test".into(),
+            Some("test".into()),
             Observed::Act {
                 verb: verb.into(),
                 subject: subject.map(str::to_string),

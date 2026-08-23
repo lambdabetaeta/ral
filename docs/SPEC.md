@@ -2984,7 +2984,7 @@ Every observation shares this common shape:
 | `col` | `Int` | one-based source column; zero for a run root |
 | `start` | `Int` | microseconds since the Unix epoch |
 | `end` | `Int` | microseconds since the Unix epoch |
-| `principal` | `String` | shell principal when the observation was recorded |
+| `principal` | `String` | shell principal when the observation was recorded; empty where nothing named one |
 
 `grep` is raised by host doors — exarch's `grep-files` — not by any door in
 core itself.
