@@ -30,3 +30,5 @@ http = "1"
 [dev-dependencies]
 # The loopback suite reads the audit ledger back, one JSON object per line.
 serde_json = { workspace = true }
+# Serializes the loopback suite; see its module doc.
+serial_test = "3"

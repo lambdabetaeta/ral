@@ -15,6 +15,9 @@
 //!
 //! Unix-only: the harness needs a `UnixStream` pair to stand in for the net
 //! wire.
+//!
+//! `#[serial_test::serial]` everywhere: the thread-count test reads
+//! process-wide state a concurrent sibling `Session` would corrupt.
 #![cfg(unix)]
 
 use std::io::{Read, Write};
@@ -293,6 +296,7 @@ fn join_within(
 /// `set_any_ip`. A SYN for anything else is not addressed to it at all, so
 /// it is dropped rather than reset: the connection goes nowhere.
 #[test]
+#[serial_test::serial]
 fn direct_traffic_to_an_arbitrary_address_never_reaches_a_worker() {
     let dialer = Arc::new(TestDialer::default());
     let (mut guest, session) = harness(dialer.clone());
@@ -310,6 +314,7 @@ fn direct_traffic_to_an_arbitrary_address_never_reaches_a_worker() {
 }
 
 #[test]
+#[serial_test::serial]
 fn a_port_other_than_3128_has_no_listener() {
     let (mut guest, session) = harness(Arc::new(TestDialer::default()));
     let handle = guest.tcp_connect(GATEWAY, 9999, 40001);
@@ -327,6 +332,7 @@ fn a_port_other_than_3128_has_no_listener() {
 }
 
 #[test]
+#[serial_test::serial]
 fn a_denied_connect_never_dials() {
     let dialer = Arc::new(TestDialer::default());
     let (mut guest, session) = harness(dialer.clone());
@@ -364,6 +370,7 @@ fn a_denied_connect_never_dials() {
 /// The authority-confusion string that bypassed the old intercepting
 /// proxy: `decode` must refuse it before policy or DNS is consulted.
 #[test]
+#[serial_test::serial]
 fn the_authority_confusion_regression_is_refused_before_any_dial() {
     let dialer = Arc::new(TestDialer::default());
     let (mut guest, session) = harness(dialer.clone());
@@ -394,6 +401,7 @@ fn the_authority_confusion_regression_is_refused_before_any_dial() {
 /// guest and the host's own network — and its refusal must reach the guest
 /// instead of a tunnel.
 #[test]
+#[serial_test::serial]
 fn an_allowed_host_that_resolves_to_a_link_local_address_never_dials() {
     let dialer = Arc::new(TestDialer {
         // A dial that did happen would succeed, and say so loudly.
@@ -435,6 +443,7 @@ fn an_allowed_host_that_resolves_to_a_link_local_address_never_dials() {
 /// bytes copy both ways; closing the guest's side then closes the whole
 /// tunnel.
 #[test]
+#[serial_test::serial]
 fn an_allowed_connect_tunnels_bytes_both_ways_and_either_eof_closes_both() {
     let fixture = spawn_echo_fixture();
     let dialer = Arc::new(TestDialer {
@@ -476,6 +485,7 @@ fn an_allowed_connect_tunnels_bytes_both_ways_and_either_eof_closes_both() {
 /// and this proxy is its only writer: a refusal in the department's own
 /// words, the tunnel that was allowed, and what that tunnel carried.
 #[test]
+#[serial_test::serial]
 fn the_ledger_records_the_refusal_the_tunnel_and_its_byte_counts() {
     let ledger = std::env::temp_dir().join(format!(
         "guest-net-ledger-test-{}.jsonl",
@@ -555,6 +565,7 @@ fn the_ledger_records_the_refusal_the_tunnel_and_its_byte_counts() {
 /// The fixed live-tunnel cap refuses the next connection at accept, before
 /// any worker exists, and frees a slot the moment one tunnel ends.
 #[test]
+#[serial_test::serial]
 fn capacity_rejects_the_next_connection_and_frees_after_one_tunnel_ends() {
     let fixture = spawn_echo_fixture();
     let dialer = Arc::new(TestDialer {
@@ -612,6 +623,7 @@ fn capacity_rejects_the_next_connection_and_frees_after_one_tunnel_ends() {
 }
 
 #[test]
+#[serial_test::serial]
 fn stop_during_an_incomplete_connect_ends_the_session_promptly() {
     let (mut guest, session) = harness(Arc::new(TestDialer::default()));
     let handle = guest.tcp_connect(GATEWAY, PORT, 40005);
@@ -631,6 +643,7 @@ fn stop_during_an_incomplete_connect_ends_the_session_promptly() {
 }
 
 #[test]
+#[serial_test::serial]
 fn stop_while_a_worker_is_dialling_ends_the_session_once_the_dial_returns() {
     let fixture = spawn_echo_fixture();
     let dialer = Arc::new(TestDialer {
@@ -657,6 +670,7 @@ fn stop_while_a_worker_is_dialling_ends_the_session_once_the_dial_returns() {
 }
 
 #[test]
+#[serial_test::serial]
 fn stop_during_an_idle_established_tunnel_ends_the_session_promptly() {
     let fixture = spawn_echo_fixture();
     let dialer = Arc::new(TestDialer {
@@ -686,6 +700,7 @@ fn stop_during_an_idle_established_tunnel_ends_the_session_promptly() {
 /// and a guest that never drains, so the worker's write genuinely blocks;
 /// `stop` must still wake it.
 #[test]
+#[serial_test::serial]
 fn stop_while_the_worker_to_guest_direction_is_blocked_ends_the_session_promptly() {
     let fixture = spawn_flood_fixture();
     let dialer = Arc::new(TestDialer {
@@ -716,6 +731,7 @@ fn stop_while_the_worker_to_guest_direction_is_blocked_ends_the_session_promptly
 }
 
 #[test]
+#[serial_test::serial]
 fn a_worker_panic_becomes_a_named_session_failure() {
     let dialer = Arc::new(TestDialer {
         panic_on_resolve: true,
@@ -739,6 +755,7 @@ fn a_worker_panic_becomes_a_named_session_failure() {
 }
 
 #[test]
+#[serial_test::serial]
 #[cfg(target_os = "linux")]
 fn repeated_start_stop_leaves_thread_count_stable() {
     fn thread_count() -> usize {
