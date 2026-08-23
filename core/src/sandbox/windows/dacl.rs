@@ -724,6 +724,8 @@ pub fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
 
 /// Under the XDG `state` base rather than a hardcoded `%LOCALAPPDATA%`, so
 /// `XDG_STATE_HOME` relocates it — which is how the tests get a private one.
+/// With no home and no override the base is the temp dir: the ledger must land
+/// somewhere absolute, and never under the cwd.
 #[allow(
     clippy::disallowed_methods,
     reason = "host-env: the sandbox ledger is process state under the host's XDG state base, not script-visible data"
@@ -731,8 +733,9 @@ pub fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
 fn ledger_dir() -> PathBuf {
     let dir = crate::path::basedir::resolve_xdg(
         crate::path::basedir::XdgKind::State,
-        &crate::host::home(),
+        crate::host::home().as_deref(),
     )
+    .unwrap_or_else(std::env::temp_dir)
     .join("ral")
     .join("sandbox-dacl");
     debug_assert!(
