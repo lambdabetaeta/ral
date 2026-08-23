@@ -112,10 +112,11 @@ impl ProviderError {
 /// surfaces raw instead of being silently misclassified.
 enum Fault<'a> {
     /// A completed response with a non-2xx status, reached through any of the
-    /// four shapes genai reports one by: `HttpError`; `ResponseFailedStatus`,
-    /// the only shape carrying `headers` and so the only `retry-after` source;
-    /// an `HttpError` boxed in `WebStream`; or a mid-stream `ChatResponse`
-    /// frame whose status lives in its JSON body.
+    /// four shapes genai reports one by: `HttpError`; `ResponseFailedStatus`;
+    /// an `HttpError` boxed in `WebStream`, the streaming path's version of
+    /// the same shape; or a mid-stream `ChatResponse` frame whose status lives
+    /// in its JSON body and so carries no headers to read a `retry-after`
+    /// from.
     Status {
         status: StatusCode,
         headers: Option<&'a HeaderMap>,
@@ -132,7 +133,12 @@ enum Fault<'a> {
 impl<'a> Fault<'a> {
     fn of(err: &'a genai::Error) -> Self {
         match err {
-            genai::Error::HttpError { status, body, .. } => Self::status(*status, None, body),
+            genai::Error::HttpError {
+                status,
+                body,
+                headers,
+                ..
+            } => Self::status(*status, Some(headers), body),
             genai::Error::WebModelCall { webc_error, .. }
             | genai::Error::WebAdapterCall { webc_error, .. } => Self::of_webc(webc_error),
             genai::Error::WebStream { error, .. } => Self::of_boxed(error.as_ref()),
@@ -377,7 +383,7 @@ mod tests {
 
     /// The streaming failure shape: the initial non-2xx becomes an `HttpError`
     /// boxed as `WebStream`'s cause, as `resp.stream.next()` yields it.
-    fn web_stream_http(status: StatusCode) -> genai::Error {
+    fn web_stream_http(status: StatusCode, headers: HeaderMap) -> genai::Error {
         genai::Error::WebStream {
             model_iden: iden("m"),
             cause: "stream open failed".into(),
@@ -385,6 +391,7 @@ mod tests {
                 status,
                 canonical_reason: status.canonical_reason().unwrap_or("").into(),
                 body: String::new(),
+                headers: Box::new(headers),
             }),
         }
     }
@@ -446,6 +453,25 @@ mod tests {
         }
     }
 
+    /// genai's streaming `HttpError` carries its own response headers, not
+    /// just `ResponseFailedStatus`'s — so a 429 hit mid-stream honors the
+    /// server's `retry-after` exactly as a non-streamed one does.
+    #[test]
+    fn from_genai_classifies_429_rate_limit_via_web_stream_http() {
+        let mut headers = HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, HeaderValue::from_static("11"));
+        let e = ProviderError::from_genai(
+            &web_stream_http(StatusCode::TOO_MANY_REQUESTS, headers),
+            "gpt-5.5",
+        );
+        match e {
+            ProviderError::RateLimited { retry_after, .. } => {
+                assert_eq!(retry_after, Some(Duration::from_secs(11)));
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
     /// The verbose `Display` would land a wall of JSON in a parent agent's
     /// one-line breadcrumb.
     #[test]
@@ -491,8 +517,10 @@ mod tests {
     /// retry loop burns its whole budget on an unfixable request.
     #[test]
     fn from_genai_classifies_400_wrapped_in_web_stream_error() {
-        let e =
-            ProviderError::from_genai(&web_stream_http(StatusCode::BAD_REQUEST), "deepseek-v4-pro");
+        let e = ProviderError::from_genai(
+            &web_stream_http(StatusCode::BAD_REQUEST, HeaderMap::new()),
+            "deepseek-v4-pro",
+        );
         match e {
             ProviderError::Api { status, model, .. } => {
                 assert_eq!(status, Some(400));

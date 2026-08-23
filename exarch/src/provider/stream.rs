@@ -281,6 +281,7 @@ mod tests {
     use genai::ModelIden;
     use genai::chat::{ContentPart, MessageContent};
     use reqwest::StatusCode;
+    use reqwest::header::HeaderMap;
 
     fn web_stream_http(status: StatusCode) -> genai::Error {
         genai::Error::WebStream {
@@ -290,6 +291,7 @@ mod tests {
                 status,
                 canonical_reason: status.canonical_reason().unwrap_or("").into(),
                 body: String::new(),
+                headers: Box::new(HeaderMap::new()),
             }),
         }
     }
