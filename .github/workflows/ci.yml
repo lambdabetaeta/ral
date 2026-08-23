@@ -22,46 +22,25 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # bubblewrap is the Linux sandbox backend itself.  Absent, every test
-      # that spawns an envelope *skips* — which reads exactly like a pass,
-      # and is how a `deny` rendering that could not even launch went
-      # unnoticed. scripts/linux-box.Dockerfile carries the same install
-      # for the local podman gate; keep both in step.
-      - name: Install bubblewrap
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
-
-      # Ubuntu 24.04's AppArmor policy denies unprivileged user-namespace
-      # creation by default — exactly what bwrap needs to build its sandbox
-      # without being setuid-root — so every launch otherwise dies with
-      # "setting up uid map: Permission denied" before it can even enforce
-      # a deny.
+      # bwrap needs a real user namespace to build its sandbox without being
+      # setuid-root, and a bare GitHub-hosted runner's unprivileged path
+      # there has proven unreliable: Ubuntu 24.04's AppArmor policy denies
+      # it outright ("setting up uid map: Permission denied"), and even
+      # with that lifted, device access inside the sandbox itself broke
+      # non-deterministically run to run ("/bin/sh: cannot open /dev/null:
+      # Permission denied") on an otherwise-identical runner image — two
+      # structurally opposite AppArmor profiles produced the identical
+      # failure, and removing the restriction outright still reproduced it,
+      # which rules out the profile *and* that one restriction as the cause.
       #
-      # Tried first: loading a profile that grants bwrap `userns,` alone
-      # (both a hand-rolled `unconfined` stub and Ubuntu's own shipped
-      # `bwrap-userns-restrict`, structurally opposite profiles) — both got
-      # past the uid-map error and both then broke device access inside the
-      # sandbox (`/bin/sh: cannot open /dev/null: Permission denied`) on a
-      # test that passes clean with no AppArmor step at all. Two profiles
-      # with opposite rule sets producing the identical downstream failure
-      # means the profile's *content* isn't the variable — the restriction
-      # being enforced at all is. There is no principal on a GitHub-hosted
-      # runner for it to protect: the job already has passwordless root, the
-      # runner is single-tenant and destroyed after the job, and AppArmor
-      # plays no role in what this suite tests (bwrap's own mount/seccomp
-      # confinement does) — so disable it here rather than fight a profile
-      # that has no rule left to add.
-      - name: Allow unprivileged user namespaces (CI runner only)
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-
-      # The ref names the channel and overrides rust-toolchain.toml; keep it in
-      # step with what that file tracks.
-      - name: Install toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      # scripts/linux-box.Dockerfile + `just linux-ci` already solve this
+      # for local dev by running privileged instead of fighting the
+      # unprivileged path — a `--privileged` container has real
+      # CAP_SYS_ADMIN and disables the AppArmor/seccomp mediation this was
+      # colliding with. Do the same here rather than re-fight the bare
+      # runner: build the same image, run the same steps in it.
+      - name: Build the Linux sandbox image
+        run: docker build -t ral-linux-box -f scripts/linux-box.Dockerfile scripts
 
       # Enforces the fs/process I/O-door denylist (clippy.toml): every read,
       # write, spawn, and exec must go through a known door or carry an
@@ -72,34 +51,49 @@ jobs:
       # The closed-door-set meta-test (core/tests/io_door_set.rs) runs under
       # `cargo test` below and pins the reviewed allow set.
       # synod is excluded from all three: its tauri dependency links the
-      # GTK/WebKit stack, whose dev packages this runner does not carry, and
+      # GTK/WebKit stack, whose dev packages this image does not carry, and
       # synod ships on macOS and Windows only.  `just linux-ci` excludes it
       # for the same reason, so both Linux gates cover the same crates.
       - name: cargo clippy
-        run: cargo clippy --workspace --exclude synod --all-targets
+        run: >
+          docker run --rm --privileged --user root -e RUSTFLAGS -v "$PWD:/workspace"
+          -v ral-linux-cargo:/home/dev/.cargo ral-linux-box
+          cargo clippy --workspace --exclude synod --all-targets
 
       - name: cargo build
-        run: cargo build --workspace --exclude synod --all-targets
+        run: >
+          docker run --rm --privileged --user root -v "$PWD:/workspace"
+          -v ral-linux-cargo:/home/dev/.cargo ral-linux-box
+          cargo build --workspace --exclude synod --all-targets
 
       # Integration tests in ral/tests/ invoke the `ral` binary as a
       # subprocess, so `cargo build` above is load-bearing — `cargo test`
       # alone does not reliably refresh that binary.
       - name: cargo test
-        run: cargo test --workspace --exclude synod
+        run: >
+          docker run --rm --privileged --user root -v "$PWD:/workspace"
+          -v ral-linux-cargo:/home/dev/.cargo ral-linux-box
+          cargo test --workspace --exclude synod
 
       - uses: astral-sh/setup-uv@v9.0.0
 
       # Renders the whole site.  Without tree-sitter installed the examples
       # page falls back to the regex highlighter, which keeps this check cheap
       # on every PR while still catching a broken example, doc, or template.
+      # Runs on the bare runner: it needs uv/python, not the sandbox image.
       - name: Render site
         run: uv run scripts/render-site.py
 
       # plugins/*.ral are not checked here: the `_ed-*` builtins they call
       # live only on the interactive shell's table, so batch `--check`
       # cannot type them — the REPL checks each plugin as rc loads it.
+      # Runs inside the same image as the build above so `cargo run` reuses
+      # its compiled artifacts (CARGO_TARGET_DIR=/workspace/.target-linux)
+      # instead of triggering a second, bare-runner build.
       - name: Syntax-check examples
         run: |
           for f in examples/*/*.ral; do
-            cargo run -p ral --quiet -- --check "$f"
+            docker run --rm --privileged --user root -v "$PWD:/workspace" \
+              -v ral-linux-cargo:/home/dev/.cargo ral-linux-box \
+              cargo run -p ral --quiet -- --check "$f"
           done
