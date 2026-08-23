@@ -698,6 +698,13 @@ mod tests {
         if !envelope_launches(&deny_within(&dir, &[])) {
             return;
         }
+        if !crate::sandbox::bwrap_devnull_writable() {
+            eprintln!(
+                "skipping: this host's bwrap envelope cannot open /dev/null, \
+                 which every `2>/dev/null` in this script depends on"
+            );
+            return;
+        }
 
         let script = format!(
             "echo READY\n\

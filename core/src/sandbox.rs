@@ -179,7 +179,7 @@ pub fn apply_child_limits(child: &crate::process::ChildHandle) {
 /// whether to skip, per [`confinement_unavailable`]'s "nothing ran, and the
 /// sandbox is why" — never a real spawn path, which already fails closed on
 /// the same underlying error.
-#[cfg(all(target_os = "linux", feature = "test-util"))]
+#[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:bwrap-devnull-probe] A host capability probe for the test suite, never a spawn a grant or the model can observe."
